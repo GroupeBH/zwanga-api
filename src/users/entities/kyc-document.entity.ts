@@ -1,0 +1,61 @@
+import {
+  Entity,
+  PrimaryGeneratedColumn,
+  Column,
+  CreateDateColumn,
+  UpdateDateColumn,
+  ManyToOne,
+  JoinColumn,
+} from 'typeorm';
+import { User } from './user.entity';
+
+export enum KycStatus {
+  PENDING = 'pending',
+  APPROVED = 'approved',
+  REJECTED = 'rejected',
+}
+
+@Entity('kyc_documents')
+export class KycDocument {
+  @PrimaryGeneratedColumn('uuid')
+  id: string;
+
+  @Column()
+  userId: string;
+
+  @ManyToOne(() => User, (user) => user.kycDocuments)
+  @JoinColumn({ name: 'userId' })
+  user: User;
+
+  @Column()
+  cniFrontUrl: string;
+
+  @Column()
+  cniBackUrl: string;
+
+  @Column()
+  selfieUrl: string;
+
+  @Column({
+    type: 'enum',
+    enum: KycStatus,
+    default: KycStatus.PENDING,
+  })
+  status: KycStatus;
+
+  @Column({ nullable: true })
+  rejectionReason: string;
+
+  @Column({ nullable: true })
+  reviewedBy: string;
+
+  @Column({ type: 'timestamp', nullable: true })
+  reviewedAt: Date;
+
+  @CreateDateColumn()
+  createdAt: Date;
+
+  @UpdateDateColumn()
+  updatedAt: Date;
+}
+
