@@ -7,10 +7,13 @@ import {
   Body,
   Request,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { BookingsService } from './bookings.service';
 import { CreateBookingDto, UpdateBookingStatusDto } from './dto/booking.dto';
 import { Auth } from '../auth/decorators/auth.decorator';
+import { Roles } from '../common/decorators/roles.decorator';
+import { UserRole } from '../users/entities/user.entity';
 
 @ApiTags('Bookings')
 @Controller('bookings')
@@ -19,6 +22,8 @@ export class BookingsController {
 
   @Post()
   @Auth()
+  @Roles(UserRole.PASSENGER)
+  @Throttle({ default: { limit: 10, ttl: 60000 } }) // 10 requests per minute
   @ApiOperation({ summary: 'Create a new booking' })
   async create(@Request() req, @Body() createBookingDto: CreateBookingDto) {
     return this.bookingsService.create(req.user.userId, createBookingDto);
@@ -47,6 +52,8 @@ export class BookingsController {
 
   @Put(':id/status')
   @Auth()
+  @Roles(UserRole.DRIVER)
+  @Throttle({ default: { limit: 20, ttl: 60000 } }) // 20 requests per minute
   @ApiOperation({ summary: 'Update booking status (driver only)' })
   async updateStatus(
     @Request() req,

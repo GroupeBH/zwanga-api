@@ -9,10 +9,14 @@ import {
   Query,
   Request,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { TripsService } from './trips.service';
 import { CreateTripDto, SearchTripsDto, UpdateTripDto } from './dto/trip.dto';
 import { Auth } from '../auth/decorators/auth.decorator';
+import { Roles } from '../common/decorators/roles.decorator';
+import { UserRole } from '../users/entities/user.entity';
+import { Public } from '../common/decorators/public.decorator';
 
 @ApiTags('Trips')
 @Controller('trips')
@@ -21,12 +25,16 @@ export class TripsController {
 
   @Post()
   @Auth()
+  @Roles(UserRole.DRIVER)
+  @Throttle({ default: { limit: 10, ttl: 60000 } }) // 10 requests per minute
   @ApiOperation({ summary: 'Create a new trip' })
   async create(@Request() req, @Body() createTripDto: CreateTripDto) {
     return this.tripsService.create(req.user.userId, createTripDto);
   }
 
   @Get()
+  @Public()
+  @Throttle({ default: { limit: 30, ttl: 60000 } }) // 30 requests per minute
   @ApiOperation({ summary: 'Get all available trips or search trips' })
   async findAll(@Query() searchTripsDto: SearchTripsDto) {
     if (Object.keys(searchTripsDto).length > 0) {

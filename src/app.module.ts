@@ -3,11 +3,15 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { CacheModule } from '@nestjs/cache-manager';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
-import { APP_GUARD } from '@nestjs/core';
+import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { ConfigModule as AppConfigModule } from './config/config.module';
 import { CommonModule } from './common/common.module';
+import { LoggerModule } from './common/logger/logger.module';
+import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
+import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
+import { RolesGuard } from './common/guards/roles.guard';
 import { AuthModule } from './auth/auth.module';
 import { UsersModule } from './users/users.module';
 import { VehiclesModule } from './vehicles/vehicles.module';
@@ -32,6 +36,7 @@ import { Subscription } from './subscriptions/entities/subscription.entity';
 @Module({
   imports: [
     AppConfigModule,
+    LoggerModule,
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],
       useFactory: (configService: ConfigService) => ({
@@ -90,6 +95,18 @@ import { Subscription } from './subscriptions/entities/subscription.entity';
     {
       provide: APP_GUARD,
       useClass: ThrottlerGuard,
+    },
+    {
+      provide: APP_GUARD,
+      useClass: JwtAuthGuard,
+    },
+    {
+      provide: APP_GUARD,
+      useClass: RolesGuard,
+    },
+    {
+      provide: APP_INTERCEPTOR,
+      useClass: LoggingInterceptor,
     },
   ],
 })

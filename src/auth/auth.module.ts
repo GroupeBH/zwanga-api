@@ -9,7 +9,6 @@ import { User } from '../users/entities/user.entity';
 import { KycDocument } from '../users/entities/kyc-document.entity';
 import { UsersModule } from '../users/users.module';
 import { JwtStrategy } from './strategies/jwt.strategy';
-import { JwtAuthGuard } from './guards/jwt-auth.guard';
 
 @Module({
   imports: [
@@ -28,8 +27,8 @@ import { JwtAuthGuard } from './guards/jwt-auth.guard';
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, JwtStrategy, JwtAuthGuard],
-  exports: [AuthService, JwtAuthGuard],
+  providers: [AuthService, JwtStrategy],
+  exports: [AuthService],
 })
 export class AuthModule {}
 
