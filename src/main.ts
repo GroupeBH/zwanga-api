@@ -3,10 +3,12 @@ import { ValidationPipe } from '@nestjs/common';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { ConfigService } from '@nestjs/config';
 import { ThrottlerGuard } from '@nestjs/throttler';
+import { NestExpressApplication } from '@nestjs/platform-express';
+import { join } from 'path';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
 
   const configService = app.get(ConfigService);
   const apiPrefix = configService.get<string>('API_PREFIX') || 'api/v1';
@@ -32,6 +34,15 @@ async function bootstrap() {
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
     credentials: true,
   });
+
+  // Serve static files (uploads) - only if not using S3
+  const useS3 = configService.get<string>('AWS_S3_BUCKET_NAME') ? true : false;
+  if (!useS3) {
+    const uploadDest = configService.get<string>('UPLOAD_DEST') || './uploads';
+    app.useStaticAssets(join(process.cwd(), uploadDest), {
+      prefix: '/uploads',
+    });
+  }
 
   // Swagger configuration
   const config = new DocumentBuilder()

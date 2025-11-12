@@ -27,13 +27,13 @@ export class KycDocument {
   @JoinColumn({ name: 'userId' })
   user: User;
 
-  @Column()
+  @Column({ nullable: true })
   cniFrontUrl: string;
 
-  @Column()
+  @Column({ nullable: true })
   cniBackUrl: string;
 
-  @Column()
+  @Column({ nullable: true })
   selfieUrl: string;
 
   @Column({

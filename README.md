@@ -64,6 +64,25 @@ Une fois l'application démarrée, accédez à la documentation Swagger :
 http://localhost:3000/api/v1/docs
 ```
 
+## ☁️ Stockage des fichiers (Amazon S3)
+
+L'application supporte le stockage des fichiers multimédias sur Amazon S3 avec modération de contenu automatique via AWS Rekognition.
+
+### Configuration
+
+1. **Stockage S3** : Configurez les variables d'environnement AWS (voir `AWS_S3_SETUP.md`)
+2. **Modération de contenu** : Activez AWS Rekognition pour détecter automatiquement le contenu inapproprié
+
+### Fonctionnalités
+
+- ✅ Upload automatique vers S3 (ou stockage local en fallback)
+- ✅ Modération de contenu avec AWS Rekognition
+- ✅ Détection de contenu explicite, violence, drogues, symboles de haine, etc.
+- ✅ URLs présignées pour l'accès sécurisé aux fichiers privés
+- ✅ Support des fichiers publics ou privés
+
+Voir `AWS_S3_SETUP.md` pour la configuration détaillée.
+
 ## 🏗️ Architecture
 
 ### Modules principaux

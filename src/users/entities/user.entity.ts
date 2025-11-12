@@ -35,13 +35,13 @@ export class User {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ unique: true })
+  @Column({ unique: true, nullable: true })
   email: string;
 
   @Column({ unique: true })
   phone: string;
 
-  @Column()
+  @Column({ nullable: true })
   password: string;
 
   @Column()
@@ -75,6 +75,12 @@ export class User {
 
   @Column({ default: false })
   isPhoneVerified: boolean;
+
+  @Column({ default: true })
+  isActive: boolean;
+
+  @Column({ default: true })
+  isDriver: boolean;
 
   @Column({ nullable: true })
   refreshToken: string;

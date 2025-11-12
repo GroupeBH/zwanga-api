@@ -29,15 +29,15 @@ export class RegisterDto {
 }
 
 export class LoginDto {
-  @ApiProperty({ example: 'john.doe@example.com' })
-  @IsEmail()
-  @IsNotEmpty()
-  email: string;
 
-  @ApiProperty({ example: 'password123' })
-  @IsString()
+  @ApiProperty({ example: '0831919710' })
   @IsNotEmpty()
-  password: string;
+  phone: string;
+
+  // @ApiProperty({ example: 'password123' })
+  // @IsString()
+  // @IsNotEmpty()
+  // password: string;
 }
 
 export class RefreshTokenDto {

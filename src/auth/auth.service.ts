@@ -5,63 +5,139 @@ import { Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcrypt';
 import { User, UserStatus } from '../users/entities/user.entity';
+import { KycDocument, KycStatus } from '../users/entities/kyc-document.entity';
 import { RegisterDto, LoginDto, RefreshTokenDto } from './dto/auth.dto';
+import { FileUploadService } from '../common/services/file-upload.service';
+
+interface MulterFile {
+  fieldname: string;
+  originalname: string;
+  encoding: string;
+  mimetype: string;
+  size: number;
+  buffer: Buffer;
+  destination?: string;
+  filename?: string;
+  path?: string;
+}
 
 @Injectable()
 export class AuthService {
   constructor(
     @InjectRepository(User)
     private userRepository: Repository<User>,
+    @InjectRepository(KycDocument)
+    private kycDocumentRepository: Repository<KycDocument>,
     private jwtService: JwtService,
     private configService: ConfigService,
+    private fileUploadService: FileUploadService,
   ) {}
 
-  async register(registerDto: RegisterDto): Promise<User> {
-    const { email, phone, password, firstName, lastName } = registerDto;
+  async register(
+    registerDto: RegisterDto,
+    files?: {
+      profilePicture?: Array<MulterFile>;
+      cniImage?: Array<MulterFile>;
+      selfieImage?: Array<MulterFile>;
+    },
+  ): Promise<User> {
+    const { phone, firstName, lastName } = registerDto;
 
     // Check if user already exists
     const existingUser = await this.userRepository.findOne({
-      where: [{ email }, { phone }],
+      where: [{ phone }],
     });
 
     if (existingUser) {
-      throw new UnauthorizedException('Email or phone already exists');
+      throw new UnauthorizedException('phone already exists');
     }
 
-    // Hash password
-    const hashedPassword = await bcrypt.hash(password, 10);
+    // Handle file uploads
+    let profilePicturePath: string | null = null;
+    let cniImagePath: string | null = null;
+    let selfieImagePath: string | null = null;
+
+    if (files) {
+      // Save profile picture
+      if (files.profilePicture && files.profilePicture.length > 0) {
+        profilePicturePath = await this.fileUploadService.saveFile(
+          files.profilePicture[0],
+          'profiles',
+        );
+      }
+
+      // Save CNI image
+      if (files.cniImage && files.cniImage.length > 0) {
+        cniImagePath = await this.fileUploadService.saveFile(
+          files.cniImage[0],
+          'kyc',
+        );
+      }
+
+      // Save selfie image
+      if (files.selfieImage && files.selfieImage.length > 0) {
+        selfieImagePath = await this.fileUploadService.saveFile(
+          files.selfieImage[0],
+          'kyc',
+        );
+      }
+    }
 
     // Create user
-    const user = this.userRepository.create({
-      email,
+    const userData: Partial<User> = {
       phone,
-      password: hashedPassword,
       firstName,
       lastName,
       status: UserStatus.PENDING_KYC,
-    });
+    };
 
-    return await this.userRepository.save(user);
+    if (profilePicturePath) {
+      userData.profilePicture = profilePicturePath;
+    }
+
+    const user = this.userRepository.create(userData);
+    const savedUser = await this.userRepository.save(user);
+
+    // Create KYC document if CNI or selfie images are provided
+    if (cniImagePath || selfieImagePath) {
+      const kycData: Partial<KycDocument> = {
+        userId: savedUser.id,
+        status: KycStatus.PENDING,
+      };
+
+      if (cniImagePath) {
+        kycData.cniFrontUrl = cniImagePath;
+      }
+
+      if (selfieImagePath) {
+        kycData.selfieUrl = selfieImagePath;
+      }
+
+      const kycDocument = this.kycDocumentRepository.create(kycData);
+      await this.kycDocumentRepository.save(kycDocument);
+    }
+
+    return savedUser;
   }
 
-  async validateUser(email: string, password: string): Promise<User | null> {
-    const user = await this.userRepository.findOne({ where: { email } });
+  async validateUser(phone: string): Promise<User | null> {
+    const user = await this.userRepository.findOne({ where: { phone } });
 
     if (!user) {
       return null;
     }
 
-    const isPasswordValid = await bcrypt.compare(password, user.password);
+    // const isPasswordValid = await bcrypt.compare(password, user.password);
 
-    if (!isPasswordValid) {
-      return null;
-    }
+    // if (!isPasswordValid) {
+    //   return null;
+    // }
 
     return user;
   }
 
   async login(loginDto: LoginDto) {
-    const user = await this.validateUser(loginDto.email, loginDto.password);
+    const user = await this.validateUser(loginDto.phone);
 
     if (!user) {
       throw new UnauthorizedException('Invalid credentials');
@@ -82,7 +158,7 @@ export class AuthService {
       refreshToken: tokens.refreshToken,
       user: {
         id: user.id,
-        email: user.email,
+        email: user.email || user.phone,
         firstName: user.firstName,
         lastName: user.lastName,
         role: user.role,
@@ -121,7 +197,7 @@ export class AuthService {
   private async generateTokens(user: User) {
     const payload = {
       sub: user.id,
-      email: user.email,
+      email: user.email || user.phone,
       role: user.role,
     };
 
