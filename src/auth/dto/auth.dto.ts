@@ -12,10 +12,8 @@ export class RegisterDto {
   @IsNotEmpty()
   phone: string;
 
-  @ApiProperty({ example: 'password123', minLength: 6 })
-  @IsString()
-  @MinLength(6)
-  password: string;
+  @IsNotEmpty()
+  isDriver: boolean;
 
   @ApiProperty({ example: 'John' })
   @IsString()
@@ -53,14 +51,5 @@ export class AuthResponseDto {
 
   @ApiProperty()
   refreshToken: string;
-
-  @ApiProperty()
-  user: {
-    id: string;
-    email: string;
-    firstName: string;
-    lastName: string;
-    role: string;
-  };
 }
 
