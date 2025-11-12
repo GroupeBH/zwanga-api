@@ -34,8 +34,6 @@ lerna-debug.log*
 !.vscode/launch.json
 !.vscode/extensions.json
 
-zwanga-c791b-firebase-adminsdk-fbsvc-43707dcb4e.json
-
 # Environment
 .env
 .env.local

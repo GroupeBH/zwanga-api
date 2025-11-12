@@ -10,17 +10,40 @@ export class NotificationService implements OnModuleInit {
 
   onModuleInit() {
     const projectId = this.configService.get<string>('FCM_PROJECT_ID');
-    const privateKey = this.configService.get<string>('FCM_PRIVATE_KEY');
+    const privateKeyBase64 = this.configService.get<string>('FCM_PRIVATE_KEY');
     const clientEmail = this.configService.get<string>('FCM_CLIENT_EMAIL');
+    const credentialsBase64 = this.configService.get<string>('FCM_CREDENTIALS_BASE64');
 
-    if (projectId && privateKey && clientEmail) {
-      this.firebaseApp = admin.initializeApp({
-        credential: admin.credential.cert({
-          projectId,
-          privateKey: privateKey.replace(/\\n/g, '\n'),
-          clientEmail,
-        }),
-      });
+    if (credentialsBase64) {
+      // Option 1: Utiliser le fichier JSON complet encodé en base64
+      try {
+        const credentialsJson = Buffer.from(credentialsBase64, 'base64').toString('utf-8');
+        const credentials = JSON.parse(credentialsJson);
+        this.firebaseApp = admin.initializeApp({
+          credential: admin.credential.cert(credentials),
+        });
+        return;
+      } catch (error) {
+        console.error('Error parsing FCM credentials from base64:', error);
+      }
+    }
+
+    // Option 2: Utiliser les credentials individuels (avec privateKey en base64)
+    if (projectId && privateKeyBase64 && clientEmail) {
+      try {
+        // Décoder la clé privée depuis base64
+        const privateKey = Buffer.from(privateKeyBase64, 'base64').toString('utf-8');
+        
+        this.firebaseApp = admin.initializeApp({
+          credential: admin.credential.cert({
+            projectId,
+            privateKey: privateKey.replace(/\\n/g, '\n'),
+            clientEmail,
+          }),
+        });
+      } catch (error) {
+        console.error('Error initializing FCM with individual credentials:', error);
+      }
     }
   }
 
