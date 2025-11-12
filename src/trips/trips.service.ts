@@ -4,14 +4,18 @@ import { Repository } from 'typeorm';
 import { Trip, TripStatus } from './entities/trip.entity';
 import { User } from '../users/entities/user.entity';
 import { CreateTripDto, SearchTripsDto, UpdateTripDto } from './dto/trip.dto';
+import { CacheService } from '../common/services/cache.service';
 
 @Injectable()
 export class TripsService {
+  private readonly CACHE_TTL = 300; // 5 minutes
+
   constructor(
     @InjectRepository(Trip)
     private tripRepository: Repository<Trip>,
     @InjectRepository(User)
     private userRepository: Repository<User>,
+    private cacheService: CacheService,
   ) {}
 
   async create(driverId: string, createTripDto: CreateTripDto): Promise<Trip> {
@@ -30,15 +34,31 @@ export class TripsService {
       departureDate: new Date(createTripDto.departureDate),
     });
 
-    return await this.tripRepository.save(trip);
+    const savedTrip = await this.tripRepository.save(trip);
+    
+    // Invalidate cache
+    await this.cacheService.del(CacheService.getTripsListKey());
+    await this.cacheService.del(CacheService.getTripsListKey('all'));
+
+    return savedTrip;
   }
 
   async findAll(): Promise<Trip[]> {
-    return this.tripRepository.find({
+    const cacheKey = CacheService.getTripsListKey('all');
+    const cached = await this.cacheService.get<Trip[]>(cacheKey);
+    
+    if (cached) {
+      return cached;
+    }
+
+    const trips = await this.tripRepository.find({
       relations: ['driver', 'bookings'],
       where: { status: TripStatus.PENDING },
       order: { departureDate: 'ASC' },
     });
+
+    await this.cacheService.set(cacheKey, trips, this.CACHE_TTL);
+    return trips;
   }
 
   async search(searchTripsDto: SearchTripsDto): Promise<Trip[]> {
@@ -105,6 +125,13 @@ export class TripsService {
   }
 
   async findOne(id: string): Promise<Trip> {
+    const cacheKey = CacheService.getTripKey(id);
+    const cached = await this.cacheService.get<Trip>(cacheKey);
+    
+    if (cached) {
+      return cached;
+    }
+
     const trip = await this.tripRepository.findOne({
       where: { id },
       relations: ['driver', 'driver.vehicles', 'bookings', 'bookings.passenger'],
@@ -114,6 +141,7 @@ export class TripsService {
       throw new NotFoundException('Trip not found');
     }
 
+    await this.cacheService.set(cacheKey, trip, this.CACHE_TTL);
     return trip;
   }
 
@@ -140,7 +168,14 @@ export class TripsService {
     }
 
     Object.assign(trip, updateTripDto);
-    return await this.tripRepository.save(trip);
+    const updatedTrip = await this.tripRepository.save(trip);
+    
+    // Invalidate cache
+    await this.cacheService.del(CacheService.getTripKey(id));
+    await this.cacheService.del(CacheService.getTripsListKey());
+    await this.cacheService.del(CacheService.getTripsListKey('all'));
+
+    return updatedTrip;
   }
 
   async remove(id: string, driverId: string): Promise<void> {
@@ -153,6 +188,11 @@ export class TripsService {
     }
 
     await this.tripRepository.remove(trip);
+    
+    // Invalidate cache
+    await this.cacheService.del(CacheService.getTripKey(id));
+    await this.cacheService.del(CacheService.getTripsListKey());
+    await this.cacheService.del(CacheService.getTripsListKey('all'));
   }
 }
 

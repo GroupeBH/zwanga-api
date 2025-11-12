@@ -116,6 +116,42 @@ npm run test:e2e
 npm run test:cov
 ```
 
+## 🚀 PM2 - Gestion des processus
+
+L'application utilise PM2 pour la gestion des processus en production.
+
+### Commandes PM2
+
+```bash
+# Démarrer avec PM2
+npm run pm2:start
+
+# Arrêter
+npm run pm2:stop
+
+# Redémarrer
+npm run pm2:restart
+
+# Voir les logs
+npm run pm2:logs
+
+# Monitoring
+npm run pm2:monit
+```
+
+Voir `PM2_GUIDE.md` pour plus de détails.
+
+## 💾 Cache Redis
+
+Le système de cache Redis est configuré pour améliorer les performances :
+
+- **Trips** : Cache de 5 minutes pour les listes et détails
+- **Vehicles** : Cache de 10 minutes pour les véhicules
+- **Bookings** : Cache de 3 minutes pour les réservations
+- **Notifications** : Cache pour les notifications utilisateur
+
+Le cache est automatiquement invalidé lors des opérations de modification (create, update, delete).
+
 ## 📄 Licence
 
 UNLICENSED

@@ -3,8 +3,9 @@
 /node_modules
 
 # Logs
-logs
+logs/
 *.log
+pm2-*.log
 npm-debug.log*
 pnpm-debug.log*
 yarn-debug.log*

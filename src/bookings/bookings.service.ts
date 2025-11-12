@@ -5,9 +5,12 @@ import { Booking, BookingStatus } from './entities/booking.entity';
 import { Trip, TripStatus } from '../trips/entities/trip.entity';
 import { User } from '../users/entities/user.entity';
 import { CreateBookingDto, UpdateBookingStatusDto } from './dto/booking.dto';
+import { CacheService } from '../common/services/cache.service';
 
 @Injectable()
 export class BookingsService {
+  private readonly CACHE_TTL = 180; // 3 minutes
+
   constructor(
     @InjectRepository(Booking)
     private bookingRepository: Repository<Booking>,
@@ -15,6 +18,7 @@ export class BookingsService {
     private tripRepository: Repository<Trip>,
     @InjectRepository(User)
     private userRepository: Repository<User>,
+    private cacheService: CacheService,
   ) {}
 
   async create(passengerId: string, createBookingDto: CreateBookingDto): Promise<Booking> {
@@ -62,15 +66,32 @@ export class BookingsService {
       passengerId,
     });
 
-    return await this.bookingRepository.save(booking);
+    const savedBooking = await this.bookingRepository.save(booking);
+    
+    // Invalidate cache
+    await this.cacheService.del(CacheService.getBookingsByTripKey(createBookingDto.tripId));
+    await this.cacheService.del(CacheService.getBookingsByPassengerKey(passengerId));
+    await this.cacheService.del(CacheService.getTripKey(createBookingDto.tripId));
+
+    return savedBooking;
   }
 
   async findAllByPassenger(passengerId: string): Promise<Booking[]> {
-    return this.bookingRepository.find({
+    const cacheKey = CacheService.getBookingsByPassengerKey(passengerId);
+    const cached = await this.cacheService.get<Booking[]>(cacheKey);
+    
+    if (cached) {
+      return cached;
+    }
+
+    const bookings = await this.bookingRepository.find({
       where: { passengerId },
       relations: ['trip', 'trip.driver'],
       order: { createdAt: 'DESC' },
     });
+
+    await this.cacheService.set(cacheKey, bookings, this.CACHE_TTL);
+    return bookings;
   }
 
   async findAllByTrip(tripId: string, driverId: string): Promise<Booking[]> {
@@ -82,14 +103,31 @@ export class BookingsService {
       throw new NotFoundException('Trip not found');
     }
 
-    return this.bookingRepository.find({
+    const cacheKey = CacheService.getBookingsByTripKey(tripId);
+    const cached = await this.cacheService.get<Booking[]>(cacheKey);
+    
+    if (cached) {
+      return cached;
+    }
+
+    const bookings = await this.bookingRepository.find({
       where: { tripId },
       relations: ['passenger'],
       order: { createdAt: 'DESC' },
     });
+
+    await this.cacheService.set(cacheKey, bookings, this.CACHE_TTL);
+    return bookings;
   }
 
   async findOne(id: string): Promise<Booking> {
+    const cacheKey = CacheService.getBookingKey(id);
+    const cached = await this.cacheService.get<Booking>(cacheKey);
+    
+    if (cached) {
+      return cached;
+    }
+
     const booking = await this.bookingRepository.findOne({
       where: { id },
       relations: ['trip', 'trip.driver', 'passenger'],
@@ -99,6 +137,7 @@ export class BookingsService {
       throw new NotFoundException('Booking not found');
     }
 
+    await this.cacheService.set(cacheKey, booking, this.CACHE_TTL);
     return booking;
   }
 
@@ -131,7 +170,15 @@ export class BookingsService {
     }
 
     booking.status = updateStatusDto.status;
-    return await this.bookingRepository.save(booking);
+    const updatedBooking = await this.bookingRepository.save(booking);
+    
+    // Invalidate cache
+    await this.cacheService.del(CacheService.getBookingKey(bookingId));
+    await this.cacheService.del(CacheService.getBookingsByTripKey(booking.tripId));
+    await this.cacheService.del(CacheService.getBookingsByPassengerKey(booking.passengerId));
+    await this.cacheService.del(CacheService.getTripKey(booking.tripId));
+
+    return updatedBooking;
   }
 
   async cancel(bookingId: string, passengerId: string): Promise<void> {
@@ -150,6 +197,20 @@ export class BookingsService {
     booking.status = BookingStatus.CANCELLED;
     booking.cancelledAt = new Date();
     await this.bookingRepository.save(booking);
+    
+    // Invalidate cache
+    await this.cacheService.del(CacheService.getBookingKey(bookingId));
+    await this.cacheService.del(CacheService.getBookingsByPassengerKey(passengerId));
+    
+    // Get tripId from booking to invalidate trip cache
+    const bookingWithTrip = await this.bookingRepository.findOne({
+      where: { id: bookingId },
+      relations: ['trip'],
+    });
+    if (bookingWithTrip) {
+      await this.cacheService.del(CacheService.getBookingsByTripKey(bookingWithTrip.tripId));
+      await this.cacheService.del(CacheService.getTripKey(bookingWithTrip.tripId));
+    }
   }
 }
 
