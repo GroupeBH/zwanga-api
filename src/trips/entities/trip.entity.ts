@@ -13,8 +13,8 @@ import { User } from '../../users/entities/user.entity';
 import { Booking } from '../../bookings/entities/booking.entity';
 
 export enum TripStatus {
-  PENDING = 'pending',
-  ACTIVE = 'active',
+  PENDING = 'upcoming',
+  ACTIVE = 'ongoing',
   COMPLETED = 'completed',
   CANCELLED = 'cancelled',
 }

@@ -1,18 +1,14 @@
-import { IsEmail, IsNotEmpty, IsString, MinLength } from 'class-validator';
+import { IsEmail, IsNotEmpty, IsOptional, IsString, MinLength } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
+import { UserRole } from '../../users/entities/user.entity';
 
 export class RegisterDto {
-  @ApiProperty({ example: 'john.doe@example.com' })
-  @IsEmail()
-  @IsNotEmpty()
-  email: string;
-
   @ApiProperty({ example: '+243900000000' })
   @IsString()
   @IsNotEmpty()
   phone: string;
 
-  @IsNotEmpty()
+  @IsOptional()
   isDriver: boolean;
 
   @ApiProperty({ example: 'John' })
@@ -24,6 +20,9 @@ export class RegisterDto {
   @IsString()
   @IsNotEmpty()
   lastName: string;
+
+  @IsNotEmpty()
+  role: UserRole;
 }
 
 export class LoginDto {

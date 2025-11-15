@@ -1,4 +1,4 @@
-import { Injectable, BadRequestException, InternalServerErrorException } from '@nestjs/common';
+import { Injectable, BadRequestException, InternalServerErrorException, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { S3Client, PutObjectCommand, DeleteObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
@@ -6,6 +6,7 @@ import * as crypto from 'crypto';
 
 @Injectable()
 export class S3Service {
+  private readonly logger = new Logger(S3Service.name);
   private s3Client: S3Client | null = null;
   private readonly bucketName: string | null;
   private readonly region: string;
@@ -20,9 +21,11 @@ export class S3Service {
       const secretAccessKey = this.configService.get<string>('AWS_SECRET_ACCESS_KEY');
 
       if (!accessKeyId || !secretAccessKey) {
-        console.warn('AWS credentials not configured. S3 service will not be available.');
+        this.logger.warn('AWS credentials not configured. S3 service will not be available.');
         return;
       }
+
+      this.logger.log(`S3 service initialized - Bucket: ${this.bucketName}, Region: ${this.region}`);
 
       this.s3Client = new S3Client({
         region: this.region,
@@ -69,9 +72,10 @@ export class S3Service {
 
       await this.s3Client.send(command);
 
+      this.logger.debug(`File uploaded to S3 successfully: ${key}`);
       return key;
     } catch (error) {
-      console.error('S3 upload error:', error);
+      this.logger.error('S3 upload error:', error);
       throw new InternalServerErrorException('Failed to upload file to S3');
     }
   }
@@ -92,8 +96,9 @@ export class S3Service {
       });
 
       await this.s3Client.send(command);
+      this.logger.debug(`File deleted from S3: ${key}`);
     } catch (error) {
-      console.warn(`Failed to delete file from S3 ${key}:`, error.message);
+      this.logger.warn(`Failed to delete file from S3 ${key}:`, error.message);
       // Don't throw error, just log warning
     }
   }
@@ -116,9 +121,10 @@ export class S3Service {
       });
 
       const url = await getSignedUrl(this.s3Client, command, { expiresIn });
+      this.logger.debug(`Presigned URL generated for key ${key} (expires in ${expiresIn}s)`);
       return url;
     } catch (error) {
-      console.error('Error generating presigned URL:', error);
+      this.logger.error(`Error generating presigned URL for key ${key}:`, error);
       return null;
     }
   }

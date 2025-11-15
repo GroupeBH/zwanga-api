@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Rating } from './entities/rating.entity';
@@ -7,6 +7,8 @@ import { CreateRatingDto } from './dto/rating.dto';
 
 @Injectable()
 export class RatingsService {
+  private readonly logger = new Logger(RatingsService.name);
+
   constructor(
     @InjectRepository(Rating)
     private ratingRepository: Repository<Rating>,
@@ -15,7 +17,10 @@ export class RatingsService {
   ) {}
 
   async create(raterId: string, createRatingDto: CreateRatingDto): Promise<Rating> {
+    this.logger.log(`Creating rating: User ${raterId} rating user ${createRatingDto.ratedUserId} (Rating: ${createRatingDto.rating})`);
+    
     if (raterId === createRatingDto.ratedUserId) {
+      this.logger.warn(`Rating creation failed: User ${raterId} tried to rate themselves`);
       throw new BadRequestException('Cannot rate yourself');
     }
 
@@ -24,6 +29,7 @@ export class RatingsService {
     });
 
     if (!ratedUser) {
+      this.logger.warn(`Rating creation failed: User ${createRatingDto.ratedUserId} not found`);
       throw new NotFoundException('User to rate not found');
     }
 
@@ -38,6 +44,7 @@ export class RatingsService {
       });
 
       if (existingRating) {
+        this.logger.warn(`Rating creation failed: User ${raterId} already rated user ${createRatingDto.ratedUserId} for trip ${createRatingDto.tripId}`);
         throw new BadRequestException('You have already rated this user for this trip');
       }
     }
@@ -47,25 +54,37 @@ export class RatingsService {
       raterId,
     });
 
-    return await this.ratingRepository.save(rating);
+    const savedRating = await this.ratingRepository.save(rating);
+    
+    this.logger.log(`Rating created successfully: ${savedRating.id} - User ${raterId} rated user ${createRatingDto.ratedUserId} with ${createRatingDto.rating} stars`);
+    return savedRating;
   }
 
   async findByUser(userId: string): Promise<Rating[]> {
-    return this.ratingRepository.find({
+    this.logger.debug(`Fetching ratings for user: ${userId}`);
+    
+    const ratings = await this.ratingRepository.find({
       where: { ratedUserId: userId },
       relations: ['rater'],
       order: { createdAt: 'DESC' },
     });
+
+    this.logger.debug(`Found ${ratings.length} ratings for user ${userId}`);
+    return ratings;
   }
 
   async getUserAverageRating(userId: string): Promise<number> {
+    this.logger.debug(`Calculating average rating for user: ${userId}`);
+    
     const result = await this.ratingRepository
       .createQueryBuilder('rating')
       .select('AVG(rating.rating)', 'average')
       .where('rating.ratedUserId = :userId', { userId })
       .getRawOne();
 
-    return result?.average ? parseFloat(result.average) : 0;
+    const average = result?.average ? parseFloat(result.average) : 0;
+    this.logger.debug(`Average rating for user ${userId}: ${average.toFixed(2)}`);
+    return average;
   }
 }
 

@@ -1,4 +1,4 @@
-import { Injectable, BadRequestException, InternalServerErrorException } from '@nestjs/common';
+import { Injectable, BadRequestException, InternalServerErrorException, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { RekognitionClient, DetectModerationLabelsCommand } from '@aws-sdk/client-rekognition';
 
@@ -14,6 +14,7 @@ export interface ModerationResult {
 
 @Injectable()
 export class ContentModerationService {
+  private readonly logger = new Logger(ContentModerationService.name);
   private rekognitionClient: RekognitionClient | null = null;
   private readonly minConfidence: number;
   private readonly enabled: boolean;
@@ -93,7 +94,7 @@ export class ContentModerationService {
       const secretAccessKey = this.configService.get<string>('AWS_SECRET_ACCESS_KEY');
 
       if (!accessKeyId || !secretAccessKey) {
-        console.warn('AWS credentials not configured. Content moderation will be disabled.');
+        this.logger.warn('AWS credentials not configured. Content moderation will be disabled.');
         this.enabled = false;
         return;
       }
@@ -105,6 +106,10 @@ export class ContentModerationService {
           secretAccessKey,
         },
       });
+      
+      this.logger.log(`Content moderation service initialized - Min confidence: ${this.minConfidence}%`);
+    } else {
+      this.logger.debug('Content moderation is disabled');
     }
   }
 
@@ -124,7 +129,7 @@ export class ContentModerationService {
 
     if (!this.rekognitionClient) {
       // If moderation is enabled but client is not initialized, approve the image
-      console.warn('Rekognition client not initialized. Approving image.');
+      this.logger.warn('Rekognition client not initialized. Approving image.');
       return {
         isApproved: true,
         moderationLabels: [],
@@ -132,6 +137,8 @@ export class ContentModerationService {
     }
 
     try {
+      this.logger.debug(`Running content moderation (min confidence: ${this.minConfidence}%)`);
+      
       const command = new DetectModerationLabelsCommand({
         Image: {
           Bytes: imageBuffer,
@@ -168,6 +175,7 @@ export class ContentModerationService {
           .map((label: any) => `${label.name} (${label.confidence?.toFixed(1) || 0}%)`)
           .join(', ');
 
+        this.logger.warn(`Content moderation rejected image - Labels: ${blockedLabelsFound}`);
         return {
           isApproved: false,
           moderationLabels,
@@ -175,12 +183,13 @@ export class ContentModerationService {
         };
       }
 
+      this.logger.debug(`Content moderation approved image - Found ${moderationLabels.length} labels (all safe)`);
       return {
         isApproved: true,
         moderationLabels,
       };
     } catch (error) {
-      console.error('Content moderation error:', error);
+      this.logger.error('Content moderation error:', error);
       // If moderation fails, we can either:
       // 1. Reject the image (safer but might block legitimate content)
       // 2. Approve the image (less safe but better UX)

@@ -1,4 +1,4 @@
-import { Injectable, BadRequestException, Inject, Optional } from '@nestjs/common';
+import { Injectable, BadRequestException, Inject, Optional, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { promises as fs } from 'fs';
 import { join } from 'path';
@@ -8,6 +8,7 @@ import { ContentModerationService, ModerationResult } from './content-moderation
 
 @Injectable()
 export class FileUploadService {
+  private readonly logger = new Logger(FileUploadService.name);
   private readonly uploadPath: string;
   private readonly useS3: boolean;
   private readonly useModeration: boolean;
@@ -50,9 +51,12 @@ export class FileUploadService {
       return null;
     }
 
+    this.logger.debug(`Processing file upload: ${file.originalname} (${file.mimetype}, ${(file.size / 1024).toFixed(2)}KB) to ${subfolder}`);
+
     // Validate file type
     const allowedMimes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
     if (!allowedMimes.includes(file.mimetype)) {
+      this.logger.warn(`File upload rejected: Invalid file type ${file.mimetype} for file ${file.originalname}`);
       throw new BadRequestException(
         `Invalid file type. Allowed types: ${allowedMimes.join(', ')}`,
       );
@@ -61,25 +65,30 @@ export class FileUploadService {
     // Validate file size (5MB max)
     const maxSize = this.configService.get<number>('MAX_FILE_SIZE') || 5242880;
     if (file.size > maxSize) {
+      this.logger.warn(`File upload rejected: File size ${(file.size / 1024 / 1024).toFixed(2)}MB exceeds limit for file ${file.originalname}`);
       throw new BadRequestException(`File size exceeds ${maxSize / 1024 / 1024}MB limit`);
     }
 
     // Content moderation - check for inappropriate content
     if (this.useModeration && this.contentModerationService) {
       try {
+        this.logger.debug(`Running content moderation for file: ${file.originalname}`);
         const moderationResult: ModerationResult = await this.contentModerationService.moderateImage(file.buffer);
 
         if (!moderationResult.isApproved) {
+          this.logger.warn(`File upload rejected: Content moderation failed for ${file.originalname} - ${moderationResult.reason}`);
           throw new BadRequestException(
             moderationResult.reason || 'Image contains inappropriate content and cannot be uploaded',
           );
         }
+        
+        this.logger.debug(`Content moderation passed for file: ${file.originalname}`);
       } catch (error) {
         if (error instanceof BadRequestException) {
           throw error;
         }
         // If moderation service fails, log but don't block upload (can be configured differently)
-        console.error('Content moderation failed:', error);
+        this.logger.error(`Content moderation failed for file ${file.originalname}:`, error);
         // For safety, you might want to throw here instead
         // throw new BadRequestException('Failed to verify image content');
       }
@@ -88,25 +97,29 @@ export class FileUploadService {
     // Upload to S3 or save locally
     if (this.useS3 && this.s3Service) {
       try {
+        this.logger.debug(`Uploading file to S3: ${file.originalname} to ${subfolder}`);
         const s3Key = await this.s3Service.uploadFile(
           file.buffer,
           subfolder,
           file.mimetype,
           file.originalname,
         );
+        this.logger.log(`File uploaded to S3 successfully: ${s3Key}`);
         return s3Key; // Return S3 key for database storage
       } catch (error) {
-        console.error('S3 upload failed:', error);
+        this.logger.error(`S3 upload failed for file ${file.originalname}:`, error);
         throw new BadRequestException('Failed to upload file to cloud storage');
       }
     } else {
       // Local storage fallback
+      this.logger.debug(`Saving file locally: ${file.originalname} to ${subfolder}`);
       const fileExtension = file.originalname.split('.').pop();
       const uniqueName = `${crypto.randomUUID()}.${fileExtension}`;
       const filePath = join(this.uploadPath, subfolder, uniqueName);
 
       await fs.writeFile(filePath, file.buffer);
 
+      this.logger.log(`File saved locally successfully: ${subfolder}/${uniqueName}`);
       return `${subfolder}/${uniqueName}`;
     }
   }
@@ -120,14 +133,18 @@ export class FileUploadService {
       return;
     }
 
+    this.logger.debug(`Deleting file: ${filePath}`);
+
     if (this.useS3 && this.s3Service) {
       await this.s3Service.deleteFile(filePath);
+      this.logger.debug(`File deleted from S3: ${filePath}`);
     } else {
       try {
         const fullPath = join(this.uploadPath, filePath);
         await fs.unlink(fullPath);
+        this.logger.debug(`File deleted locally: ${filePath}`);
       } catch (error) {
-        console.warn(`Failed to delete file ${filePath}:`, error.message);
+        this.logger.warn(`Failed to delete file ${filePath}:`, error.message);
       }
     }
   }

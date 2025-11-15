@@ -9,6 +9,7 @@ import { KycDocument, KycStatus } from '../users/entities/kyc-document.entity';
 import { RegisterDto, LoginDto, RefreshTokenDto, AuthResponseDto } from './dto/auth.dto';
 import { FileUploadService } from '../common/services/file-upload.service';
 
+
 interface MulterFile {
   fieldname: string;
   originalname: string;
@@ -43,7 +44,9 @@ export class AuthService {
       selfieImage?: Array<MulterFile>;
     },
   ): Promise<AuthResponseDto> {
-    const { phone, firstName, lastName } = registerDto;
+    console.log('registerDto', registerDto);
+    console.log('files', files);
+    const { phone, firstName, lastName, role } = registerDto;
 
     // Check if user already exists
     const existingUser = await this.userRepository.findOne({
@@ -90,6 +93,7 @@ export class AuthService {
       phone,
       firstName,
       lastName,
+      role,
       status: UserStatus.PENDING_KYC,
     };
 

@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Vehicle } from './entities/vehicle.entity';
@@ -7,6 +7,7 @@ import { CacheService } from '../common/services/cache.service';
 
 @Injectable()
 export class VehiclesService {
+  private readonly logger = new Logger(VehiclesService.name);
   private readonly CACHE_TTL = 600; // 10 minutes
 
   constructor(
@@ -18,8 +19,11 @@ export class VehiclesService {
   ) {}
 
   async create(ownerId: string, vehicleData: Partial<Vehicle>): Promise<Vehicle> {
+    this.logger.log(`Creating vehicle for owner: ${ownerId} (${vehicleData.brand} ${vehicleData.model})`);
+    
     const owner = await this.userRepository.findOne({ where: { id: ownerId } });
     if (!owner) {
+      this.logger.warn(`Vehicle creation failed: Owner ${ownerId} not found`);
       throw new NotFoundException('Owner not found');
     }
 
@@ -33,14 +37,18 @@ export class VehiclesService {
     // Invalidate cache
     await this.cacheService.del(CacheService.getVehiclesByOwnerKey(ownerId));
 
+    this.logger.log(`Vehicle created successfully: ${savedVehicle.id} for owner ${ownerId}`);
     return savedVehicle;
   }
 
   async findAllByOwner(ownerId: string): Promise<Vehicle[]> {
+    this.logger.debug(`Fetching vehicles for owner: ${ownerId}`);
+    
     const cacheKey = CacheService.getVehiclesByOwnerKey(ownerId);
     const cached = await this.cacheService.get<Vehicle[]>(cacheKey);
     
     if (cached) {
+      this.logger.debug(`Returning ${cached.length} vehicles from cache for owner ${ownerId}`);
       return cached;
     }
 
@@ -50,14 +58,18 @@ export class VehiclesService {
     });
 
     await this.cacheService.set(cacheKey, vehicles, this.CACHE_TTL);
+    this.logger.debug(`Fetched ${vehicles.length} vehicles from database for owner ${ownerId}`);
     return vehicles;
   }
 
   async findOne(id: string, ownerId: string): Promise<Vehicle> {
+    this.logger.debug(`Fetching vehicle ${id} for owner ${ownerId}`);
+    
     const cacheKey = CacheService.getVehicleKey(id);
     const cached = await this.cacheService.get<Vehicle>(cacheKey);
     
     if (cached && cached.ownerId === ownerId) {
+      this.logger.debug(`Vehicle ${id} returned from cache`);
       return cached;
     }
 
@@ -66,14 +78,18 @@ export class VehiclesService {
     });
 
     if (!vehicle) {
+      this.logger.warn(`Vehicle not found: ${id} for owner ${ownerId}`);
       throw new NotFoundException('Vehicle not found');
     }
 
     await this.cacheService.set(cacheKey, vehicle, this.CACHE_TTL);
+    this.logger.debug(`Vehicle ${id} fetched from database`);
     return vehicle;
   }
 
   async update(id: string, ownerId: string, updateData: Partial<Vehicle>): Promise<Vehicle> {
+    this.logger.log(`Updating vehicle ${id} for owner ${ownerId}`);
+    
     const vehicle = await this.findOne(id, ownerId);
     Object.assign(vehicle, updateData);
     const updatedVehicle = await this.vehicleRepository.save(vehicle);
@@ -82,16 +98,21 @@ export class VehiclesService {
     await this.cacheService.del(CacheService.getVehicleKey(id));
     await this.cacheService.del(CacheService.getVehiclesByOwnerKey(ownerId));
 
+    this.logger.log(`Vehicle ${id} updated successfully`);
     return updatedVehicle;
   }
 
   async remove(id: string, ownerId: string): Promise<void> {
+    this.logger.log(`Removing vehicle ${id} for owner ${ownerId}`);
+    
     const vehicle = await this.findOne(id, ownerId);
     await this.vehicleRepository.remove(vehicle);
     
     // Invalidate cache
     await this.cacheService.del(CacheService.getVehicleKey(id));
     await this.cacheService.del(CacheService.getVehiclesByOwnerKey(ownerId));
+
+    this.logger.log(`Vehicle ${id} removed successfully`);
   }
 }
 
