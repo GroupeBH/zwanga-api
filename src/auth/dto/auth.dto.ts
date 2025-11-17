@@ -1,6 +1,16 @@
-import { IsEmail, IsNotEmpty, IsOptional, IsString, MinLength } from 'class-validator';
+import {
+  IsBoolean,
+  IsEmail,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  MinLength,
+  ValidateNested,
+} from 'class-validator';
+import { Type } from 'class-transformer';
 import { ApiProperty } from '@nestjs/swagger';
 import { UserRole } from '../../users/entities/user.entity';
+import { CreateVehicleDto } from '../../vehicles/dto/vehicle.dto';
 
 export class RegisterDto {
   @ApiProperty({ example: '+243900000000' })
@@ -8,8 +18,10 @@ export class RegisterDto {
   @IsNotEmpty()
   phone: string;
 
+  @ApiProperty({ required: false, example: true, description: 'Indique si l’utilisateur est conducteur' })
+  @IsBoolean()
   @IsOptional()
-  isDriver: boolean;
+  isDriver?: boolean;
 
   @ApiProperty({ example: 'John' })
   @IsString()
@@ -21,8 +33,19 @@ export class RegisterDto {
   @IsNotEmpty()
   lastName: string;
 
+  @ApiProperty({ enum: UserRole, example: UserRole.DRIVER })
   @IsNotEmpty()
   role: UserRole;
+
+  @ApiProperty({
+    required: false,
+    type: () => CreateVehicleDto,
+    description: 'Informations du véhicule (uniquement pour les conducteurs)',
+  })
+  @ValidateNested()
+  @IsOptional()
+  @Type(() => CreateVehicleDto)
+  vehicle?: CreateVehicleDto;
 }
 
 export class LoginDto {

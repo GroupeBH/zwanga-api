@@ -8,11 +8,12 @@ import {
   UploadedFiles,
 } from '@nestjs/common';
 import { FileFieldsInterceptor } from '@nestjs/platform-express';
-import { Throttle } from '@nestjs/throttler';
 import { ApiTags, ApiOperation, ApiResponse, ApiConsumes, ApiBody } from '@nestjs/swagger';
 import { AuthService } from './auth.service';
 import { RegisterDto, LoginDto, RefreshTokenDto, AuthResponseDto } from './dto/auth.dto';
 import { Public } from '../common/decorators/public.decorator';
+import { UserRole } from '../users/entities/user.entity';
+import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
 
 interface MulterFile {
   fieldname: string;
@@ -33,7 +34,7 @@ export class AuthController {
 
   @Post('register')
   @Public()
-  @Throttle({ default: { limit: 5, ttl: 60000 } }) // 5 requests per minute
+  @SensitiveThrottle(5, 60000) // 5 requests per minute per IP
   @UseInterceptors(
     FileFieldsInterceptor(
       [
@@ -55,6 +56,28 @@ export class AuthController {
         phone: { type: 'string', example: '+243900000000' },
         firstName: { type: 'string', example: 'John' },
         lastName: { type: 'string', example: 'Doe' },
+        role: {
+          type: 'string',
+          enum: Object.values(UserRole),
+          example: UserRole.DRIVER,
+          description: 'Rôle de l’utilisateur (driver, passenger, admin)',
+        },
+        isDriver: {
+          type: 'boolean',
+          example: true,
+          description: 'Indique si l’utilisateur souhaite conduire',
+        },
+        vehicle: {
+          type: 'object',
+          description: 'Informations du véhicule (optionnel, conducteurs uniquement)',
+          properties: {
+            brand: { type: 'string', example: 'Toyota' },
+            model: { type: 'string', example: 'Corolla' },
+            color: { type: 'string', example: 'Noir' },
+            licensePlate: { type: 'string', example: 'ABC-1234' },
+            photoUrl: { type: 'string', example: 'https://...' },
+          },
+        },
         profilePicture: {
           type: 'string',
           format: 'binary',
@@ -90,7 +113,7 @@ export class AuthController {
 
   @Post('login')
   @Public()
-  @Throttle({ default: { limit: 10, ttl: 60000 } }) // 10 requests per minute
+  @SensitiveThrottle(10, 60000) // 10 requests per minute per IP
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Login user' })
   @ApiResponse({ status: 200, type: AuthResponseDto })
@@ -101,7 +124,7 @@ export class AuthController {
 
   @Post('refresh')
   @Public()
-  @Throttle({ default: { limit: 20, ttl: 60000 } }) // 20 requests per minute
+  @SensitiveThrottle(20, 60000) // 20 requests per minute per IP
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Refresh access token' })
   @ApiResponse({ status: 200, description: 'Token refreshed successfully' })
