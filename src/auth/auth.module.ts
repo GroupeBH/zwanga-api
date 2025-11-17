@@ -9,6 +9,7 @@ import { User } from '../users/entities/user.entity';
 import { KycDocument } from '../users/entities/kyc-document.entity';
 import { UsersModule } from '../users/users.module';
 import { JwtStrategy } from './strategies/jwt.strategy';
+import { VehiclesModule } from '../vehicles/vehicles.module';
 
 @Module({
   imports: [
@@ -25,6 +26,7 @@ import { JwtStrategy } from './strategies/jwt.strategy';
       }),
       inject: [ConfigService],
     }),
+    VehiclesModule,
   ],
   controllers: [AuthController],
   providers: [AuthService, JwtStrategy],

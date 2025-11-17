@@ -10,6 +10,7 @@ import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { UsersService } from './users.service';
 import { UpdateProfileDto, UploadKycDto } from './dto/user.dto';
 import { Auth } from '../auth/decorators/auth.decorator';
+import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
 
 @ApiTags('Users')
 @Controller('users')
@@ -18,6 +19,7 @@ export class UsersController {
 
   @Get('profile')
   @Auth()
+  @SensitiveThrottle(30, 60000)
   @ApiOperation({ summary: 'Get current user profile' })
   async getProfile(@Request() req) {
     return this.usersService.findOne(req.user.userId);
@@ -25,6 +27,7 @@ export class UsersController {
 
   @Put('profile')
   @Auth()
+  @SensitiveThrottle(10, 60000)
   @ApiOperation({ summary: 'Update user profile' })
   async updateProfile(@Request() req, @Body() updateProfileDto: UpdateProfileDto) {
     return this.usersService.updateProfile(req.user.userId, updateProfileDto);
@@ -32,6 +35,7 @@ export class UsersController {
 
   @Post('kyc')
   @Auth()
+  @SensitiveThrottle(5, 60000)
   @ApiOperation({ summary: 'Upload KYC documents' })
   async uploadKyc(@Request() req, @Body() uploadKycDto: UploadKycDto) {
     return this.usersService.uploadKyc(req.user.userId, uploadKycDto);
@@ -39,6 +43,7 @@ export class UsersController {
 
   @Get('kyc/status')
   @Auth()
+  @SensitiveThrottle(30, 60000)
   @ApiOperation({ summary: 'Get KYC verification status' })
   async getKycStatus(@Request() req) {
     return this.usersService.getKycStatus(req.user.userId);
@@ -46,6 +51,7 @@ export class UsersController {
 
   @Post('fcm-token')
   @Auth()
+  @SensitiveThrottle(10, 60000)
   @ApiOperation({ summary: 'Update FCM token for push notifications' })
   async updateFcmToken(@Request() req, @Body('fcmToken') fcmToken: string) {
     await this.usersService.updateFcmToken(req.user.userId, fcmToken);

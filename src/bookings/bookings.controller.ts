@@ -7,13 +7,13 @@ import {
   Body,
   Request,
 } from '@nestjs/common';
-import { Throttle } from '@nestjs/throttler';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { BookingsService } from './bookings.service';
 import { CreateBookingDto, UpdateBookingStatusDto } from './dto/booking.dto';
 import { Auth } from '../auth/decorators/auth.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { UserRole } from '../users/entities/user.entity';
+import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
 
 @ApiTags('Bookings')
 @Controller('bookings')
@@ -23,7 +23,7 @@ export class BookingsController {
   @Post()
   @Auth()
   @Roles(UserRole.PASSENGER)
-  @Throttle({ default: { limit: 10, ttl: 60000 } }) // 10 requests per minute
+  @SensitiveThrottle(10, 60000) // 10 requests per minute per IP
   @ApiOperation({ summary: 'Create a new booking' })
   async create(@Request() req, @Body() createBookingDto: CreateBookingDto) {
     return this.bookingsService.create(req.user.userId, createBookingDto);
@@ -31,6 +31,7 @@ export class BookingsController {
 
   @Get('my-bookings')
   @Auth()
+  @SensitiveThrottle(20, 60000)
   @ApiOperation({ summary: 'Get all bookings of the current user' })
   async findMyBookings(@Request() req) {
     return this.bookingsService.findAllByPassenger(req.user.userId);
@@ -38,6 +39,7 @@ export class BookingsController {
 
   @Get('trip/:tripId')
   @Auth()
+  @SensitiveThrottle(20, 60000)
   @ApiOperation({ summary: 'Get all bookings for a trip (driver only)' })
   async findByTrip(@Request() req, @Param('tripId') tripId: string) {
     return this.bookingsService.findAllByTrip(tripId, req.user.userId);
@@ -45,6 +47,7 @@ export class BookingsController {
 
   @Get(':id')
   @Auth()
+  @SensitiveThrottle(30, 60000)
   @ApiOperation({ summary: 'Get a booking by ID' })
   async findOne(@Param('id') id: string) {
     return this.bookingsService.findOne(id);
@@ -53,7 +56,7 @@ export class BookingsController {
   @Put(':id/status')
   @Auth()
   @Roles(UserRole.DRIVER)
-  @Throttle({ default: { limit: 20, ttl: 60000 } }) // 20 requests per minute
+  @SensitiveThrottle(20, 60000) // 20 requests per minute per IP
   @ApiOperation({ summary: 'Update booking status (driver only)' })
   async updateStatus(
     @Request() req,
@@ -65,6 +68,7 @@ export class BookingsController {
 
   @Put(':id/cancel')
   @Auth()
+  @SensitiveThrottle(10, 60000)
   @ApiOperation({ summary: 'Cancel a booking' })
   async cancel(@Request() req, @Param('id') id: string) {
     await this.bookingsService.cancel(id, req.user.userId);

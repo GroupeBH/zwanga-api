@@ -1,13 +1,14 @@
-import { Injectable, UnauthorizedException, Logger } from '@nestjs/common';
+import { Injectable, UnauthorizedException, Logger, BadRequestException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcrypt';
-import { User, UserStatus } from '../users/entities/user.entity';
+import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { KycDocument, KycStatus } from '../users/entities/kyc-document.entity';
 import { RegisterDto, LoginDto, RefreshTokenDto, AuthResponseDto } from './dto/auth.dto';
 import { FileUploadService } from '../common/services/file-upload.service';
+import { VehiclesService } from '../vehicles/vehicles.service';
 
 
 interface MulterFile {
@@ -34,6 +35,7 @@ export class AuthService {
     private jwtService: JwtService,
     private configService: ConfigService,
     private fileUploadService: FileUploadService,
+    private vehiclesService: VehiclesService,
   ) {}
 
   async register(
@@ -46,7 +48,8 @@ export class AuthService {
   ): Promise<AuthResponseDto> {
     console.log('registerDto', registerDto);
     console.log('files', files);
-    const { phone, firstName, lastName, role } = registerDto;
+    const { phone, firstName, lastName, role, isDriver, vehicle } = registerDto;
+    const resolvedIsDriver = isDriver ?? role === UserRole.DRIVER;
 
     // Check if user already exists
     const existingUser = await this.userRepository.findOne({
@@ -94,6 +97,7 @@ export class AuthService {
       firstName,
       lastName,
       role,
+      isDriver: resolvedIsDriver,
       status: UserStatus.PENDING_KYC,
     };
 
@@ -103,6 +107,14 @@ export class AuthService {
 
     const user = this.userRepository.create(userData);
     const savedUser = await this.userRepository.save(user);
+
+    if (vehicle && !resolvedIsDriver) {
+      throw new BadRequestException('Vehicle information is only allowed for drivers');
+    }
+
+    if (vehicle && resolvedIsDriver) {
+      await this.vehiclesService.create(savedUser.id, vehicle);
+    }
 
     // Create KYC document if CNI or selfie images are provided
     if (cniImagePath || selfieImagePath) {
