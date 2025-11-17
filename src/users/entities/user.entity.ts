@@ -79,7 +79,7 @@ export class User {
   @Column({ default: true })
   isActive: boolean;
 
-  @Column({ default: true })
+  @Column({ default: false })
   isDriver: boolean;
 
   @Column({ nullable: true })

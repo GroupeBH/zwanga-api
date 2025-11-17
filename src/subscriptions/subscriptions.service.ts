@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
@@ -7,6 +7,8 @@ import { User } from '../users/entities/user.entity';
 
 @Injectable()
 export class SubscriptionsService {
+  private readonly logger = new Logger(SubscriptionsService.name);
+
   constructor(
     @InjectRepository(Subscription)
     private subscriptionRepository: Repository<Subscription>,
@@ -16,8 +18,11 @@ export class SubscriptionsService {
   ) {}
 
   async createTrial(userId: string): Promise<Subscription> {
+    this.logger.log(`Creating trial subscription for user: ${userId}`);
+    
     const user = await this.userRepository.findOne({ where: { id: userId } });
     if (!user) {
+      this.logger.warn(`Trial creation failed: User ${userId} not found`);
       throw new NotFoundException('User not found');
     }
 
@@ -30,6 +35,7 @@ export class SubscriptionsService {
     });
 
     if (activeSubscription) {
+      this.logger.warn(`Trial creation failed: User ${userId} already has active subscription`);
       throw new BadRequestException('User already has an active subscription');
     }
 
@@ -48,12 +54,18 @@ export class SubscriptionsService {
       isTrial: true,
     });
 
-    return await this.subscriptionRepository.save(subscription);
+    const savedSubscription = await this.subscriptionRepository.save(subscription);
+    
+    this.logger.log(`Trial subscription created successfully: ${savedSubscription.id} for user ${userId} (${trialPeriodDays} days)`);
+    return savedSubscription;
   }
 
   async subscribe(userId: string, plan: SubscriptionPlan): Promise<Subscription> {
+    this.logger.log(`Creating subscription for user: ${userId} - Plan: ${plan}`);
+    
     const user = await this.userRepository.findOne({ where: { id: userId } });
     if (!user) {
+      this.logger.warn(`Subscription creation failed: User ${userId} not found`);
       throw new NotFoundException('User not found');
     }
 
@@ -87,30 +99,51 @@ export class SubscriptionsService {
       isTrial: false,
     });
 
-    return await this.subscriptionRepository.save(subscription);
+    const savedSubscription = await this.subscriptionRepository.save(subscription);
+    
+    this.logger.log(`Subscription created successfully: ${savedSubscription.id} for user ${userId} - Plan: ${plan}, Amount: ${subscriptionPrice}, Payment Ref: ${paymentReference}`);
+    return savedSubscription;
   }
 
   async getActiveSubscription(userId: string): Promise<Subscription | null> {
-    return this.subscriptionRepository.findOne({
+    this.logger.debug(`Fetching active subscription for user: ${userId}`);
+    
+    const subscription = await this.subscriptionRepository.findOne({
       where: {
         userId,
         status: SubscriptionStatus.ACTIVE,
       },
       order: { createdAt: 'DESC' },
     });
+
+    if (subscription) {
+      this.logger.debug(`Active subscription found for user ${userId}: ${subscription.id}`);
+    } else {
+      this.logger.debug(`No active subscription found for user ${userId}`);
+    }
+    
+    return subscription;
   }
 
   async getUserSubscriptions(userId: string): Promise<Subscription[]> {
-    return this.subscriptionRepository.find({
+    this.logger.debug(`Fetching all subscriptions for user: ${userId}`);
+    
+    const subscriptions = await this.subscriptionRepository.find({
       where: { userId },
       order: { createdAt: 'DESC' },
     });
+
+    this.logger.debug(`Found ${subscriptions.length} subscriptions for user ${userId}`);
+    return subscriptions;
   }
 
   async checkSubscriptionStatus(userId: string): Promise<boolean> {
+    this.logger.debug(`Checking subscription status for user: ${userId}`);
+    
     const subscription = await this.getActiveSubscription(userId);
 
     if (!subscription) {
+      this.logger.debug(`No active subscription found for user: ${userId}`);
       return false;
     }
 
@@ -118,9 +151,11 @@ export class SubscriptionsService {
     if (new Date() > subscription.endDate) {
       subscription.status = SubscriptionStatus.EXPIRED;
       await this.subscriptionRepository.save(subscription);
+      this.logger.log(`Subscription ${subscription.id} expired for user ${userId}`);
       return false;
     }
 
+    this.logger.debug(`User ${userId} has active subscription until ${subscription.endDate}`);
     return true;
   }
 }

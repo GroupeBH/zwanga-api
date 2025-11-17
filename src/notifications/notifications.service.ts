@@ -1,9 +1,10 @@
 import * as admin from 'firebase-admin';
-import { Injectable, OnModuleInit } from '@nestjs/common';
+import { Injectable, OnModuleInit, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 @Injectable()
 export class NotificationService implements OnModuleInit {
+  private readonly logger = new Logger(NotificationService.name);
   private firebaseApp: admin.app.App;
 
   constructor(private configService: ConfigService) {}
@@ -22,9 +23,10 @@ export class NotificationService implements OnModuleInit {
         this.firebaseApp = admin.initializeApp({
           credential: admin.credential.cert(credentials),
         });
+        this.logger.log('FCM initialized successfully with base64 credentials');
         return;
       } catch (error) {
-        console.error('Error parsing FCM credentials from base64:', error);
+        this.logger.error('Error parsing FCM credentials from base64:', error);
       }
     }
 
@@ -41,8 +43,9 @@ export class NotificationService implements OnModuleInit {
             clientEmail,
           }),
         });
+        this.logger.log('FCM initialized successfully with individual credentials');
       } catch (error) {
-        console.error('Error initializing FCM with individual credentials:', error);
+        this.logger.error('Error initializing FCM with individual credentials:', error);
       }
     }
   }
@@ -54,11 +57,13 @@ export class NotificationService implements OnModuleInit {
     data?: Record<string, any>,
   ): Promise<void> {
     if (!this.firebaseApp) {
-      console.log('FCM not configured, skipping notification');
+      this.logger.warn('FCM not configured, skipping notification');
       return;
     }
 
     try {
+      this.logger.debug(`Sending notification to token: ${fcmToken.substring(0, 10)}... - Title: ${title}`);
+      
       await admin.messaging().send({
         token: fcmToken,
         notification: {
@@ -67,8 +72,10 @@ export class NotificationService implements OnModuleInit {
         },
         data: data ? Object.fromEntries(Object.entries(data).map(([k, v]) => [k, String(v)])) : undefined,
       });
+      
+      this.logger.log(`Notification sent successfully - Title: ${title}`);
     } catch (error) {
-      console.error('Error sending notification:', error);
+      this.logger.error(`Error sending notification: ${error.message}`, error.stack);
     }
   }
 
@@ -79,10 +86,13 @@ export class NotificationService implements OnModuleInit {
     data?: Record<string, any>,
   ): Promise<void> {
     if (!this.firebaseApp || fcmTokens.length === 0) {
+      this.logger.debug('FCM not configured or no tokens provided, skipping multicast notification');
       return;
     }
 
     try {
+      this.logger.log(`Sending multicast notification to ${fcmTokens.length} tokens - Title: ${title}`);
+      
       const message = {
         notification: {
           title,
@@ -92,9 +102,11 @@ export class NotificationService implements OnModuleInit {
         tokens: fcmTokens,
       };
 
-      await admin.messaging().sendEachForMulticast(message);
+      const response = await admin.messaging().sendEachForMulticast(message);
+      
+      this.logger.log(`Multicast notification sent - Success: ${response.successCount}, Failed: ${response.failureCount}`);
     } catch (error) {
-      console.error('Error sending notifications:', error);
+      this.logger.error(`Error sending multicast notifications: ${error.message}`, error.stack);
     }
   }
 }

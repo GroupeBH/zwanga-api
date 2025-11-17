@@ -4,6 +4,9 @@ import { RedisService } from './services/redis.service';
 import { FileUploadService } from './services/file-upload.service';
 import { S3Service } from './services/s3.service';
 import { ContentModerationService } from './services/content-moderation.service';
+import { RolesGuard } from './guards/roles.guard';
+import { JwtAuthGuard } from './guards/jwt-auth.guard';
+import { LoggingInterceptor } from './interceptors/logging.interceptor';
 
 @Global()
 @Module({
@@ -13,6 +16,9 @@ import { ContentModerationService } from './services/content-moderation.service'
     S3Service,
     ContentModerationService,
     FileUploadService,
+    RolesGuard,
+    JwtAuthGuard,
+    LoggingInterceptor,
   ],
   exports: [
     CacheService,
@@ -20,6 +26,9 @@ import { ContentModerationService } from './services/content-moderation.service'
     S3Service,
     ContentModerationService,
     FileUploadService,
+    RolesGuard,
+    JwtAuthGuard,
+    LoggingInterceptor,
   ],
 })
 export class CommonModule {}

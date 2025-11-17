@@ -1,9 +1,10 @@
 import { createClient } from 'redis';
-import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 @Injectable()
 export class RedisService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(RedisService.name);
   private client: ReturnType<typeof createClient>;
 
   constructor(private configService: ConfigService) {}
@@ -17,14 +18,21 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
       password: this.configService.get<string>('REDIS_PASSWORD') || undefined,
     });
 
-    this.client.on('error', (err) => console.error('Redis Client Error', err));
-    this.client.on('connect', () => console.log('Redis Client Connected'));
+    this.client.on('error', (err) => {
+      this.logger.error('Redis Client Error:', err);
+    });
+    this.client.on('connect', () => {
+      this.logger.log('Redis Client Connected');
+    });
 
     await this.client.connect();
+    this.logger.log(`Redis connected to ${this.configService.get<string>('REDIS_HOST') || 'localhost'}:${this.configService.get<number>('REDIS_PORT') || 6379}`);
   }
 
   async onModuleDestroy() {
+    this.logger.log('Disconnecting Redis client');
     await this.client.quit();
+    this.logger.log('Redis client disconnected');
   }
 
   getClient() {

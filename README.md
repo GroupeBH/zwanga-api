@@ -171,6 +171,19 @@ Le système de cache Redis est configuré pour améliorer les performances :
 
 Le cache est automatiquement invalidé lors des opérations de modification (create, update, delete).
 
+## 🔐 Sécurité et Logging
+
+L'application implémente plusieurs mesures de sécurité :
+
+- ✅ **Authentification JWT** : Toutes les routes sont protégées par défaut
+- ✅ **Contrôle d'accès basé sur les rôles (RBAC)** : Restrictions par rôle (Admin, Driver, Passenger)
+- ✅ **Rate Limiting** : Protection contre les abus et attaques DDoS
+- ✅ **Logging complet** : Toutes les requêtes et opérations sont loggées
+- ✅ **Validation des entrées** : Validation automatique des DTOs
+- ✅ **Modération de contenu** : Détection automatique de contenu inapproprié
+
+Voir `SECURITY.md` pour plus de détails sur la sécurité et le logging.
+
 ## 📄 Licence
 
 UNLICENSED

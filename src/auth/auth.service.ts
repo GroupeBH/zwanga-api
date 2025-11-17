@@ -1,4 +1,4 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { Injectable, UnauthorizedException, Logger } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -6,8 +6,9 @@ import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcrypt';
 import { User, UserStatus } from '../users/entities/user.entity';
 import { KycDocument, KycStatus } from '../users/entities/kyc-document.entity';
-import { RegisterDto, LoginDto, RefreshTokenDto } from './dto/auth.dto';
+import { RegisterDto, LoginDto, RefreshTokenDto, AuthResponseDto } from './dto/auth.dto';
 import { FileUploadService } from '../common/services/file-upload.service';
+
 
 interface MulterFile {
   fieldname: string;
@@ -23,6 +24,8 @@ interface MulterFile {
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+
   constructor(
     @InjectRepository(User)
     private userRepository: Repository<User>,
@@ -40,8 +43,10 @@ export class AuthService {
       cniImage?: Array<MulterFile>;
       selfieImage?: Array<MulterFile>;
     },
-  ): Promise<User> {
-    const { phone, firstName, lastName } = registerDto;
+  ): Promise<AuthResponseDto> {
+    console.log('registerDto', registerDto);
+    console.log('files', files);
+    const { phone, firstName, lastName, role } = registerDto;
 
     // Check if user already exists
     const existingUser = await this.userRepository.findOne({
@@ -88,6 +93,7 @@ export class AuthService {
       phone,
       firstName,
       lastName,
+      role,
       status: UserStatus.PENDING_KYC,
     };
 
@@ -117,7 +123,20 @@ export class AuthService {
       await this.kycDocumentRepository.save(kycDocument);
     }
 
-    return savedUser;
+    // Generate tokens for the newly registered user
+    const tokens = await this.generateTokens(savedUser);
+
+    return {
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+      // user: {
+      //   id: savedUser.id,
+      //   email: savedUser.email || savedUser.phone,
+      //   firstName: savedUser.firstName,
+      //   lastName: savedUser.lastName,
+      //   role: savedUser.role,
+      // },
+    };
   }
 
   async validateUser(phone: string): Promise<User | null> {
@@ -156,13 +175,13 @@ export class AuthService {
     return {
       accessToken: tokens.accessToken,
       refreshToken: tokens.refreshToken,
-      user: {
-        id: user.id,
-        email: user.email || user.phone,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        role: user.role,
-      },
+      // user: {
+      //   id: user.id,
+      //   email: user.email || user.phone,
+      //   firstName: user.firstName,
+      //   lastName: user.lastName,
+      //   role: user.role,
+      // },
     };
   }
 
@@ -197,18 +216,20 @@ export class AuthService {
   private async generateTokens(user: User) {
     const payload = {
       sub: user.id,
-      email: user.email || user.phone,
+      phone: user.phone,
       role: user.role,
     };
 
+    // Access token: 1 day (1d)
     const accessToken = await this.jwtService.signAsync(payload, {
       secret: this.configService.get<string>('JWT_SECRET'),
-      expiresIn: this.configService.get<string>('JWT_EXPIRES_IN'),
+      expiresIn: this.configService.get<string>('JWT_EXPIRES_IN') || '1d',
     });
 
+    // Refresh token: 3 weeks (21d)
     const refreshToken = await this.jwtService.signAsync(payload, {
       secret: this.configService.get<string>('JWT_REFRESH_SECRET'),
-      expiresIn: this.configService.get<string>('JWT_REFRESH_EXPIRES_IN'),
+      expiresIn: this.configService.get<string>('JWT_REFRESH_EXPIRES_IN') || '21d',
     });
 
     // Save refresh token to user

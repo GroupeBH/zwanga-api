@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { User, UserStatus } from './entities/user.entity';
@@ -7,6 +7,8 @@ import { UpdateProfileDto, UploadKycDto } from './dto/user.dto';
 
 @Injectable()
 export class UsersService {
+  private readonly logger = new Logger(UsersService.name);
+
   constructor(
     @InjectRepository(User)
     private userRepository: Repository<User>,
@@ -15,12 +17,15 @@ export class UsersService {
   ) {}
 
   async findOne(id: string): Promise<User> {
+    this.logger.debug(`Fetching user: ${id}`);
+    
     const user = await this.userRepository.findOne({
       where: { id },
       relations: ['vehicles', 'kycDocuments'],
     });
 
     if (!user) {
+      this.logger.warn(`User not found: ${id}`);
       throw new NotFoundException('User not found');
     }
 
@@ -32,6 +37,8 @@ export class UsersService {
   }
 
   async updateProfile(userId: string, updateProfileDto: UpdateProfileDto): Promise<User> {
+    this.logger.log(`Updating profile for user: ${userId}`);
+    
     const user = await this.findOne(userId);
 
     if (updateProfileDto.phone && updateProfileDto.phone !== user.phone) {
@@ -40,15 +47,21 @@ export class UsersService {
       });
 
       if (existingUser) {
+        this.logger.warn(`Profile update failed: Phone ${updateProfileDto.phone} already exists`);
         throw new BadRequestException('Phone number already exists');
       }
     }
 
     Object.assign(user, updateProfileDto);
-    return await this.userRepository.save(user);
+    const updatedUser = await this.userRepository.save(user);
+    
+    this.logger.log(`Profile updated successfully for user: ${userId}`);
+    return updatedUser;
   }
 
   async uploadKyc(userId: string, uploadKycDto: UploadKycDto): Promise<KycDocument> {
+    this.logger.log(`Uploading KYC documents for user: ${userId}`);
+    
     const user = await this.findOne(userId);
 
     // Check if user already has a pending KYC
@@ -57,6 +70,7 @@ export class UsersService {
     });
 
     if (existingKyc) {
+      this.logger.warn(`KYC upload failed: User ${userId} already has pending KYC`);
       throw new BadRequestException('You already have a pending KYC verification');
     }
 
@@ -66,7 +80,10 @@ export class UsersService {
       status: KycStatus.PENDING,
     });
 
-    return await this.kycDocumentRepository.save(kycDocument);
+    const savedKyc = await this.kycDocumentRepository.save(kycDocument);
+    
+    this.logger.log(`KYC documents uploaded successfully for user: ${userId} (KYC ID: ${savedKyc.id})`);
+    return savedKyc;
   }
 
   async getKycStatus(userId: string): Promise<KycDocument | null> {
@@ -77,9 +94,13 @@ export class UsersService {
   }
 
   async updateFcmToken(userId: string, fcmToken: string): Promise<void> {
+    this.logger.debug(`Updating FCM token for user: ${userId}`);
+    
     const user = await this.findOne(userId);
     user.fcmToken = fcmToken;
     await this.userRepository.save(user);
+    
+    this.logger.debug(`FCM token updated for user: ${userId}`);
   }
 }
 
