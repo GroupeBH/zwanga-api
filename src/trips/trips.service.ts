@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, Point } from 'typeorm';
 import { Trip, TripStatus } from './entities/trip.entity';
 import { User } from '../users/entities/user.entity';
 import { CreateTripDto, SearchTripsDto, UpdateTripDto } from './dto/trip.dto';
@@ -33,10 +33,19 @@ export class TripsService {
       throw new BadRequestException('User must be a driver to create trips');
     }
 
+    const {
+      departureCoordinates,
+      arrivalCoordinates,
+      departureDate,
+      ...baseTripData
+    } = createTripDto;
+
     const trip = this.tripRepository.create({
-      ...createTripDto,
+      ...baseTripData,
       driverId,
-      departureDate: new Date(createTripDto.departureDate),
+      departureDate: new Date(departureDate),
+      departurePoint: this.buildPointFromCoordinates(departureCoordinates),
+      arrivalPoint: this.buildPointFromCoordinates(arrivalCoordinates),
     });
 
     const savedTrip = await this.tripRepository.save(trip);
@@ -115,23 +124,77 @@ export class TripsService {
     }
 
     // If coordinates are provided, calculate distance (simplified - in production use PostGIS)
-    if (
-      searchTripsDto.departureLatitude &&
-      searchTripsDto.departureLongitude
-    ) {
-      // Simple radius search (50km radius)
-      const radius = 0.5; // approximately 50km
+    const hasDepartureCoords =
+      Array.isArray(searchTripsDto.departureCoordinates) &&
+      searchTripsDto.departureCoordinates.length === 2;
+
+    let depLng: number | undefined;
+    let depLat: number | undefined;
+
+    if (hasDepartureCoords) {
+      [depLng, depLat] = searchTripsDto.departureCoordinates as [number, number];
+      const departureRadiusMeters =
+        (searchTripsDto.departureRadiusKm ?? 50) * 1000;
+
       queryBuilder.andWhere(
-        'ABS(trip.departureLatitude - :depLat) <= :radius AND ABS(trip.departureLongitude - :depLng) <= :radius',
+        `ST_DWithin(
+          trip.departurePoint,
+          ST_SetSRID(ST_MakePoint(:depLng, :depLat), 4326)::geography,
+          :depRadius
+        )`,
         {
-          depLat: searchTripsDto.departureLatitude,
-          depLng: searchTripsDto.departureLongitude,
-          radius,
+          depLat,
+          depLng,
+          depRadius: departureRadiusMeters,
         },
       );
     }
 
-    queryBuilder.orderBy('trip.departureDate', 'ASC');
+    const hasArrivalCoords =
+      Array.isArray(searchTripsDto.arrivalCoordinates) &&
+      searchTripsDto.arrivalCoordinates.length === 2;
+
+    let arrLng: number | undefined;
+    let arrLat: number | undefined;
+
+    if (hasArrivalCoords) {
+      [arrLng, arrLat] = searchTripsDto.arrivalCoordinates as [number, number];
+      const arrivalRadiusMeters =
+        (searchTripsDto.arrivalRadiusKm ?? 50) * 1000;
+
+      queryBuilder.andWhere(
+        `ST_DWithin(
+          trip.arrivalPoint,
+          ST_SetSRID(ST_MakePoint(:arrLng, :arrLat), 4326)::geography,
+          :arrRadius
+        )`,
+        {
+          arrLat,
+          arrLng,
+          arrRadius: arrivalRadiusMeters,
+        },
+      );
+    }
+
+    if (hasDepartureCoords && depLng !== undefined && depLat !== undefined) {
+      queryBuilder.orderBy(
+        `ST_Distance(
+          trip.departurePoint,
+          ST_SetSRID(ST_MakePoint(:depLng, :depLat), 4326)::geography
+        )`,
+        'ASC',
+      );
+    } else if (hasArrivalCoords && arrLng !== undefined && arrLat !== undefined) {
+      queryBuilder.orderBy(
+        `ST_Distance(
+          trip.arrivalPoint,
+          ST_SetSRID(ST_MakePoint(:arrLng, :arrLat), 4326)::geography
+        )`,
+        'ASC',
+      );
+    } else {
+      queryBuilder.orderBy('trip.departureDate', 'ASC');
+    }
 
     const results = await queryBuilder.getMany();
     this.logger.log(`Trip search returned ${results.length} results`);
@@ -189,12 +252,26 @@ export class TripsService {
       throw new NotFoundException('Trip not found');
     }
 
-    if (updateTripDto.departureDate) {
-      trip.departureDate = new Date(updateTripDto.departureDate);
-      delete updateTripDto.departureDate;
+    const {
+      departureDate,
+      departureCoordinates,
+      arrivalCoordinates,
+      ...restPayload
+    } = updateTripDto;
+
+    if (departureDate) {
+      trip.departureDate = new Date(departureDate);
     }
 
-    Object.assign(trip, updateTripDto);
+    if (departureCoordinates) {
+      trip.departurePoint = this.buildPointFromCoordinates(departureCoordinates);
+    }
+
+    if (arrivalCoordinates) {
+      trip.arrivalPoint = this.buildPointFromCoordinates(arrivalCoordinates);
+    }
+
+    Object.assign(trip, restPayload);
     const updatedTrip = await this.tripRepository.save(trip);
     
     // Invalidate cache
@@ -226,6 +303,12 @@ export class TripsService {
     await this.cacheService.del(CacheService.getTripsListKey('all'));
 
     this.logger.log(`Trip ${id} cancelled successfully`);
+  }
+  private buildPointFromCoordinates([longitude, latitude]: [number, number]): Point {
+    return {
+      type: 'Point',
+      coordinates: [Number(longitude), Number(latitude)],
+    };
   }
 }
 

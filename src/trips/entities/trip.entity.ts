@@ -1,3 +1,4 @@
+import type { Point } from 'typeorm';
 import {
   Entity,
   PrimaryGeneratedColumn,
@@ -37,20 +38,24 @@ export class Trip {
   @Column()
   departureLocation: string;
 
-  @Column('decimal', { precision: 10, scale: 8 })
-  departureLatitude: number;
-
-  @Column('decimal', { precision: 11, scale: 8 })
-  departureLongitude: number;
+  @Index('IDX_trips_departure_point', { spatial: true })
+  @Column({
+    type: 'geography',
+    spatialFeatureType: 'Point',
+    srid: 4326,
+  })
+  departurePoint: Point;
 
   @Column()
   arrivalLocation: string;
 
-  @Column('decimal', { precision: 10, scale: 8 })
-  arrivalLatitude: number;
-
-  @Column('decimal', { precision: 11, scale: 8 })
-  arrivalLongitude: number;
+  @Index('IDX_trips_arrival_point', { spatial: true })
+  @Column({
+    type: 'geography',
+    spatialFeatureType: 'Point',
+    srid: 4326,
+  })
+  arrivalPoint: Point;
 
   @Column({ type: 'timestamp' })
   departureDate: Date;
