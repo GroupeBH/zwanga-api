@@ -3,8 +3,33 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, Point } from 'typeorm';
 import { Trip, TripStatus } from './entities/trip.entity';
 import { User } from '../users/entities/user.entity';
+import { Booking } from '../bookings/entities/booking.entity';
 import { CreateTripDto, SearchTripsDto, UpdateTripDto } from './dto/trip.dto';
 import { CacheService } from '../common/services/cache.service';
+
+export type Coordinates = [number, number] | null;
+
+export interface SanitizedUser {
+  id: string;
+  firstName: string;
+  lastName: string;
+  phone: string;
+  profilePicture: string | null;
+  role: User['role'];
+  status: User['status'];
+  isDriver: boolean;
+}
+
+export type SanitizedBooking = Omit<Booking, 'trip' | 'passenger' | 'messages'> & {
+  passenger: SanitizedUser | null;
+};
+
+export type SanitizedTrip = Omit<Trip, 'driver' | 'bookings' | 'departurePoint' | 'arrivalPoint'> & {
+  driver: SanitizedUser | null;
+  bookings: SanitizedBooking[];
+  departureCoordinates: Coordinates;
+  arrivalCoordinates: Coordinates;
+};
 
 @Injectable()
 export class TripsService {
@@ -19,7 +44,7 @@ export class TripsService {
     private cacheService: CacheService,
   ) {}
 
-  async create(driverId: string, createTripDto: CreateTripDto): Promise<Trip> {
+  async create(driverId: string, createTripDto: CreateTripDto): Promise<SanitizedTrip> {
     this.logger.log(`Creating trip for driver: ${driverId} from ${createTripDto.departureLocation} to ${createTripDto.arrivalLocation}`);
     
     const driver = await this.userRepository.findOne({ where: { id: driverId } });
@@ -55,14 +80,14 @@ export class TripsService {
     await this.cacheService.del(CacheService.getTripsListKey('all'));
 
     this.logger.log(`Trip created successfully: ${savedTrip.id} by driver ${driverId}`);
-    return savedTrip;
+    return this.findOne(savedTrip.id);
   }
 
-  async findAll(): Promise<Trip[]> {
+  async findAll(): Promise<SanitizedTrip[]> {
     this.logger.debug('Fetching all trips');
     
     const cacheKey = CacheService.getTripsListKey('all');
-    const cached = await this.cacheService.get<Trip[]>(cacheKey);
+    const cached = await this.cacheService.get<SanitizedTrip[]>(cacheKey);
     
     if (cached) {
       this.logger.debug(`Returning ${cached.length} trips from cache`);
@@ -70,23 +95,26 @@ export class TripsService {
     }
 
     const trips = await this.tripRepository.find({
-      relations: ['driver', 'bookings'],
+      relations: ['driver', 'bookings', 'bookings.passenger'],
       where: { status: TripStatus.PENDING },
       order: { departureDate: 'ASC' },
     });
 
-    await this.cacheService.set(cacheKey, trips, this.CACHE_TTL);
+    const sanitized = trips.map((trip) => this.sanitizeTrip(trip));
+
+    await this.cacheService.set(cacheKey, sanitized, this.CACHE_TTL);
     this.logger.log(`Fetched ${trips.length} trips from database`);
-    return trips;
+    return sanitized;
   }
 
-  async search(searchTripsDto: SearchTripsDto): Promise<Trip[]> {
+  async search(searchTripsDto: SearchTripsDto): Promise<SanitizedTrip[]> {
     this.logger.log(`Searching trips with filters: ${JSON.stringify(searchTripsDto)}`);
     
     const queryBuilder = this.tripRepository
       .createQueryBuilder('trip')
       .leftJoinAndSelect('trip.driver', 'driver')
       .leftJoinAndSelect('trip.bookings', 'bookings')
+      .leftJoinAndSelect('bookings.passenger', 'bookingPassenger')
       .where('trip.status = :status', { status: TripStatus.PENDING });
 
     if (searchTripsDto.departureDate) {
@@ -197,15 +225,16 @@ export class TripsService {
     }
 
     const results = await queryBuilder.getMany();
-    this.logger.log(`Trip search returned ${results.length} results`);
-    return results;
+    const sanitized = results.map((trip) => this.sanitizeTrip(trip));
+    this.logger.log(`Trip search returned ${sanitized.length} results`);
+    return sanitized;
   }
 
-  async findOne(id: string): Promise<Trip> {
+  async findOne(id: string): Promise<SanitizedTrip> {
     this.logger.debug(`Fetching trip: ${id}`);
     
     const cacheKey = CacheService.getTripKey(id);
-    const cached = await this.cacheService.get<Trip>(cacheKey);
+    const cached = await this.cacheService.get<SanitizedTrip>(cacheKey);
     
     if (cached) {
       this.logger.debug(`Trip ${id} returned from cache`);
@@ -222,25 +251,28 @@ export class TripsService {
       throw new NotFoundException('Trip not found');
     }
 
-    await this.cacheService.set(cacheKey, trip, this.CACHE_TTL);
+    const sanitized = this.sanitizeTrip(trip);
+    await this.cacheService.set(cacheKey, sanitized, this.CACHE_TTL);
     this.logger.debug(`Trip ${id} fetched from database`);
-    return trip;
+    return sanitized;
   }
 
-  async findByDriver(driverId: string): Promise<Trip[]> {
+  async findByDriver(driverId: string): Promise<SanitizedTrip[]> {
     this.logger.debug(`Fetching trips for driver: ${driverId}`);
     
     const trips = await this.tripRepository.find({
       where: { driverId },
-      relations: ['bookings'],
+      relations: ['bookings', 'bookings.passenger', 'driver'],
       order: { departureDate: 'DESC' },
     });
 
+    const sanitized = trips.map((trip) => this.sanitizeTrip(trip));
+
     this.logger.debug(`Found ${trips.length} trips for driver ${driverId}`);
-    return trips;
+    return sanitized;
   }
 
-  async update(id: string, driverId: string, updateTripDto: UpdateTripDto): Promise<Trip> {
+  async update(id: string, driverId: string, updateTripDto: UpdateTripDto): Promise<SanitizedTrip> {
     this.logger.log(`Updating trip ${id} by driver ${driverId}`);
     
     const trip = await this.tripRepository.findOne({
@@ -280,7 +312,7 @@ export class TripsService {
     await this.cacheService.del(CacheService.getTripsListKey('all'));
 
     this.logger.log(`Trip ${id} updated successfully`);
-    return updatedTrip;
+    return this.findOne(id);
   }
 
   async remove(id: string, driverId: string): Promise<void> {
@@ -309,6 +341,52 @@ export class TripsService {
       type: 'Point',
       coordinates: [Number(longitude), Number(latitude)],
     };
+  }
+
+  private sanitizeTrip(trip: Trip): SanitizedTrip {
+    const { driver, bookings, departurePoint, arrivalPoint, ...rest } = trip;
+
+    return {
+      ...(rest as Omit<Trip, 'driver' | 'bookings' | 'departurePoint' | 'arrivalPoint'>),
+      departureCoordinates: this.pointToCoordinates(departurePoint),
+      arrivalCoordinates: this.pointToCoordinates(arrivalPoint),
+      driver: this.sanitizeUser(driver),
+      bookings: bookings?.map((booking) => this.sanitizeBooking(booking)) ?? [],
+    } as SanitizedTrip;
+  }
+
+  private sanitizeBooking(booking: Booking): SanitizedBooking {
+    const { passenger, trip, messages, ...rest } = booking;
+    return {
+      ...(rest as Omit<Booking, 'trip' | 'passenger' | 'messages'>),
+      passenger: this.sanitizeUser(passenger),
+    } as SanitizedBooking;
+  }
+
+  private sanitizeUser(user?: User): SanitizedUser | null {
+    if (!user) {
+      return null;
+    }
+
+    return {
+      id: user.id,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      phone: user.phone,
+      profilePicture: user.profilePicture,
+      role: user.role,
+      status: user.status,
+      isDriver: user.isDriver,
+    };
+  }
+
+  private pointToCoordinates(point?: Point): Coordinates {
+    if (!point?.coordinates) {
+      return null;
+    }
+
+    const [longitude, latitude] = point.coordinates;
+    return [Number(longitude), Number(latitude)];
   }
 }
 

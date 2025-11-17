@@ -204,3 +204,70 @@ export class UpdateTripDto {
   status?: TripStatus;
 }
 
+export class SearchByPointsDto {
+  @ApiProperty({
+    description: 'Coordonnées du point de départ [longitude, latitude]',
+    example: [15.2663, -4.325],
+    minItems: 2,
+    maxItems: 2,
+  })
+  @IsArray()
+  @ArrayMinSize(2)
+  @ArrayMaxSize(2)
+  @IsNumber({}, { each: true })
+  @IsNotEmpty()
+  departureCoordinates: [number, number];
+
+  @ApiProperty({
+    description: 'Coordonnées du point d’arrivée [longitude, latitude]',
+    example: [15.3222, -4.4419],
+    minItems: 2,
+    maxItems: 2,
+  })
+  @IsArray()
+  @ArrayMinSize(2)
+  @ArrayMaxSize(2)
+  @IsNumber({}, { each: true })
+  @IsNotEmpty()
+  arrivalCoordinates: [number, number];
+
+  @ApiProperty({
+    required: false,
+    minimum: 1,
+    description: 'Rayon de recherche autour du départ (km)',
+    default: 5,
+  })
+  @IsNumber()
+  @Min(1)
+  @IsOptional()
+  departureRadiusKm?: number;
+
+  @ApiProperty({
+    required: false,
+    minimum: 1,
+    description: 'Rayon de recherche autour de l’arrivée (km)',
+    default: 5,
+  })
+  @IsNumber()
+  @Min(1)
+  @IsOptional()
+  arrivalRadiusKm?: number;
+
+  @ApiProperty({ required: false })
+  @IsDateString()
+  @IsOptional()
+  departureDate?: string;
+
+  @ApiProperty({ required: false, minimum: 1 })
+  @IsNumber()
+  @Min(1)
+  @IsOptional()
+  minSeats?: number;
+
+  @ApiProperty({ required: false, minimum: 0 })
+  @IsNumber()
+  @Min(0)
+  @IsOptional()
+  maxPrice?: number;
+}
+
