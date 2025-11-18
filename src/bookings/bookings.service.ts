@@ -6,6 +6,7 @@ import { Trip, TripStatus } from '../trips/entities/trip.entity';
 import { User } from '../users/entities/user.entity';
 import { CreateBookingDto, UpdateBookingStatusDto } from './dto/booking.dto';
 import { CacheService } from '../common/services/cache.service';
+import { NotificationService } from '../notifications/notifications.service';
 
 @Injectable()
 export class BookingsService {
@@ -20,6 +21,7 @@ export class BookingsService {
     @InjectRepository(User)
     private userRepository: Repository<User>,
     private cacheService: CacheService,
+    private notificationService: NotificationService,
   ) {}
 
   async create(passengerId: string, createBookingDto: CreateBookingDto): Promise<Booking> {
@@ -27,7 +29,7 @@ export class BookingsService {
     
     const trip = await this.tripRepository.findOne({
       where: { id: createBookingDto.tripId },
-      relations: ['bookings'],
+      relations: ['bookings', 'driver'],
     });
 
     if (!trip) {
@@ -82,6 +84,8 @@ export class BookingsService {
     await this.cacheService.del(CacheService.getTripKey(createBookingDto.tripId));
 
     this.logger.log(`Booking created successfully: ${savedBooking.id} for passenger ${passengerId} on trip ${createBookingDto.tripId}`);
+
+    await this.notifyDriverOfNewBooking(trip, passengerId, savedBooking);
     return savedBooking;
   }
 
@@ -188,12 +192,18 @@ export class BookingsService {
 
     if (updateStatusDto.status === BookingStatus.ACCEPTED) {
       booking.acceptedAt = new Date();
+      booking.rejectionReason = null;
     } else if (updateStatusDto.status === BookingStatus.CANCELLED) {
       booking.cancelledAt = new Date();
-    }
-
-    if (updateStatusDto.rejectionReason) {
-      booking.rejectionReason = updateStatusDto.rejectionReason;
+    } else if (updateStatusDto.status === BookingStatus.REJECTED) {
+      if (!updateStatusDto.rejectionReason?.trim()) {
+        this.logger.warn(`Driver ${driverId} tried to reject booking ${bookingId} without reason`);
+        throw new BadRequestException('Rejection reason is required when rejecting a booking');
+      }
+      booking.rejectionReason = updateStatusDto.rejectionReason.trim();
+      booking.acceptedAt = null;
+    } else {
+      booking.rejectionReason = null;
     }
 
     booking.status = updateStatusDto.status;
@@ -206,6 +216,7 @@ export class BookingsService {
     await this.cacheService.del(CacheService.getTripKey(booking.tripId));
 
     this.logger.log(`Booking ${bookingId} status updated to ${updateStatusDto.status} successfully`);
+    await this.notifyPassengerOfStatusChange(updatedBooking);
     return updatedBooking;
   }
 
@@ -245,6 +256,89 @@ export class BookingsService {
     }
 
     this.logger.log(`Booking ${bookingId} cancelled successfully`);
+  }
+
+  async acceptBooking(bookingId: string, driverId: string): Promise<Booking> {
+    return this.updateStatus(bookingId, driverId, {
+      status: BookingStatus.ACCEPTED,
+    });
+  }
+
+  async rejectBooking(bookingId: string, driverId: string, reason: string): Promise<Booking> {
+    return this.updateStatus(bookingId, driverId, {
+      status: BookingStatus.REJECTED,
+      rejectionReason: reason,
+    });
+  }
+
+  private async notifyPassengerOfStatusChange(booking: Booking) {
+    try {
+      const passenger = await this.userRepository.findOne({ where: { id: booking.passengerId } });
+      if (!passenger?.fcmToken) {
+        this.logger.debug(
+          `Passenger ${booking.passengerId} has no FCM token, skipping status notification`,
+        );
+        return;
+      }
+
+      const trip = await this.tripRepository.findOne({
+        where: { id: booking.tripId },
+      });
+
+      const statusLabel =
+        booking.status === BookingStatus.ACCEPTED
+          ? 'acceptée'
+          : booking.status === BookingStatus.REJECTED
+          ? 'refusée'
+          : booking.status === BookingStatus.CANCELLED
+          ? 'annulée'
+          : booking.status;
+
+      let body = `Votre réservation pour ${trip?.departureLocation ?? '...'} → ${trip?.arrivalLocation ?? '...'} a été ${statusLabel}.`;
+
+      if (booking.status === BookingStatus.REJECTED && booking.rejectionReason) {
+        body += ` Motif: ${booking.rejectionReason}`;
+      }
+
+      await this.notificationService.sendNotification(
+        passenger.fcmToken,
+        'Mise à jour de votre réservation',
+        body,
+        {
+          bookingId: booking.id,
+          tripId: booking.tripId,
+          status: booking.status,
+        },
+      );
+    } catch (error) {
+      this.logger.error(`Failed to send passenger notification: ${error.message}`, error.stack);
+    }
+  }
+
+  private async notifyDriverOfNewBooking(trip: Trip, passengerId: string, booking: Booking) {
+    try {
+      const driver = trip.driver ?? (await this.userRepository.findOne({ where: { id: trip.driverId } }));
+
+      if (!driver?.fcmToken) {
+        this.logger.debug(`Driver ${trip.driverId} has no FCM token, skipping notification`);
+        return;
+      }
+
+      const passenger = await this.userRepository.findOne({ where: { id: passengerId } });
+      const passengerName = passenger ? `${passenger.firstName} ${passenger.lastName}` : 'Un passager';
+
+      await this.notificationService.sendNotification(
+        driver.fcmToken,
+        'Nouvelle réservation',
+        `${passengerName} a réservé ${booking.numberOfSeats} place(s) sur votre trajet ${trip.departureLocation} → ${trip.arrivalLocation}`,
+        {
+          bookingId: booking.id,
+          tripId: trip.id,
+        },
+      );
+    } catch (error) {
+      this.logger.error(`Failed to send booking notification: ${error.message}`, error.stack);
+    }
   }
 }
 

@@ -27,3 +27,10 @@ export class UpdateBookingStatusDto {
   rejectionReason?: string;
 }
 
+export class RejectBookingDto {
+  @ApiProperty({ example: 'Le véhicule est déjà complet' })
+  @IsString()
+  @IsNotEmpty()
+  reason: string;
+}
+

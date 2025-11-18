@@ -52,13 +52,13 @@ export class Booking {
   status: BookingStatus;
 
   @Column({ nullable: true })
-  rejectionReason: string;
+  rejectionReason: string | null;
 
   @Column({ type: 'timestamp', nullable: true })
-  acceptedAt: Date;
+  acceptedAt: Date | null;
 
   @Column({ type: 'timestamp', nullable: true })
-  cancelledAt: Date;
+  cancelledAt: Date | null;
 
   @CreateDateColumn()
   createdAt: Date;

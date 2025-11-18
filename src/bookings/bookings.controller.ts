@@ -9,7 +9,7 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { BookingsService } from './bookings.service';
-import { CreateBookingDto, UpdateBookingStatusDto } from './dto/booking.dto';
+import { CreateBookingDto, UpdateBookingStatusDto, RejectBookingDto } from './dto/booking.dto';
 import { Auth } from '../auth/decorators/auth.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { UserRole } from '../users/entities/user.entity';
@@ -22,7 +22,7 @@ export class BookingsController {
 
   @Post()
   @Auth()
-  @Roles(UserRole.PASSENGER)
+  // @Roles(UserRole.PASSENGER)
   @SensitiveThrottle(10, 60000) // 10 requests per minute per IP
   @ApiOperation({ summary: 'Create a new booking' })
   async create(@Request() req, @Body() createBookingDto: CreateBookingDto) {
@@ -64,6 +64,28 @@ export class BookingsController {
     @Body() updateStatusDto: UpdateBookingStatusDto,
   ) {
     return this.bookingsService.updateStatus(id, req.user.userId, updateStatusDto);
+  }
+
+  @Put(':id/accept')
+  @Auth()
+  @Roles(UserRole.DRIVER)
+  @SensitiveThrottle(20, 60000)
+  @ApiOperation({ summary: 'Accept a booking (driver only)' })
+  async accept(@Request() req, @Param('id') id: string) {
+    return this.bookingsService.acceptBooking(id, req.user.userId);
+  }
+
+  @Put(':id/reject')
+  @Auth()
+  @Roles(UserRole.DRIVER)
+  @SensitiveThrottle(20, 60000)
+  @ApiOperation({ summary: 'Reject a booking with a reason (driver only)' })
+  async reject(
+    @Request() req,
+    @Param('id') id: string,
+    @Body() rejectBookingDto: RejectBookingDto,
+  ) {
+    return this.bookingsService.rejectBooking(id, req.user.userId, rejectBookingDto.reason);
   }
 
   @Put(':id/cancel')
