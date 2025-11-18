@@ -51,7 +51,7 @@ export class Booking {
   })
   status: BookingStatus;
 
-  @Column({ nullable: true })
+  @Column({ type: 'text', nullable: true })
   rejectionReason: string | null;
 
   @Column({ type: 'timestamp', nullable: true })
