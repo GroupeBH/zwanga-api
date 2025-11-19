@@ -7,14 +7,24 @@ import { Message } from './entities/message.entity';
 import { Booking } from '../bookings/entities/booking.entity';
 import { JwtModule } from '@nestjs/jwt';
 import { ConfigModule } from '@nestjs/config';
+import { Conversation } from './entities/conversation.entity';
+import { ConversationParticipant } from './entities/conversation-participant.entity';
+import { User } from '../users/entities/user.entity';
+import { ConversationsController } from './conversations.controller';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Message, Booking]),
+    TypeOrmModule.forFeature([
+      Message,
+      Booking,
+      Conversation,
+      ConversationParticipant,
+      User,
+    ]),
     JwtModule,
     ConfigModule,
   ],
-  controllers: [ChatController],
+  controllers: [ChatController, ConversationsController],
   providers: [ChatService, ChatGateway],
   exports: [ChatService],
 })

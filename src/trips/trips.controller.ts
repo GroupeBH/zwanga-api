@@ -11,7 +11,7 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { TripsService } from './trips.service';
-import { CreateTripDto, SearchTripsDto, UpdateTripDto } from './dto/trip.dto';
+import { CreateTripDto, SearchTripsDto, UpdateTripDto, SearchByPointsDto } from './dto/trip.dto';
 import { Auth } from '../auth/decorators/auth.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { UserRole } from '../users/entities/user.entity';
@@ -41,6 +41,32 @@ export class TripsController {
       return this.tripsService.search(searchTripsDto);
     }
     return this.tripsService.findAll();
+  }
+
+  @Post('search/coordinates')
+  @Public()
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'Find trips by providing departure and arrival coordinates' })
+  async searchByCoordinates(@Body() payload: SearchByPointsDto) {
+    const {
+      departureCoordinates,
+      arrivalCoordinates,
+      departureRadiusKm,
+      arrivalRadiusKm,
+      departureDate,
+      minSeats,
+      maxPrice,
+    } = payload;
+
+    return this.tripsService.search({
+      departureCoordinates,
+      arrivalCoordinates,
+      departureRadiusKm,
+      arrivalRadiusKm,
+      departureDate,
+      minSeats,
+      maxPrice,
+    });
   }
 
   @Get('my-trips')

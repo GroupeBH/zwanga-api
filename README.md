@@ -19,6 +19,7 @@ Backend API pour la plateforme de covoiturage ZWANGA à Kinshasa.
 - Node.js 20+
 - Docker et Docker Compose
 - PostgreSQL 15+
+- Extension PostGIS (v3+) activée sur la base (`CREATE EXTENSION postgis;`)
 - Redis 7+
 
 ## 🛠️ Installation
@@ -82,6 +83,17 @@ L'application supporte le stockage des fichiers multimédias sur Amazon S3 avec 
 - ✅ Support des fichiers publics ou privés
 
 Voir `AWS_S3_SETUP.md` pour la configuration détaillée.
+
+## 🗺️ Gestion des localisations (PostGIS)
+
+- Les trajets stockent désormais les points de départ / destination avec des colonnes `geography(Point, 4326)` afin de permettre des recherches géospatiales précises (radius, distances, etc.).
+- Assurez-vous que l'extension PostGIS est installée et activée dans votre base :
+  ```sql
+  CREATE EXTENSION IF NOT EXISTS postgis;
+  ```
+- Les DTOs `CreateTripDto`, `SearchTripsDto` et `UpdateTripDto` utilisent désormais des champs `[longitude, latitude]` (`departureCoordinates`, `arrivalCoordinates`) pour représenter les points.
+- Après mise à jour, exécutez une migration ou, en développement, laissez TypeORM synchroniser le schéma pour ajouter les colonnes `departurePoint` et `arrivalPoint`.
+- Les filtres de recherche peuvent inclure des coordonnées + un rayon personnalisé (en km) pour exploiter les requêtes `ST_DWithin`.
 
 ## 🏗️ Architecture
 

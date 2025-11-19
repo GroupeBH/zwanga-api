@@ -33,6 +33,8 @@ import { Booking } from './bookings/entities/booking.entity';
 import { Message } from './chat/entities/message.entity';
 import { Rating } from './ratings/entities/rating.entity';
 import { Subscription } from './subscriptions/entities/subscription.entity';
+import { Conversation } from './chat/entities/conversation.entity';
+import { ConversationParticipant } from './chat/entities/conversation-participant.entity';
 
 @Module({
   imports: [
@@ -56,6 +58,8 @@ import { Subscription } from './subscriptions/entities/subscription.entity';
           Message,
           Rating,
           Subscription,
+          Conversation,
+          ConversationParticipant,
         ],
         synchronize: configService.get<string>('NODE_ENV') === 'development',
         logging: configService.get<string>('NODE_ENV') === 'development',
