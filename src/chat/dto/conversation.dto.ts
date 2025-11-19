@@ -74,3 +74,20 @@ export class AddParticipantsDto {
   userIds: string[];
 }
 
+export class CreateSupportConversationDto {
+  @ApiProperty({
+    required: false,
+    description: 'Sujet de la demande',
+  })
+  @IsString()
+  @IsOptional()
+  subject?: string;
+
+  @ApiProperty({
+    description: 'Message à envoyer au support',
+  })
+  @IsString()
+  @IsNotEmpty()
+  message: string;
+}
+

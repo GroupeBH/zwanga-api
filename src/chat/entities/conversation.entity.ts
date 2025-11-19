@@ -10,8 +10,15 @@ import {
 import { Message } from './message.entity';
 import { ConversationParticipant } from './conversation-participant.entity';
 
+export enum ConversationType {
+  GENERAL = 'general',
+  SUPPORT = 'support',
+  BOOKING = 'booking',
+}
+
 @Entity('conversations')
-@Index(['bookingId'], { unique: true })
+@Index(['bookingId'], { unique: true, where: '"bookingId" IS NOT NULL' })
+@Index(['type'])
 export class Conversation {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -21,6 +28,13 @@ export class Conversation {
 
   @Column({ nullable: true })
   bookingId: string;
+
+  @Column({
+    type: 'enum',
+    enum: ConversationType,
+    default: ConversationType.GENERAL,
+  })
+  type: ConversationType;
 
   @Column({ type: 'timestamp', nullable: true })
   lastMessageAt: Date;
@@ -34,7 +48,10 @@ export class Conversation {
   @OneToMany(() => Message, (message) => message.conversation)
   messages: Message[];
 
-  @OneToMany(() => ConversationParticipant, (participant) => participant.conversation)
+  @OneToMany(
+    () => ConversationParticipant,
+    (participant) => participant.conversation,
+  )
   participants: ConversationParticipant[];
 }
 

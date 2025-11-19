@@ -1,9 +1,18 @@
-import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+  Logger,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { User, UserStatus } from './entities/user.entity';
 import { KycDocument, KycStatus } from './entities/kyc-document.entity';
 import { UpdateProfileDto, UploadKycDto } from './dto/user.dto';
+import { Trip } from '../trips/entities/trip.entity';
+import { Booking } from '../bookings/entities/booking.entity';
+import { Message } from '../chat/entities/message.entity';
+import { FileUploadService } from '../common/services/file-upload.service';
 
 @Injectable()
 export class UsersService {
@@ -14,7 +23,19 @@ export class UsersService {
     private userRepository: Repository<User>,
     @InjectRepository(KycDocument)
     private kycDocumentRepository: Repository<KycDocument>,
+    @InjectRepository(Trip)
+    private tripRepository: Repository<Trip>,
+    @InjectRepository(Booking)
+    private bookingRepository: Repository<Booking>,
+    @InjectRepository(Message)
+    private messageRepository: Repository<Message>,
+    private fileUploadService: FileUploadService,
   ) {}
+
+  private toSafeUser(user: User) {
+    const { password, refreshToken, ...safeUser } = user;
+    return safeUser;
+  }
 
   async findOne(id: string): Promise<User> {
     this.logger.debug(`Fetching user: ${id}`);
@@ -30,6 +51,37 @@ export class UsersService {
     }
 
     return user;
+  }
+
+  async getProfileSummary(userId: string) {
+    const user = await this.findOne(userId);
+
+    const [
+      tripsAsDriver,
+      bookingsAsPassenger,
+      bookingsAsDriver,
+      messagesSent,
+    ] = await Promise.all([
+      this.tripRepository.count({ where: { driverId: userId } }),
+      this.bookingRepository.count({ where: { passengerId: userId } }),
+      this.bookingRepository
+        .createQueryBuilder('booking')
+        .innerJoin('booking.trip', 'trip')
+        .where('trip.driverId = :userId', { userId })
+        .getCount(),
+      this.messageRepository.count({ where: { senderId: userId } }),
+    ]);
+
+    return {
+      user: this.toSafeUser(user),
+      stats: {
+        vehicles: user.vehicles?.length ?? 0,
+        tripsAsDriver,
+        bookingsAsPassenger,
+        bookingsAsDriver,
+        messagesSent,
+      },
+    };
   }
 
   async findByEmail(email: string): Promise<User | null> {
@@ -52,9 +104,38 @@ export class UsersService {
       }
     }
 
-    Object.assign(user, updateProfileDto);
+    const previousProfilePicture = user.profilePicture;
+
+    if (updateProfileDto.firstName !== undefined) {
+      user.firstName = updateProfileDto.firstName;
+    }
+
+    if (updateProfileDto.lastName !== undefined) {
+      user.lastName = updateProfileDto.lastName;
+    }
+
+    if (updateProfileDto.profilePicture !== undefined) {
+      user.profilePicture = updateProfileDto.profilePicture;
+    }
+
+    if (updateProfileDto.wantsToBeDriver !== undefined) {
+      user.isDriver = updateProfileDto.wantsToBeDriver;
+    }
+
+    if (updateProfileDto.phone) {
+      user.phone = updateProfileDto.phone;
+    }
+
     const updatedUser = await this.userRepository.save(user);
-    
+
+    if (
+      updateProfileDto.profilePicture &&
+      previousProfilePicture &&
+      updateProfileDto.profilePicture !== previousProfilePicture
+    ) {
+      await this.fileUploadService.deleteFile(previousProfilePicture);
+    }
+
     this.logger.log(`Profile updated successfully for user: ${userId}`);
     return updatedUser;
   }
