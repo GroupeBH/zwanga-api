@@ -14,6 +14,7 @@ import { Rating } from '../../ratings/entities/rating.entity';
 import { Message } from '../../chat/entities/message.entity';
 import { Subscription } from '../../subscriptions/entities/subscription.entity';
 import { KycDocument } from '../entities/kyc-document.entity';
+import { ConversationParticipant } from '../../chat/entities/conversation-participant.entity';
 
 export enum UserRole {
   DRIVER = 'driver',
@@ -112,6 +113,9 @@ export class User {
 
   @OneToMany(() => Message, (message) => message.sender)
   sentMessages: Message[];
+
+  @OneToMany(() => ConversationParticipant, (participant) => participant.user)
+  conversationParticipants: ConversationParticipant[];
 
   @OneToMany(() => Subscription, (subscription) => subscription.user)
   subscriptions: Subscription[];

@@ -7,6 +7,7 @@ import { User } from '../users/entities/user.entity';
 import { CreateBookingDto, UpdateBookingStatusDto } from './dto/booking.dto';
 import { CacheService } from '../common/services/cache.service';
 import { NotificationService } from '../notifications/notifications.service';
+import { ChatService } from '../chat/chat.service';
 
 @Injectable()
 export class BookingsService {
@@ -22,6 +23,7 @@ export class BookingsService {
     private userRepository: Repository<User>,
     private cacheService: CacheService,
     private notificationService: NotificationService,
+    private chatService: ChatService,
   ) {}
 
   async create(passengerId: string, createBookingDto: CreateBookingDto): Promise<Booking> {
@@ -78,6 +80,8 @@ export class BookingsService {
 
     const savedBooking = await this.bookingRepository.save(booking);
     
+    await this.chatService.ensureConversationForBooking(savedBooking.id);
+
     // Invalidate cache
     await this.cacheService.del(CacheService.getBookingsByTripKey(createBookingDto.tripId));
     await this.cacheService.del(CacheService.getBookingsByPassengerKey(passengerId));
