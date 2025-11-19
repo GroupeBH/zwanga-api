@@ -16,6 +16,7 @@ import {
   CreateConversationDto,
   ListConversationsQueryDto,
 } from './dto/conversation.dto';
+import { NotificationService } from '../notifications/notifications.service';
 
 @Injectable()
 export class ChatService {
@@ -32,6 +33,7 @@ export class ChatService {
     private readonly bookingRepository: Repository<Booking>,
     @InjectRepository(User)
     private readonly userRepository: Repository<User>,
+    private readonly notificationService: NotificationService,
   ) {}
 
   /* -------------------------------------------------------------------------- */
@@ -174,10 +176,16 @@ export class ChatService {
       { lastReadAt: savedMessage.createdAt },
     );
 
-    return this.messageRepository.findOne({
+    const populatedMessage = await this.messageRepository.findOne({
       where: { id: savedMessage.id },
       relations: ['sender'],
     });
+
+    if (populatedMessage) {
+      await this.notifyConversationParticipants(conversation, populatedMessage);
+    }
+
+    return populatedMessage;
   }
 
   async addParticipants(
@@ -414,5 +422,76 @@ export class ChatService {
     ]);
 
     return conversation;
+  }
+
+  private async notifyConversationParticipants(
+    conversation: Conversation,
+    message: Message,
+  ) {
+    try {
+      const participants = await this.participantRepository.find({
+        where: { conversationId: conversation.id },
+        relations: ['user'],
+      });
+
+      const tokens = Array.from(
+        new Set(
+          participants
+            .filter(
+              (participant) =>
+                participant.userId !== message.senderId &&
+                participant.user?.fcmToken,
+            )
+            .map((participant) => participant.user!.fcmToken as string),
+        ),
+      );
+
+      if (tokens.length === 0) {
+        return;
+      }
+
+      const senderName = message.sender
+        ? `${message.sender.firstName ?? ''} ${message.sender.lastName ?? ''}`.trim() ||
+          'Un utilisateur'
+        : 'Un utilisateur';
+
+      const title =
+        conversation.title ||
+        (conversation.bookingId ? 'Discussion de trajet' : 'Nouveau message');
+
+      const snippet =
+        message.content.length > 80
+          ? `${message.content.slice(0, 80)}…`
+          : message.content;
+
+      const body = `${senderName}: ${snippet}`;
+
+      const data = {
+        conversationId: conversation.id,
+        messageId: message.id,
+        bookingId: conversation.bookingId ?? '',
+      };
+
+      if (tokens.length === 1) {
+        await this.notificationService.sendNotification(
+          tokens[0],
+          title,
+          body,
+          data,
+        );
+      } else {
+        await this.notificationService.sendToMultiple(
+          tokens,
+          title,
+          body,
+          data,
+        );
+      }
+    } catch (error) {
+      this.logger.error(
+        `Failed to send message notification: ${error.message}`,
+        error.stack,
+      );
+    }
   }
 }
