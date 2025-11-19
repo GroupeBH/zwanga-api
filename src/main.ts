@@ -69,6 +69,8 @@ async function bootstrap() {
     .addTag('Ratings', 'Rating endpoints')
     .addTag('Subscriptions', 'Subscription endpoints')
     .addTag('Admin', 'Admin endpoints')
+    .addTag('Support', 'Support & helpdesk endpoints')
+    .addTag('FAQ', 'Foire aux questions')
     .build();
 
   const document = SwaggerModule.createDocument(app, config);

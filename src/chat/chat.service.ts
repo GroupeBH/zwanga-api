@@ -9,12 +9,14 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository, MoreThan, Not, FindOptionsWhere } from 'typeorm';
 import { Message } from './entities/message.entity';
 import { Booking } from '../bookings/entities/booking.entity';
-import { Conversation } from './entities/conversation.entity';
+import { Conversation, ConversationType } from './entities/conversation.entity';
 import { ConversationParticipant } from './entities/conversation-participant.entity';
-import { User } from '../users/entities/user.entity';
+import { User, UserRole } from '../users/entities/user.entity';
 import {
   CreateConversationDto,
   ListConversationsQueryDto,
+  CreateSupportConversationDto,
+  SendMessageDto,
 } from './dto/conversation.dto';
 import { NotificationService } from '../notifications/notifications.service';
 
@@ -59,6 +61,7 @@ export class ChatService {
       await this.ensureUsersExist(participantIds);
       conversation = this.conversationRepository.create({
         title: dto.title,
+        type: ConversationType.GENERAL,
       });
       conversation = await this.conversationRepository.save(conversation);
       await this.ensureParticipants(conversation.id, participantIds);
@@ -78,6 +81,7 @@ export class ChatService {
   async listConversations(
     userId: string,
     query: ListConversationsQueryDto,
+    options?: { type?: ConversationType },
   ) {
     const page = query.page ?? 1;
     const limit = query.limit ?? 20;
@@ -97,6 +101,10 @@ export class ChatService {
       .skip(skip)
       .take(limit);
 
+    if (options?.type) {
+      qb.andWhere('conversation.type = :type', { type: options.type });
+    }
+
     const [conversations, total] = await qb.getManyAndCount();
 
     const data = await Promise.all(
@@ -115,7 +123,11 @@ export class ChatService {
     };
   }
 
-  async getConversation(userId: string, conversationId: string) {
+  async getConversation(
+    userId: string,
+    conversationId: string,
+    expectedType?: ConversationType,
+  ) {
     const conversation = await this.conversationRepository.findOne({
       where: { id: conversationId },
       relations: ['participants', 'participants.user'],
@@ -126,12 +138,27 @@ export class ChatService {
     }
 
     this.ensureMembership(conversation.participants, userId);
+    this.ensureConversationType(conversation, expectedType);
 
     return this.enrichConversation(conversation, userId);
   }
 
-  async getConversationMessages(conversationId: string, userId: string) {
-    await this.ensureUserInConversation(conversationId, userId);
+  async getConversationMessages(
+    conversationId: string,
+    userId: string,
+    expectedType?: ConversationType,
+  ) {
+    const conversation = await this.conversationRepository.findOne({
+      where: { id: conversationId },
+      relations: ['participants'],
+    });
+
+    if (!conversation) {
+      throw new NotFoundException('Conversation not found');
+    }
+
+    this.ensureMembership(conversation.participants, userId);
+    this.ensureConversationType(conversation, expectedType);
 
     const messages = await this.messageRepository.find({
       where: { conversationId },
@@ -319,6 +346,95 @@ export class ChatService {
     };
   }
 
+  async createSupportConversation(
+    userId: string,
+    dto: CreateSupportConversationDto,
+  ) {
+    const supportAgents = await this.getSupportAgents();
+
+    if (supportAgents.length === 0) {
+      throw new BadRequestException(
+        'Support indisponible pour le moment. Veuillez réessayer plus tard.',
+      );
+    }
+
+    const conversation = this.conversationRepository.create({
+      title: dto.subject || 'Support',
+      type: ConversationType.SUPPORT,
+    });
+
+    const savedConversation = await this.conversationRepository.save(
+      conversation,
+    );
+
+    const participantIds = Array.from(
+      new Set([userId, ...supportAgents.map((agent) => agent.id)]),
+    );
+
+    await this.ensureParticipants(savedConversation.id, participantIds);
+
+    if (dto.message) {
+      await this.sendConversationMessage(
+        savedConversation.id,
+        userId,
+        dto.message,
+      );
+    }
+
+    return this.getConversation(
+      userId,
+      savedConversation.id,
+      ConversationType.SUPPORT,
+    );
+  }
+
+  async listSupportConversations(
+    userId: string,
+    query: ListConversationsQueryDto,
+  ) {
+    return this.listConversations(userId, query, {
+      type: ConversationType.SUPPORT,
+    });
+  }
+
+  async getSupportConversation(userId: string, conversationId: string) {
+    return this.getConversation(
+      userId,
+      conversationId,
+      ConversationType.SUPPORT,
+    );
+  }
+
+  async getSupportConversationMessages(
+    conversationId: string,
+    userId: string,
+  ) {
+    return this.getConversationMessages(
+      conversationId,
+      userId,
+      ConversationType.SUPPORT,
+    );
+  }
+
+  async sendSupportMessage(
+    conversationId: string,
+    userId: string,
+    dto: SendMessageDto,
+  ) {
+    const conversation = await this.conversationRepository.findOne({
+      where: { id: conversationId },
+    });
+
+    if (!conversation) {
+      throw new NotFoundException('Conversation not found');
+    }
+
+    this.ensureConversationType(conversation, ConversationType.SUPPORT);
+    await this.ensureUserInConversation(conversationId, userId);
+
+    return this.sendConversationMessage(conversationId, userId, dto.content);
+  }
+
   private async ensureParticipants(conversationId: string, userIds: string[]) {
     if (userIds.length === 0) {
       return;
@@ -411,6 +527,7 @@ export class ChatService {
         bookingId: booking.id,
         title: `Trajet ${booking.trip.departureLocation} -> ${booking.trip.arrivalLocation}`,
         lastMessageAt: new Date(),
+        type: ConversationType.BOOKING,
       });
       conversation = await this.conversationRepository.save(conversation);
       conversation.participants = [];
@@ -422,6 +539,22 @@ export class ChatService {
     ]);
 
     return conversation;
+  }
+
+  private async getSupportAgents(): Promise<User[]> {
+    return this.userRepository.find({
+      where: { role: UserRole.ADMIN },
+      select: ['id', 'firstName', 'lastName', 'fcmToken'],
+    });
+  }
+
+  private ensureConversationType(
+    conversation: Conversation,
+    expectedType?: ConversationType,
+  ) {
+    if (expectedType && conversation.type !== expectedType) {
+      throw new BadRequestException('Invalid conversation type');
+    }
   }
 
   private async notifyConversationParticipants(

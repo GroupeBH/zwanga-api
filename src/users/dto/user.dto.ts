@@ -1,6 +1,5 @@
-import { IsString, IsOptional, IsEnum } from 'class-validator';
+import { IsBoolean, IsOptional, IsString } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
-import { UserRole } from '../entities/user.entity';
 
 export class UpdateProfileDto {
   @ApiProperty({ required: false })
@@ -23,10 +22,13 @@ export class UpdateProfileDto {
   @IsOptional()
   profilePicture?: string;
 
-  @ApiProperty({ required: false, enum: UserRole })
-  @IsEnum(UserRole)
+  @ApiProperty({
+    required: false,
+    description: 'Indique si l’utilisateur souhaite devenir conducteur',
+  })
+  @IsBoolean()
   @IsOptional()
-  role?: UserRole;
+  wantsToBeDriver?: boolean;
 }
 
 export class UploadKycDto {

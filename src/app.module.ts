@@ -23,6 +23,8 @@ import { RatingsModule } from './ratings/ratings.module';
 import { SubscriptionsModule } from './subscriptions/subscriptions.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { AdminModule } from './admin/admin.module';
+import { SupportModule } from './support/support.module';
+import { FaqModule } from './faq/faq.module';
 
 // Entities
 import { User } from './users/entities/user.entity';
@@ -35,6 +37,7 @@ import { Rating } from './ratings/entities/rating.entity';
 import { Subscription } from './subscriptions/entities/subscription.entity';
 import { Conversation } from './chat/entities/conversation.entity';
 import { ConversationParticipant } from './chat/entities/conversation-participant.entity';
+import { FaqEntry } from './faq/entities/faq-entry.entity';
 
 @Module({
   imports: [
@@ -60,6 +63,7 @@ import { ConversationParticipant } from './chat/entities/conversation-participan
           Subscription,
           Conversation,
           ConversationParticipant,
+          FaqEntry,
         ],
         synchronize: configService.get<string>('NODE_ENV') === 'development',
         logging: configService.get<string>('NODE_ENV') === 'development',
@@ -93,6 +97,8 @@ import { ConversationParticipant } from './chat/entities/conversation-participan
     SubscriptionsModule,
     NotificationsModule,
     AdminModule,
+    SupportModule,
+    FaqModule,
   ],
   controllers: [AppController],
   providers: [

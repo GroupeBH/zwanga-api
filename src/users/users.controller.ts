@@ -17,15 +17,15 @@ import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decor
 export class UsersController {
   constructor(private readonly usersService: UsersService) {}
 
-  @Get('profile')
+  @Get('me')
   @Auth()
   @SensitiveThrottle(30, 60000)
   @ApiOperation({ summary: 'Get current user profile' })
   async getProfile(@Request() req) {
-    return this.usersService.findOne(req.user.userId);
+    return this.usersService.getProfileSummary(req.user.userId);
   }
 
-  @Put('profile')
+  @Put('me')
   @Auth()
   @SensitiveThrottle(10, 60000)
   @ApiOperation({ summary: 'Update user profile' })
