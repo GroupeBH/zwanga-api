@@ -79,6 +79,17 @@ export class Trip {
   @Column({ type: 'timestamp', nullable: true })
   completedAt: Date;
 
+  @Column({
+    type: 'geography',
+    spatialFeatureType: 'Point',
+    srid: 4326,
+    nullable: true,
+  })
+  currentLocation: Point;
+
+  @Column({ type: 'timestamp', nullable: true })
+  lastLocationUpdateAt: Date;
+
   @CreateDateColumn()
   createdAt: Date;
 

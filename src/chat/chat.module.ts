@@ -12,6 +12,7 @@ import { ConversationParticipant } from './entities/conversation-participant.ent
 import { User } from '../users/entities/user.entity';
 import { ConversationsController } from './conversations.controller';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { TripsModule } from '../trips/trips.module';
 
 @Module({
   imports: [
@@ -25,6 +26,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
     JwtModule,
     ConfigModule,
     NotificationsModule,
+    TripsModule,
   ],
   controllers: [ChatController, ConversationsController],
   providers: [ChatService, ChatGateway],
