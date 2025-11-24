@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, Logger, ForbiddenException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Booking, BookingStatus } from './entities/booking.entity';
@@ -273,6 +273,40 @@ export class BookingsService {
       status: BookingStatus.REJECTED,
       rejectionReason: reason,
     });
+  }
+
+  async getDriverContact(bookingId: string, requesterId: string) {
+    const booking = await this.bookingRepository.findOne({
+      where: { id: bookingId },
+      relations: ['trip', 'trip.driver'],
+    });
+
+    if (!booking) {
+      throw new NotFoundException('Booking not found');
+    }
+
+    if (
+      booking.passengerId !== requesterId &&
+      booking.trip.driverId !== requesterId
+    ) {
+      throw new ForbiddenException('Access denied');
+    }
+
+    const driver = booking.trip.driver;
+
+    if (!driver) {
+      throw new NotFoundException('Driver not found');
+    }
+
+    return {
+      driver: {
+        id: driver.id,
+        firstName: driver.firstName,
+        lastName: driver.lastName,
+        phone: driver.phone,
+        profilePicture: driver.profilePicture,
+      },
+    };
   }
 
   private async notifyPassengerOfStatusChange(booking: Booking) {

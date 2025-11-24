@@ -1,9 +1,15 @@
-import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+  Logger,
+  ForbiddenException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, Point } from 'typeorm';
 import { Trip, TripStatus } from './entities/trip.entity';
 import { User } from '../users/entities/user.entity';
-import { Booking } from '../bookings/entities/booking.entity';
+import { Booking, BookingStatus } from '../bookings/entities/booking.entity';
 import { CreateTripDto, SearchTripsDto, UpdateTripDto } from './dto/trip.dto';
 import { CacheService } from '../common/services/cache.service';
 
@@ -39,6 +45,8 @@ export class TripsService {
   constructor(
     @InjectRepository(Trip)
     private tripRepository: Repository<Trip>,
+    @InjectRepository(Booking)
+    private bookingRepository: Repository<Booking>,
     @InjectRepository(User)
     private userRepository: Repository<User>,
     private cacheService: CacheService,
@@ -387,6 +395,70 @@ export class TripsService {
 
     const [longitude, latitude] = point.coordinates;
     return [Number(longitude), Number(latitude)];
+  }
+
+  private async verifyTripParticipant(tripId: string, userId: string) {
+    const trip = await this.tripRepository.findOne({
+      where: { id: tripId },
+      relations: ['bookings'],
+    });
+
+    if (!trip) {
+      throw new NotFoundException('Trip not found');
+    }
+
+    const isDriver = trip.driverId === userId;
+    const isPassenger =
+      trip.bookings?.some(
+        (booking) =>
+          booking.passengerId === userId &&
+          booking.status === BookingStatus.ACCEPTED,
+      ) ?? false;
+
+    if (!isDriver && !isPassenger) {
+      throw new ForbiddenException('You are not part of this trip');
+    }
+
+    return { trip, isDriver, isPassenger };
+  }
+
+  async ensureUserCanTrackTrip(tripId: string, userId: string) {
+    await this.verifyTripParticipant(tripId, userId);
+  }
+
+  async updateDriverLocation(
+    driverId: string,
+    tripId: string,
+    coordinates: [number, number],
+  ) {
+    const { trip, isDriver } = await this.verifyTripParticipant(
+      tripId,
+      driverId,
+    );
+
+    if (!isDriver) {
+      throw new ForbiddenException('Only the driver can update location');
+    }
+
+    trip.currentLocation = this.buildPointFromCoordinates(coordinates);
+    trip.lastLocationUpdateAt = new Date();
+
+    await this.tripRepository.save(trip);
+
+    return {
+      tripId: trip.id,
+      coordinates,
+      updatedAt: trip.lastLocationUpdateAt,
+    };
+  }
+
+  async getDriverLocationForUser(tripId: string, userId: string) {
+    const { trip } = await this.verifyTripParticipant(tripId, userId);
+    return {
+      tripId: trip.id,
+      coordinates: this.pointToCoordinates(trip.currentLocation),
+      updatedAt: trip.lastLocationUpdateAt,
+    };
   }
 }
 

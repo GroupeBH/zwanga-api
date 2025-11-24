@@ -96,5 +96,13 @@ export class BookingsController {
     await this.bookingsService.cancel(id, req.user.userId);
     return { message: 'Booking cancelled successfully' };
   }
+
+  @Get(':id/driver-contact')
+  @Auth()
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'Get driver contact information for a booking' })
+  async getDriverContact(@Request() req, @Param('id') id: string) {
+    return this.bookingsService.getDriverContact(id, req.user.userId);
+  }
 }
 

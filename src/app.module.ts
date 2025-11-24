@@ -25,6 +25,7 @@ import { NotificationsModule } from './notifications/notifications.module';
 import { AdminModule } from './admin/admin.module';
 import { SupportModule } from './support/support.module';
 import { FaqModule } from './faq/faq.module';
+import { TrackingModule } from './tracking/tracking.module';
 
 // Entities
 import { User } from './users/entities/user.entity';
@@ -99,6 +100,7 @@ import { FaqEntry } from './faq/entities/faq-entry.entity';
     AdminModule,
     SupportModule,
     FaqModule,
+    TrackingModule,
   ],
   controllers: [AppController],
   providers: [

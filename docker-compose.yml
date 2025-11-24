@@ -1,12 +1,12 @@
-version: '3.8'
+# version: '3.8'
 
 services:
   postgres:
     image: postgres:15-alpine
     container_name: zwanga-postgres
     environment:
-      POSTGRES_USER: zwanga_user
-      POSTGRES_PASSWORD: zwanga_password
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: rosamystica97
       POSTGRES_DB: zwanga_db
     ports:
       - "5432:5432"
@@ -15,7 +15,7 @@ services:
     networks:
       - zwanga-network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U zwanga_user"]
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -46,8 +46,8 @@ services:
       - NODE_ENV=development
       - DATABASE_HOST=postgres
       - DATABASE_PORT=5432
-      - DATABASE_USER=zwanga_user
-      - DATABASE_PASSWORD=zwanga_password
+      - DATABASE_USER=postgres
+      - DATABASE_PASSWORD=rosamystica97
       - DATABASE_NAME=zwanga_db
       - REDIS_HOST=redis
       - REDIS_PORT=6379
