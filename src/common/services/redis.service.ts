@@ -10,13 +10,30 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
   constructor(private configService: ConfigService) {}
 
   async onModuleInit() {
-    this.client = createClient({
-      socket: {
-        host: this.configService.get<string>('REDIS_HOST') || 'localhost',
-        port: this.configService.get<number>('REDIS_PORT') || 6379,
-      },
-      password: this.configService.get<string>('REDIS_PASSWORD') || undefined,
-    });
+    const redisUrl = this.configService.get<string>('REDIS_URL');
+    const host = this.configService.get<string>('REDIS_HOST') || 'localhost';
+    const port = this.configService.get<number>('REDIS_PORT') || 6379;
+    const password = this.configService.get<string>('REDIS_PASSWORD') || undefined;
+
+    if (redisUrl) {
+      this.logger.log(`Connecting to Redis via URL (${redisUrl.includes('upstash') ? 'Upstash' : 'custom'}).`);
+      this.client = createClient({
+        url: redisUrl,
+        socket: redisUrl.startsWith('rediss://')
+          ? {
+              tls: true,
+            }
+          : undefined,
+      });
+    } else {
+      this.client = createClient({
+        socket: {
+          host,
+          port,
+        },
+        password,
+      });
+    }
 
     this.client.on('error', (err) => {
       this.logger.error('Redis Client Error:', err);
@@ -26,7 +43,11 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     });
 
     await this.client.connect();
-    this.logger.log(`Redis connected to ${this.configService.get<string>('REDIS_HOST') || 'localhost'}:${this.configService.get<number>('REDIS_PORT') || 6379}`);
+    if (redisUrl) {
+      this.logger.log(`Redis connected via URL (${redisUrl}).`);
+    } else {
+      this.logger.log(`Redis connected to ${host}:${port}`);
+    }
   }
 
   async onModuleDestroy() {

@@ -32,6 +32,9 @@ DATABASE_URL=
 REDIS_HOST=localhost
 REDIS_PORT=6379
 REDIS_PASSWORD=
+# Optionnel : URL unique (ex: Upstash)
+# Si définie, les variables ci-dessus sont ignorées
+REDIS_URL=
 
 # ============================================
 # JWT Authentication
