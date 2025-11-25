@@ -40,6 +40,20 @@ import { Conversation } from './chat/entities/conversation.entity';
 import { ConversationParticipant } from './chat/entities/conversation-participant.entity';
 import { FaqEntry } from './faq/entities/faq-entry.entity';
 
+const typeOrmEntities = [
+  User,
+  KycDocument,
+  Vehicle,
+  Trip,
+  Booking,
+  Message,
+  Rating,
+  Subscription,
+  Conversation,
+  ConversationParticipant,
+  FaqEntry,
+];
+
 @Module({
   imports: [
     AppConfigModule,
@@ -47,27 +61,40 @@ import { FaqEntry } from './faq/entities/faq-entry.entity';
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],
       useFactory: (configService: ConfigService) => ({
-        type: 'postgres',
-        host: configService.get<string>('DATABASE_HOST'),
-        port: configService.get<number>('DATABASE_PORT'),
-        username: configService.get<string>('DATABASE_USER'),
-        password: configService.get<string>('DATABASE_PASSWORD'),
-        database: configService.get<string>('DATABASE_NAME'),
-        entities: [
-          User,
-          KycDocument,
-          Vehicle,
-          Trip,
-          Booking,
-          Message,
-          Rating,
-          Subscription,
-          Conversation,
-          ConversationParticipant,
-          FaqEntry,
-        ],
-        synchronize: configService.get<string>('NODE_ENV') === 'development',
-        logging: configService.get<string>('NODE_ENV') === 'development',
+        ...((
+          databaseUrl: string | undefined,
+          isDevelopment: boolean,
+        ) => {
+          const baseConfig = {
+            type: 'postgres' as const,
+            entities: typeOrmEntities,
+            synchronize: isDevelopment,
+            logging: isDevelopment,
+          };
+
+          if (databaseUrl) {
+            const sslDisabled = databaseUrl.includes('sslmode=disable');
+            return {
+              ...baseConfig,
+              url: databaseUrl,
+              ssl: sslDisabled
+                ? undefined
+                : {
+                    rejectUnauthorized: false,
+                  },
+              extra: sslDisabled ? undefined : { sslmode: 'require' },
+            };
+          }
+
+          return {
+            ...baseConfig,
+            host: configService.get<string>('DATABASE_HOST'),
+            port: configService.get<number>('DATABASE_PORT'),
+            username: configService.get<string>('DATABASE_USER'),
+            password: configService.get<string>('DATABASE_PASSWORD'),
+            database: configService.get<string>('DATABASE_NAME'),
+          };
+        })(configService.get<string>('DATABASE_URL'), configService.get<string>('NODE_ENV') === 'development'),
       }),
       inject: [ConfigService],
     }),
