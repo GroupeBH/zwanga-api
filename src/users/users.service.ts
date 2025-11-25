@@ -5,7 +5,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, DeepPartial } from 'typeorm';
 import { User, UserStatus } from './entities/user.entity';
 import { KycDocument, KycStatus } from './entities/kyc-document.entity';
 import { UpdateProfileDto, UploadKycDto } from './dto/user.dto';
@@ -13,6 +13,7 @@ import { Trip } from '../trips/entities/trip.entity';
 import { Booking } from '../bookings/entities/booking.entity';
 import { Message } from '../chat/entities/message.entity';
 import { FileUploadService } from '../common/services/file-upload.service';
+import { Express } from 'express';
 
 @Injectable()
 export class UsersService {
@@ -140,26 +141,51 @@ export class UsersService {
     return updatedUser;
   }
 
-  async uploadKyc(userId: string, uploadKycDto: UploadKycDto): Promise<KycDocument> {
+  async uploadKyc(
+    userId: string,
+    uploadKycDto: UploadKycDto,
+    files?: {
+      cniFront?: Express.Multer.File[];
+      cniBack?: Express.Multer.File[];
+      selfie?: Express.Multer.File[];
+    },
+  ): Promise<KycDocument> {
     this.logger.log(`Uploading KYC documents for user: ${userId}`);
     
     const user = await this.findOne(userId);
 
     // Check if user already has a pending KYC
     const existingKyc = await this.kycDocumentRepository.findOne({
-      where: { userId, status: KycStatus.PENDING },
+      where: { userId },
     });
 
-    if (existingKyc) {
-      this.logger.warn(`KYC upload failed: User ${userId} already has pending KYC`);
-      throw new BadRequestException('You already have a pending KYC verification');
+    // if (existingKyc) {
+    //   this.logger.warn(`KYC upload failed: User ${userId} already has pending KYC`);
+    //   throw new BadRequestException('You already have a pending KYC verification');
+    // }
+
+    const cniFrontFile = files?.cniFront?.[0];
+    const cniBackFile = files?.cniBack?.[0];
+    const selfieFile = files?.selfie?.[0];
+
+    if (!cniFrontFile || !cniBackFile || !selfieFile) {
+      throw new BadRequestException('All KYC images are required');
     }
+
+    const [cniFrontUrl, cniBackUrl, selfieUrl] = await Promise.all([
+      this.fileUploadService.saveFile(cniFrontFile, 'kyc'),
+      this.fileUploadService.saveFile(cniBackFile, 'kyc'),
+      this.fileUploadService.saveFile(selfieFile, 'kyc'),
+    ]);
 
     const kycDocument = this.kycDocumentRepository.create({
       userId,
-      ...uploadKycDto,
+      cniFrontUrl,
+      cniBackUrl,
+      selfieUrl,
       status: KycStatus.PENDING,
-    });
+      documentNumber: uploadKycDto.documentNumber,
+    } as DeepPartial<KycDocument>);
 
     const savedKyc = await this.kycDocumentRepository.save(kycDocument);
     

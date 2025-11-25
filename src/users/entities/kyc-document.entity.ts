@@ -52,6 +52,9 @@ export class KycDocument {
   @Column({ type: 'timestamp', nullable: true })
   reviewedAt: Date;
 
+  @Column({ nullable: true })
+  documentNumber: string;
+
   @CreateDateColumn()
   createdAt: Date;
 

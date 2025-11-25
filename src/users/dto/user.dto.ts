@@ -32,16 +32,9 @@ export class UpdateProfileDto {
 }
 
 export class UploadKycDto {
-  @ApiProperty()
+  @ApiProperty({ required: false, description: 'Numéro de document ou référence' })
   @IsString()
-  cniFrontUrl: string;
-
-  @ApiProperty()
-  @IsString()
-  cniBackUrl: string;
-
-  @ApiProperty()
-  @IsString()
-  selfieUrl: string;
+  @IsOptional()
+  documentNumber?: string;
 }
 
