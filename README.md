@@ -43,6 +43,7 @@ cp .env.example .env
 # Éditer .env avec vos configurations
 ```
 > ☁️ **Base de données managée (Neon, Supabase, etc.)** : définissez simplement `DATABASE_URL=postgres://...` (avec `sslmode=require`). Cette variable remplace `DATABASE_HOST`, `DATABASE_USER`, etc.
+> ☁️ **Redis managé (Upstash, etc.)** : utilisez `REDIS_URL=rediss://...`. Dans ce cas `REDIS_HOST/PORT/PASSWORD` sont ignorés.
 
 4. Démarrer les services avec Docker Compose
 ```bash
