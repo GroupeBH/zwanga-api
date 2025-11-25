@@ -22,6 +22,9 @@ DATABASE_PORT=5432
 DATABASE_USER=zwanga_user
 DATABASE_PASSWORD=zwanga_password
 DATABASE_NAME=zwanga_db
+# Optionnel : chaîne de connexion complète (Neon, Railway, etc.)
+# Si définie, les variables ci-dessus sont ignorées
+DATABASE_URL=
 
 # ============================================
 # Redis
