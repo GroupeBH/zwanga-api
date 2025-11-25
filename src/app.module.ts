@@ -68,7 +68,7 @@ const typeOrmEntities = [
           const baseConfig = {
             type: 'postgres' as const,
             entities: typeOrmEntities,
-            synchronize: isDevelopment,
+            synchronize: true,
             logging: isDevelopment,
           };
 
