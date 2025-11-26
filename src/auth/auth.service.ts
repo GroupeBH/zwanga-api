@@ -184,6 +184,8 @@ export class AuthService {
 
     const tokens = await this.generateTokens(user);
 
+    console.log("user status is", user.status);
+
     return {
       accessToken: tokens.accessToken,
       refreshToken: tokens.refreshToken,
@@ -230,6 +232,7 @@ export class AuthService {
       sub: user.id,
       phone: user.phone,
       role: user.role,
+      status: user.status,
     };
 
     // Access token: 1 day (1d)
