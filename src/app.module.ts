@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConfigModule, ConfigService } from '@nestjs/config';
+import { ScheduleModule } from '@nestjs/schedule';
 import { CacheModule } from '@nestjs/cache-manager';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
@@ -102,6 +103,7 @@ const typeOrmEntities = [
       isGlobal: true,
       ttl: 300, // 5 minutes default TTL
     }),
+    ScheduleModule.forRoot(),
     CommonModule,
     ThrottlerModule.forRootAsync({
       imports: [ConfigModule],

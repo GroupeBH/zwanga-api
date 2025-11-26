@@ -29,9 +29,19 @@ async function bootstrap() {
   );
 
   // CORS
+  const corsOrigins =
+    configService
+      .get<string>('CORS_ORIGINS')
+      ?.split(',')
+      .map((origin) => origin.trim())
+      .filter((origin) => origin.length > 0) ?? [
+      'http://localhost:3000',
+      'http://localhost:5173',
+    ];
+
   app.enableCors({
-    origin: '*',
-    methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
+    origin: corsOrigins,
+    methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
     credentials: true,
   });
 

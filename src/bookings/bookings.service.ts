@@ -137,7 +137,7 @@ export class BookingsService {
 
     const bookings = await this.bookingRepository.find({
       where: { tripId },
-      relations: ['passenger'],
+      relations: ['passenger', 'trip', 'trip.driver'],
       order: { createdAt: 'DESC' },
     });
 

@@ -88,6 +88,13 @@ THROTTLE_TTL=60
 THROTTLE_LIMIT=10
 
 # ============================================
+# CORS
+# ============================================
+# Liste d'origines autorisées séparées par des virgules
+# Exemple: http://localhost:3000,http://localhost:5173,https://app.example.com
+CORS_ORIGINS=http://localhost:3000,http://localhost:5173
+
+# ============================================
 # Subscriptions
 # ============================================
 TRIAL_PERIOD_DAYS=7
