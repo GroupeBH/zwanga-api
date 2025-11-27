@@ -220,7 +220,6 @@ export class BookingsService {
     await this.cacheService.del(CacheService.getTripKey(booking.tripId));
 
     this.logger.log(`Booking ${bookingId} status updated to ${updateStatusDto.status} successfully`);
-    await this.notifyPassengerOfStatusChange(updatedBooking);
     return updatedBooking;
   }
 
@@ -263,16 +262,20 @@ export class BookingsService {
   }
 
   async acceptBooking(bookingId: string, driverId: string): Promise<Booking> {
-    return this.updateStatus(bookingId, driverId, {
+    const booking = await this.updateStatus(bookingId, driverId, {
       status: BookingStatus.ACCEPTED,
     });
+    await this.notifyPassengerOfStatusChange(booking, BookingStatus.ACCEPTED);
+    return booking;
   }
 
   async rejectBooking(bookingId: string, driverId: string, reason: string): Promise<Booking> {
-    return this.updateStatus(bookingId, driverId, {
+    const booking = await this.updateStatus(bookingId, driverId, {
       status: BookingStatus.REJECTED,
       rejectionReason: reason,
     });
+    await this.notifyPassengerOfStatusChange(booking, BookingStatus.REJECTED, reason);
+    return booking;
   }
 
   async getDriverContact(bookingId: string, requesterId: string) {
@@ -309,9 +312,15 @@ export class BookingsService {
     };
   }
 
-  private async notifyPassengerOfStatusChange(booking: Booking) {
+  private async notifyPassengerOfStatusChange(
+    booking: Booking,
+    status: BookingStatus,
+    rejectionReason?: string,
+  ) {
     try {
-      const passenger = await this.userRepository.findOne({ where: { id: booking.passengerId } });
+      const passenger = await this.userRepository.findOne({
+        where: { id: booking.passengerId },
+      });
       if (!passenger?.fcmToken) {
         this.logger.debug(
           `Passenger ${booking.passengerId} has no FCM token, skipping status notification`,
