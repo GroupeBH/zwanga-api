@@ -89,7 +89,11 @@ export class UsersService {
     return this.userRepository.findOne({ where: { email } });
   }
 
-  async updateProfile(userId: string, updateProfileDto: UpdateProfileDto): Promise<User> {
+  async updateProfile(
+    userId: string,
+    updateProfileDto: UpdateProfileDto,
+    profilePictureFile?: Express.Multer.File,
+  ): Promise<User> {
     this.logger.log(`Updating profile for user: ${userId}`);
     
     const user = await this.findOne(userId);
@@ -115,8 +119,15 @@ export class UsersService {
       user.lastName = updateProfileDto.lastName;
     }
 
-    if (updateProfileDto.profilePicture !== undefined) {
-      user.profilePicture = updateProfileDto.profilePicture;
+    if (profilePictureFile) {
+      const uploadedUrl = await this.fileUploadService.saveFile(
+        profilePictureFile,
+        'profiles',
+      );
+
+      if (uploadedUrl) {
+        user.profilePicture = uploadedUrl;
+      }
     }
 
     if (updateProfileDto.wantsToBeDriver !== undefined) {
@@ -130,9 +141,9 @@ export class UsersService {
     const updatedUser = await this.userRepository.save(user);
 
     if (
-      updateProfileDto.profilePicture &&
+      profilePictureFile &&
       previousProfilePicture &&
-      updateProfileDto.profilePicture !== previousProfilePicture
+      previousProfilePicture !== updatedUser.profilePicture
     ) {
       await this.fileUploadService.deleteFile(previousProfilePicture);
     }
