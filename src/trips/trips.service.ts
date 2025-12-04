@@ -12,6 +12,7 @@ import { User } from '../users/entities/user.entity';
 import { Booking, BookingStatus } from '../bookings/entities/booking.entity';
 import { CreateTripDto, SearchTripsDto, UpdateTripDto } from './dto/trip.dto';
 import { CacheService } from '../common/services/cache.service';
+import { FileUploadService } from '../common/services/file-upload.service';
 
 export type Coordinates = [number, number] | null;
 
@@ -50,6 +51,7 @@ export class TripsService {
     @InjectRepository(User)
     private userRepository: Repository<User>,
     private cacheService: CacheService,
+    private fileUploadService: FileUploadService,
   ) {}
 
   async create(driverId: string, createTripDto: CreateTripDto): Promise<SanitizedTrip> {
@@ -108,7 +110,7 @@ export class TripsService {
       order: { departureDate: 'ASC' },
     });
 
-    const sanitized = trips.map((trip) => this.sanitizeTrip(trip));
+    const sanitized = await Promise.all(trips.map((trip) => this.sanitizeTrip(trip)));
 
     await this.cacheService.set(cacheKey, sanitized, this.CACHE_TTL);
     this.logger.log(`Fetched ${trips.length} trips from database`);
@@ -233,7 +235,7 @@ export class TripsService {
     }
 
     const results = await queryBuilder.getMany();
-    const sanitized = results.map((trip) => this.sanitizeTrip(trip));
+    const sanitized = await Promise.all(results.map((trip) => this.sanitizeTrip(trip)));
     this.logger.log(`Trip search returned ${sanitized.length} results`);
     return sanitized;
   }
@@ -259,7 +261,7 @@ export class TripsService {
       throw new NotFoundException('Trip not found');
     }
 
-    const sanitized = this.sanitizeTrip(trip);
+    const sanitized = await this.sanitizeTrip(trip);
     await this.cacheService.set(cacheKey, sanitized, this.CACHE_TTL);
     this.logger.debug(`Trip ${id} fetched from database`);
     return sanitized;
@@ -277,7 +279,8 @@ export class TripsService {
     const sanitized = trips.map((trip) => this.sanitizeTrip(trip));
 
     this.logger.debug(`Found ${trips.length} trips for driver ${driverId}`);
-    return sanitized;
+    const sanitizedResults = await Promise.all(sanitized);
+    return sanitizedResults;
   }
 
   async update(id: string, driverId: string, updateTripDto: UpdateTripDto): Promise<SanitizedTrip> {
@@ -351,37 +354,42 @@ export class TripsService {
     };
   }
 
-  private sanitizeTrip(trip: Trip): SanitizedTrip {
+  private async sanitizeTrip(trip: Trip): Promise<SanitizedTrip> {
     const { driver, bookings, departurePoint, arrivalPoint, ...rest } = trip;
 
     return {
       ...(rest as Omit<Trip, 'driver' | 'bookings' | 'departurePoint' | 'arrivalPoint'>),
       departureCoordinates: this.pointToCoordinates(departurePoint),
       arrivalCoordinates: this.pointToCoordinates(arrivalPoint),
-      driver: this.sanitizeUser(driver),
-      bookings: bookings?.map((booking) => this.sanitizeBooking(booking)) ?? [],
+      driver: await this.sanitizeUser(driver),
+      bookings: bookings ? await Promise.all(bookings.map((booking) => this.sanitizeBooking(booking))) : [],
     } as SanitizedTrip;
   }
 
-  private sanitizeBooking(booking: Booking): SanitizedBooking {
+  private async sanitizeBooking(booking: Booking): Promise<SanitizedBooking> {
     const { passenger, trip, messages, ...rest } = booking;
     return {
       ...(rest as Omit<Booking, 'trip' | 'passenger' | 'messages'>),
-      passenger: this.sanitizeUser(passenger),
+      passenger: await this.sanitizeUser(passenger),
     } as SanitizedBooking;
   }
 
-  private sanitizeUser(user?: User): SanitizedUser | null {
+  private async sanitizeUser(user?: User): Promise<SanitizedUser | null> {
     if (!user) {
       return null;
     }
+
+    // Convert S3 key to presigned URL
+    const profilePicture = user.profilePicture
+      ? await this.fileUploadService.getPresignedUrlIfS3Key(user.profilePicture)
+      : null;
 
     return {
       id: user.id,
       firstName: user.firstName,
       lastName: user.lastName,
       phone: user.phone,
-      profilePicture: user.profilePicture,
+      profilePicture: profilePicture || user.profilePicture,
       role: user.role,
       status: user.status,
       isDriver: user.isDriver,
