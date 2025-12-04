@@ -14,6 +14,7 @@ import { Booking } from '../bookings/entities/booking.entity';
 import { Message } from '../chat/entities/message.entity';
 import { FileUploadService } from '../common/services/file-upload.service';
 import { Express } from 'express';
+import { UserRole } from './entities/user.entity';
 
 @Injectable()
 export class UsersService {
@@ -130,8 +131,8 @@ export class UsersService {
       }
     }
 
-    if (updateProfileDto.wantsToBeDriver !== undefined) {
-      user.isDriver = updateProfileDto.wantsToBeDriver;
+    if (updateProfileDto.role) {
+      user.role = updateProfileDto.role;
     }
 
     if (updateProfileDto.phone) {

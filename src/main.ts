@@ -34,10 +34,9 @@ async function bootstrap() {
       .get<string>('CORS_ORIGINS')
       ?.split(',')
       .map((origin) => origin.trim())
-      .filter((origin) => origin.length > 0) ?? [
-      'http://localhost:3000',
-      'http://localhost:5173',
-    ];
+      .filter((origin) => origin.length > 0);
+
+  console.log("corsOrigins: -", corsOrigins);
 
   app.enableCors({
     origin: corsOrigins,

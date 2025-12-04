@@ -107,7 +107,7 @@ export class FileUploadService {
         this.logger.log(`File uploaded to S3 successfully: ${s3Key}`);
 
         const publicUrl = this.s3Service.getPublicUrl(s3Key);
-        return publicUrl || s3Key;
+        return publicUrl;
       } catch (error) {
         this.logger.error(`S3 upload failed for file ${file.originalname}:`, error);
         throw new BadRequestException('Failed to upload file to cloud storage');

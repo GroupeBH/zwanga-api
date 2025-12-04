@@ -99,6 +99,18 @@ CORS_ORIGINS=http://localhost:3000,http://localhost:5173
 # ============================================
 TRIAL_PERIOD_DAYS=7
 SUBSCRIPTION_PRICE=5000
+
+# ============================================
+# Keccel OTP Service
+# ============================================
+# API token for Keccel OTP service
+KECCEL_TOKEN=
+# Sender identifier (default: GUEST)
+KECCEL_FROM=GUEST
+# OTP Generate API URL (optional, defaults to Keccel API)
+KECCEL_OTP_URL_GENERATE=https://api.keccel.com/otp/generate.asp
+# OTP Validate API URL (optional, defaults to Keccel API)
+KECCEL_OTP_URL_VALIDATE=https://api.keccel.com/otp/validate.asp
 ```
 
 ## 🔐 Durées de validité des tokens JWT
