@@ -7,7 +7,7 @@ services:
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: rosamystica97
-      POSTGRES_DB: zwanga_db
+      POSTGRES_DB: zwangadb
     ports:
       - "5432:5432"
     volumes:
@@ -41,14 +41,14 @@ services:
       dockerfile: Dockerfile
     container_name: zwanga-api
     ports:
-      - "3000:3000"
+      - "4000:4000"
     environment:
       - NODE_ENV=development
       - DATABASE_HOST=postgres
       - DATABASE_PORT=5432
       - DATABASE_USER=postgres
       - DATABASE_PASSWORD=rosamystica97
-      - DATABASE_NAME=zwanga_db
+      - DATABASE_NAME=zwangadb
       - REDIS_HOST=redis
       - REDIS_PORT=6379
     depends_on:

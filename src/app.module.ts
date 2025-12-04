@@ -27,6 +27,7 @@ import { AdminModule } from './admin/admin.module';
 import { SupportModule } from './support/support.module';
 import { FaqModule } from './faq/faq.module';
 import { TrackingModule } from './tracking/tracking.module';
+import { KeccelOtpModule } from './keccel-otp/keccel-otp.module';
 
 // Entities
 import { User } from './users/entities/user.entity';
@@ -130,6 +131,7 @@ const typeOrmEntities = [
     SupportModule,
     FaqModule,
     TrackingModule,
+    KeccelOtpModule,
   ],
   controllers: [AppController],
   providers: [

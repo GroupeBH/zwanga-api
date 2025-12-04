@@ -1,5 +1,6 @@
 import { IsBoolean, IsOptional, IsString } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
+import { UserRole } from '../entities/user.entity';
 
 export class UpdateProfileDto {
   @ApiProperty({ required: false })
@@ -26,9 +27,8 @@ export class UpdateProfileDto {
     required: false,
     description: 'Indique si l’utilisateur souhaite devenir conducteur',
   })
-  @IsBoolean()
   @IsOptional()
-  wantsToBeDriver?: boolean;
+  role?: UserRole;
 }
 
 export class UploadKycDto {

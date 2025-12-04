@@ -6,6 +6,7 @@ import {
   Body,
   Request,
   UploadedFiles,
+  UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiConsumes, ApiBody } from '@nestjs/swagger';
@@ -13,7 +14,7 @@ import { UsersService } from './users.service';
 import { UpdateProfileDto, UploadKycDto } from './dto/user.dto';
 import { Auth } from '../auth/decorators/auth.decorator';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
-import { FileFieldsInterceptor } from '@nestjs/platform-express';
+import { FileFieldsInterceptor, FileInterceptor } from '@nestjs/platform-express';
 
 @ApiTags('Users')
 @Controller('users')
@@ -32,8 +33,18 @@ export class UsersController {
   @Auth()
   @SensitiveThrottle(10, 60000)
   @ApiOperation({ summary: 'Update user profile' })
-  async updateProfile(@Request() req, @Body() updateProfileDto: UpdateProfileDto) {
-    return this.usersService.updateProfile(req.user.userId, updateProfileDto);
+  @UseInterceptors(FileInterceptor('profilePicture'))
+  @ApiConsumes('multipart/form-data')
+  async updateProfile(
+    @Request() req,
+    @Body() updateProfileDto: UpdateProfileDto,
+    @UploadedFile() profilePicture?: Express.Multer.File,
+  ) {
+    return this.usersService.updateProfile(
+      req.user.userId,
+      updateProfileDto,
+      profilePicture,
+    );
   }
 
   @Post('kyc')

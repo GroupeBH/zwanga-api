@@ -14,6 +14,7 @@ import { Booking } from '../bookings/entities/booking.entity';
 import { Message } from '../chat/entities/message.entity';
 import { FileUploadService } from '../common/services/file-upload.service';
 import { Express } from 'express';
+import { UserRole } from './entities/user.entity';
 
 @Injectable()
 export class UsersService {
@@ -89,7 +90,11 @@ export class UsersService {
     return this.userRepository.findOne({ where: { email } });
   }
 
-  async updateProfile(userId: string, updateProfileDto: UpdateProfileDto): Promise<User> {
+  async updateProfile(
+    userId: string,
+    updateProfileDto: UpdateProfileDto,
+    profilePictureFile?: Express.Multer.File,
+  ): Promise<User> {
     this.logger.log(`Updating profile for user: ${userId}`);
     
     const user = await this.findOne(userId);
@@ -115,12 +120,19 @@ export class UsersService {
       user.lastName = updateProfileDto.lastName;
     }
 
-    if (updateProfileDto.profilePicture !== undefined) {
-      user.profilePicture = updateProfileDto.profilePicture;
+    if (profilePictureFile) {
+      const uploadedUrl = await this.fileUploadService.saveFile(
+        profilePictureFile,
+        'profiles',
+      );
+
+      if (uploadedUrl) {
+        user.profilePicture = uploadedUrl;
+      }
     }
 
-    if (updateProfileDto.wantsToBeDriver !== undefined) {
-      user.isDriver = updateProfileDto.wantsToBeDriver;
+    if (updateProfileDto.role) {
+      user.role = updateProfileDto.role;
     }
 
     if (updateProfileDto.phone) {
@@ -130,9 +142,9 @@ export class UsersService {
     const updatedUser = await this.userRepository.save(user);
 
     if (
-      updateProfileDto.profilePicture &&
+      profilePictureFile &&
       previousProfilePicture &&
-      updateProfileDto.profilePicture !== previousProfilePicture
+      previousProfilePicture !== updatedUser.profilePicture
     ) {
       await this.fileUploadService.deleteFile(previousProfilePicture);
     }
