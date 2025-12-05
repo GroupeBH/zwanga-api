@@ -106,8 +106,8 @@ export class FileUploadService {
         );
         this.logger.log(`File uploaded to S3 successfully: ${s3Key}`);
 
-        const publicUrl = this.s3Service.getPublicUrl(s3Key);
-        return publicUrl;
+        // Return S3 key instead of public URL - we'll generate presigned URLs when needed
+        return s3Key;
       } catch (error) {
         this.logger.error(`S3 upload failed for file ${file.originalname}:`, error);
         throw new BadRequestException('Failed to upload file to cloud storage');
@@ -128,7 +128,7 @@ export class FileUploadService {
 
   /**
    * Delete a file from S3 or local storage
-   * @param filePath File path/key to delete
+   * @param filePath File path/key to delete (can be S3 key or URL)
    */
   async deleteFile(filePath: string): Promise<void> {
     if (!filePath) {
@@ -138,8 +138,20 @@ export class FileUploadService {
     this.logger.debug(`Deleting file: ${filePath}`);
 
     if (this.useS3 && this.s3Service) {
-      await this.s3Service.deleteFile(filePath);
-      this.logger.debug(`File deleted from S3: ${filePath}`);
+      // Extract S3 key from URL if it's a URL, otherwise use as-is
+      let s3Key = filePath;
+      if (filePath.startsWith('http://') || filePath.startsWith('https://')) {
+        // Extract key from URL (e.g., https://bucket.s3.region.amazonaws.com/profiles/uuid.jpg -> profiles/uuid.jpg)
+        try {
+          const url = new URL(filePath);
+          // Remove leading slash from pathname
+          s3Key = url.pathname.startsWith('/') ? url.pathname.substring(1) : url.pathname;
+        } catch (error) {
+          this.logger.warn(`Failed to parse URL ${filePath}, using as-is`);
+        }
+      }
+      await this.s3Service.deleteFile(s3Key);
+      this.logger.debug(`File deleted from S3: ${s3Key}`);
     } else {
       try {
         const fullPath = join(this.uploadPath, filePath);
@@ -153,9 +165,9 @@ export class FileUploadService {
 
   /**
    * Get URL for accessing a file
-   * @param filePath File path/key
+   * @param filePath File path/key (S3 key or local path)
    * @param usePresignedUrl Whether to use presigned URL for S3 (default: true for S3)
-   * @returns File URL
+   * @returns File URL (presigned URL for S3, local path for local storage)
    */
   async getFileUrl(filePath: string, usePresignedUrl: boolean = true): Promise<string | null> {
     if (!filePath) {
@@ -163,21 +175,44 @@ export class FileUploadService {
     }
 
     if (this.useS3 && this.s3Service) {
-      // Check if bucket is public or use presigned URL
-      const usePublicUrl = this.configService.get<string>('AWS_S3_PUBLIC_BUCKET') === 'true';
-      
-      if (usePublicUrl) {
-        return this.s3Service.getPublicUrl(filePath);
-      } else if (usePresignedUrl) {
+      // Always use presigned URLs for S3 private buckets
+      if (usePresignedUrl) {
         const expiresIn = this.configService.get<number>('AWS_S3_PRESIGNED_URL_EXPIRES_IN') || 3600;
         return await this.s3Service.getPresignedUrl(filePath, expiresIn);
       } else {
-        return this.s3Service.getPublicUrl(filePath);
+        // Fallback to public URL if bucket is public (not recommended)
+        const usePublicUrl = this.configService.get<string>('AWS_S3_PUBLIC_BUCKET') === 'true';
+        if (usePublicUrl) {
+          return this.s3Service.getPublicUrl(filePath);
+        }
+        // Default to presigned URL even if usePresignedUrl is false
+        const expiresIn = this.configService.get<number>('AWS_S3_PRESIGNED_URL_EXPIRES_IN') || 3600;
+        return await this.s3Service.getPresignedUrl(filePath, expiresIn);
       }
     } else {
       // Local storage
       return `/uploads/${filePath}`;
     }
+  }
+
+  /**
+   * Convert S3 keys to presigned URLs for user data
+   * @param s3Key S3 key (path) or null
+   * @returns Presigned URL or null
+   */
+  async getPresignedUrlIfS3Key(s3Key: string | null): Promise<string | null> {
+    if (!s3Key) {
+      return null;
+    }
+
+    // Check if it's an S3 key (contains /) or already a URL
+    if (s3Key.startsWith('http://') || s3Key.startsWith('https://')) {
+      // Already a URL, return as is
+      return s3Key;
+    }
+
+    // It's an S3 key, generate presigned URL
+    return await this.getFileUrl(s3Key, true);
   }
 }
 

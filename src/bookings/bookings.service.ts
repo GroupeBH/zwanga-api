@@ -8,6 +8,7 @@ import { CreateBookingDto, UpdateBookingStatusDto } from './dto/booking.dto';
 import { CacheService } from '../common/services/cache.service';
 import { NotificationService } from '../notifications/notifications.service';
 import { ChatService } from '../chat/chat.service';
+import { FileUploadService } from '../common/services/file-upload.service';
 
 @Injectable()
 export class BookingsService {
@@ -24,6 +25,7 @@ export class BookingsService {
     private cacheService: CacheService,
     private notificationService: NotificationService,
     private chatService: ChatService,
+    private fileUploadService: FileUploadService,
   ) {}
 
   async create(passengerId: string, createBookingDto: CreateBookingDto): Promise<Booking> {
@@ -301,13 +303,18 @@ export class BookingsService {
       throw new NotFoundException('Driver not found');
     }
 
+    // Convert S3 key to presigned URL
+    const profilePicture = driver.profilePicture
+      ? await this.fileUploadService.getPresignedUrlIfS3Key(driver.profilePicture)
+      : null;
+
     return {
       driver: {
         id: driver.id,
         firstName: driver.firstName,
         lastName: driver.lastName,
         phone: driver.phone,
-        profilePicture: driver.profilePicture,
+        profilePicture: profilePicture || driver.profilePicture,
       },
     };
   }

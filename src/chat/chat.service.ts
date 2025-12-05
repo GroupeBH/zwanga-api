@@ -19,6 +19,7 @@ import {
   SendMessageDto,
 } from './dto/conversation.dto';
 import { NotificationService } from '../notifications/notifications.service';
+import { FileUploadService } from '../common/services/file-upload.service';
 
 @Injectable()
 export class ChatService {
@@ -36,6 +37,7 @@ export class ChatService {
     @InjectRepository(User)
     private readonly userRepository: Repository<User>,
     private readonly notificationService: NotificationService,
+    private readonly fileUploadService: FileUploadService,
   ) {}
 
   /* -------------------------------------------------------------------------- */
@@ -327,20 +329,28 @@ export class ChatService {
 
     return {
       ...conversation,
-      participants: conversation.participants.map((participant) => ({
-        id: participant.id,
-        userId: participant.userId,
-        user: participant.user
-          ? {
-              id: participant.user.id,
-              firstName: participant.user.firstName,
-              lastName: participant.user.lastName,
-              profilePicture: participant.user.profilePicture,
-            }
-          : null,
-        lastReadAt: participant.lastReadAt,
-        isMuted: participant.isMuted,
-      })),
+      participants: await Promise.all(
+        conversation.participants.map(async (participant) => {
+          let profilePicture = participant.user?.profilePicture || null;
+          if (profilePicture) {
+            profilePicture = await this.fileUploadService.getPresignedUrlIfS3Key(profilePicture) || profilePicture;
+          }
+          return {
+            id: participant.id,
+            userId: participant.userId,
+            user: participant.user
+              ? {
+                  id: participant.user.id,
+                  firstName: participant.user.firstName,
+                  lastName: participant.user.lastName,
+                  profilePicture,
+                }
+              : null,
+            lastReadAt: participant.lastReadAt,
+            isMuted: participant.isMuted,
+          };
+        }),
+      ),
       lastMessage,
       unreadCount,
     };

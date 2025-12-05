@@ -39,6 +39,32 @@ export class UsersService {
     return safeUser;
   }
 
+  /**
+   * Convert S3 keys to presigned URLs for user profile picture
+   */
+  private async enrichUserWithPresignedUrls(user: User): Promise<User> {
+    if (user.profilePicture) {
+      user.profilePicture = await this.fileUploadService.getPresignedUrlIfS3Key(user.profilePicture) || user.profilePicture;
+    }
+    return user;
+  }
+
+  /**
+   * Convert S3 keys to presigned URLs for KYC documents
+   */
+  private async enrichKycWithPresignedUrls(kyc: KycDocument): Promise<KycDocument> {
+    if (kyc.cniFrontUrl) {
+      kyc.cniFrontUrl = await this.fileUploadService.getPresignedUrlIfS3Key(kyc.cniFrontUrl) || kyc.cniFrontUrl;
+    }
+    if (kyc.cniBackUrl) {
+      kyc.cniBackUrl = await this.fileUploadService.getPresignedUrlIfS3Key(kyc.cniBackUrl) || kyc.cniBackUrl;
+    }
+    if (kyc.selfieUrl) {
+      kyc.selfieUrl = await this.fileUploadService.getPresignedUrlIfS3Key(kyc.selfieUrl) || kyc.selfieUrl;
+    }
+    return kyc;
+  }
+
   async findOne(id: string): Promise<User> {
     this.logger.debug(`Fetching user: ${id}`);
     
@@ -74,8 +100,11 @@ export class UsersService {
       this.messageRepository.count({ where: { senderId: userId } }),
     ]);
 
+    // Convert S3 keys to presigned URLs
+    const enrichedUser = await this.enrichUserWithPresignedUrls(user);
+
     return {
-      user: this.toSafeUser(user),
+      user: this.toSafeUser(enrichedUser),
       stats: {
         vehicles: user.vehicles?.length ?? 0,
         tripsAsDriver,
@@ -150,7 +179,9 @@ export class UsersService {
     }
 
     this.logger.log(`Profile updated successfully for user: ${userId}`);
-    return updatedUser;
+    
+    // Convert S3 key to presigned URL before returning
+    return await this.enrichUserWithPresignedUrls(updatedUser);
   }
 
   async uploadKyc(
@@ -202,14 +233,23 @@ export class UsersService {
     const savedKyc = await this.kycDocumentRepository.save(kycDocument);
     
     this.logger.log(`KYC documents uploaded successfully for user: ${userId} (KYC ID: ${savedKyc.id})`);
-    return savedKyc;
+    
+    // Convert S3 keys to presigned URLs before returning
+    return await this.enrichKycWithPresignedUrls(savedKyc);
   }
 
   async getKycStatus(userId: string): Promise<KycDocument | null> {
-    return this.kycDocumentRepository.findOne({
+    const kyc = await this.kycDocumentRepository.findOne({
       where: { userId },
       order: { createdAt: 'DESC' },
     });
+    
+    if (!kyc) {
+      return null;
+    }
+    
+    // Convert S3 keys to presigned URLs before returning
+    return await this.enrichKycWithPresignedUrls(kyc);
   }
 
   async updateFcmToken(userId: string, fcmToken: string): Promise<void> {
