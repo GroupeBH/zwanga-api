@@ -249,8 +249,6 @@ export class UsersService {
         selfieFile.buffer,
       );
 
-      console.log('validationResult', validationResult);
-
       if (validationResult.isValid) {
         kycStatus = KycStatus.APPROVED;
         this.logger.log(
