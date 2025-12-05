@@ -81,6 +81,14 @@ AWS_REKOGNITION_ENABLED=false
 # Minimum confidence threshold for moderation labels (0-100, default: 50)
 AWS_REKOGNITION_MIN_CONFIDENCE=50
 
+# AWS Rekognition - KYC Validation (Optional)
+# Set to 'true' to enable automatic KYC validation (default: false)
+AWS_REKOGNITION_KYC_ENABLED=false
+# Minimum similarity score for face matching (0-100, default: 80)
+AWS_REKOGNITION_KYC_MIN_SIMILARITY=80
+# Minimum face quality threshold (0-100, default: 50)
+AWS_REKOGNITION_KYC_MIN_FACE_QUALITY=50
+
 # ============================================
 # Rate Limiting
 # ============================================

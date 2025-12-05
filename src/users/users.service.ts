@@ -13,6 +13,7 @@ import { Trip } from '../trips/entities/trip.entity';
 import { Booking } from '../bookings/entities/booking.entity';
 import { Message } from '../chat/entities/message.entity';
 import { FileUploadService } from '../common/services/file-upload.service';
+import { KycValidationService } from '../common/services/kyc-validation.service';
 import { Express } from 'express';
 import { UserRole } from './entities/user.entity';
 
@@ -32,7 +33,8 @@ export class UsersService {
     @InjectRepository(Message)
     private messageRepository: Repository<Message>,
     private fileUploadService: FileUploadService,
-  ) {}
+    private kycValidationService: KycValidationService,
+  ) { }
 
   private toSafeUser(user: User) {
     const { password, refreshToken, ...safeUser } = user;
@@ -67,7 +69,7 @@ export class UsersService {
 
   async findOne(id: string): Promise<User> {
     this.logger.debug(`Fetching user: ${id}`);
-    
+
     const user = await this.userRepository.findOne({
       where: { id },
       relations: ['vehicles', 'kycDocuments'],
@@ -125,7 +127,7 @@ export class UsersService {
     profilePictureFile?: Express.Multer.File,
   ): Promise<User> {
     this.logger.log(`Updating profile for user: ${userId}`);
-    
+
     const user = await this.findOne(userId);
 
     if (updateProfileDto.phone && updateProfileDto.phone !== user.phone) {
@@ -179,7 +181,7 @@ export class UsersService {
     }
 
     this.logger.log(`Profile updated successfully for user: ${userId}`);
-    
+
     // Convert S3 key to presigned URL before returning
     return await this.enrichUserWithPresignedUrls(updatedUser);
   }
@@ -194,18 +196,32 @@ export class UsersService {
     },
   ): Promise<KycDocument> {
     this.logger.log(`Uploading KYC documents for user: ${userId}`);
-    
+
     const user = await this.findOne(userId);
 
-    // Check if user already has a pending KYC
+    // Check if user already has a KYC in progress
     const existingKyc = await this.kycDocumentRepository.findOne({
       where: { userId },
     });
 
-    // if (existingKyc) {
-    //   this.logger.warn(`KYC upload failed: User ${userId} already has pending KYC`);
-    //   throw new BadRequestException('You already have a pending KYC verification');
-    // }
+    if (existingKyc) {
+      this.logger.warn(`KYC upload failed: User ${userId} already has a KYC document in progress (Status: ${existingKyc.status})`);
+      
+      // Determine the appropriate message based on KYC status
+      let message = 'Vous avez déjà un document KYC en cours de vérification.';
+      if (existingKyc.status === KycStatus.APPROVED) {
+        message = 'Votre document KYC a déjà été approuvé.';
+      } else if (existingKyc.status === KycStatus.REJECTED) {
+        message = 'Votre document KYC a été rejeté. Veuillez contacter le support pour plus d\'informations.';
+        if (existingKyc.rejectionReason) {
+          message += ` Raison: ${existingKyc.rejectionReason}`;
+        }
+      } else if (existingKyc.status === KycStatus.PENDING) {
+        message = 'Vous avez déjà un document KYC en attente de vérification. Veuillez patienter.';
+      }
+      
+      throw new BadRequestException(message);
+    }
 
     const cniFrontFile = files?.cniFront?.[0];
     const cniBackFile = files?.cniBack?.[0];
@@ -221,19 +237,69 @@ export class UsersService {
       this.fileUploadService.saveFile(selfieFile, 'kyc'),
     ]);
 
+    // Validate KYC using AWS Rekognition
+    let validationResult;
+    let kycStatus = KycStatus.PENDING;
+    let rejectionReason: string | null = null;
+
+    try {
+      this.logger.debug(`Validating KYC for user: ${userId}`);
+      validationResult = await this.kycValidationService.validateKyc(
+        cniFrontFile.buffer,
+        selfieFile.buffer,
+      );
+
+      console.log('validationResult', validationResult);
+
+      if (validationResult.isValid) {
+        kycStatus = KycStatus.APPROVED;
+        this.logger.log(
+          `KYC validation successful for user: ${userId} - Similarity: ${validationResult.faceMatch.similarity.toFixed(1)}%`,
+        );
+      } else {
+        kycStatus = KycStatus.REJECTED;
+        rejectionReason = validationResult.reason || 'Validation KYC échouée';
+        this.logger.warn(
+          `KYC validation failed for user: ${userId} - Reason: ${rejectionReason}`,
+        );
+      }
+    } catch (error) {
+      this.logger.error(
+        `KYC validation error for user: ${userId}:`,
+        error.message,
+      );
+      // If validation fails due to service error, keep status as PENDING for manual review
+      kycStatus = KycStatus.PENDING;
+      this.logger.warn(
+        `KYC validation service error, keeping status as PENDING for manual review`,
+      );
+    }
+
     const kycDocument = this.kycDocumentRepository.create({
       userId,
       cniFrontUrl,
       cniBackUrl,
       selfieUrl,
-      status: KycStatus.PENDING,
+      status: kycStatus,
+      rejectionReason,
       documentNumber: uploadKycDto.documentNumber,
     } as DeepPartial<KycDocument>);
 
     const savedKyc = await this.kycDocumentRepository.save(kycDocument);
-    
-    this.logger.log(`KYC documents uploaded successfully for user: ${userId} (KYC ID: ${savedKyc.id})`);
-    
+
+    // Update user status if KYC is approved
+    if (kycStatus === KycStatus.APPROVED) {
+      user.status = UserStatus.ACTIVE;
+      await this.userRepository.save(user);
+      this.logger.log(
+        `User ${userId} status updated to ACTIVE after KYC approval`,
+      );
+    }
+
+    this.logger.log(
+      `KYC documents uploaded successfully for user: ${userId} (KYC ID: ${savedKyc.id}, Status: ${kycStatus})`,
+    );
+
     // Convert S3 keys to presigned URLs before returning
     return await this.enrichKycWithPresignedUrls(savedKyc);
   }
@@ -243,22 +309,22 @@ export class UsersService {
       where: { userId },
       order: { createdAt: 'DESC' },
     });
-    
+
     if (!kyc) {
       return null;
     }
-    
+
     // Convert S3 keys to presigned URLs before returning
     return await this.enrichKycWithPresignedUrls(kyc);
   }
 
   async updateFcmToken(userId: string, fcmToken: string): Promise<void> {
     this.logger.debug(`Updating FCM token for user: ${userId}`);
-    
+
     const user = await this.findOne(userId);
     user.fcmToken = fcmToken;
     await this.userRepository.save(user);
-    
+
     this.logger.debug(`FCM token updated for user: ${userId}`);
   }
 }
