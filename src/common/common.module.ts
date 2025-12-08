@@ -4,6 +4,7 @@ import { RedisService } from './services/redis.service';
 import { FileUploadService } from './services/file-upload.service';
 import { S3Service } from './services/s3.service';
 import { ContentModerationService } from './services/content-moderation.service';
+import { KycValidationService } from './services/kyc-validation.service';
 import { RolesGuard } from './guards/roles.guard';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { LoggingInterceptor } from './interceptors/logging.interceptor';
@@ -15,6 +16,7 @@ import { LoggingInterceptor } from './interceptors/logging.interceptor';
     RedisService,
     S3Service,
     ContentModerationService,
+    KycValidationService,
     FileUploadService,
     RolesGuard,
     JwtAuthGuard,
@@ -25,6 +27,7 @@ import { LoggingInterceptor } from './interceptors/logging.interceptor';
     RedisService,
     S3Service,
     ContentModerationService,
+    KycValidationService,
     FileUploadService,
     RolesGuard,
     JwtAuthGuard,

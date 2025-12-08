@@ -8,13 +8,12 @@ import {
   Param,
   Query,
   Request,
+  BadRequestException,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { TripsService } from './trips.service';
 import { CreateTripDto, SearchTripsDto, UpdateTripDto, SearchByPointsDto } from './dto/trip.dto';
 import { Auth } from '../auth/decorators/auth.decorator';
-import { Roles } from '../common/decorators/roles.decorator';
-import { UserRole } from '../users/entities/user.entity';
 import { Public } from '../common/decorators/public.decorator';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
 
@@ -25,9 +24,11 @@ export class TripsController {
 
   @Post()
   @Auth()
-  @Roles(UserRole.DRIVER)
   @SensitiveThrottle(10, 60000) // 10 requests per minute per IP
-  @ApiOperation({ summary: 'Create a new trip' })
+  @ApiOperation({ 
+    summary: 'Create a new trip',
+    description: 'Permet à un utilisateur de créer un trajet. Si l\'utilisateur est un passager et fournit un véhicule, il sera automatiquement promu en conducteur.'
+  })
   async create(@Request() req, @Body() createTripDto: CreateTripDto) {
     return this.tripsService.create(req.user.userId, createTripDto);
   }
@@ -35,7 +36,10 @@ export class TripsController {
   @Get()
   @Public()
   @SensitiveThrottle(30, 60000) // 30 requests per minute per IP
-  @ApiOperation({ summary: 'Get all available trips or search trips' })
+  @ApiOperation({ 
+    summary: 'Rechercher des trajets ou obtenir tous les trajets disponibles',
+    description: 'Recherche flexible par coordonnées : vous pouvez fournir uniquement departureCoordinates, uniquement arrivalCoordinates, ou les deux. Le rayon de recherche (departureRadiusKm, arrivalRadiusKm) est optionnel pour chaque point (défaut: 50 km). Si aucun critère n\'est fourni, retourne tous les trajets disponibles.'
+  })
   async findAll(@Query() searchTripsDto: SearchTripsDto) {
     if (Object.keys(searchTripsDto).length > 0) {
       return this.tripsService.search(searchTripsDto);
@@ -46,8 +50,16 @@ export class TripsController {
   @Post('search/coordinates')
   @Public()
   @SensitiveThrottle(30, 60000)
-  @ApiOperation({ summary: 'Find trips by providing departure and arrival coordinates' })
+  @ApiOperation({ 
+    summary: 'Rechercher des trajets par coordonnées',
+    description: 'Recherche flexible : vous pouvez fournir uniquement departureCoordinates, uniquement arrivalCoordinates, ou les deux. Le rayon de recherche est optionnel pour chaque point (défaut: 50 km).'
+  })
   async searchByCoordinates(@Body() payload: SearchByPointsDto) {
+    // Validate that at least one coordinate is provided
+    if (!payload.departureCoordinates && !payload.arrivalCoordinates) {
+      throw new BadRequestException('Au moins un point (départ ou arrivée) doit être fourni pour la recherche');
+    }
+
     const {
       departureCoordinates,
       arrivalCoordinates,

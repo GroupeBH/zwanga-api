@@ -70,17 +70,29 @@ export class CreateTripDto {
   @IsString()
   @IsOptional()
   description?: string;
+
+  @ApiProperty({
+    required: false,
+    description: 'ID du véhicule à associer au trajet (doit appartenir au driver)',
+  })
+  @IsString()
+  @IsOptional()
+  vehicleId?: string;
 }
 
 export class SearchTripsDto {
-  @ApiProperty({ required: false })
+  @ApiProperty({
+    required: false,
+    description: 'Nom du lieu de départ (recherche textuelle)',
+  })
   @IsString()
   @IsOptional()
   departureLocation?: string;
 
   @ApiProperty({
     required: false,
-    description: 'Coordonnées du point de départ [longitude, latitude]',
+    description: 'Coordonnées du point de départ [longitude, latitude]. Peut être utilisé seul ou avec arrivalCoordinates.',
+    example: [15.2663, -4.325],
   })
   @IsOptional()
   @IsArray()
@@ -89,14 +101,18 @@ export class SearchTripsDto {
   @IsNumber({}, { each: true })
   departureCoordinates?: [number, number];
 
-  @ApiProperty({ required: false })
+  @ApiProperty({
+    required: false,
+    description: 'Nom du lieu d\'arrivée (recherche textuelle)',
+  })
   @IsString()
   @IsOptional()
   arrivalLocation?: string;
 
   @ApiProperty({
     required: false,
-    description: 'Coordonnées du point d’arrivée [longitude, latitude]',
+    description: 'Coordonnées du point d\'arrivée [longitude, latitude]. Peut être utilisé seul ou avec departureCoordinates.',
+    example: [15.3222, -4.4419],
   })
   @IsOptional()
   @IsArray()
@@ -108,7 +124,8 @@ export class SearchTripsDto {
   @ApiProperty({
     required: false,
     minimum: 1,
-    description: 'Rayon de recherche autour du point de départ (km)',
+    description: 'Rayon de recherche autour du point de départ en kilomètres (défaut: 50 km). Optionnel si departureCoordinates est fourni.',
+    default: 50,
   })
   @IsNumber()
   @Min(1)
@@ -118,7 +135,8 @@ export class SearchTripsDto {
   @ApiProperty({
     required: false,
     minimum: 1,
-    description: 'Rayon de recherche autour du point d’arrivée (km)',
+    description: 'Rayon de recherche autour du point d\'arrivée en kilomètres (défaut: 50 km). Optionnel si arrivalCoordinates est fourni.',
+    default: 50,
   })
   @IsNumber()
   @Min(1)
@@ -202,11 +220,20 @@ export class UpdateTripDto {
   @IsEnum(TripStatus)
   @IsOptional()
   status?: TripStatus;
+
+  @ApiProperty({
+    required: false,
+    description: 'ID du véhicule à associer au trajet (doit appartenir au driver). Passer null pour retirer l\'association.',
+  })
+  @IsString()
+  @IsOptional()
+  vehicleId?: string | null;
 }
 
 export class SearchByPointsDto {
   @ApiProperty({
-    description: 'Coordonnées du point de départ [longitude, latitude]',
+    required: false,
+    description: 'Coordonnées du point de départ [longitude, latitude]. Peut être utilisé seul ou avec arrivalCoordinates.',
     example: [15.2663, -4.325],
     minItems: 2,
     maxItems: 2,
@@ -215,11 +242,12 @@ export class SearchByPointsDto {
   @ArrayMinSize(2)
   @ArrayMaxSize(2)
   @IsNumber({}, { each: true })
-  @IsNotEmpty()
-  departureCoordinates: [number, number];
+  @IsOptional()
+  departureCoordinates?: [number, number];
 
   @ApiProperty({
-    description: 'Coordonnées du point d’arrivée [longitude, latitude]',
+    required: false,
+    description: "Coordonnées du point d'arrivée [longitude, latitude]. Peut être utilisé seul ou avec departureCoordinates.",
     example: [15.3222, -4.4419],
     minItems: 2,
     maxItems: 2,
@@ -228,14 +256,14 @@ export class SearchByPointsDto {
   @ArrayMinSize(2)
   @ArrayMaxSize(2)
   @IsNumber({}, { each: true })
-  @IsNotEmpty()
-  arrivalCoordinates: [number, number];
+  @IsOptional()
+  arrivalCoordinates?: [number, number];
 
   @ApiProperty({
     required: false,
     minimum: 1,
-    description: 'Rayon de recherche autour du départ (km)',
-    default: 5,
+    description: 'Rayon de recherche autour du point de départ en kilomètres (défaut: 50 km). Optionnel si departureCoordinates est fourni.',
+    default: 50,
   })
   @IsNumber()
   @Min(1)
@@ -245,8 +273,8 @@ export class SearchByPointsDto {
   @ApiProperty({
     required: false,
     minimum: 1,
-    description: 'Rayon de recherche autour de l’arrivée (km)',
-    default: 5,
+    description: 'Rayon de recherche autour du point d\'arrivée en kilomètres (défaut: 50 km). Optionnel si arrivalCoordinates est fourni.',
+    default: 50,
   })
   @IsNumber()
   @Min(1)

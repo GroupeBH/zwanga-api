@@ -8,8 +8,9 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, Point } from 'typeorm';
 import { Trip, TripStatus } from './entities/trip.entity';
-import { User } from '../users/entities/user.entity';
+import { User, UserRole } from '../users/entities/user.entity';
 import { Booking, BookingStatus } from '../bookings/entities/booking.entity';
+import { Vehicle } from '../vehicles/entities/vehicle.entity';
 import { CreateTripDto, SearchTripsDto, UpdateTripDto } from './dto/trip.dto';
 import { CacheService } from '../common/services/cache.service';
 import { FileUploadService } from '../common/services/file-upload.service';
@@ -31,11 +32,21 @@ export type SanitizedBooking = Omit<Booking, 'trip' | 'passenger' | 'messages'> 
   passenger: SanitizedUser | null;
 };
 
-export type SanitizedTrip = Omit<Trip, 'driver' | 'bookings' | 'departurePoint' | 'arrivalPoint'> & {
+export interface SanitizedVehicle {
+  id: string;
+  brand: string;
+  model: string;
+  color: string;
+  licensePlate: string;
+  photoUrl: string | null;
+}
+
+export type SanitizedTrip = Omit<Trip, 'driver' | 'bookings' | 'departurePoint' | 'arrivalPoint' | 'vehicle'> & {
   driver: SanitizedUser | null;
   bookings: SanitizedBooking[];
   departureCoordinates: Coordinates;
   arrivalCoordinates: Coordinates;
+  vehicle: SanitizedVehicle | null;
 };
 
 @Injectable()
@@ -50,34 +61,72 @@ export class TripsService {
     private bookingRepository: Repository<Booking>,
     @InjectRepository(User)
     private userRepository: Repository<User>,
+    @InjectRepository(Vehicle)
+    private vehicleRepository: Repository<Vehicle>,
     private cacheService: CacheService,
     private fileUploadService: FileUploadService,
   ) {}
 
   async create(driverId: string, createTripDto: CreateTripDto): Promise<SanitizedTrip> {
-    this.logger.log(`Creating trip for driver: ${driverId} from ${createTripDto.departureLocation} to ${createTripDto.arrivalLocation}`);
+    this.logger.log(`Creating trip for user: ${driverId} from ${createTripDto.departureLocation} to ${createTripDto.arrivalLocation}`);
     
-    const driver = await this.userRepository.findOne({ where: { id: driverId } });
-    if (!driver) {
-      this.logger.warn(`Trip creation failed: Driver not found - ${driverId}`);
-      throw new NotFoundException('Driver not found');
-    }
-
-    if (driver.role !== 'driver') {
-      this.logger.warn(`Trip creation failed: User ${driverId} is not a driver`);
-      throw new BadRequestException('User must be a driver to create trips');
+    const user = await this.userRepository.findOne({ where: { id: driverId } });
+    if (!user) {
+      this.logger.warn(`Trip creation failed: User not found - ${driverId}`);
+      throw new NotFoundException('User not found');
     }
 
     const {
       departureCoordinates,
       arrivalCoordinates,
       departureDate,
+      vehicleId,
       ...baseTripData
     } = createTripDto;
+
+    // Validate vehicle if provided
+    let vehicle: Vehicle | null = null;
+    if (vehicleId) {
+      vehicle = await this.vehicleRepository.findOne({
+        where: { id: vehicleId, ownerId: driverId },
+      });
+
+      if (!vehicle) {
+        this.logger.warn(
+          `Trip creation failed: Vehicle ${vehicleId} not found or does not belong to user ${driverId}`,
+        );
+        throw new BadRequestException(
+          'Véhicule non trouvé ou ne vous appartient pas',
+        );
+      }
+
+      if (!vehicle.isActive) {
+        this.logger.warn(
+          `Trip creation failed: Vehicle ${vehicleId} is not active`,
+        );
+        throw new BadRequestException('Le véhicule sélectionné n\'est pas actif');
+      }
+
+      // If user is a passenger and provides a vehicle, promote them to driver
+      if (user.role === UserRole.PASSENGER && !user.isDriver) {
+        this.logger.log(`Promoting user ${driverId} from passenger to driver (creating trip with vehicle)`);
+        user.role = UserRole.DRIVER;
+        user.isDriver = true;
+        await this.userRepository.save(user);
+        this.logger.log(`User ${driverId} successfully promoted to driver`);
+      }
+    } else {
+      // If no vehicle is provided, user must already be a driver
+      if (user.role !== 'driver') {
+        this.logger.warn(`Trip creation failed: User ${driverId} is not a driver and no vehicle provided`);
+        throw new BadRequestException('Vous devez être un conducteur ou fournir un véhicule pour créer un trajet');
+      }
+    }
 
     const trip = this.tripRepository.create({
       ...baseTripData,
       driverId,
+      vehicleId: vehicleId || null,
       departureDate: new Date(departureDate),
       departurePoint: this.buildPointFromCoordinates(departureCoordinates),
       arrivalPoint: this.buildPointFromCoordinates(arrivalCoordinates),
@@ -89,7 +138,7 @@ export class TripsService {
     await this.cacheService.del(CacheService.getTripsListKey());
     await this.cacheService.del(CacheService.getTripsListKey('all'));
 
-    this.logger.log(`Trip created successfully: ${savedTrip.id} by driver ${driverId}`);
+    this.logger.log(`Trip created successfully: ${savedTrip.id} by user ${driverId}`);
     return this.findOne(savedTrip.id);
   }
 
@@ -105,7 +154,7 @@ export class TripsService {
     }
 
     const trips = await this.tripRepository.find({
-      relations: ['driver', 'bookings', 'bookings.passenger'],
+      relations: ['driver', 'vehicle', 'bookings', 'bookings.passenger'],
       where: { status: TripStatus.PENDING },
       order: { departureDate: 'ASC' },
     });
@@ -253,7 +302,7 @@ export class TripsService {
 
     const trip = await this.tripRepository.findOne({
       where: { id },
-      relations: ['driver', 'driver.vehicles', 'bookings', 'bookings.passenger'],
+      relations: ['driver', 'driver.vehicles', 'vehicle', 'bookings', 'bookings.passenger'],
     });
 
     if (!trip) {
@@ -272,7 +321,7 @@ export class TripsService {
     
     const trips = await this.tripRepository.find({
       where: { driverId },
-      relations: ['bookings', 'bookings.passenger', 'driver'],
+      relations: ['vehicle', 'bookings', 'bookings.passenger', 'driver'],
       order: { departureDate: 'DESC' },
     });
 
@@ -299,6 +348,7 @@ export class TripsService {
       departureDate,
       departureCoordinates,
       arrivalCoordinates,
+      vehicleId,
       ...restPayload
     } = updateTripDto;
 
@@ -312,6 +362,36 @@ export class TripsService {
 
     if (arrivalCoordinates) {
       trip.arrivalPoint = this.buildPointFromCoordinates(arrivalCoordinates);
+    }
+
+    // Validate and update vehicle if provided
+    if (vehicleId !== undefined) {
+      if (vehicleId === null) {
+        // Allow removing vehicle association
+        trip.vehicleId = null;
+      } else {
+        const vehicle = await this.vehicleRepository.findOne({
+          where: { id: vehicleId, ownerId: driverId },
+        });
+
+        if (!vehicle) {
+          this.logger.warn(
+            `Trip update failed: Vehicle ${vehicleId} not found or does not belong to driver ${driverId}`,
+          );
+          throw new BadRequestException(
+            'Véhicule non trouvé ou ne vous appartient pas',
+          );
+        }
+
+        if (!vehicle.isActive) {
+          this.logger.warn(
+            `Trip update failed: Vehicle ${vehicleId} is not active`,
+          );
+          throw new BadRequestException('Le véhicule sélectionné n\'est pas actif');
+        }
+
+        trip.vehicleId = vehicleId;
+      }
     }
 
     Object.assign(trip, restPayload);
@@ -355,14 +435,32 @@ export class TripsService {
   }
 
   private async sanitizeTrip(trip: Trip): Promise<SanitizedTrip> {
-    const { driver, bookings, departurePoint, arrivalPoint, ...rest } = trip;
+    const { driver, bookings, departurePoint, arrivalPoint, vehicle, ...rest } = trip;
+
+    // Convert vehicle photo URL to presigned URL if needed
+    let sanitizedVehicle: SanitizedVehicle | null = null;
+    if (vehicle) {
+      let photoUrl = vehicle.photoUrl;
+      if (photoUrl) {
+        photoUrl = await this.fileUploadService.getPresignedUrlIfS3Key(photoUrl) || photoUrl;
+      }
+      sanitizedVehicle = {
+        id: vehicle.id,
+        brand: vehicle.brand,
+        model: vehicle.model,
+        color: vehicle.color,
+        licensePlate: vehicle.licensePlate,
+        photoUrl,
+      };
+    }
 
     return {
-      ...(rest as Omit<Trip, 'driver' | 'bookings' | 'departurePoint' | 'arrivalPoint'>),
+      ...(rest as Omit<Trip, 'driver' | 'bookings' | 'departurePoint' | 'arrivalPoint' | 'vehicle'>),
       departureCoordinates: this.pointToCoordinates(departurePoint),
       arrivalCoordinates: this.pointToCoordinates(arrivalPoint),
       driver: await this.sanitizeUser(driver),
       bookings: bookings ? await Promise.all(bookings.map((booking) => this.sanitizeBooking(booking))) : [],
+      vehicle: sanitizedVehicle,
     } as SanitizedTrip;
   }
 

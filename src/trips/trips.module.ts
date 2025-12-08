@@ -5,9 +5,10 @@ import { TripsController } from './trips.controller';
 import { Trip } from './entities/trip.entity';
 import { User } from '../users/entities/user.entity';
 import { Booking } from '../bookings/entities/booking.entity';
+import { Vehicle } from '../vehicles/entities/vehicle.entity';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Trip, User, Booking])],
+  imports: [TypeOrmModule.forFeature([Trip, User, Booking, Vehicle])],
   controllers: [TripsController],
   providers: [TripsService],
   exports: [TripsService],

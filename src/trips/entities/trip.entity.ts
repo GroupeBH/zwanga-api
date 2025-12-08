@@ -12,6 +12,7 @@ import {
 } from 'typeorm';
 import { User } from '../../users/entities/user.entity';
 import { Booking } from '../../bookings/entities/booking.entity';
+import { Vehicle } from '../../vehicles/entities/vehicle.entity';
 
 export enum TripStatus {
   PENDING = 'upcoming',
@@ -34,6 +35,13 @@ export class Trip {
   @ManyToOne(() => User, (user) => user.trips)
   @JoinColumn({ name: 'driverId' })
   driver: User;
+
+  @Column({ nullable: true })
+  vehicleId: string | null;
+
+  @ManyToOne(() => Vehicle, { nullable: true })
+  @JoinColumn({ name: 'vehicleId' })
+  vehicle: Vehicle | null;
 
   @Column()
   departureLocation: string;
