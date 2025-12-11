@@ -16,6 +16,7 @@ import { FileUploadService } from '../common/services/file-upload.service';
 import { KycValidationService } from '../common/services/kyc-validation.service';
 import { Express } from 'express';
 import { UserRole } from './entities/user.entity';
+import { DataSource } from 'typeorm';
 
 @Injectable()
 export class UsersService {
@@ -25,7 +26,7 @@ export class UsersService {
     @InjectRepository(User)
     private userRepository: Repository<User>,
     @InjectRepository(KycDocument)
-    private kycDocumentRepository: Repository<KycDocument>,
+    private kycDocumentRepository: Repository<any>,
     @InjectRepository(Trip)
     private tripRepository: Repository<Trip>,
     @InjectRepository(Booking)
@@ -34,6 +35,7 @@ export class UsersService {
     private messageRepository: Repository<Message>,
     private fileUploadService: FileUploadService,
     private kycValidationService: KycValidationService,
+    private readonly dataSource: DataSource,
   ) { }
 
   private toSafeUser(user: User) {
@@ -197,32 +199,26 @@ export class UsersService {
   ): Promise<KycDocument> {
     this.logger.log(`Uploading KYC documents for user: ${userId}`);
 
-    const user = await this.findOne(userId);
-
-    // Check if user already has a KYC in progress
-    const existingKyc = await this.kycDocumentRepository.findOne({
-      where: { userId },
-    });
-
-    if (existingKyc) {
-      this.logger.warn(`KYC upload failed: User ${userId} already has a KYC document in progress (Status: ${existingKyc.status})`);
-      
-      // Determine the appropriate message based on KYC status
-      let message = 'Vous avez déjà un document KYC en cours de vérification.';
-      if (existingKyc.status === KycStatus.APPROVED) {
-        message = 'Votre document KYC a déjà été approuvé.';
-      } else if (existingKyc.status === KycStatus.REJECTED) {
-        message = 'Votre document KYC a été rejeté. Veuillez contacter le support pour plus d\'informations.';
-        if (existingKyc.rejectionReason) {
-          message += ` Raison: ${existingKyc.rejectionReason}`;
-        }
-      } else if (existingKyc.status === KycStatus.PENDING) {
-        message = 'Vous avez déjà un document KYC en attente de vérification. Veuillez patienter.';
-      }
-      
-      throw new BadRequestException(message);
+    // 1. User Existence Check (Fail Fast)
+    const user = await this.userRepository.findOne({ where: { id: userId } });
+    if (!user) {
+      throw new NotFoundException(`User with ID ${userId} not found.`);
     }
 
+    // 2. Existing KYC Check Logic (Allow RETRY if REJECTED)
+    const existingKyc = await this.kycDocumentRepository.findOne({ where: { userId } });
+
+    if (existingKyc) {
+      if (existingKyc.status === KycStatus.APPROVED) {
+        throw new BadRequestException('Your KYC document has already been approved.');
+      }
+      if (existingKyc.status === KycStatus.PENDING) {
+        throw new BadRequestException('You already have a KYC document pending verification. Please wait.');
+      }
+      // If REJECTED, we continue: the new document will replace/update the old one
+    }
+
+    // 3. File Presence Check
     const cniFrontFile = files?.cniFront?.[0];
     const cniBackFile = files?.cniBack?.[0];
     const selfieFile = files?.selfie?.[0];
@@ -231,89 +227,137 @@ export class UsersService {
       throw new BadRequestException('All KYC images are required');
     }
 
+    // 4. S3 File Upload (External execution, before the transaction starts)
     const [cniFrontUrl, cniBackUrl, selfieUrl] = await Promise.all([
       this.fileUploadService.saveFile(cniFrontFile, 'kyc'),
       this.fileUploadService.saveFile(cniBackFile, 'kyc'),
       this.fileUploadService.saveFile(selfieFile, 'kyc'),
     ]);
 
-    // Validate KYC using AWS Rekognition
-    let validationResult;
+    // 5. KYC Validation (with error handling)
     let kycStatus = KycStatus.PENDING;
     let rejectionReason: string | null = null;
+    let isApprovalConfirmed = false;
 
     try {
       this.logger.debug(`Validating KYC for user: ${userId}`);
-      validationResult = await this.kycValidationService.validateKyc(
+      const validationResult = await this.kycValidationService.validateKyc(
         cniFrontFile.buffer,
         selfieFile.buffer,
       );
 
       if (validationResult.isValid) {
         kycStatus = KycStatus.APPROVED;
-        this.logger.log(
-          `KYC validation successful for user: ${userId} - Similarity: ${validationResult.faceMatch.similarity.toFixed(1)}%`,
-        );
+        isApprovalConfirmed = true;
+        this.logger.log(`KYC validation successful for user: ${userId}`);
       } else {
         kycStatus = KycStatus.REJECTED;
-        rejectionReason = validationResult.reason || 'Validation KYC échouée';
-        this.logger.warn(
-          `KYC validation failed for user: ${userId} - Reason: ${rejectionReason}`,
-        );
+        rejectionReason = validationResult.reason || 'KYC Validation Failed';
+        this.logger.warn(`KYC validation failed for user: ${userId} - Reason: ${rejectionReason}`);
       }
     } catch (error) {
-      this.logger.error(
-        `KYC validation error for user: ${userId}:`,
-        error.message,
-      );
-      // If validation fails due to service error, keep status as PENDING for manual review
+      this.logger.error(`KYC validation error for user: ${userId}: ${error.message}`);
+      // In case of an AI service error, status remains PENDING for manual review
       kycStatus = KycStatus.PENDING;
-      this.logger.warn(
-        `KYC validation service error, keeping status as PENDING for manual review`,
-      );
+      this.logger.warn(`KYC validation service error, keeping status as PENDING`);
     }
 
-    const kycDocument = this.kycDocumentRepository.create({
-      userId,
-      cniFrontUrl,
-      cniBackUrl,
-      selfieUrl,
-      status: kycStatus,
-      rejectionReason,
-      documentNumber: uploadKycDto.documentNumber,
-    } as DeepPartial<KycDocument>);
+    // 6. Start Database Transaction (Atomicity)
+    // This is crucial to link the KYC save and the user status update.
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    await queryRunner.startTransaction();
 
-    const savedKyc = await this.kycDocumentRepository.save(kycDocument);
 
-    // Update user status if KYC is approved
-    if (kycStatus === KycStatus.APPROVED) {
-      user.status = UserStatus.ACTIVE;
-      await this.userRepository.save(user);
-      this.logger.log(
-        `User ${userId} status updated to ACTIVE after KYC approval`,
-      );
+    try {
+      // Prepare the KYC document (TypeORM FIX: Pass the 'user' object)
+      let kycDocument = existingKyc
+        ? this.kycDocumentRepository.merge(existingKyc, {})
+        : this.kycDocumentRepository.create({
+          userId, // <-- TypeORM BUG FIX: Pass the user object
+          cniFrontUrl,
+          cniBackUrl,
+          selfieUrl,
+          status: kycStatus,
+          rejectionReason,
+          documentNumber: uploadKycDto.documentNumber,
+        });
+
+      kycDocument = queryRunner.manager.merge(KycDocument, kycDocument, {
+        user: user, // <-- TypeORM BUG FIX: Pass the user object
+        cniFrontUrl,
+        cniBackUrl,
+        selfieUrl,
+        status: kycStatus,
+        rejectionReason,
+        documentNumber: uploadKycDto.documentNumber,
+      } as DeepPartial<KycDocument>);
+
+      const savedKyc = await queryRunner.manager.save(kycDocument);
+
+      // Update user status ONLY if approval is confirmed
+      if (isApprovalConfirmed) {
+        user.status = UserStatus.ACTIVE;
+        await queryRunner.manager.save(user); // Transactional user save
+        this.logger.log(`User ${userId} status updated to ACTIVE after KYC approval`);
+      }
+
+      await queryRunner.commitTransaction();
+
+      this.logger.log(`KYC documents uploaded successfully for user: ${userId} (Status: ${kycStatus})`);
+
+      // Convert S3 keys to presigned URLs
+      return await this.enrichKycWithPresignedUrls(savedKyc);
+
+    } catch (error) {
+      await queryRunner.rollbackTransaction();
+      this.logger.error(`Transaction failed for user ${userId}`, error.stack);
+
+      // 7. NEW: S3 File Cleanup Process 🗑️
+      try {
+        this.logger.warn(`Transaction failed. Starting cleanup for S3 files for user: ${userId}`);
+
+        // Parallel deletion of all uploaded files
+        await Promise.all([
+          this.fileUploadService.deleteFile(cniFrontUrl),
+          this.fileUploadService.deleteFile(cniBackUrl),
+          this.fileUploadService.deleteFile(selfieUrl),
+        ]);
+
+        this.logger.log(`S3 files cleaned up successfully for user: ${userId}`);
+      } catch (cleanupError) {
+        // If cleanup fails, we log the error but still throw the original transaction error.
+        this.logger.error(
+          `FATAL: Failed to clean up S3 files after transaction rollback. Orphaned files remaining.`,
+          cleanupError.stack
+        );
+      }
+
+      throw error; // Throw the original transaction error
+    } finally {
+      await queryRunner.release();
     }
-
-    this.logger.log(
-      `KYC documents uploaded successfully for user: ${userId} (KYC ID: ${savedKyc.id}, Status: ${kycStatus})`,
-    );
-
-    // Convert S3 keys to presigned URLs before returning
-    return await this.enrichKycWithPresignedUrls(savedKyc);
   }
 
+
   async getKycStatus(userId: string): Promise<KycDocument | null> {
-    const kyc = await this.kycDocumentRepository.findOne({
-      where: { userId },
-      order: { createdAt: 'DESC' },
+    const kyc = await this.kycDocumentRepository.findOneBy({
+      userId: userId
     });
+
+    this.logger.log(`Fetching KYC status for user: ${kyc} ${userId}`);
+    console.log("kyc", kyc);
 
     if (!kyc) {
       return null;
     }
 
+    const thisUserKyc = await this.enrichKycWithPresignedUrls(kyc);
+
+    console.log("thiskyc", thisUserKyc);
+
     // Convert S3 keys to presigned URLs before returning
-    return await this.enrichKycWithPresignedUrls(kyc);
+    return thisUserKyc
   }
 
   async updateFcmToken(userId: string, fcmToken: string): Promise<void> {

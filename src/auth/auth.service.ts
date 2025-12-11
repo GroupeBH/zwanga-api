@@ -244,7 +244,7 @@ export class AuthService {
     // Refresh token: 3 weeks (21d)
     const refreshToken = await this.jwtService.signAsync(payload, {
       secret: this.configService.get<string>('JWT_REFRESH_SECRET'),
-      expiresIn: this.configService.get<string>('JWT_REFRESH_EXPIRES_IN') || '21d',
+      expiresIn: this.configService.get<string>('JWT_REFRESH_EXPIRES_IN') || '90d',
     });
 
     // Save refresh token to user

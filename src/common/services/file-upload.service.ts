@@ -81,7 +81,7 @@ export class FileUploadService {
             moderationResult.reason || 'Image contains inappropriate content and cannot be uploaded',
           );
         }
-        
+
         this.logger.debug(`Content moderation passed for file: ${file.originalname}`);
       } catch (error) {
         if (error instanceof BadRequestException) {
@@ -130,7 +130,7 @@ export class FileUploadService {
    * Delete a file from S3 or local storage
    * @param filePath File path/key to delete (can be S3 key or URL)
    */
-  async deleteFile(filePath: string): Promise<void> {
+  async deleteFile(filePath: any): Promise<void> {
     if (!filePath) {
       return;
     }

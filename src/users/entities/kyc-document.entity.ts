@@ -20,7 +20,7 @@ export class KycDocument {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
-  @Column({ nullable: true, insert: false, update: false })
+  @Column({ nullable: true, insert: true, update: false })
   userId: string;
 
   @ManyToOne(() => User, (user) => user.kycDocuments)
