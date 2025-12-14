@@ -1,6 +1,13 @@
-import { IsBoolean, IsOptional, IsString } from 'class-validator';
+import { IsBoolean, IsOptional, IsString, IsNotEmpty, IsEnum } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
+import { Transform } from 'class-transformer';
 import { UserRole } from '../entities/user.entity';
+
+export enum PhoneVerificationContext {
+  REGISTRATION = 'registration',
+  LOGIN = 'login',
+  UPDATE = 'update',
+}
 
 export class UpdateProfileDto {
   @ApiProperty({ required: false })
@@ -36,5 +43,58 @@ export class UploadKycDto {
   @IsString()
   @IsOptional()
   documentNumber?: string;
+}
+
+export class SendPhoneVerificationOtpDto {
+  @ApiProperty({
+    description: 'Numéro de téléphone à vérifier',
+    example: '+243900000000',
+  })
+  @IsString()
+  @IsNotEmpty()
+  phone: string;
+
+  @ApiProperty({
+    description: 'Contexte de la vérification : registration (inscription), login (connexion), ou update (mise à jour)',
+    enum: PhoneVerificationContext,
+    enumName: 'PhoneVerificationContext',
+    example: 'login',
+  })
+  @Transform(({ value }) => {
+    if (value === null || value === undefined) {
+      return value;
+    }
+    if (typeof value === 'string') {
+      const normalized = value.toLowerCase().trim();
+      // Check if the normalized value is a valid enum value
+      if (Object.values(PhoneVerificationContext).includes(normalized as PhoneVerificationContext)) {
+        return normalized;
+      }
+    }
+    return value;
+  })
+  @IsNotEmpty({ message: 'context should not be empty' })
+  @IsEnum(PhoneVerificationContext, {
+    message: 'context must be one of the following values: registration, login, update',
+  })
+  context: PhoneVerificationContext;
+}
+
+export class VerifyPhoneOtpDto {
+  @ApiProperty({
+    description: 'Numéro de téléphone à vérifier',
+    example: '+243900000000',
+  })
+  @IsString()
+  @IsNotEmpty()
+  phone: string;
+
+  @ApiProperty({
+    description: 'Code OTP reçu par SMS',
+    example: '123456',
+  })
+  @IsString()
+  @IsNotEmpty()
+  otp: string;
 }
 

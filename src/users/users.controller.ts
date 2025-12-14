@@ -11,8 +11,9 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiConsumes, ApiBody } from '@nestjs/swagger';
 import { UsersService } from './users.service';
-import { UpdateProfileDto, UploadKycDto } from './dto/user.dto';
+import { UpdateProfileDto, UploadKycDto, SendPhoneVerificationOtpDto, VerifyPhoneOtpDto } from './dto/user.dto';
 import { Auth } from '../auth/decorators/auth.decorator';
+import { Public } from '../common/decorators/public.decorator';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
 import { FileFieldsInterceptor, FileInterceptor } from '@nestjs/platform-express';
 
@@ -99,6 +100,32 @@ export class UsersController {
   async updateFcmToken(@Request() req, @Body('fcmToken') fcmToken: string) {
     await this.usersService.updateFcmToken(req.user.userId, fcmToken);
     return { message: 'FCM token updated successfully' };
+  }
+
+  @Post('phone/send-otp')
+  @Public()
+  @SensitiveThrottle(5, 60000) // 5 requests per minute to prevent abuse
+  @ApiOperation({ 
+    summary: 'Send OTP for phone verification',
+    description: 'Envoie un code OTP par SMS pour vérifier un numéro de téléphone. Le contexte (registration/login/update) détermine le comportement : pour l\'inscription, le numéro ne doit pas exister ; pour la connexion/mise à jour, le numéro doit exister.'
+  })
+  async sendPhoneVerificationOtp(
+    @Body() sendOtpDto: SendPhoneVerificationOtpDto,
+  ) {
+    return this.usersService.sendPhoneVerificationOtp(sendOtpDto);
+  }
+
+  @Post('phone/verify')
+  @Public()
+  @SensitiveThrottle(10, 60000) // 10 requests per minute
+  @ApiOperation({ 
+    summary: 'Verify phone number with OTP',
+    description: 'Vérifie le code OTP reçu par SMS et marque le numéro de téléphone comme vérifié. Si l\'utilisateur existe en base, son numéro sera marqué comme vérifié.'
+  })
+  async verifyPhoneOtp(
+    @Body() verifyOtpDto: VerifyPhoneOtpDto,
+  ) {
+    return this.usersService.verifyPhoneOtp(verifyOtpDto);
   }
 }
 

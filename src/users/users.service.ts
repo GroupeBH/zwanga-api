@@ -8,12 +8,13 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DeepPartial } from 'typeorm';
 import { User, UserStatus } from './entities/user.entity';
 import { KycDocument, KycStatus } from './entities/kyc-document.entity';
-import { UpdateProfileDto, UploadKycDto } from './dto/user.dto';
+import { UpdateProfileDto, UploadKycDto, SendPhoneVerificationOtpDto, VerifyPhoneOtpDto, PhoneVerificationContext } from './dto/user.dto';
 import { Trip } from '../trips/entities/trip.entity';
 import { Booking } from '../bookings/entities/booking.entity';
 import { Message } from '../chat/entities/message.entity';
 import { FileUploadService } from '../common/services/file-upload.service';
 import { KycValidationService } from '../common/services/kyc-validation.service';
+import { KeccelOtpService } from '../keccel-otp/keccel-otp.service';
 import { Express } from 'express';
 import { UserRole } from './entities/user.entity';
 import { DataSource } from 'typeorm';
@@ -35,6 +36,7 @@ export class UsersService {
     private messageRepository: Repository<Message>,
     private fileUploadService: FileUploadService,
     private kycValidationService: KycValidationService,
+    private keccelOtpService: KeccelOtpService,
     private readonly dataSource: DataSource,
   ) { }
 
@@ -368,6 +370,73 @@ export class UsersService {
     await this.userRepository.save(user);
 
     this.logger.debug(`FCM token updated for user: ${userId}`);
+  }
+
+  /**
+   * Send OTP for phone verification
+   * @param sendOtpDto DTO containing phone number and context
+   * @returns Success message
+   */
+  async sendPhoneVerificationOtp(
+    sendOtpDto: SendPhoneVerificationOtpDto,
+  ): Promise<{ message: string }> {
+    this.logger.log(`Sending phone verification OTP to: ${sendOtpDto.phone} (context: ${sendOtpDto.context})`);
+
+    // Check if phone number already exists in database
+    const existingUser = await this.userRepository.findOne({
+      where: { phone: sendOtpDto.phone },
+    });
+
+    // Different logic based on context
+    if (sendOtpDto.context === PhoneVerificationContext.REGISTRATION) {
+      // For registration: if user exists, return error
+      if (existingUser) {
+        this.logger.warn(`Registration failed: Phone ${sendOtpDto.phone} already exists`);
+        throw new BadRequestException('Ce numéro de téléphone est déjà utilisé');
+      }
+    } else if (sendOtpDto.context === PhoneVerificationContext.LOGIN || sendOtpDto.context === PhoneVerificationContext.UPDATE) {
+      // For login or update: if user doesn't exist, return error
+      if (!existingUser) {
+        this.logger.warn(`Login/Update failed: Phone ${sendOtpDto.phone} not found`);
+        throw new BadRequestException('Aucun compte trouvé avec ce numéro de téléphone');
+      }
+    }
+
+    // Send OTP using Keccel service
+    const message = 'Votre code de vérification Zwanga est : %OTP%';
+    await this.keccelOtpService.sendOtp(sendOtpDto.phone, message);
+
+    this.logger.log(`Phone verification OTP sent successfully to ${sendOtpDto.phone} (context: ${sendOtpDto.context})`);
+    return { message: 'Code de vérification envoyé avec succès' };
+  }
+
+  /**
+   * Verify OTP without modifying user data
+   * @param verifyOtpDto DTO containing phone number and OTP code
+   * @returns Verification result
+   */
+  async verifyPhoneOtp(
+    verifyOtpDto: VerifyPhoneOtpDto,
+  ): Promise<{ message: string; valid: boolean }> {
+    this.logger.log(`Verifying phone OTP for: ${verifyOtpDto.phone}`);
+
+    // Verify OTP using Keccel service
+    const verificationResult = await this.keccelOtpService.verifyOtp(
+      verifyOtpDto.phone,
+      verifyOtpDto.otp,
+    );
+
+    if (!verificationResult.valid) {
+      this.logger.warn(`Phone verification failed: Invalid OTP for phone ${verifyOtpDto.phone}`);
+      throw new BadRequestException('Code OTP invalide ou expiré');
+    }
+
+    // Just return the verification result without modifying any user data
+    this.logger.log(`Phone OTP verified successfully for: ${verifyOtpDto.phone}`);
+    return {
+      message: 'Code OTP vérifié avec succès',
+      valid: true,
+    };
   }
 }
 
