@@ -5,6 +5,7 @@ import {
   IsDateString,
   IsOptional,
   IsEnum,
+  IsBoolean,
   Min,
   Max,
   IsArray,
@@ -60,11 +61,24 @@ export class CreateTripDto {
   @IsNotEmpty()
   availableSeats: number;
 
-  @ApiProperty({ minimum: 0 })
+  @ApiProperty({ 
+    minimum: 0,
+    description: 'Prix par place en francs congolais. Mettre 0 pour un trajet gratuit.',
+    example: 0,
+  })
   @IsNumber()
   @Min(0)
-  @IsNotEmpty()
   pricePerSeat: number;
+
+  @ApiProperty({ 
+    required: false,
+    default: false,
+    description: 'Indique si le trajet est gratuit. Si true, pricePerSeat sera automatiquement mis à 0.',
+    example: false,
+  })
+  @IsBoolean()
+  @IsOptional()
+  isFree?: boolean;
 
   @ApiProperty({ required: false })
   @IsString()
@@ -159,6 +173,15 @@ export class SearchTripsDto {
   @Min(0)
   @IsOptional()
   maxPrice?: number;
+
+  @ApiProperty({ 
+    required: false,
+    description: 'Filtrer uniquement les trajets gratuits',
+    example: false,
+  })
+  @IsBoolean()
+  @IsOptional()
+  isFree?: boolean;
 }
 
 export class UpdateTripDto {
@@ -210,6 +233,15 @@ export class UpdateTripDto {
   @Min(0)
   @IsOptional()
   pricePerSeat?: number;
+
+  @ApiProperty({ 
+    required: false,
+    description: 'Indique si le trajet est gratuit. Si true, pricePerSeat sera automatiquement mis à 0.',
+    example: false,
+  })
+  @IsBoolean()
+  @IsOptional()
+  isFree?: boolean;
 
   @ApiProperty({ required: false })
   @IsString()

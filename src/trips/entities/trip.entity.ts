@@ -74,6 +74,9 @@ export class Trip {
   @Column({ type: 'decimal', precision: 10, scale: 2 })
   pricePerSeat: number;
 
+  @Column({ type: 'boolean', default: false })
+  isFree: boolean;
+
   @Column({ nullable: true })
   description: string;
 

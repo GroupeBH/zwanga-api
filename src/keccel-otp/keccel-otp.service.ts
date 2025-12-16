@@ -33,8 +33,18 @@ export class KeccelOtpService {
     private readonly httpService: HttpService,
     private readonly configService: ConfigService,
   ) {
-    this.token = this.configService.get<string>('KECCEL_TOKEN') || '';
-    this.from = this.configService.get<string>('KECCEL_FROM') || 'GUEST';
+    const token = this.configService.get<string>('KECCEL_TOKEN');
+    if (!token) {
+      throw new Error('KECCEL_TOKEN is not defined in environment variables');
+    } 
+    this.token = token;
+
+    const from = this.configService.get<string>('KECCEL_FROM');
+    if (!from) {
+      throw new Error('KECCEL_FROM is not defined in environment variables');
+    }
+    this.from = from;
+
     this.generateUrl =
       this.configService.get<string>('KECCEL_OTP_URL_GENERATE') ||
       'https://api.keccel.com/otp/generate.asp';
@@ -69,6 +79,12 @@ export class KeccelOtpService {
     if (!phone || !phone.trim()) {
       throw new BadRequestException('Phone number is required');
     }
+    this.logger.debug(`Token: ${this.token}`);
+    this.logger.debug(`From: ${this.from}`);
+    this.logger.debug(`Phone: ${phone.trim()}`);
+    this.logger.debug(`Message: ${message || this.defaultMessage}`);
+    this.logger.debug(`Length: ${length}`);
+    this.logger.debug(`Lifetime: ${lifetime}`);
 
     const params = new URLSearchParams({
       token: this.token,
@@ -95,6 +111,7 @@ export class KeccelOtpService {
 
     try {
       this.logger.debug(`Calling Keccel OTP Generate API: ${this.generateUrl}`);
+      this.logger.debug(`Request parameters: from=${this.from}, to=${phone.trim()}`);
 
       const response = await firstValueFrom(
         this.httpService.get<KeccelOtpGenerateResponse>(url).pipe(
@@ -139,8 +156,18 @@ export class KeccelOtpService {
         this.logger.error(
           `Keccel OTP Generate API returned error status: ${data.description}`,
         );
+        this.logger.error(
+          `API Error details - Status: ${data.status}, Description: ${data.description}, From parameter: ${this.from}`,
+        );
+        
+        // Provide more helpful error message for common issues
+        let errorMessage = data.description || 'Failed to send OTP';
+        if (data.description?.includes('FROM') || data.description?.includes('from')) {
+          errorMessage = `Configuration error: Invalid FROM parameter. Please check KECCEL_FROM environment variable. Current value: ${this.from}`;
+        }
+        
         throw new HttpException(
-          data.description || 'Failed to send OTP',
+          errorMessage,
           HttpStatus.BAD_REQUEST,
         );
       }
