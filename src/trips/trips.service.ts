@@ -68,7 +68,12 @@ export class TripsService {
   ) {}
 
   async create(driverId: string, createTripDto: CreateTripDto): Promise<SanitizedTrip> {
-    this.logger.log(`Creating trip for user: ${driverId} from ${createTripDto.departureLocation} to ${createTripDto.arrivalLocation}`);
+    // Synchronize isFree with pricePerSeat
+    const isFree = createTripDto.isFree ?? createTripDto.pricePerSeat === 0;
+    const pricePerSeat = isFree ? 0 : createTripDto.pricePerSeat;
+    
+    const tripType = isFree ? 'gratuit' : 'payant';
+    this.logger.log(`Creating ${tripType} trip for user: ${driverId} from ${createTripDto.departureLocation} to ${createTripDto.arrivalLocation} (price: ${pricePerSeat} CDF)`);
     
     const user = await this.userRepository.findOne({ where: { id: driverId } });
     if (!user) {
@@ -130,6 +135,8 @@ export class TripsService {
       departureDate: new Date(departureDate),
       departurePoint: this.buildPointFromCoordinates(departureCoordinates),
       arrivalPoint: this.buildPointFromCoordinates(arrivalCoordinates),
+      isFree,
+      pricePerSeat,
     });
 
     const savedTrip = await this.tripRepository.save(trip);
@@ -204,9 +211,17 @@ export class TripsService {
       });
     }
 
-    if (searchTripsDto.maxPrice) {
+    // Filter by maximum price (includes free trips when maxPrice >= 0)
+    if (searchTripsDto.maxPrice !== undefined) {
       queryBuilder.andWhere('trip.pricePerSeat <= :maxPrice', {
         maxPrice: searchTripsDto.maxPrice,
+      });
+    }
+
+    // Filter by free trips
+    if (searchTripsDto.isFree !== undefined) {
+      queryBuilder.andWhere('trip.isFree = :isFree', {
+        isFree: searchTripsDto.isFree,
       });
     }
 
@@ -349,6 +364,8 @@ export class TripsService {
       departureCoordinates,
       arrivalCoordinates,
       vehicleId,
+      isFree,
+      pricePerSeat,
       ...restPayload
     } = updateTripDto;
 
@@ -362,6 +379,19 @@ export class TripsService {
 
     if (arrivalCoordinates) {
       trip.arrivalPoint = this.buildPointFromCoordinates(arrivalCoordinates);
+    }
+
+    // Synchronize isFree with pricePerSeat
+    if (isFree !== undefined || pricePerSeat !== undefined) {
+      const newIsFree = isFree !== undefined 
+        ? isFree 
+        : (pricePerSeat !== undefined ? pricePerSeat === 0 : trip.isFree);
+      const newPricePerSeat = newIsFree 
+        ? 0 
+        : (pricePerSeat !== undefined ? pricePerSeat : trip.pricePerSeat);
+      
+      trip.isFree = newIsFree;
+      trip.pricePerSeat = newPricePerSeat;
     }
 
     // Validate and update vehicle if provided
@@ -454,12 +484,20 @@ export class TripsService {
       };
     }
 
+    // Sanitize driver with profile picture (presigned URL if S3 key)
+    const sanitizedDriver = await this.sanitizeUser(driver);
+    
+    // Sanitize bookings with passenger profile pictures (presigned URLs if S3 keys)
+    const sanitizedBookings = bookings 
+      ? await Promise.all(bookings.map((booking) => this.sanitizeBooking(booking)))
+      : [];
+
     return {
       ...(rest as Omit<Trip, 'driver' | 'bookings' | 'departurePoint' | 'arrivalPoint' | 'vehicle'>),
       departureCoordinates: this.pointToCoordinates(departurePoint),
       arrivalCoordinates: this.pointToCoordinates(arrivalPoint),
-      driver: await this.sanitizeUser(driver),
-      bookings: bookings ? await Promise.all(bookings.map((booking) => this.sanitizeBooking(booking))) : [],
+      driver: sanitizedDriver,
+      bookings: sanitizedBookings,
       vehicle: sanitizedVehicle,
     } as SanitizedTrip;
   }
@@ -477,17 +515,22 @@ export class TripsService {
       return null;
     }
 
-    // Convert S3 key to presigned URL
-    const profilePicture = user.profilePicture
-      ? await this.fileUploadService.getPresignedUrlIfS3Key(user.profilePicture)
-      : null;
+    // Convert S3 key to presigned URL for profile picture
+    let profilePicture: string | null = null;
+    if (user.profilePicture) {
+      profilePicture = await this.fileUploadService.getPresignedUrlIfS3Key(user.profilePicture);
+      // If getPresignedUrlIfS3Key returns null, it means it's not an S3 key, so use the original value
+      if (!profilePicture) {
+        profilePicture = user.profilePicture;
+      }
+    }
 
     return {
       id: user.id,
       firstName: user.firstName,
       lastName: user.lastName,
       phone: user.phone,
-      profilePicture: profilePicture || user.profilePicture,
+      profilePicture,
       role: user.role,
       status: user.status,
       isDriver: user.isDriver,

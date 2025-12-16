@@ -404,7 +404,7 @@ export class UsersService {
 
     // Send OTP using Keccel service
     const message = 'Votre code de vérification Zwanga est : %OTP%';
-    await this.keccelOtpService.sendOtp(sendOtpDto.phone, message);
+    await this.keccelOtpService.sendOtp(sendOtpDto.phone.trim(), message);
 
     this.logger.log(`Phone verification OTP sent successfully to ${sendOtpDto.phone} (context: ${sendOtpDto.context})`);
     return { message: 'Code de vérification envoyé avec succès' };
