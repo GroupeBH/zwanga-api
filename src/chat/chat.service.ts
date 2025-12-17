@@ -616,18 +616,31 @@ export class ChatService {
       };
 
       if (tokens.length === 1) {
+        const recipient = participants.find(
+          (p) => p.userId !== message.senderId && p.user?.fcmToken === tokens[0],
+        );
         await this.notificationService.sendNotification(
           tokens[0],
           title,
           body,
           data,
+          recipient?.userId,
         );
       } else {
+        const recipientIds = participants
+          .filter(
+            (p) =>
+              p.userId !== message.senderId &&
+              p.user?.fcmToken &&
+              tokens.includes(p.user.fcmToken),
+          )
+          .map((p) => p.userId);
         await this.notificationService.sendToMultiple(
           tokens,
           title,
           body,
           data,
+          recipientIds,
         );
       }
     } catch (error) {

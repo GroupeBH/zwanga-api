@@ -10,6 +10,7 @@ import {
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { BookingsService } from './bookings.service';
 import { CreateBookingDto, UpdateBookingStatusDto, RejectBookingDto } from './dto/booking.dto';
+import { SendWhatsAppNotificationDto } from './dto/send-whatsapp-notification.dto';
 import { Auth } from '../auth/decorators/auth.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { UserRole } from '../users/entities/user.entity';
@@ -103,6 +104,26 @@ export class BookingsController {
   @ApiOperation({ summary: 'Get driver contact information for a booking' })
   async getDriverContact(@Request() req, @Param('id') id: string) {
     return this.bookingsService.getDriverContact(id, req.user.userId);
+  }
+
+  @Post(':id/whatsapp-notification-data')
+  @Auth()
+  @SensitiveThrottle(10, 60000) // Limiter à 10 requêtes par minute
+  @ApiOperation({
+    summary: 'Récupérer les données pour envoyer des notifications WhatsApp aux contacts d\'urgence (2 à 3 contacts)',
+    description:
+      'Retourne le message formaté et les informations des contacts d\'urgence sélectionnés. Le frontend se charge de l\'envoi WhatsApp.',
+  })
+  async getWhatsAppNotificationData(
+    @Request() req,
+    @Param('id') id: string,
+    @Body() sendDto: SendWhatsAppNotificationDto,
+  ) {
+    return this.bookingsService.getWhatsAppNotificationData(
+      id,
+      req.user.userId,
+      sendDto,
+    );
   }
 }
 

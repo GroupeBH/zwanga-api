@@ -157,6 +157,7 @@ export class TripRequestsService {
       }
 
       const fcmTokens = driversWithTokens.map((driver) => driver.fcmToken!);
+      const driverIds = driversWithTokens.map((driver) => driver.id);
 
       const title = 'Nouvelle demande de trajet disponible';
       const body = `Un passager cherche un trajet de ${tripRequest.departureLocation} à ${tripRequest.arrivalLocation}`;
@@ -171,7 +172,7 @@ export class TripRequestsService {
         departureDateMax: tripRequest.departureDateMax.toISOString(),
       };
 
-      await this.notificationService.sendToMultiple(fcmTokens, title, body, data);
+      await this.notificationService.sendToMultiple(fcmTokens, title, body, data, driverIds);
       this.logger.log(`Notified ${fcmTokens.length} drivers about trip request ${tripRequest.id}`);
     } catch (error) {
       this.logger.error(`Error notifying drivers about trip request ${tripRequest.id}: ${error.message}`, error.stack);
@@ -384,7 +385,13 @@ export class TripRequestsService {
         proposedDepartureDate: offer.proposedDepartureDate.toISOString(),
       };
 
-      await this.notificationService.sendNotification(passenger.fcmToken, title, body, data);
+      await this.notificationService.sendNotification(
+        passenger.fcmToken,
+        title,
+        body,
+        data,
+        tripRequest.passengerId,
+      );
       this.logger.log(`Notified passenger ${tripRequest.passengerId} about driver offer ${offer.id}`);
     } catch (error) {
       this.logger.error(`Error notifying passenger about driver offer ${offer.id}: ${error.message}`, error.stack);

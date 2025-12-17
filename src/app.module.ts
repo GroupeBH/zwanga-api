@@ -29,6 +29,7 @@ import { FaqModule } from './faq/faq.module';
 import { TrackingModule } from './tracking/tracking.module';
 import { KeccelOtpModule } from './keccel-otp/keccel-otp.module';
 import { TripRequestsModule } from './trip-requests/trip-requests.module';
+import { SafetyModule } from './safety/safety.module';
 
 // Entities
 import { User } from './users/entities/user.entity';
@@ -44,6 +45,10 @@ import { ConversationParticipant } from './chat/entities/conversation-participan
 import { FaqEntry } from './faq/entities/faq-entry.entity';
 import { TripRequest } from './trip-requests/entities/trip-request.entity';
 import { DriverOffer } from './trip-requests/entities/driver-offer.entity';
+import { EmergencyContact } from './safety/entities/emergency-contact.entity';
+import { SafetyAlert } from './safety/entities/safety-alert.entity';
+import { UserReport } from './safety/entities/user-report.entity';
+import { Notification } from './notifications/entities/notification.entity';
 
 const typeOrmEntities = [
   User,
@@ -59,6 +64,10 @@ const typeOrmEntities = [
   FaqEntry,
   TripRequest,
   DriverOffer,
+  EmergencyContact,
+  SafetyAlert,
+  UserReport,
+  Notification,
 ];
 
 @Module({
@@ -138,6 +147,7 @@ const typeOrmEntities = [
     TrackingModule,
     KeccelOtpModule,
     TripRequestsModule,
+    SafetyModule,
   ],
   controllers: [AppController],
   providers: [

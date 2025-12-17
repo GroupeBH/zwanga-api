@@ -163,6 +163,7 @@ export class TripAvailabilityNotificationService {
         {
           tripId: trips[0].id,
         },
+        user.id,
       );
     } catch (error) {
       this.logger.warn(
