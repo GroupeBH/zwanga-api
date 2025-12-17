@@ -9,6 +9,9 @@ import { CacheService } from '../common/services/cache.service';
 import { NotificationService } from '../notifications/notifications.service';
 import { ChatService } from '../chat/chat.service';
 import { FileUploadService } from '../common/services/file-upload.service';
+import { WhatsAppService } from '../whatsapp/whatsapp.service';
+import { SafetyService } from '../safety/safety.service';
+import { SendWhatsAppNotificationDto } from './dto/send-whatsapp-notification.dto';
 
 @Injectable()
 export class BookingsService {
@@ -26,6 +29,8 @@ export class BookingsService {
     private notificationService: NotificationService,
     private chatService: ChatService,
     private fileUploadService: FileUploadService,
+    private whatsAppService: WhatsAppService,
+    private safetyService: SafetyService,
   ) {}
 
   async create(passengerId: string, createBookingDto: CreateBookingDto): Promise<Booking> {
@@ -363,6 +368,7 @@ export class BookingsService {
           tripId: booking.tripId,
           status: booking.status,
         },
+        booking.passengerId,
       );
     } catch (error) {
       this.logger.error(`Failed to send passenger notification: ${error.message}`, error.stack);
@@ -389,10 +395,117 @@ export class BookingsService {
           bookingId: booking.id,
           tripId: trip.id,
         },
+        trip.driverId,
       );
     } catch (error) {
       this.logger.error(`Failed to send booking notification: ${error.message}`, error.stack);
     }
+  }
+
+  async getWhatsAppNotificationData(
+    bookingId: string,
+    passengerId: string,
+    sendDto: SendWhatsAppNotificationDto,
+  ): Promise<{
+    message: string;
+    contacts: Array<{ id: string; name: string; phone: string }>;
+    tripDetails: {
+      departureLocation: string;
+      arrivalLocation: string;
+      departureDate: Date;
+      vehicleColor: string;
+      licensePlate: string;
+      driverName: string;
+      driverPhone: string;
+    };
+  }> {
+    this.logger.log(
+      `Getting WhatsApp notification data for booking ${bookingId} by passenger ${passengerId}`,
+    );
+
+    // Vérifier que la réservation appartient au passager
+    const booking = await this.bookingRepository.findOne({
+      where: { id: bookingId, passengerId },
+      relations: ['trip', 'trip.driver', 'trip.vehicle', 'passenger'],
+    });
+
+    if (!booking) {
+      throw new NotFoundException('Réservation non trouvée');
+    }
+
+    // Vérifier que la réservation est acceptée
+    if (booking.status !== BookingStatus.ACCEPTED) {
+      throw new BadRequestException(
+        'Vous ne pouvez envoyer des notifications que pour une réservation acceptée',
+      );
+    }
+
+    // Récupérer les contacts d'urgence
+    const emergencyContacts = await this.safetyService.findAllEmergencyContacts(passengerId);
+    const selectedContacts = emergencyContacts.filter((contact) =>
+      sendDto.emergencyContactIds.includes(contact.id),
+    );
+
+    if (selectedContacts.length !== sendDto.emergencyContactIds.length) {
+      throw new BadRequestException('Certains contacts d\'urgence sélectionnés n\'existent pas');
+    }
+
+    // Vérifier que tous les contacts sont actifs
+    const inactiveContacts = selectedContacts.filter((contact) => !contact.isActive);
+    if (inactiveContacts.length > 0) {
+      throw new BadRequestException(
+        `Certains contacts d'urgence ne sont pas actifs: ${inactiveContacts.map((c) => c.name).join(', ')}`,
+      );
+    }
+
+    // Récupérer les informations du véhicule
+    const trip = booking.trip;
+    if (!trip.vehicle) {
+      throw new BadRequestException('Aucun véhicule associé à ce trajet');
+    }
+
+    const vehicle = trip.vehicle;
+    const driver = trip.driver || (await this.userRepository.findOne({ where: { id: trip.driverId } }));
+    const passenger = booking.passenger || (await this.userRepository.findOne({ where: { id: passengerId } }));
+
+    if (!driver) {
+      throw new NotFoundException('Conducteur non trouvé');
+    }
+
+    if (!passenger) {
+      throw new NotFoundException('Passager non trouvé');
+    }
+
+    // Générer le message WhatsApp
+    const message = this.whatsAppService.generateTripNotificationMessage({
+      passengerName: `${passenger.firstName} ${passenger.lastName}`,
+      departureLocation: trip.departureLocation,
+      arrivalLocation: trip.arrivalLocation,
+      departureDate: trip.departureDate,
+      vehicleColor: vehicle.color,
+      licensePlate: vehicle.licensePlate,
+      driverName: `${driver.firstName} ${driver.lastName}`,
+      driverPhone: driver.phone,
+    });
+
+    // Retourner les données pour le frontend
+    return {
+      message,
+      contacts: selectedContacts.map((contact) => ({
+        id: contact.id,
+        name: contact.name,
+        phone: contact.phone,
+      })),
+      tripDetails: {
+        departureLocation: trip.departureLocation,
+        arrivalLocation: trip.arrivalLocation,
+        departureDate: trip.departureDate,
+        vehicleColor: vehicle.color,
+        licensePlate: vehicle.licensePlate,
+        driverName: `${driver.firstName} ${driver.lastName}`,
+        driverPhone: driver.phone,
+      },
+    };
   }
 }
 

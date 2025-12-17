@@ -7,12 +7,16 @@ import { Trip } from '../trips/entities/trip.entity';
 import { User } from '../users/entities/user.entity';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { ChatModule } from '../chat/chat.module';
+import { WhatsAppModule } from '../whatsapp/whatsapp.module';
+import { SafetyModule } from '../safety/safety.module';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([Booking, Trip, User]),
     NotificationsModule,
     ChatModule,
+    WhatsAppModule,
+    SafetyModule,
   ],
   controllers: [BookingsController],
   providers: [BookingsService],

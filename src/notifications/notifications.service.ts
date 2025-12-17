@@ -1,13 +1,23 @@
 import * as admin from 'firebase-admin';
 import { Injectable, OnModuleInit, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository } from 'typeorm';
+import { Notification, NotificationStatus } from './entities/notification.entity';
+import { User } from '../users/entities/user.entity';
 
 @Injectable()
 export class NotificationService implements OnModuleInit {
   private readonly logger = new Logger(NotificationService.name);
   private firebaseApp: admin.app.App;
 
-  constructor(private configService: ConfigService) {}
+  constructor(
+    private configService: ConfigService,
+    @InjectRepository(Notification)
+    private readonly notificationRepository: Repository<Notification>,
+    @InjectRepository(User)
+    private readonly userRepository: Repository<User>,
+  ) {}
 
   onModuleInit() {
     const projectId = this.configService.get<string>('FCM_PROJECT_ID');
@@ -55,16 +65,30 @@ export class NotificationService implements OnModuleInit {
     title: string,
     body: string,
     data?: Record<string, any>,
+    userId?: string,
   ): Promise<void> {
     if (!this.firebaseApp) {
       this.logger.warn('FCM not configured, skipping notification');
       return;
     }
 
+    // Créer l'enregistrement de notification en base de données
+    const notification = this.notificationRepository.create({
+      userId: userId || null,
+      fcmToken,
+      title,
+      body,
+      data: data || null,
+      status: NotificationStatus.PENDING,
+    });
+
+    // Sauvegarder la notification en attente
+    const savedNotification = await this.notificationRepository.save(notification);
+
     try {
       this.logger.debug(`Sending notification to token: ${fcmToken.substring(0, 10)}... - Title: ${title}`);
       
-      await admin.messaging().send({
+      const messageId = await admin.messaging().send({
         token: fcmToken,
         notification: {
           title,
@@ -73,8 +97,18 @@ export class NotificationService implements OnModuleInit {
         data: data ? Object.fromEntries(Object.entries(data).map(([k, v]) => [k, String(v)])) : undefined,
       });
       
-      this.logger.log(`Notification sent successfully - Title: ${title}`);
+      // Mettre à jour la notification avec le statut de succès
+      savedNotification.status = NotificationStatus.SENT;
+      savedNotification.messageId = messageId;
+      await this.notificationRepository.save(savedNotification);
+      
+      this.logger.log(`Notification sent successfully - Title: ${title}, MessageId: ${messageId}`);
     } catch (error) {
+      // Mettre à jour la notification avec le statut d'échec
+      savedNotification.status = NotificationStatus.FAILED;
+      savedNotification.errorMessage = error.message;
+      await this.notificationRepository.save(savedNotification);
+      
       this.logger.error(`Error sending notification: ${error.message}`, error.stack);
     }
   }
@@ -84,11 +118,27 @@ export class NotificationService implements OnModuleInit {
     title: string,
     body: string,
     data?: Record<string, any>,
+    userIds?: string[],
   ): Promise<void> {
     if (!this.firebaseApp || fcmTokens.length === 0) {
       this.logger.debug('FCM not configured or no tokens provided, skipping multicast notification');
       return;
     }
+
+    // Créer les enregistrements de notifications en base de données
+    const notifications = fcmTokens.map((token, index) =>
+      this.notificationRepository.create({
+        userId: userIds && userIds[index] ? userIds[index] : null,
+        fcmToken: token,
+        title,
+        body,
+        data: data || null,
+        status: NotificationStatus.PENDING,
+      }),
+    );
+
+    // Sauvegarder toutes les notifications en attente
+    const savedNotifications = await this.notificationRepository.save(notifications);
 
     try {
       this.logger.log(`Sending multicast notification to ${fcmTokens.length} tokens - Title: ${title}`);
@@ -104,10 +154,122 @@ export class NotificationService implements OnModuleInit {
 
       const response = await admin.messaging().sendEachForMulticast(message);
       
+      // Mettre à jour les notifications selon les résultats
+      if (response.responses) {
+        for (let i = 0; i < response.responses.length; i++) {
+          const notificationResponse = response.responses[i];
+          const notification = savedNotifications[i];
+
+          if (notificationResponse.success) {
+            notification.status = NotificationStatus.SENT;
+            notification.messageId = notificationResponse.messageId || null;
+          } else {
+            notification.status = NotificationStatus.FAILED;
+            notification.errorMessage = notificationResponse.error?.message || 'Unknown error';
+          }
+
+          await this.notificationRepository.save(notification);
+        }
+      }
+      
       this.logger.log(`Multicast notification sent - Success: ${response.successCount}, Failed: ${response.failureCount}`);
     } catch (error) {
+      // Marquer toutes les notifications comme échouées en cas d'erreur globale
+      for (const notification of savedNotifications) {
+        notification.status = NotificationStatus.FAILED;
+        notification.errorMessage = error.message;
+        await this.notificationRepository.save(notification);
+      }
+      
       this.logger.error(`Error sending multicast notifications: ${error.message}`, error.stack);
     }
+  }
+
+  // ==================== Notification Retrieval ====================
+
+  async findAllByUser(userId: string, options?: { limit?: number; offset?: number }): Promise<{
+    notifications: Notification[];
+    total: number;
+    unreadCount: number;
+  }> {
+    this.logger.debug(`Fetching notifications for user ${userId}`);
+
+    const [notifications, total] = await this.notificationRepository.findAndCount({
+      where: { userId },
+      order: { createdAt: 'DESC' },
+      take: options?.limit,
+      skip: options?.offset,
+    });
+
+    const unreadCount = await this.notificationRepository.count({
+      where: { userId, isRead: false },
+    });
+
+    return {
+      notifications,
+      total,
+      unreadCount,
+    };
+  }
+
+  async markAsRead(userId: string, notificationIds: string[]): Promise<{ updated: number }> {
+    this.logger.debug(`Marking ${notificationIds.length} notifications as read for user ${userId}`);
+
+    const updateResult = await this.notificationRepository
+      .createQueryBuilder()
+      .update(Notification)
+      .set({ isRead: true, readAt: new Date() })
+      .where('id IN (:...ids)', { ids: notificationIds })
+      .andWhere('userId = :userId', { userId })
+      .andWhere('isRead = :isRead', { isRead: false })
+      .execute();
+
+    return { updated: updateResult.affected || 0 };
+  }
+
+  async markAllAsRead(userId: string): Promise<{ updated: number }> {
+    this.logger.debug(`Marking all notifications as read for user ${userId}`);
+
+    const result = await this.notificationRepository.update(
+      {
+        userId,
+        isRead: false,
+      },
+      {
+        isRead: true,
+        readAt: new Date(),
+      },
+    );
+
+    return { updated: result.affected || 0 };
+  }
+
+  async markAsUnread(userId: string, notificationIds: string[]): Promise<{ updated: number }> {
+    this.logger.debug(`Marking ${notificationIds.length} notifications as unread for user ${userId}`);
+
+    if (notificationIds.length === 1) {
+      const result = await this.notificationRepository.update(
+        {
+          id: notificationIds[0],
+          userId,
+        },
+        {
+          isRead: false,
+          readAt: null,
+        },
+      );
+      return { updated: result.affected || 0 };
+    }
+
+    const updateResult = await this.notificationRepository
+      .createQueryBuilder()
+      .update(Notification)
+      .set({ isRead: false, readAt: null })
+      .where('id IN (:...ids)', { ids: notificationIds })
+      .andWhere('userId = :userId', { userId })
+      .execute();
+
+    return { updated: updateResult.affected || 0 };
   }
 }
 
