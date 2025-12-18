@@ -56,14 +56,14 @@ export class BookingsService {
       throw new BadRequestException('Trip is not available for booking');
     }
 
-    // Check available seats
-    const totalBookedSeats = trip.bookings
-      .filter((b) => b.status === BookingStatus.ACCEPTED)
-      .reduce((sum, b) => sum + b.numberOfSeats, 0);
-
-    if (totalBookedSeats + createBookingDto.numberOfSeats > trip.availableSeats) {
-      this.logger.warn(`Booking creation failed: Not enough seats on trip ${createBookingDto.tripId} (requested: ${createBookingDto.numberOfSeats}, available: ${trip.availableSeats - totalBookedSeats})`);
-      throw new BadRequestException('Not enough available seats');
+    // Vérifier les places disponibles directement (les places sont déduites immédiatement à la création)
+    if (trip.availableSeats < createBookingDto.numberOfSeats) {
+      this.logger.warn(
+        `Booking creation failed: Not enough seats on trip ${createBookingDto.tripId} (requested: ${createBookingDto.numberOfSeats}, available: ${trip.availableSeats})`,
+      );
+      throw new BadRequestException(
+        `Not enough available seats. Available: ${trip.availableSeats}, Requested: ${createBookingDto.numberOfSeats}`,
+      );
     }
 
     // Check if user already has a pending booking for this trip
@@ -86,6 +86,23 @@ export class BookingsService {
     });
 
     const savedBooking = await this.bookingRepository.save(booking);
+    
+    // Déduire immédiatement les places disponibles du trip
+    const newAvailableSeats = trip.availableSeats - createBookingDto.numberOfSeats;
+    if (newAvailableSeats < 0) {
+      // Ce cas ne devrait pas arriver car on a déjà vérifié, mais on le gère pour sécurité
+      this.logger.error(`Negative available seats detected for trip ${trip.id}. Rolling back booking.`);
+      await this.bookingRepository.remove(savedBooking);
+      throw new BadRequestException('Not enough available seats');
+    }
+
+    await this.tripRepository.update(trip.id, {
+      availableSeats: newAvailableSeats,
+    });
+
+    this.logger.log(
+      `Updated trip ${trip.id} available seats: ${trip.availableSeats} -> ${newAvailableSeats} (deducted ${createBookingDto.numberOfSeats} for booking ${savedBooking.id})`,
+    );
     
     await this.chatService.ensureConversationForBooking(savedBooking.id);
 
@@ -201,11 +218,28 @@ export class BookingsService {
       throw new BadRequestException('Only the trip driver can update booking status');
     }
 
+    const oldStatus = booking.status;
+    const trip = await this.tripRepository.findOne({ where: { id: booking.tripId } });
+
+    if (!trip) {
+      throw new NotFoundException('Trip not found');
+    }
+
     if (updateStatusDto.status === BookingStatus.ACCEPTED) {
       booking.acceptedAt = new Date();
       booking.rejectionReason = null;
+      // Les places ont déjà été déduites lors de la création, donc pas besoin de les déduire à nouveau
     } else if (updateStatusDto.status === BookingStatus.CANCELLED) {
       booking.cancelledAt = new Date();
+      // Remettre les places disponibles si la réservation était en PENDING ou ACCEPTED
+      if (oldStatus === BookingStatus.PENDING || oldStatus === BookingStatus.ACCEPTED) {
+        await this.tripRepository.update(trip.id, {
+          availableSeats: trip.availableSeats + booking.numberOfSeats,
+        });
+        this.logger.log(
+          `Restored ${booking.numberOfSeats} seats for trip ${trip.id} (booking ${bookingId} cancelled). New available seats: ${trip.availableSeats + booking.numberOfSeats}`,
+        );
+      }
     } else if (updateStatusDto.status === BookingStatus.REJECTED) {
       if (!updateStatusDto.rejectionReason?.trim()) {
         this.logger.warn(`Driver ${driverId} tried to reject booking ${bookingId} without reason`);
@@ -213,6 +247,15 @@ export class BookingsService {
       }
       booking.rejectionReason = updateStatusDto.rejectionReason.trim();
       booking.acceptedAt = null;
+      // Remettre les places disponibles si la réservation était en PENDING ou ACCEPTED
+      if (oldStatus === BookingStatus.PENDING || oldStatus === BookingStatus.ACCEPTED) {
+        await this.tripRepository.update(trip.id, {
+          availableSeats: trip.availableSeats + booking.numberOfSeats,
+        });
+        this.logger.log(
+          `Restored ${booking.numberOfSeats} seats for trip ${trip.id} (booking ${bookingId} rejected). New available seats: ${trip.availableSeats + booking.numberOfSeats}`,
+        );
+      }
     } else {
       booking.rejectionReason = null;
     }
@@ -247,23 +290,32 @@ export class BookingsService {
       throw new BadRequestException('Cannot cancel a completed booking');
     }
 
+    const oldStatus = booking.status;
+    const trip = await this.tripRepository.findOne({ where: { id: booking.tripId } });
+
+    if (!trip) {
+      throw new NotFoundException('Trip not found');
+    }
+
     booking.status = BookingStatus.CANCELLED;
     booking.cancelledAt = new Date();
     await this.bookingRepository.save(booking);
+
+    // Remettre les places disponibles si la réservation était en PENDING ou ACCEPTED
+    if (oldStatus === BookingStatus.PENDING || oldStatus === BookingStatus.ACCEPTED) {
+      await this.tripRepository.update(trip.id, {
+        availableSeats: trip.availableSeats + booking.numberOfSeats,
+      });
+      this.logger.log(
+        `Restored ${booking.numberOfSeats} seats for trip ${trip.id} (booking ${bookingId} cancelled by passenger). New available seats: ${trip.availableSeats + booking.numberOfSeats}`,
+      );
+    }
     
     // Invalidate cache
     await this.cacheService.del(CacheService.getBookingKey(bookingId));
     await this.cacheService.del(CacheService.getBookingsByPassengerKey(passengerId));
-    
-    // Get tripId from booking to invalidate trip cache
-    const bookingWithTrip = await this.bookingRepository.findOne({
-      where: { id: bookingId },
-      relations: ['trip'],
-    });
-    if (bookingWithTrip) {
-      await this.cacheService.del(CacheService.getBookingsByTripKey(bookingWithTrip.tripId));
-      await this.cacheService.del(CacheService.getTripKey(bookingWithTrip.tripId));
-    }
+    await this.cacheService.del(CacheService.getBookingsByTripKey(booking.tripId));
+    await this.cacheService.del(CacheService.getTripKey(booking.tripId));
 
     this.logger.log(`Booking ${bookingId} cancelled successfully`);
   }

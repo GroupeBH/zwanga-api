@@ -1,11 +1,74 @@
+# Dependencies
 node_modules
 npm-debug.log
+yarn-error.log
+yarn.lock
+
+# Build output
 dist
+build
+*.tsbuildinfo
+
+# Environment files
 .env
+.env.local
+.env.*.local
+
+# Git
 .git
 .gitignore
-README.md
-coverage
+.gitattributes
+
+# IDE
 .vscode
 .idea
+*.swp
+*.swo
+*~
+
+# Documentation
+README.md
+*.md
+docs
+
+# Testing
+coverage
+.nyc_output
+test
+*.test.ts
+*.spec.ts
+*.e2e-spec.ts
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+docker-compose.yml
+docker-compose.*.yml
+Dockerfile*
+.dockerignore
+
+# CI/CD
+.github
+.gitlab-ci.yml
+.travis.yml
+
+# Misc
+.eslintcache
+.prettierignore
+ecosystem.config.js
+PM2_GUIDE.md
+SETUP.md
+ENV_VARIABLES.md
+AWS_S3_SETUP.md
+FCM_SETUP.md
+SECURITY.md
 

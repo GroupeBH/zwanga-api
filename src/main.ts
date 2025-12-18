@@ -98,10 +98,10 @@ async function bootstrap() {
   const document = SwaggerModule.createDocument(app, config);
   SwaggerModule.setup(`${apiPrefix}/docs`, app, document);
 
-  const port = configService.get<number>('PORT') || 5000;
+  const port = configService.get<number>('PORT') || 5200;
   await app.listen(port);
 
-  console.log(`Application is running on: http://localhost:${port}`);
+  console.log(`Application zwanga backend is running on: http://localhost:${port}`);
   console.log(`Swagger documentation: http://localhost:${port}/${apiPrefix}/docs`);
 }
 
