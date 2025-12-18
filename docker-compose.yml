@@ -58,7 +58,7 @@ services:
       - DATABASE_PORT=5432
       - DATABASE_USER=${DATABASE_USER:-postgres}
       - DATABASE_PASSWORD=${DATABASE_PASSWORD:-postgres_password}
-      - DATABASE_NAME=${DATABASE_NAME:-zwanga_db}
+      - DATABASE_NAME=${DATABASE_NAME:-zwangadb}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
       - REDIS_PASSWORD=${REDIS_PASSWORD:-}

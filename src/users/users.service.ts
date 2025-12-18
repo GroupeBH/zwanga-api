@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DeepPartial } from 'typeorm';
+import { ConfigService } from '@nestjs/config';
 import { User, UserStatus } from './entities/user.entity';
 import { KycDocument, KycStatus } from './entities/kyc-document.entity';
 import { UpdateProfileDto, UploadKycDto, SendPhoneVerificationOtpDto, VerifyPhoneOtpDto, PhoneVerificationContext } from './dto/user.dto';
@@ -38,6 +39,7 @@ export class UsersService {
     private kycValidationService: KycValidationService,
     private keccelOtpService: KeccelOtpService,
     private readonly dataSource: DataSource,
+    private configService: ConfigService,
   ) { }
 
   private toSafeUser(user: User) {
@@ -212,12 +214,17 @@ export class UsersService {
 
     if (existingKyc) {
       if (existingKyc.status === KycStatus.APPROVED) {
-        throw new BadRequestException('Your KYC document has already been approved.');
+        throw new BadRequestException(
+          'ÉCHEC : Votre document KYC a déjà été approuvé. Vous ne pouvez pas soumettre un nouveau document KYC.'
+        );
       }
       if (existingKyc.status === KycStatus.PENDING) {
-        throw new BadRequestException('You already have a KYC document pending verification. Please wait.');
+        throw new BadRequestException(
+          'ÉCHEC : Vous avez déjà un document KYC en attente de vérification. Veuillez patienter pendant que nous examinons votre demande.'
+        );
       }
       // If REJECTED, we continue: the new document will replace/update the old one
+      this.logger.log(`[KYC Upload] Previous KYC was REJECTED, allowing new submission`);
     }
 
     // 3. File Presence Check
@@ -226,7 +233,14 @@ export class UsersService {
     const selfieFile = files?.selfie?.[0];
 
     if (!cniFrontFile || !cniBackFile || !selfieFile) {
-      throw new BadRequestException('All KYC images are required');
+      const missingFiles: string[] = [];
+      if (!cniFrontFile) missingFiles.push('cniFront (recto de la CNI)');
+      if (!cniBackFile) missingFiles.push('cniBack (verso de la CNI)');
+      if (!selfieFile) missingFiles.push('selfie (photo selfie)');
+      
+      throw new BadRequestException(
+        `ÉCHEC : Fichiers manquants. Veuillez fournir tous les documents requis.\n\nFichiers manquants : ${missingFiles.join(', ')}\n\nTous les fichiers suivants sont requis :\n- cniFront : Photo du recto de votre carte d'identité\n- cniBack : Photo du verso de votre carte d'identité\n- selfie : Photo selfie de vous-même`
+      );
     }
 
     // 4. S3 File Upload (External execution, before the transaction starts)
@@ -241,28 +255,126 @@ export class UsersService {
     let rejectionReason: string | null = null;
     let isApprovalConfirmed = false;
 
-    try {
-      this.logger.debug(`Validating KYC for user: ${userId}`);
-      const validationResult = await this.kycValidationService.validateKyc(
-        cniFrontFile.buffer,
-        selfieFile.buffer,
-      );
+    // Only perform KYC validation if AWS Rekognition is enabled
+    const kycValidationEnabled = this.configService.get<string>('AWS_REKOGNITION_KYC_ENABLED') === 'true';
+    
+    this.logger.log(`[KYC Upload] ========================================`);
+    this.logger.log(`[KYC Upload] Processing KYC upload for user: ${userId}`);
+    this.logger.log(`[KYC Upload] KYC validation enabled: ${kycValidationEnabled}`);
+    this.logger.log(`[KYC Upload] CNI front file: ${cniFrontFile.originalname} (${cniFrontFile.size} bytes)`);
+    this.logger.log(`[KYC Upload] Selfie file: ${selfieFile.originalname} (${selfieFile.size} bytes)`);
+    
+    if (kycValidationEnabled) {
+      try {
+        this.logger.log(`[KYC Upload] Starting AI validation for user: ${userId}`);
+        const validationResult = await this.kycValidationService.validateKyc(
+          cniFrontFile.buffer,
+          selfieFile.buffer,
+        );
 
-      if (validationResult.isValid) {
-        kycStatus = KycStatus.APPROVED;
-        isApprovalConfirmed = true;
-        this.logger.log(`KYC validation successful for user: ${userId}`);
-      } else {
-        kycStatus = KycStatus.REJECTED;
-        rejectionReason = validationResult.reason || 'KYC Validation Failed';
-        this.logger.warn(`KYC validation failed for user: ${userId} - Reason: ${rejectionReason}`);
+        this.logger.log(`[KYC Upload] Validation result received:`);
+        this.logger.log(`[KYC Upload]   - Valid: ${validationResult.isValid}`);
+        this.logger.log(`[KYC Upload]   - Face match: ${validationResult.faceMatch.matched} (similarity: ${validationResult.faceMatch.similarity.toFixed(2)}%)`);
+        this.logger.log(`[KYC Upload]   - CNI face detected: ${validationResult.faceDetection.cniFront}`);
+        this.logger.log(`[KYC Upload]   - Selfie face detected: ${validationResult.faceDetection.selfie}`);
+        if (validationResult.reason) {
+          this.logger.log(`[KYC Upload]   - Reason: ${validationResult.reason}`);
+        }
+
+        if (validationResult.isValid) {
+          kycStatus = KycStatus.APPROVED;
+          isApprovalConfirmed = true;
+          this.logger.log(`[KYC Upload] ✅ KYC validation SUCCESSFUL for user: ${userId} - Status set to APPROVED`);
+        } else {
+          kycStatus = KycStatus.REJECTED;
+          // Construire un message d'erreur détaillé avec toutes les informations
+          let detailedReason = validationResult.reason || 'ÉCHEC : Validation KYC échouée';
+          
+          // Ajouter les détails techniques si disponibles
+          if (validationResult.details) {
+            const details = validationResult.details;
+            detailedReason += '\n\nDétails techniques :';
+            
+            if (details.issue) {
+              detailedReason += `\n- Problème identifié : ${details.issue}`;
+            }
+            
+            if (details.cniFrontFaces !== undefined) {
+              detailedReason += `\n- Visages détectés sur CNI : ${details.cniFrontFaces}`;
+            }
+            
+            if (details.selfieFaces !== undefined) {
+              detailedReason += `\n- Visages détectés sur selfie : ${details.selfieFaces}`;
+            }
+            
+            if (details.similarityScore !== undefined) {
+              detailedReason += `\n- Score de similarité : ${details.similarityScore.toFixed(1)}% (minimum requis : ${details.minRequiredSimilarity || this.configService.get<string>('AWS_REKOGNITION_KYC_MIN_SIMILARITY') || '80'}%)`;
+            }
+            
+            if (details.cniQuality !== undefined || details.selfieQuality !== undefined) {
+              detailedReason += '\n- Qualité des images :';
+              if (details.cniQuality !== undefined) {
+                detailedReason += `\n  • CNI : ${details.cniQuality.toFixed(1)}%`;
+              }
+              if (details.selfieQuality !== undefined) {
+                detailedReason += `\n  • Selfie : ${details.selfieQuality.toFixed(1)}%`;
+              }
+              if (details.minRequiredQuality !== undefined) {
+                detailedReason += `\n  • Minimum requis : ${details.minRequiredQuality}%`;
+              }
+            }
+            
+            if (details.recommendation) {
+              detailedReason += `\n\n💡 Recommandation : ${details.recommendation}`;
+            }
+          }
+          
+          rejectionReason = detailedReason;
+          this.logger.warn(`[KYC Upload] ❌ KYC validation FAILED for user: ${userId}`);
+          this.logger.warn(`[KYC Upload] Reason: ${validationResult.reason}`);
+          if (validationResult.details?.issue) {
+            this.logger.warn(`[KYC Upload] Issue type: ${validationResult.details.issue}`);
+          }
+          this.logger.warn(`[KYC Upload] Status set to REJECTED`);
+        }
+      } catch (error) {
+        this.logger.error(`[KYC Upload] ❌ KYC validation ERROR for user: ${userId}:`);
+        this.logger.error(`[KYC Upload] Error message: ${error.message}`);
+        this.logger.error(`[KYC Upload] Error stack: ${error.stack}`);
+        
+        // En cas d'erreur technique du service IA, mettre le statut à PENDING pour validation manuelle
+        kycStatus = KycStatus.PENDING;
+        
+        // Construire un message clair pour l'utilisateur
+        const errorMessage = error.message || 'Erreur inconnue';
+        rejectionReason = `VALIDATION MANUELLE REQUISE : Le service de validation automatique n'est pas disponible actuellement.\n\nVotre demande sera examinée manuellement par notre équipe dans les plus brefs délais.\n\nRaison technique : ${errorMessage}`;
+        
+        this.logger.warn(`[KYC Upload] ⚠️ KYC validation service unavailable - Status set to PENDING for manual review`);
+        this.logger.warn(`[KYC Upload] User will be notified that manual review is required`);
       }
-    } catch (error) {
-      this.logger.error(`KYC validation error for user: ${userId}: ${error.message}`);
-      // In case of an AI service error, status remains PENDING for manual review
+    } else {
+      const kycEnabledConfig = this.configService.get<string>('AWS_REKOGNITION_KYC_ENABLED');
+      const accessKeyId = this.configService.get<string>('AWS_ACCESS_KEY_ID');
+      const secretAccessKey = this.configService.get<string>('AWS_SECRET_ACCESS_KEY');
+      
+      this.logger.warn(`[KYC Upload] ⚠️ KYC validation is DISABLED`);
+      this.logger.warn(`[KYC Upload] Reason: AWS_REKOGNITION_KYC_ENABLED="${kycEnabledConfig || 'NOT SET'}" (must be "true" to enable)`);
+      
+      if (!accessKeyId || !secretAccessKey) {
+        this.logger.warn(`[KYC Upload] Additional issue: AWS credentials not configured`);
+        this.logger.warn(`[KYC Upload]   - AWS_ACCESS_KEY_ID: ${accessKeyId ? 'configured' : 'NOT SET'}`);
+        this.logger.warn(`[KYC Upload]   - AWS_SECRET_ACCESS_KEY: ${secretAccessKey ? 'configured' : 'NOT SET'}`);
+      }
+      
+      this.logger.warn(`[KYC Upload] Action: Keeping status as PENDING for manual review`);
+      this.logger.warn(`[KYC Upload] To enable AI validation, set AWS_REKOGNITION_KYC_ENABLED=true and configure AWS credentials`);
+      
+      // When KYC validation is disabled, keep status as PENDING for manual review
       kycStatus = KycStatus.PENDING;
-      this.logger.warn(`KYC validation service error, keeping status as PENDING`);
     }
+    
+    this.logger.log(`[KYC Upload] Final KYC status: ${kycStatus}`);
+    this.logger.log(`[KYC Upload] ========================================`);
 
     // 6. Start Database Transaction (Atomicity)
     // This is crucial to link the KYC save and the user status update.

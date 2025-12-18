@@ -19,6 +19,7 @@ export enum BookingStatus {
   REJECTED = 'rejected',
   CANCELLED = 'cancelled',
   COMPLETED = 'completed',
+  EXPIRED = 'expired',
 }
 
 @Entity('bookings')

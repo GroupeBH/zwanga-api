@@ -85,7 +85,9 @@ const typeOrmEntities = [
             type: 'postgres' as const,
             entities: typeOrmEntities,
             synchronize: true,
-            logging: isDevelopment,
+            // Disable SQL query logging to keep logs clean
+            // Set to ['error', 'warn'] if you want to see TypeORM errors/warnings only
+            logging: false,
           };
 
           if (databaseUrl) {
