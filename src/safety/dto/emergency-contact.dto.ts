@@ -1,5 +1,6 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { IsString, IsNotEmpty, IsOptional, IsBoolean, Matches } from 'class-validator';
+import { IsString, IsNotEmpty, IsOptional, IsBoolean, Matches, IsArray, ValidateNested, ArrayMaxSize, ArrayMinSize } from 'class-validator';
+import { Type } from 'class-transformer';
 
 export class CreateEmergencyContactDto {
   @ApiProperty({ description: 'Nom du contact d\'urgence' })
@@ -17,6 +18,23 @@ export class CreateEmergencyContactDto {
   @IsString()
   @IsOptional()
   relationship?: string;
+}
+
+export class CreateMultipleEmergencyContactsDto {
+  @ApiProperty({ 
+    description: 'Liste des contacts d\'urgence à créer (maximum 5 au total par utilisateur)',
+    type: [CreateEmergencyContactDto],
+    example: [
+      { name: 'Jean Dupont', phone: '+33612345678', relationship: 'Famille' },
+      { name: 'Marie Martin', phone: '+33687654321', relationship: 'Ami' }
+    ]
+  })
+  @IsArray()
+  @ArrayMinSize(1, { message: 'Vous devez fournir au moins un contact' })
+  @ArrayMaxSize(5, { message: 'Vous ne pouvez pas ajouter plus de 5 contacts en une seule fois' })
+  @ValidateNested({ each: true })
+  @Type(() => CreateEmergencyContactDto)
+  contacts: CreateEmergencyContactDto[];
 }
 
 export class UpdateEmergencyContactDto {

@@ -102,6 +102,9 @@ export class TripRequest {
   @Column({ type: 'timestamp', nullable: true })
   selectedAt: Date | null; // Date de sélection du driver
 
+  @Column({ type: 'boolean', default: false })
+  expirationNotificationSent: boolean; // Si une notification d'expiration a été envoyée
+
   @CreateDateColumn()
   createdAt: Date;
 

@@ -194,15 +194,17 @@ export class NotificationService implements OnModuleInit {
   }> {
     this.logger.debug(`Fetching notifications for user ${userId}`);
 
+    // Ne récupérer que les notifications actives (non désactivées)
     const [notifications, total] = await this.notificationRepository.findAndCount({
-      where: { userId },
+      where: { userId, isActive: true },
       order: { createdAt: 'DESC' },
       take: options?.limit,
       skip: options?.offset,
     });
 
+    // Compter uniquement les notifications non lues et actives
     const unreadCount = await this.notificationRepository.count({
-      where: { userId, isRead: false },
+      where: { userId, isRead: false, isActive: true },
     });
 
     return {
@@ -228,12 +230,13 @@ export class NotificationService implements OnModuleInit {
   }
 
   async markAllAsRead(userId: string): Promise<{ updated: number }> {
-    this.logger.debug(`Marking all notifications as read for user ${userId}`);
+    this.logger.debug(`Marking all active notifications as read for user ${userId}`);
 
     const result = await this.notificationRepository.update(
       {
         userId,
         isRead: false,
+        isActive: true, // Ne marquer que les notifications actives
       },
       {
         isRead: true,
@@ -267,6 +270,36 @@ export class NotificationService implements OnModuleInit {
       .set({ isRead: false, readAt: null })
       .where('id IN (:...ids)', { ids: notificationIds })
       .andWhere('userId = :userId', { userId })
+      .execute();
+
+    return { updated: updateResult.affected || 0 };
+  }
+
+  async disableNotifications(userId: string, notificationIds: string[]): Promise<{ updated: number }> {
+    this.logger.debug(`Disabling ${notificationIds.length} notifications for user ${userId}`);
+
+    const updateResult = await this.notificationRepository
+      .createQueryBuilder()
+      .update(Notification)
+      .set({ isActive: false })
+      .where('id IN (:...ids)', { ids: notificationIds })
+      .andWhere('userId = :userId', { userId })
+      .andWhere('isActive = :isActive', { isActive: true })
+      .execute();
+
+    return { updated: updateResult.affected || 0 };
+  }
+
+  async enableNotifications(userId: string, notificationIds: string[]): Promise<{ updated: number }> {
+    this.logger.debug(`Enabling ${notificationIds.length} notifications for user ${userId}`);
+
+    const updateResult = await this.notificationRepository
+      .createQueryBuilder()
+      .update(Notification)
+      .set({ isActive: true })
+      .where('id IN (:...ids)', { ids: notificationIds })
+      .andWhere('userId = :userId', { userId })
+      .andWhere('isActive = :isActive', { isActive: false })
       .execute();
 
     return { updated: updateResult.affected || 0 };

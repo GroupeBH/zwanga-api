@@ -56,5 +56,19 @@ export class NotificationsController {
   async markAsUnread(@Request() req, @Body() dto: MarkNotificationsAsReadDto) {
     return this.notificationService.markAsUnread(req.user.userId, dto.notificationIds);
   }
+
+  @Put('disable')
+  @ApiOperation({ summary: 'Désactiver des notifications (les retirer de la liste affichée)' })
+  @ApiResponse({ status: 200, description: 'Notifications désactivées avec succès' })
+  async disableNotifications(@Request() req, @Body() dto: MarkNotificationsAsReadDto) {
+    return this.notificationService.disableNotifications(req.user.userId, dto.notificationIds);
+  }
+
+  @Put('enable')
+  @ApiOperation({ summary: 'Réactiver des notifications (les remettre dans la liste affichée)' })
+  @ApiResponse({ status: 200, description: 'Notifications réactivées avec succès' })
+  async enableNotifications(@Request() req, @Body() dto: MarkNotificationsAsReadDto) {
+    return this.notificationService.enableNotifications(req.user.userId, dto.notificationIds);
+  }
 }
 

@@ -14,7 +14,7 @@ import {
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { SafetyService } from './safety.service';
-import { CreateEmergencyContactDto, UpdateEmergencyContactDto } from './dto/emergency-contact.dto';
+import { CreateEmergencyContactDto, UpdateEmergencyContactDto, CreateMultipleEmergencyContactsDto } from './dto/emergency-contact.dto';
 import { CreateSafetyAlertDto, UpdateSafetyAlertStatusDto, UpdateLocationDto } from './dto/safety-alert.dto';
 import { CreateUserReportDto, UpdateReportStatusDto } from './dto/user-report.dto';
 
@@ -35,6 +35,16 @@ export class SafetyController {
     @Body() createDto: CreateEmergencyContactDto,
   ) {
     return this.safetyService.createEmergencyContact(req.user.userId, createDto);
+  }
+
+  @Post('emergency-contacts/batch')
+  @ApiOperation({ summary: 'Créer plusieurs contacts d\'urgence en une seule requête (jusqu\'à 5 au total)' })
+  @ApiResponse({ status: 201, description: 'Contacts d\'urgence créés avec succès' })
+  async createMultipleEmergencyContacts(
+    @Request() req,
+    @Body() createDto: CreateMultipleEmergencyContactsDto,
+  ) {
+    return this.safetyService.createMultipleEmergencyContacts(req.user.userId, createDto.contacts);
   }
 
   @Get('emergency-contacts')
