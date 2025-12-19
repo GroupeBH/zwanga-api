@@ -19,6 +19,7 @@ export enum NotificationStatus {
 @Entity('notifications')
 @Index(['userId', 'createdAt'])
 @Index(['userId', 'isRead'])
+@Index(['userId', 'isActive'])
 @Index(['status'])
 export class Notification {
   @PrimaryGeneratedColumn('uuid')
@@ -61,6 +62,9 @@ export class Notification {
 
   @Column({ type: 'timestamp', nullable: true })
   readAt: Date | null; // Date de lecture de la notification
+
+  @Column({ type: 'boolean', default: true })
+  isActive: boolean; // Si la notification est active (affichée dans la liste)
 
   @CreateDateColumn()
   createdAt: Date;

@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { ScheduleModule } from '@nestjs/schedule';
 import { TripRequestsService } from './trip-requests.service';
 import { TripRequestsController } from './trip-requests.controller';
 import { TripRequest } from './entities/trip-request.entity';
@@ -12,6 +13,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
 @Module({
   imports: [
     TypeOrmModule.forFeature([TripRequest, DriverOffer, User, Vehicle]),
+    ScheduleModule,
     CommonModule,
     NotificationsModule,
   ],

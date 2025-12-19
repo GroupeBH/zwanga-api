@@ -81,6 +81,18 @@ export class SafetyService {
   ): Promise<SanitizedEmergencyContact> {
     this.logger.debug(`Creating emergency contact for user ${userId}`);
 
+    // Vérifier le nombre de contacts existants (actifs ou non)
+    const existingContactsCount = await this.emergencyContactRepository.count({
+      where: { userId },
+    });
+
+    const MAX_EMERGENCY_CONTACTS = 5;
+    if (existingContactsCount >= MAX_EMERGENCY_CONTACTS) {
+      throw new BadRequestException(
+        `Vous ne pouvez pas avoir plus de ${MAX_EMERGENCY_CONTACTS} contacts d'urgence. Veuillez supprimer un contact existant avant d'en ajouter un nouveau.`
+      );
+    }
+
     const contact = this.emergencyContactRepository.create({
       ...createDto,
       userId,
@@ -88,6 +100,61 @@ export class SafetyService {
 
     const saved = await this.emergencyContactRepository.save(contact);
     return this.sanitizeEmergencyContact(saved);
+  }
+
+  async createMultipleEmergencyContacts(
+    userId: string,
+    createDtos: CreateEmergencyContactDto[],
+  ): Promise<SanitizedEmergencyContact[]> {
+    this.logger.debug(`Creating ${createDtos.length} emergency contacts for user ${userId}`);
+
+    const MAX_EMERGENCY_CONTACTS = 5;
+    
+    // Vérifier le nombre de contacts existants
+    const existingContactsCount = await this.emergencyContactRepository.count({
+      where: { userId },
+    });
+
+    // Vérifier que le total ne dépasse pas la limite
+    const totalAfterCreation = existingContactsCount + createDtos.length;
+    if (totalAfterCreation > MAX_EMERGENCY_CONTACTS) {
+      const remainingSlots = MAX_EMERGENCY_CONTACTS - existingContactsCount;
+      throw new BadRequestException(
+        `Vous ne pouvez pas ajouter ${createDtos.length} contacts. Vous avez déjà ${existingContactsCount} contact(s) et pouvez en ajouter au maximum ${remainingSlots} de plus (limite totale : ${MAX_EMERGENCY_CONTACTS}).`
+      );
+    }
+
+    // Vérifier qu'il n'y a pas de doublons dans la liste fournie
+    const phones = createDtos.map(dto => dto.phone);
+    const uniquePhones = new Set(phones);
+    if (uniquePhones.size !== phones.length) {
+      throw new BadRequestException(
+        'Vous ne pouvez pas ajouter plusieurs contacts avec le même numéro de téléphone.'
+      );
+    }
+
+    // Vérifier qu'aucun numéro n'existe déjà dans la base de données
+    const existingContacts = await this.emergencyContactRepository.find({
+      where: { userId },
+    });
+    const existingPhones = new Set(existingContacts.map(c => c.phone));
+    const duplicatePhones = phones.filter(phone => existingPhones.has(phone));
+    if (duplicatePhones.length > 0) {
+      throw new BadRequestException(
+        `Les numéros suivants existent déjà parmi vos contacts : ${duplicatePhones.join(', ')}`
+      );
+    }
+
+    // Créer tous les contacts
+    const contacts = createDtos.map(dto =>
+      this.emergencyContactRepository.create({
+        ...dto,
+        userId,
+      })
+    );
+
+    const saved = await this.emergencyContactRepository.save(contacts);
+    return saved.map((contact) => this.sanitizeEmergencyContact(contact));
   }
 
   async findAllEmergencyContacts(userId: string): Promise<SanitizedEmergencyContact[]> {

@@ -6,7 +6,8 @@ import {
   ForbiddenException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, Point } from 'typeorm';
+import { Repository, Point, LessThan, MoreThan, Between, In } from 'typeorm';
+import { Cron, CronExpression } from '@nestjs/schedule';
 import { TripRequest, TripRequestStatus } from './entities/trip-request.entity';
 import { DriverOffer, DriverOfferStatus } from './entities/driver-offer.entity';
 import { User } from '../users/entities/user.entity';
@@ -183,9 +184,13 @@ export class TripRequestsService {
   async findAll(): Promise<SanitizedTripRequest[]> {
     this.logger.debug('Fetching all trip requests');
 
+    const now = new Date();
     const tripRequests = await this.tripRequestRepository.find({
       relations: ['passenger', 'selectedDriver', 'selectedVehicle', 'driverOffers', 'driverOffers.driver', 'driverOffers.vehicle'],
-      where: { status: TripRequestStatus.PENDING },
+      where: { 
+        status: TripRequestStatus.PENDING,
+        departureDateMax: MoreThan(now), // Exclure les demandes expirées
+      },
       order: { createdAt: 'DESC' },
     });
 
@@ -219,8 +224,12 @@ export class TripRequestsService {
   async findByPassenger(passengerId: string): Promise<SanitizedTripRequest[]> {
     this.logger.debug(`Fetching trip requests for passenger: ${passengerId}`);
 
+    const now = new Date();
     const tripRequests = await this.tripRequestRepository.find({
-      where: { passengerId },
+      where: { 
+        passengerId,
+        departureDateMax: MoreThan(now), // Exclure les demandes expirées
+      },
       relations: ['passenger', 'selectedDriver', 'selectedVehicle', 'driverOffers', 'driverOffers.driver', 'driverOffers.vehicle'],
       order: { createdAt: 'DESC' },
     });
@@ -263,6 +272,12 @@ export class TripRequestsService {
 
     if (!tripRequest) {
       throw new NotFoundException('Trip request not found');
+    }
+
+    // Check if trip request is expired
+    const now = new Date();
+    if (tripRequest.departureDateMax < now) {
+      throw new BadRequestException('Cette demande de trajet a expiré');
     }
 
     if (tripRequest.status !== TripRequestStatus.PENDING && tripRequest.status !== TripRequestStatus.OFFERS_RECEIVED) {
@@ -643,6 +658,131 @@ export class TripRequestsService {
       createdAt: tripRequest.createdAt,
       updatedAt: tripRequest.updatedAt,
     };
+  }
+
+  // ==================== Cron Jobs ====================
+
+  /**
+   * Cron job to mark expired trip requests
+   * Runs every hour to check for trip requests with departureDateMax in the past
+   */
+  @Cron(CronExpression.EVERY_HOUR)
+  async markExpiredTripRequests() {
+    this.logger.debug('Running cron job to mark expired trip requests');
+    
+    const now = new Date();
+    
+    // Find all pending trip requests with departureDateMax in the past
+    const expiredRequests = await this.tripRequestRepository.find({
+      where: {
+        status: TripRequestStatus.PENDING,
+        departureDateMax: LessThan(now),
+      },
+      relations: ['passenger'],
+    });
+
+    if (expiredRequests.length === 0) {
+      this.logger.debug('No expired trip requests found');
+      return;
+    }
+
+    this.logger.log(`Found ${expiredRequests.length} expired trip requests to mark as expired`);
+
+    // Mark all expired requests
+    await this.tripRequestRepository.update(
+      {
+        id: In(expiredRequests.map((r) => r.id)),
+      },
+      {
+        status: TripRequestStatus.EXPIRED,
+      },
+    );
+
+    this.logger.log(`Successfully marked ${expiredRequests.length} trip requests as expired`);
+  }
+
+  /**
+   * Cron job to notify passengers about upcoming trip request expiration
+   * Runs every 15 minutes to check for trip requests expiring in the next 30 minutes
+   */
+  @Cron('*/15 * * * *') // Every 15 minutes
+  async notifyAboutUpcomingTripRequestExpiration() {
+    this.logger.debug('Running cron job to notify about upcoming trip request expiration');
+    
+    const now = new Date();
+    const thirtyMinutesFromNow = new Date(now.getTime() + 30 * 60 * 1000); // 30 minutes from now
+    
+    // Find all pending trip requests expiring in the next 30 minutes that haven't been notified yet
+    const requestsExpiringSoon = await this.tripRequestRepository.find({
+      where: {
+        status: TripRequestStatus.PENDING,
+        departureDateMax: Between(now, thirtyMinutesFromNow),
+        expirationNotificationSent: false,
+      },
+      relations: ['passenger'],
+    });
+
+    if (requestsExpiringSoon.length === 0) {
+      this.logger.debug('No trip requests expiring soon found');
+      return;
+    }
+
+    this.logger.log(`Found ${requestsExpiringSoon.length} trip requests expiring soon`);
+
+    for (const tripRequest of requestsExpiringSoon) {
+      try {
+        // Notify passenger about upcoming expiration
+        await this.notifyPassengerAboutUpcomingExpiration(tripRequest);
+        
+        // Mark notification as sent
+        tripRequest.expirationNotificationSent = true;
+        await this.tripRequestRepository.save(tripRequest);
+      } catch (error) {
+        this.logger.error(
+          `Error notifying passenger about trip request expiration ${tripRequest.id}: ${error.message}`,
+          error.stack,
+        );
+      }
+    }
+
+    this.logger.log(
+      `Successfully notified about ${requestsExpiringSoon.length} trip requests expiring soon`,
+    );
+  }
+
+  /**
+   * Notify passenger about upcoming trip request expiration
+   */
+  private async notifyPassengerAboutUpcomingExpiration(tripRequest: TripRequest): Promise<void> {
+    const passenger = tripRequest.passenger;
+    
+    if (!passenger || !passenger.fcmToken) {
+      this.logger.debug(`Passenger ${tripRequest.passengerId} has no FCM token, skipping notification`);
+      return;
+    }
+
+    const minutesUntilExpiration = Math.round(
+      (tripRequest.departureDateMax.getTime() - Date.now()) / (60 * 1000),
+    );
+
+    const title = '⏰ Votre demande de trajet expire bientôt';
+    const body = `Votre demande de trajet ${tripRequest.departureLocation} → ${tripRequest.arrivalLocation} expire dans ${minutesUntilExpiration} minute(s). Vous pouvez la mettre à jour ou la laisser expirer.`;
+
+    await this.notificationService.sendNotification(
+      passenger.fcmToken,
+      title,
+      body,
+      {
+        type: 'trip_request_expiring',
+        tripRequestId: tripRequest.id,
+        minutesUntilExpiration,
+      },
+      passenger.id,
+    );
+
+    this.logger.log(
+      `Notified passenger ${passenger.id} about trip request ${tripRequest.id} expiring in ${minutesUntilExpiration} minutes`,
+    );
   }
 }
 
