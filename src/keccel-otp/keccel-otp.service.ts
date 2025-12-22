@@ -26,7 +26,7 @@ export class KeccelOtpService {
   private readonly generateUrl: string;
   private readonly validateUrl: string;
   private readonly defaultMessage = 'Votre code est : %OTP%';
-  private readonly defaultLength = 6;
+  private readonly defaultLength = 5;
   private readonly defaultLifetime = 300; // 5 minutes
 
   constructor(
@@ -47,10 +47,10 @@ export class KeccelOtpService {
 
     this.generateUrl =
       this.configService.get<string>('KECCEL_OTP_URL_GENERATE') ||
-      'https://api.keccel.com/otp/generate.asp';
+      'https://api.keccel.com/otp/generate';
     this.validateUrl =
       this.configService.get<string>('KECCEL_OTP_URL_VALIDATE') ||
-      'https://api.keccel.com/otp/validate.asp';
+      'https://api.keccel.com/otp/validate';
 
     if (!this.token) {
       this.logger.warn(
@@ -86,35 +86,39 @@ export class KeccelOtpService {
     this.logger.debug(`Length: ${length}`);
     this.logger.debug(`Lifetime: ${lifetime}`);
 
-    const params = new URLSearchParams({
+    // Build request body as JSON
+    const otpLength = length !== undefined ? length : this.defaultLength;
+    const otpLifetime = lifetime !== undefined ? lifetime : this.defaultLifetime;
+
+    // Validate length
+    if (otpLength < 4 || otpLength > 8) {
+      throw new BadRequestException('OTP length must be between 4 and 8');
+    }
+
+    // Validate lifetime
+    if (otpLifetime < 60) {
+      throw new BadRequestException('OTP lifetime must be at least 60 seconds');
+    }
+
+    const requestBody: any = {
       token: this.token,
       from: this.from,
       to: phone.trim(),
       message: message || this.defaultMessage,
-    });
-
-    if (length !== undefined) {
-      if (length < 4 || length > 8) {
-        throw new BadRequestException('OTP length must be between 4 and 8');
-      }
-      params.append('length', length.toString());
-    }
-
-    if (lifetime !== undefined) {
-      if (lifetime < 60) {
-        throw new BadRequestException('OTP lifetime must be at least 60 seconds');
-      }
-      params.append('lifetime', lifetime.toString());
-    }
-
-    const url = `${this.generateUrl}?${params.toString()}`;
+      length: otpLength,
+      lifetime: otpLifetime,
+    };
 
     try {
       this.logger.debug(`Calling Keccel OTP Generate API: ${this.generateUrl}`);
-      this.logger.debug(`Request parameters: from=${this.from}, to=${phone.trim()}`);
+      this.logger.debug(`Request body: ${JSON.stringify(requestBody)}`);
 
       const response = await firstValueFrom(
-        this.httpService.get<KeccelOtpGenerateResponse>(url).pipe(
+        this.httpService.post<KeccelOtpGenerateResponse>(this.generateUrl, requestBody, {
+          headers: {
+            'Content-Type': 'application/json',
+          },
+        }).pipe(
           retryWhen((errors) =>
             errors.pipe(
               concatMap((error, index: number) => {
@@ -205,20 +209,27 @@ export class KeccelOtpService {
       throw new BadRequestException('OTP code is required');
     }
 
-    const params = new URLSearchParams({
+    // Build request body as JSON
+    const requestBody = {
       token: this.token,
       from: this.from,
       to: phone.trim(),
       otp: otp.trim(),
-    });
-
-    const url = `${this.validateUrl}?${params.toString()}`;
+    };
 
     try {
       this.logger.debug(`Calling Keccel OTP Validate API: ${this.validateUrl}`);
+      this.logger.debug(`Request body: ${JSON.stringify(requestBody)}`);
 
       const response = await firstValueFrom(
-        this.httpService.get<KeccelOtpValidateResponse>(url).pipe(
+        this.httpService.request<KeccelOtpValidateResponse>({
+          method: 'GET',
+          url: this.validateUrl,
+          data: requestBody,
+          headers: {
+            'Content-Type': 'application/json',
+          },
+        }).pipe(
           retryWhen((errors) =>
             errors.pipe(
               concatMap((error, index) => {
