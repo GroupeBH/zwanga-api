@@ -25,12 +25,12 @@ export interface KycValidationResult {
   };
   reason?: string;
   details?: {
-    cniFrontFaces?: number;
+    cniFrontFaces?: number | number[]; // Can be array if multiple CNI images
     selfieFaces?: number;
     similarityScore?: number;
     issue?: string;
     recommendation?: string;
-    cniQuality?: number;
+    cniQuality?: number | number[]; // Can be array if multiple CNI images
     selfieQuality?: number;
     minRequiredQuality?: number;
     minRequiredSimilarity?: number;
@@ -105,18 +105,21 @@ export class KycValidationService {
   }
 
   /**
-   * Validate KYC documents by comparing selfie with CNI photo
-   * @param cniFrontImage Buffer containing CNI front image
+   * Validate KYC documents by comparing selfie with CNI photo(s)
+   * @param cniFrontImages Array of buffers containing CNI front images (1 or 2)
    * @param selfieImage Buffer containing selfie image
    * @returns Validation result
    */
   async validateKyc(
-    cniFrontImage: Buffer,
+    cniFrontImages: Buffer[],
     selfieImage: Buffer,
   ): Promise<KycValidationResult> {
     this.logger.log('[KYC Validation] ========================================');
     this.logger.log('[KYC Validation] Starting KYC validation process');
-    this.logger.log(`[KYC Validation] CNI image size: ${cniFrontImage.length} bytes`);
+    this.logger.log(`[KYC Validation] CNI images count: ${cniFrontImages.length}`);
+    cniFrontImages.forEach((img, idx) => {
+      this.logger.log(`[KYC Validation] CNI image ${idx + 1} size: ${img.length} bytes`);
+    });
     this.logger.log(`[KYC Validation] Selfie image size: ${selfieImage.length} bytes`);
     
     // If validation is disabled, approve automatically
@@ -147,20 +150,26 @@ export class KycValidationService {
       this.logger.log('[KYC Validation] ✅ Rekognition client is ready');
       this.logger.log('[KYC Validation] Step 1: Detecting faces in CNI and selfie images...');
 
-      // Step 1: Detect faces in both images
-      const [cniFaceDetection, selfieFaceDetection] = await Promise.all([
-        this.detectFaces(cniFrontImage, 'CNI'),
-        this.detectFaces(selfieImage, 'Selfie'),
-      ]);
+      // Step 1: Detect faces in all CNI images and selfie
+      const cniFaceDetections = await Promise.all(
+        cniFrontImages.map((img, idx) => this.detectFaces(img, `CNI-${idx + 1}`))
+      );
+      const selfieFaceDetection = await this.detectFaces(selfieImage, 'Selfie');
 
       this.logger.log('[KYC Validation] Step 1 completed:');
-      this.logger.log(`[KYC Validation]   - CNI: ${cniFaceDetection.hasFace ? '✅ Face detected' : '❌ No face'} (${cniFaceDetection.faceCount} face(s), quality: ${cniFaceDetection.faceQuality.toFixed(2)}%)`);
+      cniFaceDetections.forEach((detection, idx) => {
+        this.logger.log(`[KYC Validation]   - CNI-${idx + 1}: ${detection.hasFace ? '✅ Face detected' : '❌ No face'} (${detection.faceCount} face(s), quality: ${detection.faceQuality.toFixed(2)}%)`);
+      });
       this.logger.log(`[KYC Validation]   - Selfie: ${selfieFaceDetection.hasFace ? '✅ Face detected' : '❌ No face'} (${selfieFaceDetection.faceCount} face(s), quality: ${selfieFaceDetection.faceQuality.toFixed(2)}%)`);
 
-      // Step 2: Validate face detection
+      // Step 2: Validate face detection in all CNI images
       this.logger.log('[KYC Validation] Step 2: Validating face detection results...');
-      if (!cniFaceDetection.hasFace) {
-        this.logger.warn('[KYC Validation] ❌ No face detected in CNI front image');
+      const cniWithoutFaces = cniFaceDetections.filter(d => !d.hasFace);
+      if (cniWithoutFaces.length > 0) {
+        const failedIndices = cniFaceDetections
+          .map((d, idx) => !d.hasFace ? idx + 1 : null)
+          .filter(idx => idx !== null);
+        this.logger.warn(`[KYC Validation] ❌ No face detected in CNI front image(s): ${failedIndices.join(', ')}`);
         return {
           isValid: false,
           faceMatch: {
@@ -171,12 +180,12 @@ export class KycValidationService {
             cniFront: false,
             selfie: selfieFaceDetection.hasFace,
           },
-          reason: `ÉCHEC : Aucun visage détecté sur la photo de la CNI. Veuillez prendre une photo claire de votre carte d'identité où votre visage est bien visible.`,
+          reason: `ÉCHEC : Aucun visage détecté sur ${failedIndices.length === 1 ? 'la photo' : 'certaines photos'} de la CNI (photo${failedIndices.length > 1 ? 's' : ''} ${failedIndices.join(', ')}). Veuillez prendre une photo claire de votre carte d'identité où votre visage est bien visible.`,
           details: {
-            cniFrontFaces: cniFaceDetection.faceCount,
+            cniFrontFaces: cniFaceDetections.map(d => d.faceCount),
             selfieFaces: selfieFaceDetection.faceCount,
             issue: 'NO_FACE_IN_CNI',
-            recommendation: 'Assurez-vous que votre visage est clairement visible sur la photo de la CNI. Évitez les reflets et les ombres.',
+            recommendation: 'Assurez-vous que votre visage est clairement visible sur toutes les photos de la CNI. Évitez les reflets et les ombres.',
           },
         };
       }
@@ -195,7 +204,7 @@ export class KycValidationService {
           },
           reason: `ÉCHEC : Aucun visage détecté sur la photo selfie. Veuillez prendre une photo selfie claire où votre visage est bien visible et centré.`,
           details: {
-            cniFrontFaces: cniFaceDetection.faceCount,
+            cniFrontFaces: cniFaceDetections.map(d => d.faceCount),
             selfieFaces: selfieFaceDetection.faceCount,
             issue: 'NO_FACE_IN_SELFIE',
             recommendation: 'Prenez une photo selfie avec un bon éclairage, face à la caméra, sans masque ni lunettes de soleil.',
@@ -203,11 +212,18 @@ export class KycValidationService {
         };
       }
 
-      // Step 3: Check if multiple faces detected (should be only one)
-      this.logger.log('[KYC Validation] Step 3: Checking for multiple faces...');
-      if (cniFaceDetection.faceCount > 1) {
+      // Step 3: Check if too many faces detected in any CNI image (max 2 faces per image allowed)
+      this.logger.log('[KYC Validation] Step 3: Checking face count per CNI image...');
+      const cniWithTooManyFaces = cniFaceDetections.filter(d => d.faceCount > 2);
+      if (cniWithTooManyFaces.length > 0) {
+        const failedIndices = cniFaceDetections
+          .map((d, idx) => d.faceCount > 2 ? idx + 1 : null)
+          .filter(idx => idx !== null);
+        const faceCounts = cniFaceDetections
+          .map((d, idx) => d.faceCount > 2 ? `${idx + 1}:${d.faceCount}` : null)
+          .filter(s => s !== null);
         this.logger.warn(
-          `[KYC Validation] ❌ Multiple faces detected in CNI front image (${cniFaceDetection.faceCount})`,
+          `[KYC Validation] ❌ Too many faces detected in CNI front image(s) (${faceCounts.join(', ')})`,
         );
         return {
           isValid: false,
@@ -219,15 +235,22 @@ export class KycValidationService {
             cniFront: true,
             selfie: true,
           },
-          reason: `ÉCHEC : Plusieurs visages détectés sur la photo de la CNI (${cniFaceDetection.faceCount} visage(s)). Un seul visage est autorisé.`,
+          reason: `ÉCHEC : Trop de visages détectés sur ${failedIndices.length === 1 ? 'la photo' : 'certaines photos'} de la CNI (photo${failedIndices.length > 1 ? 's' : ''} ${failedIndices.join(', ')}). Maximum 2 visages autorisés par photo (par exemple, un passeport avec photo principale et photo secondaire).`,
           details: {
-            cniFrontFaces: cniFaceDetection.faceCount,
+            cniFrontFaces: cniFaceDetections.map(d => d.faceCount),
             selfieFaces: selfieFaceDetection.faceCount,
-            issue: 'MULTIPLE_FACES_IN_CNI',
-            recommendation: 'Assurez-vous que seule votre photo apparaît sur la carte d\'identité. Évitez les photos avec d\'autres personnes en arrière-plan.',
+            issue: 'TOO_MANY_FACES_IN_CNI',
+            recommendation: 'Assurez-vous que maximum 2 visages apparaissent sur chaque photo de la carte d\'identité/passeport. Si vous avez plus de 2 visages, veuillez prendre une photo plus claire.',
           },
         };
       }
+      
+      // Log face counts (1 or 2 faces per CNI image is acceptable)
+      cniFaceDetections.forEach((detection, idx) => {
+        if (detection.faceCount === 2) {
+          this.logger.log(`[KYC Validation]   - CNI-${idx + 1}: 2 visages détectés (sera vérifié qu'ils correspondent à la même personne)`);
+        }
+      });
 
       if (selfieFaceDetection.faceCount > 1) {
         this.logger.warn(
@@ -245,7 +268,7 @@ export class KycValidationService {
           },
           reason: `ÉCHEC : Plusieurs visages détectés sur la photo selfie (${selfieFaceDetection.faceCount} visage(s)). Un seul visage est autorisé.`,
           details: {
-            cniFrontFaces: cniFaceDetection.faceCount,
+            cniFrontFaces: cniFaceDetections.map(d => d.faceCount),
             selfieFaces: selfieFaceDetection.faceCount,
             issue: 'MULTIPLE_FACES_IN_SELFIE',
             recommendation: 'Prenez une photo selfie seule, sans autres personnes dans le cadre.',
@@ -255,15 +278,21 @@ export class KycValidationService {
 
       // Step 4: Check face quality
       this.logger.log('[KYC Validation] Step 4: Checking face quality...');
-      this.logger.log(`[KYC Validation]   - CNI quality: ${cniFaceDetection.faceQuality.toFixed(2)}% (minimum: ${this.minFaceQuality}%)`);
+      cniFaceDetections.forEach((detection, idx) => {
+        this.logger.log(`[KYC Validation]   - CNI-${idx + 1} quality: ${detection.faceQuality.toFixed(2)}% (minimum: ${this.minFaceQuality}%)`);
+      });
       this.logger.log(`[KYC Validation]   - Selfie quality: ${selfieFaceDetection.faceQuality.toFixed(2)}% (minimum: ${this.minFaceQuality}%)`);
       
-      if (
-        cniFaceDetection.faceQuality < this.minFaceQuality ||
-        selfieFaceDetection.faceQuality < this.minFaceQuality
-      ) {
+      const lowQualityCni = cniFaceDetections.filter(d => d.faceQuality < this.minFaceQuality);
+      if (lowQualityCni.length > 0 || selfieFaceDetection.faceQuality < this.minFaceQuality) {
+        const failedIndices = cniFaceDetections
+          .map((d, idx) => d.faceQuality < this.minFaceQuality ? idx + 1 : null)
+          .filter(idx => idx !== null);
+        const qualityDetails = cniFaceDetections
+          .map((d, idx) => `CNI-${idx + 1}: ${d.faceQuality.toFixed(1)}%`)
+          .join(', ');
         this.logger.warn(
-          `[KYC Validation] ❌ Low face quality detected - CNI: ${cniFaceDetection.faceQuality.toFixed(2)}%, Selfie: ${selfieFaceDetection.faceQuality.toFixed(2)}% (minimum: ${this.minFaceQuality}%)`,
+          `[KYC Validation] ❌ Low face quality detected - ${qualityDetails}, Selfie: ${selfieFaceDetection.faceQuality.toFixed(2)}% (minimum: ${this.minFaceQuality}%)`,
         );
         return {
           isValid: false,
@@ -275,11 +304,11 @@ export class KycValidationService {
             cniFront: true,
             selfie: true,
           },
-          reason: `ÉCHEC : Qualité des images insuffisante. CNI: ${cniFaceDetection.faceQuality.toFixed(1)}% (minimum: ${this.minFaceQuality}%), Selfie: ${selfieFaceDetection.faceQuality.toFixed(1)}% (minimum: ${this.minFaceQuality}%).`,
+          reason: `ÉCHEC : Qualité des images insuffisante. ${qualityDetails}, Selfie: ${selfieFaceDetection.faceQuality.toFixed(1)}% (minimum: ${this.minFaceQuality}%).`,
           details: {
-            cniFrontFaces: cniFaceDetection.faceCount,
+            cniFrontFaces: cniFaceDetections.map(d => d.faceCount),
             selfieFaces: selfieFaceDetection.faceCount,
-            cniQuality: cniFaceDetection.faceQuality,
+            cniQuality: cniFaceDetections.map(d => d.faceQuality),
             selfieQuality: selfieFaceDetection.faceQuality,
             minRequiredQuality: this.minFaceQuality,
             issue: 'LOW_IMAGE_QUALITY',
@@ -288,56 +317,153 @@ export class KycValidationService {
         };
       }
 
-      // Step 5: Compare faces
-      this.logger.log('[KYC Validation] Step 5: Comparing faces between CNI and selfie...');
-      const faceComparison = await this.compareFaces(
-        cniFrontImage,
-        selfieImage,
+      // Step 5: Compare all CNI faces with selfie and between CNI images
+      this.logger.log('[KYC Validation] Step 5: Comparing faces between CNI images and selfie...');
+      
+      // Compare each CNI image with selfie
+      const cniSelfieComparisons = await Promise.all(
+        cniFrontImages.map((img, idx) => 
+          this.compareFaces(img, selfieImage).then(result => ({
+            cniIndex: idx + 1,
+            similarity: result.similarity,
+          }))
+        )
       );
 
-      const similarity = faceComparison.similarity;
-      const matched = similarity >= this.minSimilarity;
+      // If a CNI image has 2 faces, compare them with each other to verify they're the same person
+      const cniSameImageComparisons: Array<{ cniIndex: number; similarity: number }> = [];
+      for (let i = 0; i < cniFrontImages.length; i++) {
+        if (cniFaceDetections[i].faceCount === 2) {
+          this.logger.log(`[KYC Validation] CNI-${i + 1} has 2 faces - comparing them to verify same person...`);
+          // Compare the image with itself - AWS Rekognition will compare all faces in source with all faces in target
+          const comparison = await this.compareFaces(cniFrontImages[i], cniFrontImages[i]);
+          cniSameImageComparisons.push({
+            cniIndex: i + 1,
+            similarity: comparison.similarity,
+          });
+          this.logger.log(`[KYC Validation]   - CNI-${i + 1} (2 faces): similarity ${comparison.similarity.toFixed(2)}%`);
+        }
+      }
 
-      this.logger.log(`[KYC Validation] Face comparison result:`);
-      this.logger.log(`[KYC Validation]   - Similarity score: ${similarity.toFixed(2)}%`);
+      // Compare CNI images with each other (if more than one photo)
+      let cniCniComparisons: Array<{ cni1: number; cni2: number; similarity: number }> = [];
+      if (cniFrontImages.length > 1) {
+        this.logger.log('[KYC Validation] Comparing CNI images with each other...');
+        for (let i = 0; i < cniFrontImages.length; i++) {
+          for (let j = i + 1; j < cniFrontImages.length; j++) {
+            const comparison = await this.compareFaces(cniFrontImages[i], cniFrontImages[j]);
+            cniCniComparisons.push({
+              cni1: i + 1,
+              cni2: j + 1,
+              similarity: comparison.similarity,
+            });
+          }
+        }
+      }
+
+      // Find minimum similarity scores
+      const minCniSelfieSimilarity = Math.min(...cniSelfieComparisons.map(c => c.similarity));
+      const minCniSameImageSimilarity = cniSameImageComparisons.length > 0
+        ? Math.min(...cniSameImageComparisons.map(c => c.similarity))
+        : 100; // If no CNI image has 2 faces, consider it as matching
+      const minCniCniSimilarity = cniCniComparisons.length > 0 
+        ? Math.min(...cniCniComparisons.map(c => c.similarity))
+        : 100; // If only one CNI image, consider it as matching itself
+
+      // All comparisons must pass
+      const allCniSelfieMatch = cniSelfieComparisons.every(c => c.similarity >= this.minSimilarity);
+      const allCniSameImageMatch = cniSameImageComparisons.length === 0 || cniSameImageComparisons.every(c => c.similarity >= this.minSimilarity);
+      const allCniCniMatch = cniCniComparisons.length === 0 || cniCniComparisons.every(c => c.similarity >= this.minSimilarity);
+      const matched = allCniSelfieMatch && allCniSameImageMatch && allCniCniMatch;
+
+      this.logger.log(`[KYC Validation] Face comparison results:`);
+      cniSelfieComparisons.forEach(c => {
+        this.logger.log(`[KYC Validation]   - CNI-${c.cniIndex} vs Selfie: ${c.similarity.toFixed(2)}% ${c.similarity >= this.minSimilarity ? '✅' : '❌'}`);
+      });
+      if (cniSameImageComparisons.length > 0) {
+        cniSameImageComparisons.forEach(c => {
+          this.logger.log(`[KYC Validation]   - CNI-${c.cniIndex} (2 faces internal): ${c.similarity.toFixed(2)}% ${c.similarity >= this.minSimilarity ? '✅' : '❌'}`);
+        });
+      }
+      if (cniCniComparisons.length > 0) {
+        cniCniComparisons.forEach(c => {
+          this.logger.log(`[KYC Validation]   - CNI-${c.cni1} vs CNI-${c.cni2}: ${c.similarity.toFixed(2)}% ${c.similarity >= this.minSimilarity ? '✅' : '❌'}`);
+        });
+      }
       this.logger.log(`[KYC Validation]   - Minimum required: ${this.minSimilarity}%`);
-      this.logger.log(`[KYC Validation]   - Match: ${matched ? '✅ PASSED' : '❌ FAILED'}`);
+      this.logger.log(`[KYC Validation]   - Overall match: ${matched ? '✅ PASSED' : '❌ FAILED'}`);
 
       if (!matched) {
+        const failedComparisons: string[] = [];
+        cniSelfieComparisons.forEach(c => {
+          if (c.similarity < this.minSimilarity) {
+            failedComparisons.push(`CNI-${c.cniIndex} vs Selfie: ${c.similarity.toFixed(1)}%`);
+          }
+        });
+        cniSameImageComparisons.forEach(c => {
+          if (c.similarity < this.minSimilarity) {
+            failedComparisons.push(`CNI-${c.cniIndex} (2 faces): ${c.similarity.toFixed(1)}%`);
+          }
+        });
+        cniCniComparisons.forEach(c => {
+          if (c.similarity < this.minSimilarity) {
+            failedComparisons.push(`CNI-${c.cni1} vs CNI-${c.cni2}: ${c.similarity.toFixed(1)}%`);
+          }
+        });
+
         this.logger.warn(
-          `[KYC Validation] ❌ Face comparison failed - Similarity: ${similarity.toFixed(2)}% (minimum: ${this.minSimilarity}%)`,
+          `[KYC Validation] ❌ Face comparison failed - Failed comparisons: ${failedComparisons.join(', ')}`,
         );
+        
+        const minSimilarity = Math.min(
+          minCniSelfieSimilarity,
+          minCniSameImageSimilarity,
+          minCniCniSimilarity
+        );
+        
+        let reasonMessage = `ÉCHEC : Les visages ne correspondent pas. ${failedComparisons.length === 1 ? 'La comparaison' : 'Certaines comparaisons'} ${failedComparisons.length === 1 ? 'a échoué' : 'ont échoué'} (minimum requis: ${this.minSimilarity}%).`;
+        if (cniSameImageComparisons.some(c => c.similarity < this.minSimilarity)) {
+          reasonMessage += ' Les 2 visages détectés sur une photo CNI ne correspondent pas à la même personne.';
+        }
+        reasonMessage += ' Toutes les photos CNI doivent être de la même personne et correspondre au selfie.';
+        
         return {
           isValid: false,
           faceMatch: {
-            similarity,
+            similarity: minSimilarity,
             matched: false,
           },
           faceDetection: {
             cniFront: true,
             selfie: true,
           },
-          reason: `ÉCHEC : Les visages ne correspondent pas. Score de similarité: ${similarity.toFixed(1)}% (minimum requis: ${this.minSimilarity}%). La photo selfie ne correspond pas à la photo sur votre carte d'identité.`,
+          reason: reasonMessage,
           details: {
-            cniFrontFaces: cniFaceDetection.faceCount,
+            cniFrontFaces: cniFaceDetections.map(d => d.faceCount),
             selfieFaces: selfieFaceDetection.faceCount,
-            similarityScore: similarity,
+            similarityScore: minSimilarity,
             minRequiredSimilarity: this.minSimilarity,
             issue: 'FACE_MISMATCH',
-            recommendation: 'Assurez-vous que la photo selfie correspond bien à la personne sur la carte d\'identité. Prenez la photo selfie dans les mêmes conditions (même personne, même coiffure si possible).',
+            recommendation: 'Assurez-vous que toutes les photos CNI sont de la même personne et que le selfie correspond à la personne sur la carte d\'identité/passeport. Si votre document a 2 photos, elles doivent être de la même personne.',
           },
         };
       }
 
+      const avgSimilarity = (
+        cniSelfieComparisons.reduce((sum, c) => sum + c.similarity, 0) +
+        cniSameImageComparisons.reduce((sum, c) => sum + c.similarity, 0) +
+        cniCniComparisons.reduce((sum, c) => sum + c.similarity, 0)
+      ) / (cniSelfieComparisons.length + cniSameImageComparisons.length + cniCniComparisons.length || 1);
+
       this.logger.log(
-        `[KYC Validation] ✅ KYC validation SUCCESSFUL - Similarity: ${similarity.toFixed(2)}%`,
+        `[KYC Validation] ✅ KYC validation SUCCESSFUL - Average similarity: ${avgSimilarity.toFixed(2)}%`,
       );
       this.logger.log('[KYC Validation] ========================================');
 
       return {
         isValid: true,
         faceMatch: {
-          similarity,
+          similarity: avgSimilarity,
           matched: true,
         },
         faceDetection: {
@@ -345,9 +471,9 @@ export class KycValidationService {
           selfie: true,
         },
         details: {
-          cniFrontFaces: cniFaceDetection.faceCount,
+          cniFrontFaces: cniFaceDetections.map(d => d.faceCount),
           selfieFaces: selfieFaceDetection.faceCount,
-          similarityScore: similarity,
+          similarityScore: avgSimilarity,
         },
       };
     } catch (error) {

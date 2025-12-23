@@ -64,6 +64,14 @@ export class UsersService {
     if (kyc.cniFrontUrl) {
       kyc.cniFrontUrl = await this.fileUploadService.getPresignedUrlIfS3Key(kyc.cniFrontUrl) || kyc.cniFrontUrl;
     }
+    // Handle array of CNI front URLs
+    if (kyc.cniFrontUrls && Array.isArray(kyc.cniFrontUrls)) {
+      kyc.cniFrontUrls = await Promise.all(
+        kyc.cniFrontUrls.map(url => 
+          this.fileUploadService.getPresignedUrlIfS3Key(url).then(presigned => presigned || url)
+        )
+      );
+    }
     if (kyc.cniBackUrl) {
       kyc.cniBackUrl = await this.fileUploadService.getPresignedUrlIfS3Key(kyc.cniBackUrl) || kyc.cniBackUrl;
     }
@@ -228,27 +236,37 @@ export class UsersService {
     }
 
     // 3. File Presence Check
-    const cniFrontFile = files?.cniFront?.[0];
+    const cniFrontFiles = files?.cniFront || [];
     const cniBackFile = files?.cniBack?.[0];
     const selfieFile = files?.selfie?.[0];
 
-    if (!cniFrontFile || !cniBackFile || !selfieFile) {
+    if (cniFrontFiles.length === 0 || cniFrontFiles.length > 2) {
+      throw new BadRequestException(
+        `ÉCHEC : Nombre de photos CNI invalide. Veuillez fournir 1 ou 2 photos du recto de votre carte d'identité (${cniFrontFiles.length} fourni${cniFrontFiles.length > 1 ? 'es' : 'e'}).`
+      );
+    }
+
+    if (!cniBackFile || !selfieFile) {
       const missingFiles: string[] = [];
-      if (!cniFrontFile) missingFiles.push('cniFront (recto de la CNI)');
       if (!cniBackFile) missingFiles.push('cniBack (verso de la CNI)');
       if (!selfieFile) missingFiles.push('selfie (photo selfie)');
       
       throw new BadRequestException(
-        `ÉCHEC : Fichiers manquants. Veuillez fournir tous les documents requis.\n\nFichiers manquants : ${missingFiles.join(', ')}\n\nTous les fichiers suivants sont requis :\n- cniFront : Photo du recto de votre carte d'identité\n- cniBack : Photo du verso de votre carte d'identité\n- selfie : Photo selfie de vous-même`
+        `ÉCHEC : Fichiers manquants. Veuillez fournir tous les documents requis.\n\nFichiers manquants : ${missingFiles.join(', ')}\n\nTous les fichiers suivants sont requis :\n- cniFront : 1 ou 2 photos du recto de votre carte d'identité\n- cniBack : Photo du verso de votre carte d'identité\n- selfie : Photo selfie de vous-même`
       );
     }
 
     // 4. S3 File Upload (External execution, before the transaction starts)
-    const [cniFrontUrl, cniBackUrl, selfieUrl] = await Promise.all([
-      this.fileUploadService.saveFile(cniFrontFile, 'kyc'),
+    const cniFrontUrls = await Promise.all(
+      cniFrontFiles.map(file => this.fileUploadService.saveFile(file, 'kyc'))
+    );
+    const [cniBackUrl, selfieUrl] = await Promise.all([
       this.fileUploadService.saveFile(cniBackFile, 'kyc'),
       this.fileUploadService.saveFile(selfieFile, 'kyc'),
     ]);
+    
+    // Keep first CNI front URL for backward compatibility
+    const cniFrontUrl = cniFrontUrls[0];
 
     // 5. KYC Validation (with error handling)
     let kycStatus = KycStatus.PENDING;
@@ -261,14 +279,18 @@ export class UsersService {
     this.logger.log(`[KYC Upload] ========================================`);
     this.logger.log(`[KYC Upload] Processing KYC upload for user: ${userId}`);
     this.logger.log(`[KYC Upload] KYC validation enabled: ${kycValidationEnabled}`);
-    this.logger.log(`[KYC Upload] CNI front file: ${cniFrontFile.originalname} (${cniFrontFile.size} bytes)`);
+    this.logger.log(`[KYC Upload] CNI front files: ${cniFrontFiles.length} photo(s)`);
+    cniFrontFiles.forEach((file, idx) => {
+      this.logger.log(`[KYC Upload]   - CNI front ${idx + 1}: ${file.originalname} (${file.size} bytes)`);
+    });
     this.logger.log(`[KYC Upload] Selfie file: ${selfieFile.originalname} (${selfieFile.size} bytes)`);
     
     if (kycValidationEnabled) {
       try {
         this.logger.log(`[KYC Upload] Starting AI validation for user: ${userId}`);
+        const cniFrontBuffers = cniFrontFiles.map(file => file.buffer);
         const validationResult = await this.kycValidationService.validateKyc(
-          cniFrontFile.buffer,
+          cniFrontBuffers,
           selfieFile.buffer,
         );
 
@@ -314,7 +336,11 @@ export class UsersService {
             if (details.cniQuality !== undefined || details.selfieQuality !== undefined) {
               detailedReason += '\n- Qualité des images :';
               if (details.cniQuality !== undefined) {
-                detailedReason += `\n  • CNI : ${details.cniQuality.toFixed(1)}%`;
+                if (Array.isArray(details.cniQuality)) {
+                  detailedReason += `\n  • CNI : ${details.cniQuality.map(q => q.toFixed(1)).join('%, ')}%`;
+                } else {
+                  detailedReason += `\n  • CNI : ${details.cniQuality.toFixed(1)}%`;
+                }
               }
               if (details.selfieQuality !== undefined) {
                 detailedReason += `\n  • Selfie : ${details.selfieQuality.toFixed(1)}%`;
@@ -390,6 +416,7 @@ export class UsersService {
         : this.kycDocumentRepository.create({
           userId, // <-- TypeORM BUG FIX: Pass the user object
           cniFrontUrl,
+          cniFrontUrls, // Store array of CNI front URLs
           cniBackUrl,
           selfieUrl,
           status: kycStatus,
@@ -400,6 +427,7 @@ export class UsersService {
       kycDocument = queryRunner.manager.merge(KycDocument, kycDocument, {
         user: user, // <-- TypeORM BUG FIX: Pass the user object
         cniFrontUrl,
+        cniFrontUrls, // Store array of CNI front URLs
         cniBackUrl,
         selfieUrl,
         status: kycStatus,
@@ -433,7 +461,7 @@ export class UsersService {
 
         // Parallel deletion of all uploaded files
         await Promise.all([
-          this.fileUploadService.deleteFile(cniFrontUrl),
+          ...cniFrontUrls.map(url => this.fileUploadService.deleteFile(url)),
           this.fileUploadService.deleteFile(cniBackUrl),
           this.fileUploadService.deleteFile(selfieUrl),
         ]);
