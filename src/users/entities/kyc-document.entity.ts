@@ -30,6 +30,9 @@ export class KycDocument {
   @Column({ nullable: true })
   cniFrontUrl: string;
 
+  @Column({ type: 'jsonb', nullable: true })
+  cniFrontUrls: string[]; // Array of CNI front photo URLs (1 or 2 photos)
+
   @Column({ nullable: true })
   cniBackUrl: string;
 

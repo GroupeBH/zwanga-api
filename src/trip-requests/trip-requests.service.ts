@@ -140,7 +140,7 @@ export class TripRequestsService {
 
   private async notifyDriversAboutTripRequest(tripRequest: TripRequest): Promise<void> {
     try {
-      // Get all active drivers with FCM tokens
+      // Get all active drivers with FCM tokens, excluding the passenger who created the request
       const drivers = await this.userRepository.find({
         where: {
           isDriver: true,
@@ -149,11 +149,13 @@ export class TripRequestsService {
         select: ['id', 'fcmToken', 'firstName'],
       });
 
-      // Filter drivers with valid FCM tokens
-      const driversWithTokens = drivers.filter((driver) => driver.fcmToken);
+      // Filter drivers: exclude the passenger who created the trip request and keep only those with valid FCM tokens
+      const driversWithTokens = drivers.filter(
+        (driver) => driver.fcmToken && driver.id !== tripRequest.passengerId,
+      );
 
       if (driversWithTokens.length === 0) {
-        this.logger.debug('No drivers with FCM tokens found, skipping notifications');
+        this.logger.debug('No drivers with FCM tokens found (excluding passenger), skipping notifications');
         return;
       }
 
@@ -174,7 +176,7 @@ export class TripRequestsService {
       };
 
       await this.notificationService.sendToMultiple(fcmTokens, title, body, data, driverIds);
-      this.logger.log(`Notified ${fcmTokens.length} drivers about trip request ${tripRequest.id}`);
+      this.logger.log(`Notified ${fcmTokens.length} drivers about trip request ${tripRequest.id} (excluded passenger ${tripRequest.passengerId})`);
     } catch (error) {
       this.logger.error(`Error notifying drivers about trip request ${tripRequest.id}: ${error.message}`, error.stack);
       // Don't throw error, just log it - trip request creation should succeed even if notification fails

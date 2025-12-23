@@ -53,7 +53,7 @@ export class UsersController {
   @SensitiveThrottle(5, 60000)
   @UseInterceptors(
     FileFieldsInterceptor([
-      { name: 'cniFront', maxCount: 1 },
+      { name: 'cniFront', maxCount: 2 }, // Allow 1 or 2 CNI front photos
       { name: 'cniBack', maxCount: 1 },
       { name: 'selfie', maxCount: 1 },
     ]),
@@ -64,7 +64,11 @@ export class UsersController {
       type: 'object',
       properties: {
         // documentNumber: { type: 'string', required: false },
-        cniFront: { type: 'string', format: 'binary' },
+        cniFront: { 
+          type: 'array',
+          items: { type: 'string', format: 'binary' },
+          description: '1 or 2 photos of CNI front (recto)',
+        },
         cniBack: { type: 'string', format: 'binary' },
         selfie: { type: 'string', format: 'binary' },
       },
