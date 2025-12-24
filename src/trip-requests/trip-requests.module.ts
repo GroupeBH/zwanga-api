@@ -9,6 +9,8 @@ import { User } from '../users/entities/user.entity';
 import { Vehicle } from '../vehicles/entities/vehicle.entity';
 import { CommonModule } from '../common/common.module';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { TripsModule } from '../trips/trips.module';
+import { BookingsModule } from '../bookings/bookings.module';
 
 @Module({
   imports: [
@@ -16,6 +18,8 @@ import { NotificationsModule } from '../notifications/notifications.module';
     ScheduleModule,
     CommonModule,
     NotificationsModule,
+    TripsModule,
+    BookingsModule,
   ],
   controllers: [TripRequestsController],
   providers: [TripRequestsService],
