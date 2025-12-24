@@ -108,6 +108,14 @@ export class TripsController {
     return this.tripsService.update(id, req.user.userId, updateTripDto);
   }
 
+  @Put(':id/start')
+  @Auth()
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({ summary: 'Start a trip' })
+  async startTrip(@Request() req, @Param('id') id: string) {
+    return this.tripsService.startTrip(id, req.user.userId);
+  }
+
   @Delete(':id')
   @Auth()
   @SensitiveThrottle(10, 60000)

@@ -466,6 +466,152 @@ export class TripsService {
 
     this.logger.log(`Trip ${id} cancelled successfully`);
   }
+
+  async startTrip(tripId: string, driverId: string): Promise<SanitizedTrip> {
+    this.logger.log(`Starting trip ${tripId} by driver ${driverId}`);
+    
+    const trip = await this.tripRepository.findOne({
+      where: { id: tripId, driverId },
+      relations: ['bookings', 'bookings.passenger', 'driver'],
+    });
+
+    if (!trip) {
+      this.logger.warn(`Trip start failed: Trip ${tripId} not found for driver ${driverId}`);
+      throw new NotFoundException('Trip not found or you are not the driver');
+    }
+
+    if (trip.status !== TripStatus.PENDING) {
+      this.logger.warn(`Trip start failed: Trip ${tripId} is not in PENDING status (current: ${trip.status})`);
+      throw new BadRequestException(`Cannot start trip. Current status: ${trip.status}`);
+    }
+
+    // Calculate total accepted seats
+    const acceptedBookings = trip.bookings?.filter(
+      (booking) => booking.status === BookingStatus.ACCEPTED,
+    ) || [];
+    const totalAcceptedSeats = acceptedBookings.reduce(
+      (sum, booking) => sum + booking.numberOfSeats,
+      0,
+    );
+    const hasAvailableSeats = trip.availableSeats > 0;
+
+    // Update trip status to ACTIVE
+    trip.status = TripStatus.ACTIVE;
+    await this.tripRepository.save(trip);
+
+    // Invalidate cache
+    await this.cacheService.del(CacheService.getTripKey(tripId));
+    await this.cacheService.del(CacheService.getTripsListKey());
+    await this.cacheService.del(CacheService.getTripsListKey('all'));
+
+    this.logger.log(`Trip ${tripId} started successfully. Available seats: ${trip.availableSeats}, Accepted bookings: ${acceptedBookings.length}`);
+
+    // Notify users based on seat availability
+    if (hasAvailableSeats) {
+      // Notify all active users (except driver) about available seats
+      await this.notifyNearbyUsersAboutTripStart(trip);
+    } else {
+      // Notify only passengers who have booked
+      await this.notifyBookedPassengersAboutTripStart(trip, acceptedBookings);
+    }
+
+    return this.findOne(tripId);
+  }
+
+  private async notifyNearbyUsersAboutTripStart(trip: Trip): Promise<void> {
+    try {
+      this.logger.log(`Notifying nearby users about trip ${trip.id} start (${trip.availableSeats} seats available)`);
+      
+      // Get all active users with FCM tokens (except the driver)
+      const users = await this.userRepository.find({
+        where: {
+          isActive: true,
+        },
+        select: ['id', 'fcmToken', 'firstName'],
+      });
+
+      // Filter out driver and users without FCM tokens
+      const usersToNotify = users.filter(
+        (user) => user.id !== trip.driverId && user.fcmToken,
+      );
+
+      if (usersToNotify.length === 0) {
+        this.logger.debug('No users to notify about trip start');
+        return;
+      }
+
+      const fcmTokens = usersToNotify.map((user) => user.fcmToken!);
+      const userIds = usersToNotify.map((user) => user.id);
+
+      const title = '🚗 Trajet disponible maintenant';
+      const body = `Un trajet vient de démarrer : ${trip.departureLocation} → ${trip.arrivalLocation} (${trip.availableSeats} place${trip.availableSeats > 1 ? 's' : ''} disponible${trip.availableSeats > 1 ? 's' : ''})`;
+
+      const data = {
+        type: 'trip_started',
+        tripId: trip.id,
+        departureLocation: trip.departureLocation,
+        arrivalLocation: trip.arrivalLocation,
+        availableSeats: trip.availableSeats.toString(),
+        pricePerSeat: trip.pricePerSeat.toString(),
+        departureDate: trip.departureDate.toISOString(),
+      };
+
+      await this.notificationService.sendToMultiple(fcmTokens, title, body, data, userIds);
+      this.logger.log(`Notified ${fcmTokens.length} users about trip ${trip.id} start`);
+    } catch (error) {
+      this.logger.error(`Error notifying nearby users about trip start: ${error.message}`, error.stack);
+    }
+  }
+
+  private async notifyBookedPassengersAboutTripStart(
+    trip: Trip,
+    acceptedBookings: Booking[],
+  ): Promise<void> {
+    try {
+      this.logger.log(`Notifying ${acceptedBookings.length} booked passengers about trip ${trip.id} start`);
+
+      if (acceptedBookings.length === 0) {
+        this.logger.debug('No accepted bookings to notify');
+        return;
+      }
+
+      // Get passengers with FCM tokens
+      const passengerIds = acceptedBookings.map((booking) => booking.passengerId);
+      const passengers = await this.userRepository.find({
+        where: {
+          id: In(passengerIds),
+        },
+        select: ['id', 'fcmToken', 'firstName'],
+      });
+
+      const passengersWithTokens = passengers.filter((passenger) => passenger.fcmToken);
+
+      if (passengersWithTokens.length === 0) {
+        this.logger.debug('No passengers with FCM tokens to notify');
+        return;
+      }
+
+      const fcmTokens = passengersWithTokens.map((passenger) => passenger.fcmToken!);
+      const userIds = passengersWithTokens.map((passenger) => passenger.id);
+
+      const title = '🚗 Votre trajet a démarré';
+      const body = `Le trajet ${trip.departureLocation} → ${trip.arrivalLocation} vient de démarrer. Préparez-vous !`;
+
+      const data = {
+        type: 'trip_started',
+        tripId: trip.id,
+        departureLocation: trip.departureLocation,
+        arrivalLocation: trip.arrivalLocation,
+        departureDate: trip.departureDate.toISOString(),
+      };
+
+      await this.notificationService.sendToMultiple(fcmTokens, title, body, data, userIds);
+      this.logger.log(`Notified ${fcmTokens.length} passengers about trip ${trip.id} start`);
+    } catch (error) {
+      this.logger.error(`Error notifying booked passengers about trip start: ${error.message}`, error.stack);
+    }
+  }
+
   private buildPointFromCoordinates([longitude, latitude]: [number, number]): Point {
     return {
       type: 'Point',

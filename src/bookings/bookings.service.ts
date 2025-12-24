@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException, BadRequestException, Logger, ForbiddenException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import type { Point } from 'typeorm';
 import { Booking, BookingStatus } from './entities/booking.entity';
 import { Trip, TripStatus } from '../trips/entities/trip.entity';
 import { User } from '../users/entities/user.entity';
@@ -80,9 +81,32 @@ export class BookingsService {
       throw new BadRequestException('You already have a pending booking for this trip');
     }
 
+    // Build passenger destination point if coordinates are provided
+    let passengerDestinationPoint: Point | null = null;
+    if (createBookingDto.passengerDestinationCoordinates) {
+      passengerDestinationPoint = {
+        type: 'Point',
+        coordinates: [
+          Number(createBookingDto.passengerDestinationCoordinates.longitude),
+          Number(createBookingDto.passengerDestinationCoordinates.latitude),
+        ],
+      };
+    }
+
+    // Use trip's arrival location as default if passenger destination is not specified
+    const passengerDestination = createBookingDto.passengerDestination || trip.arrivalLocation;
+    
+    // If no coordinates provided but destination is specified, use trip's arrival point
+    if (!passengerDestinationPoint && createBookingDto.passengerDestination) {
+      passengerDestinationPoint = trip.arrivalPoint;
+    }
+
     const booking = this.bookingRepository.create({
-      ...createBookingDto,
+      tripId: createBookingDto.tripId,
       passengerId,
+      numberOfSeats: createBookingDto.numberOfSeats,
+      passengerDestination: passengerDestination || null,
+      passengerDestinationPoint,
     });
 
     const savedBooking = await this.bookingRepository.save(booking);
@@ -438,14 +462,21 @@ export class BookingsService {
 
       const passenger = await this.userRepository.findOne({ where: { id: passengerId } });
       const passengerName = passenger ? `${passenger.firstName} ${passenger.lastName}` : 'Un passager';
+      
+      // Build destination message
+      const destination = booking.passengerDestination || trip.arrivalLocation;
+      const destinationMessage = booking.passengerDestination && booking.passengerDestination !== trip.arrivalLocation
+        ? `${trip.departureLocation} → ${destination} (destination personnalisée)`
+        : `${trip.departureLocation} → ${trip.arrivalLocation}`;
 
       await this.notificationService.sendNotification(
         driver.fcmToken,
         'Nouvelle réservation',
-        `${passengerName} a réservé ${booking.numberOfSeats} place(s) sur votre trajet ${trip.departureLocation} → ${trip.arrivalLocation}`,
+        `${passengerName} a réservé ${booking.numberOfSeats} place(s) sur votre trajet ${destinationMessage}`,
         {
           bookingId: booking.id,
           tripId: trip.id,
+          passengerDestination: destination,
         },
         trip.driverId,
       );

@@ -1,3 +1,4 @@
+import type { Point } from 'typeorm';
 import {
   Entity,
   PrimaryGeneratedColumn,
@@ -44,6 +45,18 @@ export class Booking {
 
   @Column({ type: 'int', default: 1 })
   numberOfSeats: number;
+
+  @Column({ type: 'varchar', nullable: true })
+  passengerDestination: string | null;
+
+  @Index('IDX_bookings_passenger_destination_point', { spatial: true })
+  @Column({
+    type: 'geography',
+    spatialFeatureType: 'Point',
+    srid: 4326,
+    nullable: true,
+  })
+  passengerDestinationPoint: Point | null;
 
   @Column({
     type: 'enum',
