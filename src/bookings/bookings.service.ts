@@ -5,7 +5,7 @@ import type { Point } from 'typeorm';
 import { Booking, BookingStatus } from './entities/booking.entity';
 import { Trip, TripStatus } from '../trips/entities/trip.entity';
 import { User } from '../users/entities/user.entity';
-import { CreateBookingDto, UpdateBookingStatusDto } from './dto/booking.dto';
+import { CreateBookingDto, UpdateBookingStatusDto, ReportBookingProblemDto } from './dto/booking.dto';
 import { CacheService } from '../common/services/cache.service';
 import { NotificationService } from '../notifications/notifications.service';
 import { ChatService } from '../chat/chat.service';
@@ -482,6 +482,322 @@ export class BookingsService {
       );
     } catch (error) {
       this.logger.error(`Failed to send booking notification: ${error.message}`, error.stack);
+    }
+  }
+
+  async confirmPickup(bookingId: string, driverId: string): Promise<Booking> {
+    this.logger.log(`Driver ${driverId} confirming pickup for booking ${bookingId}`);
+
+    const booking = await this.bookingRepository.findOne({
+      where: { id: bookingId },
+      relations: ['trip', 'trip.driver', 'passenger'],
+    });
+
+    if (!booking) {
+      throw new NotFoundException('Booking not found');
+    }
+
+    if (booking.trip.driverId !== driverId) {
+      throw new ForbiddenException('You are not the driver for this trip');
+    }
+
+    if (booking.status !== BookingStatus.ACCEPTED) {
+      throw new BadRequestException('Booking must be accepted before confirming pickup');
+    }
+
+    if (booking.pickedUp) {
+      throw new BadRequestException('Passenger already marked as picked up');
+    }
+
+    booking.pickedUp = true;
+    booking.pickedUpAt = new Date();
+    await this.bookingRepository.save(booking);
+
+    // Notify passenger
+    await this.notifyPassengerAboutPickupConfirmation(booking);
+
+    // Invalidate cache
+    await this.cacheService.del(CacheService.getBookingsByTripKey(booking.tripId));
+    await this.cacheService.del(CacheService.getBookingsByPassengerKey(booking.passengerId));
+
+    this.logger.log(`Pickup confirmed for booking ${bookingId}`);
+    return booking;
+  }
+
+  async confirmPickupByPassenger(bookingId: string, passengerId: string): Promise<Booking> {
+    this.logger.log(`Passenger ${passengerId} confirming pickup for booking ${bookingId}`);
+
+    const booking = await this.bookingRepository.findOne({
+      where: { id: bookingId, passengerId },
+      relations: ['trip', 'trip.driver', 'passenger'],
+    });
+
+    if (!booking) {
+      throw new NotFoundException('Booking not found');
+    }
+
+    if (!booking.pickedUp) {
+      throw new BadRequestException('Driver must confirm pickup first');
+    }
+
+    if (booking.pickedUpConfirmedByPassenger) {
+      throw new BadRequestException('Pickup already confirmed by passenger');
+    }
+
+    booking.pickedUpConfirmedByPassenger = true;
+    booking.pickedUpConfirmedAt = new Date();
+    await this.bookingRepository.save(booking);
+
+    // Notify driver
+    await this.notifyDriverAboutPickupConfirmation(booking);
+
+    // Invalidate cache
+    await this.cacheService.del(CacheService.getBookingsByTripKey(booking.tripId));
+    await this.cacheService.del(CacheService.getBookingsByPassengerKey(booking.passengerId));
+
+    this.logger.log(`Pickup confirmed by passenger for booking ${bookingId}`);
+    return booking;
+  }
+
+  async confirmDropoff(bookingId: string, driverId: string): Promise<Booking> {
+    this.logger.log(`Driver ${driverId} confirming dropoff for booking ${bookingId}`);
+
+    const booking = await this.bookingRepository.findOne({
+      where: { id: bookingId },
+      relations: ['trip', 'trip.driver', 'passenger'],
+    });
+
+    if (!booking) {
+      throw new NotFoundException('Booking not found');
+    }
+
+    if (booking.trip.driverId !== driverId) {
+      throw new ForbiddenException('You are not the driver for this trip');
+    }
+
+    if (!booking.pickedUp || !booking.pickedUpConfirmedByPassenger) {
+      throw new BadRequestException('Passenger must be picked up and confirmed before dropoff');
+    }
+
+    if (booking.droppedOff) {
+      throw new BadRequestException('Passenger already marked as dropped off');
+    }
+
+    booking.droppedOff = true;
+    booking.droppedOffAt = new Date();
+    await this.bookingRepository.save(booking);
+
+    // Notify passenger
+    await this.notifyPassengerAboutDropoffConfirmation(booking);
+
+    // Invalidate cache
+    await this.cacheService.del(CacheService.getBookingsByTripKey(booking.tripId));
+    await this.cacheService.del(CacheService.getBookingsByPassengerKey(booking.passengerId));
+
+    this.logger.log(`Dropoff confirmed for booking ${bookingId}`);
+    return booking;
+  }
+
+  async confirmDropoffByPassenger(bookingId: string, passengerId: string): Promise<Booking> {
+    this.logger.log(`Passenger ${passengerId} confirming dropoff for booking ${bookingId}`);
+
+    const booking = await this.bookingRepository.findOne({
+      where: { id: bookingId, passengerId },
+      relations: ['trip', 'trip.driver', 'passenger'],
+    });
+
+    if (!booking) {
+      throw new NotFoundException('Booking not found');
+    }
+
+    if (!booking.droppedOff) {
+      throw new BadRequestException('Driver must confirm dropoff first');
+    }
+
+    if (booking.droppedOffConfirmedByPassenger) {
+      throw new BadRequestException('Dropoff already confirmed by passenger');
+    }
+
+    booking.droppedOffConfirmedByPassenger = true;
+    booking.droppedOffConfirmedAt = new Date();
+    
+    // Mark booking as completed
+    booking.status = BookingStatus.COMPLETED;
+    
+    await this.bookingRepository.save(booking);
+
+    // Notify driver
+    await this.notifyDriverAboutDropoffConfirmation(booking);
+
+    // Invalidate cache
+    await this.cacheService.del(CacheService.getBookingsByTripKey(booking.tripId));
+    await this.cacheService.del(CacheService.getBookingsByPassengerKey(booking.passengerId));
+
+    this.logger.log(`Dropoff confirmed by passenger for booking ${bookingId}`);
+    return booking;
+  }
+
+  async reportBookingProblem(
+    bookingId: string,
+    userId: string,
+    reportDto: ReportBookingProblemDto,
+  ): Promise<any> {
+    this.logger.log(`User ${userId} reporting problem for booking ${bookingId}`);
+
+    const booking = await this.bookingRepository.findOne({
+      where: { id: bookingId },
+      relations: ['trip', 'passenger'],
+    });
+
+    if (!booking) {
+      throw new NotFoundException('Booking not found');
+    }
+
+    // Verify user is either driver or passenger
+    const isDriver = booking.trip.driverId === userId;
+    const isPassenger = booking.passengerId === userId;
+
+    if (!isDriver && !isPassenger) {
+      throw new ForbiddenException('You are not authorized to report problems for this booking');
+    }
+
+    // Determine reported user (opposite party)
+    const reportedUserId = isDriver ? booking.passengerId : booking.trip.driverId;
+
+    // Create report using SafetyService
+    const report = await this.safetyService.createUserReport(userId, {
+      reportedUserId,
+      reason: reportDto.reason,
+      description: reportDto.description,
+      tripId: booking.tripId,
+      bookingId: booking.id,
+    });
+
+    this.logger.log(`Problem reported for booking ${bookingId} by user ${userId}`);
+    return report;
+  }
+
+  private async notifyPassengerAboutPickupConfirmation(booking: Booking): Promise<void> {
+    try {
+      const passenger = await this.userRepository.findOne({
+        where: { id: booking.passengerId },
+        select: ['id', 'fcmToken', 'firstName'],
+      });
+
+      if (!passenger?.fcmToken) {
+        this.logger.debug(`Passenger ${booking.passengerId} has no FCM token, skipping notification`);
+        return;
+      }
+
+      await this.notificationService.sendNotification(
+        passenger.fcmToken,
+        '✅ Récupération confirmée',
+        `Le conducteur a confirmé votre récupération pour le trajet ${booking.trip.departureLocation} → ${booking.passengerDestination || booking.trip.arrivalLocation}. Veuillez confirmer également.`,
+        {
+          type: 'pickup_confirmed_by_driver',
+          bookingId: booking.id,
+          tripId: booking.tripId,
+        },
+        booking.passengerId,
+      );
+    } catch (error) {
+      this.logger.error(`Failed to notify passenger about pickup: ${error.message}`, error.stack);
+    }
+  }
+
+  private async notifyDriverAboutPickupConfirmation(booking: Booking): Promise<void> {
+    try {
+      const driver = await this.userRepository.findOne({
+        where: { id: booking.trip.driverId },
+        select: ['id', 'fcmToken', 'firstName'],
+      });
+
+      if (!driver?.fcmToken) {
+        this.logger.debug(`Driver ${booking.trip.driverId} has no FCM token, skipping notification`);
+        return;
+      }
+
+      const passenger = await this.userRepository.findOne({
+        where: { id: booking.passengerId },
+        select: ['firstName', 'lastName'],
+      });
+      const passengerName = passenger ? `${passenger.firstName} ${passenger.lastName}` : 'Le passager';
+
+      await this.notificationService.sendNotification(
+        driver.fcmToken,
+        '✅ Récupération confirmée',
+        `${passengerName} a confirmé la récupération pour le trajet ${booking.trip.departureLocation} → ${booking.passengerDestination || booking.trip.arrivalLocation}.`,
+        {
+          type: 'pickup_confirmed_by_passenger',
+          bookingId: booking.id,
+          tripId: booking.tripId,
+        },
+        booking.trip.driverId,
+      );
+    } catch (error) {
+      this.logger.error(`Failed to notify driver about pickup confirmation: ${error.message}`, error.stack);
+    }
+  }
+
+  private async notifyPassengerAboutDropoffConfirmation(booking: Booking): Promise<void> {
+    try {
+      const passenger = await this.userRepository.findOne({
+        where: { id: booking.passengerId },
+        select: ['id', 'fcmToken', 'firstName'],
+      });
+
+      if (!passenger?.fcmToken) {
+        this.logger.debug(`Passenger ${booking.passengerId} has no FCM token, skipping notification`);
+        return;
+      }
+
+      await this.notificationService.sendNotification(
+        passenger.fcmToken,
+        '✅ Dépose confirmée',
+        `Le conducteur a confirmé votre dépose pour le trajet ${booking.trip.departureLocation} → ${booking.passengerDestination || booking.trip.arrivalLocation}. Veuillez confirmer également.`,
+        {
+          type: 'dropoff_confirmed_by_driver',
+          bookingId: booking.id,
+          tripId: booking.tripId,
+        },
+        booking.passengerId,
+      );
+    } catch (error) {
+      this.logger.error(`Failed to notify passenger about dropoff: ${error.message}`, error.stack);
+    }
+  }
+
+  private async notifyDriverAboutDropoffConfirmation(booking: Booking): Promise<void> {
+    try {
+      const driver = await this.userRepository.findOne({
+        where: { id: booking.trip.driverId },
+        select: ['id', 'fcmToken', 'firstName'],
+      });
+
+      if (!driver?.fcmToken) {
+        this.logger.debug(`Driver ${booking.trip.driverId} has no FCM token, skipping notification`);
+        return;
+      }
+
+      const passenger = await this.userRepository.findOne({
+        where: { id: booking.passengerId },
+        select: ['firstName', 'lastName'],
+      });
+      const passengerName = passenger ? `${passenger.firstName} ${passenger.lastName}` : 'Le passager';
+
+      await this.notificationService.sendNotification(
+        driver.fcmToken,
+        '✅ Dépose confirmée',
+        `${passengerName} a confirmé la dépose pour le trajet ${booking.trip.departureLocation} → ${booking.passengerDestination || booking.trip.arrivalLocation}. La réservation est maintenant complétée.`,
+        {
+          type: 'dropoff_confirmed_by_passenger',
+          bookingId: booking.id,
+          tripId: booking.tripId,
+        },
+        booking.trip.driverId,
+      );
+    } catch (error) {
+      this.logger.error(`Failed to notify driver about dropoff confirmation: ${error.message}`, error.stack);
     }
   }
 

@@ -74,6 +74,30 @@ export class Booking {
   @Column({ type: 'timestamp', nullable: true })
   cancelledAt: Date | null;
 
+  @Column({ type: 'boolean', default: false })
+  pickedUp: boolean; // Driver a confirmé la récupération
+
+  @Column({ type: 'timestamp', nullable: true })
+  pickedUpAt: Date | null; // Date de récupération confirmée par le driver
+
+  @Column({ type: 'boolean', default: false })
+  pickedUpConfirmedByPassenger: boolean; // Passager a confirmé la récupération
+
+  @Column({ type: 'timestamp', nullable: true })
+  pickedUpConfirmedAt: Date | null; // Date de confirmation par le passager
+
+  @Column({ type: 'boolean', default: false })
+  droppedOff: boolean; // Driver a confirmé la dépose
+
+  @Column({ type: 'timestamp', nullable: true })
+  droppedOffAt: Date | null; // Date de dépose confirmée par le driver
+
+  @Column({ type: 'boolean', default: false })
+  droppedOffConfirmedByPassenger: boolean; // Passager a confirmé la dépose
+
+  @Column({ type: 'timestamp', nullable: true })
+  droppedOffConfirmedAt: Date | null; // Date de confirmation par le passager
+
   @CreateDateColumn()
   createdAt: Date;
 

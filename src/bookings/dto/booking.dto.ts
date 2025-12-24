@@ -1,7 +1,8 @@
-import { IsString, IsNotEmpty, IsNumber, IsOptional, IsEnum, Min, ValidateNested } from 'class-validator';
+import { IsString, IsNotEmpty, IsNumber, IsOptional, IsEnum, Min, ValidateNested, IsBoolean } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import { BookingStatus } from '../entities/booking.entity';
+import { ReportReason } from '../../safety/entities/user-report.entity';
 
 class PassengerDestinationCoordinatesDto {
   @ApiProperty({ description: 'Latitude de la destination du passager', example: -4.3276 })
@@ -64,5 +65,29 @@ export class RejectBookingDto {
   @IsString()
   @IsNotEmpty()
   reason: string;
+}
+
+export class ConfirmPickupDto {
+  @ApiProperty({ description: 'Confirmer la récupération du passager', example: true })
+  @IsOptional()
+  confirmed?: boolean; // Pour compatibilité, mais toujours true quand appelé
+}
+
+export class ConfirmDropoffDto {
+  @ApiProperty({ description: 'Confirmer la dépose du passager', example: true })
+  @IsOptional()
+  confirmed?: boolean; // Pour compatibilité, mais toujours true quand appelé
+}
+
+export class ReportBookingProblemDto {
+  @ApiProperty({ description: 'Raison du signalement', enum: ReportReason })
+  @IsEnum(ReportReason)
+  @IsNotEmpty()
+  reason: ReportReason;
+
+  @ApiProperty({ description: 'Description détaillée du problème' })
+  @IsString()
+  @IsNotEmpty()
+  description: string;
 }
 

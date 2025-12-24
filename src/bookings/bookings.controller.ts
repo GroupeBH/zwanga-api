@@ -9,7 +9,7 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { BookingsService } from './bookings.service';
-import { CreateBookingDto, UpdateBookingStatusDto, RejectBookingDto } from './dto/booking.dto';
+import { CreateBookingDto, UpdateBookingStatusDto, RejectBookingDto, ConfirmPickupDto, ConfirmDropoffDto, ReportBookingProblemDto } from './dto/booking.dto';
 import { SendWhatsAppNotificationDto } from './dto/send-whatsapp-notification.dto';
 import { Auth } from '../auth/decorators/auth.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -124,6 +124,52 @@ export class BookingsController {
       req.user.userId,
       sendDto,
     );
+  }
+
+  @Put(':id/confirm-pickup')
+  @Auth()
+  @Roles(UserRole.DRIVER)
+  @SensitiveThrottle(20, 60000)
+  @ApiOperation({ summary: 'Confirm passenger pickup (driver only)' })
+  async confirmPickup(@Request() req, @Param('id') id: string, @Body() dto: ConfirmPickupDto) {
+    return this.bookingsService.confirmPickup(id, req.user.userId);
+  }
+
+  @Put(':id/confirm-pickup-passenger')
+  @Auth()
+  @SensitiveThrottle(20, 60000)
+  @ApiOperation({ summary: 'Confirm pickup by passenger' })
+  async confirmPickupByPassenger(@Request() req, @Param('id') id: string, @Body() dto: ConfirmPickupDto) {
+    return this.bookingsService.confirmPickupByPassenger(id, req.user.userId);
+  }
+
+  @Put(':id/confirm-dropoff')
+  @Auth()
+  @Roles(UserRole.DRIVER)
+  @SensitiveThrottle(20, 60000)
+  @ApiOperation({ summary: 'Confirm passenger dropoff (driver only)' })
+  async confirmDropoff(@Request() req, @Param('id') id: string, @Body() dto: ConfirmDropoffDto) {
+    return this.bookingsService.confirmDropoff(id, req.user.userId);
+  }
+
+  @Put(':id/confirm-dropoff-passenger')
+  @Auth()
+  @SensitiveThrottle(20, 60000)
+  @ApiOperation({ summary: 'Confirm dropoff by passenger' })
+  async confirmDropoffByPassenger(@Request() req, @Param('id') id: string, @Body() dto: ConfirmDropoffDto) {
+    return this.bookingsService.confirmDropoffByPassenger(id, req.user.userId);
+  }
+
+  @Post(':id/report-problem')
+  @Auth()
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({ summary: 'Report a problem related to a booking (driver or passenger)' })
+  async reportProblem(
+    @Request() req,
+    @Param('id') id: string,
+    @Body() reportDto: ReportBookingProblemDto,
+  ) {
+    return this.bookingsService.reportBookingProblem(id, req.user.userId, reportDto);
   }
 }
 
