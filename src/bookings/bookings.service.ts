@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException, BadRequestException, Logger, ForbiddenException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { Repository, In } from 'typeorm';
 import type { Point } from 'typeorm';
 import { Booking, BookingStatus } from './entities/booking.entity';
 import { Trip, TripStatus } from '../trips/entities/trip.entity';
@@ -52,9 +52,13 @@ export class BookingsService {
       throw new BadRequestException('Cannot book your own trip');
     }
 
-    if (trip.status !== TripStatus.PENDING) {
-      this.logger.warn(`Booking creation failed: Trip ${createBookingDto.tripId} is not available (status: ${trip.status})`);
-      throw new BadRequestException('Trip is not available for booking');
+    // Allow booking for PENDING trips OR ACTIVE trips with available seats
+    const isPendingTrip = trip.status === TripStatus.PENDING;
+    const isActiveTripWithSeats = trip.status === TripStatus.ACTIVE && trip.availableSeats > 0;
+    
+    if (!isPendingTrip && !isActiveTripWithSeats) {
+      this.logger.warn(`Booking creation failed: Trip ${createBookingDto.tripId} is not available for booking (status: ${trip.status}, availableSeats: ${trip.availableSeats})`);
+      throw new BadRequestException('Trip is not available for booking. Only pending trips or active trips with available seats can be booked.');
     }
 
     // Vérifier les places disponibles directement (les places sont déduites immédiatement à la création)
@@ -67,18 +71,26 @@ export class BookingsService {
       );
     }
 
-    // Check if user already has a pending booking for this trip
+    // Check if user already has a pending or accepted booking for this trip
+    // For ACTIVE trips, also check ACCEPTED bookings to prevent double booking
+    const statusesToCheck = trip.status === TripStatus.ACTIVE
+      ? [BookingStatus.PENDING, BookingStatus.ACCEPTED]
+      : [BookingStatus.PENDING];
+    
     const existingBooking = await this.bookingRepository.findOne({
       where: {
         tripId: createBookingDto.tripId,
         passengerId,
-        status: BookingStatus.PENDING,
+        status: In(statusesToCheck),
       },
     });
 
     if (existingBooking) {
-      this.logger.warn(`Booking creation failed: Passenger ${passengerId} already has pending booking for trip ${createBookingDto.tripId}`);
-      throw new BadRequestException('You already have a pending booking for this trip');
+      const statusText = trip.status === TripStatus.ACTIVE 
+        ? 'pending or accepted' 
+        : 'pending';
+      this.logger.warn(`Booking creation failed: Passenger ${passengerId} already has ${statusText} booking for trip ${createBookingDto.tripId}`);
+      throw new BadRequestException(`You already have a ${statusText} booking for this trip`);
     }
 
     // Build passenger destination point if coordinates are provided

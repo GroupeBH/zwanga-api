@@ -102,7 +102,7 @@ export class TripRequest {
   @Column({ type: 'timestamp', nullable: true })
   selectedAt: Date | null; // Date de sélection du driver
 
-  @Column({ nullable: true })
+  @Column({ type: 'varchar', nullable: true })
   tripId: string | null; // ID du trip créé à partir de cette demande
 
   @Column({ type: 'boolean', default: false })

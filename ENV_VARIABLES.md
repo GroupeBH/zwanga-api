@@ -119,6 +119,17 @@ KECCEL_FROM=GUEST
 KECCEL_OTP_URL_GENERATE=https://api.keccel.com/otp/generate.asp
 # OTP Validate API URL (optional, defaults to Keccel API)
 KECCEL_OTP_URL_VALIDATE=https://api.keccel.com/otp/validate.asp
+
+# ============================================
+# Google Maps API
+# ============================================
+# API key for Google Maps services (Directions, Places, Geocoding)
+# Get your API key from: https://console.cloud.google.com/google/maps-apis
+# Make sure to enable the following APIs:
+# - Directions API
+# - Places API
+# - Geocoding API
+GOOGLE_MAPS_API_KEY=
 ```
 
 ## 🔐 Durées de validité des tokens JWT

@@ -6,7 +6,7 @@ import {
   ForbiddenException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, Point, LessThan, MoreThan, In, Between } from 'typeorm';
+import { Repository, Point, LessThan, MoreThan, In, Between, Brackets } from 'typeorm';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { Trip, TripStatus } from './entities/trip.entity';
 import { User, UserRole } from '../users/entities/user.entity';
@@ -164,19 +164,27 @@ export class TripsService {
     }
 
     const now = new Date();
-    const trips = await this.tripRepository.find({
-      relations: ['driver', 'vehicle', 'bookings', 'bookings.passenger'],
-      where: { 
-        status: TripStatus.PENDING,
-        departureDate: MoreThan(now), // Only show trips with future departure dates
-      },
-      order: { departureDate: 'ASC' },
-    });
+    // Include PENDING trips with future departure dates OR ACTIVE trips with available seats
+    const trips = await this.tripRepository
+      .createQueryBuilder('trip')
+      .leftJoinAndSelect('trip.driver', 'driver')
+      .leftJoinAndSelect('trip.vehicle', 'vehicle')
+      .leftJoinAndSelect('trip.bookings', 'bookings')
+      .leftJoinAndSelect('bookings.passenger', 'bookingPassenger')
+      .where('(trip.status = :pendingStatus AND trip.departureDate > :now)', {
+        pendingStatus: TripStatus.PENDING,
+        now,
+      })
+      .orWhere('(trip.status = :activeStatus AND trip.availableSeats > 0)', {
+        activeStatus: TripStatus.ACTIVE,
+      })
+      .orderBy('trip.departureDate', 'ASC')
+      .getMany();
 
     const sanitized = await Promise.all(trips.map((trip) => this.sanitizeTrip(trip)));
 
     await this.cacheService.set(cacheKey, sanitized, this.CACHE_TTL);
-    this.logger.log(`Fetched ${trips.length} trips from database`);
+    this.logger.log(`Fetched ${trips.length} trips from database (${trips.filter(t => t.status === TripStatus.PENDING).length} pending, ${trips.filter(t => t.status === TripStatus.ACTIVE).length} active)`);
     return sanitized;
   }
 
@@ -189,8 +197,19 @@ export class TripsService {
       .leftJoinAndSelect('trip.driver', 'driver')
       .leftJoinAndSelect('trip.bookings', 'bookings')
       .leftJoinAndSelect('bookings.passenger', 'bookingPassenger')
-      .where('trip.status = :status', { status: TripStatus.PENDING })
-      .andWhere('trip.departureDate > :now', { now }); // Only show trips with future departure dates
+      .where(
+        new Brackets((qb) => {
+          qb.where('trip.status = :pendingStatus', { pendingStatus: TripStatus.PENDING })
+            .andWhere('trip.departureDate > :now', { now })
+            .orWhere(
+              new Brackets((qb2) => {
+                qb2
+                  .where('trip.status = :activeStatus', { activeStatus: TripStatus.ACTIVE })
+                  .andWhere('trip.availableSeats > 0');
+              }),
+            );
+        }),
+      );
 
     if (searchTripsDto.departureDate) {
       const date = new Date(searchTripsDto.departureDate);
