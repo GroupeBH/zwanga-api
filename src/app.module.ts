@@ -30,6 +30,7 @@ import { TrackingModule } from './tracking/tracking.module';
 import { KeccelOtpModule } from './keccel-otp/keccel-otp.module';
 import { TripRequestsModule } from './trip-requests/trip-requests.module';
 import { SafetyModule } from './safety/safety.module';
+import { GoogleMapsModule } from './google-maps/google-maps.module';
 
 // Entities
 import { User } from './users/entities/user.entity';
@@ -150,6 +151,7 @@ const typeOrmEntities = [
     KeccelOtpModule,
     TripRequestsModule,
     SafetyModule,
+    GoogleMapsModule,
   ],
   controllers: [AppController],
   providers: [

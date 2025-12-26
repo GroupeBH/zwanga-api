@@ -15,6 +15,9 @@ import { Vehicle } from '../vehicles/entities/vehicle.entity';
 import { CreateTripRequestDto, CreateDriverOfferDto, AcceptDriverOfferDto } from './dto/trip-request.dto';
 import { FileUploadService } from '../common/services/file-upload.service';
 import { NotificationService } from '../notifications/notifications.service';
+import { TripsService } from '../trips/trips.service';
+import { BookingsService } from '../bookings/bookings.service';
+import { BookingStatus } from '../bookings/entities/booking.entity';
 
 export interface SanitizedUser {
   id: string;
@@ -76,6 +79,7 @@ export interface SanitizedTripRequest {
   selectedVehicle: SanitizedVehicle | null;
   selectedPricePerSeat: number | null;
   selectedAt: Date | null;
+  tripId: string | null;
   driverOffers: SanitizedDriverOffer[];
   createdAt: Date;
   updatedAt: Date;
@@ -96,6 +100,8 @@ export class TripRequestsService {
     private vehicleRepository: Repository<Vehicle>,
     private fileUploadService: FileUploadService,
     private notificationService: NotificationService,
+    private tripsService: TripsService,
+    private bookingsService: BookingsService,
   ) {}
 
   async create(passengerId: string, createTripRequestDto: CreateTripRequestDto): Promise<SanitizedTripRequest> {
@@ -475,6 +481,93 @@ export class TripRequestsService {
     return this.findOne(tripRequestId, passengerId);
   }
 
+  async startTripFromRequest(tripRequestId: string, driverId: string) {
+    this.logger.log(`Starting trip from request ${tripRequestId} by driver ${driverId}`);
+
+    const tripRequest = await this.tripRequestRepository.findOne({
+      where: { id: tripRequestId },
+      relations: ['passenger', 'selectedDriver', 'selectedVehicle'],
+    });
+
+    if (!tripRequest) {
+      throw new NotFoundException('Trip request not found');
+    }
+
+    if (tripRequest.status !== TripRequestStatus.DRIVER_SELECTED) {
+      throw new BadRequestException('Un driver doit être sélectionné avant de lancer le trajet');
+    }
+
+    if (tripRequest.selectedDriverId !== driverId) {
+      throw new ForbiddenException('Vous n\'êtes pas le driver sélectionné pour cette demande');
+    }
+
+    if (tripRequest.tripId) {
+      throw new BadRequestException('Un trajet a déjà été créé à partir de cette demande');
+    }
+
+    // Get the accepted offer to get the proposed departure date
+    const acceptedOffer = await this.driverOfferRepository.findOne({
+      where: {
+        tripRequestId,
+        driverId,
+        status: DriverOfferStatus.ACCEPTED,
+      },
+    });
+
+    if (!acceptedOffer) {
+      throw new NotFoundException('Offre acceptée non trouvée');
+    }
+
+    // Get coordinates
+    const departureCoordinates = this.pointToCoordinates(tripRequest.departurePoint);
+    const arrivalCoordinates = this.pointToCoordinates(tripRequest.arrivalPoint);
+
+    if (!departureCoordinates || !arrivalCoordinates) {
+      throw new BadRequestException('Les coordonnées de départ ou d\'arrivée sont manquantes');
+    }
+
+    // Create Trip from TripRequest
+    const trip = await this.tripsService.create(driverId, {
+      departureLocation: tripRequest.departureLocation,
+      arrivalLocation: tripRequest.arrivalLocation,
+      departureCoordinates,
+      arrivalCoordinates,
+      departureDate: acceptedOffer.proposedDepartureDate.toISOString(),
+      availableSeats: acceptedOffer.availableSeats,
+      pricePerSeat: tripRequest.selectedPricePerSeat || 0,
+      isFree: (tripRequest.selectedPricePerSeat || 0) === 0,
+      vehicleId: tripRequest.selectedVehicleId || undefined,
+      description: tripRequest.description || undefined,
+    });
+
+    // Create booking for the passenger automatically (ACCEPTED status)
+    await this.bookingsService.create(tripRequest.passengerId, {
+      tripId: trip.id,
+      numberOfSeats: tripRequest.numberOfSeats,
+    });
+
+    // Accept the booking automatically
+    const bookings = await this.bookingsService.findAllByTrip(trip.id, driverId);
+    const passengerBooking = bookings.find((b) => b.passengerId === tripRequest.passengerId);
+    if (passengerBooking) {
+      await this.bookingsService.acceptBooking(passengerBooking.id, driverId);
+    }
+
+    // Update trip request with tripId
+    tripRequest.tripId = trip.id;
+    await this.tripRequestRepository.save(tripRequest);
+
+    // Start the trip
+    const startedTrip = await this.tripsService.startTrip(trip.id, driverId);
+
+    this.logger.log(`Trip ${trip.id} started from request ${tripRequestId}`);
+
+    return {
+      trip: startedTrip,
+      tripRequest: await this.findOne(tripRequestId, tripRequest.passengerId),
+    };
+  }
+
   async cancel(passengerId: string, tripRequestId: string): Promise<void> {
     this.logger.log(`Cancelling trip request ${tripRequestId} by passenger ${passengerId}`);
 
@@ -654,6 +747,7 @@ export class TripRequestsService {
       selectedVehicle: await this.sanitizeVehicle(tripRequest.selectedVehicle || undefined),
       selectedPricePerSeat: tripRequest.selectedPricePerSeat ? Number(tripRequest.selectedPricePerSeat) : null,
       selectedAt: tripRequest.selectedAt,
+      tripId: tripRequest.tripId,
       driverOffers: tripRequest.driverOffers
         ? await Promise.all(tripRequest.driverOffers.map((offer) => this.sanitizeDriverOffer(offer)))
         : [],

@@ -1,6 +1,7 @@
 import {
   Controller,
   Get,
+  Put,
   Post,
   Body,
   Param,
@@ -107,6 +108,18 @@ export class TripRequestsController {
     @Body() acceptDto: AcceptDriverOfferDto,
   ) {
     return this.tripRequestsService.acceptDriverOffer(req.user.userId, tripRequestId, acceptDto);
+  }
+
+  @Put(':id/start-trip')
+  @Auth()
+  @SensitiveThrottle(5, 60000)
+  @ApiOperation({
+    summary: 'Start a trip from an accepted trip request',
+    description: 'Permet au driver sélectionné de lancer le trajet à partir d\'une demande acceptée. Crée un trajet et une réservation automatique pour le passager.',
+  })
+  @ApiBearerAuth()
+  async startTripFromRequest(@Request() req, @Param('id') id: string) {
+    return this.tripRequestsService.startTripFromRequest(id, req.user.userId);
   }
 
   @Delete(':id')
