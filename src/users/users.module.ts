@@ -11,7 +11,7 @@ import { Message } from '../chat/entities/message.entity';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([User, KycDocument, Trip, Booking, Message]),
+    TypeOrmModule.forFeature([User, KycDocument, Trip, Booking, Message, FavoriteLocation]),
     ConfigModule,
   ],
   controllers: [UsersController],

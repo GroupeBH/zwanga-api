@@ -3,15 +3,20 @@ import {
   Get,
   Put,
   Post,
+  Delete,
   Body,
   Request,
+  Param,
   UploadedFiles,
   UploadedFile,
   UseInterceptors,
+  Query,
 } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiConsumes, ApiBody } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiConsumes, ApiBody, ApiParam, ApiQuery } from '@nestjs/swagger';
 import { UsersService } from './users.service';
 import { UpdateProfileDto, UploadKycDto, SendPhoneVerificationOtpDto, VerifyPhoneOtpDto } from './dto/user.dto';
+import { CreateFavoriteLocationDto, UpdateFavoriteLocationDto } from './dto/favorite-location.dto';
+import { FavoriteLocationType } from './entities/favorite-location.entity';
 import { Auth } from '../auth/decorators/auth.decorator';
 import { Public } from '../common/decorators/public.decorator';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
@@ -130,6 +135,77 @@ export class UsersController {
     @Body() verifyOtpDto: VerifyPhoneOtpDto,
   ) {
     return this.usersService.verifyPhoneOtp(verifyOtpDto);
+  }
+
+  // ==================== Favorite Locations Endpoints ====================
+
+  @Post('favorite-locations')
+  @Auth()
+  @SensitiveThrottle(20, 60000)
+  @ApiOperation({ summary: 'Create a favorite location (home, work, etc.)' })
+  async createFavoriteLocation(
+    @Request() req,
+    @Body() createDto: CreateFavoriteLocationDto,
+  ) {
+    return this.usersService.createFavoriteLocation(req.user.userId, createDto);
+  }
+
+  @Get('favorite-locations')
+  @Auth()
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'Get all favorite locations for the current user' })
+  async findAllFavoriteLocations(@Request() req) {
+    return this.usersService.findAllFavoriteLocations(req.user.userId);
+  }
+
+  @Get('favorite-locations/default')
+  @Auth()
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'Get default favorite location (optionally filtered by type)' })
+  @ApiQuery({ name: 'type', enum: FavoriteLocationType, required: false })
+  async getDefaultFavoriteLocation(
+    @Request() req,
+    @Query('type') type?: FavoriteLocationType,
+  ) {
+    return this.usersService.getDefaultFavoriteLocation(req.user.userId, type);
+  }
+
+  @Get('favorite-locations/:id')
+  @Auth()
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'Get a favorite location by ID' })
+  @ApiParam({ name: 'id', description: 'Favorite location ID' })
+  async findFavoriteLocationById(
+    @Request() req,
+    @Param('id') id: string,
+  ) {
+    return this.usersService.findFavoriteLocationById(req.user.userId, id);
+  }
+
+  @Put('favorite-locations/:id')
+  @Auth()
+  @SensitiveThrottle(20, 60000)
+  @ApiOperation({ summary: 'Update a favorite location' })
+  @ApiParam({ name: 'id', description: 'Favorite location ID' })
+  async updateFavoriteLocation(
+    @Request() req,
+    @Param('id') id: string,
+    @Body() updateDto: UpdateFavoriteLocationDto,
+  ) {
+    return this.usersService.updateFavoriteLocation(req.user.userId, id, updateDto);
+  }
+
+  @Delete('favorite-locations/:id')
+  @Auth()
+  @SensitiveThrottle(20, 60000)
+  @ApiOperation({ summary: 'Delete a favorite location' })
+  @ApiParam({ name: 'id', description: 'Favorite location ID' })
+  async deleteFavoriteLocation(
+    @Request() req,
+    @Param('id') id: string,
+  ) {
+    await this.usersService.deleteFavoriteLocation(req.user.userId, id);
+    return { message: 'Favorite location deleted successfully' };
   }
 }
 

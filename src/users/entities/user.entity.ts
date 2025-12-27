@@ -15,6 +15,7 @@ import { Message } from '../../chat/entities/message.entity';
 import { Subscription } from '../../subscriptions/entities/subscription.entity';
 import { KycDocument } from '../entities/kyc-document.entity';
 import { ConversationParticipant } from '../../chat/entities/conversation-participant.entity';
+import { FavoriteLocation } from './favorite-location.entity';
 
 export enum UserRole {
   DRIVER = 'driver',
@@ -122,5 +123,8 @@ export class User {
 
   @OneToMany(() => KycDocument, (kycDocument) => kycDocument.user)
   kycDocuments: KycDocument[];
+
+  @OneToMany(() => FavoriteLocation, (favoriteLocation) => favoriteLocation.user)
+  favoriteLocations: FavoriteLocation[];
 }
 
