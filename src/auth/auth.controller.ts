@@ -54,18 +54,19 @@ export class AuthController {
       type: 'object',
       properties: {
         phone: { type: 'string', example: '+243900000000' },
+        pin: { type: 'string', example: '1234', description: 'PIN à 4 chiffres' },
         firstName: { type: 'string', example: 'John' },
         lastName: { type: 'string', example: 'Doe' },
         role: {
           type: 'string',
           enum: Object.values(UserRole),
           example: UserRole.DRIVER,
-          description: 'Rôle de l’utilisateur (driver, passenger, admin)',
+          description: 'Rôle de l\’utilisateur (driver, passenger, admin)',
         },
         isDriver: {
           type: 'boolean',
           example: true,
-          description: 'Indique si l’utilisateur souhaite conduire',
+          description: 'Indique si l\’utilisateur souhaite conduire',
         },
         vehicle: {
           type: 'object',
@@ -115,9 +116,9 @@ export class AuthController {
   @Public()
   @SensitiveThrottle(10, 60000) // 10 requests per minute per IP
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Login user' })
+  @ApiOperation({ summary: 'Login user with phone number and PIN' })
   @ApiResponse({ status: 200, type: AuthResponseDto })
-  @ApiResponse({ status: 401, description: 'Invalid credentials' })
+  @ApiResponse({ status: 401, description: 'Invalid phone number or PIN' })
   async login(@Body() loginDto: LoginDto) {
     return this.authService.login(loginDto);
   }

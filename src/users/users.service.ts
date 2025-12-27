@@ -3,13 +3,18 @@ import {
   NotFoundException,
   BadRequestException,
   Logger,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DeepPartial } from 'typeorm';
+import { Repository, DeepPartial, Not } from 'typeorm';
+import type { Point } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
+import * as bcrypt from 'bcrypt';
 import { User, UserStatus } from './entities/user.entity';
 import { KycDocument, KycStatus } from './entities/kyc-document.entity';
-import { UpdateProfileDto, UploadKycDto, SendPhoneVerificationOtpDto, VerifyPhoneOtpDto, PhoneVerificationContext } from './dto/user.dto';
+import { FavoriteLocation, FavoriteLocationType } from './entities/favorite-location.entity';
+import { UpdateProfileDto, UploadKycDto, SendPhoneVerificationOtpDto, VerifyPhoneOtpDto, PhoneVerificationContext, ChangePinDto } from './dto/user.dto';
+import { CreateFavoriteLocationDto, UpdateFavoriteLocationDto, FavoriteLocationResponse } from './dto/favorite-location.dto';
 import { Trip } from '../trips/entities/trip.entity';
 import { Booking } from '../bookings/entities/booking.entity';
 import { Message } from '../chat/entities/message.entity';
@@ -35,6 +40,8 @@ export class UsersService {
     private bookingRepository: Repository<Booking>,
     @InjectRepository(Message)
     private messageRepository: Repository<Message>,
+    @InjectRepository(FavoriteLocation)
+    private favoriteLocationRepository: Repository<FavoriteLocation>,
     private fileUploadService: FileUploadService,
     private kycValidationService: KycValidationService,
     private keccelOtpService: KeccelOtpService,
@@ -576,6 +583,210 @@ export class UsersService {
     return {
       message: 'Code OTP vérifié avec succès',
       valid: true,
+    };
+  }
+
+  // ==================== PIN Management Methods ====================
+
+  async changePin(userId: string, changePinDto: ChangePinDto): Promise<void> {
+    this.logger.log(`Changing PIN for user ${userId}${changePinDto.oldPin ? ' (with old PIN verification)' : ' (old PIN not provided - reset mode)'}`);
+
+    const user = await this.findOne(userId);
+
+    // If old PIN is provided, verify it
+    if (changePinDto.oldPin) {
+      // Check if user has a PIN set
+      if (!user.password) {
+        this.logger.warn(`PIN change failed: User ${userId} does not have a PIN set but provided old PIN`);
+        throw new BadRequestException('No PIN set for this account. Please set a PIN first.');
+      }
+
+      // Verify old PIN
+      const isOldPinValid = await bcrypt.compare(changePinDto.oldPin, user.password);
+
+      if (!isOldPinValid) {
+        this.logger.warn(`PIN change failed: Invalid old PIN for user ${userId}`);
+        throw new UnauthorizedException('Invalid old PIN');
+      }
+
+      // Check if new PIN is different from old PIN
+      if (changePinDto.oldPin === changePinDto.newPin) {
+        this.logger.warn(`PIN change failed: New PIN is the same as old PIN for user ${userId}`);
+        throw new BadRequestException('New PIN must be different from the old PIN');
+      }
+    } else {
+      // Old PIN not provided - allow PIN reset (user forgot their PIN)
+      this.logger.log(`PIN reset requested for user ${userId} (old PIN not provided)`);
+      // No verification needed, proceed with PIN reset
+    }
+
+    // Hash the new PIN
+    const saltRounds = 10;
+    const hashedNewPin = await bcrypt.hash(changePinDto.newPin, saltRounds);
+
+    // Update user password with new hashed PIN
+    user.password = hashedNewPin;
+    await this.userRepository.save(user);
+
+    this.logger.log(`PIN ${changePinDto.oldPin ? 'changed' : 'reset'} successfully for user ${userId}`);
+  }
+
+  // ==================== Favorite Locations Methods ====================
+
+  async createFavoriteLocation(userId: string, createDto: CreateFavoriteLocationDto): Promise<FavoriteLocationResponse> {
+    this.logger.log(`Creating favorite location for user ${userId}: ${createDto.name}`);
+
+    // Build Point from coordinates
+    const point: Point = {
+      type: 'Point',
+      coordinates: [createDto.coordinates.longitude, createDto.coordinates.latitude],
+    };
+
+    // If setting as default, unset other defaults of the same type
+    if (createDto.isDefault) {
+      await this.favoriteLocationRepository.update(
+        {
+          userId,
+          type: createDto.type || FavoriteLocationType.OTHER,
+          isDefault: true,
+        },
+        { isDefault: false },
+      );
+    }
+
+    const favoriteLocation = this.favoriteLocationRepository.create({
+      userId,
+      name: createDto.name,
+      address: createDto.address,
+      point,
+      type: createDto.type || FavoriteLocationType.OTHER,
+      isDefault: createDto.isDefault || false,
+      notes: createDto.notes || null,
+    });
+
+    const saved = await this.favoriteLocationRepository.save(favoriteLocation);
+    this.logger.log(`Favorite location created successfully: ${saved.id}`);
+
+    return this.mapFavoriteLocationToResponse(saved);
+  }
+
+  async findAllFavoriteLocations(userId: string): Promise<FavoriteLocationResponse[]> {
+    this.logger.debug(`Fetching favorite locations for user ${userId}`);
+
+    const locations = await this.favoriteLocationRepository.find({
+      where: { userId },
+      order: { isDefault: 'DESC', createdAt: 'ASC' },
+    });
+
+    return locations.map((loc) => this.mapFavoriteLocationToResponse(loc));
+  }
+
+  async findFavoriteLocationById(userId: string, locationId: string): Promise<FavoriteLocationResponse> {
+    const location = await this.favoriteLocationRepository.findOne({
+      where: { id: locationId, userId },
+    });
+
+    if (!location) {
+      this.logger.warn(`Favorite location ${locationId} not found for user ${userId}`);
+      throw new NotFoundException('Favorite location not found');
+    }
+
+    return this.mapFavoriteLocationToResponse(location);
+  }
+
+  async updateFavoriteLocation(
+    userId: string,
+    locationId: string,
+    updateDto: UpdateFavoriteLocationDto,
+  ): Promise<FavoriteLocationResponse> {
+    this.logger.log(`Updating favorite location ${locationId} for user ${userId}`);
+
+    const location = await this.favoriteLocationRepository.findOne({
+      where: { id: locationId, userId },
+    });
+
+    if (!location) {
+      this.logger.warn(`Favorite location ${locationId} not found for user ${userId}`);
+      throw new NotFoundException('Favorite location not found');
+    }
+
+    // If setting as default, unset other defaults of the same type
+    if (updateDto.isDefault === true) {
+      const typeToUpdate = updateDto.type || location.type;
+      await this.favoriteLocationRepository.update(
+        {
+          userId,
+          id: Not(locationId),
+          type: typeToUpdate,
+          isDefault: true,
+        },
+        { isDefault: false },
+      );
+    }
+
+    // Update point if coordinates are provided
+    if (updateDto.coordinates) {
+      location.point = {
+        type: 'Point',
+        coordinates: [updateDto.coordinates.longitude, updateDto.coordinates.latitude],
+      };
+    }
+
+    // Update other fields
+    if (updateDto.name !== undefined) location.name = updateDto.name;
+    if (updateDto.address !== undefined) location.address = updateDto.address;
+    if (updateDto.type !== undefined) location.type = updateDto.type;
+    if (updateDto.isDefault !== undefined) location.isDefault = updateDto.isDefault;
+    if (updateDto.notes !== undefined) location.notes = updateDto.notes;
+
+    const updated = await this.favoriteLocationRepository.save(location);
+    this.logger.log(`Favorite location updated successfully: ${updated.id}`);
+
+    return this.mapFavoriteLocationToResponse(updated);
+  }
+
+  async deleteFavoriteLocation(userId: string, locationId: string): Promise<void> {
+    this.logger.log(`Deleting favorite location ${locationId} for user ${userId}`);
+
+    const location = await this.favoriteLocationRepository.findOne({
+      where: { id: locationId, userId },
+    });
+
+    if (!location) {
+      this.logger.warn(`Favorite location ${locationId} not found for user ${userId}`);
+      throw new NotFoundException('Favorite location not found');
+    }
+
+    await this.favoriteLocationRepository.remove(location);
+    this.logger.log(`Favorite location deleted successfully: ${locationId}`);
+  }
+
+  async getDefaultFavoriteLocation(userId: string, type?: FavoriteLocationType): Promise<FavoriteLocationResponse | null> {
+    const where: any = { userId, isDefault: true };
+    if (type) {
+      where.type = type;
+    }
+
+    const location = await this.favoriteLocationRepository.findOne({ where });
+
+    return location ? this.mapFavoriteLocationToResponse(location) : null;
+  }
+
+  private mapFavoriteLocationToResponse(location: FavoriteLocation): FavoriteLocationResponse {
+    const point = location.point as any;
+    return {
+      id: location.id,
+      name: location.name,
+      address: location.address,
+      coordinates: {
+        latitude: point.coordinates[1],
+        longitude: point.coordinates[0],
+      },
+      type: location.type,
+      isDefault: location.isDefault,
+      notes: location.notes,
+      createdAt: location.createdAt,
+      updatedAt: location.updatedAt,
     };
   }
 }

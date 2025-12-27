@@ -31,6 +31,7 @@ import { KeccelOtpModule } from './keccel-otp/keccel-otp.module';
 import { TripRequestsModule } from './trip-requests/trip-requests.module';
 import { SafetyModule } from './safety/safety.module';
 import { GoogleMapsModule } from './google-maps/google-maps.module';
+import { FavoritePlacesModule } from './favorite-places/favorite-places.module';
 
 // Entities
 import { User } from './users/entities/user.entity';
@@ -50,6 +51,8 @@ import { EmergencyContact } from './safety/entities/emergency-contact.entity';
 import { SafetyAlert } from './safety/entities/safety-alert.entity';
 import { UserReport } from './safety/entities/user-report.entity';
 import { Notification } from './notifications/entities/notification.entity';
+import { FavoriteLocation } from './users/entities/favorite-location.entity';
+import { FavoritePlace } from './favorite-places/entities/favorite-place.entity';
 
 const typeOrmEntities = [
   User,
@@ -69,6 +72,8 @@ const typeOrmEntities = [
   SafetyAlert,
   UserReport,
   Notification,
+  FavoritePlace,
+  FavoriteLocation,
 ];
 
 @Module({
@@ -152,6 +157,7 @@ const typeOrmEntities = [
     TripRequestsModule,
     SafetyModule,
     GoogleMapsModule,
+    FavoritePlacesModule,
   ],
   controllers: [AppController],
   providers: [

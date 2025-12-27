@@ -165,21 +165,22 @@ export class TripsService {
 
     const now = new Date();
     // Include PENDING trips with future departure dates OR ACTIVE trips with available seats
-    const trips = await this.tripRepository
-      .createQueryBuilder('trip')
-      .leftJoinAndSelect('trip.driver', 'driver')
-      .leftJoinAndSelect('trip.vehicle', 'vehicle')
-      .leftJoinAndSelect('trip.bookings', 'bookings')
-      .leftJoinAndSelect('bookings.passenger', 'bookingPassenger')
-      .where('(trip.status = :pendingStatus AND trip.departureDate > :now)', {
-        pendingStatus: TripStatus.PENDING,
-        now,
-      })
-      .orWhere('(trip.status = :activeStatus AND trip.availableSeats > 0)', {
-        activeStatus: TripStatus.ACTIVE,
-      })
-      .orderBy('trip.departureDate', 'ASC')
-      .getMany();
+    const trips = await this.tripRepository.find({
+      where: [
+        {
+          status: TripStatus.PENDING,
+          departureDate: MoreThan(now),
+        },
+        {
+          status: TripStatus.ACTIVE,
+          availableSeats: MoreThan(0),
+        },
+      ],
+      relations: ['driver', 'vehicle', 'bookings', 'bookings.passenger'],
+      order: {
+        departureDate: 'ASC',
+      },
+    });
 
     const sanitized = await Promise.all(trips.map((trip) => this.sanitizeTrip(trip)));
 
@@ -195,6 +196,7 @@ export class TripsService {
     const queryBuilder = this.tripRepository
       .createQueryBuilder('trip')
       .leftJoinAndSelect('trip.driver', 'driver')
+      .leftJoinAndSelect('trip.vehicle', 'vehicle')
       .leftJoinAndSelect('trip.bookings', 'bookings')
       .leftJoinAndSelect('bookings.passenger', 'bookingPassenger')
       .where(

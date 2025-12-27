@@ -5,7 +5,10 @@ import {
   IsOptional,
   IsString,
   MinLength,
+  MaxLength,
+  Matches,
   ValidateNested,
+  ValidateIf,
 } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ApiProperty } from '@nestjs/swagger';
@@ -18,7 +21,15 @@ export class RegisterDto {
   @IsNotEmpty()
   phone: string;
 
-  @ApiProperty({ required: false, example: true, description: 'Indique si l’utilisateur est conducteur' })
+  @ApiProperty({ example: '1234', description: 'PIN à 4 chiffres' })
+  @IsString()
+  @IsNotEmpty()
+  @MinLength(4)
+  @MaxLength(4)
+  @Matches(/^\d{4}$/, { message: 'PIN must be exactly 4 digits' })
+  pin: string;
+
+  @ApiProperty({ required: false, example: true, description: 'Indique si l\'utilisateur est conducteur' })
   @IsBoolean()
   @IsOptional()
   isDriver?: boolean;
@@ -49,15 +60,36 @@ export class RegisterDto {
 }
 
 export class LoginDto {
-
   @ApiProperty({ example: '0831919710' })
+  @IsString()
   @IsNotEmpty()
   phone: string;
 
-  // @ApiProperty({ example: 'password123' })
-  // @IsString()
-  // @IsNotEmpty()
-  // password: string;
+  @ApiProperty({ 
+    required: false,
+    example: '1234', 
+    description: 'PIN à 4 chiffres - requis si newPin n\'est pas fourni' 
+  })
+  @ValidateIf((o) => !o.newPin)
+  @IsString()
+  @IsNotEmpty({ message: 'PIN is required if newPin is not provided' })
+  @MinLength(4)
+  @MaxLength(4)
+  @Matches(/^\d{4}$/, { message: 'PIN must be exactly 4 digits' })
+  pin?: string;
+
+  @ApiProperty({ 
+    required: false,
+    example: '5678', 
+    description: 'Nouveau PIN à 4 chiffres - utilisé si l\'ancien PIN est oublié (remplace pin)' 
+  })
+  @ValidateIf((o) => !o.pin)
+  @IsString()
+  @IsNotEmpty({ message: 'newPin is required if PIN is not provided' })
+  @MinLength(4)
+  @MaxLength(4)
+  @Matches(/^\d{4}$/, { message: 'New PIN must be exactly 4 digits' })
+  newPin?: string;
 }
 
 export class RefreshTokenDto {
