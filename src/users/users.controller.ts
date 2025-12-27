@@ -14,7 +14,7 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiConsumes, ApiBody, ApiParam, ApiQuery } from '@nestjs/swagger';
 import { UsersService } from './users.service';
-import { UpdateProfileDto, UploadKycDto, SendPhoneVerificationOtpDto, VerifyPhoneOtpDto } from './dto/user.dto';
+import { UpdateProfileDto, UploadKycDto, SendPhoneVerificationOtpDto, VerifyPhoneOtpDto, ChangePinDto } from './dto/user.dto';
 import { CreateFavoriteLocationDto, UpdateFavoriteLocationDto } from './dto/favorite-location.dto';
 import { FavoriteLocationType } from './entities/favorite-location.entity';
 import { Auth } from '../auth/decorators/auth.decorator';
@@ -135,6 +135,20 @@ export class UsersController {
     @Body() verifyOtpDto: VerifyPhoneOtpDto,
   ) {
     return this.usersService.verifyPhoneOtp(verifyOtpDto);
+  }
+
+  // ==================== PIN Management Endpoints ====================
+
+  @Put('pin/change')
+  @Auth()
+  @SensitiveThrottle(5, 60000) // 5 requests per minute (sensitive operation)
+  @ApiOperation({ summary: 'Change user PIN' })
+  async changePin(
+    @Request() req,
+    @Body() changePinDto: ChangePinDto,
+  ) {
+    await this.usersService.changePin(req.user.userId, changePinDto);
+    return { message: 'PIN changed successfully' };
   }
 
   // ==================== Favorite Locations Endpoints ====================

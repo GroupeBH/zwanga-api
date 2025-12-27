@@ -48,7 +48,7 @@ export class AuthService {
   ): Promise<AuthResponseDto> {
     console.log('registerDto', registerDto);
     console.log('files', files);
-    const { phone, firstName, lastName, role, isDriver, vehicle } = registerDto;
+    const { phone, pin, firstName, lastName, role, isDriver, vehicle } = registerDto;
     const resolvedIsDriver = isDriver ?? role === UserRole.DRIVER;
 
     // Check if user already exists
@@ -59,6 +59,10 @@ export class AuthService {
     if (existingUser) {
       throw new UnauthorizedException('phone already exists');
     }
+
+    // Hash the PIN
+    const saltRounds = 10;
+    const hashedPin = await bcrypt.hash(pin, saltRounds);
 
     // Handle file uploads
     let profilePicturePath: string | null = null;
@@ -94,6 +98,7 @@ export class AuthService {
     // Create user
     const userData: Partial<User> = {
       phone,
+      password: hashedPin, // Store hashed PIN
       firstName,
       lastName,
       role,
@@ -151,31 +156,69 @@ export class AuthService {
     };
   }
 
-  async validateUser(phone: string): Promise<User | null> {
+  async validateUser(phone: string, pin: string): Promise<User | null> {
     const user = await this.userRepository.findOne({ where: { phone } });
 
     if (!user) {
       return null;
     }
 
-    // const isPasswordValid = await bcrypt.compare(password, user.password);
+    // Check if user has a password (PIN) set
+    if (!user.password) {
+      this.logger.warn(`User ${phone} does not have a PIN set`);
+      return null;
+    }
 
-    // if (!isPasswordValid) {
-    //   return null;
-    // }
+    // Validate PIN
+    const isPinValid = await bcrypt.compare(pin, user.password);
+
+    if (!isPinValid) {
+      this.logger.warn(`Invalid PIN for user ${phone}`);
+      return null;
+    }
 
     return user;
   }
 
   async login(loginDto: LoginDto) {
-    const user = await this.validateUser(loginDto.phone);
+    // Find user by phone
+    const user = await this.userRepository.findOne({ where: { phone: loginDto.phone } });
 
     if (!user) {
-      throw new UnauthorizedException('Invalid credentials');
+      this.logger.warn(`Login failed: User not found for phone: ${loginDto.phone}`);
+      throw new UnauthorizedException('Invalid phone number or PIN');
     }
 
     if (user.status === UserStatus.SUSPENDED) {
       throw new UnauthorizedException('Account is suspended');
+    }
+
+    // Handle PIN validation or reset
+    if (loginDto.newPin) {
+      // User wants to reset PIN (forgot old PIN)
+      this.logger.log(`PIN reset requested during login for user ${user.id}`);
+      
+      // Hash the new PIN
+      const saltRounds = 10;
+      const hashedNewPin = await bcrypt.hash(loginDto.newPin, saltRounds);
+      
+      // Update user password with new hashed PIN
+      user.password = hashedNewPin;
+      await this.userRepository.save(user);
+      
+      this.logger.log(`PIN reset successfully during login for user ${user.id}`);
+    } else if (loginDto.pin) {
+      // Normal login with PIN validation
+      const validatedUser = await this.validateUser(loginDto.phone, loginDto.pin);
+      
+      if (!validatedUser) {
+        this.logger.warn(`Login failed: Invalid PIN for phone: ${loginDto.phone}`);
+        throw new UnauthorizedException('Invalid phone number or PIN. If you forgot your PIN, provide a newPin to reset it.');
+      }
+    } else {
+      // No PIN provided and no newPin provided
+      this.logger.warn(`Login failed: No PIN provided for phone: ${loginDto.phone}`);
+      throw new UnauthorizedException('PIN is required. If you forgot your PIN, provide a newPin to reset it.');
     }
 
     // Update last login

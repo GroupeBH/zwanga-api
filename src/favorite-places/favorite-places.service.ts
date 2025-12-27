@@ -79,11 +79,11 @@ export class FavoritePlacesService {
 
     const places = await this.favoritePlaceRepository.find({
       where: { userId },
-      order: [
-        { type: 'ASC' },
-        { isDefault: 'DESC' },
-        { createdAt: 'ASC' },
-      ],
+      order: {
+        type: 'ASC',
+        isDefault: 'DESC',
+        createdAt: 'ASC',
+      },
     });
 
     const response = places.map((place) => this.toResponse(place));
@@ -98,10 +98,8 @@ export class FavoritePlacesService {
 
     const places = await this.favoritePlaceRepository.find({
       where: { userId, type },
-      order: [
-        { isDefault: 'DESC' },
-        { createdAt: 'ASC' },
-      ],
+      order: { isDefault: 'DESC', createdAt: 'ASC' },
+      
     });
 
     return places.map((place) => this.toResponse(place));

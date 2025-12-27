@@ -3,15 +3,17 @@ import {
   NotFoundException,
   BadRequestException,
   Logger,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DeepPartial, Not } from 'typeorm';
 import type { Point } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
+import * as bcrypt from 'bcrypt';
 import { User, UserStatus } from './entities/user.entity';
 import { KycDocument, KycStatus } from './entities/kyc-document.entity';
 import { FavoriteLocation, FavoriteLocationType } from './entities/favorite-location.entity';
-import { UpdateProfileDto, UploadKycDto, SendPhoneVerificationOtpDto, VerifyPhoneOtpDto, PhoneVerificationContext } from './dto/user.dto';
+import { UpdateProfileDto, UploadKycDto, SendPhoneVerificationOtpDto, VerifyPhoneOtpDto, PhoneVerificationContext, ChangePinDto } from './dto/user.dto';
 import { CreateFavoriteLocationDto, UpdateFavoriteLocationDto, FavoriteLocationResponse } from './dto/favorite-location.dto';
 import { Trip } from '../trips/entities/trip.entity';
 import { Booking } from '../bookings/entities/booking.entity';
@@ -582,6 +584,51 @@ export class UsersService {
       message: 'Code OTP vérifié avec succès',
       valid: true,
     };
+  }
+
+  // ==================== PIN Management Methods ====================
+
+  async changePin(userId: string, changePinDto: ChangePinDto): Promise<void> {
+    this.logger.log(`Changing PIN for user ${userId}${changePinDto.oldPin ? ' (with old PIN verification)' : ' (old PIN not provided - reset mode)'}`);
+
+    const user = await this.findOne(userId);
+
+    // If old PIN is provided, verify it
+    if (changePinDto.oldPin) {
+      // Check if user has a PIN set
+      if (!user.password) {
+        this.logger.warn(`PIN change failed: User ${userId} does not have a PIN set but provided old PIN`);
+        throw new BadRequestException('No PIN set for this account. Please set a PIN first.');
+      }
+
+      // Verify old PIN
+      const isOldPinValid = await bcrypt.compare(changePinDto.oldPin, user.password);
+
+      if (!isOldPinValid) {
+        this.logger.warn(`PIN change failed: Invalid old PIN for user ${userId}`);
+        throw new UnauthorizedException('Invalid old PIN');
+      }
+
+      // Check if new PIN is different from old PIN
+      if (changePinDto.oldPin === changePinDto.newPin) {
+        this.logger.warn(`PIN change failed: New PIN is the same as old PIN for user ${userId}`);
+        throw new BadRequestException('New PIN must be different from the old PIN');
+      }
+    } else {
+      // Old PIN not provided - allow PIN reset (user forgot their PIN)
+      this.logger.log(`PIN reset requested for user ${userId} (old PIN not provided)`);
+      // No verification needed, proceed with PIN reset
+    }
+
+    // Hash the new PIN
+    const saltRounds = 10;
+    const hashedNewPin = await bcrypt.hash(changePinDto.newPin, saltRounds);
+
+    // Update user password with new hashed PIN
+    user.password = hashedNewPin;
+    await this.userRepository.save(user);
+
+    this.logger.log(`PIN ${changePinDto.oldPin ? 'changed' : 'reset'} successfully for user ${userId}`);
   }
 
   // ==================== Favorite Locations Methods ====================

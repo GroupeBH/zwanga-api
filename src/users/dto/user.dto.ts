@@ -1,4 +1,4 @@
-import { IsBoolean, IsOptional, IsString, IsNotEmpty, IsEnum } from 'class-validator';
+import { IsBoolean, IsOptional, IsString, IsNotEmpty, IsEnum, MinLength, MaxLength, Matches, ValidateIf } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
 import { UserRole } from '../entities/user.entity';
@@ -78,6 +78,29 @@ export class SendPhoneVerificationOtpDto {
     message: 'context must be one of the following values: registration, login, update',
   })
   context: PhoneVerificationContext;
+}
+
+export class ChangePinDto {
+  @ApiProperty({ 
+    required: false,
+    example: '1234', 
+    description: 'Ancien PIN (4 chiffres) - optionnel si oublié' 
+  })
+  @IsOptional()
+  @ValidateIf((o) => o.oldPin !== undefined && o.oldPin !== null)
+  @IsString()
+  @MinLength(4)
+  @MaxLength(4)
+  @Matches(/^\d{4}$/, { message: 'Old PIN must be exactly 4 digits' })
+  oldPin?: string;
+
+  @ApiProperty({ example: '5678', description: 'Nouveau PIN (4 chiffres)' })
+  @IsString()
+  @IsNotEmpty()
+  @MinLength(4)
+  @MaxLength(4)
+  @Matches(/^\d{4}$/, { message: 'New PIN must be exactly 4 digits' })
+  newPin: string;
 }
 
 export class VerifyPhoneOtpDto {
