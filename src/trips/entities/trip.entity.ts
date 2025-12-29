@@ -68,6 +68,9 @@ export class Trip {
   @Column({ type: 'timestamp' })
   departureDate: Date;
 
+  @Column({ type: 'int', nullable: true })
+  totalSeats: number | null;
+
   @Column({ type: 'int' })
   availableSeats: number;
 

@@ -81,7 +81,7 @@ export class TripsService {
     const user = await this.userRepository.findOne({ where: { id: driverId } });
     if (!user) {
       this.logger.warn(`Trip creation failed: User not found - ${driverId}`);
-      throw new NotFoundException('User not found');
+      throw new NotFoundException('Utilisateur non trouvé');
     }
 
     const {
@@ -140,6 +140,8 @@ export class TripsService {
       arrivalPoint: this.buildPointFromCoordinates(arrivalCoordinates),
       isFree,
       pricePerSeat,
+      totalSeats: baseTripData.totalSeats,
+      availableSeats: baseTripData.totalSeats || baseTripData.totalSeats, // Initialiser availableSeats = totalSeats
     });
 
     const savedTrip = await this.tripRepository.save(trip);
@@ -352,7 +354,7 @@ export class TripsService {
 
     if (!trip) {
       this.logger.warn(`Trip not found: ${id}`);
-      throw new NotFoundException('Trip not found');
+      throw new NotFoundException('Trajet non trouvé');
     }
 
     const sanitized = await this.sanitizeTrip(trip);
@@ -386,7 +388,7 @@ export class TripsService {
 
     if (!trip) {
       this.logger.warn(`Trip update failed: Trip ${id} not found for driver ${driverId}`);
-      throw new NotFoundException('Trip not found');
+      throw new NotFoundException('Trajet non trouvé');
     }
 
     const {
@@ -396,6 +398,7 @@ export class TripsService {
       vehicleId,
       isFree,
       pricePerSeat,
+      totalSeats,
       ...restPayload
     } = updateTripDto;
 
@@ -454,6 +457,23 @@ export class TripsService {
       }
     }
 
+    // Gérer totalSeats et recalculer availableSeats si nécessaire
+    if (totalSeats !== undefined && totalSeats !== (trip.totalSeats ?? trip.availableSeats)) {
+      const oldTotalSeats = trip.totalSeats ?? trip.availableSeats; // Utiliser availableSeats comme fallback si totalSeats est null
+      const oldAvailableSeats = trip.availableSeats;
+      trip.totalSeats = totalSeats;
+      
+      // Si totalSeats change, recalculer availableSeats
+      // availableSeats = totalSeats - (oldTotalSeats - oldAvailableSeats)
+      // = totalSeats - réservations acceptées
+      const bookedSeats = oldTotalSeats - oldAvailableSeats;
+      trip.availableSeats = Math.max(0, totalSeats - bookedSeats);
+      
+      this.logger.log(
+        `Updated trip ${id} totalSeats: ${oldTotalSeats} -> ${totalSeats}, availableSeats recalculated: ${oldAvailableSeats} -> ${trip.availableSeats} (booked seats: ${bookedSeats})`,
+      );
+    }
+
     Object.assign(trip, restPayload);
     const updatedTrip = await this.tripRepository.save(trip);
     
@@ -475,7 +495,7 @@ export class TripsService {
 
     if (!trip) {
       this.logger.warn(`Trip cancellation failed: Trip ${id} not found for driver ${driverId}`);
-      throw new NotFoundException('Trip not found');
+      throw new NotFoundException('Trajet non trouvé');
     }
 
     await this.tripRepository.remove(trip);
@@ -498,12 +518,12 @@ export class TripsService {
 
     if (!trip) {
       this.logger.warn(`Trip start failed: Trip ${tripId} not found for driver ${driverId}`);
-      throw new NotFoundException('Trip not found or you are not the driver');
+      throw new NotFoundException('Trajet non trouvé ou vous n\'êtes pas le conducteur');
     }
 
     if (trip.status !== TripStatus.PENDING) {
       this.logger.warn(`Trip start failed: Trip ${tripId} is not in PENDING status (current: ${trip.status})`);
-      throw new BadRequestException(`Cannot start trip. Current status: ${trip.status}`);
+      throw new BadRequestException(`Impossible de démarrer le trajet. Statut actuel : ${trip.status}`);
     }
 
     // Calculate total accepted seats
@@ -535,6 +555,46 @@ export class TripsService {
       // Notify only passengers who have booked
       await this.notifyBookedPassengersAboutTripStart(trip, acceptedBookings);
     }
+
+    return this.findOne(tripId);
+  }
+
+  async pauseTrip(tripId: string, driverId: string): Promise<SanitizedTrip> {
+    this.logger.log(`Pausing trip ${tripId} by driver ${driverId}`);
+    
+    const trip = await this.tripRepository.findOne({
+      where: { id: tripId, driverId },
+      relations: ['bookings', 'bookings.passenger', 'driver'],
+    });
+
+    if (!trip) {
+      this.logger.warn(`Trip pause failed: Trip ${tripId} not found for driver ${driverId}`);
+      throw new NotFoundException('Trajet non trouvé ou vous n\'êtes pas le conducteur');
+    }
+
+    if (trip.status !== TripStatus.ACTIVE) {
+      this.logger.warn(`Trip pause failed: Trip ${tripId} is not in ACTIVE status (current: ${trip.status})`);
+      throw new BadRequestException(`Impossible d'interrompre le trajet. Le trajet doit être en cours (statut actuel : ${trip.status})`);
+    }
+
+    // Get accepted bookings to notify passengers
+    const acceptedBookings = trip.bookings?.filter(
+      (booking) => booking.status === BookingStatus.ACCEPTED,
+    ) || [];
+
+    // Update trip status to PENDING (interrupted)
+    trip.status = TripStatus.PENDING;
+    await this.tripRepository.save(trip);
+
+    // Invalidate cache
+    await this.cacheService.del(CacheService.getTripKey(tripId));
+    await this.cacheService.del(CacheService.getTripsListKey());
+    await this.cacheService.del(CacheService.getTripsListKey('all'));
+
+    this.logger.log(`Trip ${tripId} paused successfully. Notifying ${acceptedBookings.length} passengers.`);
+
+    // Notify booked passengers about trip interruption
+    await this.notifyPassengersAboutTripPause(trip, acceptedBookings);
 
     return this.findOne(tripId);
   }
@@ -630,6 +690,72 @@ export class TripsService {
       this.logger.log(`Notified ${fcmTokens.length} passengers about trip ${trip.id} start`);
     } catch (error) {
       this.logger.error(`Error notifying booked passengers about trip start: ${error.message}`, error.stack);
+    }
+  }
+
+  private async notifyPassengersAboutTripPause(
+    trip: Trip,
+    acceptedBookings: Booking[],
+  ): Promise<void> {
+    try {
+      this.logger.log(`Notifying ${acceptedBookings.length} passengers about trip ${trip.id} pause`);
+
+      if (acceptedBookings.length === 0) {
+        this.logger.debug('No accepted bookings to notify about pause');
+        return;
+      }
+
+      // Get passengers with FCM tokens
+      const passengerIds = acceptedBookings.map((booking) => booking.passengerId);
+      const passengers = await this.userRepository.find({
+        where: {
+          id: In(passengerIds),
+        },
+        select: ['id', 'fcmToken', 'firstName'],
+      });
+
+      const passengersWithTokens = passengers.filter((passenger) => passenger.fcmToken);
+
+      if (passengersWithTokens.length === 0) {
+        this.logger.debug('No passengers with FCM tokens to notify about pause');
+        return;
+      }
+
+      const fcmTokens = passengersWithTokens.map((passenger) => passenger.fcmToken!);
+      const userIds = passengersWithTokens.map((passenger) => passenger.id);
+
+      const title = '⏸️ Trajet interrompu';
+      const body = `Le trajet de ${trip.departureLocation} à ${trip.arrivalLocation} a été interrompu par le conducteur. Vous serez notifié lorsque le trajet reprendra.`;
+
+      const data = {
+        type: 'trip_paused',
+        tripId: trip.id,
+        departureLocation: trip.departureLocation,
+        arrivalLocation: trip.arrivalLocation,
+        departureDate: trip.departureDate.toISOString(),
+      };
+
+      if (fcmTokens.length === 1) {
+        await this.notificationService.sendNotification(
+          fcmTokens[0],
+          title,
+          body,
+          data,
+          userIds[0],
+        );
+      } else {
+        await this.notificationService.sendToMultiple(
+          fcmTokens,
+          title,
+          body,
+          data,
+          userIds,
+        );
+      }
+
+      this.logger.log(`Notified ${fcmTokens.length} passengers about trip ${trip.id} pause`);
+    } catch (error) {
+      this.logger.error(`Error notifying passengers about trip pause: ${error.message}`, error.stack);
     }
   }
 
@@ -729,7 +855,7 @@ export class TripsService {
     });
 
     if (!trip) {
-      throw new NotFoundException('Trip not found');
+      throw new NotFoundException('Trajet non trouvé');
     }
 
     const isDriver = trip.driverId === userId;
@@ -741,7 +867,7 @@ export class TripsService {
       ) ?? false;
 
     if (!isDriver && !isPassenger) {
-      throw new ForbiddenException('You are not part of this trip');
+      throw new ForbiddenException('Vous ne faites pas partie de ce trajet');
     }
 
     return { trip, isDriver, isPassenger };
@@ -762,7 +888,7 @@ export class TripsService {
     );
 
     if (!isDriver) {
-      throw new ForbiddenException('Only the driver can update location');
+      throw new ForbiddenException('Seul le conducteur peut mettre à jour la localisation');
     }
 
     trip.currentLocation = this.buildPointFromCoordinates(coordinates);

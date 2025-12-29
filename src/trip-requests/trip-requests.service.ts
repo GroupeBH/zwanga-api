@@ -109,7 +109,7 @@ export class TripRequestsService {
 
     const passenger = await this.userRepository.findOne({ where: { id: passengerId } });
     if (!passenger) {
-      throw new NotFoundException('User not found');
+      throw new NotFoundException('Utilisateur non trouvé');
     }
 
     const { departureCoordinates, arrivalCoordinates, departureDateMin, departureDateMax, ...rest } = createTripRequestDto;
@@ -214,7 +214,7 @@ export class TripRequestsService {
     });
 
     if (!tripRequest) {
-      throw new NotFoundException('Trip request not found');
+      throw new NotFoundException('Demande de trajet non trouvée');
     }
 
     // Only passenger or drivers who made offers can see all offers
@@ -227,6 +227,30 @@ export class TripRequestsService {
     }
 
     return this.sanitizeTripRequest(tripRequest);
+  }
+
+  async getOffersForTripRequest(tripRequestId: string, userId?: string): Promise<SanitizedDriverOffer[]> {
+    this.logger.debug(`Fetching offers for trip request: ${tripRequestId}`);
+
+    const tripRequest = await this.tripRequestRepository.findOne({
+      where: { id: tripRequestId },
+      relations: ['driverOffers', 'driverOffers.driver', 'driverOffers.vehicle'],
+    });
+
+    if (!tripRequest) {
+      throw new NotFoundException('Demande de trajet non trouvée');
+    }
+
+    // Only passenger can see all offers
+    if (userId && tripRequest.passengerId !== userId) {
+      throw new ForbiddenException('Seul le passager peut voir toutes les offres');
+    }
+
+    if (!tripRequest.driverOffers || tripRequest.driverOffers.length === 0) {
+      return [];
+    }
+
+    return Promise.all(tripRequest.driverOffers.map((offer) => this.sanitizeDriverOffer(offer)));
   }
 
   async findByPassenger(passengerId: string): Promise<SanitizedTripRequest[]> {
@@ -266,7 +290,7 @@ export class TripRequestsService {
 
     const driver = await this.userRepository.findOne({ where: { id: driverId } });
     if (!driver) {
-      throw new NotFoundException('Driver not found');
+      throw new NotFoundException('Conducteur non trouvé');
     }
 
     if (!driver.isDriver) {
@@ -279,7 +303,7 @@ export class TripRequestsService {
     });
 
     if (!tripRequest) {
-      throw new NotFoundException('Trip request not found');
+      throw new NotFoundException('Demande de trajet non trouvée');
     }
 
     // Check if trip request is expired
@@ -422,16 +446,60 @@ export class TripRequestsService {
     }
   }
 
+  private async notifyDriverAboutOfferAcceptance(
+    tripRequest: TripRequest,
+    offer: DriverOffer,
+  ): Promise<void> {
+    try {
+      // Get the driver with FCM token
+      const driver = await this.userRepository.findOne({
+        where: { id: offer.driverId },
+        select: ['id', 'fcmToken', 'firstName'],
+      });
+
+      if (!driver || !driver.fcmToken) {
+        this.logger.debug(`Driver ${offer.driverId} has no FCM token, skipping notification`);
+        return;
+      }
+
+      const passengerName = tripRequest.passenger ? `${tripRequest.passenger.firstName} ${tripRequest.passenger.lastName}` : 'Un passager';
+      const title = '✅ Offre acceptée';
+      const body = `${passengerName} a accepté votre offre pour le trajet de ${tripRequest.departureLocation} à ${tripRequest.arrivalLocation}. Vous pouvez maintenant démarrer le trajet.`;
+      
+      const data = {
+        type: 'offer_accepted',
+        tripRequestId: tripRequest.id,
+        offerId: offer.id,
+        passengerId: tripRequest.passengerId,
+        departureLocation: tripRequest.departureLocation,
+        arrivalLocation: tripRequest.arrivalLocation,
+        proposedDepartureDate: offer.proposedDepartureDate.toISOString(),
+      };
+
+      await this.notificationService.sendNotification(
+        driver.fcmToken,
+        title,
+        body,
+        data,
+        offer.driverId,
+      );
+      this.logger.log(`Notified driver ${offer.driverId} about offer acceptance ${offer.id}`);
+    } catch (error) {
+      this.logger.error(`Error notifying driver about offer acceptance ${offer.id}: ${error.message}`, error.stack);
+      // Don't throw error, just log it - offer acceptance should succeed even if notification fails
+    }
+  }
+
   async acceptDriverOffer(passengerId: string, tripRequestId: string, acceptDto: AcceptDriverOfferDto): Promise<SanitizedTripRequest> {
     this.logger.log(`Accepting driver offer ${acceptDto.offerId} for trip request ${tripRequestId} by passenger ${passengerId}`);
 
     const tripRequest = await this.tripRequestRepository.findOne({
       where: { id: tripRequestId, passengerId },
-      relations: ['driverOffers', 'driverOffers.driver', 'driverOffers.vehicle'],
+      relations: ['passenger', 'driverOffers', 'driverOffers.driver', 'driverOffers.vehicle'],
     });
 
     if (!tripRequest) {
-      throw new NotFoundException('Trip request not found or you are not the owner');
+      throw new NotFoundException('Demande de trajet non trouvée ou vous n\'êtes pas le propriétaire');
     }
 
     if (tripRequest.status === TripRequestStatus.DRIVER_SELECTED) {
@@ -444,7 +512,7 @@ export class TripRequestsService {
 
     const offer = tripRequest.driverOffers?.find((o) => o.id === acceptDto.offerId);
     if (!offer) {
-      throw new NotFoundException('Driver offer not found');
+      throw new NotFoundException('Offre du conducteur non trouvée');
     }
 
     if (offer.status !== DriverOfferStatus.PENDING) {
@@ -478,6 +546,9 @@ export class TripRequestsService {
 
     this.logger.log(`Driver offer ${acceptDto.offerId} accepted for trip request ${tripRequestId}`);
 
+    // Notify the driver that their offer was accepted
+    await this.notifyDriverAboutOfferAcceptance(tripRequest, offer);
+
     return this.findOne(tripRequestId, passengerId);
   }
 
@@ -490,7 +561,7 @@ export class TripRequestsService {
     });
 
     if (!tripRequest) {
-      throw new NotFoundException('Trip request not found');
+      throw new NotFoundException('Demande de trajet non trouvée');
     }
 
     if (tripRequest.status !== TripRequestStatus.DRIVER_SELECTED) {
@@ -502,7 +573,7 @@ export class TripRequestsService {
     }
 
     if (tripRequest.tripId) {
-      throw new BadRequestException('Un trajet a déjà été créé à partir de cette demande');
+      throw new BadRequestException('Un trajet a déjà été créé à partir de cette demande !');
     }
 
     // Get the accepted offer to get the proposed departure date
@@ -533,7 +604,7 @@ export class TripRequestsService {
       departureCoordinates,
       arrivalCoordinates,
       departureDate: acceptedOffer.proposedDepartureDate.toISOString(),
-      availableSeats: acceptedOffer.availableSeats,
+      totalSeats: acceptedOffer.availableSeats,
       pricePerSeat: tripRequest.selectedPricePerSeat || 0,
       isFree: (tripRequest.selectedPricePerSeat || 0) === 0,
       vehicleId: tripRequest.selectedVehicleId || undefined,
@@ -576,7 +647,7 @@ export class TripRequestsService {
     });
 
     if (!tripRequest) {
-      throw new NotFoundException('Trip request not found or you are not the owner');
+      throw new NotFoundException('Demande de trajet non trouvée ou vous n\'êtes pas le propriétaire');
     }
 
     if (tripRequest.status === TripRequestStatus.DRIVER_SELECTED) {

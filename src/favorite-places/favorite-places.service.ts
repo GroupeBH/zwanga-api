@@ -130,7 +130,7 @@ export class FavoritePlacesService {
 
     if (!place) {
       this.logger.warn(`Favorite place not found: ${id} for user ${userId}`);
-      throw new NotFoundException('Favorite place not found');
+      throw new NotFoundException('Lieu favori non trouvé');
     }
 
     return this.toResponse(place);
@@ -149,7 +149,7 @@ export class FavoritePlacesService {
 
     if (!place) {
       this.logger.warn(`Update failed: Favorite place ${id} not found for user ${userId}`);
-      throw new NotFoundException('Favorite place not found');
+      throw new NotFoundException('Lieu favori non trouvé');
     }
 
     // If isDefault is being set to true, unset other default places of the same type
@@ -202,7 +202,7 @@ export class FavoritePlacesService {
 
     if (!place) {
       this.logger.warn(`Delete failed: Favorite place ${id} not found for user ${userId}`);
-      throw new NotFoundException('Favorite place not found');
+      throw new NotFoundException('Lieu favori non trouvé');
     }
 
     await this.favoritePlaceRepository.remove(place);
@@ -222,7 +222,7 @@ export class FavoritePlacesService {
 
     if (!place) {
       this.logger.warn(`Set default failed: Favorite place ${id} not found for user ${userId}`);
-      throw new NotFoundException('Favorite place not found');
+      throw new NotFoundException('Lieu favori non trouvé');
     }
 
     // Unset other default places of the same type

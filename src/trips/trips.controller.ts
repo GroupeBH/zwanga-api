@@ -116,6 +116,14 @@ export class TripsController {
     return this.tripsService.startTrip(id, req.user.userId);
   }
 
+  @Put(':id/pause')
+  @Auth()
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({ summary: 'Pause/interrupt an active trip' })
+  async pauseTrip(@Request() req, @Param('id') id: string) {
+    return this.tripsService.pauseTrip(id, req.user.userId);
+  }
+
   @Delete(':id')
   @Auth()
   @SensitiveThrottle(10, 60000)

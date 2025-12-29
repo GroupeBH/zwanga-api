@@ -32,6 +32,7 @@ import { TripRequestsModule } from './trip-requests/trip-requests.module';
 import { SafetyModule } from './safety/safety.module';
 import { GoogleMapsModule } from './google-maps/google-maps.module';
 import { FavoritePlacesModule } from './favorite-places/favorite-places.module';
+import { ChatbotModule } from './chatbot/chatbot.module';
 
 // Entities
 import { User } from './users/entities/user.entity';
@@ -158,6 +159,7 @@ const typeOrmEntities = [
     SafetyModule,
     GoogleMapsModule,
     FavoritePlacesModule,
+    ChatbotModule,
   ],
   controllers: [AppController],
   providers: [

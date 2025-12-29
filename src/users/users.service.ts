@@ -98,7 +98,7 @@ export class UsersService {
 
     if (!user) {
       this.logger.warn(`User not found: ${id}`);
-      throw new NotFoundException('User not found');
+      throw new NotFoundException('Utilisateur non trouvé');
     }
 
     return user;
@@ -158,7 +158,7 @@ export class UsersService {
 
       if (existingUser) {
         this.logger.warn(`Profile update failed: Phone ${updateProfileDto.phone} already exists`);
-        throw new BadRequestException('Phone number already exists');
+        throw new BadRequestException('Ce numéro de téléphone existe déjà');
       }
     }
 
@@ -598,7 +598,7 @@ export class UsersService {
       // Check if user has a PIN set
       if (!user.password) {
         this.logger.warn(`PIN change failed: User ${userId} does not have a PIN set but provided old PIN`);
-        throw new BadRequestException('No PIN set for this account. Please set a PIN first.');
+        throw new BadRequestException('Aucun code PIN défini pour ce compte. Veuillez d\'abord définir un code PIN.');
       }
 
       // Verify old PIN
@@ -606,13 +606,13 @@ export class UsersService {
 
       if (!isOldPinValid) {
         this.logger.warn(`PIN change failed: Invalid old PIN for user ${userId}`);
-        throw new UnauthorizedException('Invalid old PIN');
+        throw new UnauthorizedException('Ancien code PIN invalide');
       }
 
       // Check if new PIN is different from old PIN
       if (changePinDto.oldPin === changePinDto.newPin) {
         this.logger.warn(`PIN change failed: New PIN is the same as old PIN for user ${userId}`);
-        throw new BadRequestException('New PIN must be different from the old PIN');
+        throw new BadRequestException('Le nouveau code PIN doit être différent de l\'ancien');
       }
     } else {
       // Old PIN not provided - allow PIN reset (user forgot their PIN)
@@ -688,7 +688,7 @@ export class UsersService {
 
     if (!location) {
       this.logger.warn(`Favorite location ${locationId} not found for user ${userId}`);
-      throw new NotFoundException('Favorite location not found');
+      throw new NotFoundException('Lieu favori non trouvé');
     }
 
     return this.mapFavoriteLocationToResponse(location);
@@ -707,7 +707,7 @@ export class UsersService {
 
     if (!location) {
       this.logger.warn(`Favorite location ${locationId} not found for user ${userId}`);
-      throw new NotFoundException('Favorite location not found');
+      throw new NotFoundException('Lieu favori non trouvé');
     }
 
     // If setting as default, unset other defaults of the same type
@@ -754,7 +754,7 @@ export class UsersService {
 
     if (!location) {
       this.logger.warn(`Favorite location ${locationId} not found for user ${userId}`);
-      throw new NotFoundException('Favorite location not found');
+      throw new NotFoundException('Lieu favori non trouvé');
     }
 
     await this.favoriteLocationRepository.remove(location);

@@ -57,7 +57,7 @@ export class AuthService {
     });
 
     if (existingUser) {
-      throw new UnauthorizedException('phone already exists');
+      throw new UnauthorizedException('Ce numéro de téléphone existe déjà');
     }
 
     // Hash the PIN
@@ -114,7 +114,7 @@ export class AuthService {
     const savedUser = await this.userRepository.save(user);
 
     if (vehicle && !resolvedIsDriver) {
-      throw new BadRequestException('Vehicle information is only allowed for drivers');
+      throw new BadRequestException('Les informations du véhicule sont uniquement autorisées pour les conducteurs');
     }
 
     if (vehicle && resolvedIsDriver) {
@@ -186,11 +186,11 @@ export class AuthService {
 
     if (!user) {
       this.logger.warn(`Login failed: User not found for phone: ${loginDto.phone}`);
-      throw new UnauthorizedException('Invalid phone number or PIN');
+      throw new UnauthorizedException('Numéro de téléphone ou code PIN invalide');
     }
 
     if (user.status === UserStatus.SUSPENDED) {
-      throw new UnauthorizedException('Account is suspended');
+      throw new UnauthorizedException('Compte suspendu');
     }
 
     // Handle PIN validation or reset
@@ -213,12 +213,12 @@ export class AuthService {
       
       if (!validatedUser) {
         this.logger.warn(`Login failed: Invalid PIN for phone: ${loginDto.phone}`);
-        throw new UnauthorizedException('Invalid phone number or PIN. If you forgot your PIN, provide a newPin to reset it.');
+        throw new UnauthorizedException('Numéro de téléphone ou code PIN invalide. Si vous avez oublié votre code PIN, fournissez un newPin pour le réinitialiser.');
       }
     } else {
       // No PIN provided and no newPin provided
       this.logger.warn(`Login failed: No PIN provided for phone: ${loginDto.phone}`);
-      throw new UnauthorizedException('PIN is required. If you forgot your PIN, provide a newPin to reset it.');
+      throw new UnauthorizedException('Le code PIN est requis. Si vous avez oublié votre code PIN, fournissez un newPin pour le réinitialiser.');
     }
 
     // Update last login
@@ -256,7 +256,7 @@ export class AuthService {
       });
 
       if (!user || user.refreshToken !== refreshTokenDto.refreshToken) {
-        throw new UnauthorizedException('Invalid refresh token');
+        throw new UnauthorizedException('Token de rafraîchissement invalide');
       }
 
       const tokens = await this.generateTokens(user);
@@ -266,7 +266,7 @@ export class AuthService {
         refreshToken: tokens.refreshToken,
       };
     } catch (error) {
-      throw new UnauthorizedException('Invalid refresh token');
+      throw new UnauthorizedException('Token de rafraîchissement invalide');
     }
   }
 
