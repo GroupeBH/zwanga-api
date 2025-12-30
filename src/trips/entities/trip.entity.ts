@@ -102,7 +102,10 @@ export class Trip {
   currentLocation: Point;
 
   @Column({ type: 'timestamp', nullable: true })
-  lastLocationUpdateAt: Date;
+  lastLocationUpdateAt: Date | null;
+
+  @Column({ type: 'boolean', default: false })
+  departureReminderNotified: boolean; // Indique si la notification de rappel de départ a été envoyée
 
   @CreateDateColumn()
   createdAt: Date;
@@ -113,4 +116,3 @@ export class Trip {
   @OneToMany(() => Booking, (booking) => booking.trip)
   bookings: Booking[];
 }
-

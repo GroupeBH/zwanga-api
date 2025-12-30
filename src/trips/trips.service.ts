@@ -1000,6 +1000,135 @@ export class TripsService {
   }
 
   /**
+   * Cron job to notify drivers and passengers about upcoming trip departure
+   * Runs every 15 minutes to check for trips starting in the next 30 minutes
+   */
+  @Cron('*/15 * * * *') // Every 15 minutes
+  async notifyAboutUpcomingTripDeparture() {
+    this.logger.debug('Running cron job to notify about upcoming trip departure');
+    
+    const now = new Date();
+    const thirtyMinutesFromNow = new Date(now.getTime() + 30 * 60 * 1000); // 30 minutes from now
+    
+    // Find all pending trips starting in the next 30 minutes that haven't been notified yet
+    const tripsStartingSoon = await this.tripRepository.find({
+      where: {
+        status: TripStatus.PENDING,
+        departureReminderNotified: false,
+        departureDate: Between(now, thirtyMinutesFromNow),
+      },
+      relations: ['driver', 'bookings', 'bookings.passenger'],
+    });
+
+    if (tripsStartingSoon.length === 0) {
+      this.logger.debug('No trips starting soon found');
+      return;
+    }
+
+    this.logger.log(`Found ${tripsStartingSoon.length} trips starting soon`);
+
+    for (const trip of tripsStartingSoon) {
+      // Notify driver and passengers
+      await this.notifyAboutTripDeparture(trip);
+      
+      // Mark as notified
+      trip.departureReminderNotified = true;
+      await this.tripRepository.save(trip);
+    }
+
+    this.logger.log(
+      `Successfully notified about ${tripsStartingSoon.length} trips starting soon`,
+    );
+  }
+
+  /**
+   * Notify driver and passengers about upcoming trip departure
+   */
+  private async notifyAboutTripDeparture(trip: Trip): Promise<void> {
+    try {
+      // Notify driver
+      if (trip.driver?.fcmToken) {
+        const minutesUntilDeparture = Math.round(
+          (trip.departureDate.getTime() - new Date().getTime()) / (60 * 1000),
+        );
+        
+        const title = '⏰ Départ du trajet proche';
+        const body = `Votre trajet de ${trip.departureLocation} à ${trip.arrivalLocation} commence dans ${minutesUntilDeparture} minute${minutesUntilDeparture > 1 ? 's' : ''}.`;
+
+        const data = {
+          type: 'trip_departure_reminder',
+          tripId: trip.id,
+          departureLocation: trip.departureLocation,
+          arrivalLocation: trip.arrivalLocation,
+          departureDate: trip.departureDate.toISOString(),
+          minutesUntilDeparture,
+        };
+
+        await this.notificationService.sendNotification(
+          trip.driver.fcmToken,
+          title,
+          body,
+          data,
+          trip.driverId,
+        );
+        this.logger.log(`Notified driver ${trip.driverId} about trip ${trip.id} departure`);
+      }
+
+      // Notify passengers with accepted bookings
+      const acceptedBookings = trip.bookings?.filter(
+        (booking) => booking.status === BookingStatus.ACCEPTED,
+      ) || [];
+
+      if (acceptedBookings.length === 0) {
+        this.logger.debug(`No accepted bookings to notify for trip ${trip.id}`);
+        return;
+      }
+
+      const passengerIds = acceptedBookings.map((booking) => booking.passengerId);
+      const passengers = await this.userRepository.find({
+        where: {
+          id: In(passengerIds),
+        },
+        select: ['id', 'fcmToken', 'firstName', 'lastName'],
+      });
+
+      const passengersWithTokens = passengers.filter((passenger) => passenger.fcmToken);
+
+      if (passengersWithTokens.length === 0) {
+        this.logger.debug('No passengers with FCM tokens found, skipping notifications');
+        return;
+      }
+
+      const minutesUntilDeparture = Math.round(
+        (trip.departureDate.getTime() - new Date().getTime()) / (60 * 1000),
+      );
+
+      const fcmTokens = passengersWithTokens.map((p) => p.fcmToken!);
+      const userIds = passengersWithTokens.map((p) => p.id);
+
+      const title = '⏰ Départ du trajet proche';
+      const body = `Le trajet de ${trip.departureLocation} à ${trip.arrivalLocation} commence dans ${minutesUntilDeparture} minute${minutesUntilDeparture > 1 ? 's' : ''}. Préparez-vous !`;
+
+      const data = {
+        type: 'trip_departure_reminder',
+        tripId: trip.id,
+        departureLocation: trip.departureLocation,
+        arrivalLocation: trip.arrivalLocation,
+        departureDate: trip.departureDate.toISOString(),
+        minutesUntilDeparture,
+      };
+
+      await this.notificationService.sendToMultiple(fcmTokens, title, body, data, userIds);
+      this.logger.log(`Notified ${fcmTokens.length} passengers about trip ${trip.id} departure`);
+    } catch (error) {
+      this.logger.error(
+        `Error notifying about trip departure ${trip.id}: ${error.message}`,
+        error.stack,
+      );
+    }
+  }
+
+  /**
    * Cron job to notify drivers and passengers about upcoming trip expiration
    * Runs every 15 minutes to check for trips expiring in the next hour
    */
