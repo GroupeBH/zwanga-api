@@ -80,6 +80,62 @@ export class SendPhoneVerificationOtpDto {
   context: PhoneVerificationContext;
 }
 
+export class PublicUserInfoDto {
+  @ApiProperty({ description: 'ID de l\'utilisateur' })
+  id: string;
+
+  @ApiProperty({ description: 'Prénom' })
+  firstName: string;
+
+  @ApiProperty({ description: 'Nom' })
+  lastName: string;
+
+  @ApiProperty({ description: 'Photo de profil', nullable: true })
+  profilePicture: string | null;
+
+  @ApiProperty({ description: 'Rôle de l\'utilisateur', enum: UserRole })
+  role: UserRole;
+
+  @ApiProperty({ description: 'Indique si l\'utilisateur est conducteur' })
+  isDriver: boolean;
+
+  @ApiProperty({ description: 'Statut de l\'utilisateur' })
+  status: string;
+
+  @ApiProperty({ description: 'Indique si l\'email est vérifié' })
+  isEmailVerified: boolean;
+
+  @ApiProperty({ description: 'Indique si le téléphone est vérifié' })
+  isPhoneVerified: boolean;
+
+  @ApiProperty({ description: 'Date de création du compte' })
+  createdAt: Date;
+
+  @ApiProperty({ description: 'Note moyenne de l\'utilisateur', nullable: true })
+  averageRating: number | null;
+
+  @ApiProperty({ description: 'Nombre total de notes reçues' })
+  totalRatings: number;
+
+  @ApiProperty({ description: 'Statistiques de l\'utilisateur' })
+  stats: {
+    tripsAsDriver: number;
+    bookingsAsPassenger: number;
+    bookingsAsDriver: number;
+    vehiclesCount: number;
+  };
+
+  @ApiProperty({ description: 'Véhicules du conducteur (si driver)', nullable: true, type: 'array' })
+  vehicles?: Array<{
+    id: string;
+    brand: string;
+    model: string;
+    color: string;
+    licensePlate: string;
+    photoUrl: string | null;
+  }>;
+}
+
 export class ChangePinDto {
   @ApiProperty({ 
     required: false,

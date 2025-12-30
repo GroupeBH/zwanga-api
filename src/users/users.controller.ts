@@ -35,6 +35,17 @@ export class UsersController {
     return this.usersService.getProfileSummary(req.user.userId);
   }
 
+  @Get(':id/public')
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ 
+    summary: 'Get public user information',
+    description: 'Récupère les informations publiques d\'un utilisateur (driver ou passager) à afficher aux autres utilisateurs. Inclut les statistiques, la note moyenne, et les véhicules si applicable.'
+  })
+  @ApiParam({ name: 'id', description: 'ID de l\'utilisateur' })
+  async getPublicUserInfo(@Param('id') id: string) {
+    return this.usersService.getPublicUserInfo(id);
+  }
+
   @Put('me')
   @Auth()
   @SensitiveThrottle(10, 60000)

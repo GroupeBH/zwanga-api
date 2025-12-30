@@ -9,10 +9,12 @@ import { Trip } from '../trips/entities/trip.entity';
 import { Booking } from '../bookings/entities/booking.entity';
 import { Message } from '../chat/entities/message.entity';
 import { FavoriteLocation } from './entities/favorite-location.entity';
+import { Rating } from '../ratings/entities/rating.entity';
+import { Vehicle } from '../vehicles/entities/vehicle.entity';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([User, KycDocument, Trip, Booking, Message, FavoriteLocation]),
+    TypeOrmModule.forFeature([User, KycDocument, Trip, Booking, Message, FavoriteLocation, Rating, Vehicle]),
     ConfigModule,
   ],
   controllers: [UsersController],

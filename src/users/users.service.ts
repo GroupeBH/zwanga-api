@@ -13,11 +13,13 @@ import * as bcrypt from 'bcrypt';
 import { User, UserStatus } from './entities/user.entity';
 import { KycDocument, KycStatus } from './entities/kyc-document.entity';
 import { FavoriteLocation, FavoriteLocationType } from './entities/favorite-location.entity';
-import { UpdateProfileDto, UploadKycDto, SendPhoneVerificationOtpDto, VerifyPhoneOtpDto, PhoneVerificationContext, ChangePinDto } from './dto/user.dto';
+import { UpdateProfileDto, UploadKycDto, SendPhoneVerificationOtpDto, VerifyPhoneOtpDto, PhoneVerificationContext, ChangePinDto, PublicUserInfoDto } from './dto/user.dto';
 import { CreateFavoriteLocationDto, UpdateFavoriteLocationDto, FavoriteLocationResponse } from './dto/favorite-location.dto';
 import { Trip } from '../trips/entities/trip.entity';
 import { Booking } from '../bookings/entities/booking.entity';
 import { Message } from '../chat/entities/message.entity';
+import { Rating } from '../ratings/entities/rating.entity';
+import { Vehicle } from '../vehicles/entities/vehicle.entity';
 import { FileUploadService } from '../common/services/file-upload.service';
 import { KycValidationService } from '../common/services/kyc-validation.service';
 import { KeccelOtpService } from '../keccel-otp/keccel-otp.service';
@@ -42,6 +44,10 @@ export class UsersService {
     private messageRepository: Repository<Message>,
     @InjectRepository(FavoriteLocation)
     private favoriteLocationRepository: Repository<FavoriteLocation>,
+    @InjectRepository(Rating)
+    private ratingRepository: Repository<Rating>,
+    @InjectRepository(Vehicle)
+    private vehicleRepository: Repository<Vehicle>,
     private fileUploadService: FileUploadService,
     private kycValidationService: KycValidationService,
     private keccelOtpService: KeccelOtpService,
@@ -787,6 +793,96 @@ export class UsersService {
       notes: location.notes,
       createdAt: location.createdAt,
       updatedAt: location.updatedAt,
+    };
+  }
+
+  /**
+   * Récupère les informations publiques d'un utilisateur (driver ou passager)
+   * Ces informations sont destinées à être affichées aux autres utilisateurs
+   */
+  async getPublicUserInfo(userId: string): Promise<PublicUserInfoDto> {
+    this.logger.log(`Fetching public info for user: ${userId}`);
+
+    const user = await this.userRepository.findOne({
+      where: { id: userId },
+      relations: ['vehicles'],
+    });
+
+    if (!user) {
+      throw new NotFoundException('Utilisateur non trouvé');
+    }
+
+    // Calculer les statistiques
+    const [
+      tripsAsDriver,
+      bookingsAsPassenger,
+      bookingsAsDriver,
+    ] = await Promise.all([
+      this.tripRepository.count({ where: { driverId: userId } }),
+      this.bookingRepository.count({ where: { passengerId: userId } }),
+      this.bookingRepository
+        .createQueryBuilder('booking')
+        .innerJoin('booking.trip', 'trip')
+        .where('trip.driverId = :userId', { userId })
+        .getCount(),
+    ]);
+
+    // Calculer la note moyenne et le nombre total de notes
+    const ratingStats = await this.ratingRepository
+      .createQueryBuilder('rating')
+      .select('AVG(rating.rating)', 'average')
+      .addSelect('COUNT(rating.id)', 'total')
+      .where('rating.ratedUserId = :userId', { userId })
+      .getRawOne();
+
+    const averageRating = ratingStats?.average ? parseFloat(ratingStats.average) : null;
+    const totalRatings = ratingStats?.total ? parseInt(ratingStats.total, 10) : 0;
+
+    // Enrichir la photo de profil avec presigned URL si nécessaire
+    const enrichedUser = await this.enrichUserWithPresignedUrls(user);
+
+    // Préparer les véhicules (si driver)
+    const vehicles = user.isDriver && user.vehicles
+      ? await Promise.all(
+          user.vehicles
+            .filter((v) => v.isActive)
+            .map(async (vehicle) => {
+              let photoUrl = vehicle.photoUrl;
+              if (photoUrl) {
+                photoUrl = await this.fileUploadService.getPresignedUrlIfS3Key(photoUrl) || photoUrl;
+              }
+              return {
+                id: vehicle.id,
+                brand: vehicle.brand,
+                model: vehicle.model,
+                color: vehicle.color,
+                licensePlate: vehicle.licensePlate,
+                photoUrl,
+              };
+            }),
+        )
+      : undefined;
+
+    return {
+      id: user.id,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      profilePicture: enrichedUser.profilePicture,
+      role: user.role,
+      isDriver: user.isDriver,
+      status: user.status,
+      isEmailVerified: user.isEmailVerified,
+      isPhoneVerified: user.isPhoneVerified,
+      createdAt: user.createdAt,
+      averageRating: averageRating ? Math.round(averageRating * 10) / 10 : null, // Arrondir à 1 décimale
+      totalRatings,
+      stats: {
+        tripsAsDriver,
+        bookingsAsPassenger,
+        bookingsAsDriver,
+        vehiclesCount: user.vehicles?.filter((v) => v.isActive).length ?? 0,
+      },
+      vehicles,
     };
   }
 }
