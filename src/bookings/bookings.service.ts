@@ -5,7 +5,7 @@ import type { Point } from 'typeorm';
 import { Booking, BookingStatus } from './entities/booking.entity';
 import { Trip, TripStatus } from '../trips/entities/trip.entity';
 import { User } from '../users/entities/user.entity';
-import { CreateBookingDto, UpdateBookingStatusDto, ReportBookingProblemDto } from './dto/booking.dto';
+import { CreateBookingDto, UpdateBookingStatusDto, ReportBookingProblemDto, UpdatePassengerLocationDto } from './dto/booking.dto';
 import { CacheService } from '../common/services/cache.service';
 import { NotificationService } from '../notifications/notifications.service';
 import { ChatService } from '../chat/chat.service';
@@ -18,6 +18,7 @@ import { SendWhatsAppNotificationDto } from './dto/send-whatsapp-notification.dt
 export class BookingsService {
   private readonly logger = new Logger(BookingsService.name);
   private readonly CACHE_TTL = 180; // 3 minutes
+  private readonly DESTINATION_PROXIMITY_THRESHOLD_METERS = 1000; // 1 km
 
   constructor(
     @InjectRepository(Booking)
@@ -928,6 +929,251 @@ export class BookingsService {
         driverPhone: driver.phone,
       },
     };
+  }
+
+  async updatePassengerLocation(
+    passengerId: string,
+    bookingId: string,
+    updateLocationDto: UpdatePassengerLocationDto,
+  ): Promise<{ bookingId: string; coordinates: [number, number]; updatedAt: Date }> {
+    this.logger.log(`Updating passenger location for booking ${bookingId} by passenger ${passengerId}`);
+
+    const booking = await this.bookingRepository.findOne({
+      where: { id: bookingId, passengerId },
+      relations: ['trip'],
+    });
+
+    if (!booking) {
+      throw new NotFoundException('Réservation non trouvée ou vous n\'êtes pas le passager');
+    }
+
+    // Vérifier que la réservation est acceptée
+    if (booking.status !== BookingStatus.ACCEPTED) {
+      throw new BadRequestException('Seules les réservations acceptées peuvent partager leur position');
+    }
+
+    // Vérifier que le trajet est actif
+    if (booking.trip.status !== TripStatus.ACTIVE) {
+      throw new BadRequestException('Le trajet doit être actif pour partager la position');
+    }
+
+    // Construire le point de position
+    const currentLocation: Point = {
+      type: 'Point',
+      coordinates: [
+        Number(updateLocationDto.longitude),
+        Number(updateLocationDto.latitude),
+      ],
+    };
+
+    // Mettre à jour la position
+    booking.passengerCurrentLocation = currentLocation;
+    booking.passengerLastLocationUpdateAt = new Date();
+    await this.bookingRepository.save(booking);
+
+    this.logger.log(`Passenger location updated for booking ${bookingId}`);
+
+    // Vérifier la proximité de la destination et notifier si nécessaire
+    await this.checkAndNotifyDestinationProximity(booking);
+
+    return {
+      bookingId: booking.id,
+      coordinates: [updateLocationDto.longitude, updateLocationDto.latitude],
+      updatedAt: booking.passengerLastLocationUpdateAt!,
+    };
+  }
+
+  /**
+   * Calcule la distance en mètres entre la position actuelle du passager et sa destination
+   */
+  private async calculateDistanceToDestination(booking: Booking): Promise<number | null> {
+    if (!booking.passengerCurrentLocation || !booking.passengerDestinationPoint) {
+      return null;
+    }
+
+    try {
+      // Utiliser PostGIS ST_Distance pour calculer la distance en mètres
+      const result = await this.bookingRepository
+        .createQueryBuilder('booking')
+        .select(
+          `ST_Distance(
+            booking.passengerCurrentLocation::geography,
+            booking.passengerDestinationPoint::geography
+          )`,
+          'distance',
+        )
+        .where('booking.id = :id', { id: booking.id })
+        .getRawOne();
+
+      return result?.distance ? Math.round(result.distance) : null;
+    } catch (error) {
+      this.logger.error(`Error calculating distance to destination: ${error.message}`, error.stack);
+      return null;
+    }
+  }
+
+  /**
+   * Vérifie si le passager est proche de sa destination et envoie les notifications si nécessaire
+   */
+  private async checkAndNotifyDestinationProximity(booking: Booking): Promise<void> {
+    // Ne pas vérifier si la notification a déjà été envoyée
+    if (booking.destinationProximityNotified) {
+      return;
+    }
+
+    // Vérifier que la destination est définie
+    if (!booking.passengerDestinationPoint) {
+      return;
+    }
+
+    // Calculer la distance
+    const distance = await this.calculateDistanceToDestination(booking);
+    
+    if (distance === null || distance > this.DESTINATION_PROXIMITY_THRESHOLD_METERS) {
+      return;
+    }
+
+    this.logger.log(
+      `Passenger ${booking.passengerId} is ${distance}m away from destination for booking ${booking.id}. Sending notifications.`,
+    );
+
+    // Marquer comme notifié et envoyer les notifications
+    booking.destinationProximityNotified = true;
+    await this.bookingRepository.save(booking);
+
+    // Envoyer les notifications au conducteur et au passager
+    await this.notifyDestinationProximity(booking, distance);
+  }
+
+  /**
+   * Envoie les notifications de proximité au conducteur et au passager
+   */
+  private async notifyDestinationProximity(booking: Booking, distanceMeters: number): Promise<void> {
+    try {
+      // Charger les relations nécessaires
+      const bookingWithRelations = await this.bookingRepository.findOne({
+        where: { id: booking.id },
+        relations: ['passenger', 'trip', 'trip.driver'],
+      });
+
+      if (!bookingWithRelations || !bookingWithRelations.trip || !bookingWithRelations.passenger) {
+        this.logger.warn(`Cannot notify destination proximity: missing relations for booking ${booking.id}`);
+        return;
+      }
+
+      const trip = bookingWithRelations.trip;
+      const passenger = bookingWithRelations.passenger;
+      const driver = trip.driver;
+
+      const distanceKm = (distanceMeters / 1000).toFixed(1);
+      const destinationName = bookingWithRelations.passengerDestination || 'votre destination';
+
+      // Notification au passager
+      if (passenger.fcmToken) {
+        const passengerTitle = '📍 Proche de votre destination';
+        const passengerBody = `Vous êtes à environ ${distanceKm} km de ${destinationName}. Préparez-vous à descendre.`;
+
+        const passengerData = {
+          type: 'destination_proximity',
+          bookingId: booking.id,
+          tripId: trip.id,
+          distanceMeters,
+          distanceKm: parseFloat(distanceKm),
+          destination: destinationName,
+        };
+
+        await this.notificationService.sendNotification(
+          passenger.fcmToken,
+          passengerTitle,
+          passengerBody,
+          passengerData,
+          passenger.id,
+        );
+        this.logger.log(`Notified passenger ${passenger.id} about destination proximity`);
+      }
+
+      // Notification au conducteur
+      if (driver && driver.fcmToken) {
+        const driverTitle = '📍 Passager proche de sa destination';
+        const driverBody = `${passenger.firstName} ${passenger.lastName} est à environ ${distanceKm} km de ${destinationName}. Préparez-vous à l'arrêt.`;
+
+        const driverData = {
+          type: 'passenger_destination_proximity',
+          bookingId: booking.id,
+          tripId: trip.id,
+          passengerId: passenger.id,
+          passengerName: `${passenger.firstName} ${passenger.lastName}`,
+          distanceMeters,
+          distanceKm: parseFloat(distanceKm),
+          destination: destinationName,
+        };
+
+        await this.notificationService.sendNotification(
+          driver.fcmToken,
+          driverTitle,
+          driverBody,
+          driverData,
+          driver.id,
+        );
+        this.logger.log(`Notified driver ${driver.id} about passenger destination proximity`);
+      }
+    } catch (error) {
+      this.logger.error(
+        `Error notifying destination proximity for booking ${booking.id}: ${error.message}`,
+        error.stack,
+      );
+    }
+  }
+
+  async getPassengersLocations(tripId: string, driverId: string): Promise<Array<{
+    bookingId: string;
+    passengerId: string;
+    passengerName: string;
+    coordinates: [number, number] | null;
+    lastLocationUpdateAt: Date | null;
+  }>> {
+    this.logger.log(`Getting passengers locations for trip ${tripId} by driver ${driverId}`);
+
+    // Vérifier que l'utilisateur est le conducteur du trajet
+    const trip = await this.tripRepository.findOne({
+      where: { id: tripId, driverId },
+    });
+
+    if (!trip) {
+      throw new NotFoundException('Trajet non trouvé ou vous n\'êtes pas le conducteur');
+    }
+
+    // Récupérer toutes les réservations acceptées pour ce trajet
+    const acceptedBookings = await this.bookingRepository.find({
+      where: {
+        tripId,
+        status: BookingStatus.ACCEPTED,
+      },
+      relations: ['passenger'],
+      select: ['id', 'passengerId', 'passengerCurrentLocation', 'passengerLastLocationUpdateAt'],
+    });
+
+    // Convertir les positions en coordonnées
+    return acceptedBookings.map((booking) => {
+      let coordinates: [number, number] | null = null;
+      
+      if (booking.passengerCurrentLocation) {
+        const point = booking.passengerCurrentLocation as any;
+        if (point.coordinates && point.coordinates.length === 2) {
+          coordinates = [point.coordinates[0], point.coordinates[1]]; // [longitude, latitude]
+        }
+      }
+
+      return {
+        bookingId: booking.id,
+        passengerId: booking.passengerId,
+        passengerName: booking.passenger 
+          ? `${booking.passenger.firstName} ${booking.passenger.lastName}`
+          : 'Passager inconnu',
+        coordinates,
+        lastLocationUpdateAt: booking.passengerLastLocationUpdateAt,
+      };
+    });
   }
 }
 

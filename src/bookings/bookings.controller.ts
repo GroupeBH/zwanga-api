@@ -9,7 +9,7 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { BookingsService } from './bookings.service';
-import { CreateBookingDto, UpdateBookingStatusDto, RejectBookingDto, ConfirmPickupDto, ConfirmDropoffDto, ReportBookingProblemDto } from './dto/booking.dto';
+import { CreateBookingDto, UpdateBookingStatusDto, RejectBookingDto, ConfirmPickupDto, ConfirmDropoffDto, ReportBookingProblemDto, UpdatePassengerLocationDto } from './dto/booking.dto';
 import { SendWhatsAppNotificationDto } from './dto/send-whatsapp-notification.dto';
 import { Auth } from '../auth/decorators/auth.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -170,6 +170,26 @@ export class BookingsController {
     @Body() reportDto: ReportBookingProblemDto,
   ) {
     return this.bookingsService.reportBookingProblem(id, req.user.userId, reportDto);
+  }
+
+  @Put(':id/passenger-location')
+  @Auth()
+  @SensitiveThrottle(30, 60000) // 30 updates per minute (frequent updates for tracking)
+  @ApiOperation({ summary: 'Update passenger current location (passenger only)' })
+  async updatePassengerLocation(
+    @Request() req,
+    @Param('id') id: string,
+    @Body() updateLocationDto: UpdatePassengerLocationDto,
+  ) {
+    return this.bookingsService.updatePassengerLocation(req.user.userId, id, updateLocationDto);
+  }
+
+  @Get('trip/:tripId/passengers-locations')
+  @Auth()
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'Get all passengers locations for a trip (driver only)' })
+  async getPassengersLocations(@Request() req, @Param('tripId') tripId: string) {
+    return this.bookingsService.getPassengersLocations(tripId, req.user.userId);
   }
 }
 
