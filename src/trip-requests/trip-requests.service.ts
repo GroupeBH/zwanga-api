@@ -102,7 +102,7 @@ export class TripRequestsService {
     private notificationService: NotificationService,
     private tripsService: TripsService,
     private bookingsService: BookingsService,
-  ) {}
+  ) { }
 
   async create(passengerId: string, createTripRequestDto: CreateTripRequestDto): Promise<SanitizedTripRequest> {
     this.logger.log(`Creating trip request for passenger: ${passengerId}`);
@@ -117,7 +117,7 @@ export class TripRequestsService {
     // Validate dates
     const minDate = new Date(departureDateMin);
     const maxDate = new Date(departureDateMax);
-    
+
     if (minDate >= maxDate) {
       throw new BadRequestException('La date de départ minimum doit être antérieure à la date maximum');
     }
@@ -137,10 +137,10 @@ export class TripRequestsService {
 
     const saved = await this.tripRequestRepository.save(tripRequest);
     this.logger.log(`Trip request created: ${saved.id}`);
-    
+
     // Notify all active drivers about the new trip request
     await this.notifyDriversAboutTripRequest(saved);
-    
+
     return this.findOne(saved.id, passengerId);
   }
 
@@ -170,7 +170,7 @@ export class TripRequestsService {
 
       const title = 'Nouvelle demande de trajet disponible';
       const body = `Un passager cherche un trajet de ${tripRequest.departureLocation} à ${tripRequest.arrivalLocation}`;
-      
+
       const data = {
         type: 'trip_request',
         tripRequestId: tripRequest.id,
@@ -195,7 +195,7 @@ export class TripRequestsService {
     const now = new Date();
     const tripRequests = await this.tripRequestRepository.find({
       relations: ['passenger', 'selectedDriver', 'selectedVehicle', 'driverOffers', 'driverOffers.driver', 'driverOffers.vehicle'],
-      where: { 
+      where: {
         status: TripRequestStatus.PENDING,
         departureDateMax: MoreThan(now), // Exclure les demandes expirées
       },
@@ -258,7 +258,7 @@ export class TripRequestsService {
 
     const now = new Date();
     const tripRequests = await this.tripRequestRepository.find({
-      where: { 
+      where: {
         passengerId,
         departureDateMax: MoreThan(now), // Exclure les demandes expirées
       },
@@ -294,9 +294,9 @@ export class TripRequestsService {
     }
 
     // Vérifier que l'utilisateur est bien un conducteur
-    if (!driver.isDriver || driver.role !== UserRole.DRIVER) {
-      throw new ForbiddenException('Seuls les conducteurs peuvent faire des offres sur les demandes de trajets. Vous devez être un conducteur pour effectuer cette action.');
-    }
+    // if (!driver.isDriver || driver.role !== UserRole.DRIVER) {
+    //   throw new ForbiddenException('Seuls les conducteurs peuvent faire des offres sur les demandes de trajets. Vous devez être un conducteur pour effectuer cette action.');
+    // }
 
     const tripRequest = await this.tripRequestRepository.findOne({
       where: { id: tripRequestId },
@@ -423,7 +423,7 @@ export class TripRequestsService {
       const driverName = offer.driver ? `${offer.driver.firstName} ${offer.driver.lastName}` : 'Un conducteur';
       const title = 'Nouvelle offre reçue';
       const body = `${driverName} a fait une offre pour votre demande de trajet de ${tripRequest.departureLocation} à ${tripRequest.arrivalLocation}`;
-      
+
       const data = {
         type: 'driver_offer',
         tripRequestId: tripRequest.id,
@@ -466,7 +466,7 @@ export class TripRequestsService {
       const passengerName = tripRequest.passenger ? `${tripRequest.passenger.firstName} ${tripRequest.passenger.lastName}` : 'Un passager';
       const title = '✅ Offre acceptée';
       const body = `${passengerName} a accepté votre offre pour le trajet de ${tripRequest.departureLocation} à ${tripRequest.arrivalLocation}. Vous pouvez maintenant démarrer le trajet.`;
-      
+
       const data = {
         type: 'offer_accepted',
         tripRequestId: tripRequest.id,
@@ -844,9 +844,9 @@ export class TripRequestsService {
   @Cron(CronExpression.EVERY_HOUR)
   async markExpiredTripRequests() {
     this.logger.debug('Running cron job to mark expired trip requests');
-    
+
     const now = new Date();
-    
+
     // Find all pending trip requests with departureDateMax in the past
     const expiredRequests = await this.tripRequestRepository.find({
       where: {
@@ -883,10 +883,10 @@ export class TripRequestsService {
   @Cron('*/15 * * * *') // Every 15 minutes
   async notifyAboutUpcomingTripRequestExpiration() {
     this.logger.debug('Running cron job to notify about upcoming trip request expiration');
-    
+
     const now = new Date();
     const thirtyMinutesFromNow = new Date(now.getTime() + 30 * 60 * 1000); // 30 minutes from now
-    
+
     // Find all pending trip requests expiring in the next 30 minutes that haven't been notified yet
     const requestsExpiringSoon = await this.tripRequestRepository.find({
       where: {
@@ -908,7 +908,7 @@ export class TripRequestsService {
       try {
         // Notify passenger about upcoming expiration
         await this.notifyPassengerAboutUpcomingExpiration(tripRequest);
-        
+
         // Mark notification as sent
         tripRequest.expirationNotificationSent = true;
         await this.tripRequestRepository.save(tripRequest);
@@ -930,7 +930,7 @@ export class TripRequestsService {
    */
   private async notifyPassengerAboutUpcomingExpiration(tripRequest: TripRequest): Promise<void> {
     const passenger = tripRequest.passenger;
-    
+
     if (!passenger || !passenger.fcmToken) {
       this.logger.debug(`Passenger ${tripRequest.passengerId} has no FCM token, skipping notification`);
       return;
