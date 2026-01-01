@@ -80,7 +80,7 @@ export class UsersService {
     // Handle array of CNI front URLs
     if (kyc.cniFrontUrls && Array.isArray(kyc.cniFrontUrls)) {
       kyc.cniFrontUrls = await Promise.all(
-        kyc.cniFrontUrls.map(url => 
+        kyc.cniFrontUrls.map(url =>
           this.fileUploadService.getPresignedUrlIfS3Key(url).then(presigned => presigned || url)
         )
       );
@@ -112,6 +112,7 @@ export class UsersService {
 
   async getProfileSummary(userId: string) {
     const user = await this.findOne(userId);
+    console.log("this user:", user);
 
     const [
       tripsAsDriver,
@@ -263,7 +264,7 @@ export class UsersService {
       const missingFiles: string[] = [];
       if (!cniBackFile) missingFiles.push('cniBack (verso de la CNI)');
       if (!selfieFile) missingFiles.push('selfie (photo selfie)');
-      
+
       throw new BadRequestException(
         `ÉCHEC : Fichiers manquants. Veuillez fournir tous les documents requis.\n\nFichiers manquants : ${missingFiles.join(', ')}\n\nTous les fichiers suivants sont requis :\n- cniFront : 1 ou 2 photos du recto de votre carte d'identité\n- cniBack : Photo du verso de votre carte d'identité\n- selfie : Photo selfie de vous-même`
       );
@@ -277,7 +278,7 @@ export class UsersService {
       this.fileUploadService.saveFile(cniBackFile, 'kyc'),
       this.fileUploadService.saveFile(selfieFile, 'kyc'),
     ]);
-    
+
     // Keep first CNI front URL for backward compatibility
     const cniFrontUrl = cniFrontUrls[0];
 
@@ -288,7 +289,7 @@ export class UsersService {
 
     // Only perform KYC validation if AWS Rekognition is enabled
     const kycValidationEnabled = this.configService.get<string>('AWS_REKOGNITION_KYC_ENABLED') === 'true';
-    
+
     this.logger.log(`[KYC Upload] ========================================`);
     this.logger.log(`[KYC Upload] Processing KYC upload for user: ${userId}`);
     this.logger.log(`[KYC Upload] KYC validation enabled: ${kycValidationEnabled}`);
@@ -297,7 +298,7 @@ export class UsersService {
       this.logger.log(`[KYC Upload]   - CNI front ${idx + 1}: ${file.originalname} (${file.size} bytes)`);
     });
     this.logger.log(`[KYC Upload] Selfie file: ${selfieFile.originalname} (${selfieFile.size} bytes)`);
-    
+
     if (kycValidationEnabled) {
       try {
         this.logger.log(`[KYC Upload] Starting AI validation for user: ${userId}`);
@@ -324,28 +325,28 @@ export class UsersService {
           kycStatus = KycStatus.REJECTED;
           // Construire un message d'erreur détaillé avec toutes les informations
           let detailedReason = validationResult.reason || 'ÉCHEC : Validation KYC échouée';
-          
+
           // Ajouter les détails techniques si disponibles
           if (validationResult.details) {
             const details = validationResult.details;
             detailedReason += '\n\nDétails techniques :';
-            
+
             if (details.issue) {
               detailedReason += `\n- Problème identifié : ${details.issue}`;
             }
-            
+
             if (details.cniFrontFaces !== undefined) {
               detailedReason += `\n- Visages détectés sur CNI : ${details.cniFrontFaces}`;
             }
-            
+
             if (details.selfieFaces !== undefined) {
               detailedReason += `\n- Visages détectés sur selfie : ${details.selfieFaces}`;
             }
-            
+
             if (details.similarityScore !== undefined) {
               detailedReason += `\n- Score de similarité : ${details.similarityScore.toFixed(1)}% (minimum requis : ${details.minRequiredSimilarity || this.configService.get<string>('AWS_REKOGNITION_KYC_MIN_SIMILARITY') || '80'}%)`;
             }
-            
+
             if (details.cniQuality !== undefined || details.selfieQuality !== undefined) {
               detailedReason += '\n- Qualité des images :';
               if (details.cniQuality !== undefined) {
@@ -362,12 +363,12 @@ export class UsersService {
                 detailedReason += `\n  • Minimum requis : ${details.minRequiredQuality}%`;
               }
             }
-            
+
             if (details.recommendation) {
               detailedReason += `\n\n💡 Recommandation : ${details.recommendation}`;
             }
           }
-          
+
           rejectionReason = detailedReason;
           this.logger.warn(`[KYC Upload] ❌ KYC validation FAILED for user: ${userId}`);
           this.logger.warn(`[KYC Upload] Reason: ${validationResult.reason}`);
@@ -380,14 +381,14 @@ export class UsersService {
         this.logger.error(`[KYC Upload] ❌ KYC validation ERROR for user: ${userId}:`);
         this.logger.error(`[KYC Upload] Error message: ${error.message}`);
         this.logger.error(`[KYC Upload] Error stack: ${error.stack}`);
-        
+
         // En cas d'erreur technique du service IA, mettre le statut à PENDING pour validation manuelle
         kycStatus = KycStatus.PENDING;
-        
+
         // Construire un message clair pour l'utilisateur
         const errorMessage = error.message || 'Erreur inconnue';
         rejectionReason = `VALIDATION MANUELLE REQUISE : Le service de validation automatique n'est pas disponible actuellement.\n\nVotre demande sera examinée manuellement par notre équipe dans les plus brefs délais.\n\nRaison technique : ${errorMessage}`;
-        
+
         this.logger.warn(`[KYC Upload] ⚠️ KYC validation service unavailable - Status set to PENDING for manual review`);
         this.logger.warn(`[KYC Upload] User will be notified that manual review is required`);
       }
@@ -395,23 +396,23 @@ export class UsersService {
       const kycEnabledConfig = this.configService.get<string>('AWS_REKOGNITION_KYC_ENABLED');
       const accessKeyId = this.configService.get<string>('AWS_ACCESS_KEY_ID');
       const secretAccessKey = this.configService.get<string>('AWS_SECRET_ACCESS_KEY');
-      
+
       this.logger.warn(`[KYC Upload] ⚠️ KYC validation is DISABLED`);
       this.logger.warn(`[KYC Upload] Reason: AWS_REKOGNITION_KYC_ENABLED="${kycEnabledConfig || 'NOT SET'}" (must be "true" to enable)`);
-      
+
       if (!accessKeyId || !secretAccessKey) {
         this.logger.warn(`[KYC Upload] Additional issue: AWS credentials not configured`);
         this.logger.warn(`[KYC Upload]   - AWS_ACCESS_KEY_ID: ${accessKeyId ? 'configured' : 'NOT SET'}`);
         this.logger.warn(`[KYC Upload]   - AWS_SECRET_ACCESS_KEY: ${secretAccessKey ? 'configured' : 'NOT SET'}`);
       }
-      
+
       this.logger.warn(`[KYC Upload] Action: Keeping status as PENDING for manual review`);
       this.logger.warn(`[KYC Upload] To enable AI validation, set AWS_REKOGNITION_KYC_ENABLED=true and configure AWS credentials`);
-      
+
       // When KYC validation is disabled, keep status as PENDING for manual review
       kycStatus = KycStatus.PENDING;
     }
-    
+
     this.logger.log(`[KYC Upload] Final KYC status: ${kycStatus}`);
     this.logger.log(`[KYC Upload] ========================================`);
 
@@ -844,23 +845,23 @@ export class UsersService {
     // Préparer les véhicules (si driver)
     const vehicles = user.isDriver && user.vehicles
       ? await Promise.all(
-          user.vehicles
-            .filter((v) => v.isActive)
-            .map(async (vehicle) => {
-              let photoUrl = vehicle.photoUrl;
-              if (photoUrl) {
-                photoUrl = await this.fileUploadService.getPresignedUrlIfS3Key(photoUrl) || photoUrl;
-              }
-              return {
-                id: vehicle.id,
-                brand: vehicle.brand,
-                model: vehicle.model,
-                color: vehicle.color,
-                licensePlate: vehicle.licensePlate,
-                photoUrl,
-              };
-            }),
-        )
+        user.vehicles
+          .filter((v) => v.isActive)
+          .map(async (vehicle) => {
+            let photoUrl = vehicle.photoUrl;
+            if (photoUrl) {
+              photoUrl = await this.fileUploadService.getPresignedUrlIfS3Key(photoUrl) || photoUrl;
+            }
+            return {
+              id: vehicle.id,
+              brand: vehicle.brand,
+              model: vehicle.model,
+              color: vehicle.color,
+              licensePlate: vehicle.licensePlate,
+              photoUrl,
+            };
+          }),
+      )
       : undefined;
 
     return {

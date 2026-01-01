@@ -10,7 +10,7 @@ import { Repository, Point, LessThan, MoreThan, Between, In } from 'typeorm';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { TripRequest, TripRequestStatus } from './entities/trip-request.entity';
 import { DriverOffer, DriverOfferStatus } from './entities/driver-offer.entity';
-import { User } from '../users/entities/user.entity';
+import { User, UserRole } from '../users/entities/user.entity';
 import { Vehicle } from '../vehicles/entities/vehicle.entity';
 import { CreateTripRequestDto, CreateDriverOfferDto, AcceptDriverOfferDto } from './dto/trip-request.dto';
 import { FileUploadService } from '../common/services/file-upload.service';
@@ -290,11 +290,12 @@ export class TripRequestsService {
 
     const driver = await this.userRepository.findOne({ where: { id: driverId } });
     if (!driver) {
-      throw new NotFoundException('Conducteur non trouvé');
+      throw new NotFoundException('Utilisateur non trouvé');
     }
 
-    if (!driver.isDriver) {
-      throw new BadRequestException('Vous devez être un conducteur pour faire une offre');
+    // Vérifier que l'utilisateur est bien un conducteur
+    if (!driver.isDriver || driver.role !== UserRole.DRIVER) {
+      throw new ForbiddenException('Seuls les conducteurs peuvent faire des offres sur les demandes de trajets. Vous devez être un conducteur pour effectuer cette action.');
     }
 
     const tripRequest = await this.tripRequestRepository.findOne({
@@ -597,19 +598,26 @@ export class TripRequestsService {
       throw new BadRequestException('Les coordonnées de départ ou d\'arrivée sont manquantes');
     }
 
-    // Create Trip from TripRequest
-    const trip = await this.tripsService.create(driverId, {
-      departureLocation: tripRequest.departureLocation,
-      arrivalLocation: tripRequest.arrivalLocation,
-      departureCoordinates,
-      arrivalCoordinates,
-      departureDate: acceptedOffer.proposedDepartureDate.toISOString(),
-      totalSeats: acceptedOffer.availableSeats,
-      pricePerSeat: tripRequest.selectedPricePerSeat || 0,
-      isFree: (tripRequest.selectedPricePerSeat || 0) === 0,
-      vehicleId: tripRequest.selectedVehicleId || undefined,
-      description: tripRequest.description || undefined,
-    });
+    // Create Trip from TripRequest (private by default)
+    const trip = await this.tripsService.create(
+      driverId,
+      {
+        departureLocation: tripRequest.departureLocation,
+        arrivalLocation: tripRequest.arrivalLocation,
+        departureCoordinates,
+        arrivalCoordinates,
+        departureDate: acceptedOffer.proposedDepartureDate.toISOString(),
+        totalSeats: acceptedOffer.availableSeats,
+        pricePerSeat: tripRequest.selectedPricePerSeat || 0,
+        isFree: (tripRequest.selectedPricePerSeat || 0) === 0,
+        vehicleId: tripRequest.selectedVehicleId || undefined,
+        description: tripRequest.description || undefined,
+      },
+      {
+        isPrivate: true, // Trajet privé par défaut
+        tripRequestId: tripRequest.id,
+      },
+    );
 
     // Create booking for the passenger automatically (ACCEPTED status)
     await this.bookingsService.create(tripRequest.passengerId, {

@@ -324,6 +324,7 @@ export class BookingsService {
     
     const booking = await this.bookingRepository.findOne({
       where: { id: bookingId, passengerId },
+      relations: ['passenger'],
     });
 
     if (!booking) {
@@ -337,7 +338,10 @@ export class BookingsService {
     }
 
     const oldStatus = booking.status;
-    const trip = await this.tripRepository.findOne({ where: { id: booking.tripId } });
+    const trip = await this.tripRepository.findOne({ 
+      where: { id: booking.tripId },
+      relations: ['driver'],
+    });
 
     if (!trip) {
       throw new NotFoundException('Trajet non trouvé');
@@ -358,6 +362,19 @@ export class BookingsService {
         `Restored ${booking.numberOfSeats} seats for trip ${trip.id} (booking ${bookingId} cancelled by passenger). New available seats: ${newAvailableSeats} (totalSeats: ${trip.totalSeats})`,
       );
     }
+
+    // Si c'est un trajet privé, terminer automatiquement le trajet et notifier le driver
+    if (trip.isPrivate) {
+      this.logger.log(`Private trip ${trip.id} - Passenger cancelled booking. Terminating trip automatically.`);
+      
+      // Terminer le trajet
+      trip.status = TripStatus.COMPLETED;
+      trip.completedAt = new Date();
+      await this.tripRepository.save(trip);
+
+      // Notifier le driver
+      await this.notifyDriverAboutPrivateTripCancellation(trip, booking);
+    }
     
     // Invalidate cache
     await this.cacheService.del(CacheService.getBookingKey(bookingId));
@@ -366,6 +383,48 @@ export class BookingsService {
     await this.cacheService.del(CacheService.getTripKey(booking.tripId));
 
     this.logger.log(`Booking ${bookingId} cancelled successfully!`);
+  }
+
+  /**
+   * Notifie le conducteur qu'un trajet privé a été terminé à cause de l'annulation du passager
+   */
+  private async notifyDriverAboutPrivateTripCancellation(trip: Trip, cancelledBooking: Booking): Promise<void> {
+    try {
+      if (!trip.driver?.fcmToken) {
+        this.logger.debug(`Driver ${trip.driverId} has no FCM token, skipping notification`);
+        return;
+      }
+
+      const passengerName = cancelledBooking.passenger 
+        ? `${cancelledBooking.passenger.firstName} ${cancelledBooking.passenger.lastName}`
+        : 'Le passager';
+
+      const title = '🚫 Trajet terminé';
+      const body = `${passengerName} a annulé sa réservation. Le trajet privé de ${trip.departureLocation} à ${trip.arrivalLocation} a été automatiquement terminé.`;
+
+      const data = {
+        type: 'private_trip_cancelled',
+        tripId: trip.id,
+        bookingId: cancelledBooking.id,
+        passengerId: cancelledBooking.passengerId,
+        departureLocation: trip.departureLocation,
+        arrivalLocation: trip.arrivalLocation,
+      };
+
+      await this.notificationService.sendNotification(
+        trip.driver.fcmToken,
+        title,
+        body,
+        data,
+        trip.driverId,
+      );
+      this.logger.log(`Notified driver ${trip.driverId} about private trip ${trip.id} cancellation`);
+    } catch (error) {
+      this.logger.error(
+        `Error notifying driver about private trip cancellation ${trip.id}: ${error.message}`,
+        error.stack,
+      );
+    }
   }
 
   async acceptBooking(bookingId: string, driverId: string): Promise<Booking> {

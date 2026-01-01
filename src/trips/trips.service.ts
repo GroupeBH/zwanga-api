@@ -9,9 +9,11 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, Point, LessThan, MoreThan, In, Between, Brackets } from 'typeorm';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { Trip, TripStatus } from './entities/trip.entity';
-import { User, UserRole } from '../users/entities/user.entity';
+import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { Booking, BookingStatus } from '../bookings/entities/booking.entity';
 import { Vehicle } from '../vehicles/entities/vehicle.entity';
+import { TripRequest } from '../trip-requests/entities/trip-request.entity';
+import { KycDocument, KycStatus } from '../users/entities/kyc-document.entity';
 import { CreateTripDto, SearchTripsDto, UpdateTripDto } from './dto/trip.dto';
 import { CacheService } from '../common/services/cache.service';
 import { FileUploadService } from '../common/services/file-upload.service';
@@ -65,12 +67,20 @@ export class TripsService {
     private userRepository: Repository<User>,
     @InjectRepository(Vehicle)
     private vehicleRepository: Repository<Vehicle>,
+    @InjectRepository(TripRequest)
+    private tripRequestRepository: Repository<TripRequest>,
+    @InjectRepository(KycDocument)
+    private kycDocumentRepository: Repository<KycDocument>,
     private cacheService: CacheService,
     private fileUploadService: FileUploadService,
     private notificationService: NotificationService,
   ) {}
 
-  async create(driverId: string, createTripDto: CreateTripDto): Promise<SanitizedTrip> {
+  async create(
+    driverId: string,
+    createTripDto: CreateTripDto,
+    options?: { isPrivate?: boolean; tripRequestId?: string },
+  ): Promise<SanitizedTrip> {
     // Synchronize isFree with pricePerSeat
     const isFree = createTripDto.isFree ?? createTripDto.pricePerSeat === 0;
     const pricePerSeat = isFree ? 0 : createTripDto.pricePerSeat;
@@ -142,6 +152,8 @@ export class TripsService {
       pricePerSeat,
       totalSeats: baseTripData.totalSeats,
       availableSeats: baseTripData.totalSeats || baseTripData.totalSeats, // Initialiser availableSeats = totalSeats
+      isPrivate: options?.isPrivate ?? false,
+      tripRequestId: options?.tripRequestId || null,
     });
 
     const savedTrip = await this.tripRepository.save(trip);
@@ -167,15 +179,18 @@ export class TripsService {
 
     const now = new Date();
     // Include PENDING trips with future departure dates OR ACTIVE trips with available seats
+    // Exclude private trips (created from trip requests)
     const trips = await this.tripRepository.find({
       where: [
         {
           status: TripStatus.PENDING,
           departureDate: MoreThan(now),
+          isPrivate: false, // Exclude private trips
         },
         {
           status: TripStatus.ACTIVE,
           availableSeats: MoreThan(0),
+          isPrivate: false, // Exclude private trips
         },
       ],
       relations: ['driver', 'vehicle', 'bookings', 'bookings.passenger'],
@@ -205,11 +220,13 @@ export class TripsService {
         new Brackets((qb) => {
           qb.where('trip.status = :pendingStatus', { pendingStatus: TripStatus.PENDING })
             .andWhere('trip.departureDate > :now', { now })
+            .andWhere('trip.isPrivate = :isPrivate', { isPrivate: false }) // Exclude private trips
             .orWhere(
               new Brackets((qb2) => {
                 qb2
                   .where('trip.status = :activeStatus', { activeStatus: TripStatus.ACTIVE })
-                  .andWhere('trip.availableSeats > 0');
+                  .andWhere('trip.availableSeats > 0')
+                  .andWhere('trip.isPrivate = :isPrivate', { isPrivate: false }); // Exclude private trips
               }),
             );
         }),
@@ -377,6 +394,90 @@ export class TripsService {
     this.logger.debug(`Found ${trips.length} trips for driver ${driverId}`);
     const sanitizedResults = await Promise.all(sanitized);
     return sanitizedResults;
+  }
+
+  /**
+   * Permet au passager qui a créé la demande de trajet d'autoriser que le trajet devienne public
+   * Le conducteur doit avoir passé le KYC et avoir au moins un véhicule actif pour que le trajet soit effectivement publié
+   */
+  async makeTripPublic(tripId: string, userId: string): Promise<SanitizedTrip> {
+    this.logger.log(`Making trip ${tripId} public by user ${userId}`);
+
+    const trip = await this.tripRepository.findOne({
+      where: { id: tripId },
+    });
+
+    if (!trip) {
+      throw new NotFoundException('Trajet non trouvé');
+    }
+
+    if (!trip.isPrivate) {
+      throw new BadRequestException('Ce trajet est déjà public');
+    }
+
+    if (!trip.tripRequestId) {
+      throw new BadRequestException('Ce trajet n\'a pas été créé à partir d\'une demande de trajet');
+    }
+
+    // Vérifier que l'utilisateur est le passager qui a créé la demande de trajet
+    const tripRequest = await this.tripRequestRepository.findOne({
+      where: { id: trip.tripRequestId },
+      select: ['id', 'passengerId'],
+    });
+
+    if (!tripRequest) {
+      throw new NotFoundException('Demande de trajet non trouvée');
+    }
+
+    // Seul le passager qui a créé la demande peut autoriser la publication
+    if (tripRequest.passengerId !== userId) {
+      throw new ForbiddenException('Seul le passager qui a créé la demande de trajet peut autoriser que le trajet devienne public. Vous n\'êtes pas autorisé à effectuer cette action.');
+    }
+
+    // Vérifier que le conducteur du trajet a les prérequis (KYC + véhicules)
+    const driver = await this.userRepository.findOne({
+      where: { id: trip.driverId },
+      relations: ['vehicles'],
+      select: ['id', 'role', 'isDriver', 'status'],
+    });
+
+    if (!driver) {
+      throw new NotFoundException('Conducteur du trajet non trouvé');
+    }
+
+    // Vérifier que le conducteur a passé le KYC (status ACTIVE)
+    if (driver.status !== UserStatus.ACTIVE) {
+      throw new BadRequestException('Le conducteur du trajet doit avoir passé la vérification KYC (compte actif) pour que le trajet puisse être rendu public.');
+    }
+
+    // Vérifier que le KYC est approuvé
+    const kycDocument = await this.kycDocumentRepository.findOne({
+      where: { userId: trip.driverId },
+      select: ['id', 'status'],
+    });
+
+    if (!kycDocument || kycDocument.status !== KycStatus.APPROVED) {
+      throw new BadRequestException('Le conducteur du trajet doit avoir un KYC approuvé pour que le trajet puisse être rendu public.');
+    }
+
+    // Vérifier que le conducteur a au moins un véhicule actif
+    const activeVehicles = driver.vehicles?.filter((v) => v.isActive) || [];
+    if (activeVehicles.length === 0) {
+      throw new BadRequestException('Le conducteur du trajet doit avoir au moins un véhicule actif pour que le trajet puisse être rendu public.');
+    }
+
+    // Rendre le trajet public
+    trip.isPrivate = false;
+    await this.tripRepository.save(trip);
+
+    // Invalider le cache
+    await this.cacheService.del(CacheService.getTripKey(tripId));
+    await this.cacheService.del(CacheService.getTripsListKey());
+    await this.cacheService.del(CacheService.getTripsListKey('all'));
+
+    this.logger.log(`Trip ${tripId} is now public`);
+
+    return this.findOne(tripId);
   }
 
   async update(id: string, driverId: string, updateTripDto: UpdateTripDto): Promise<SanitizedTrip> {
