@@ -77,7 +77,7 @@ export class KeccelOtpService {
     this.logger.log(`Sending OTP to phone: ${phone}`);
 
     if (!phone || !phone.trim()) {
-      throw new BadRequestException('Phone number is required');
+      throw new BadRequestException('Le numéro de téléphone est requis');
     }
     this.logger.debug(`Token: ${this.token}`);
     this.logger.debug(`From: ${this.from}`);
@@ -92,12 +92,12 @@ export class KeccelOtpService {
 
     // Validate length
     if (otpLength < 4 || otpLength > 8) {
-      throw new BadRequestException('OTP length must be between 4 and 8');
+      throw new BadRequestException('La longueur du code OTP doit être entre 4 et 8');
     }
 
     // Validate lifetime
     if (otpLifetime < 60) {
-      throw new BadRequestException('OTP lifetime must be at least 60 seconds');
+      throw new BadRequestException('La durée de vie du code OTP doit être d\'au moins 60 secondes');
     }
 
     const requestBody: any = {
@@ -153,7 +153,7 @@ export class KeccelOtpService {
         this.logger.log(`OTP sent successfully to ${phone}`);
         return {
           success: true,
-          message: data.description || 'OTP sent successfully',
+          message: data.description || 'Code OTP envoyé avec succès',
           status: data.status,
         };
       } else {
@@ -165,9 +165,9 @@ export class KeccelOtpService {
         );
         
         // Provide more helpful error message for common issues
-        let errorMessage = data.description || 'Failed to send OTP';
+        let errorMessage = data.description || 'Échec de l\'envoi du code OTP';
         if (data.description?.includes('FROM') || data.description?.includes('from')) {
-          errorMessage = `Configuration error: Invalid FROM parameter. Please check KECCEL_FROM environment variable. Current value: ${this.from}`;
+          errorMessage = `Erreur de configuration : Paramètre FROM invalide. Veuillez vérifier la variable d'environnement KECCEL_FROM. Valeur actuelle : ${this.from}`;
         }
         
         throw new HttpException(
@@ -185,7 +185,7 @@ export class KeccelOtpService {
         error.stack,
       );
       throw new HttpException(
-        'An unexpected error occurred while sending OTP',
+        'Une erreur inattendue s\'est produite lors de l\'envoi du code OTP',
         HttpStatus.INTERNAL_SERVER_ERROR,
       );
     }
@@ -202,11 +202,11 @@ export class KeccelOtpService {
     this.logger.log(`Verifying OTP for phone: ${phone}`);
 
     if (!phone || !phone.trim()) {
-      throw new BadRequestException('Phone number is required');
+      throw new BadRequestException('Le numéro de téléphone est requis');
     }
 
     if (!otp || !otp.trim()) {
-      throw new BadRequestException('OTP code is required');
+      throw new BadRequestException('Le code OTP est requis');
     }
 
     // Build request body as JSON

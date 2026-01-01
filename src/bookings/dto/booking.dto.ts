@@ -91,3 +91,15 @@ export class ReportBookingProblemDto {
   description: string;
 }
 
+export class UpdatePassengerLocationDto {
+  @ApiProperty({ description: 'Latitude de la position actuelle du passager', example: -4.3276 })
+  @IsNumber()
+  @IsNotEmpty()
+  latitude: number;
+
+  @ApiProperty({ description: 'Longitude de la position actuelle du passager', example: 15.3136 })
+  @IsNumber()
+  @IsNotEmpty()
+  longitude: number;
+}
+

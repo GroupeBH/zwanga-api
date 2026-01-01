@@ -130,6 +130,20 @@ KECCEL_OTP_URL_VALIDATE=https://api.keccel.com/otp/validate.asp
 # - Places API
 # - Geocoding API
 GOOGLE_MAPS_API_KEY=
+
+# ============================================
+# Chatbot Ollama
+# ============================================
+# Base URL for Ollama service
+# For Docker Compose: http://ollama:11434
+# For local installation: http://localhost:11434
+# For remote server: http://ollama-server:11434
+OLLAMA_BASE_URL=http://localhost:11434
+# Model to use (recommended: phi3 for production, llama3.2 for better quality)
+# Available models: phi3, llama3.2, mistral, llama3.1
+OLLAMA_MODEL=phi3
+# Optional: Port for Ollama (default: 11434)
+OLLAMA_PORT=11434
 ```
 
 ## 🔐 Durées de validité des tokens JWT

@@ -5,7 +5,7 @@ import type { Point } from 'typeorm';
 import { Booking, BookingStatus } from './entities/booking.entity';
 import { Trip, TripStatus } from '../trips/entities/trip.entity';
 import { User } from '../users/entities/user.entity';
-import { CreateBookingDto, UpdateBookingStatusDto, ReportBookingProblemDto } from './dto/booking.dto';
+import { CreateBookingDto, UpdateBookingStatusDto, ReportBookingProblemDto, UpdatePassengerLocationDto } from './dto/booking.dto';
 import { CacheService } from '../common/services/cache.service';
 import { NotificationService } from '../notifications/notifications.service';
 import { ChatService } from '../chat/chat.service';
@@ -18,6 +18,7 @@ import { SendWhatsAppNotificationDto } from './dto/send-whatsapp-notification.dt
 export class BookingsService {
   private readonly logger = new Logger(BookingsService.name);
   private readonly CACHE_TTL = 180; // 3 minutes
+  private readonly DESTINATION_PROXIMITY_THRESHOLD_METERS = 1000; // 1 km
 
   constructor(
     @InjectRepository(Booking)
@@ -44,12 +45,12 @@ export class BookingsService {
 
     if (!trip) {
       this.logger.warn(`Booking creation failed: Trip ${createBookingDto.tripId} not found`);
-      throw new NotFoundException('Trip not found');
+      throw new NotFoundException('Trajet non trouvé');
     }
 
     if (trip.driverId === passengerId) {
       this.logger.warn(`Booking creation failed: Passenger ${passengerId} tried to book own trip ${createBookingDto.tripId}`);
-      throw new BadRequestException('Cannot book your own trip');
+      throw new BadRequestException('Vous ne pouvez pas réserver votre propre trajet');
     }
 
     // Allow booking for PENDING trips OR ACTIVE trips with available seats
@@ -58,7 +59,7 @@ export class BookingsService {
     
     if (!isPendingTrip && !isActiveTripWithSeats) {
       this.logger.warn(`Booking creation failed: Trip ${createBookingDto.tripId} is not available for booking (status: ${trip.status}, availableSeats: ${trip.availableSeats})`);
-      throw new BadRequestException('Trip is not available for booking. Only pending trips or active trips with available seats can be booked.');
+      throw new BadRequestException('Ce trajet n\'est pas disponible pour la réservation. Seuls les trajets en attente ou les trajets actifs avec des places disponibles peuvent être réservés.');
     }
 
     // Vérifier les places disponibles directement (les places sont déduites immédiatement à la création)
@@ -67,7 +68,7 @@ export class BookingsService {
         `Booking creation failed: Not enough seats on trip ${createBookingDto.tripId} (requested: ${createBookingDto.numberOfSeats}, available: ${trip.availableSeats})`,
       );
       throw new BadRequestException(
-        `Not enough available seats. Available: ${trip.availableSeats}, Requested: ${createBookingDto.numberOfSeats}`,
+        `Pas assez de places disponibles. Disponibles : ${trip.availableSeats}, Demandées : ${createBookingDto.numberOfSeats}`,
       );
     }
 
@@ -90,7 +91,7 @@ export class BookingsService {
         ? 'pending or accepted' 
         : 'pending';
       this.logger.warn(`Booking creation failed: Passenger ${passengerId} already has ${statusText} booking for trip ${createBookingDto.tripId}`);
-      throw new BadRequestException(`You already have a ${statusText} booking for this trip`);
+      throw new BadRequestException(`Vous avez déjà une réservation ${statusText === 'pending or accepted' ? 'en attente ou acceptée' : 'en attente'} pour ce trajet`);
     }
 
     // Build passenger destination point if coordinates are provided
@@ -124,20 +125,25 @@ export class BookingsService {
     const savedBooking = await this.bookingRepository.save(booking);
     
     // Déduire immédiatement les places disponibles du trip
+    // Les places sont déduites dès la création (même en PENDING) pour éviter les sur-réservations
     const newAvailableSeats = trip.availableSeats - createBookingDto.numberOfSeats;
     if (newAvailableSeats < 0) {
       // Ce cas ne devrait pas arriver car on a déjà vérifié, mais on le gère pour sécurité
       this.logger.error(`Negative available seats detected for trip ${trip.id}. Rolling back booking.`);
       await this.bookingRepository.remove(savedBooking);
-      throw new BadRequestException('Not enough available seats');
+      throw new BadRequestException('Pas assez de places disponibles');
     }
 
+    // S'assurer que availableSeats ne dépasse pas totalSeats (ou availableSeats si totalSeats est null temporairement)
+    const maxSeats = trip.totalSeats ?? trip.availableSeats + createBookingDto.numberOfSeats; // Fallback si totalSeats est null
+    const finalAvailableSeats = Math.max(0, Math.min(newAvailableSeats, maxSeats));
+    
     await this.tripRepository.update(trip.id, {
-      availableSeats: newAvailableSeats,
+      availableSeats: finalAvailableSeats,
     });
 
     this.logger.log(
-      `Updated trip ${trip.id} available seats: ${trip.availableSeats} -> ${newAvailableSeats} (deducted ${createBookingDto.numberOfSeats} for booking ${savedBooking.id})`,
+      `Updated trip ${trip.id} available seats: ${trip.availableSeats} -> ${finalAvailableSeats} (deducted ${createBookingDto.numberOfSeats} for booking ${savedBooking.id}, totalSeats: ${trip.totalSeats})`,
     );
     
     await this.chatService.ensureConversationForBooking(savedBooking.id);
@@ -184,7 +190,7 @@ export class BookingsService {
 
     if (!trip) {
       this.logger.warn(`Get bookings failed: Trip ${tripId} not found for driver ${driverId}`);
-      throw new NotFoundException('Trip not found');
+      throw new NotFoundException('Trajet non trouvé');
     }
 
     const cacheKey = CacheService.getBookingsByTripKey(tripId);
@@ -224,7 +230,7 @@ export class BookingsService {
 
     if (!booking) {
       this.logger.warn(`Booking not found: ${id}`);
-      throw new NotFoundException('Booking not found');
+      throw new NotFoundException('Réservation non trouvée');
     }
 
     await this.cacheService.set(cacheKey, booking, this.CACHE_TTL);
@@ -246,19 +252,19 @@ export class BookingsService {
 
     if (!booking) {
       this.logger.warn(`Booking status update failed: Booking ${bookingId} not found`);
-      throw new NotFoundException('Booking not found');
+      throw new NotFoundException('Réservation non trouvée');
     }
 
     if (booking.trip.driverId !== driverId) {
       this.logger.warn(`Booking status update failed: Driver ${driverId} tried to update booking ${bookingId} (owner: ${booking.trip.driverId})`);
-      throw new BadRequestException('Only the trip driver can update booking status');
+      throw new BadRequestException('Seul le conducteur du trajet peut modifier le statut de la réservation');
     }
 
     const oldStatus = booking.status;
     const trip = await this.tripRepository.findOne({ where: { id: booking.tripId } });
 
     if (!trip) {
-      throw new NotFoundException('Trip not found');
+      throw new NotFoundException('Trajet non trouvé');
     }
 
     if (updateStatusDto.status === BookingStatus.ACCEPTED) {
@@ -269,27 +275,31 @@ export class BookingsService {
       booking.cancelledAt = new Date();
       // Remettre les places disponibles si la réservation était en PENDING ou ACCEPTED
       if (oldStatus === BookingStatus.PENDING || oldStatus === BookingStatus.ACCEPTED) {
+        const maxSeats = trip.totalSeats ?? trip.availableSeats + booking.numberOfSeats; // Fallback si totalSeats est null
+        const newAvailableSeats = Math.min(maxSeats, trip.availableSeats + booking.numberOfSeats);
         await this.tripRepository.update(trip.id, {
-          availableSeats: trip.availableSeats + booking.numberOfSeats,
+          availableSeats: newAvailableSeats,
         });
         this.logger.log(
-          `Restored ${booking.numberOfSeats} seats for trip ${trip.id} (booking ${bookingId} cancelled). New available seats: ${trip.availableSeats + booking.numberOfSeats}`,
+          `Restored ${booking.numberOfSeats} seats for trip ${trip.id} (booking ${bookingId} cancelled). New available seats: ${newAvailableSeats} (totalSeats: ${trip.totalSeats})`,
         );
       }
     } else if (updateStatusDto.status === BookingStatus.REJECTED) {
       if (!updateStatusDto.rejectionReason?.trim()) {
         this.logger.warn(`Driver ${driverId} tried to reject booking ${bookingId} without reason`);
-        throw new BadRequestException('Rejection reason is required when rejecting a booking');
+        throw new BadRequestException('Un motif de refus est requis lors du rejet d\'une réservation');
       }
       booking.rejectionReason = updateStatusDto.rejectionReason.trim();
       booking.acceptedAt = null;
       // Remettre les places disponibles si la réservation était en PENDING ou ACCEPTED
       if (oldStatus === BookingStatus.PENDING || oldStatus === BookingStatus.ACCEPTED) {
+        const maxSeats = trip.totalSeats ?? trip.availableSeats + booking.numberOfSeats; // Fallback si totalSeats est null
+        const newAvailableSeats = Math.min(maxSeats, trip.availableSeats + booking.numberOfSeats);
         await this.tripRepository.update(trip.id, {
-          availableSeats: trip.availableSeats + booking.numberOfSeats,
+          availableSeats: newAvailableSeats,
         });
         this.logger.log(
-          `Restored ${booking.numberOfSeats} seats for trip ${trip.id} (booking ${bookingId} rejected). New available seats: ${trip.availableSeats + booking.numberOfSeats}`,
+          `Restored ${booking.numberOfSeats} seats for trip ${trip.id} (booking ${bookingId} rejected). New available seats: ${newAvailableSeats} (totalSeats: ${trip.totalSeats})`,
         );
       }
     } else {
@@ -314,23 +324,27 @@ export class BookingsService {
     
     const booking = await this.bookingRepository.findOne({
       where: { id: bookingId, passengerId },
+      relations: ['passenger'],
     });
 
     if (!booking) {
       this.logger.warn(`Booking cancellation failed: Booking ${bookingId} not found for passenger ${passengerId}`);
-      throw new NotFoundException('Booking not found');
+      throw new NotFoundException('Réservation non trouvée');
     }
 
     if (booking.status === BookingStatus.COMPLETED) {
       this.logger.warn(`Booking cancellation failed: Booking ${bookingId} is already completed`);
-      throw new BadRequestException('Cannot cancel a completed booking');
+      throw new BadRequestException('Impossible d\'annuler une réservation terminée');
     }
 
     const oldStatus = booking.status;
-    const trip = await this.tripRepository.findOne({ where: { id: booking.tripId } });
+    const trip = await this.tripRepository.findOne({ 
+      where: { id: booking.tripId },
+      relations: ['driver'],
+    });
 
     if (!trip) {
-      throw new NotFoundException('Trip not found');
+      throw new NotFoundException('Trajet non trouvé');
     }
 
     booking.status = BookingStatus.CANCELLED;
@@ -339,12 +353,27 @@ export class BookingsService {
 
     // Remettre les places disponibles si la réservation était en PENDING ou ACCEPTED
     if (oldStatus === BookingStatus.PENDING || oldStatus === BookingStatus.ACCEPTED) {
+      const maxSeats = trip.totalSeats ?? trip.availableSeats + booking.numberOfSeats; // Fallback si totalSeats est null
+      const newAvailableSeats = Math.min(maxSeats, trip.availableSeats + booking.numberOfSeats);
       await this.tripRepository.update(trip.id, {
-        availableSeats: trip.availableSeats + booking.numberOfSeats,
+        availableSeats: newAvailableSeats,
       });
       this.logger.log(
-        `Restored ${booking.numberOfSeats} seats for trip ${trip.id} (booking ${bookingId} cancelled by passenger). New available seats: ${trip.availableSeats + booking.numberOfSeats}`,
+        `Restored ${booking.numberOfSeats} seats for trip ${trip.id} (booking ${bookingId} cancelled by passenger). New available seats: ${newAvailableSeats} (totalSeats: ${trip.totalSeats})`,
       );
+    }
+
+    // Si c'est un trajet privé, terminer automatiquement le trajet et notifier le driver
+    if (trip.isPrivate) {
+      this.logger.log(`Private trip ${trip.id} - Passenger cancelled booking. Terminating trip automatically.`);
+      
+      // Terminer le trajet
+      trip.status = TripStatus.COMPLETED;
+      trip.completedAt = new Date();
+      await this.tripRepository.save(trip);
+
+      // Notifier le driver
+      await this.notifyDriverAboutPrivateTripCancellation(trip, booking);
     }
     
     // Invalidate cache
@@ -353,7 +382,49 @@ export class BookingsService {
     await this.cacheService.del(CacheService.getBookingsByTripKey(booking.tripId));
     await this.cacheService.del(CacheService.getTripKey(booking.tripId));
 
-    this.logger.log(`Booking ${bookingId} cancelled successfully`);
+    this.logger.log(`Booking ${bookingId} cancelled successfully!`);
+  }
+
+  /**
+   * Notifie le conducteur qu'un trajet privé a été terminé à cause de l'annulation du passager
+   */
+  private async notifyDriverAboutPrivateTripCancellation(trip: Trip, cancelledBooking: Booking): Promise<void> {
+    try {
+      if (!trip.driver?.fcmToken) {
+        this.logger.debug(`Driver ${trip.driverId} has no FCM token, skipping notification`);
+        return;
+      }
+
+      const passengerName = cancelledBooking.passenger 
+        ? `${cancelledBooking.passenger.firstName} ${cancelledBooking.passenger.lastName}`
+        : 'Le passager';
+
+      const title = '🚫 Trajet terminé';
+      const body = `${passengerName} a annulé sa réservation. Le trajet privé de ${trip.departureLocation} à ${trip.arrivalLocation} a été automatiquement terminé.`;
+
+      const data = {
+        type: 'private_trip_cancelled',
+        tripId: trip.id,
+        bookingId: cancelledBooking.id,
+        passengerId: cancelledBooking.passengerId,
+        departureLocation: trip.departureLocation,
+        arrivalLocation: trip.arrivalLocation,
+      };
+
+      await this.notificationService.sendNotification(
+        trip.driver.fcmToken,
+        title,
+        body,
+        data,
+        trip.driverId,
+      );
+      this.logger.log(`Notified driver ${trip.driverId} about private trip ${trip.id} cancellation`);
+    } catch (error) {
+      this.logger.error(
+        `Error notifying driver about private trip cancellation ${trip.id}: ${error.message}`,
+        error.stack,
+      );
+    }
   }
 
   async acceptBooking(bookingId: string, driverId: string): Promise<Booking> {
@@ -380,20 +451,20 @@ export class BookingsService {
     });
 
     if (!booking) {
-      throw new NotFoundException('Booking not found');
+      throw new NotFoundException('Réservation non trouvée');
     }
 
     if (
       booking.passengerId !== requesterId &&
       booking.trip.driverId !== requesterId
     ) {
-      throw new ForbiddenException('Access denied');
+      throw new ForbiddenException('Accès refusé');
     }
 
     const driver = booking.trip.driver;
 
     if (!driver) {
-      throw new NotFoundException('Driver not found');
+      throw new NotFoundException('Conducteur non trouvé');
     }
 
     // Convert S3 key to presigned URL
@@ -506,19 +577,19 @@ export class BookingsService {
     });
 
     if (!booking) {
-      throw new NotFoundException('Booking not found');
+      throw new NotFoundException('Réservation non trouvée');
     }
 
     if (booking.trip.driverId !== driverId) {
-      throw new ForbiddenException('You are not the driver for this trip');
+      throw new ForbiddenException('Vous n\'êtes pas le conducteur de ce trajet');
     }
 
     if (booking.status !== BookingStatus.ACCEPTED) {
-      throw new BadRequestException('Booking must be accepted before confirming pickup');
+      throw new BadRequestException('La réservation doit être acceptée avant de confirmer la prise en charge');
     }
 
     if (booking.pickedUp) {
-      throw new BadRequestException('Passenger already marked as picked up');
+      throw new BadRequestException('Le passager est déjà marqué comme pris en charge');
     }
 
     booking.pickedUp = true;
@@ -545,15 +616,15 @@ export class BookingsService {
     });
 
     if (!booking) {
-      throw new NotFoundException('Booking not found');
+      throw new NotFoundException('Réservation non trouvée');
     }
 
     if (!booking.pickedUp) {
-      throw new BadRequestException('Driver must confirm pickup first');
+      throw new BadRequestException('Le conducteur doit d\'abord confirmer la prise en charge');
     }
 
     if (booking.pickedUpConfirmedByPassenger) {
-      throw new BadRequestException('Pickup already confirmed by passenger');
+      throw new BadRequestException('La prise en charge est déjà confirmée par le passager');
     }
 
     booking.pickedUpConfirmedByPassenger = true;
@@ -580,19 +651,19 @@ export class BookingsService {
     });
 
     if (!booking) {
-      throw new NotFoundException('Booking not found');
+      throw new NotFoundException('Réservation non trouvée');
     }
 
     if (booking.trip.driverId !== driverId) {
-      throw new ForbiddenException('You are not the driver for this trip');
+      throw new ForbiddenException('Vous n\'êtes pas le conducteur de ce trajet');
     }
 
     if (!booking.pickedUp || !booking.pickedUpConfirmedByPassenger) {
-      throw new BadRequestException('Passenger must be picked up and confirmed before dropoff');
+      throw new BadRequestException('Le passager doit être pris en charge et confirmé avant la dépose');
     }
 
     if (booking.droppedOff) {
-      throw new BadRequestException('Passenger already marked as dropped off');
+      throw new BadRequestException('Le passager est déjà marqué comme déposé');
     }
 
     booking.droppedOff = true;
@@ -619,15 +690,15 @@ export class BookingsService {
     });
 
     if (!booking) {
-      throw new NotFoundException('Booking not found');
+      throw new NotFoundException('Réservation non trouvée');
     }
 
     if (!booking.droppedOff) {
-      throw new BadRequestException('Driver must confirm dropoff first');
+      throw new BadRequestException('Le conducteur doit d\'abord confirmer la dépose');
     }
 
     if (booking.droppedOffConfirmedByPassenger) {
-      throw new BadRequestException('Dropoff already confirmed by passenger');
+      throw new BadRequestException('La dépose est déjà confirmée par le passager');
     }
 
     booking.droppedOffConfirmedByPassenger = true;
@@ -662,7 +733,7 @@ export class BookingsService {
     });
 
     if (!booking) {
-      throw new NotFoundException('Booking not found');
+      throw new NotFoundException('Réservation non trouvée');
     }
 
     // Verify user is either driver or passenger
@@ -670,7 +741,7 @@ export class BookingsService {
     const isPassenger = booking.passengerId === userId;
 
     if (!isDriver && !isPassenger) {
-      throw new ForbiddenException('You are not authorized to report problems for this booking');
+      throw new ForbiddenException('Vous n\'êtes pas autorisé à signaler des problèmes pour cette réservation');
     }
 
     // Determine reported user (opposite party)
@@ -917,6 +988,251 @@ export class BookingsService {
         driverPhone: driver.phone,
       },
     };
+  }
+
+  async updatePassengerLocation(
+    passengerId: string,
+    bookingId: string,
+    updateLocationDto: UpdatePassengerLocationDto,
+  ): Promise<{ bookingId: string; coordinates: [number, number]; updatedAt: Date }> {
+    this.logger.log(`Updating passenger location for booking ${bookingId} by passenger ${passengerId}`);
+
+    const booking = await this.bookingRepository.findOne({
+      where: { id: bookingId, passengerId },
+      relations: ['trip'],
+    });
+
+    if (!booking) {
+      throw new NotFoundException('Réservation non trouvée ou vous n\'êtes pas le passager');
+    }
+
+    // Vérifier que la réservation est acceptée
+    if (booking.status !== BookingStatus.ACCEPTED) {
+      throw new BadRequestException('Seules les réservations acceptées peuvent partager leur position');
+    }
+
+    // Vérifier que le trajet est actif
+    if (booking.trip.status !== TripStatus.ACTIVE) {
+      throw new BadRequestException('Le trajet doit être actif pour partager la position');
+    }
+
+    // Construire le point de position
+    const currentLocation: Point = {
+      type: 'Point',
+      coordinates: [
+        Number(updateLocationDto.longitude),
+        Number(updateLocationDto.latitude),
+      ],
+    };
+
+    // Mettre à jour la position
+    booking.passengerCurrentLocation = currentLocation;
+    booking.passengerLastLocationUpdateAt = new Date();
+    await this.bookingRepository.save(booking);
+
+    this.logger.log(`Passenger location updated for booking ${bookingId}`);
+
+    // Vérifier la proximité de la destination et notifier si nécessaire
+    await this.checkAndNotifyDestinationProximity(booking);
+
+    return {
+      bookingId: booking.id,
+      coordinates: [updateLocationDto.longitude, updateLocationDto.latitude],
+      updatedAt: booking.passengerLastLocationUpdateAt!,
+    };
+  }
+
+  /**
+   * Calcule la distance en mètres entre la position actuelle du passager et sa destination
+   */
+  private async calculateDistanceToDestination(booking: Booking): Promise<number | null> {
+    if (!booking.passengerCurrentLocation || !booking.passengerDestinationPoint) {
+      return null;
+    }
+
+    try {
+      // Utiliser PostGIS ST_Distance pour calculer la distance en mètres
+      const result = await this.bookingRepository
+        .createQueryBuilder('booking')
+        .select(
+          `ST_Distance(
+            booking.passengerCurrentLocation::geography,
+            booking.passengerDestinationPoint::geography
+          )`,
+          'distance',
+        )
+        .where('booking.id = :id', { id: booking.id })
+        .getRawOne();
+
+      return result?.distance ? Math.round(result.distance) : null;
+    } catch (error) {
+      this.logger.error(`Error calculating distance to destination: ${error.message}`, error.stack);
+      return null;
+    }
+  }
+
+  /**
+   * Vérifie si le passager est proche de sa destination et envoie les notifications si nécessaire
+   */
+  private async checkAndNotifyDestinationProximity(booking: Booking): Promise<void> {
+    // Ne pas vérifier si la notification a déjà été envoyée
+    if (booking.destinationProximityNotified) {
+      return;
+    }
+
+    // Vérifier que la destination est définie
+    if (!booking.passengerDestinationPoint) {
+      return;
+    }
+
+    // Calculer la distance
+    const distance = await this.calculateDistanceToDestination(booking);
+    
+    if (distance === null || distance > this.DESTINATION_PROXIMITY_THRESHOLD_METERS) {
+      return;
+    }
+
+    this.logger.log(
+      `Passenger ${booking.passengerId} is ${distance}m away from destination for booking ${booking.id}. Sending notifications.`,
+    );
+
+    // Marquer comme notifié et envoyer les notifications
+    booking.destinationProximityNotified = true;
+    await this.bookingRepository.save(booking);
+
+    // Envoyer les notifications au conducteur et au passager
+    await this.notifyDestinationProximity(booking, distance);
+  }
+
+  /**
+   * Envoie les notifications de proximité au conducteur et au passager
+   */
+  private async notifyDestinationProximity(booking: Booking, distanceMeters: number): Promise<void> {
+    try {
+      // Charger les relations nécessaires
+      const bookingWithRelations = await this.bookingRepository.findOne({
+        where: { id: booking.id },
+        relations: ['passenger', 'trip', 'trip.driver'],
+      });
+
+      if (!bookingWithRelations || !bookingWithRelations.trip || !bookingWithRelations.passenger) {
+        this.logger.warn(`Cannot notify destination proximity: missing relations for booking ${booking.id}`);
+        return;
+      }
+
+      const trip = bookingWithRelations.trip;
+      const passenger = bookingWithRelations.passenger;
+      const driver = trip.driver;
+
+      const distanceKm = (distanceMeters / 1000).toFixed(1);
+      const destinationName = bookingWithRelations.passengerDestination || 'votre destination';
+
+      // Notification au passager
+      if (passenger.fcmToken) {
+        const passengerTitle = '📍 Proche de votre destination';
+        const passengerBody = `Vous êtes à environ ${distanceKm} km de ${destinationName}. Préparez-vous à descendre.`;
+
+        const passengerData = {
+          type: 'destination_proximity',
+          bookingId: booking.id,
+          tripId: trip.id,
+          distanceMeters,
+          distanceKm: parseFloat(distanceKm),
+          destination: destinationName,
+        };
+
+        await this.notificationService.sendNotification(
+          passenger.fcmToken,
+          passengerTitle,
+          passengerBody,
+          passengerData,
+          passenger.id,
+        );
+        this.logger.log(`Notified passenger ${passenger.id} about destination proximity`);
+      }
+
+      // Notification au conducteur
+      if (driver && driver.fcmToken) {
+        const driverTitle = '📍 Passager proche de sa destination';
+        const driverBody = `${passenger.firstName} ${passenger.lastName} est à environ ${distanceKm} km de ${destinationName}. Préparez-vous à l'arrêt.`;
+
+        const driverData = {
+          type: 'passenger_destination_proximity',
+          bookingId: booking.id,
+          tripId: trip.id,
+          passengerId: passenger.id,
+          passengerName: `${passenger.firstName} ${passenger.lastName}`,
+          distanceMeters,
+          distanceKm: parseFloat(distanceKm),
+          destination: destinationName,
+        };
+
+        await this.notificationService.sendNotification(
+          driver.fcmToken,
+          driverTitle,
+          driverBody,
+          driverData,
+          driver.id,
+        );
+        this.logger.log(`Notified driver ${driver.id} about passenger destination proximity`);
+      }
+    } catch (error) {
+      this.logger.error(
+        `Error notifying destination proximity for booking ${booking.id}: ${error.message}`,
+        error.stack,
+      );
+    }
+  }
+
+  async getPassengersLocations(tripId: string, driverId: string): Promise<Array<{
+    bookingId: string;
+    passengerId: string;
+    passengerName: string;
+    coordinates: [number, number] | null;
+    lastLocationUpdateAt: Date | null;
+  }>> {
+    this.logger.log(`Getting passengers locations for trip ${tripId} by driver ${driverId}`);
+
+    // Vérifier que l'utilisateur est le conducteur du trajet
+    const trip = await this.tripRepository.findOne({
+      where: { id: tripId, driverId },
+    });
+
+    if (!trip) {
+      throw new NotFoundException('Trajet non trouvé ou vous n\'êtes pas le conducteur');
+    }
+
+    // Récupérer toutes les réservations acceptées pour ce trajet
+    const acceptedBookings = await this.bookingRepository.find({
+      where: {
+        tripId,
+        status: BookingStatus.ACCEPTED,
+      },
+      relations: ['passenger'],
+      select: ['id', 'passengerId', 'passengerCurrentLocation', 'passengerLastLocationUpdateAt'],
+    });
+
+    // Convertir les positions en coordonnées
+    return acceptedBookings.map((booking) => {
+      let coordinates: [number, number] | null = null;
+      
+      if (booking.passengerCurrentLocation) {
+        const point = booking.passengerCurrentLocation as any;
+        if (point.coordinates && point.coordinates.length === 2) {
+          coordinates = [point.coordinates[0], point.coordinates[1]]; // [longitude, latitude]
+        }
+      }
+
+      return {
+        bookingId: booking.id,
+        passengerId: booking.passengerId,
+        passengerName: booking.passenger 
+          ? `${booking.passenger.firstName} ${booking.passenger.lastName}`
+          : 'Passager inconnu',
+        coordinates,
+        lastLocationUpdateAt: booking.passengerLastLocationUpdateAt,
+      };
+    });
   }
 }
 

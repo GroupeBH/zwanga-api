@@ -58,6 +58,21 @@ export class Booking {
   })
   passengerDestinationPoint: Point | null;
 
+  @Index('IDX_bookings_passenger_current_location', { spatial: true })
+  @Column({
+    type: 'geography',
+    spatialFeatureType: 'Point',
+    srid: 4326,
+    nullable: true,
+  })
+  passengerCurrentLocation: Point | null; // Position actuelle du passager
+
+  @Column({ type: 'timestamp', nullable: true })
+  passengerLastLocationUpdateAt: Date | null; // Dernière mise à jour de position
+
+  @Column({ type: 'boolean', default: false })
+  destinationProximityNotified: boolean; // Indique si la notification de proximité a été envoyée
+
   @Column({
     type: 'enum',
     enum: BookingStatus,

@@ -13,11 +13,13 @@ import * as bcrypt from 'bcrypt';
 import { User, UserStatus } from './entities/user.entity';
 import { KycDocument, KycStatus } from './entities/kyc-document.entity';
 import { FavoriteLocation, FavoriteLocationType } from './entities/favorite-location.entity';
-import { UpdateProfileDto, UploadKycDto, SendPhoneVerificationOtpDto, VerifyPhoneOtpDto, PhoneVerificationContext, ChangePinDto } from './dto/user.dto';
+import { UpdateProfileDto, UploadKycDto, SendPhoneVerificationOtpDto, VerifyPhoneOtpDto, PhoneVerificationContext, ChangePinDto, PublicUserInfoDto } from './dto/user.dto';
 import { CreateFavoriteLocationDto, UpdateFavoriteLocationDto, FavoriteLocationResponse } from './dto/favorite-location.dto';
 import { Trip } from '../trips/entities/trip.entity';
 import { Booking } from '../bookings/entities/booking.entity';
 import { Message } from '../chat/entities/message.entity';
+import { Rating } from '../ratings/entities/rating.entity';
+import { Vehicle } from '../vehicles/entities/vehicle.entity';
 import { FileUploadService } from '../common/services/file-upload.service';
 import { KycValidationService } from '../common/services/kyc-validation.service';
 import { KeccelOtpService } from '../keccel-otp/keccel-otp.service';
@@ -42,6 +44,10 @@ export class UsersService {
     private messageRepository: Repository<Message>,
     @InjectRepository(FavoriteLocation)
     private favoriteLocationRepository: Repository<FavoriteLocation>,
+    @InjectRepository(Rating)
+    private ratingRepository: Repository<Rating>,
+    @InjectRepository(Vehicle)
+    private vehicleRepository: Repository<Vehicle>,
     private fileUploadService: FileUploadService,
     private kycValidationService: KycValidationService,
     private keccelOtpService: KeccelOtpService,
@@ -74,7 +80,7 @@ export class UsersService {
     // Handle array of CNI front URLs
     if (kyc.cniFrontUrls && Array.isArray(kyc.cniFrontUrls)) {
       kyc.cniFrontUrls = await Promise.all(
-        kyc.cniFrontUrls.map(url => 
+        kyc.cniFrontUrls.map(url =>
           this.fileUploadService.getPresignedUrlIfS3Key(url).then(presigned => presigned || url)
         )
       );
@@ -98,7 +104,7 @@ export class UsersService {
 
     if (!user) {
       this.logger.warn(`User not found: ${id}`);
-      throw new NotFoundException('User not found');
+      throw new NotFoundException('Utilisateur non trouvé');
     }
 
     return user;
@@ -106,6 +112,7 @@ export class UsersService {
 
   async getProfileSummary(userId: string) {
     const user = await this.findOne(userId);
+    console.log("this user:", user);
 
     const [
       tripsAsDriver,
@@ -158,7 +165,7 @@ export class UsersService {
 
       if (existingUser) {
         this.logger.warn(`Profile update failed: Phone ${updateProfileDto.phone} already exists`);
-        throw new BadRequestException('Phone number already exists');
+        throw new BadRequestException('Ce numéro de téléphone existe déjà');
       }
     }
 
@@ -257,7 +264,7 @@ export class UsersService {
       const missingFiles: string[] = [];
       if (!cniBackFile) missingFiles.push('cniBack (verso de la CNI)');
       if (!selfieFile) missingFiles.push('selfie (photo selfie)');
-      
+
       throw new BadRequestException(
         `ÉCHEC : Fichiers manquants. Veuillez fournir tous les documents requis.\n\nFichiers manquants : ${missingFiles.join(', ')}\n\nTous les fichiers suivants sont requis :\n- cniFront : 1 ou 2 photos du recto de votre carte d'identité\n- cniBack : Photo du verso de votre carte d'identité\n- selfie : Photo selfie de vous-même`
       );
@@ -271,7 +278,7 @@ export class UsersService {
       this.fileUploadService.saveFile(cniBackFile, 'kyc'),
       this.fileUploadService.saveFile(selfieFile, 'kyc'),
     ]);
-    
+
     // Keep first CNI front URL for backward compatibility
     const cniFrontUrl = cniFrontUrls[0];
 
@@ -282,7 +289,7 @@ export class UsersService {
 
     // Only perform KYC validation if AWS Rekognition is enabled
     const kycValidationEnabled = this.configService.get<string>('AWS_REKOGNITION_KYC_ENABLED') === 'true';
-    
+
     this.logger.log(`[KYC Upload] ========================================`);
     this.logger.log(`[KYC Upload] Processing KYC upload for user: ${userId}`);
     this.logger.log(`[KYC Upload] KYC validation enabled: ${kycValidationEnabled}`);
@@ -291,7 +298,7 @@ export class UsersService {
       this.logger.log(`[KYC Upload]   - CNI front ${idx + 1}: ${file.originalname} (${file.size} bytes)`);
     });
     this.logger.log(`[KYC Upload] Selfie file: ${selfieFile.originalname} (${selfieFile.size} bytes)`);
-    
+
     if (kycValidationEnabled) {
       try {
         this.logger.log(`[KYC Upload] Starting AI validation for user: ${userId}`);
@@ -318,28 +325,28 @@ export class UsersService {
           kycStatus = KycStatus.REJECTED;
           // Construire un message d'erreur détaillé avec toutes les informations
           let detailedReason = validationResult.reason || 'ÉCHEC : Validation KYC échouée';
-          
+
           // Ajouter les détails techniques si disponibles
           if (validationResult.details) {
             const details = validationResult.details;
             detailedReason += '\n\nDétails techniques :';
-            
+
             if (details.issue) {
               detailedReason += `\n- Problème identifié : ${details.issue}`;
             }
-            
+
             if (details.cniFrontFaces !== undefined) {
               detailedReason += `\n- Visages détectés sur CNI : ${details.cniFrontFaces}`;
             }
-            
+
             if (details.selfieFaces !== undefined) {
               detailedReason += `\n- Visages détectés sur selfie : ${details.selfieFaces}`;
             }
-            
+
             if (details.similarityScore !== undefined) {
               detailedReason += `\n- Score de similarité : ${details.similarityScore.toFixed(1)}% (minimum requis : ${details.minRequiredSimilarity || this.configService.get<string>('AWS_REKOGNITION_KYC_MIN_SIMILARITY') || '80'}%)`;
             }
-            
+
             if (details.cniQuality !== undefined || details.selfieQuality !== undefined) {
               detailedReason += '\n- Qualité des images :';
               if (details.cniQuality !== undefined) {
@@ -356,12 +363,12 @@ export class UsersService {
                 detailedReason += `\n  • Minimum requis : ${details.minRequiredQuality}%`;
               }
             }
-            
+
             if (details.recommendation) {
               detailedReason += `\n\n💡 Recommandation : ${details.recommendation}`;
             }
           }
-          
+
           rejectionReason = detailedReason;
           this.logger.warn(`[KYC Upload] ❌ KYC validation FAILED for user: ${userId}`);
           this.logger.warn(`[KYC Upload] Reason: ${validationResult.reason}`);
@@ -374,14 +381,14 @@ export class UsersService {
         this.logger.error(`[KYC Upload] ❌ KYC validation ERROR for user: ${userId}:`);
         this.logger.error(`[KYC Upload] Error message: ${error.message}`);
         this.logger.error(`[KYC Upload] Error stack: ${error.stack}`);
-        
+
         // En cas d'erreur technique du service IA, mettre le statut à PENDING pour validation manuelle
         kycStatus = KycStatus.PENDING;
-        
+
         // Construire un message clair pour l'utilisateur
         const errorMessage = error.message || 'Erreur inconnue';
         rejectionReason = `VALIDATION MANUELLE REQUISE : Le service de validation automatique n'est pas disponible actuellement.\n\nVotre demande sera examinée manuellement par notre équipe dans les plus brefs délais.\n\nRaison technique : ${errorMessage}`;
-        
+
         this.logger.warn(`[KYC Upload] ⚠️ KYC validation service unavailable - Status set to PENDING for manual review`);
         this.logger.warn(`[KYC Upload] User will be notified that manual review is required`);
       }
@@ -389,23 +396,23 @@ export class UsersService {
       const kycEnabledConfig = this.configService.get<string>('AWS_REKOGNITION_KYC_ENABLED');
       const accessKeyId = this.configService.get<string>('AWS_ACCESS_KEY_ID');
       const secretAccessKey = this.configService.get<string>('AWS_SECRET_ACCESS_KEY');
-      
+
       this.logger.warn(`[KYC Upload] ⚠️ KYC validation is DISABLED`);
       this.logger.warn(`[KYC Upload] Reason: AWS_REKOGNITION_KYC_ENABLED="${kycEnabledConfig || 'NOT SET'}" (must be "true" to enable)`);
-      
+
       if (!accessKeyId || !secretAccessKey) {
         this.logger.warn(`[KYC Upload] Additional issue: AWS credentials not configured`);
         this.logger.warn(`[KYC Upload]   - AWS_ACCESS_KEY_ID: ${accessKeyId ? 'configured' : 'NOT SET'}`);
         this.logger.warn(`[KYC Upload]   - AWS_SECRET_ACCESS_KEY: ${secretAccessKey ? 'configured' : 'NOT SET'}`);
       }
-      
+
       this.logger.warn(`[KYC Upload] Action: Keeping status as PENDING for manual review`);
       this.logger.warn(`[KYC Upload] To enable AI validation, set AWS_REKOGNITION_KYC_ENABLED=true and configure AWS credentials`);
-      
+
       // When KYC validation is disabled, keep status as PENDING for manual review
       kycStatus = KycStatus.PENDING;
     }
-    
+
     this.logger.log(`[KYC Upload] Final KYC status: ${kycStatus}`);
     this.logger.log(`[KYC Upload] ========================================`);
 
@@ -598,7 +605,7 @@ export class UsersService {
       // Check if user has a PIN set
       if (!user.password) {
         this.logger.warn(`PIN change failed: User ${userId} does not have a PIN set but provided old PIN`);
-        throw new BadRequestException('No PIN set for this account. Please set a PIN first.');
+        throw new BadRequestException('Aucun code PIN défini pour ce compte. Veuillez d\'abord définir un code PIN.');
       }
 
       // Verify old PIN
@@ -606,13 +613,13 @@ export class UsersService {
 
       if (!isOldPinValid) {
         this.logger.warn(`PIN change failed: Invalid old PIN for user ${userId}`);
-        throw new UnauthorizedException('Invalid old PIN');
+        throw new UnauthorizedException('Ancien code PIN invalide');
       }
 
       // Check if new PIN is different from old PIN
       if (changePinDto.oldPin === changePinDto.newPin) {
         this.logger.warn(`PIN change failed: New PIN is the same as old PIN for user ${userId}`);
-        throw new BadRequestException('New PIN must be different from the old PIN');
+        throw new BadRequestException('Le nouveau code PIN doit être différent de l\'ancien');
       }
     } else {
       // Old PIN not provided - allow PIN reset (user forgot their PIN)
@@ -688,7 +695,7 @@ export class UsersService {
 
     if (!location) {
       this.logger.warn(`Favorite location ${locationId} not found for user ${userId}`);
-      throw new NotFoundException('Favorite location not found');
+      throw new NotFoundException('Lieu favori non trouvé');
     }
 
     return this.mapFavoriteLocationToResponse(location);
@@ -707,7 +714,7 @@ export class UsersService {
 
     if (!location) {
       this.logger.warn(`Favorite location ${locationId} not found for user ${userId}`);
-      throw new NotFoundException('Favorite location not found');
+      throw new NotFoundException('Lieu favori non trouvé');
     }
 
     // If setting as default, unset other defaults of the same type
@@ -754,7 +761,7 @@ export class UsersService {
 
     if (!location) {
       this.logger.warn(`Favorite location ${locationId} not found for user ${userId}`);
-      throw new NotFoundException('Favorite location not found');
+      throw new NotFoundException('Lieu favori non trouvé');
     }
 
     await this.favoriteLocationRepository.remove(location);
@@ -787,6 +794,96 @@ export class UsersService {
       notes: location.notes,
       createdAt: location.createdAt,
       updatedAt: location.updatedAt,
+    };
+  }
+
+  /**
+   * Récupère les informations publiques d'un utilisateur (driver ou passager)
+   * Ces informations sont destinées à être affichées aux autres utilisateurs
+   */
+  async getPublicUserInfo(userId: string): Promise<PublicUserInfoDto> {
+    this.logger.log(`Fetching public info for user: ${userId}`);
+
+    const user = await this.userRepository.findOne({
+      where: { id: userId },
+      relations: ['vehicles'],
+    });
+
+    if (!user) {
+      throw new NotFoundException('Utilisateur non trouvé');
+    }
+
+    // Calculer les statistiques
+    const [
+      tripsAsDriver,
+      bookingsAsPassenger,
+      bookingsAsDriver,
+    ] = await Promise.all([
+      this.tripRepository.count({ where: { driverId: userId } }),
+      this.bookingRepository.count({ where: { passengerId: userId } }),
+      this.bookingRepository
+        .createQueryBuilder('booking')
+        .innerJoin('booking.trip', 'trip')
+        .where('trip.driverId = :userId', { userId })
+        .getCount(),
+    ]);
+
+    // Calculer la note moyenne et le nombre total de notes
+    const ratingStats = await this.ratingRepository
+      .createQueryBuilder('rating')
+      .select('AVG(rating.rating)', 'average')
+      .addSelect('COUNT(rating.id)', 'total')
+      .where('rating.ratedUserId = :userId', { userId })
+      .getRawOne();
+
+    const averageRating = ratingStats?.average ? parseFloat(ratingStats.average) : null;
+    const totalRatings = ratingStats?.total ? parseInt(ratingStats.total, 10) : 0;
+
+    // Enrichir la photo de profil avec presigned URL si nécessaire
+    const enrichedUser = await this.enrichUserWithPresignedUrls(user);
+
+    // Préparer les véhicules (si driver)
+    const vehicles = user.isDriver && user.vehicles
+      ? await Promise.all(
+        user.vehicles
+          .filter((v) => v.isActive)
+          .map(async (vehicle) => {
+            let photoUrl = vehicle.photoUrl;
+            if (photoUrl) {
+              photoUrl = await this.fileUploadService.getPresignedUrlIfS3Key(photoUrl) || photoUrl;
+            }
+            return {
+              id: vehicle.id,
+              brand: vehicle.brand,
+              model: vehicle.model,
+              color: vehicle.color,
+              licensePlate: vehicle.licensePlate,
+              photoUrl,
+            };
+          }),
+      )
+      : undefined;
+
+    return {
+      id: user.id,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      profilePicture: enrichedUser.profilePicture,
+      role: user.role,
+      isDriver: user.isDriver,
+      status: user.status,
+      isEmailVerified: user.isEmailVerified,
+      isPhoneVerified: user.isPhoneVerified,
+      createdAt: user.createdAt,
+      averageRating: averageRating ? Math.round(averageRating * 10) / 10 : null, // Arrondir à 1 décimale
+      totalRatings,
+      stats: {
+        tripsAsDriver,
+        bookingsAsPassenger,
+        bookingsAsDriver,
+        vehiclesCount: user.vehicles?.filter((v) => v.isActive).length ?? 0,
+      },
+      vehicles,
     };
   }
 }

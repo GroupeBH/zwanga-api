@@ -116,6 +116,25 @@ export class TripsController {
     return this.tripsService.startTrip(id, req.user.userId);
   }
 
+  @Put(':id/pause')
+  @Auth()
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({ summary: 'Pause/interrupt an active trip' })
+  async pauseTrip(@Request() req, @Param('id') id: string) {
+    return this.tripsService.pauseTrip(id, req.user.userId);
+  }
+
+  @Put(':id/make-public')
+  @Auth()
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({ 
+    summary: 'Make a private trip public',
+    description: 'Permet au passager qui a créé la demande de trajet d\'autoriser que le trajet devienne public. Le conducteur du trajet doit avoir passé le KYC et avoir au moins un véhicule actif pour que le trajet soit effectivement publié.'
+  })
+  async makeTripPublic(@Request() req, @Param('id') id: string) {
+    return this.tripsService.makeTripPublic(id, req.user.userId);
+  }
+
   @Delete(':id')
   @Auth()
   @SensitiveThrottle(10, 60000)

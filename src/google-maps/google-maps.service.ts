@@ -61,12 +61,12 @@ export class GoogleMapsService {
       );
 
       if (response.data.status === 'ZERO_RESULTS') {
-        throw new BadRequestException('No results found for this address');
+        throw new BadRequestException('Aucun résultat trouvé pour cette adresse');
       }
 
       if (response.data.status !== 'OK') {
         throw new BadRequestException(
-          `Geocoding failed: ${response.data.status}${response.data.error_message ? ` - ${response.data.error_message}` : ''}`,
+          `Échec du géocodage : ${response.data.status}${response.data.error_message ? ` - ${response.data.error_message}` : ''}`,
         );
       }
 
@@ -89,7 +89,7 @@ export class GoogleMapsService {
         throw error;
       }
       this.logger.error(`Geocoding error: ${error.message}`, error.stack);
-      throw new InternalServerErrorException('Failed to geocode address');
+      throw new InternalServerErrorException('Échec du géocodage de l\'adresse');
     }
   }
 
@@ -108,7 +108,7 @@ export class GoogleMapsService {
       );
 
       if (response.data.status === 'ZERO_RESULTS') {
-        throw new BadRequestException('No results found for these coordinates');
+        throw new BadRequestException('Aucun résultat trouvé pour ces coordonnées');
       }
 
       if (response.data.status !== 'OK') {
@@ -136,7 +136,7 @@ export class GoogleMapsService {
         throw error;
       }
       this.logger.error(`Reverse geocoding error: ${error.message}`, error.stack);
-      throw new InternalServerErrorException('Failed to reverse geocode coordinates');
+      throw new InternalServerErrorException('Échec du géocodage inverse des coordonnées');
     }
   }
 
@@ -190,7 +190,7 @@ export class GoogleMapsService {
         throw error;
       }
       this.logger.error(`Places autocomplete error: ${error.message}`, error.stack);
-      throw new InternalServerErrorException('Failed to get place autocomplete');
+      throw new InternalServerErrorException('Échec de la récupération de l\'autocomplétion des lieux');
     }
   }
 
@@ -238,7 +238,7 @@ export class GoogleMapsService {
         throw error;
       }
       this.logger.error(`Place details error: ${error.message}`, error.stack);
-      throw new InternalServerErrorException('Failed to get place details');
+      throw new InternalServerErrorException('Échec de la récupération des détails du lieu');
     }
   }
 
@@ -294,7 +294,7 @@ export class GoogleMapsService {
         throw error;
       }
       this.logger.error(`Places search error: ${error.message}`, error.stack);
-      throw new InternalServerErrorException('Failed to search places');
+      throw new InternalServerErrorException('Échec de la recherche de lieux');
     }
   }
 
@@ -306,13 +306,13 @@ export class GoogleMapsService {
       // Build origin
       const origin = this.buildWaypoint(dto.origin);
       if (!origin) {
-        throw new BadRequestException('Origin is required');
+        throw new BadRequestException('Le point de départ est requis');
       }
 
       // Build destination
       const destination = this.buildWaypoint(dto.destination);
       if (!destination) {
-        throw new BadRequestException('Destination is required');
+        throw new BadRequestException('La destination est requise');
       }
 
       const params: Record<string, string> = {
@@ -371,7 +371,7 @@ export class GoogleMapsService {
       );
 
       if (response.data.status === 'ZERO_RESULTS') {
-        throw new BadRequestException('No route found between origin and destination');
+        throw new BadRequestException('Aucun itinéraire trouvé entre le départ et la destination');
       }
 
       if (response.data.status !== 'OK') {
@@ -438,7 +438,7 @@ export class GoogleMapsService {
         throw error;
       }
       this.logger.error(`Directions error: ${error.message}`, error.stack);
-      throw new InternalServerErrorException('Failed to get directions');
+      throw new InternalServerErrorException('Échec de la récupération des directions');
     }
   }
 

@@ -68,6 +68,9 @@ export class Trip {
   @Column({ type: 'timestamp' })
   departureDate: Date;
 
+  @Column({ type: 'int', nullable: true })
+  totalSeats: number | null;
+
   @Column({ type: 'int' })
   availableSeats: number;
 
@@ -99,7 +102,16 @@ export class Trip {
   currentLocation: Point;
 
   @Column({ type: 'timestamp', nullable: true })
-  lastLocationUpdateAt: Date;
+  lastLocationUpdateAt: Date | null;
+
+  @Column({ type: 'boolean', default: false })
+  departureReminderNotified: boolean; // Indique si la notification de rappel de départ a été envoyée
+
+  @Column({ type: 'boolean', default: false })
+  isPrivate: boolean; // Indique si le trajet est privé (créé depuis une demande de trajet)
+
+  @Column({ type: 'varchar', nullable: true })
+  tripRequestId: string | null; // ID de la demande de trajet à l'origine de ce trajet (si applicable)
 
   @CreateDateColumn()
   createdAt: Date;
@@ -110,4 +122,3 @@ export class Trip {
   @OneToMany(() => Booking, (booking) => booking.trip)
   bookings: Booking[];
 }
-

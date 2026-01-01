@@ -55,11 +55,11 @@ export class CreateTripDto {
   @IsNotEmpty()
   departureDate: string;
 
-  @ApiProperty({ minimum: 1 })
+  @ApiProperty({ minimum: 1, description: 'Nombre total de places disponibles dans le véhicule' })
   @IsNumber()
   @Min(1)
   @IsNotEmpty()
-  availableSeats: number;
+  totalSeats: number;
 
   @ApiProperty({ 
     minimum: 0,
@@ -222,11 +222,11 @@ export class UpdateTripDto {
   @IsOptional()
   departureDate?: string;
 
-  @ApiProperty({ required: false, minimum: 1 })
+  @ApiProperty({ required: false, minimum: 1, description: 'Nombre total de places (si modifié, availableSeats sera recalculé)' })
   @IsNumber()
   @Min(1)
   @IsOptional()
-  availableSeats?: number;
+  totalSeats?: number;
 
   @ApiProperty({ required: false, minimum: 0 })
   @IsNumber()

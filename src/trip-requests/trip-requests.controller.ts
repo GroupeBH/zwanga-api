@@ -78,6 +78,18 @@ export class TripRequestsController {
     return this.tripRequestsService.findOne(id, userId);
   }
 
+  @Get(':id/offers')
+  @Auth()
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({
+    summary: 'Get all offers for a trip request',
+    description: 'Récupère toutes les offres faites par les conducteurs pour une demande de trajet. Seul le passager peut voir toutes les offres.',
+  })
+  @ApiBearerAuth()
+  async getOffers(@Param('id') id: string, @Request() req) {
+    return this.tripRequestsService.getOffersForTripRequest(id, req.user.userId);
+  }
+
   @Post(':id/offers')
   @Auth()
   @SensitiveThrottle(10, 60000)
