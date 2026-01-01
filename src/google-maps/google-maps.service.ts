@@ -7,6 +7,8 @@ import {
 import { HttpService } from '@nestjs/axios';
 import { ConfigService } from '@nestjs/config';
 import { firstValueFrom } from 'rxjs';
+import * as crypto from 'crypto';
+import { CacheService } from '../common/services/cache.service';
 import { AxiosError } from 'axios';
 import {
   GeocodeDto,
@@ -32,6 +34,7 @@ export class GoogleMapsService {
   constructor(
     private readonly httpService: HttpService,
     private readonly configService: ConfigService,
+    private readonly cacheService: CacheService,
   ) {
     const apiKey = this.configService.get<string>('GOOGLE_MAPS_API_KEY');
     if (!apiKey) {
@@ -302,7 +305,16 @@ export class GoogleMapsService {
    * Get directions between origin and destination
    */
   async getDirections(dto: DirectionsDto): Promise<DirectionsResponse> {
+    const cacheKey = this.getDirectionsCacheKey(dto);
+
     try {
+      // Try to get from cache first
+      const cached = await this.cacheService.get<DirectionsResponse>(cacheKey);
+      if (cached) {
+        this.logger.debug('Returning directions from cache');
+        return cached;
+      }
+
       // Build origin
       const origin = this.buildWaypoint(dto.origin);
       if (!origin) {
@@ -429,10 +441,15 @@ export class GoogleMapsService {
         };
       });
 
-      return {
+      const result = {
         routes,
         status: response.data.status,
       };
+
+      // Cache the result for one week (604800 seconds)
+      await this.cacheService.set(cacheKey, result, 604800);
+
+      return result;
     } catch (error) {
       if (error instanceof BadRequestException) {
         throw error;
@@ -462,5 +479,26 @@ export class GoogleMapsService {
     }
     return null;
   }
-}
 
+  /**
+   * Generate a unique cache key for directions based on the DTO
+   */
+  private getDirectionsCacheKey(dto: DirectionsDto): string {
+    const data = JSON.stringify({
+      origin: dto.origin,
+      destination: dto.destination,
+      waypoints: dto.waypoints,
+      optimizeWaypoints: dto.optimizeWaypoints,
+      mode: dto.mode,
+      avoid: dto.avoid,
+      alternatives: dto.alternatives,
+      language: dto.language,
+      region: dto.region,
+      departureTime: dto.departureTime,
+      arrivalTime: dto.arrivalTime,
+    });
+
+    const hash = crypto.createHash('md5').update(data).digest('hex');
+    return `google_maps:directions:${hash}`;
+  }
+}
