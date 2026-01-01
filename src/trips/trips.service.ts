@@ -74,7 +74,7 @@ export class TripsService {
     private cacheService: CacheService,
     private fileUploadService: FileUploadService,
     private notificationService: NotificationService,
-  ) {}
+  ) { }
 
   async create(
     driverId: string,
@@ -84,10 +84,10 @@ export class TripsService {
     // Synchronize isFree with pricePerSeat
     const isFree = createTripDto.isFree ?? createTripDto.pricePerSeat === 0;
     const pricePerSeat = isFree ? 0 : createTripDto.pricePerSeat;
-    
+
     const tripType = isFree ? 'gratuit' : 'payant';
     this.logger.log(`Creating ${tripType} trip for user: ${driverId} from ${createTripDto.departureLocation} to ${createTripDto.arrivalLocation} (price: ${pricePerSeat} CDF)`);
-    
+
     const user = await this.userRepository.findOne({ where: { id: driverId } });
     if (!user) {
       this.logger.warn(`Trip creation failed: User not found - ${driverId}`);
@@ -157,7 +157,7 @@ export class TripsService {
     });
 
     const savedTrip = await this.tripRepository.save(trip);
-    
+
     // Invalidate cache
     await this.cacheService.del(CacheService.getTripsListKey());
     await this.cacheService.del(CacheService.getTripsListKey('all'));
@@ -168,10 +168,10 @@ export class TripsService {
 
   async findAll(): Promise<SanitizedTrip[]> {
     this.logger.debug('Fetching all trips');
-    
+
     const cacheKey = CacheService.getTripsListKey('all');
     const cached = await this.cacheService.get<SanitizedTrip[]>(cacheKey);
-    
+
     if (cached) {
       this.logger.debug(`Returning ${cached.length} trips from cache`);
       return cached;
@@ -189,6 +189,7 @@ export class TripsService {
         },
         {
           status: TripStatus.ACTIVE,
+          departureDate: MoreThan(now),
           availableSeats: MoreThan(0),
           isPrivate: false, // Exclude private trips
         },
@@ -208,7 +209,7 @@ export class TripsService {
 
   async search(searchTripsDto: SearchTripsDto): Promise<SanitizedTrip[]> {
     this.logger.log(`Searching trips with filters: ${JSON.stringify(searchTripsDto)}`);
-    
+
     const now = new Date();
     const queryBuilder = this.tripRepository
       .createQueryBuilder('trip')
@@ -218,16 +219,18 @@ export class TripsService {
       .leftJoinAndSelect('bookings.passenger', 'bookingPassenger')
       .where(
         new Brackets((qb) => {
-          qb.where('trip.status = :pendingStatus', { pendingStatus: TripStatus.PENDING })
+          qb.where('trip.isPrivate = :isPrivate', { isPrivate: false })
             .andWhere('trip.departureDate > :now', { now })
-            .andWhere('trip.isPrivate = :isPrivate', { isPrivate: false }) // Exclude private trips
-            .orWhere(
+            .andWhere(
               new Brackets((qb2) => {
-                qb2
-                  .where('trip.status = :activeStatus', { activeStatus: TripStatus.ACTIVE })
-                  .andWhere('trip.availableSeats > 0')
-                  .andWhere('trip.isPrivate = :isPrivate', { isPrivate: false }); // Exclude private trips
-              }),
+                qb2.where('trip.status = :pendingStatus', { pendingStatus: TripStatus.PENDING })
+                  .orWhere(
+                    new Brackets((qb3) => {
+                      qb3.where('trip.status = :activeStatus', { activeStatus: TripStatus.ACTIVE })
+                        .andWhere('trip.availableSeats > 0');
+                    })
+                  );
+              })
             );
         }),
       );
@@ -355,10 +358,10 @@ export class TripsService {
 
   async findOne(id: string): Promise<SanitizedTrip> {
     this.logger.debug(`Fetching trip: ${id}`);
-    
+
     const cacheKey = CacheService.getTripKey(id);
     const cached = await this.cacheService.get<SanitizedTrip>(cacheKey);
-    
+
     if (cached) {
       this.logger.debug(`Trip ${id} returned from cache`);
       return cached;
@@ -382,7 +385,7 @@ export class TripsService {
 
   async findByDriver(driverId: string): Promise<SanitizedTrip[]> {
     this.logger.debug(`Fetching trips for driver: ${driverId}`);
-    
+
     const trips = await this.tripRepository.find({
       where: { driverId },
       relations: ['vehicle', 'bookings', 'bookings.passenger', 'driver'],
@@ -482,7 +485,7 @@ export class TripsService {
 
   async update(id: string, driverId: string, updateTripDto: UpdateTripDto): Promise<SanitizedTrip> {
     this.logger.log(`Updating trip ${id} by driver ${driverId}`);
-    
+
     const trip = await this.tripRepository.findOne({
       where: { id, driverId },
     });
@@ -517,13 +520,13 @@ export class TripsService {
 
     // Synchronize isFree with pricePerSeat
     if (isFree !== undefined || pricePerSeat !== undefined) {
-      const newIsFree = isFree !== undefined 
-        ? isFree 
+      const newIsFree = isFree !== undefined
+        ? isFree
         : (pricePerSeat !== undefined ? pricePerSeat === 0 : trip.isFree);
-      const newPricePerSeat = newIsFree 
-        ? 0 
+      const newPricePerSeat = newIsFree
+        ? 0
         : (pricePerSeat !== undefined ? pricePerSeat : trip.pricePerSeat);
-      
+
       trip.isFree = newIsFree;
       trip.pricePerSeat = newPricePerSeat;
     }
@@ -563,13 +566,13 @@ export class TripsService {
       const oldTotalSeats = trip.totalSeats ?? trip.availableSeats; // Utiliser availableSeats comme fallback si totalSeats est null
       const oldAvailableSeats = trip.availableSeats;
       trip.totalSeats = totalSeats;
-      
+
       // Si totalSeats change, recalculer availableSeats
       // availableSeats = totalSeats - (oldTotalSeats - oldAvailableSeats)
       // = totalSeats - réservations acceptées
       const bookedSeats = oldTotalSeats - oldAvailableSeats;
       trip.availableSeats = Math.max(0, totalSeats - bookedSeats);
-      
+
       this.logger.log(
         `Updated trip ${id} totalSeats: ${oldTotalSeats} -> ${totalSeats}, availableSeats recalculated: ${oldAvailableSeats} -> ${trip.availableSeats} (booked seats: ${bookedSeats})`,
       );
@@ -577,7 +580,7 @@ export class TripsService {
 
     Object.assign(trip, restPayload);
     const updatedTrip = await this.tripRepository.save(trip);
-    
+
     // Invalidate cache
     await this.cacheService.del(CacheService.getTripKey(id));
     await this.cacheService.del(CacheService.getTripsListKey());
@@ -589,7 +592,7 @@ export class TripsService {
 
   async remove(id: string, driverId: string): Promise<void> {
     this.logger.log(`Cancelling trip ${id} by driver ${driverId}`);
-    
+
     const trip = await this.tripRepository.findOne({
       where: { id, driverId },
     });
@@ -600,7 +603,7 @@ export class TripsService {
     }
 
     await this.tripRepository.remove(trip);
-    
+
     // Invalidate cache
     await this.cacheService.del(CacheService.getTripKey(id));
     await this.cacheService.del(CacheService.getTripsListKey());
@@ -611,7 +614,7 @@ export class TripsService {
 
   async startTrip(tripId: string, driverId: string): Promise<SanitizedTrip> {
     this.logger.log(`Starting trip ${tripId} by driver ${driverId}`);
-    
+
     const trip = await this.tripRepository.findOne({
       where: { id: tripId, driverId },
       relations: ['bookings', 'bookings.passenger', 'driver'],
@@ -662,7 +665,7 @@ export class TripsService {
 
   async pauseTrip(tripId: string, driverId: string): Promise<SanitizedTrip> {
     this.logger.log(`Pausing trip ${tripId} by driver ${driverId}`);
-    
+
     const trip = await this.tripRepository.findOne({
       where: { id: tripId, driverId },
       relations: ['bookings', 'bookings.passenger', 'driver'],
@@ -703,7 +706,7 @@ export class TripsService {
   private async notifyNearbyUsersAboutTripStart(trip: Trip): Promise<void> {
     try {
       this.logger.log(`Notifying nearby users about trip ${trip.id} start (${trip.availableSeats} seats available)`);
-      
+
       // Get all active users with FCM tokens (except the driver)
       const users = await this.userRepository.find({
         where: {
@@ -889,9 +892,9 @@ export class TripsService {
 
     // Sanitize driver with profile picture (presigned URL if S3 key)
     const sanitizedDriver = await this.sanitizeUser(driver);
-    
+
     // Sanitize bookings with passenger profile pictures (presigned URLs if S3 keys)
-    const sanitizedBookings = bookings 
+    const sanitizedBookings = bookings
       ? await Promise.all(bookings.map((booking) => this.sanitizeBooking(booking)))
       : [];
 
@@ -1020,9 +1023,9 @@ export class TripsService {
   @Cron(CronExpression.EVERY_HOUR)
   async markExpiredTrips() {
     this.logger.debug('Running cron job to mark expired trips');
-    
+
     const now = new Date();
-    
+
     // Find all pending trips with departure dates in the past
     const expiredTrips = await this.tripRepository.find({
       where: {
@@ -1107,10 +1110,10 @@ export class TripsService {
   @Cron('*/15 * * * *') // Every 15 minutes
   async notifyAboutUpcomingTripDeparture() {
     this.logger.debug('Running cron job to notify about upcoming trip departure');
-    
+
     const now = new Date();
     const thirtyMinutesFromNow = new Date(now.getTime() + 30 * 60 * 1000); // 30 minutes from now
-    
+
     // Find all pending trips starting in the next 30 minutes that haven't been notified yet
     const tripsStartingSoon = await this.tripRepository.find({
       where: {
@@ -1131,7 +1134,7 @@ export class TripsService {
     for (const trip of tripsStartingSoon) {
       // Notify driver and passengers
       await this.notifyAboutTripDeparture(trip);
-      
+
       // Mark as notified
       trip.departureReminderNotified = true;
       await this.tripRepository.save(trip);
@@ -1152,7 +1155,7 @@ export class TripsService {
         const minutesUntilDeparture = Math.round(
           (trip.departureDate.getTime() - new Date().getTime()) / (60 * 1000),
         );
-        
+
         const title = '⏰ Départ du trajet proche';
         const body = `Votre trajet de ${trip.departureLocation} à ${trip.arrivalLocation} commence dans ${minutesUntilDeparture} minute${minutesUntilDeparture > 1 ? 's' : ''}.`;
 
@@ -1236,10 +1239,10 @@ export class TripsService {
   @Cron('*/15 * * * *') // Every 15 minutes
   async notifyAboutUpcomingTripExpiration() {
     this.logger.debug('Running cron job to notify about upcoming trip expiration');
-    
+
     const now = new Date();
     const oneHourFromNow = new Date(now.getTime() + 60 * 60 * 1000); // 1 hour from now
-    
+
     // Find all pending trips expiring in the next hour
     const tripsExpiringSoon = await this.tripRepository.find({
       where: {
@@ -1264,7 +1267,7 @@ export class TripsService {
       const acceptedBookings = trip.bookings?.filter(
         (booking) => booking.status === BookingStatus.ACCEPTED,
       ) || [];
-      
+
       if (acceptedBookings.length > 0) {
         await this.notifyPassengersAboutUpcomingExpiration(trip, acceptedBookings);
       }
@@ -1287,7 +1290,7 @@ export class TripsService {
 
       const title = 'Trajet expiré';
       const body = `Votre trajet de ${trip.departureLocation} à ${trip.arrivalLocation} a expiré.`;
-      
+
       const data = {
         type: 'trip_expired',
         tripId: trip.id,
@@ -1337,7 +1340,7 @@ export class TripsService {
 
       const title = 'Trajet expiré';
       const body = `Le trajet de ${trip.departureLocation} à ${trip.arrivalLocation} auquel vous aviez réservé a expiré.`;
-      
+
       const data = {
         type: 'trip_expired',
         tripId: trip.id,
@@ -1391,7 +1394,7 @@ export class TripsService {
 
       const title = 'Trajet expirant bientôt';
       const body = `Votre trajet de ${trip.departureLocation} à ${trip.arrivalLocation} part dans ${timeUntilDeparture} minute(s).`;
-      
+
       const data = {
         type: 'trip_expiring_soon',
         tripId: trip.id,
@@ -1448,7 +1451,7 @@ export class TripsService {
 
       const title = 'Trajet expirant bientôt';
       const body = `Le trajet de ${trip.departureLocation} à ${trip.arrivalLocation} auquel vous avez réservé part dans ${timeUntilDeparture} minute(s).`;
-      
+
       const data = {
         type: 'trip_expiring_soon',
         tripId: trip.id,

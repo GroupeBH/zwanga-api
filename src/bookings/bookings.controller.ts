@@ -19,7 +19,7 @@ import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decor
 @ApiTags('Bookings')
 @Controller('bookings')
 export class BookingsController {
-  constructor(private readonly bookingsService: BookingsService) {}
+  constructor(private readonly bookingsService: BookingsService) { }
 
   @Post()
   @Auth()
@@ -56,7 +56,7 @@ export class BookingsController {
 
   @Put(':id/status')
   @Auth()
-  @Roles(UserRole.DRIVER)
+  // @Roles(UserRole.DRIVER)
   @SensitiveThrottle(20, 60000) // 20 requests per minute per IP
   @ApiOperation({ summary: 'Update booking status (driver only)' })
   async updateStatus(
@@ -69,7 +69,7 @@ export class BookingsController {
 
   @Put(':id/accept')
   @Auth()
-  @Roles(UserRole.DRIVER)
+  // @Roles(UserRole.DRIVER)
   @SensitiveThrottle(20, 60000)
   @ApiOperation({ summary: 'Accept a booking (driver only)' })
   async accept(@Request() req, @Param('id') id: string) {
@@ -78,7 +78,7 @@ export class BookingsController {
 
   @Put(':id/reject')
   @Auth()
-  @Roles(UserRole.DRIVER)
+  // @Roles(UserRole.DRIVER)
   @SensitiveThrottle(20, 60000)
   @ApiOperation({ summary: 'Reject a booking with a reason (driver only)' })
   async reject(

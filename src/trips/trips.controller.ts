@@ -20,12 +20,12 @@ import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decor
 @ApiTags('Trips')
 @Controller('trips')
 export class TripsController {
-  constructor(private readonly tripsService: TripsService) {}
+  constructor(private readonly tripsService: TripsService) { }
 
   @Post()
   @Auth()
   @SensitiveThrottle(10, 60000) // 10 requests per minute per IP
-  @ApiOperation({ 
+  @ApiOperation({
     summary: 'Create a new trip',
     description: 'Permet à un utilisateur de créer un trajet. Si l\'utilisateur est un passager et fournit un véhicule, il sera automatiquement promu en conducteur.'
   })
@@ -36,7 +36,7 @@ export class TripsController {
   @Get()
   @Public()
   @SensitiveThrottle(30, 60000) // 30 requests per minute per IP
-  @ApiOperation({ 
+  @ApiOperation({
     summary: 'Rechercher des trajets ou obtenir tous les trajets disponibles',
     description: 'Recherche flexible par coordonnées : vous pouvez fournir uniquement departureCoordinates, uniquement arrivalCoordinates, ou les deux. Le rayon de recherche (departureRadiusKm, arrivalRadiusKm) est optionnel pour chaque point (défaut: 50 km). Si aucun critère n\'est fourni, retourne tous les trajets disponibles.'
   })
@@ -50,7 +50,7 @@ export class TripsController {
   @Post('search/coordinates')
   @Public()
   @SensitiveThrottle(30, 60000)
-  @ApiOperation({ 
+  @ApiOperation({
     summary: 'Rechercher des trajets par coordonnées',
     description: 'Recherche flexible : vous pouvez fournir uniquement departureCoordinates, uniquement arrivalCoordinates, ou les deux. Le rayon de recherche est optionnel pour chaque point (défaut: 50 km).'
   })
@@ -127,7 +127,7 @@ export class TripsController {
   @Put(':id/make-public')
   @Auth()
   @SensitiveThrottle(10, 60000)
-  @ApiOperation({ 
+  @ApiOperation({
     summary: 'Make a private trip public',
     description: 'Permet au passager qui a créé la demande de trajet d\'autoriser que le trajet devienne public. Le conducteur du trajet doit avoir passé le KYC et avoir au moins un véhicule actif pour que le trajet soit effectivement publié.'
   })
