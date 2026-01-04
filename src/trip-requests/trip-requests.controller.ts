@@ -50,7 +50,7 @@ export class TripRequestsController {
     summary: 'Get my trip requests',
     description: 'Récupère toutes les demandes de trajet créées par l\'utilisateur connecté',
   })
-  @ApiBearerAuth()
+  // @ApiBearerAuth()
   async findMyRequests(@Request() req) {
     return this.tripRequestsService.findByPassenger(req.user.userId);
   }
@@ -61,7 +61,7 @@ export class TripRequestsController {
     summary: 'Get my driver offers',
     description: 'Récupère toutes les offres faites par le driver connecté, avec les détails des demandes de trajet associées',
   })
-  @ApiBearerAuth()
+  // @ApiBearerAuth()
   async findMyOffers(@Request() req) {
     return this.tripRequestsService.findByDriver(req.user.userId);
   }
