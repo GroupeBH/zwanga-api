@@ -1163,6 +1163,7 @@ export class TripsService {
           type: 'trip_departure_reminder',
           tripId: trip.id,
           departureLocation: trip.departureLocation,
+          driverId: trip.driver.id,
           arrivalLocation: trip.arrivalLocation,
           departureDate: trip.departureDate.toISOString(),
           minutesUntilDeparture,
@@ -1294,6 +1295,8 @@ export class TripsService {
       const data = {
         type: 'trip_expired',
         tripId: trip.id,
+        driverId: trip.driver.id,
+        role: 'driver',
         departureLocation: trip.departureLocation,
         arrivalLocation: trip.arrivalLocation,
       };
@@ -1398,6 +1401,8 @@ export class TripsService {
       const data = {
         type: 'trip_expiring_soon',
         tripId: trip.id,
+        driverId: trip.driver.id,
+        role: 'driver',
         departureLocation: trip.departureLocation,
         arrivalLocation: trip.arrivalLocation,
         departureDate: trip.departureDate.toISOString(),

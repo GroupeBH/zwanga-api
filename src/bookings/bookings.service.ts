@@ -560,6 +560,8 @@ export class BookingsService {
           bookingId: booking.id,
           tripId: trip.id,
           passengerDestination: destination,
+          role: 'driver',
+          driverId: trip.driverId,
         },
         trip.driverId,
       );
@@ -814,6 +816,7 @@ export class BookingsService {
           type: 'pickup_confirmed_by_passenger',
           bookingId: booking.id,
           tripId: booking.tripId,
+          role: 'driver',
         },
         booking.trip.driverId,
       );
@@ -876,6 +879,7 @@ export class BookingsService {
           type: 'dropoff_confirmed_by_passenger',
           bookingId: booking.id,
           tripId: booking.tripId,
+          role: 'driver',
         },
         booking.trip.driverId,
       );
