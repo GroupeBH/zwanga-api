@@ -259,7 +259,7 @@ export class TripRequestsService {
     const now = new Date();
     const tripRequests = await this.tripRequestRepository.find({
       where: {
-        passengerId,
+        passenger: { id: passengerId },
         departureDateMax: MoreThan(now), // Exclure les demandes expirées
       },
       relations: ['passenger', 'selectedDriver', 'selectedVehicle', 'driverOffers', 'driverOffers.driver', 'driverOffers.vehicle'],
