@@ -9,12 +9,15 @@ import {
   UploadedFiles,
   UploadedFile,
   UseInterceptors,
+  HttpCode,
+  HttpStatus,
 } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiConsumes, ApiBody } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiConsumes, ApiBody, ApiResponse } from '@nestjs/swagger';
 import { UsersService } from './users.service';
-import { UpdateProfileDto, UploadKycDto } from './dto/user.dto';
+import { UpdateProfileDto, UploadKycDto, SendPhoneVerificationOtpDto, VerifyPhoneOtpDto, ChangePinDto } from './dto/user.dto';
 import { Auth } from '../auth/decorators/auth.decorator';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
+import { Public } from '../common/decorators/public.decorator';
 import { FileFieldsInterceptor, FileInterceptor } from '@nestjs/platform-express';
 
 @ApiTags('Users')
@@ -108,6 +111,69 @@ export class UsersController {
   @ApiOperation({ summary: 'Get public profile of a user (driver or passenger)' })
   async getPublicProfile(@Param('id') id: string) {
     return this.usersService.getPublicUserInfo(id);
+  }
+
+  @Post('phone/send-otp')
+  @Public()
+  @HttpCode(HttpStatus.OK)
+  @SensitiveThrottle(5, 60000) // 5 requests per minute per IP
+  @ApiOperation({ summary: 'Send OTP code to phone number for verification' })
+  @ApiResponse({ 
+    status: 200, 
+    description: 'OTP sent successfully',
+    schema: {
+      type: 'object',
+      properties: {
+        message: { type: 'string', example: 'Code de vérification envoyé avec succès' }
+      }
+    }
+  })
+  @ApiResponse({ status: 400, description: 'Bad request - Phone already exists or not found' })
+  async sendPhoneVerificationOtp(@Body() sendOtpDto: SendPhoneVerificationOtpDto) {
+    return this.usersService.sendPhoneVerificationOtp(sendOtpDto);
+  }
+
+  @Post('phone/verify')
+  @Public()
+  @HttpCode(HttpStatus.OK)
+  @SensitiveThrottle(10, 60000) // 10 requests per minute per IP
+  @ApiOperation({ summary: 'Verify OTP code sent to phone number' })
+  @ApiResponse({ 
+    status: 200, 
+    description: 'OTP verified successfully',
+    schema: {
+      type: 'object',
+      properties: {
+        message: { type: 'string', example: 'Code OTP vérifié avec succès' },
+        valid: { type: 'boolean', example: true }
+      }
+    }
+  })
+  @ApiResponse({ status: 400, description: 'Bad request - Invalid or expired OTP' })
+  async verifyPhoneOtp(@Body() verifyOtpDto: VerifyPhoneOtpDto) {
+    return this.usersService.verifyPhoneOtp(verifyOtpDto);
+  }
+
+  @Post('pin/change')
+  @Auth()
+  @HttpCode(HttpStatus.OK)
+  @SensitiveThrottle(5, 60000) // 5 requests per minute per IP
+  @ApiOperation({ summary: 'Change user PIN code' })
+  @ApiResponse({ 
+    status: 200, 
+    description: 'PIN changed successfully',
+    schema: {
+      type: 'object',
+      properties: {
+        message: { type: 'string', example: 'Code PIN modifié avec succès' }
+      }
+    }
+  })
+  @ApiResponse({ status: 400, description: 'Bad request - Invalid PIN or same PIN' })
+  @ApiResponse({ status: 401, description: 'Unauthorized - Invalid old PIN' })
+  async changePin(@Request() req, @Body() changePinDto: ChangePinDto) {
+    await this.usersService.changePin(req.user.userId, changePinDto);
+    return { message: 'Code PIN modifié avec succès' };
   }
 }
 
