@@ -138,10 +138,10 @@ export class TripsController {
   @Delete(':id')
   @Auth()
   @SensitiveThrottle(10, 60000)
-  @ApiOperation({ summary: 'Cancel a trip' })
+  @ApiOperation({ summary: 'Delete a trip (only completed, cancelled, or expired trips can be deleted)' })
   async remove(@Request() req, @Param('id') id: string) {
     await this.tripsService.remove(id, req.user.userId);
-    return { message: 'Trip cancelled successfully' };
+    return { message: 'Trajet supprimé avec succès' };
   }
 }
 
