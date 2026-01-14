@@ -330,6 +330,23 @@ export class TripRequestsService {
       throw new NotFoundException('Demande de trajet non trouvée');
     }
 
+    // Check if trip request has an accepted offer
+    const hasAcceptedOffer = tripRequest.driverOffers?.some(
+      (offer) => offer.status === DriverOfferStatus.ACCEPTED,
+    ) || tripRequest.status === TripRequestStatus.DRIVER_SELECTED;
+
+    // If user is not the passenger and an offer has been accepted, hide the trip request
+    if (userId && tripRequest.passengerId !== userId && hasAcceptedOffer) {
+      this.logger.debug(`Trip request ${id} has an accepted offer and user ${userId} is not the passenger, hiding it`);
+      throw new NotFoundException('Demande de trajet non trouvée');
+    }
+
+    // If no user is authenticated and an offer has been accepted, hide the trip request
+    if (!userId && hasAcceptedOffer) {
+      this.logger.debug(`Trip request ${id} has an accepted offer and no user authenticated, hiding it`);
+      throw new NotFoundException('Demande de trajet non trouvée');
+    }
+
     // Only passenger or drivers who made offers can see all offers
     if (userId && tripRequest.passengerId !== userId) {
       const hasOffer = tripRequest.driverOffers?.some((offer) => offer.driverId === userId);
@@ -413,7 +430,7 @@ export class TripRequestsService {
 
     const tripRequest = await this.tripRequestRepository.findOne({
       where: { id: tripRequestId },
-      relations: ['passenger'],
+      relations: ['passenger', 'driverOffers'],
     });
 
     if (!tripRequest) {
@@ -426,8 +443,22 @@ export class TripRequestsService {
       throw new BadRequestException('Cette demande de trajet a expiré');
     }
 
+    // Check if trip request status allows new offers
+    if (tripRequest.status === TripRequestStatus.DRIVER_SELECTED) {
+      throw new BadRequestException('Cette demande de trajet n\'accepte plus d\'offres car un driver a déjà été sélectionné');
+    }
+
     if (tripRequest.status !== TripRequestStatus.PENDING && tripRequest.status !== TripRequestStatus.OFFERS_RECEIVED) {
       throw new BadRequestException('Cette demande de trajet n\'accepte plus d\'offres');
+    }
+
+    // Check if any offer has been accepted (double check even if status is not DRIVER_SELECTED yet)
+    const hasAcceptedOffer = tripRequest.driverOffers?.some(
+      (offer) => offer.status === DriverOfferStatus.ACCEPTED,
+    );
+
+    if (hasAcceptedOffer) {
+      throw new BadRequestException('Cette demande de trajet n\'accepte plus d\'offres car une offre a déjà été acceptée');
     }
 
     if (tripRequest.passengerId === driverId) {
