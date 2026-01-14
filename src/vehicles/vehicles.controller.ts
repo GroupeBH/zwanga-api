@@ -58,10 +58,10 @@ export class VehiclesController {
   @Delete(':id')
   @Auth()
   @SensitiveThrottle(10, 60000)
-  @ApiOperation({ summary: 'Delete a vehicle' })
+  @ApiOperation({ summary: 'Deactivate a vehicle (can be used even if linked to trips)' })
   async remove(@Request() req, @Param('id') id: string) {
     await this.vehiclesService.remove(id, req.user.userId);
-    return { message: 'Vehicle deleted successfully' };
+    return { message: 'Véhicule désactivé avec succès' };
   }
 }
 

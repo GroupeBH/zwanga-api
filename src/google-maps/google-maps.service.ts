@@ -311,7 +311,7 @@ export class GoogleMapsService {
       // Try to get from cache first
       const cached = await this.cacheService.get<DirectionsResponse>(cacheKey);
       if (cached) {
-        this.logger.debug('Returning directions from cache');
+        // this.logger.debug('Returning directions from cache');
         return cached;
       }
 
@@ -454,7 +454,7 @@ export class GoogleMapsService {
       if (error instanceof BadRequestException) {
         throw error;
       }
-      this.logger.error(`Directions error: ${error.message}`, error.stack);
+      // this.logger.error(`Directions error: ${error.message}`, error.stack);
       throw new InternalServerErrorException('Échec de la récupération des directions');
     }
   }

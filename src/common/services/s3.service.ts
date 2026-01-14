@@ -121,10 +121,10 @@ export class S3Service {
       });
 
       const url = await getSignedUrl(this.s3Client, command, { expiresIn });
-      this.logger.debug(`Presigned URL generated for key ${key} (expires in ${expiresIn}s)`);
+      // this.logger.debug(`Presigned URL generated for key ${key} (expires in ${expiresIn}s)`);
       return url;
     } catch (error) {
-      this.logger.error(`Error generating presigned URL for key ${key}:`, error);
+      // this.logger.error(`Error generating presigned URL for key ${key}:`, error);
       return null;
     }
   }

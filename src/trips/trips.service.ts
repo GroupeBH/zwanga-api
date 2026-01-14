@@ -126,7 +126,7 @@ export class TripsService {
       }
 
       // If user is a passenger and provides a vehicle, promote them to driver
-      if (user.role === UserRole.PASSENGER && !user.isDriver) {
+      if (user.role === UserRole.PASSENGER) {
         this.logger.log(`Promoting user ${driverId} from passenger to driver (creating trip with vehicle)`);
         user.role = UserRole.DRIVER;
         user.isDriver = true;
@@ -1058,7 +1058,9 @@ export class TripsService {
    */
   @Cron(CronExpression.EVERY_HOUR)
   async markExpiredTrips() {
-    this.logger.debug('Running cron job to mark expired trips');
+    // Use setImmediate to ensure HTTP requests have priority
+    setImmediate(async () => {
+      this.logger.debug('Running cron job to mark expired trips');
 
     const now = new Date();
     // Calculate the time 2 hours ago
@@ -1141,6 +1143,7 @@ export class TripsService {
     this.logger.log(
       `Successfully marked ${expiredTrips.length} trips and their bookings as expired`,
     );
+    });
   }
 
   /**
@@ -1149,7 +1152,9 @@ export class TripsService {
    */
   @Cron('*/15 * * * *') // Every 15 minutes
   async notifyAboutUpcomingTripDeparture() {
-    this.logger.debug('Running cron job to notify about upcoming trip departure');
+    // Use setImmediate to ensure HTTP requests have priority
+    setImmediate(async () => {
+      this.logger.debug('Running cron job to notify about upcoming trip departure');
 
     const now = new Date();
     const thirtyMinutesFromNow = new Date(now.getTime() + 30 * 60 * 1000); // 30 minutes from now
@@ -1183,6 +1188,7 @@ export class TripsService {
     this.logger.log(
       `Successfully notified about ${tripsStartingSoon.length} trips starting soon`,
     );
+    });
   }
 
   /**
@@ -1279,7 +1285,9 @@ export class TripsService {
    */
   @Cron('*/15 * * * *') // Every 15 minutes
   async notifyAboutUpcomingTripExpiration() {
-    this.logger.debug('Running cron job to notify about upcoming trip expiration');
+    // Use setImmediate to ensure HTTP requests have priority
+    setImmediate(async () => {
+      this.logger.debug('Running cron job to notify about upcoming trip expiration');
 
     const now = new Date();
     const oneHourFromNow = new Date(now.getTime() + 60 * 60 * 1000); // 1 hour from now
@@ -1317,6 +1325,7 @@ export class TripsService {
     this.logger.log(
       `Successfully notified about ${tripsExpiringSoon.length} trips expiring soon`,
     );
+    });
   }
 
   /**

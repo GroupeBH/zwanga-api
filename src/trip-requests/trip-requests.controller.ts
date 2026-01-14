@@ -11,7 +11,7 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { TripRequestsService } from './trip-requests.service';
-import { CreateTripRequestDto, CreateDriverOfferDto, AcceptDriverOfferDto } from './dto/trip-request.dto';
+import { CreateTripRequestDto, CreateDriverOfferDto, AcceptDriverOfferDto, UpdateTripRequestDto } from './dto/trip-request.dto';
 import { Auth } from '../auth/decorators/auth.decorator';
 import { Public } from '../common/decorators/public.decorator';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
@@ -133,6 +133,21 @@ export class TripRequestsController {
   async startTripFromRequest(@Request() req, @Param('id') id: string) {
 
     return this.tripRequestsService.startTripFromRequest(id, req.user.userId);
+  }
+
+  @Put(':id')
+  @Auth()
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({
+    summary: 'Update a trip request',
+    description: 'Permet au passager de modifier sa demande de trajet. La modification n\'est possible que si aucun driver n\'a été sélectionné et qu\'aucune offre n\'a été acceptée.',
+  })
+  async update(
+    @Request() req,
+    @Param('id') id: string,
+    @Body() updateTripRequestDto: UpdateTripRequestDto,
+  ) {
+    return this.tripRequestsService.update(req.user.userId, id, updateTripRequestDto);
   }
 
   @Delete(':id')
