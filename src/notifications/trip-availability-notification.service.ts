@@ -34,7 +34,9 @@ export class TripAvailabilityNotificationService {
 
   @Cron(CronExpression.EVERY_HOUR)
   async sendRecommendationNotifications() {
-    this.logger.debug('Running trip availability recommendation cron job');
+    // Use setImmediate to ensure HTTP requests have priority
+    setImmediate(async () => {
+      this.logger.debug('Running trip availability recommendation cron job');
 
     const users = await this.userRepository.find({
       where: { isActive: true },
@@ -63,6 +65,7 @@ export class TripAvailabilityNotificationService {
 
       await this.notifyUserAboutTrips(user, matchingTrips);
     }
+    });
   }
 
   private async getPreferredLocations(

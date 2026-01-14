@@ -6,7 +6,7 @@ import {
   ForbiddenException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, Point, LessThan, MoreThan, In, Between, Brackets } from 'typeorm';
+import { Repository, Point, LessThan, MoreThan, In, Between, Brackets, Not } from 'typeorm';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { Trip, TripStatus } from './entities/trip.entity';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
@@ -126,7 +126,7 @@ export class TripsService {
       }
 
       // If user is a passenger and provides a vehicle, promote them to driver
-      if (user.role === UserRole.PASSENGER && !user.isDriver) {
+      if (user.role === UserRole.PASSENGER) {
         this.logger.log(`Promoting user ${driverId} from passenger to driver (creating trip with vehicle)`);
         user.role = UserRole.DRIVER;
         user.isDriver = true;
@@ -591,17 +591,52 @@ export class TripsService {
   }
 
   async remove(id: string, driverId: string): Promise<void> {
-    this.logger.log(`Cancelling trip ${id} by driver ${driverId}`);
+    this.logger.log(`Deleting trip ${id} by driver ${driverId}`);
 
     const trip = await this.tripRepository.findOne({
       where: { id, driverId },
+      relations: ['bookings'],
     });
 
     if (!trip) {
-      this.logger.warn(`Trip cancellation failed: Trip ${id} not found for driver ${driverId}`);
+      this.logger.warn(`Trip deletion failed: Trip ${id} not found for driver ${driverId}`);
       throw new NotFoundException('Trajet non trouvé');
     }
 
+    // Check if trip is completed or expired
+    const now = new Date();
+    const twoHoursAgo = new Date(now.getTime() - 2 * 60 * 60 * 1000);
+    const isExpired = trip.status === TripStatus.PENDING && trip.departureDate < twoHoursAgo;
+    const isCompleted = trip.status === TripStatus.COMPLETED;
+    const isCancelled = trip.status === TripStatus.CANCELLED;
+
+    // Only allow deletion of completed, cancelled, or expired trips
+    if (!isCompleted && !isCancelled && !isExpired) {
+      this.logger.warn(
+        `Trip deletion failed: Trip ${id} is not completed, cancelled, or expired (status: ${trip.status})`,
+      );
+      throw new BadRequestException(
+        'Vous ne pouvez supprimer que les trajets terminés, annulés ou expirés',
+      );
+    }
+
+    // If trip has bookings, we need to handle them
+    if (trip.bookings && trip.bookings.length > 0) {
+      this.logger.log(
+        `Trip ${id} has ${trip.bookings.length} bookings. Handling them before deletion.`,
+      );
+
+      // Get all booking IDs
+      const bookingIds = trip.bookings.map((booking) => booking.id);
+
+      // Delete all bookings associated with this trip
+      // This will also handle cascade deletion of related messages if configured
+      await this.bookingRepository.delete({ tripId: id });
+
+      this.logger.log(`Deleted ${bookingIds.length} bookings for trip ${id}`);
+    }
+
+    // Now delete the trip
     await this.tripRepository.remove(trip);
 
     // Invalidate cache
@@ -609,7 +644,7 @@ export class TripsService {
     await this.cacheService.del(CacheService.getTripsListKey());
     await this.cacheService.del(CacheService.getTripsListKey('all'));
 
-    this.logger.log(`Trip ${id} cancelled successfully`);
+    this.logger.log(`Trip ${id} deleted successfully`);
   }
 
   async startTrip(tripId: string, driverId: string): Promise<SanitizedTrip> {
@@ -1018,19 +1053,26 @@ export class TripsService {
 
   /**
    * Cron job to mark expired trips and their bookings as expired
-   * Runs every hour to check for trips with departure dates in the past
+   * Runs every hour to check for trips that are not in progress (ACTIVE)
+   * and have passed their scheduled departure time by more than 2 hours
    */
   @Cron(CronExpression.EVERY_HOUR)
   async markExpiredTrips() {
-    this.logger.debug('Running cron job to mark expired trips');
+    // Use setImmediate to ensure HTTP requests have priority
+    setImmediate(async () => {
+      this.logger.debug('Running cron job to mark expired trips');
 
     const now = new Date();
+    // Calculate the time 2 hours ago
+    const twoHoursAgo = new Date(now.getTime() - 2 * 60 * 60 * 1000);
 
-    // Find all pending trips with departure dates in the past
+    // Find all trips that are not in progress (ACTIVE) with departure dates more than 2 hours in the past
+    // A trip expires only if it's not in progress (ACTIVE) and 2 hours have passed since scheduled departure
+    // We only process PENDING trips (exclude ACTIVE, COMPLETED, and CANCELLED)
     const expiredTrips = await this.tripRepository.find({
       where: {
-        status: TripStatus.PENDING,
-        departureDate: LessThan(now),
+        status: TripStatus.PENDING, // Only process pending trips (not ACTIVE, COMPLETED, or CANCELLED)
+        departureDate: LessThan(twoHoursAgo),
       },
       relations: ['driver', 'bookings', 'bookings.passenger'],
     });
@@ -1101,6 +1143,7 @@ export class TripsService {
     this.logger.log(
       `Successfully marked ${expiredTrips.length} trips and their bookings as expired`,
     );
+    });
   }
 
   /**
@@ -1109,7 +1152,9 @@ export class TripsService {
    */
   @Cron('*/15 * * * *') // Every 15 minutes
   async notifyAboutUpcomingTripDeparture() {
-    this.logger.debug('Running cron job to notify about upcoming trip departure');
+    // Use setImmediate to ensure HTTP requests have priority
+    setImmediate(async () => {
+      this.logger.debug('Running cron job to notify about upcoming trip departure');
 
     const now = new Date();
     const thirtyMinutesFromNow = new Date(now.getTime() + 30 * 60 * 1000); // 30 minutes from now
@@ -1143,6 +1188,7 @@ export class TripsService {
     this.logger.log(
       `Successfully notified about ${tripsStartingSoon.length} trips starting soon`,
     );
+    });
   }
 
   /**
@@ -1239,7 +1285,9 @@ export class TripsService {
    */
   @Cron('*/15 * * * *') // Every 15 minutes
   async notifyAboutUpcomingTripExpiration() {
-    this.logger.debug('Running cron job to notify about upcoming trip expiration');
+    // Use setImmediate to ensure HTTP requests have priority
+    setImmediate(async () => {
+      this.logger.debug('Running cron job to notify about upcoming trip expiration');
 
     const now = new Date();
     const oneHourFromNow = new Date(now.getTime() + 60 * 60 * 1000); // 1 hour from now
@@ -1277,6 +1325,7 @@ export class TripsService {
     this.logger.log(
       `Successfully notified about ${tripsExpiringSoon.length} trips expiring soon`,
     );
+    });
   }
 
   /**

@@ -350,7 +350,9 @@ export class SafetyService {
   // Job cron pour détecter les téléphones éteints brusquement
   @Cron(CronExpression.EVERY_MINUTE)
   async checkForPhoneShutdowns() {
-    this.logger.debug('Checking for phone shutdowns during active trips');
+    // Use setImmediate to ensure HTTP requests have priority
+    setImmediate(async () => {
+      this.logger.debug('Checking for phone shutdowns during active trips');
 
     // Trouver toutes les alertes actives avec une dernière mise à jour de position
     const activeAlerts = await this.safetyAlertRepository.find({
@@ -431,6 +433,7 @@ export class SafetyService {
         }
       }
     }
+    });
   }
 
   private async isTripActive(tripId: string): Promise<boolean> {

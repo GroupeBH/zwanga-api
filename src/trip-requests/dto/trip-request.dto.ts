@@ -141,3 +141,88 @@ export class AcceptDriverOfferDto {
   offerId: string;
 }
 
+export class UpdateTripRequestDto {
+  @ApiProperty({ required: false })
+  @IsString()
+  @IsOptional()
+  departureLocation?: string;
+
+  @ApiProperty({
+    required: false,
+    description: 'Coordonnées du point de départ [longitude, latitude]',
+    example: [15.2663, -4.325],
+    minItems: 2,
+    maxItems: 2,
+  })
+  @IsArray()
+  @ArrayMinSize(2)
+  @ArrayMaxSize(2)
+  @IsNumber({}, { each: true })
+  @IsOptional()
+  departureCoordinates?: [number, number];
+
+  @ApiProperty({ required: false })
+  @IsString()
+  @IsOptional()
+  arrivalLocation?: string;
+
+  @ApiProperty({
+    required: false,
+    description: 'Coordonnées du point d\'arrivée [longitude, latitude]',
+    example: [15.3222, -4.4419],
+    minItems: 2,
+    maxItems: 2,
+  })
+  @IsArray()
+  @ArrayMinSize(2)
+  @ArrayMaxSize(2)
+  @IsNumber({}, { each: true })
+  @IsOptional()
+  arrivalCoordinates?: [number, number];
+
+  @ApiProperty({
+    required: false,
+    description: 'Date/heure de départ minimum souhaitée',
+    example: '2025-12-20T08:00:00Z',
+  })
+  @IsDateString()
+  @IsOptional()
+  departureDateMin?: string;
+
+  @ApiProperty({
+    required: false,
+    description: 'Date/heure de départ maximum acceptée (délai)',
+    example: '2025-12-20T18:00:00Z',
+  })
+  @IsDateString()
+  @IsOptional()
+  departureDateMax?: string;
+
+  @ApiProperty({ 
+    required: false,
+    minimum: 1,
+    description: 'Nombre de places nécessaires',
+    example: 2,
+  })
+  @IsNumber()
+  @Min(1)
+  @IsOptional()
+  numberOfSeats?: number;
+
+  @ApiProperty({ 
+    required: false,
+    minimum: 0,
+    description: 'Prix maximum par place accepté (optionnel)',
+    example: 5000,
+  })
+  @IsNumber()
+  @Min(0)
+  @IsOptional()
+  maxPricePerSeat?: number;
+
+  @ApiProperty({ required: false })
+  @IsString()
+  @IsOptional()
+  description?: string;
+}
+

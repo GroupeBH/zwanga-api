@@ -9,6 +9,7 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiQuery } from '@nestjs/swagger';
 import { Public } from '../common/decorators/public.decorator';
+import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
 import { GoogleMapsService } from './google-maps.service';
 import {
   GeocodeDto,
@@ -73,6 +74,7 @@ export class GoogleMapsController {
   @Post('directions')
   @Public()
   @HttpCode(HttpStatus.OK)
+  @SensitiveThrottle(20, 60000) // 20 requests per minute per IP
   @ApiOperation({ summary: 'Get directions between origin and destination' })
   @ApiResponse({ status: 200, description: 'Directions retrieved successfully', type: DirectionsResponse })
   async getDirections(@Body() dto: DirectionsDto): Promise<DirectionsResponse> {
