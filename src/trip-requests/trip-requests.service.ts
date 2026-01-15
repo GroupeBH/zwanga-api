@@ -323,37 +323,76 @@ export class TripRequestsService {
 
     const tripRequest = await this.tripRequestRepository.findOne({
       where: { id },
-      relations: ['passenger', 'selectedDriver', 'selectedVehicle', 'driverOffers', 'driverOffers.driver', 'driverOffers.vehicle'],
+      relations: [
+        'passenger',
+        'selectedDriver',
+        'selectedVehicle',
+        'driverOffers',
+        'driverOffers.driver',
+        'driverOffers.vehicle',
+      ],
     });
 
     if (!tripRequest) {
       throw new NotFoundException('Demande de trajet non trouvée');
     }
 
-    // Check if trip request has an accepted offer
+    const isPassenger = userId && tripRequest.passengerId === userId;
+    const isSelectedDriver =
+      userId && tripRequest.selectedDriverId && tripRequest.selectedDriverId === userId;
+
     const hasAcceptedOffer = tripRequest.driverOffers?.some(
       (offer) => offer.status === DriverOfferStatus.ACCEPTED,
-    ) || tripRequest.status === TripRequestStatus.DRIVER_SELECTED;
+    );
 
-    // If user is not the passenger and an offer has been accepted, hide the trip request
-    if (userId && tripRequest.passengerId !== userId && hasAcceptedOffer) {
-      this.logger.debug(`Trip request ${id} has an accepted offer and user ${userId} is not the passenger, hiding it`);
-      throw new NotFoundException('Demande de trajet non trouvée');
-    }
+    const userAcceptedOffer = userId
+      ? tripRequest.driverOffers?.find(
+          (offer) =>
+            offer.driverId === userId && offer.status === DriverOfferStatus.ACCEPTED,
+        )
+      : undefined;
 
-    // If no user is authenticated and an offer has been accepted, hide the trip request
-    if (!userId && hasAcceptedOffer) {
-      this.logger.debug(`Trip request ${id} has an accepted offer and no user authenticated, hiding it`);
-      throw new NotFoundException('Demande de trajet non trouvée');
-    }
-
-    // Only passenger or drivers who made offers can see all offers
-    if (userId && tripRequest.passengerId !== userId) {
-      const hasOffer = tripRequest.driverOffers?.some((offer) => offer.driverId === userId);
-      if (!hasOffer) {
-        // Remove offers from other drivers
-        tripRequest.driverOffers = tripRequest.driverOffers?.filter((offer) => offer.driverId === userId) || [];
+    // Si aucune offre n'est acceptée, garder le comportement existant (visibilité large)
+    if (!hasAcceptedOffer && tripRequest.status !== TripRequestStatus.DRIVER_SELECTED) {
+      if (userId && !isPassenger) {
+        const hasOffer = tripRequest.driverOffers?.some(
+          (offer) => offer.driverId === userId,
+        );
+        if (!hasOffer) {
+          // Ne montrer au driver que ses propres offres
+          tripRequest.driverOffers =
+            tripRequest.driverOffers?.filter((offer) => offer.driverId === userId) ||
+            [];
+        }
       }
+
+      return this.sanitizeTripRequest(tripRequest);
+    }
+
+    // À partir du moment où une offre est acceptée / le driver sélectionné :
+    // - Le passager doit toujours avoir accès
+    // - Le driver sélectionné (ou celui avec l'offre acceptée) doit avoir accès
+    // - Les autres utilisateurs ne doivent plus voir la trip-request
+
+    // Aucun utilisateur (public) ne voit les demandes avec offre acceptée
+    if (!userId) {
+      this.logger.debug(
+        `Trip request ${id} has an accepted offer and no user authenticated, hiding it`,
+      );
+      throw new NotFoundException('Demande de trajet non trouvée');
+    }
+
+    // Si ce n'est ni le passager, ni le driver sélectionné, ni le driver de l'offre acceptée -> masquer
+    if (!isPassenger && !isSelectedDriver && !userAcceptedOffer) {
+      this.logger.debug(
+        `Trip request ${id} has an accepted offer and user ${userId} is not passenger/selected driver, hiding it`,
+      );
+      throw new NotFoundException('Demande de trajet non trouvée');
+    }
+
+    // Si c'est un driver non passager, ne lui montrer que sa propre offre (l'acceptée)
+    if (!isPassenger && userAcceptedOffer) {
+      tripRequest.driverOffers = [userAcceptedOffer];
     }
 
     return this.sanitizeTripRequest(tripRequest);

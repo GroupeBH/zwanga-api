@@ -67,15 +67,15 @@ export class TripRequestsController {
   }
 
   @Get(':id')
-  @Public()
+  @Auth()
   @SensitiveThrottle(30, 60000)
   @ApiOperation({
     summary: 'Get a trip request by ID',
-    description: 'Récupère une demande de trajet spécifique. Les drivers ne voient que leurs propres offres.',
+    description:
+      'Récupère une demande de trajet spécifique. Tant qu’aucune offre n’est acceptée, tous les drivers peuvent la voir (avec uniquement leurs offres). Après acceptation, seule la passager et le driver sélectionné y ont accès.',
   })
   async findOne(@Param('id') id: string, @Request() req) {
-    const userId = req.user?.userId;
-    return this.tripRequestsService.findOne(id, userId);
+    return this.tripRequestsService.findOne(id, req.user.userId);
   }
 
   @Get(':id/offers')
