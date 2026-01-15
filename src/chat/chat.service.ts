@@ -253,6 +253,41 @@ export class ChatService {
     );
   }
 
+  /**
+   * Delete a conversation for the current user.
+   * - Seul l'utilisateur courant est retiré des participants (il ne verra plus la conversation).
+   * - La conversation, les autres participants et les messages restent en base.
+   */
+  async deleteConversationForUser(
+    conversationId: string,
+    userId: string,
+  ): Promise<void> {
+    const conversation = await this.conversationRepository.findOne({
+      where: { id: conversationId },
+      relations: ['participants'],
+    });
+
+    if (!conversation) {
+      throw new NotFoundException('Conversation not found');
+    }
+
+    // Ensure the user is part of this conversation
+    this.ensureMembership(conversation.participants, userId);
+
+    // Remove the participant (soft delete for this user)
+    const participant = conversation.participants.find(
+      (p) => p.userId === userId,
+    );
+
+    if (participant) {
+      await this.participantRepository.remove(participant);
+    }
+
+    this.logger.log(
+      `User ${userId} removed from conversation ${conversationId}; conversation and messages kept for other participants`,
+    );
+  }
+
   /* -------------------------------------------------------------------------- */
   /*                          Booking-specific helpers                          */
   /* -------------------------------------------------------------------------- */
@@ -295,6 +330,53 @@ export class ChatService {
     }
 
     await this.markConversationRead(message.conversationId, userId);
+  }
+
+  async editMessage(
+    messageId: string,
+    userId: string,
+    newContent: string,
+  ): Promise<Message> {
+    const message = await this.messageRepository.findOne({
+      where: { id: messageId },
+      relations: ['conversation'],
+    });
+
+    if (!message) {
+      throw new NotFoundException('Message not found');
+    }
+
+    if (message.senderId !== userId) {
+      throw new ForbiddenException('Vous ne pouvez modifier que vos propres messages');
+    }
+
+    if (!newContent || newContent.trim().length === 0) {
+      throw new BadRequestException('Le contenu du message ne peut pas être vide');
+    }
+
+    message.content = newContent;
+    const updated = await this.messageRepository.save(message);
+
+    return updated;
+  }
+
+  async deleteMessage(
+    messageId: string,
+    userId: string,
+  ): Promise<void> {
+    const message = await this.messageRepository.findOne({
+      where: { id: messageId },
+    });
+
+    if (!message) {
+      throw new NotFoundException('Message not found');
+    }
+
+    if (message.senderId !== userId) {
+      throw new ForbiddenException('Vous ne pouvez supprimer que vos propres messages');
+    }
+
+    await this.messageRepository.delete(messageId);
   }
 
   /* -------------------------------------------------------------------------- */

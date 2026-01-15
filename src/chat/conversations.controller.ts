@@ -5,6 +5,7 @@ import {
   Get,
   Param,
   Post,
+  Patch,
   Query,
   Request,
 } from '@nestjs/common';
@@ -111,6 +112,43 @@ export class ConversationsController {
   async markRead(@Request() req, @Param('id') id: string) {
     await this.chatService.markConversationRead(id, req.user.userId);
     return { message: 'Conversation marked as read' };
+  }
+
+  @Delete(':id')
+  @Auth()
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({
+    summary: 'Supprimer une conversation',
+    description:
+      'Supprime la conversation pour l’utilisateur courant. Si aucun participant ne reste, la conversation et ses messages sont supprimés.',
+  })
+  async deleteConversation(@Request() req, @Param('id') id: string) {
+    await this.chatService.deleteConversationForUser(id, req.user.userId);
+    return { message: 'Conversation supprimée avec succès' };
+  }
+
+  @Patch('messages/:messageId')
+  @Auth()
+  @SensitiveThrottle(60, 60000)
+  @ApiOperation({ summary: 'Modifier un message envoyé' })
+  async editMessage(
+    @Request() req,
+    @Param('messageId') messageId: string,
+    @Body() dto: SendMessageDto,
+  ) {
+    return this.chatService.editMessage(messageId, req.user.userId, dto.content);
+  }
+
+  @Delete('messages/:messageId')
+  @Auth()
+  @SensitiveThrottle(60, 60000)
+  @ApiOperation({ summary: 'Supprimer un message envoyé' })
+  async deleteMessage(
+    @Request() req,
+    @Param('messageId') messageId: string,
+  ) {
+    await this.chatService.deleteMessage(messageId, req.user.userId);
+    return { message: 'Message supprimé avec succès' };
   }
 }
 
