@@ -1013,7 +1013,17 @@ export class TripsService {
   }
 
   async ensureUserCanTrackTrip(tripId: string, userId: string) {
-    await this.verifyTripParticipant(tripId, userId);
+    const { trip } = await this.verifyTripParticipant(tripId, userId);
+
+    // Real-time tracking is only allowed for ACTIVE trips
+    if (trip.status !== TripStatus.ACTIVE) {
+      this.logger.warn(
+        `Tracking not allowed for trip ${tripId} with status ${trip.status} (user: ${userId})`,
+      );
+      throw new BadRequestException(
+        'Le suivi en temps réel est uniquement disponible pour les trajets en cours',
+      );
+    }
   }
 
   async updateDriverLocation(
@@ -1030,6 +1040,16 @@ export class TripsService {
       throw new ForbiddenException('Seul le conducteur peut mettre à jour la localisation');
     }
 
+    // Stop tracking updates if trip is not ACTIVE
+    if (trip.status !== TripStatus.ACTIVE) {
+      this.logger.warn(
+        `Ignoring location update for trip ${tripId} with status ${trip.status} (driver: ${driverId})`,
+      );
+      throw new BadRequestException(
+        'Le trajet n’est plus en cours, le suivi en temps réel est arrêté',
+      );
+    }
+
     trip.currentLocation = this.buildPointFromCoordinates(coordinates);
     trip.lastLocationUpdateAt = new Date();
 
@@ -1044,6 +1064,16 @@ export class TripsService {
 
   async getDriverLocationForUser(tripId: string, userId: string) {
     const { trip } = await this.verifyTripParticipant(tripId, userId);
+
+    // If trip is no longer ACTIVE, stop real-time tracking and prevent further polling
+    if (trip.status !== TripStatus.ACTIVE) {
+      this.logger.warn(
+        `Driver location requested for non-active trip ${tripId} (status: ${trip.status}, user: ${userId})`,
+      );
+      throw new BadRequestException(
+        'Le trajet n’est plus en cours, le suivi en temps réel est arrêté',
+      );
+    }
     return {
       tripId: trip.id,
       coordinates: this.pointToCoordinates(trip.currentLocation),
