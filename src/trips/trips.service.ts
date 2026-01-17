@@ -6,7 +6,7 @@ import {
   ForbiddenException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, Point, LessThan, MoreThan, In, Between, Brackets, Not } from 'typeorm';
+import { Repository, Point, LessThan, MoreThan, In, Between, Brackets, Not, IsNull } from 'typeorm';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { Trip, TripStatus } from './entities/trip.entity';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
@@ -675,8 +675,9 @@ export class TripsService {
     );
     const hasAvailableSeats = trip.availableSeats > 0;
 
-    // Update trip status to ACTIVE
+    // Update trip status to ACTIVE and set startedAt
     trip.status = TripStatus.ACTIVE;
+    trip.startedAt = new Date();
     await this.tripRepository.save(trip);
 
     // Invalidate cache
@@ -716,12 +717,25 @@ export class TripsService {
       throw new BadRequestException(`Impossible d'interrompre le trajet. Le trajet doit être en cours (statut actuel : ${trip.status})`);
     }
 
-    // Get accepted bookings to notify passengers
+    // Get accepted bookings
     const acceptedBookings = trip.bookings?.filter(
       (booking) => booking.status === BookingStatus.ACCEPTED,
     ) || [];
 
-    // Update trip status to PENDING (interrupted)
+    // A driver can interrupt a trip only if passengers have NOT yet been picked up
+    const bookingsWithPickedUpPassengers =
+      acceptedBookings.filter((booking) => booking.pickedUp || booking.pickedUpConfirmedByPassenger);
+
+    if (bookingsWithPickedUpPassengers.length > 0) {
+      this.logger.warn(
+        `Trip pause failed: Trip ${tripId} has ${bookingsWithPickedUpPassengers.length} booking(s) with picked up passengers. Driver ${driverId} cannot interrupt an ongoing trip with passengers already picked up.`,
+      );
+      throw new BadRequestException(
+        'Vous ne pouvez pas interrompre un trajet avec des passagers déjà récupérés',
+      );
+    }
+
+    // Update trip status to PENDING (interrupted) when there are no picked-up passengers
     trip.status = TripStatus.PENDING;
     await this.tripRepository.save(trip);
 
@@ -730,9 +744,11 @@ export class TripsService {
     await this.cacheService.del(CacheService.getTripsListKey());
     await this.cacheService.del(CacheService.getTripsListKey('all'));
 
-    this.logger.log(`Trip ${tripId} paused successfully. Notifying ${acceptedBookings.length} passengers.`);
+    this.logger.log(
+      `Trip ${tripId} paused successfully. Notifying ${acceptedBookings.length} passengers (not yet picked up).`,
+    );
 
-    // Notify booked passengers about trip interruption
+    // Notify booked passengers (with accepted bookings) about trip interruption
     await this.notifyPassengersAboutTripPause(trip, acceptedBookings);
 
     return this.findOne(tripId);
@@ -1083,8 +1099,9 @@ export class TripsService {
 
   /**
    * Cron job to mark expired trips and their bookings as expired
-   * Runs every hour to check for trips that are not in progress (ACTIVE)
-   * and have passed their scheduled departure time by more than 2 hours
+   * - PENDING trips expire 2 hours after scheduled departure
+   * - Trips that have been started (ACTIVE) expire 12 hours after scheduled departure
+   * Runs every hour.
    */
   @Cron(CronExpression.EVERY_HOUR)
   async markExpiredTrips() {
@@ -1093,28 +1110,43 @@ export class TripsService {
       this.logger.debug('Running cron job to mark expired trips');
 
     const now = new Date();
-    // Calculate the time 2 hours ago
+    // Calculate thresholds
     const twoHoursAgo = new Date(now.getTime() - 2 * 60 * 60 * 1000);
+    const twelveHoursAgo = new Date(now.getTime() - 12 * 60 * 60 * 1000);
 
-    // Find all trips that are not in progress (ACTIVE) with departure dates more than 2 hours in the past
-    // A trip expires only if it's not in progress (ACTIVE) and 2 hours have passed since scheduled departure
-    // We only process PENDING trips (exclude ACTIVE, COMPLETED, and CANCELLED)
-    const expiredTrips = await this.tripRepository.find({
+    // 1) PENDING trips that should expire 2 hours after departure
+    //    Only trips that have NEVER been started (startedAt IS NULL)
+    const pendingTripsToExpire = await this.tripRepository.find({
       where: {
-        status: TripStatus.PENDING, // Only process pending trips (not ACTIVE, COMPLETED, or CANCELLED)
+        status: TripStatus.PENDING,
+        startedAt: IsNull(),
         departureDate: LessThan(twoHoursAgo),
       },
       relations: ['driver', 'bookings', 'bookings.passenger'],
     });
 
-    if (expiredTrips.length === 0) {
+    // 2) ACTIVE trips that have been started and should auto-complete 12 hours after departure
+    const activeTripsToExpire = await this.tripRepository.find({
+      where: {
+        status: TripStatus.ACTIVE,
+        departureDate: LessThan(twelveHoursAgo),
+      },
+      relations: ['driver', 'bookings', 'bookings.passenger'],
+    });
+
+    const tripsToExpire = [...pendingTripsToExpire, ...activeTripsToExpire];
+
+    if (tripsToExpire.length === 0) {
       this.logger.debug('No expired trips found');
       return;
     }
 
-    this.logger.log(`Found ${expiredTrips.length} expired trips to mark as completed`);
+    this.logger.log(
+      `Found ${tripsToExpire.length} trips to auto-complete as expired ` +
+        `(pending: ${pendingTripsToExpire.length}, active: ${activeTripsToExpire.length})`,
+    );
 
-    for (const trip of expiredTrips) {
+    for (const trip of tripsToExpire) {
       // Mark trip as completed
       await this.tripRepository.update(trip.id, {
         status: TripStatus.COMPLETED,
@@ -1171,7 +1203,7 @@ export class TripsService {
     await this.cacheService.del(CacheService.getTripsListKey('all'));
 
     this.logger.log(
-      `Successfully marked ${expiredTrips.length} trips and their bookings as expired`,
+      `Successfully marked ${tripsToExpire.length} trips and their bookings as expired`,
     );
     });
   }
