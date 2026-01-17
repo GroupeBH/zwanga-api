@@ -91,6 +91,9 @@ export class Trip {
   status: TripStatus;
 
   @Column({ type: 'timestamp', nullable: true })
+  startedAt: Date | null;
+
+  @Column({ type: 'timestamp', nullable: true })
   completedAt: Date;
 
   @Column({
