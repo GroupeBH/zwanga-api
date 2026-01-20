@@ -161,6 +161,7 @@ export class TripsService {
     // Invalidate cache
     await this.cacheService.del(CacheService.getTripsListKey());
     await this.cacheService.del(CacheService.getTripsListKey('all'));
+    await this.cacheService.del(CacheService.getTripsListKey('allTrips'));
 
     this.logger.log(`Trip created successfully: ${savedTrip.id} by user ${driverId}`);
     return this.findOne(savedTrip.id);
@@ -204,6 +205,31 @@ export class TripsService {
 
     await this.cacheService.set(cacheKey, sanitized, this.CACHE_TTL);
     this.logger.log(`Fetched ${trips.length} trips from database (${trips.filter(t => t.status === TripStatus.PENDING).length} pending, ${trips.filter(t => t.status === TripStatus.ACTIVE).length} active)`);
+    return sanitized;
+  }
+
+  async findAllTrips(): Promise<SanitizedTrip[]> {
+    this.logger.debug('Fetching all trips of zwanga ended or none');
+
+    const cacheKey = CacheService.getTripsListKey('allTrips');
+    const cached = await this.cacheService.get<SanitizedTrip[]>(cacheKey);
+
+    if (cached) {
+      this.logger.debug(`Returning ${cached.length} trips from cache`);
+      return cached;
+    }
+
+    const trips = await this.tripRepository.find({
+      relations: ['driver', 'vehicle', 'bookings', 'bookings.passenger'],
+      order: {
+        departureDate: 'ASC',
+      },
+    });
+
+    const sanitized = await Promise.all(trips.map((trip) => this.sanitizeTrip(trip)));
+
+    await this.cacheService.set(cacheKey, sanitized, this.CACHE_TTL);
+    this.logger.log(`Fetched ${trips.length} trips of zwanga from database (${trips.filter(t => t.status === TripStatus.PENDING).length} pending, ${trips.filter(t => t.status === TripStatus.ACTIVE).length} active)`);
     return sanitized;
   }
 
@@ -585,6 +611,7 @@ export class TripsService {
     await this.cacheService.del(CacheService.getTripKey(id));
     await this.cacheService.del(CacheService.getTripsListKey());
     await this.cacheService.del(CacheService.getTripsListKey('all'));
+    await this.cacheService.del(CacheService.getTripsListKey('allTrips'));
 
     this.logger.log(`Trip ${id} updated successfully`);
     return this.findOne(id);
