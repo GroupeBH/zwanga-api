@@ -99,6 +99,25 @@ export class RefreshTokenDto {
   refreshToken: string;
 }
 
+export class GoogleMobileAuthDto {
+  @ApiProperty({
+    description: 'Google ID Token obtenu côté mobile (Expo / React-Native)',
+  })
+  @IsString()
+  @IsNotEmpty()
+  idToken: string;
+
+  @ApiProperty({
+    description:
+      'Numéro de téléphone requis uniquement lors de la première inscription Google (ou si le compte n’a pas encore de téléphone)',
+    example: '+243900000000',
+    required: false,
+  })
+  @IsString()
+  @IsOptional()
+  phone?: string;
+}
+
 export class AuthResponseDto {
   @ApiProperty()
   accessToken: string;

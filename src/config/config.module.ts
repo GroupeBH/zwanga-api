@@ -5,7 +5,8 @@ import { ConfigModule as NestConfigModule } from '@nestjs/config';
   imports: [
     NestConfigModule.forRoot({
       isGlobal: true,
-      envFilePath: '.env',
+      // Look for .env both at runtime root and one level up (useful when running from dist/)
+      envFilePath: ['.env', '../.env'],
       validationOptions: {
         allowUnknown: true,
         abortEarly: true,
