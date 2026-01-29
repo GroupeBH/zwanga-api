@@ -832,14 +832,17 @@ export class TripRequestsService {
 
   /**
    * Accept a trip request directly as a driver (Uber/Bolt/Yango style)
-   * Creates a trip and booking automatically
+   * The driver sees the number of seats requested by the passenger and the maximum price accepted.
+   * The driver accepts or refuses based on whether the request suits them.
+   * The price used is the maximum price accepted by the passenger (maxPricePerSeat), or 0 if not specified.
+   * Creates a trip and booking automatically with the passenger's requested number of seats.
    */
   async acceptTripRequest(
     driverId: string,
     tripRequestId: string,
     acceptDto: AcceptTripRequestDto,
   ): Promise<{ trip: any; tripRequest: SanitizedTripRequest }> {
-    this.logger.log(`Driver ${driverId} accepting trip request ${tripRequestId}`);
+    this.logger.log(`Driver ${driverId} accepte la demande de trajet ${tripRequestId}`);
 
     // Verify driver exists
     const driver = await this.userRepository.findOne({ where: { id: driverId } });
@@ -882,17 +885,18 @@ export class TripRequestsService {
       throw new BadRequestException('Un trajet a déjà été créé à partir de cette demande');
     }
 
-    // Validate price if maxPricePerSeat is set
-    if (tripRequest.maxPricePerSeat !== null && acceptDto.pricePerSeat > tripRequest.maxPricePerSeat) {
-      throw new BadRequestException(
-        `Le prix proposé (${acceptDto.pricePerSeat}) dépasse le prix maximum accepté (${tripRequest.maxPricePerSeat})`,
-      );
-    }
+    // Use the maximum price accepted by the passenger, or 0 (free trip) if not specified
+    // The driver accepts the request as-is, without proposing a price
+    const pricePerSeat = tripRequest.maxPricePerSeat ?? 0;
 
-    // Validate seats
-    if (acceptDto.totalSeats < tripRequest.numberOfSeats) {
+    // Determine total seats: use provided value or default to number of seats requested by passenger
+    // The driver accepts the request with the number of seats requested by the passenger
+    const totalSeats = acceptDto.totalSeats ?? tripRequest.numberOfSeats;
+
+    // Validate that totalSeats is at least equal to the number of seats requested
+    if (totalSeats < tripRequest.numberOfSeats) {
       throw new BadRequestException(
-        `Vous devez proposer au moins ${tripRequest.numberOfSeats} place(s)`,
+        `Le nombre de places doit être au moins égal au nombre de places demandées (${tripRequest.numberOfSeats})`,
       );
     }
 
@@ -945,6 +949,7 @@ export class TripRequestsService {
     }
 
     // Create Trip from TripRequest (private by default)
+    // The trip is created with the number of seats requested by the passenger (or more if driver specified)
     const trip = await this.tripsService.create(
       driverId,
       {
@@ -953,9 +958,9 @@ export class TripRequestsService {
         departureCoordinates,
         arrivalCoordinates,
         departureDate: departureDate.toISOString(),
-        totalSeats: acceptDto.totalSeats,
-        pricePerSeat: acceptDto.pricePerSeat,
-        isFree: acceptDto.pricePerSeat === 0,
+        totalSeats: totalSeats, // Use calculated totalSeats (passenger's request or driver's override)
+        pricePerSeat: pricePerSeat, // Driver's proposed price (or 0 if not specified)
+        isFree: pricePerSeat === 0,
         vehicleId: vehicle.id,
         description: tripRequest.description || undefined,
       },
@@ -965,10 +970,10 @@ export class TripRequestsService {
       },
     );
 
-    // Create booking for the passenger automatically
+    // Create booking for the passenger automatically with the number of seats they requested
     await this.bookingsService.create(tripRequest.passengerId, {
       tripId: trip.id,
-      numberOfSeats: tripRequest.numberOfSeats,
+      numberOfSeats: tripRequest.numberOfSeats, // Use the number of seats requested by the passenger
     });
 
     // Accept the booking automatically
@@ -982,7 +987,7 @@ export class TripRequestsService {
     tripRequest.status = TripRequestStatus.DRIVER_SELECTED;
     tripRequest.selectedDriverId = driverId;
     tripRequest.selectedVehicleId = vehicle.id;
-    tripRequest.selectedPricePerSeat = acceptDto.pricePerSeat;
+    tripRequest.selectedPricePerSeat = pricePerSeat;
     tripRequest.selectedAt = new Date();
     tripRequest.tripId = trip.id;
     await this.tripRequestRepository.save(tripRequest);

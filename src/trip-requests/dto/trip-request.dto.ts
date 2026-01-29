@@ -151,16 +151,6 @@ export class AcceptTripRequestDto {
   vehicleId?: string;
 
   @ApiProperty({
-    minimum: 0,
-    description: 'Prix par place proposé par le driver',
-    example: 4500,
-  })
-  @IsNumber()
-  @Min(0)
-  @IsNotEmpty()
-  pricePerSeat: number;
-
-  @ApiProperty({
     required: false,
     description: 'Date/heure de départ proposée. Si non fournie, utilise la date minimum de la demande.',
     example: '2025-12-20T10:00:00Z',
@@ -170,14 +160,15 @@ export class AcceptTripRequestDto {
   departureDate?: string;
 
   @ApiProperty({
+    required: false,
     minimum: 1,
-    description: 'Nombre total de places disponibles dans le véhicule. Doit être au moins égal au nombre de places demandées.',
+    description: 'Nombre total de places disponibles dans le véhicule. Si non fourni, sera déterminé automatiquement. Doit être au moins égal au nombre de places demandées par le passager.',
     example: 4,
   })
   @IsNumber()
   @Min(1)
-  @IsNotEmpty()
-  totalSeats: number;
+  @IsOptional()
+  totalSeats?: number;
 }
 
 export class UpdateTripRequestDto {

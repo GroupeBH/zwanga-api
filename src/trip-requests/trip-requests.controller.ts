@@ -127,7 +127,7 @@ export class TripRequestsController {
   @SensitiveThrottle(5, 60000)
   @ApiOperation({
     summary: 'Accept a trip request directly (Uber/Bolt/Yango style)',
-    description: 'Permet à un driver d\'accepter directement une demande de trajet. Crée automatiquement un trajet et une réservation pour le passager.',
+    description: 'Permet à un driver d\'accepter directement une demande de trajet. Le driver voit le nombre de places demandées par le passager et le prix maximum accepté. Il accepte ou refuse selon que la demande lui convient ou non. Le prix utilisé est le prix maximum accepté par le passager (ou 0 si non spécifié). Crée automatiquement un trajet et une réservation pour le passager avec le nombre de places demandées.',
   })
   // @ApiBearerAuth()
   async acceptTripRequest(
@@ -145,9 +145,9 @@ export class TripRequestsController {
     summary: 'Start a trip from an accepted trip request',
     description: 'Permet au driver sélectionné de lancer le trajet à partir d\'une demande acceptée. Crée un trajet et une réservation automatique pour le passager.',
   })
+  
   // @ApiBearerAuth()
   async startTripFromRequest(@Request() req, @Param('id') id: string) {
-
     return this.tripRequestsService.startTripFromRequest(id, req.user.userId);
   }
 
