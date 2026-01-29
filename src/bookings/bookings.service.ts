@@ -8,7 +8,6 @@ import { User } from '../users/entities/user.entity';
 import { CreateBookingDto, UpdateBookingStatusDto, ReportBookingProblemDto, UpdatePassengerLocationDto } from './dto/booking.dto';
 import { CacheService } from '../common/services/cache.service';
 import { NotificationService } from '../notifications/notifications.service';
-import { ChatService } from '../chat/chat.service';
 import { FileUploadService } from '../common/services/file-upload.service';
 import { WhatsAppService } from '../whatsapp/whatsapp.service';
 import { SafetyService } from '../safety/safety.service';
@@ -29,7 +28,6 @@ export class BookingsService {
     private userRepository: Repository<User>,
     private cacheService: CacheService,
     private notificationService: NotificationService,
-    private chatService: ChatService,
     private fileUploadService: FileUploadService,
     private whatsAppService: WhatsAppService,
     private safetyService: SafetyService,
@@ -38,6 +36,11 @@ export class BookingsService {
   async create(passengerId: string, createBookingDto: CreateBookingDto): Promise<Booking> {
     this.logger.log(`Creating booking for passenger ${passengerId} on trip ${createBookingDto.tripId} (${createBookingDto.numberOfSeats} seats)`);
     
+    // Validate numberOfSeats input
+    if (!createBookingDto.numberOfSeats || createBookingDto.numberOfSeats < 1) {
+      throw new BadRequestException('Le nombre de places doit être au moins 1');
+    }
+
     const trip = await this.tripRepository.findOne({
       where: { id: createBookingDto.tripId },
       relations: ['bookings', 'driver'],
@@ -53,6 +56,18 @@ export class BookingsService {
       throw new BadRequestException('Vous ne pouvez pas réserver votre propre trajet');
     }
 
+    // Vérifier que le trajet a des places totales définies
+    if (trip.totalSeats === null || trip.totalSeats === undefined) {
+      this.logger.warn(`Booking creation failed: Trip ${createBookingDto.tripId} has no totalSeats defined`);
+      throw new BadRequestException('Ce trajet n\'a pas de nombre de places défini');
+    }
+
+    // Vérifier que availableSeats est défini et valide
+    if (trip.availableSeats === null || trip.availableSeats === undefined) {
+      this.logger.warn(`Booking creation failed: Trip ${createBookingDto.tripId} has no availableSeats defined`);
+      throw new BadRequestException('Ce trajet n\'a pas de places disponibles définies');
+    }
+
     // Allow booking for PENDING trips OR ACTIVE trips with available seats
     const isPendingTrip = trip.status === TripStatus.PENDING;
     const isActiveTripWithSeats = trip.status === TripStatus.ACTIVE && trip.availableSeats > 0;
@@ -66,10 +81,20 @@ export class BookingsService {
     // Le maximum de places qu'un utilisateur peut réserver est limité uniquement par les places disponibles
     if (trip.availableSeats < createBookingDto.numberOfSeats) {
       this.logger.warn(
-        `Booking creation failed: Not enough seats on trip ${createBookingDto.tripId} (requested: ${createBookingDto.numberOfSeats}, available: ${trip.availableSeats})`,
+        `Booking creation failed: Not enough seats on trip ${createBookingDto.tripId} (requested: ${createBookingDto.numberOfSeats}, available: ${trip.availableSeats}, total: ${trip.totalSeats})`,
       );
       throw new BadRequestException(
         `Pas assez de places disponibles. Disponibles : ${trip.availableSeats}, Demandées : ${createBookingDto.numberOfSeats}. Vous pouvez réserver jusqu'à ${trip.availableSeats} place(s).`,
+      );
+    }
+
+    // Vérification supplémentaire : s'assurer que le nombre de places demandées ne dépasse pas le total
+    if (createBookingDto.numberOfSeats > trip.totalSeats) {
+      this.logger.warn(
+        `Booking creation failed: Requested seats (${createBookingDto.numberOfSeats}) exceed total seats (${trip.totalSeats})`,
+      );
+      throw new BadRequestException(
+        `Le nombre de places demandé (${createBookingDto.numberOfSeats}) dépasse le nombre total de places du véhicule (${trip.totalSeats})`,
       );
     }
 
@@ -93,6 +118,26 @@ export class BookingsService {
         : 'pending';
       this.logger.warn(`Booking creation failed: Passenger ${passengerId} already has ${statusText} booking for trip ${createBookingDto.tripId}`);
       throw new BadRequestException(`Vous avez déjà une réservation ${statusText === 'pending or accepted' ? 'en attente ou acceptée' : 'en attente'} pour ce trajet`);
+    }
+
+    // Build passenger origin point if coordinates are provided
+    let passengerOriginPoint: Point | null = null;
+    if (createBookingDto.passengerOriginCoordinates) {
+      passengerOriginPoint = {
+        type: 'Point',
+        coordinates: [
+          Number(createBookingDto.passengerOriginCoordinates.longitude),
+          Number(createBookingDto.passengerOriginCoordinates.latitude),
+        ],
+      };
+    }
+
+    // Use trip's departure location as default if passenger origin is not specified
+    const passengerOrigin = createBookingDto.passengerOrigin || trip.departureLocation;
+    
+    // If no coordinates provided but origin is specified, use trip's departure point
+    if (!passengerOriginPoint && createBookingDto.passengerOrigin) {
+      passengerOriginPoint = trip.departurePoint;
     }
 
     // Build passenger destination point if coordinates are provided
@@ -119,35 +164,58 @@ export class BookingsService {
       tripId: createBookingDto.tripId,
       passengerId,
       numberOfSeats: createBookingDto.numberOfSeats,
+      passengerOrigin: passengerOrigin || null,
+      passengerOriginPoint,
       passengerDestination: passengerDestination || null,
       passengerDestinationPoint,
     });
 
     const savedBooking = await this.bookingRepository.save(booking);
     
-    // Déduire immédiatement les places disponibles du trip
-    // Les places sont déduites dès la création (même en PENDING) pour éviter les sur-réservations
-    const newAvailableSeats = trip.availableSeats - createBookingDto.numberOfSeats;
-    if (newAvailableSeats < 0) {
-      // Ce cas ne devrait pas arriver car on a déjà vérifié, mais on le gère pour sécurité
-      this.logger.error(`Negative available seats detected for trip ${trip.id}. Rolling back booking.`);
+    // Recharger le trip pour avoir les données les plus récentes (évite les conditions de course)
+    const updatedTrip = await this.tripRepository.findOne({
+      where: { id: trip.id },
+    });
+
+    if (!updatedTrip) {
+      this.logger.error(`Trip ${trip.id} not found after booking creation. Rolling back booking.`);
       await this.bookingRepository.remove(savedBooking);
-      throw new BadRequestException('Pas assez de places disponibles');
+      throw new NotFoundException('Trajet non trouvé après création de la réservation');
     }
 
-    // S'assurer que availableSeats ne dépasse pas totalSeats (ou availableSeats si totalSeats est null temporairement)
-    const maxSeats = trip.totalSeats ?? trip.availableSeats + createBookingDto.numberOfSeats; // Fallback si totalSeats est null
-    const finalAvailableSeats = Math.max(0, Math.min(newAvailableSeats, maxSeats));
+    // Déduire immédiatement les places disponibles du trip
+    // Les places sont déduites dès la création (même en PENDING) pour éviter les sur-réservations
+    const newAvailableSeats = updatedTrip.availableSeats - createBookingDto.numberOfSeats;
+    
+    // Vérification de sécurité : s'assurer que les places ne deviennent pas négatives
+    if (newAvailableSeats < 0) {
+      this.logger.error(
+        `Negative available seats detected for trip ${trip.id}. Current: ${updatedTrip.availableSeats}, Requested: ${createBookingDto.numberOfSeats}. Rolling back booking.`,
+      );
+      await this.bookingRepository.remove(savedBooking);
+      throw new BadRequestException(
+        `Pas assez de places disponibles. Disponibles : ${updatedTrip.availableSeats}, Demandées : ${createBookingDto.numberOfSeats}`,
+      );
+    }
+
+    // S'assurer que availableSeats ne dépasse pas totalSeats
+    if (updatedTrip.totalSeats !== null && newAvailableSeats > updatedTrip.totalSeats) {
+      this.logger.warn(
+        `Calculated available seats (${newAvailableSeats}) exceeds total seats (${updatedTrip.totalSeats}). Clamping to total seats.`,
+      );
+    }
+
+    const finalAvailableSeats = updatedTrip.totalSeats !== null
+      ? Math.max(0, Math.min(newAvailableSeats, updatedTrip.totalSeats))
+      : Math.max(0, newAvailableSeats);
     
     await this.tripRepository.update(trip.id, {
       availableSeats: finalAvailableSeats,
     });
 
     this.logger.log(
-      `Updated trip ${trip.id} available seats: ${trip.availableSeats} -> ${finalAvailableSeats} (deducted ${createBookingDto.numberOfSeats} for booking ${savedBooking.id}, totalSeats: ${trip.totalSeats})`,
+      `Updated trip ${trip.id} available seats: ${updatedTrip.availableSeats} -> ${finalAvailableSeats} (deducted ${createBookingDto.numberOfSeats} for booking ${savedBooking.id}, totalSeats: ${updatedTrip.totalSeats})`,
     );
-    
-    await this.chatService.ensureConversationForBooking(savedBooking.id);
 
     // Invalidate cache
     await this.cacheService.del(CacheService.getBookingsByTripKey(createBookingDto.tripId));
