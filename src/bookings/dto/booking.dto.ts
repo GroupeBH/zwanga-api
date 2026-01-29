@@ -22,7 +22,10 @@ export class CreateBookingDto {
   @IsNotEmpty()
   tripId: string;
 
-  @ApiProperty({ minimum: 1, description: 'Nombre de places à réserver' })
+  @ApiProperty({ 
+    minimum: 1, 
+    description: 'Nombre de places à réserver. Le maximum est limité par le nombre de places disponibles dans le trajet.' 
+  })
   @IsNumber()
   @Min(1)
   @IsNotEmpty()

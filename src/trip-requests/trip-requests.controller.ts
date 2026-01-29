@@ -11,7 +11,7 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { TripRequestsService } from './trip-requests.service';
-import { CreateTripRequestDto, CreateDriverOfferDto, AcceptDriverOfferDto, UpdateTripRequestDto } from './dto/trip-request.dto';
+import { CreateTripRequestDto, CreateDriverOfferDto, AcceptDriverOfferDto, AcceptTripRequestDto, UpdateTripRequestDto } from './dto/trip-request.dto';
 import { Auth } from '../auth/decorators/auth.decorator';
 import { Public } from '../common/decorators/public.decorator';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
@@ -120,6 +120,22 @@ export class TripRequestsController {
     @Body() acceptDto: AcceptDriverOfferDto,
   ) {
     return this.tripRequestsService.acceptDriverOffer(req.user.userId, tripRequestId, acceptDto);
+  }
+
+  @Post(':id/accept')
+  @Auth()
+  @SensitiveThrottle(5, 60000)
+  @ApiOperation({
+    summary: 'Accept a trip request directly (Uber/Bolt/Yango style)',
+    description: 'Permet à un driver d\'accepter directement une demande de trajet. Crée automatiquement un trajet et une réservation pour le passager.',
+  })
+  // @ApiBearerAuth()
+  async acceptTripRequest(
+    @Request() req,
+    @Param('id') id: string,
+    @Body() acceptDto: AcceptTripRequestDto,
+  ) {
+    return this.tripRequestsService.acceptTripRequest(req.user.userId, id, acceptDto);
   }
 
   @Put(':id/start-trip')

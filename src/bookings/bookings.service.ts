@@ -63,12 +63,13 @@ export class BookingsService {
     }
 
     // Vérifier les places disponibles directement (les places sont déduites immédiatement à la création)
+    // Le maximum de places qu'un utilisateur peut réserver est limité uniquement par les places disponibles
     if (trip.availableSeats < createBookingDto.numberOfSeats) {
       this.logger.warn(
         `Booking creation failed: Not enough seats on trip ${createBookingDto.tripId} (requested: ${createBookingDto.numberOfSeats}, available: ${trip.availableSeats})`,
       );
       throw new BadRequestException(
-        `Pas assez de places disponibles. Disponibles : ${trip.availableSeats}, Demandées : ${createBookingDto.numberOfSeats}`,
+        `Pas assez de places disponibles. Disponibles : ${trip.availableSeats}, Demandées : ${createBookingDto.numberOfSeats}. Vous pouvez réserver jusqu'à ${trip.availableSeats} place(s).`,
       );
     }
 
