@@ -47,6 +47,18 @@ export class Booking {
   numberOfSeats: number;
 
   @Column({ type: 'varchar', nullable: true })
+  passengerOrigin: string | null;
+
+  @Index('IDX_bookings_passenger_origin_point', { spatial: true })
+  @Column({
+    type: 'geography',
+    spatialFeatureType: 'Point',
+    srid: 4326,
+    nullable: true,
+  })
+  passengerOriginPoint: Point | null;
+
+  @Column({ type: 'varchar', nullable: true })
   passengerDestination: string | null;
 
   @Index('IDX_bookings_passenger_destination_point', { spatial: true })

@@ -45,6 +45,22 @@ JWT_REFRESH_SECRET=your-super-secret-refresh-key-change-in-production
 JWT_REFRESH_EXPIRES_IN=21d
 
 # ============================================
+# Google OAuth Authentication
+# ============================================
+# Get your credentials from: https://console.cloud.google.com/apis/credentials
+# Create an OAuth 2.0 Client ID and configure authorized redirect URIs
+GOOGLE_CLIENT_ID=your-google-client-id
+GOOGLE_CLIENT_SECRET=your-google-client-secret
+# Callback URL after Google authentication (e.g., http://localhost:5000/api/v1/auth/google/callback)
+GOOGLE_CALLBACK_URL=http://localhost:5000/api/v1/auth/google/callback
+# Frontend URL for redirect after successful authentication
+FRONTEND_URL=http://localhost:3000
+
+# For Expo / React-Native mobile: one or multiple client IDs (comma-separated)
+# Example: GOOGLE_MOBILE_CLIENT_IDS=xxx.apps.googleusercontent.com,yyy.apps.googleusercontent.com
+GOOGLE_MOBILE_CLIENT_IDS=
+
+# ============================================
 # Firebase Cloud Messaging (FCM)
 # ============================================
 # Option 1 (Recommended): Full JSON credentials encoded in Base64

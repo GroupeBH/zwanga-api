@@ -40,7 +40,10 @@ export class User {
   @Column({ unique: true, nullable: true })
   email: string;
 
-  @Column({ unique: true })
+  @Column({ unique: true, nullable: true })
+  googleId: string;
+
+  @Column({ unique: true, nullable: true })
   phone: string;
 
   @Column({ nullable: true })
@@ -84,8 +87,11 @@ export class User {
   @Column({ default: false })
   isDriver: boolean;
 
-  @Column({ nullable: true })
-  refreshToken: string;
+  @Column({ type: 'text', nullable: true })
+  accessToken: string | null;
+
+  @Column({ type: 'text', nullable: true })
+  refreshToken: string | null;
 
   @Column({ type: 'timestamp', nullable: true })
   lastLoginAt: Date;

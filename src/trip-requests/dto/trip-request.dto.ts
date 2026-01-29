@@ -141,6 +141,36 @@ export class AcceptDriverOfferDto {
   offerId: string;
 }
 
+export class AcceptTripRequestDto {
+  @ApiProperty({
+    required: false,
+    description: 'ID du véhicule à utiliser (doit appartenir au driver). Si non fourni, le premier véhicule actif sera utilisé.',
+  })
+  @IsString()
+  @IsOptional()
+  vehicleId?: string;
+
+  @ApiProperty({
+    required: false,
+    description: 'Date/heure de départ proposée. Si non fournie, utilise la date minimum de la demande.',
+    example: '2025-12-20T10:00:00Z',
+  })
+  @IsDateString()
+  @IsOptional()
+  departureDate?: string;
+
+  @ApiProperty({
+    required: false,
+    minimum: 1,
+    description: 'Nombre total de places disponibles dans le véhicule. Si non fourni, sera déterminé automatiquement. Doit être au moins égal au nombre de places demandées par le passager.',
+    example: 4,
+  })
+  @IsNumber()
+  @Min(1)
+  @IsOptional()
+  totalSeats?: number;
+}
+
 export class UpdateTripRequestDto {
   @ApiProperty({ required: false })
   @IsString()

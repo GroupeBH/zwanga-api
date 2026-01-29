@@ -74,7 +74,7 @@ export class GoogleMapsController {
   @Post('directions')
   @Public()
   @HttpCode(HttpStatus.OK)
-  @SensitiveThrottle(20, 60000) // 20 requests per minute per IP
+  @SensitiveThrottle(20, 6000) // 20 requests per minute per IP
   @ApiOperation({ summary: 'Get directions between origin and destination' })
   @ApiResponse({ status: 200, description: 'Directions retrieved successfully', type: DirectionsResponse })
   async getDirections(@Body() dto: DirectionsDto): Promise<DirectionsResponse> {

@@ -12,7 +12,7 @@ import { TripRequest, TripRequestStatus } from './entities/trip-request.entity';
 import { DriverOffer, DriverOfferStatus } from './entities/driver-offer.entity';
 import { User, UserRole } from '../users/entities/user.entity';
 import { Vehicle } from '../vehicles/entities/vehicle.entity';
-import { CreateTripRequestDto, CreateDriverOfferDto, AcceptDriverOfferDto, UpdateTripRequestDto } from './dto/trip-request.dto';
+import { CreateTripRequestDto, CreateDriverOfferDto, AcceptDriverOfferDto, AcceptTripRequestDto, UpdateTripRequestDto } from './dto/trip-request.dto';
 import { FileUploadService } from '../common/services/file-upload.service';
 import { NotificationService } from '../notifications/notifications.service';
 import { TripsService } from '../trips/trips.service';
@@ -826,6 +826,213 @@ export class TripRequestsService {
 
     return {
       trip: startedTrip,
+      tripRequest: await this.findOne(tripRequestId, tripRequest.passengerId),
+    };
+  }
+
+  /**
+   * Accept a trip request directly as a driver (Uber/Bolt/Yango style)
+   * The driver sees the number of seats requested by the passenger and the maximum price accepted.
+   * The driver accepts or refuses based on whether the request suits them.
+   * The price used is the maximum price accepted by the passenger (maxPricePerSeat), or 0 if not specified.
+   * Creates a trip and booking automatically with the passenger's requested number of seats.
+   */
+  async acceptTripRequest(
+    driverId: string,
+    tripRequestId: string,
+    acceptDto: AcceptTripRequestDto,
+  ): Promise<{ trip: any; tripRequest: SanitizedTripRequest }> {
+    this.logger.log(`Driver ${driverId} accepte la demande de trajet ${tripRequestId}`);
+
+    // Verify driver exists
+    const driver = await this.userRepository.findOne({ where: { id: driverId } });
+    if (!driver) {
+      throw new NotFoundException('Utilisateur non trouvé');
+    }
+
+    // Get trip request with relations
+    const tripRequest = await this.tripRequestRepository.findOne({
+      where: { id: tripRequestId },
+      relations: ['passenger', 'driverOffers'],
+    });
+
+    if (!tripRequest) {
+      throw new NotFoundException('Demande de trajet non trouvée');
+    }
+
+    // Check if trip request is expired
+    const now = new Date();
+    if (tripRequest.departureDateMax < now) {
+      throw new BadRequestException('Cette demande de trajet a expiré');
+    }
+
+    // Check if trip request can be accepted
+    if (tripRequest.status === TripRequestStatus.DRIVER_SELECTED) {
+      throw new BadRequestException('Cette demande de trajet a déjà été acceptée par un autre driver');
+    }
+
+    if (tripRequest.status === TripRequestStatus.CANCELLED || tripRequest.status === TripRequestStatus.EXPIRED) {
+      throw new BadRequestException('Cette demande de trajet n\'est plus disponible');
+    }
+
+    // Check if driver is not the passenger
+    if (tripRequest.passengerId === driverId) {
+      throw new BadRequestException('Vous ne pouvez pas accepter votre propre demande');
+    }
+
+    // Check if trip request already has a trip created
+    if (tripRequest.tripId) {
+      throw new BadRequestException('Un trajet a déjà été créé à partir de cette demande');
+    }
+
+    // Use the maximum price accepted by the passenger, or 0 (free trip) if not specified
+    // The driver accepts the request as-is, without proposing a price
+    const pricePerSeat = tripRequest.maxPricePerSeat ?? 0;
+
+    // Determine total seats: use provided value or default to number of seats requested by passenger
+    // The driver accepts the request with the number of seats requested by the passenger
+    const totalSeats = acceptDto.totalSeats ?? tripRequest.numberOfSeats;
+
+    // Validate that totalSeats is at least equal to the number of seats requested
+    if (totalSeats < tripRequest.numberOfSeats) {
+      throw new BadRequestException(
+        `Le nombre de places doit être au moins égal au nombre de places demandées (${tripRequest.numberOfSeats})`,
+      );
+    }
+
+    // Validate and get vehicle
+    let vehicle: Vehicle | null = null;
+    if (acceptDto.vehicleId) {
+      vehicle = await this.vehicleRepository.findOne({
+        where: { id: acceptDto.vehicleId, ownerId: driverId },
+      });
+
+      if (!vehicle) {
+        throw new BadRequestException('Véhicule non trouvé ou ne vous appartient pas');
+      }
+
+      if (!vehicle.isActive) {
+        throw new BadRequestException('Le véhicule sélectionné n\'est pas actif');
+      }
+    } else {
+      // Get first active vehicle if no vehicle specified
+      vehicle = await this.vehicleRepository.findOne({
+        where: { ownerId: driverId, isActive: true },
+      });
+
+      if (!vehicle) {
+        throw new BadRequestException('Vous devez avoir au moins un véhicule actif pour accepter une demande');
+      }
+    }
+
+    // Determine departure date
+    let departureDate: Date;
+    if (acceptDto.departureDate) {
+      departureDate = new Date(acceptDto.departureDate);
+      // Validate date is within range
+      if (departureDate < tripRequest.departureDateMin || departureDate > tripRequest.departureDateMax) {
+        throw new BadRequestException(
+          `La date de départ doit être entre ${tripRequest.departureDateMin.toISOString()} et ${tripRequest.departureDateMax.toISOString()}`,
+        );
+      }
+    } else {
+      // Use minimum departure date if not specified
+      departureDate = tripRequest.departureDateMin;
+    }
+
+    // Get coordinates
+    const departureCoordinates = this.pointToCoordinates(tripRequest.departurePoint);
+    const arrivalCoordinates = this.pointToCoordinates(tripRequest.arrivalPoint);
+
+    if (!departureCoordinates || !arrivalCoordinates) {
+      throw new BadRequestException('Les coordonnées de départ ou d\'arrivée sont manquantes');
+    }
+
+    // Create Trip from TripRequest (private by default)
+    // The trip is created with the number of seats requested by the passenger (or more if driver specified)
+    const trip = await this.tripsService.create(
+      driverId,
+      {
+        departureLocation: tripRequest.departureLocation,
+        arrivalLocation: tripRequest.arrivalLocation,
+        departureCoordinates,
+        arrivalCoordinates,
+        departureDate: departureDate.toISOString(),
+        totalSeats: totalSeats, // Use calculated totalSeats (passenger's request or driver's override)
+        pricePerSeat: pricePerSeat, // Driver's proposed price (or 0 if not specified)
+        isFree: pricePerSeat === 0,
+        vehicleId: vehicle.id,
+        description: tripRequest.description || undefined,
+      },
+      {
+        isPrivate: true, // Trajet privé par défaut
+        tripRequestId: tripRequest.id,
+      },
+    );
+
+    // Create booking for the passenger automatically with the number of seats they requested
+    await this.bookingsService.create(tripRequest.passengerId, {
+      tripId: trip.id,
+      numberOfSeats: tripRequest.numberOfSeats, // Use the number of seats requested by the passenger
+    });
+
+    // Accept the booking automatically
+    const bookings = await this.bookingsService.findAllByTrip(trip.id, driverId);
+    const passengerBooking = bookings.find((b) => b.passengerId === tripRequest.passengerId);
+    if (passengerBooking) {
+      await this.bookingsService.acceptBooking(passengerBooking.id, driverId);
+    }
+
+    // Update trip request
+    tripRequest.status = TripRequestStatus.DRIVER_SELECTED;
+    tripRequest.selectedDriverId = driverId;
+    tripRequest.selectedVehicleId = vehicle.id;
+    tripRequest.selectedPricePerSeat = pricePerSeat;
+    tripRequest.selectedAt = new Date();
+    tripRequest.tripId = trip.id;
+    await this.tripRequestRepository.save(tripRequest);
+
+    // Reject all pending offers for this trip request
+    await this.driverOfferRepository.update(
+      { tripRequestId, status: DriverOfferStatus.PENDING },
+      { status: DriverOfferStatus.REJECTED },
+    );
+
+    // Notify passenger
+    try {
+      const passenger = await this.userRepository.findOne({
+        where: { id: tripRequest.passengerId },
+        select: ['id', 'fcmToken', 'firstName'],
+      });
+
+      // Reload driver with firstName and lastName for notification
+      const driverWithName = await this.userRepository.findOne({
+        where: { id: driverId },
+        select: ['id', 'firstName', 'lastName'],
+      });
+
+      if (passenger?.fcmToken && driverWithName) {
+        await this.notificationService.sendNotification(
+          passenger.fcmToken,
+          'Demande acceptée',
+          `${driverWithName.firstName} ${driverWithName.lastName} a accepté votre demande de trajet`,
+          {
+            type: 'trip_request_accepted',
+            tripRequestId: tripRequest.id,
+            tripId: trip.id,
+            driverId: driverId,
+          },
+          tripRequest.passengerId,
+        );
+      }
+    } catch (error) {
+      this.logger.error(`Failed to notify passenger about trip request acceptance: ${error.message}`);
+    }
+
+    this.logger.log(`Trip request ${tripRequestId} accepted by driver ${driverId}, trip ${trip.id} created`);
+
+    return {
+      trip,
       tripRequest: await this.findOne(tripRequestId, tripRequest.passengerId),
     };
   }

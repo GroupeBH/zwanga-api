@@ -3,6 +3,7 @@ import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
+import { OAuth2Client } from 'google-auth-library';
 import * as bcrypt from 'bcrypt';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { KycDocument, KycStatus } from '../users/entities/kyc-document.entity';
@@ -26,6 +27,7 @@ interface MulterFile {
 @Injectable()
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
+  private readonly googleClient: OAuth2Client;
 
   constructor(
     @InjectRepository(User)
@@ -36,7 +38,9 @@ export class AuthService {
     private configService: ConfigService,
     private fileUploadService: FileUploadService,
     private vehiclesService: VehiclesService,
-  ) {}
+  ) {
+    this.googleClient = new OAuth2Client();
+  }
 
   async register(
     registerDto: RegisterDto,
@@ -270,6 +274,176 @@ export class AuthService {
     }
   }
 
+  /**
+   * Logout user by invalidating the refresh token
+   * This ensures the refresh token cannot be reused
+   */
+  async logout(userId: string): Promise<{ message: string }> {
+    const user = await this.userRepository.findOne({
+      where: { id: userId },
+    });
+
+    if (!user) {
+      throw new UnauthorizedException('Utilisateur non trouvé');
+    }
+
+    // Invalidate the refresh token by setting it to null
+    user.refreshToken = null;
+    user.accessToken = null;
+    await this.userRepository.save(user);
+
+    this.logger.log(`User ${userId} logged out successfully`);
+
+    return { message: 'Déconnexion réussie' };
+  }
+
+  private getGoogleAudiences(): string[] {
+    const raw =
+      this.configService.get<string>('GOOGLE_MOBILE_CLIENT_IDS') ||
+      this.configService.get<string>('GOOGLE_CLIENT_ID') ||
+      '';
+
+    return raw
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+  }
+
+  private async verifyGoogleIdToken(idToken: string) {
+    const audience = this.getGoogleAudiences();
+    if (audience.length === 0) {
+      this.logger.error('Missing GOOGLE_MOBILE_CLIENT_IDS / GOOGLE_CLIENT_ID');
+      throw new UnauthorizedException('Google OAuth is not configured');
+    }
+
+    try {
+      const ticket = await this.googleClient.verifyIdToken({
+        idToken,
+        audience,
+      });
+      const payload = ticket.getPayload();
+      if (!payload || !payload.sub || !payload.email) {
+        throw new UnauthorizedException('Invalid Google token payload');
+      }
+
+      return {
+        googleId: payload.sub,
+        email: payload.email,
+        firstName: payload.given_name ?? '',
+        lastName: payload.family_name ?? '',
+        profilePicture: payload.picture ?? null,
+        emailVerified: payload.email_verified ?? false,
+      };
+    } catch (e) {
+      throw new UnauthorizedException('Invalid Google token');
+    }
+  }
+
+  async googleMobileLogin(idToken: string, phone?: string): Promise<AuthResponseDto> {
+    const googleProfile = await this.verifyGoogleIdToken(idToken);
+    // Reuse existing linking/creation logic
+    return this.validateGoogleUser({
+      googleId: googleProfile.googleId,
+      email: googleProfile.email,
+      firstName: googleProfile.firstName,
+      lastName: googleProfile.lastName,
+      profilePicture: googleProfile.profilePicture,
+    }, phone);
+  }
+
+  async validateGoogleUser(googleProfile: any, phone?: string): Promise<AuthResponseDto> {
+    const { googleId, email, firstName, lastName, profilePicture } = googleProfile;
+
+    // Check if user exists with this Google ID
+    let user = await this.userRepository.findOne({
+      where: { googleId },
+    });
+
+    // LOGIN Google (déjà inscrit) : on ne requiert pas phone
+    if (user) {
+      if (user.status === UserStatus.SUSPENDED) {
+        throw new UnauthorizedException('Compte suspendu');
+      }
+
+      user.lastLoginAt = new Date();
+      await this.userRepository.save(user);
+
+      const tokens = await this.generateTokens(user);
+      return { accessToken: tokens.accessToken, refreshToken: tokens.refreshToken };
+    }
+
+    if (!user) {
+      // Check if user exists with this email
+      user = await this.userRepository.findOne({
+        where: { email },
+      });
+
+      if (user) {
+        // Link Google account to existing user
+        user.googleId = googleId;
+        user.isEmailVerified = true;
+
+        // If phone provided and user has no phone, set it
+        if (phone && !user.phone) {
+          const phoneOwner = await this.userRepository.findOne({ where: { phone } });
+          if (phoneOwner && phoneOwner.id !== user.id) {
+            throw new UnauthorizedException('Ce numéro de téléphone est déjà utilisé');
+          }
+          user.phone = phone;
+        }
+
+        if (!user.profilePicture && profilePicture) {
+          user.profilePicture = profilePicture;
+        }
+        await this.userRepository.save(user);
+      } else {
+        // Create new user with Google account
+        if (!phone) {
+          throw new UnauthorizedException('Le numéro de téléphone est requis pour la première inscription Google');
+        }
+
+        // Ensure phone is not already used
+        const phoneOwner = await this.userRepository.findOne({ where: { phone } });
+        if (phoneOwner) {
+          throw new UnauthorizedException('Ce numéro de téléphone est déjà utilisé');
+        }
+
+        user = this.userRepository.create({
+          googleId,
+          email,
+          phone,
+          firstName,
+          lastName,
+          profilePicture,
+          role: UserRole.PASSENGER,
+          isDriver: false,
+          status: UserStatus.PENDING_KYC,
+          isEmailVerified: true,
+          isPhoneVerified: false,
+        });
+
+        user = await this.userRepository.save(user);
+        this.logger.log(`New user created via Google OAuth: ${user.id}`);
+      }
+    }
+
+    if (user.status === UserStatus.SUSPENDED) {
+      throw new UnauthorizedException('Compte suspendu');
+    }
+
+    // Update last login
+    user.lastLoginAt = new Date();
+    await this.userRepository.save(user);
+
+    // Generate tokens
+    const tokens = await this.generateTokens(user);
+
+    return {
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+    };
+  }
+
   private async generateTokens(user: User) {
     const payload = {
       sub: user.id,
@@ -290,7 +464,8 @@ export class AuthService {
       expiresIn: this.configService.get<string>('JWT_REFRESH_EXPIRES_IN') || '90d',
     });
 
-    // Save refresh token to user
+    // Save tokens to user
+    user.accessToken = accessToken;
     user.refreshToken = refreshToken;
     await this.userRepository.save(user);
 

@@ -1,16 +1,22 @@
 import {
   Controller,
   Post,
+  Get,
   Body,
   HttpCode,
   HttpStatus,
   UseInterceptors,
   UploadedFiles,
+  UseGuards,
+  Req,
+  Res,
 } from '@nestjs/common';
 import { FileFieldsInterceptor } from '@nestjs/platform-express';
-import { ApiTags, ApiOperation, ApiResponse, ApiConsumes, ApiBody } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiResponse, ApiConsumes, ApiBody, ApiBearerAuth } from '@nestjs/swagger';
+import { AuthGuard } from '@nestjs/passport';
+import type { Request, Response } from 'express';
 import { AuthService } from './auth.service';
-import { RegisterDto, LoginDto, RefreshTokenDto, AuthResponseDto } from './dto/auth.dto';
+import { RegisterDto, LoginDto, RefreshTokenDto, AuthResponseDto, GoogleMobileAuthDto } from './dto/auth.dto';
 import { Public } from '../common/decorators/public.decorator';
 import { UserRole } from '../users/entities/user.entity';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
@@ -132,6 +138,55 @@ export class AuthController {
   @ApiResponse({ status: 401, description: 'Invalid refresh token' })
   async refresh(@Body() refreshTokenDto: RefreshTokenDto) {
     return this.authService.refreshToken(refreshTokenDto);
+  }
+
+  @Post('logout')
+  @HttpCode(HttpStatus.OK)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Logout user and invalidate refresh token' })
+  @ApiResponse({ status: 200, description: 'Logged out successfully' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  async logout(@Req() req: Request) {
+    const user = req.user as { userId: string };
+    return this.authService.logout(user.userId);
+  }
+
+  @Post('google/mobile')
+  @Public()
+  @SensitiveThrottle(20, 60000)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Google Sign-In (mobile): idToken + phone -> JWT tokens' })
+  @ApiResponse({ status: 200, type: AuthResponseDto })
+  @ApiResponse({ status: 401, description: 'Invalid Google token' })
+  async googleMobile(@Body() dto: GoogleMobileAuthDto) {
+    return this.authService.googleMobileLogin(dto.idToken, dto.phone);
+  }
+
+  @Get('google')
+  @Public()
+  @UseGuards(AuthGuard('google'))
+  @ApiOperation({ summary: 'Initiate Google OAuth authentication' })
+  @ApiResponse({ status: 302, description: 'Redirects to Google OAuth' })
+  async googleAuth() {
+    // Guard redirects to Google
+  }
+
+  @Get('google/callback')
+  @Public()
+  @UseGuards(AuthGuard('google'))
+  @ApiOperation({ summary: 'Google OAuth callback' })
+  @ApiResponse({ status: 200, type: AuthResponseDto })
+  @ApiResponse({ status: 401, description: 'Authentication failed' })
+  async googleAuthCallback(@Req() req: Request, @Res() res: Response) {
+    const googleProfile = req.user;
+    const authResponse = await this.authService.validateGoogleUser(googleProfile);
+    
+    // Redirect to frontend with tokens in query params or return JSON
+    // You can customize this based on your frontend needs
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+    res.redirect(
+      `${frontendUrl}/auth/callback?accessToken=${authResponse.accessToken}&refreshToken=${authResponse.refreshToken}`,
+    );
   }
 }
 

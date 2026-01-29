@@ -24,7 +24,7 @@ export class TripsController {
 
   @Post()
   @Auth()
-  @SensitiveThrottle(10, 60000) // 10 requests per minute per IP
+  @SensitiveThrottle(10, 6000) // 10 requests per minute per IP
   @ApiOperation({
     summary: 'Create a new trip',
     description: 'Permet à un utilisateur de créer un trajet. Si l\'utilisateur est un passager et fournit un véhicule, il sera automatiquement promu en conducteur.'
@@ -35,7 +35,7 @@ export class TripsController {
 
   @Get()
   @Public()
-  @SensitiveThrottle(30, 60000) // 30 requests per minute per IP
+  @SensitiveThrottle(30, 6000) // 30 requests per minute per IP
   @ApiOperation({
     summary: 'Rechercher des trajets ou obtenir tous les trajets disponibles',
     description: 'Recherche flexible par coordonnées : vous pouvez fournir uniquement departureCoordinates, uniquement arrivalCoordinates, ou les deux. Le rayon de recherche (departureRadiusKm, arrivalRadiusKm) est optionnel pour chaque point (défaut: 50 km). Si aucun critère n\'est fourni, retourne tous les trajets disponibles.'
@@ -49,7 +49,7 @@ export class TripsController {
 
   @Post('search/coordinates')
   @Public()
-  @SensitiveThrottle(30, 60000)
+  @SensitiveThrottle(30, 6000)
   @ApiOperation({
     summary: 'Rechercher des trajets par coordonnées',
     description: 'Recherche flexible : vous pouvez fournir uniquement departureCoordinates, uniquement arrivalCoordinates, ou les deux. Le rayon de recherche est optionnel pour chaque point (défaut: 50 km).'
@@ -83,14 +83,22 @@ export class TripsController {
 
   @Get('my-trips')
   @Auth()
-  @SensitiveThrottle(20, 60000)
+  @SensitiveThrottle(20, 6000)
   @ApiOperation({ summary: 'Get trips created by current user' })
   async findMyTrips(@Request() req) {
     return this.tripsService.findByDriver(req.user.userId);
   }
 
+  @Get('all-trips')
+  @SensitiveThrottle(20, 6000)
+  @ApiOperation({ summary: 'Get all trips completed or not' })
+  async findAllTrips() {
+    return this.tripsService.findAllTrips();
+  }
+
+
   @Get(':id')
-  @SensitiveThrottle(30, 60000)
+  @SensitiveThrottle(30, 6000)
   @ApiOperation({ summary: 'Get a trip by ID' })
   async findOne(@Param('id') id: string) {
     return this.tripsService.findOne(id);
@@ -98,7 +106,7 @@ export class TripsController {
 
   @Put(':id')
   @Auth()
-  @SensitiveThrottle(10, 60000)
+  @SensitiveThrottle(10, 6000)
   @ApiOperation({ summary: 'Update a trip' })
   async update(
     @Request() req,
@@ -110,7 +118,7 @@ export class TripsController {
 
   @Put(':id/start')
   @Auth()
-  @SensitiveThrottle(10, 60000)
+  @SensitiveThrottle(10, 6000)
   @ApiOperation({ summary: 'Start a trip' })
   async startTrip(@Request() req, @Param('id') id: string) {
     return this.tripsService.startTrip(id, req.user.userId);
@@ -118,7 +126,7 @@ export class TripsController {
 
   @Put(':id/pause')
   @Auth()
-  @SensitiveThrottle(10, 60000)
+  @SensitiveThrottle(10, 6000)
   @ApiOperation({ summary: 'Pause/interrupt an active trip' })
   async pauseTrip(@Request() req, @Param('id') id: string) {
     return this.tripsService.pauseTrip(id, req.user.userId);
@@ -126,7 +134,7 @@ export class TripsController {
 
   @Put(':id/make-public')
   @Auth()
-  @SensitiveThrottle(10, 60000)
+  @SensitiveThrottle(10, 6000)
   @ApiOperation({
     summary: 'Make a private trip public',
     description: 'Permet au passager qui a créé la demande de trajet d\'autoriser que le trajet devienne public. Le conducteur du trajet doit avoir passé le KYC et avoir au moins un véhicule actif pour que le trajet soit effectivement publié.'
@@ -137,7 +145,7 @@ export class TripsController {
 
   @Delete(':id')
   @Auth()
-  @SensitiveThrottle(10, 60000)
+  @SensitiveThrottle(10, 6000)
   @ApiOperation({ summary: 'Delete a trip (only completed, cancelled, or expired trips can be deleted)' })
   async remove(@Request() req, @Param('id') id: string) {
     await this.tripsService.remove(id, req.user.userId);

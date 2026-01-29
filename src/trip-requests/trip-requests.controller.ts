@@ -11,7 +11,7 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { TripRequestsService } from './trip-requests.service';
-import { CreateTripRequestDto, CreateDriverOfferDto, AcceptDriverOfferDto, UpdateTripRequestDto } from './dto/trip-request.dto';
+import { CreateTripRequestDto, CreateDriverOfferDto, AcceptDriverOfferDto, AcceptTripRequestDto, UpdateTripRequestDto } from './dto/trip-request.dto';
 import { Auth } from '../auth/decorators/auth.decorator';
 import { Public } from '../common/decorators/public.decorator';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
@@ -122,6 +122,22 @@ export class TripRequestsController {
     return this.tripRequestsService.acceptDriverOffer(req.user.userId, tripRequestId, acceptDto);
   }
 
+  @Post(':id/accept')
+  @Auth()
+  @SensitiveThrottle(5, 60000)
+  @ApiOperation({
+    summary: 'Accept a trip request directly (Uber/Bolt/Yango style)',
+    description: 'Permet à un driver d\'accepter directement une demande de trajet. Le driver voit le nombre de places demandées par le passager et le prix maximum accepté. Il accepte ou refuse selon que la demande lui convient ou non. Le prix utilisé est le prix maximum accepté par le passager (ou 0 si non spécifié). Crée automatiquement un trajet et une réservation pour le passager avec le nombre de places demandées.',
+  })
+  // @ApiBearerAuth()
+  async acceptTripRequest(
+    @Request() req,
+    @Param('id') id: string,
+    @Body() acceptDto: AcceptTripRequestDto,
+  ) {
+    return this.tripRequestsService.acceptTripRequest(req.user.userId, id, acceptDto);
+  }
+
   @Put(':id/start-trip')
   @Auth()
   @SensitiveThrottle(5, 60000)
@@ -129,9 +145,9 @@ export class TripRequestsController {
     summary: 'Start a trip from an accepted trip request',
     description: 'Permet au driver sélectionné de lancer le trajet à partir d\'une demande acceptée. Crée un trajet et une réservation automatique pour le passager.',
   })
+  
   // @ApiBearerAuth()
   async startTripFromRequest(@Request() req, @Param('id') id: string) {
-
     return this.tripRequestsService.startTripFromRequest(id, req.user.userId);
   }
 
