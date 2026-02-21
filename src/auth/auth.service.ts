@@ -255,9 +255,14 @@ export class AuthService {
         },
       );
 
+      console.log("jwt payload:", payload)
+
       const user = await this.userRepository.findOne({
         where: { id: payload.sub },
       });
+
+      console.log("user refresh token", user?.refreshToken);
+      console.log("refresh token dto", refreshTokenDto.refreshToken);
 
       if (!user || user.refreshToken !== refreshTokenDto.refreshToken) {
         throw new UnauthorizedException('Token de rafraîchissement invalide');

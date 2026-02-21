@@ -305,7 +305,7 @@ export class GoogleMapsService {
    * Get directions between origin and destination
    */
   async getDirections(dto: DirectionsDto): Promise<DirectionsResponse> {
-    console.log('getDirections', dto);
+    // console.log('getDirections', dto);
     const cacheKey = this.getDirectionsCacheKey(dto);
 
     try {
@@ -378,7 +378,7 @@ export class GoogleMapsService {
       if (dto.arrivalTime) {
         params.arrival_time = dto.arrivalTime.toString();
       }
-      console.log('params', params);
+      // console.log('params', params);
       const response = await firstValueFrom(
         this.httpService.get(`${this.baseUrl}/directions/json`, { params }),
       );
