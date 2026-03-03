@@ -1,27 +1,36 @@
 import {
   IsBoolean,
-  IsEmail,
   IsNotEmpty,
   IsOptional,
   IsString,
-  MinLength,
   MaxLength,
   Matches,
-  ValidateNested,
+  MinLength,
   ValidateIf,
+  ValidateNested,
 } from 'class-validator';
-import { Type } from 'class-transformer';
+import { Transform, TransformFnParams, Type } from 'class-transformer';
 import { ApiProperty } from '@nestjs/swagger';
 import { UserRole } from '../../users/entities/user.entity';
 import { CreateVehicleDto } from '../../vehicles/dto/vehicle.dto';
 
+const toTrimmedString = ({ value }: TransformFnParams): unknown => {
+  if (value === undefined || value === null) {
+    return value;
+  }
+
+  return String(value).trim();
+};
+
 export class RegisterDto {
   @ApiProperty({ example: '+243900000000' })
+  @Transform(toTrimmedString)
   @IsString()
   @IsNotEmpty()
   phone: string;
 
-  @ApiProperty({ example: '1234', description: 'PIN à 4 chiffres' })
+  @ApiProperty({ example: '1234', description: 'PIN a 4 chiffres' })
+  @Transform(toTrimmedString)
   @IsString()
   @IsNotEmpty()
   @MinLength(4)
@@ -29,7 +38,7 @@ export class RegisterDto {
   @Matches(/^\d{4}$/, { message: 'PIN must be exactly 4 digits' })
   pin: string;
 
-  @ApiProperty({ required: false, example: true, description: 'Indique si l\'utilisateur est conducteur' })
+  @ApiProperty({ required: false, example: true, description: 'Indique si utilisateur est conducteur' })
   @IsBoolean()
   @IsOptional()
   isDriver?: boolean;
@@ -51,7 +60,7 @@ export class RegisterDto {
   @ApiProperty({
     required: false,
     type: () => CreateVehicleDto,
-    description: 'Informations du véhicule (uniquement pour les conducteurs)',
+    description: 'Infos vehicule (conducteurs uniquement)',
   })
   @ValidateNested()
   @IsOptional()
@@ -61,15 +70,17 @@ export class RegisterDto {
 
 export class LoginDto {
   @ApiProperty({ example: '0831919710' })
+  @Transform(toTrimmedString)
   @IsString()
   @IsNotEmpty()
   phone: string;
 
-  @ApiProperty({ 
+  @ApiProperty({
     required: false,
-    example: '1234', 
-    description: 'PIN à 4 chiffres - requis si newPin n\'est pas fourni' 
+    example: '1234',
+    description: 'PIN a 4 chiffres - requis si newPin absent',
   })
+  @Transform(toTrimmedString)
   @ValidateIf((o) => !o.newPin)
   @IsString()
   @IsNotEmpty({ message: 'PIN is required if newPin is not provided' })
@@ -78,11 +89,12 @@ export class LoginDto {
   @Matches(/^\d{4}$/, { message: 'PIN must be exactly 4 digits' })
   pin?: string;
 
-  @ApiProperty({ 
+  @ApiProperty({
     required: false,
-    example: '5678', 
-    description: 'Nouveau PIN à 4 chiffres - utilisé si l\'ancien PIN est oublié (remplace pin)' 
+    example: '5678',
+    description: 'Nouveau PIN a 4 chiffres - utilise si PIN oublie',
   })
+  @Transform(toTrimmedString)
   @ValidateIf((o) => !o.pin)
   @IsString()
   @IsNotEmpty({ message: 'newPin is required if PIN is not provided' })
@@ -101,18 +113,18 @@ export class RefreshTokenDto {
 
 export class GoogleMobileAuthDto {
   @ApiProperty({
-    description: 'Google ID Token obtenu côté mobile (Expo / React-Native)',
+    description: 'Google ID token obtenu cote mobile (Expo / React Native)',
   })
   @IsString()
   @IsNotEmpty()
   idToken: string;
 
   @ApiProperty({
-    description:
-      'Numéro de téléphone requis uniquement lors de la première inscription Google (ou si le compte n’a pas encore de téléphone)',
+    description: 'Numero de telephone requis au premier login Google',
     example: '+243900000000',
     required: false,
   })
+  @Transform(toTrimmedString)
   @IsString()
   @IsOptional()
   phone?: string;
@@ -125,4 +137,3 @@ export class AuthResponseDto {
   @ApiProperty()
   refreshToken: string;
 }
-

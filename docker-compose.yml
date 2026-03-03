@@ -1,33 +1,37 @@
-version: '3.8'
-
 services:
   postgres:
     image: postgis/postgis:15-3.4-alpine
     container_name: zwanga-postgres
     environment:
       POSTGRES_USER: ${DATABASE_USER:-postgres}
-      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:-postgres_password}
-      POSTGRES_DB: ${DATABASE_NAME:-zwanga_db}
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:-rosamystica97}
+      POSTGRES_DB: ${DATABASE_NAME:-zwangadb}
     ports:
-      - "${DATABASE_PORT:-5432}:5432"
+      - "${POSTGRES_PORT:-5433}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      # Script d'initialisation pour PostGIS
       - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     networks:
       - zwanga-network
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DATABASE_USER:-postgres}"]
+      test: ["CMD-SHELL", "pg_isready -U ${DATABASE_USER:-postgres} -d ${DATABASE_NAME:-zwangadb}"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 10s
+      start_period: 20s
     restart: unless-stopped
 
   redis:
     image: redis:7-alpine
     container_name: zwanga-redis
-    command: redis-server --appendonly yes ${REDIS_PASSWORD:+--requirepass $REDIS_PASSWORD}
+    command: >
+      sh -c 'if [ -n "$$REDIS_PASSWORD" ]; then
+      redis-server --appendonly yes --requirepass "$$REDIS_PASSWORD";
+      else
+      redis-server --appendonly yes;
+      fi'
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
     ports:
       - "${REDIS_PORT:-6379}:6379"
     volumes:
@@ -35,7 +39,7 @@ services:
     networks:
       - zwanga-network
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "if [ -n \"$$REDIS_PASSWORD\" ]; then redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG; else redis-cli ping | grep -q PONG; fi"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -52,17 +56,8 @@ services:
     networks:
       - zwanga-network
     restart: unless-stopped
-    # Limiter les ressources pour éviter la surconsommation
-    deploy:
-      resources:
-        limits:
-          cpus: '2.0'
-          memory: 4G
-        reservations:
-          cpus: '1.0'
-          memory: 2G
     healthcheck:
-      test: ["CMD-SHELL", "ollama list || exit 1"]
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -74,21 +69,18 @@ services:
       dockerfile: Dockerfile
       target: production
     container_name: zwanga-api
-    ports:
-      - "${PORT:-5000}:5000"
     env_file:
       - .env
     environment:
-      - NODE_ENV=${NODE_ENV:-production}
-      - DATABASE_HOST=postgres
-      - DATABASE_PORT=5432
-      - DATABASE_USER=${DATABASE_USER:-postgres}
-      - DATABASE_PASSWORD=${DATABASE_PASSWORD:-postgres_password}
-      - DATABASE_NAME=${DATABASE_NAME:-zwangadb}
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
-      - OLLAMA_BASE_URL=http://ollama:11434
+      DATABASE_HOST: ${DATABASE_HOST:-postgres}
+      DATABASE_PORT: ${DATABASE_PORT:-5432}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${PORT:-5200}:5200"
     depends_on:
       postgres:
         condition: service_healthy
@@ -96,13 +88,13 @@ services:
         condition: service_healthy
       ollama:
         condition: service_healthy
-    networks:
-      - zwanga-network
     volumes:
       - ./uploads:/app/uploads
+    networks:
+      - zwanga-network
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "node", "-e", "require('http').get('http://localhost:5000/api/v1/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"]
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:5200/api/v1/health', (r) => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -110,11 +102,8 @@ services:
 
 volumes:
   postgres_data:
-    driver: local
   redis_data:
-    driver: local
   ollama_data:
-    driver: local
 
 networks:
   zwanga-network:

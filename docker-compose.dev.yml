@@ -1,17 +1,18 @@
-version: '3.8'
-
-# Configuration pour le développement avec hot-reload
-# Usage: docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
-
 services:
   api:
     build:
-      target: builder
-    volumes:
-      - ./src:/app/src
-      - ./uploads:/app/uploads
-      - /app/node_modules
+      context: .
+      dockerfile: Dockerfile
+      target: development
     command: npm run start:dev
     environment:
-      - NODE_ENV=development
+      NODE_ENV: development
+      PORT: ${PORT:-5200}
+      CHOKIDAR_USEPOLLING: "true"
+      WATCHPACK_POLLING: "true"
+    volumes:
+      - ./:/app
+      - api_node_modules:/app/node_modules
 
+volumes:
+  api_node_modules:
