@@ -474,6 +474,11 @@ export class SafetyService {
     );
   }
 
+  private isTripInProgress(trip: Trip): boolean {
+    const now = new Date();
+    return trip.status === TripStatus.ACTIVE && trip.departureDate <= now && !trip.completedAt;
+  }
+
   // ==================== User Reports ====================
 
   async createUserReport(userId: string, createDto: CreateUserReportDto): Promise<SanitizedUserReport> {
@@ -493,23 +498,93 @@ export class SafetyService {
       throw new NotFoundException('Utilisateur signalé non trouvé');
     }
 
-    // Vérifier les trips/bookings si fournis
-    if (createDto.tripId) {
-      const trip = await this.tripRepository.findOne({ where: { id: createDto.tripId } });
-      if (!trip) {
-        throw new NotFoundException('Trip non trouvé');
-      }
-    }
+    let resolvedTripId: string | null = createDto.tripId ?? null;
+    let resolvedBookingId: string | null = createDto.bookingId ?? null;
 
+    // Validation stricte pour les signalements liés à un trajet/booking.
     if (createDto.bookingId) {
-      const booking = await this.bookingRepository.findOne({ where: { id: createDto.bookingId } });
+      const booking = await this.bookingRepository.findOne({
+        where: { id: createDto.bookingId },
+        relations: ['trip'],
+      });
+
       if (!booking) {
         throw new NotFoundException('Booking non trouvé');
       }
+
+      if (!booking.trip) {
+        throw new BadRequestException('Ce booking n a pas de trajet associé');
+      }
+
+      if (createDto.tripId && createDto.tripId !== booking.tripId) {
+        throw new BadRequestException('Le tripId fourni ne correspond pas au booking');
+      }
+
+      const isDriver = booking.trip.driverId === userId;
+      const isPassenger = booking.passengerId === userId;
+
+      if (!isDriver && !isPassenger) {
+        throw new ForbiddenException(
+          'Vous ne pouvez signaler un comportement que pour une réservation à laquelle vous participez',
+        );
+      }
+
+      const expectedReportedUserId = isDriver ? booking.passengerId : booking.trip.driverId;
+      if (createDto.reportedUserId !== expectedReportedUserId) {
+        throw new BadRequestException(
+          'Vous ne pouvez signaler que l autre participant de cette réservation',
+        );
+      }
+
+      if (!this.isTripInProgress(booking.trip) || booking.status !== BookingStatus.ACCEPTED) {
+        throw new BadRequestException(
+          'Le signalement de comportement pendant le trajet est disponible uniquement pour une course active',
+        );
+      }
+
+      resolvedTripId = booking.tripId;
+      resolvedBookingId = booking.id;
+    } else if (createDto.tripId) {
+      const trip = await this.tripRepository.findOne({
+        where: { id: createDto.tripId },
+        relations: ['bookings'],
+      });
+
+      if (!trip) {
+        throw new NotFoundException('Trip non trouvé');
+      }
+
+      if (!this.isTripInProgress(trip)) {
+        throw new BadRequestException(
+          'Le signalement de comportement pendant le trajet est disponible uniquement pour un trajet actif',
+        );
+      }
+
+      const participantIds = new Set<string>([trip.driverId]);
+      for (const booking of trip.bookings || []) {
+        if (booking.status === BookingStatus.ACCEPTED) {
+          participantIds.add(booking.passengerId);
+        }
+      }
+
+      if (!participantIds.has(userId)) {
+        throw new ForbiddenException('Vous ne participez pas à ce trajet');
+      }
+
+      if (!participantIds.has(createDto.reportedUserId)) {
+        throw new BadRequestException(
+          'L utilisateur signalé ne participe pas à ce trajet actif',
+        );
+      }
+
+      resolvedTripId = trip.id;
+      resolvedBookingId = null;
     }
 
     const report = this.userReportRepository.create({
       ...createDto,
+      tripId: resolvedTripId,
+      bookingId: resolvedBookingId,
       reporterId: userId,
     });
 
