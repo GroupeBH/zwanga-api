@@ -2,7 +2,6 @@ import { NestFactory } from '@nestjs/core';
 import { ValidationPipe, BadRequestException } from '@nestjs/common';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { ConfigService } from '@nestjs/config';
-import { ThrottlerGuard } from '@nestjs/throttler';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { join } from 'path';
 import { AppModule } from './app.module';
@@ -47,12 +46,30 @@ async function bootstrap() {
       .get<string>('CORS_ORIGINS')
       ?.split(',')
       .map((origin) => origin.trim())
-      .filter((origin) => origin.length > 0);
-
-  console.log("corsOrigins: -", corsOrigins);
+      .filter((origin) => origin.length > 0) ?? [];
+  const isProduction = (configService.get<string>('NODE_ENV') || 'development') === 'production';
 
   app.enableCors({
-    origin: corsOrigins,
+    origin: (origin, callback) => {
+      // Native mobile clients often do not send Origin header.
+      if (!origin) {
+        callback(null, true);
+        return;
+      }
+
+      // In non-production, allow all origins for local mobile/web testing.
+      if (!isProduction) {
+        callback(null, true);
+        return;
+      }
+
+      if (corsOrigins.includes(origin)) {
+        callback(null, true);
+        return;
+      }
+
+      callback(new Error(`Origin ${origin} is not allowed by CORS`));
+    },
     methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
     credentials: true,
   });
@@ -99,9 +116,10 @@ async function bootstrap() {
   SwaggerModule.setup(`${apiPrefix}/docs`, app, document);
 
   const port = configService.get<number>('PORT') || 5200;
-  await app.listen(port);
+  const host = configService.get<string>('HOST') || '0.0.0.0';
+  await app.listen(port, host);
 
-  console.log(`Application zwanga backend is running on: http://localhost:${port}`);
+  console.log(`Application zwanga backend is running on host ${host} and port ${port}`);
   console.log(`Swagger documentation: http://localhost:${port}/${apiPrefix}/docs`);
 }
 

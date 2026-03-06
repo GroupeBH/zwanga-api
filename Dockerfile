@@ -1,22 +1,37 @@
-FROM node:20-alpine AS builder
+# syntax=docker/dockerfile:1.7
 
+FROM node:20-bookworm-slim AS base
 WORKDIR /app
+
+# Required for proper PID 1 signal handling in containers.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends dumb-init \
+  && rm -rf /var/lib/apt/lists/*
+
+FROM base AS deps
 COPY package*.json ./
 RUN npm ci --legacy-peer-deps
+
+FROM deps AS builder
 COPY . .
 RUN npm run build
 
-FROM node:20-alpine
-
-WORKDIR /app
+FROM base AS production-deps
 COPY package*.json ./
 RUN npm ci --omit=dev --legacy-peer-deps
-COPY --from=builder /app/dist ./dist
 
+FROM deps AS development
+ENV NODE_ENV=development
+COPY . .
 EXPOSE 5200
+CMD ["npm", "run", "start:dev"]
 
-# HEALTHCHECK --interval=30s --timeout=3s --start-period=40s --retries=3 \
-#   CMD node -e "require('http').get('http://localhost:5200/api/v1/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)}).on('error', () => process.exit(1))"
-
-CMD ["node", "dist/main.js"]
-    
+FROM base AS production
+ENV NODE_ENV=production
+COPY package*.json ./
+COPY --from=production-deps /app/node_modules ./node_modules
+COPY --from=builder /app/dist ./dist
+RUN mkdir -p /app/uploads && chown -R node:node /app
+USER node
+EXPOSE 5200
+CMD ["dumb-init", "node", "dist/main.js"]
