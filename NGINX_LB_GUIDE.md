@@ -12,6 +12,10 @@ Ce setup permet de simuler un reverse proxy et un load balancer avec Nginx devan
 - `api-1` et `api-2`: deux instances backend sur le reseau Docker interne.
 - `nginx`: point d'entree unique expose sur `http://localhost:8080`.
 - Strategie de load balancing Nginx: `least_conn`.
+- Monitoring inclus via `docker-compose.yml`:
+  - Grafana: `http://127.0.0.1:3001`
+  - Prometheus: `http://127.0.0.1:9090`
+  - Loki: `http://127.0.0.1:3100`
 
 ## Base de donnees utilisee
 
