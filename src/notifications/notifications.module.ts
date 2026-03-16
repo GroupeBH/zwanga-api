@@ -8,11 +8,16 @@ import { Booking } from '../bookings/entities/booking.entity';
 import { User } from '../users/entities/user.entity';
 import { Notification } from './entities/notification.entity';
 import { TripAvailabilityNotificationService } from './trip-availability-notification.service';
+import { DailyEngagementNotificationService } from './daily-engagement-notification.service';
 
 @Module({
   imports: [ConfigModule, TypeOrmModule.forFeature([Trip, Booking, User, Notification])],
   controllers: [NotificationsController],
-  providers: [NotificationService, TripAvailabilityNotificationService],
+  providers: [
+    NotificationService,
+    TripAvailabilityNotificationService,
+    DailyEngagementNotificationService,
+  ],
   exports: [NotificationService],
 })
 export class NotificationsModule {}

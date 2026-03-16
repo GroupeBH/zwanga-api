@@ -10,10 +10,11 @@ import { Vehicle } from '../vehicles/entities/vehicle.entity';
 import { TripRequest } from '../trip-requests/entities/trip-request.entity';
 import { KycDocument } from '../users/entities/kyc-document.entity';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { Rating } from '../ratings/entities/rating.entity';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Trip, User, Booking, Vehicle, TripRequest, KycDocument]),
+    TypeOrmModule.forFeature([Trip, User, Booking, Vehicle, TripRequest, KycDocument, Rating]),
     ScheduleModule,
     NotificationsModule,
   ],

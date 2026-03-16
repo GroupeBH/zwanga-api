@@ -18,6 +18,7 @@ import { CreateTripDto, SearchTripsDto, UpdateTripDto } from './dto/trip.dto';
 import { CacheService } from '../common/services/cache.service';
 import { FileUploadService } from '../common/services/file-upload.service';
 import { NotificationService } from '../notifications/notifications.service';
+import { Rating } from '../ratings/entities/rating.entity';
 
 export type Coordinates = [number, number] | null;
 
@@ -30,6 +31,13 @@ export interface SanitizedUser {
   role: User['role'];
   status: User['status'];
   isDriver: boolean;
+  averageRating: number | null;
+  totalRatings: number;
+}
+
+interface UserRatingSummary {
+  averageRating: number | null;
+  totalRatings: number;
 }
 
 export type SanitizedBooking = Omit<Booking, 'trip' | 'passenger' | 'messages'> & {
@@ -71,6 +79,8 @@ export class TripsService {
     private tripRequestRepository: Repository<TripRequest>,
     @InjectRepository(KycDocument)
     private kycDocumentRepository: Repository<KycDocument>,
+    @InjectRepository(Rating)
+    private ratingRepository: Repository<Rating>,
     private cacheService: CacheService,
     private fileUploadService: FileUploadService,
     private notificationService: NotificationService,
@@ -201,7 +211,10 @@ export class TripsService {
       },
     });
 
-    const sanitized = await Promise.all(trips.map((trip) => this.sanitizeTrip(trip)));
+    const userRatingsMap = await this.buildUserRatingsMap(this.collectTripUserIds(trips));
+    const sanitized = await Promise.all(
+      trips.map((trip) => this.sanitizeTrip(trip, userRatingsMap)),
+    );
 
     await this.cacheService.set(cacheKey, sanitized, this.CACHE_TTL);
     this.logger.log(`Fetched ${trips.length} trips from database (${trips.filter(t => t.status === TripStatus.PENDING).length} pending, ${trips.filter(t => t.status === TripStatus.ACTIVE).length} active)`);
@@ -226,7 +239,10 @@ export class TripsService {
       },
     });
 
-    const sanitized = await Promise.all(trips.map((trip) => this.sanitizeTrip(trip)));
+    const userRatingsMap = await this.buildUserRatingsMap(this.collectTripUserIds(trips));
+    const sanitized = await Promise.all(
+      trips.map((trip) => this.sanitizeTrip(trip, userRatingsMap)),
+    );
 
     await this.cacheService.set(cacheKey, sanitized, this.CACHE_TTL);
     this.logger.log(`Fetched ${trips.length} trips of zwanga from database (${trips.filter(t => t.status === TripStatus.PENDING).length} pending, ${trips.filter(t => t.status === TripStatus.ACTIVE).length} active)`);
@@ -400,7 +416,10 @@ export class TripsService {
     }
 
     const results = await queryBuilder.getMany();
-    const sanitized = await Promise.all(results.map((trip) => this.sanitizeTrip(trip)));
+    const userRatingsMap = await this.buildUserRatingsMap(this.collectTripUserIds(results));
+    const sanitized = await Promise.all(
+      results.map((trip) => this.sanitizeTrip(trip, userRatingsMap)),
+    );
     this.logger.log(`Trip search returned ${sanitized.length} results`);
     return sanitized;
   }
@@ -426,7 +445,8 @@ export class TripsService {
       throw new NotFoundException('Trajet non trouvé');
     }
 
-    const sanitized = await this.sanitizeTrip(trip);
+    const userRatingsMap = await this.buildUserRatingsMap(this.collectTripUserIds([trip]));
+    const sanitized = await this.sanitizeTrip(trip, userRatingsMap);
     await this.cacheService.set(cacheKey, sanitized, this.CACHE_TTL);
     this.logger.debug(`Trip ${id} fetched from database`);
     return sanitized;
@@ -441,7 +461,8 @@ export class TripsService {
       order: { departureDate: 'DESC' },
     });
 
-    const sanitized = trips.map((trip) => this.sanitizeTrip(trip));
+    const userRatingsMap = await this.buildUserRatingsMap(this.collectTripUserIds(trips));
+    const sanitized = trips.map((trip) => this.sanitizeTrip(trip, userRatingsMap));
 
     this.logger.debug(`Found ${trips.length} trips for driver ${driverId}`);
     const sanitizedResults = await Promise.all(sanitized);
@@ -971,7 +992,10 @@ export class TripsService {
     };
   }
 
-  private async sanitizeTrip(trip: Trip): Promise<SanitizedTrip> {
+  private async sanitizeTrip(
+    trip: Trip,
+    userRatingsMap?: Map<string, UserRatingSummary>,
+  ): Promise<SanitizedTrip> {
     const { driver, bookings, departurePoint, arrivalPoint, vehicle, ...rest } = trip;
 
     // Convert vehicle photo URL to presigned URL if needed
@@ -992,11 +1016,13 @@ export class TripsService {
     }
 
     // Sanitize driver with profile picture (presigned URL if S3 key)
-    const sanitizedDriver = await this.sanitizeUser(driver);
+    const sanitizedDriver = await this.sanitizeUser(driver, userRatingsMap);
 
     // Sanitize bookings with passenger profile pictures (presigned URLs if S3 keys)
     const sanitizedBookings = bookings
-      ? await Promise.all(bookings.map((booking) => this.sanitizeBooking(booking)))
+      ? await Promise.all(
+          bookings.map((booking) => this.sanitizeBooking(booking, userRatingsMap)),
+        )
       : [];
 
     return {
@@ -1009,15 +1035,21 @@ export class TripsService {
     } as SanitizedTrip;
   }
 
-  private async sanitizeBooking(booking: Booking): Promise<SanitizedBooking> {
+  private async sanitizeBooking(
+    booking: Booking,
+    userRatingsMap?: Map<string, UserRatingSummary>,
+  ): Promise<SanitizedBooking> {
     const { passenger, trip, messages, ...rest } = booking;
     return {
       ...(rest as Omit<Booking, 'trip' | 'passenger' | 'messages'>),
-      passenger: await this.sanitizeUser(passenger),
+      passenger: await this.sanitizeUser(passenger, userRatingsMap),
     } as SanitizedBooking;
   }
 
-  private async sanitizeUser(user?: User): Promise<SanitizedUser | null> {
+  private async sanitizeUser(
+    user?: User,
+    userRatingsMap?: Map<string, UserRatingSummary>,
+  ): Promise<SanitizedUser | null> {
     if (!user) {
       return null;
     }
@@ -1032,6 +1064,10 @@ export class TripsService {
       }
     }
 
+    const userRatingSummary = userRatingsMap
+      ? userRatingsMap.get(user.id) ?? { averageRating: null, totalRatings: 0 }
+      : await this.getUserRatingSummary(user.id);
+
     return {
       id: user.id,
       firstName: user.firstName,
@@ -1041,6 +1077,86 @@ export class TripsService {
       role: user.role,
       status: user.status,
       isDriver: user.isDriver,
+      averageRating: userRatingSummary.averageRating,
+      totalRatings: userRatingSummary.totalRatings,
+    };
+  }
+
+  private collectTripUserIds(trips: Trip[]): string[] {
+    const userIds = new Set<string>();
+
+    for (const trip of trips) {
+      if (trip.driverId) {
+        userIds.add(trip.driverId);
+      }
+
+      if (trip.bookings?.length) {
+        for (const booking of trip.bookings) {
+          if (booking.passengerId) {
+            userIds.add(booking.passengerId);
+          }
+        }
+      }
+    }
+
+    return [...userIds];
+  }
+
+  private async buildUserRatingsMap(
+    userIds: string[],
+  ): Promise<Map<string, UserRatingSummary>> {
+    const uniqueUserIds = [...new Set(userIds.filter(Boolean))];
+    const ratingsMap = new Map<string, UserRatingSummary>();
+
+    for (const userId of uniqueUserIds) {
+      ratingsMap.set(userId, {
+        averageRating: null,
+        totalRatings: 0,
+      });
+    }
+
+    if (uniqueUserIds.length === 0) {
+      return ratingsMap;
+    }
+
+    const stats = await this.ratingRepository
+      .createQueryBuilder('rating')
+      .select('rating.ratedUserId', 'ratedUserId')
+      .addSelect('AVG(rating.rating)', 'averageRating')
+      .addSelect('COUNT(rating.id)', 'totalRatings')
+      .where('rating.ratedUserId IN (:...userIds)', { userIds: uniqueUserIds })
+      .groupBy('rating.ratedUserId')
+      .getRawMany<{
+        ratedUserId: string;
+        averageRating: string | null;
+        totalRatings: string;
+      }>();
+
+    for (const row of stats) {
+      ratingsMap.set(row.ratedUserId, {
+        averageRating: row.averageRating
+          ? Math.round(parseFloat(row.averageRating) * 10) / 10
+          : null,
+        totalRatings: row.totalRatings ? parseInt(row.totalRatings, 10) : 0,
+      });
+    }
+
+    return ratingsMap;
+  }
+
+  private async getUserRatingSummary(userId: string): Promise<UserRatingSummary> {
+    const stats = await this.ratingRepository
+      .createQueryBuilder('rating')
+      .select('AVG(rating.rating)', 'averageRating')
+      .addSelect('COUNT(rating.id)', 'totalRatings')
+      .where('rating.ratedUserId = :userId', { userId })
+      .getRawOne<{ averageRating: string | null; totalRatings: string }>();
+
+    return {
+      averageRating: stats?.averageRating
+        ? Math.round(parseFloat(stats.averageRating) * 10) / 10
+        : null,
+      totalRatings: stats?.totalRatings ? parseInt(stats.totalRatings, 10) : 0,
     };
   }
 
