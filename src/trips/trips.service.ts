@@ -271,6 +271,29 @@ export class TripsService {
       });
     }
 
+    if (searchTripsDto.keywords?.trim()) {
+      const keywords = Array.from(
+        new Set(
+          searchTripsDto.keywords
+            .trim()
+            .split(/\s+/)
+            .map((keyword) => keyword.trim())
+            .filter(Boolean),
+        ),
+      ).slice(0, 8);
+
+      keywords.forEach((keyword, index) => {
+        const keywordParam = `keyword${index}`;
+        queryBuilder.andWhere(
+          new Brackets((qb) => {
+            qb.where(`trip.departureLocation ILIKE :${keywordParam}`)
+              .orWhere(`trip.arrivalLocation ILIKE :${keywordParam}`);
+          }),
+          { [keywordParam]: `%${keyword}%` },
+        );
+      });
+    }
+
     if (searchTripsDto.departureLocation) {
       queryBuilder.andWhere('trip.departureLocation ILIKE :departureLocation', {
         departureLocation: `%${searchTripsDto.departureLocation}%`,
@@ -1633,4 +1656,3 @@ export class TripsService {
     }
   }
 }
-

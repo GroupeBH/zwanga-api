@@ -97,6 +97,15 @@ export class CreateTripDto {
 export class SearchTripsDto {
   @ApiProperty({
     required: false,
+    description: "Mots-cles de recherche. Chaque mot est teste sur l'adresse de depart ou d'arrivee.",
+    example: 'gombe aeroport',
+  })
+  @IsString()
+  @IsOptional()
+  keywords?: string;
+
+  @ApiProperty({
+    required: false,
     description: 'Nom du lieu de départ (recherche textuelle)',
   })
   @IsString()
@@ -263,6 +272,15 @@ export class UpdateTripDto {
 }
 
 export class SearchByPointsDto {
+  @ApiProperty({
+    required: false,
+    description: "Mots-cles de recherche. Chaque mot est teste sur l'adresse de depart ou d'arrivee.",
+    example: 'gombe aeroport',
+  })
+  @IsString()
+  @IsOptional()
+  keywords?: string;
+
   @ApiProperty({
     required: false,
     description: 'Coordonnées du point de départ [longitude, latitude]. Peut être utilisé seul ou avec arrivalCoordinates.',

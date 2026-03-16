@@ -61,6 +61,7 @@ export class TripsController {
     }
 
     const {
+      keywords,
       departureCoordinates,
       arrivalCoordinates,
       departureRadiusKm,
@@ -71,6 +72,7 @@ export class TripsController {
     } = payload;
 
     return this.tripsService.search({
+      keywords,
       departureCoordinates,
       arrivalCoordinates,
       departureRadiusKm,
