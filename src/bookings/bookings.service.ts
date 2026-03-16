@@ -18,6 +18,7 @@ export class BookingsService {
   private readonly logger = new Logger(BookingsService.name);
   private readonly CACHE_TTL = 180; // 3 minutes
   private readonly DESTINATION_PROXIMITY_THRESHOLD_METERS = 1000; // 1 km
+  private readonly MAX_SEATS_PER_PASSENGER = 2;
 
   constructor(
     @InjectRepository(Booking)
@@ -39,6 +40,12 @@ export class BookingsService {
     // Validate numberOfSeats input
     if (!createBookingDto.numberOfSeats || createBookingDto.numberOfSeats < 1) {
       throw new BadRequestException('Le nombre de places doit être au moins 1');
+    }
+
+    if (createBookingDto.numberOfSeats > this.MAX_SEATS_PER_PASSENGER) {
+      throw new BadRequestException(
+        `Pour des raisons de securite du conducteur, vous ne pouvez pas reserver plus de ${this.MAX_SEATS_PER_PASSENGER} places par trajet`,
+      );
     }
 
     const trip = await this.tripRepository.findOne({
@@ -1308,4 +1315,3 @@ export class BookingsService {
     });
   }
 }
-

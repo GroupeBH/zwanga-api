@@ -45,9 +45,16 @@ Vous pouvez changer les identifiants avec:
 - `Prometheus` -> `http://prometheus:9090`
 - `Loki` -> `http://loki:3100`
 
+## Prochaine etape recommandee
+
+- Ajouter `Alertmanager` + regles d'alerte Prometheus pour passer d'une observabilite passive a une observabilite actionnable.
+- Ajouter des dashboards SLO (latence p95, taux 5xx, saturation DB/Redis).
+- Ajouter le tracing distribue (OpenTelemetry + Tempo/Jaeger).
+
+Voir `PROD_INFRA_SIMULATION_GUIDE.md` pour la feuille de route complete.
+
 ## Arreter
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.nginx.yml down
 ```
-

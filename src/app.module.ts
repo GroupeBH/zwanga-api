@@ -51,6 +51,10 @@ import { DriverOffer } from './trip-requests/entities/driver-offer.entity';
 import { EmergencyContact } from './safety/entities/emergency-contact.entity';
 import { SafetyAlert } from './safety/entities/safety-alert.entity';
 import { UserReport } from './safety/entities/user-report.entity';
+import { TripSafetyParticipant } from './safety/entities/trip-safety-participant.entity';
+import { TripSafetyContact } from './safety/entities/trip-safety-contact.entity';
+import { TripSafetyEvent } from './safety/entities/trip-safety-event.entity';
+import { TripSafetyNotification } from './safety/entities/trip-safety-notification.entity';
 import { Notification } from './notifications/entities/notification.entity';
 import { FavoriteLocation } from './users/entities/favorite-location.entity';
 import { FavoritePlace } from './favorite-places/entities/favorite-place.entity';
@@ -74,6 +78,10 @@ const typeOrmEntities = [
   EmergencyContact,
   SafetyAlert,
   UserReport,
+  TripSafetyParticipant,
+  TripSafetyContact,
+  TripSafetyEvent,
+  TripSafetyNotification,
   Notification,
   FavoritePlace,
   FavoriteLocation,

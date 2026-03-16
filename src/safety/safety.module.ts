@@ -10,6 +10,13 @@ import { User } from '../users/entities/user.entity';
 import { Trip } from '../trips/entities/trip.entity';
 import { Booking } from '../bookings/entities/booking.entity';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { TripSafetyParticipant } from './entities/trip-safety-participant.entity';
+import { TripSafetyContact } from './entities/trip-safety-contact.entity';
+import { TripSafetyEvent } from './entities/trip-safety-event.entity';
+import { TripSafetyNotification } from './entities/trip-safety-notification.entity';
+import { TripSecurityService } from './trip-security.service';
+import { TripSecurityController } from './trip-security.controller';
+import { WhatsAppModule } from '../whatsapp/whatsapp.module';
 
 @Module({
   imports: [
@@ -20,13 +27,18 @@ import { NotificationsModule } from '../notifications/notifications.module';
       User,
       Trip,
       Booking,
+      TripSafetyParticipant,
+      TripSafetyContact,
+      TripSafetyEvent,
+      TripSafetyNotification,
     ]),
     ScheduleModule,
     NotificationsModule,
+    WhatsAppModule,
   ],
-  controllers: [SafetyController],
-  providers: [SafetyService],
-  exports: [SafetyService],
+  controllers: [SafetyController, TripSecurityController],
+  providers: [SafetyService, TripSecurityService],
+  exports: [SafetyService, TripSecurityService],
 })
 export class SafetyModule {}
 

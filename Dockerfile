@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
-FROM node:20-bookworm-slim AS base
+ARG NODE_BASE_IMAGE=node:20-bookworm-slim
+FROM ${NODE_BASE_IMAGE} AS base
 WORKDIR /app
 
 # Required for proper PID 1 signal handling in containers.

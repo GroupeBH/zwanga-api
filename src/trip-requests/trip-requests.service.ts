@@ -88,6 +88,7 @@ export interface SanitizedTripRequest {
 @Injectable()
 export class TripRequestsService {
   private readonly logger = new Logger(TripRequestsService.name);
+  private readonly MAX_SEATS_PER_PASSENGER = 2;
 
   constructor(
     @InjectRepository(TripRequest)
@@ -110,6 +111,12 @@ export class TripRequestsService {
     const passenger = await this.userRepository.findOne({ where: { id: passengerId } });
     if (!passenger) {
       throw new NotFoundException('Utilisateur non trouvé');
+    }
+
+    if (createTripRequestDto.numberOfSeats > this.MAX_SEATS_PER_PASSENGER) {
+      throw new BadRequestException(
+        `Pour des raisons de securite du conducteur, vous ne pouvez pas reserver plus de ${this.MAX_SEATS_PER_PASSENGER} places par trajet`,
+      );
     }
 
     const { departureCoordinates, arrivalCoordinates, departureDateMin, departureDateMax, ...rest } = createTripRequestDto;
@@ -224,6 +231,11 @@ export class TripRequestsService {
 
     // Update other fields
     if (updateTripRequestDto.numberOfSeats !== undefined) {
+      if (updateTripRequestDto.numberOfSeats > this.MAX_SEATS_PER_PASSENGER) {
+        throw new BadRequestException(
+          `Pour des raisons de securite du conducteur, vous ne pouvez pas reserver plus de ${this.MAX_SEATS_PER_PASSENGER} places par trajet`,
+        );
+      }
       tripRequest.numberOfSeats = updateTripRequestDto.numberOfSeats;
     }
 
@@ -1356,4 +1368,3 @@ export class TripRequestsService {
     );
   }
 }
-

@@ -203,3 +203,23 @@ Exemples :
 - Voir `FCM_SETUP.md` pour la configuration Firebase Cloud Messaging
 - Voir `PM2_GUIDE.md` pour la gestion des processus avec PM2
 
+
+# ============================================
+# WhatsApp Notifications
+# ============================================
+# URL de l'API provider WhatsApp Business / proxy interne
+WHATSAPP_API_URL=
+# Token/API key du provider WhatsApp
+WHATSAPP_API_KEY=
+# Expediteur affiché
+WHATSAPP_FROM=Zwanga
+# Indicatif utilisé si un numero n'est pas au format international
+DEFAULT_COUNTRY_CODE=+243
+
+# Optionnel: canaux par defaut de securite trajet (ordre libre)
+# Valeurs supportees: whatsapp,push,sms,email
+TRIP_SECURITY_NOTIFICATION_CHANNELS=whatsapp
+TRIP_SECURITY_REMINDER_DELAY_MINUTES=10
+TRIP_SECURITY_ESCALATION_DELAY_MINUTES=15
+TRIP_SECURITY_DEFAULT_ESTIMATED_DURATION_MINUTES=90
+TRIP_SECURITY_TRACKING_BASE_URL=https://zwanga.app/trip-security
