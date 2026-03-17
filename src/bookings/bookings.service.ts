@@ -9,7 +9,7 @@ import { CreateBookingDto, UpdateBookingStatusDto, ReportBookingProblemDto, Upda
 import { CacheService } from '../common/services/cache.service';
 import { NotificationService } from '../notifications/notifications.service';
 import { FileUploadService } from '../common/services/file-upload.service';
-import { WhatsAppService } from '../whatsapp/whatsapp.service';
+import { MessagingService } from '../messaging/messaging.service';
 import { SafetyService } from '../safety/safety.service';
 import { SendWhatsAppNotificationDto } from './dto/send-whatsapp-notification.dto';
 
@@ -30,7 +30,7 @@ export class BookingsService {
     private cacheService: CacheService,
     private notificationService: NotificationService,
     private fileUploadService: FileUploadService,
-    private whatsAppService: WhatsAppService,
+    private messagingService: MessagingService,
     private safetyService: SafetyService,
   ) {}
 
@@ -673,6 +673,10 @@ export class BookingsService {
     booking.pickedUp = true;
     booking.pickedUpAt = new Date();
     await this.bookingRepository.save(booking);
+    await this.touchTripInteraction(booking.tripId);
+
+    await this.notifySelectedEmergencyContacts(booking, 'pickup');
+    await this.notifyDriverEmergencyContactsOnPickup(booking);
 
     // Notify passenger
     await this.notifyPassengerAboutPickupConfirmation(booking);
@@ -708,6 +712,7 @@ export class BookingsService {
     booking.pickedUpConfirmedByPassenger = true;
     booking.pickedUpConfirmedAt = new Date();
     await this.bookingRepository.save(booking);
+    await this.touchTripInteraction(booking.tripId);
 
     // Notify driver
     await this.notifyDriverAboutPickupConfirmation(booking);
@@ -747,6 +752,9 @@ export class BookingsService {
     booking.droppedOff = true;
     booking.droppedOffAt = new Date();
     await this.bookingRepository.save(booking);
+    await this.touchTripInteraction(booking.tripId);
+
+    await this.notifySelectedEmergencyContacts(booking, 'dropoff');
 
     // Notify passenger
     await this.notifyPassengerAboutDropoffConfirmation(booking);
@@ -786,6 +794,7 @@ export class BookingsService {
     booking.status = BookingStatus.COMPLETED;
     
     await this.bookingRepository.save(booking);
+    await this.touchTripInteraction(booking.tripId);
 
     // Notify driver
     await this.notifyDriverAboutDropoffConfirmation(booking);
@@ -796,6 +805,304 @@ export class BookingsService {
 
     this.logger.log(`Dropoff confirmed by passenger for booking ${bookingId}`);
     return booking;
+  }
+
+  private async notifySelectedEmergencyContacts(
+    booking: Booking,
+    eventType: 'pickup' | 'dropoff' | 'trip_end_without_dropoff',
+  ): Promise<void> {
+    try {
+      const selectedContactIds = booking.safetyEmergencyContactIds ?? [];
+      if (selectedContactIds.length === 0) {
+        this.logger.debug(
+          `No selected emergency contacts for booking ${booking.id}, skipping ${eventType} WhatsApp notification`,
+        );
+        return;
+      }
+
+      const trip = await this.tripRepository.findOne({
+        where: { id: booking.tripId },
+        relations: ['driver', 'vehicle', 'bookings', 'bookings.passenger'],
+      });
+      if (!trip) {
+        this.logger.warn(`Trip not found while notifying emergency contacts for booking ${booking.id}`);
+        return;
+      }
+
+      const passenger =
+        booking.passenger ??
+        (await this.userRepository.findOne({
+          where: { id: booking.passengerId },
+          select: ['id', 'firstName', 'lastName'],
+        }));
+
+      const emergencyContacts = await this.safetyService.findAllEmergencyContacts(booking.passengerId);
+      const selectedContacts = emergencyContacts.filter(
+        (contact) =>
+          contact.isActive &&
+          !!contact.phone &&
+          selectedContactIds.includes(contact.id),
+      );
+
+      if (selectedContacts.length === 0) {
+        this.logger.debug(
+          `Selected emergency contacts are missing/inactive for booking ${booking.id}, skipping ${eventType} WhatsApp notification`,
+        );
+        return;
+      }
+
+      this.logger.log(
+        `[WA][EmergencyContact][${eventType}] booking=${booking.id} trip=${booking.tripId} selected=${selectedContacts.length}`,
+      );
+
+      const passengerName = passenger
+        ? `${passenger.firstName} ${passenger.lastName}`.trim()
+        : 'Le passager';
+      const driverName = trip.driver
+        ? `${trip.driver.firstName} ${trip.driver.lastName}`.trim()
+        : 'Le conducteur';
+      const driverPhone = trip.driver?.phone ?? null;
+      const vehicleDetails = this.buildVehicleSafetyLabel(trip);
+      const otherPassengerNames = this.getOtherConfirmedPassengerNames(
+        trip.bookings ?? [],
+        booking.passengerId,
+      );
+      const message = this.buildEmergencyContactSafetyMessage(
+        booking,
+        trip,
+        passengerName,
+        driverName,
+        driverPhone,
+        vehicleDetails,
+        otherPassengerNames,
+        eventType,
+      );
+
+      let success = 0;
+      let failed = 0;
+      for (const contact of selectedContacts) {
+        this.logger.debug(
+          `[WA][EmergencyContact][${eventType}] booking=${booking.id} contactId=${contact.id} phone=${contact.phone} sending...`,
+        );
+        const sent = await this.messagingService.sendMessage(contact.phone, message, {
+          flow: 'booking_passenger_safety',
+          eventType,
+          bookingId: booking.id,
+          tripId: booking.tripId,
+          contactId: contact.id,
+          passengerId: booking.passengerId,
+        });
+        if (sent) {
+          success += 1;
+          this.logger.log(
+            `[WA][EmergencyContact][${eventType}] booking=${booking.id} contactId=${contact.id} status=sent`,
+          );
+        } else {
+          failed += 1;
+          this.logger.warn(
+            `[WA][EmergencyContact][${eventType}] booking=${booking.id} contactId=${contact.id} status=failed`,
+          );
+        }
+      }
+
+      this.logger.log(
+        `[EmergencyContact][${eventType}] booking ${booking.id}: ${success} sent, ${failed} failed`,
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Emergency contact WhatsApp notification skipped for booking ${booking.id} (${eventType}): ${error.message}`,
+      );
+    }
+  }
+
+  private buildEmergencyContactSafetyMessage(
+    booking: Booking,
+    trip: Trip,
+    passengerName: string,
+    driverName: string,
+    driverPhone: string | null,
+    vehicleDetails: string,
+    otherPassengerNames: string[],
+    eventType: 'pickup' | 'dropoff' | 'trip_end_without_dropoff',
+  ): string {
+    const departure = trip.departureLocation;
+    const arrival = booking.passengerDestination || trip.arrivalLocation;
+    const driverLabel = driverPhone ? `${driverName} (${driverPhone})` : driverName;
+    const otherPassengersLabel =
+      otherPassengerNames.length > 0
+        ? otherPassengerNames.join(', ')
+        : 'aucun autre passager confirme';
+
+    if (eventType === 'dropoff') {
+      return [
+        'ZWANGA - Mise a jour securite',
+        `${passengerName} a ete depose(e) avec succes.`,
+        `Depart: ${departure}.`,
+        `Arrivee: ${arrival}.`,
+        `Conducteur: ${driverLabel}.`,
+        `Vehicule: ${vehicleDetails}.`,
+        `Autres passagers: ${otherPassengersLabel}.`,
+      ].join('\n');
+    }
+
+    if (eventType === 'trip_end_without_dropoff') {
+      return [
+        'ZWANGA - Alerte securite',
+        `Le trajet est termine mais la depose de ${passengerName} n'a pas ete confirmee.`,
+        `Depart: ${departure}.`,
+        `Arrivee: ${arrival}.`,
+        `Conducteur: ${driverLabel}.`,
+        `Vehicule: ${vehicleDetails}.`,
+        `Autres passagers: ${otherPassengersLabel}.`,
+      ].join('\n');
+    }
+
+    return [
+      'ZWANGA - Mise a jour securite',
+      `${passengerName} vient d'embarquer.`,
+      `Depart: ${departure}.`,
+      `Arrivee: ${arrival}.`,
+      `Conducteur: ${driverLabel}.`,
+      `Vehicule: ${vehicleDetails}.`,
+      `Autres passagers: ${otherPassengersLabel}.`,
+    ].join('\n');
+  }
+
+  private async notifyDriverEmergencyContactsOnPickup(booking: Booking): Promise<void> {
+    try {
+      const trip =
+        (await this.tripRepository.findOne({
+          where: { id: booking.tripId },
+          relations: ['driver', 'vehicle', 'bookings', 'bookings.passenger'],
+        }));
+      if (!trip) {
+        return;
+      }
+
+      const selectedContactIds = trip.driverSafetyEmergencyContactIds ?? [];
+      if (selectedContactIds.length === 0) {
+        return;
+      }
+
+      const emergencyContacts = await this.safetyService.findAllEmergencyContacts(trip.driverId);
+      const selectedContacts = emergencyContacts.filter(
+        (contact) =>
+          contact.isActive &&
+          !!contact.phone &&
+          selectedContactIds.includes(contact.id),
+      );
+
+      if (selectedContacts.length === 0) {
+        return;
+      }
+
+      this.logger.log(
+        `[WA][DriverEmergencyContact][pickup] booking=${booking.id} trip=${booking.tripId} selected=${selectedContacts.length}`,
+      );
+
+      const passengerName = booking.passenger
+        ? `${booking.passenger.firstName} ${booking.passenger.lastName}`.trim()
+        : 'Un passager';
+      const driverName = trip.driver
+        ? `${trip.driver.firstName} ${trip.driver.lastName}`.trim()
+        : 'Le conducteur';
+      const vehicleDetails = this.buildVehicleSafetyLabel(trip);
+      const passengerNames = this.getConfirmedPassengerNames(trip.bookings ?? []);
+      const passengersLabel =
+        passengerNames.length > 0 ? passengerNames.join(', ') : 'aucun passager confirme';
+
+      const message = [
+        'ZWANGA - Mise a jour securite conducteur',
+        `${driverName} vient de recuperer ${passengerName}.`,
+        `Depart: ${trip.departureLocation}.`,
+        `Arrivee: ${trip.arrivalLocation}.`,
+        `Conducteur: ${driverName}.`,
+        `Vehicule: ${vehicleDetails}.`,
+        `Passagers: ${passengersLabel}.`,
+      ].join('\n');
+
+      let success = 0;
+      let failed = 0;
+      for (const contact of selectedContacts) {
+        this.logger.debug(
+          `[WA][DriverEmergencyContact][pickup] booking=${booking.id} contactId=${contact.id} phone=${contact.phone} sending...`,
+        );
+        const sent = await this.messagingService.sendMessage(contact.phone, message, {
+          flow: 'booking_driver_safety',
+          eventType: 'driver_pickup',
+          bookingId: booking.id,
+          tripId: booking.tripId,
+          contactId: contact.id,
+          driverId: trip.driverId,
+        });
+        if (sent) {
+          success += 1;
+          this.logger.log(
+            `[WA][DriverEmergencyContact][pickup] booking=${booking.id} contactId=${contact.id} status=sent`,
+          );
+        } else {
+          failed += 1;
+          this.logger.warn(
+            `[WA][DriverEmergencyContact][pickup] booking=${booking.id} contactId=${contact.id} status=failed`,
+          );
+        }
+      }
+
+      this.logger.log(
+        `[DriverEmergencyContact][pickup] booking ${booking.id}: ${success} sent, ${failed} failed`,
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Driver emergency contact pickup notification skipped for booking ${booking.id}: ${error.message}`,
+      );
+    }
+  }
+
+  private buildVehicleSafetyLabel(trip: Trip): string {
+    if (!trip.vehicle) {
+      return 'vehicule non renseigne';
+    }
+    const brandModel = [trip.vehicle.brand, trip.vehicle.model].filter(Boolean).join(' ');
+    const color = trip.vehicle.color ? `, couleur ${trip.vehicle.color}` : '';
+    const plate = trip.vehicle.licensePlate ? `, plaque ${trip.vehicle.licensePlate}` : '';
+    return `${brandModel || 'vehicule'}${color}${plate}`;
+  }
+
+  private getConfirmedPassengerNames(bookings: Booking[]): string[] {
+    const seen = new Set<string>();
+    const names: string[] = [];
+
+    for (const booking of bookings) {
+      const isConfirmedPassenger =
+        booking.status === BookingStatus.ACCEPTED ||
+        booking.status === BookingStatus.COMPLETED ||
+        booking.pickedUp ||
+        booking.pickedUpConfirmedByPassenger ||
+        booking.droppedOff ||
+        booking.droppedOffConfirmedByPassenger;
+
+      if (!isConfirmedPassenger || !booking.passenger) {
+        continue;
+      }
+
+      const name = `${booking.passenger.firstName ?? ''} ${booking.passenger.lastName ?? ''}`.trim();
+      if (!name) {
+        continue;
+      }
+      if (seen.has(name)) {
+        continue;
+      }
+      seen.add(name);
+      names.push(name);
+    }
+
+    return names;
+  }
+
+  private getOtherConfirmedPassengerNames(bookings: Booking[], currentPassengerId: string): string[] {
+    return this.getConfirmedPassengerNames(
+      bookings.filter((booking) => booking.passengerId !== currentPassengerId),
+    );
   }
 
   async reportBookingProblem(
@@ -1021,6 +1328,12 @@ export class BookingsService {
     }
 
     // Récupérer les informations du véhicule
+    booking.safetyEmergencyContactIds = selectedContacts.map((contact) => contact.id);
+    await this.bookingRepository.save(booking);
+    this.logger.log(
+      `Saved ${booking.safetyEmergencyContactIds.length} emergency contact(s) for booking ${booking.id}`,
+    );
+
     const trip = booking.trip;
     if (!trip.vehicle) {
       throw new BadRequestException('Aucun véhicule associé à ce trajet');
@@ -1039,7 +1352,7 @@ export class BookingsService {
     }
 
     // Générer le message WhatsApp
-    const message = this.whatsAppService.generateTripNotificationMessage({
+    const message = this.messagingService.generateTripNotificationMessage({
       passengerName: `${passenger.firstName} ${passenger.lastName}`,
       departureLocation: trip.departureLocation,
       arrivalLocation: trip.arrivalLocation,
@@ -1109,6 +1422,7 @@ export class BookingsService {
     booking.passengerCurrentLocation = currentLocation;
     booking.passengerLastLocationUpdateAt = new Date();
     await this.bookingRepository.save(booking);
+    await this.touchTripInteraction(booking.tripId);
 
     this.logger.log(`Passenger location updated for booking ${bookingId}`);
 
@@ -1125,6 +1439,21 @@ export class BookingsService {
   /**
    * Calcule la distance en mètres entre la position actuelle du passager et sa destination
    */
+  private async touchTripInteraction(tripId: string): Promise<void> {
+    try {
+      await this.tripRepository
+        .createQueryBuilder()
+        .update(Trip)
+        .set({ updatedAt: () => 'CURRENT_TIMESTAMP' } as any)
+        .where('id = :tripId', { tripId })
+        .execute();
+    } catch (error) {
+      this.logger.warn(
+        `Unable to refresh interaction timestamp for trip ${tripId}: ${error.message}`,
+      );
+    }
+  }
+
   private async calculateDistanceToDestination(booking: Booking): Promise<number | null> {
     if (!booking.passengerCurrentLocation || !booking.passengerDestinationPoint) {
       return null;

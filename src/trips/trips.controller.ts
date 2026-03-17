@@ -12,7 +12,13 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { TripsService } from './trips.service';
-import { CreateTripDto, SearchTripsDto, UpdateTripDto, SearchByPointsDto } from './dto/trip.dto';
+import {
+  CreateTripDto,
+  SearchTripsDto,
+  UpdateTripDto,
+  SearchByPointsDto,
+  DriverEmergencyContactsDto,
+} from './dto/trip.dto';
 import { Auth } from '../auth/decorators/auth.decorator';
 import { Public } from '../common/decorators/public.decorator';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
@@ -126,12 +132,32 @@ export class TripsController {
     return this.tripsService.startTrip(id, req.user.userId);
   }
 
+  @Put(':id/driver-emergency-contacts')
+  @Auth()
+  @SensitiveThrottle(10, 6000)
+  @ApiOperation({ summary: "Select driver's emergency contacts for trip WhatsApp safety notifications" })
+  async setDriverEmergencyContacts(
+    @Request() req,
+    @Param('id') id: string,
+    @Body() dto: DriverEmergencyContactsDto,
+  ) {
+    return this.tripsService.setDriverEmergencyContacts(id, req.user.userId, dto);
+  }
+
   @Put(':id/pause')
   @Auth()
   @SensitiveThrottle(10, 6000)
   @ApiOperation({ summary: 'Pause/interrupt an active trip' })
   async pauseTrip(@Request() req, @Param('id') id: string) {
     return this.tripsService.pauseTrip(id, req.user.userId);
+  }
+
+  @Put(':id/complete')
+  @Auth()
+  @SensitiveThrottle(10, 6000)
+  @ApiOperation({ summary: 'Complete/end an active trip (driver only)' })
+  async completeTrip(@Request() req, @Param('id') id: string) {
+    return this.tripsService.completeTrip(id, req.user.userId);
   }
 
   @Put(':id/make-public')

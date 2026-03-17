@@ -14,11 +14,18 @@ import { Booking, BookingStatus } from '../bookings/entities/booking.entity';
 import { Vehicle } from '../vehicles/entities/vehicle.entity';
 import { TripRequest } from '../trip-requests/entities/trip-request.entity';
 import { KycDocument, KycStatus } from '../users/entities/kyc-document.entity';
-import { CreateTripDto, SearchTripsDto, UpdateTripDto } from './dto/trip.dto';
+import {
+  CreateTripDto,
+  SearchTripsDto,
+  UpdateTripDto,
+  DriverEmergencyContactsDto,
+} from './dto/trip.dto';
 import { CacheService } from '../common/services/cache.service';
 import { FileUploadService } from '../common/services/file-upload.service';
 import { NotificationService } from '../notifications/notifications.service';
 import { Rating } from '../ratings/entities/rating.entity';
+import { EmergencyContact } from '../safety/entities/emergency-contact.entity';
+import { MessagingService } from '../messaging/messaging.service';
 
 export type Coordinates = [number, number] | null;
 
@@ -81,9 +88,12 @@ export class TripsService {
     private kycDocumentRepository: Repository<KycDocument>,
     @InjectRepository(Rating)
     private ratingRepository: Repository<Rating>,
+    @InjectRepository(EmergencyContact)
+    private emergencyContactRepository: Repository<EmergencyContact>,
     private cacheService: CacheService,
     private fileUploadService: FileUploadService,
     private notificationService: NotificationService,
+    private messagingService: MessagingService,
   ) { }
 
   async create(
@@ -442,7 +452,7 @@ export class TripsService {
 
     if (!trip) {
       this.logger.warn(`Trip not found: ${id}`);
-      throw new NotFoundException('Trajet non trouvé');
+      throw new NotFoundException('Trajet non trouve');
     }
 
     const userRatingsMap = await this.buildUserRatingsMap(this.collectTripUserIds([trip]));
@@ -481,7 +491,7 @@ export class TripsService {
     });
 
     if (!trip) {
-      throw new NotFoundException('Trajet non trouvé');
+      throw new NotFoundException('Trajet non trouve');
     }
 
     if (!trip.isPrivate) {
@@ -499,7 +509,7 @@ export class TripsService {
     });
 
     if (!tripRequest) {
-      throw new NotFoundException('Demande de trajet non trouvée');
+      throw new NotFoundException('Demande de Trajet non trouvee');
     }
 
     // Seul le passager qui a créé la demande peut autoriser la publication
@@ -515,7 +525,7 @@ export class TripsService {
     });
 
     if (!driver) {
-      throw new NotFoundException('Conducteur du trajet non trouvé');
+      throw new NotFoundException('Conducteur du Trajet non trouve');
     }
 
     // Vérifier que le conducteur a passé le KYC (status ACTIVE)
@@ -562,7 +572,10 @@ export class TripsService {
 
     if (!trip) {
       this.logger.warn(`Trip update failed: Trip ${id} not found for driver ${driverId}`);
-      throw new NotFoundException('Trajet non trouvé');
+      throw new NotFoundException('Trajet non trouve');
+    }
+    if (updateTripDto.status === TripStatus.COMPLETED && trip.status !== TripStatus.COMPLETED) {
+      return this.completeTrip(id, driverId);
     }
 
     const {
@@ -661,6 +674,84 @@ export class TripsService {
     return this.findOne(id);
   }
 
+  async setDriverEmergencyContacts(
+    tripId: string,
+    driverId: string,
+    dto: DriverEmergencyContactsDto,
+  ): Promise<{
+    tripId: string;
+    emergencyContactIds: string[];
+    contacts: Array<{ id: string; name: string; phone: string }>;
+  }> {
+    const trip = await this.tripRepository.findOne({
+      where: { id: tripId, driverId },
+    });
+
+    if (!trip) {
+      throw new NotFoundException('Trajet non trouve');
+    }
+
+    const selectedContacts = await this.emergencyContactRepository.find({
+      where: {
+        userId: driverId,
+        isActive: true,
+        id: In(dto.emergencyContactIds),
+      },
+    });
+
+    if (selectedContacts.length !== dto.emergencyContactIds.length) {
+      throw new BadRequestException(
+        "Certains contacts d'urgence selectionnes sont introuvables ou inactifs",
+      );
+    }
+
+    trip.driverSafetyEmergencyContactIds = selectedContacts.map((contact) => contact.id);
+    await this.tripRepository.save(trip);
+
+    await this.cacheService.del(CacheService.getTripKey(tripId));
+
+    return {
+      tripId: trip.id,
+      emergencyContactIds: trip.driverSafetyEmergencyContactIds,
+      contacts: selectedContacts.map((contact) => ({
+        id: contact.id,
+        name: contact.name,
+        phone: contact.phone,
+      })),
+    };
+  }
+
+  async completeTrip(tripId: string, driverId: string): Promise<SanitizedTrip> {
+    this.logger.log(`Completing trip ${tripId} by driver ${driverId}`);
+
+    const trip = await this.tripRepository.findOne({
+      where: { id: tripId, driverId },
+      relations: ['driver', 'bookings', 'bookings.passenger', 'vehicle'],
+    });
+
+    if (!trip) {
+      throw new NotFoundException('Trajet non trouve ou vous n\'etes pas le conducteur');
+    }
+
+    if (trip.status !== TripStatus.ACTIVE) {
+      throw new BadRequestException(
+        `Impossible de terminer le trajet. Statut actuel : ${trip.status}`,
+      );
+    }
+
+    trip.status = TripStatus.COMPLETED;
+    trip.completedAt = new Date();
+    await this.tripRepository.save(trip);
+
+    await this.cacheService.del(CacheService.getTripKey(tripId));
+    await this.cacheService.del(CacheService.getTripsListKey());
+    await this.cacheService.del(CacheService.getTripsListKey('all'));
+
+    await this.notifyDriverEmergencyContacts(trip, 'trip_completed');
+
+    return this.findOne(tripId);
+  }
+
   async remove(id: string, driverId: string): Promise<void> {
     this.logger.log(`Deleting trip ${id} by driver ${driverId}`);
 
@@ -671,7 +762,7 @@ export class TripsService {
 
     if (!trip) {
       this.logger.warn(`Trip deletion failed: Trip ${id} not found for driver ${driverId}`);
-      throw new NotFoundException('Trajet non trouvé');
+      throw new NotFoundException('Trajet non trouve');
     }
 
     // Check if trip is completed or expired
@@ -723,12 +814,12 @@ export class TripsService {
 
     const trip = await this.tripRepository.findOne({
       where: { id: tripId, driverId },
-      relations: ['bookings', 'bookings.passenger', 'driver'],
+      relations: ['bookings', 'bookings.passenger', 'driver', 'vehicle'],
     });
 
     if (!trip) {
       this.logger.warn(`Trip start failed: Trip ${tripId} not found for driver ${driverId}`);
-      throw new NotFoundException('Trajet non trouvé ou vous n\'êtes pas le conducteur');
+      throw new NotFoundException('Trajet non trouve ou vous n\'êtes pas le conducteur');
     }
 
     if (trip.status !== TripStatus.PENDING) {
@@ -757,6 +848,7 @@ export class TripsService {
     await this.cacheService.del(CacheService.getTripsListKey('all'));
 
     this.logger.log(`Trip ${tripId} started successfully. Available seats: ${trip.availableSeats}, Accepted bookings: ${acceptedBookings.length}`);
+    await this.notifyDriverEmergencyContacts(trip, 'trip_started');
 
     // Notify users based on seat availability
     if (hasAvailableSeats) {
@@ -780,7 +872,7 @@ export class TripsService {
 
     if (!trip) {
       this.logger.warn(`Trip pause failed: Trip ${tripId} not found for driver ${driverId}`);
-      throw new NotFoundException('Trajet non trouvé ou vous n\'êtes pas le conducteur');
+      throw new NotFoundException('Trajet non trouve ou vous n\'êtes pas le conducteur');
     }
 
     if (trip.status !== TripStatus.ACTIVE) {
@@ -1176,7 +1268,7 @@ export class TripsService {
     });
 
     if (!trip) {
-      throw new NotFoundException('Trajet non trouvé');
+      throw new NotFoundException('Trajet non trouve');
     }
 
     const isDriver = trip.driverId === userId;
@@ -1266,7 +1358,7 @@ export class TripsService {
   /**
    * Cron job to mark expired trips and their bookings as expired
    * - PENDING trips expire 2 hours after scheduled departure
-   * - Trips that have been started (ACTIVE) expire 12 hours after scheduled departure
+   * - ACTIVE trips expire only after 12 hours without interaction since trip start
    * Runs every hour.
    */
   @Cron(CronExpression.EVERY_HOUR)
@@ -1288,16 +1380,23 @@ export class TripsService {
         startedAt: IsNull(),
         departureDate: LessThan(twoHoursAgo),
       },
-      relations: ['driver', 'bookings', 'bookings.passenger'],
+      relations: ['driver', 'bookings', 'bookings.passenger', 'vehicle'],
     });
 
-    // 2) ACTIVE trips that have been started and should auto-complete 12 hours after departure
-    const activeTripsToExpire = await this.tripRepository.find({
+    // 2) ACTIVE trips that have been started for at least 12h
+    const activeTripsCandidates = await this.tripRepository.find({
       where: {
         status: TripStatus.ACTIVE,
-        departureDate: LessThan(twelveHoursAgo),
+        startedAt: LessThan(twelveHoursAgo),
       },
-      relations: ['driver', 'bookings', 'bookings.passenger'],
+      relations: ['driver', 'bookings', 'bookings.passenger', 'vehicle'],
+    });
+
+    // Expire only if there has been no interaction for 12h after start.
+    // We rely on trip.updatedAt, which is refreshed on trip/booking interactions.
+    const activeTripsToExpire = activeTripsCandidates.filter((trip) => {
+      const lastInteractionAt = trip.updatedAt ?? trip.startedAt ?? trip.departureDate;
+      return lastInteractionAt < twelveHoursAgo;
     });
 
     const tripsToExpire = [...pendingTripsToExpire, ...activeTripsToExpire];
@@ -1309,7 +1408,7 @@ export class TripsService {
 
     this.logger.log(
       `Found ${tripsToExpire.length} trips to auto-complete as expired ` +
-        `(pending: ${pendingTripsToExpire.length}, active: ${activeTripsToExpire.length})`,
+        `(pending: ${pendingTripsToExpire.length}, active_inactive_12h: ${activeTripsToExpire.length})`,
     );
 
     for (const trip of tripsToExpire) {
@@ -1325,6 +1424,13 @@ export class TripsService {
           booking.status === BookingStatus.PENDING ||
           booking.status === BookingStatus.ACCEPTED,
       ) || [];
+
+      const bookingsMissingDropoff = bookingsToExpire.filter(
+        (booking) =>
+          (booking.pickedUp || booking.pickedUpConfirmedByPassenger) &&
+          !booking.droppedOff &&
+          !booking.droppedOffConfirmedByPassenger,
+      );
 
       if (bookingsToExpire.length > 0) {
         const bookingIds = bookingsToExpire.map((b) => b.id);
@@ -1359,6 +1465,9 @@ export class TripsService {
 
       // Notify passengers about trip expiration
       await this.notifyPassengersAboutTripExpiration(trip, bookingsToExpire);
+
+      // Notify selected emergency contacts when a picked-up passenger has no dropoff confirmation.
+      await this.notifyEmergencyContactsForMissingDropoff(trip, bookingsMissingDropoff);
 
       // Invalidate cache for this trip
       await this.cacheService.del(CacheService.getTripKey(trip.id));
@@ -1656,6 +1765,242 @@ export class TripsService {
         error.stack,
       );
     }
+  }
+
+  private async notifyDriverEmergencyContacts(
+    trip: Trip,
+    eventType: 'trip_started' | 'trip_completed',
+  ): Promise<void> {
+    try {
+      const selectedContactIds = trip.driverSafetyEmergencyContactIds ?? [];
+      if (selectedContactIds.length === 0) {
+        return;
+      }
+
+      const contacts = await this.emergencyContactRepository.find({
+        where: {
+          userId: trip.driverId,
+          isActive: true,
+          id: In(selectedContactIds),
+        },
+      });
+
+      if (contacts.length === 0) {
+        return;
+      }
+
+      this.logger.log(
+        `[WA][DriverEmergencyContact][${eventType}] trip=${trip.id} driver=${trip.driverId} selected=${contacts.length}`,
+      );
+
+      const driverName = trip.driver
+        ? `${trip.driver.firstName} ${trip.driver.lastName}`.trim()
+        : 'Le conducteur';
+      const vehicleDetails = this.buildVehicleSafetyLabel(trip);
+      const passengerNames = this.getConfirmedPassengerNames(trip.bookings ?? []);
+      const passengersLabel =
+        passengerNames.length > 0 ? passengerNames.join(', ') : 'aucun passager confirme';
+      const message =
+        eventType === 'trip_started'
+          ? [
+              'ZWANGA - Mise a jour securite conducteur',
+              `${driverName} vient de demarrer son trajet.`,
+              `Depart: ${trip.departureLocation}.`,
+              `Arrivee: ${trip.arrivalLocation}.`,
+              `Conducteur: ${driverName}.`,
+              `Vehicule: ${vehicleDetails}.`,
+              `Passagers: ${passengersLabel}.`,
+            ].join('\n')
+          : [
+              'ZWANGA - Mise a jour securite conducteur',
+              `${driverName} a termine son trajet.`,
+              `Depart: ${trip.departureLocation}.`,
+              `Arrivee: ${trip.arrivalLocation}.`,
+              `Conducteur: ${driverName}.`,
+              `Vehicule: ${vehicleDetails}.`,
+              `Passagers: ${passengersLabel}.`,
+            ].join('\n');
+
+      let sent = 0;
+      let failed = 0;
+
+      for (const contact of contacts) {
+        this.logger.debug(
+          `[WA][DriverEmergencyContact][${eventType}] trip=${trip.id} contactId=${contact.id} phone=${contact.phone} sending...`,
+        );
+        const whatsappSent = await this.messagingService.sendMessage(contact.phone, message, {
+          flow: 'trip_driver_safety',
+          eventType,
+          tripId: trip.id,
+          driverId: trip.driverId,
+          contactId: contact.id,
+        });
+        if (whatsappSent) {
+          sent += 1;
+          this.logger.log(
+            `[WA][DriverEmergencyContact][${eventType}] trip=${trip.id} contactId=${contact.id} status=sent`,
+          );
+        } else {
+          failed += 1;
+          this.logger.warn(
+            `[WA][DriverEmergencyContact][${eventType}] trip=${trip.id} contactId=${contact.id} status=failed`,
+          );
+        }
+      }
+
+      this.logger.log(
+        `[DriverEmergencyContact][${eventType}] trip ${trip.id}: ${sent} sent, ${failed} failed`,
+      );
+    } catch (error) {
+      this.logger.error(
+        `Error notifying driver emergency contacts for trip ${trip.id}: ${error.message}`,
+        error.stack,
+      );
+    }
+  }
+
+  private async notifyEmergencyContactsForMissingDropoff(
+    trip: Trip,
+    bookings: Booking[],
+  ): Promise<void> {
+    try {
+      if (bookings.length === 0) {
+        return;
+      }
+
+      let sent = 0;
+      let failed = 0;
+
+      for (const booking of bookings) {
+        const selectedContactIds = booking.safetyEmergencyContactIds ?? [];
+        if (selectedContactIds.length === 0) {
+          continue;
+        }
+
+        const contacts = await this.emergencyContactRepository.find({
+          where: {
+            userId: booking.passengerId,
+            isActive: true,
+            id: In(selectedContactIds),
+          },
+        });
+
+        if (contacts.length === 0) {
+          continue;
+        }
+
+        this.logger.log(
+          `[WA][EmergencyContact][trip_end_without_dropoff] trip=${trip.id} booking=${booking.id} selected=${contacts.length}`,
+        );
+
+        const passengerName = booking.passenger
+          ? `${booking.passenger.firstName} ${booking.passenger.lastName}`.trim()
+          : 'Le passager';
+        const driverName = trip.driver
+          ? `${trip.driver.firstName} ${trip.driver.lastName}`.trim()
+          : 'Le conducteur';
+        const driverPhone = trip.driver?.phone;
+        const vehicleDetails = this.buildVehicleSafetyLabel(trip);
+        const otherPassengers = this.getOtherConfirmedPassengerNames(
+          trip.bookings ?? [],
+          booking.passengerId,
+        );
+        const otherPassengersLabel =
+          otherPassengers.length > 0
+            ? otherPassengers.join(', ')
+            : 'aucun autre passager confirme';
+
+        const message = [
+          'ZWANGA - Alerte securite',
+          `Le trajet est termine mais la depose de ${passengerName} n'a pas ete confirmee.`,
+          `Depart: ${trip.departureLocation}.`,
+          `Arrivee: ${booking.passengerDestination || trip.arrivalLocation}.`,
+          `Conducteur: ${driverPhone ? `${driverName} (${driverPhone})` : driverName}.`,
+          `Vehicule: ${vehicleDetails}.`,
+          `Autres passagers: ${otherPassengersLabel}.`,
+        ].join('\n');
+
+        for (const contact of contacts) {
+          this.logger.debug(
+            `[WA][EmergencyContact][trip_end_without_dropoff] trip=${trip.id} booking=${booking.id} contactId=${contact.id} phone=${contact.phone} sending...`,
+          );
+          const whatsappSent = await this.messagingService.sendMessage(contact.phone, message, {
+            flow: 'trip_passenger_safety',
+            eventType: 'trip_end_without_dropoff',
+            tripId: trip.id,
+            bookingId: booking.id,
+            passengerId: booking.passengerId,
+            contactId: contact.id,
+          });
+          if (whatsappSent) {
+            sent += 1;
+            this.logger.log(
+              `[WA][EmergencyContact][trip_end_without_dropoff] trip=${trip.id} booking=${booking.id} contactId=${contact.id} status=sent`,
+            );
+          } else {
+            failed += 1;
+            this.logger.warn(
+              `[WA][EmergencyContact][trip_end_without_dropoff] trip=${trip.id} booking=${booking.id} contactId=${contact.id} status=failed`,
+            );
+          }
+        }
+      }
+
+      if (sent > 0 || failed > 0) {
+        this.logger.log(
+          `[EmergencyContact][trip_end_without_dropoff] trip ${trip.id}: ${sent} sent, ${failed} failed`,
+        );
+      }
+    } catch (error) {
+      this.logger.error(
+        `Error notifying emergency contacts for missing dropoff on trip ${trip.id}: ${error.message}`,
+        error.stack,
+      );
+    }
+  }
+
+  private buildVehicleSafetyLabel(trip: Trip): string {
+    if (!trip.vehicle) {
+      return 'vehicule non renseigne';
+    }
+    const brandModel = [trip.vehicle.brand, trip.vehicle.model].filter(Boolean).join(' ');
+    const color = trip.vehicle.color ? `, couleur ${trip.vehicle.color}` : '';
+    const plate = trip.vehicle.licensePlate ? `, plaque ${trip.vehicle.licensePlate}` : '';
+    return `${brandModel || 'vehicule'}${color}${plate}`;
+  }
+
+  private getConfirmedPassengerNames(bookings: Booking[]): string[] {
+    const seen = new Set<string>();
+    const names: string[] = [];
+
+    for (const booking of bookings) {
+      const isConfirmedPassenger =
+        booking.status === BookingStatus.ACCEPTED ||
+        booking.status === BookingStatus.COMPLETED ||
+        booking.pickedUp ||
+        booking.pickedUpConfirmedByPassenger ||
+        booking.droppedOff ||
+        booking.droppedOffConfirmedByPassenger;
+
+      if (!isConfirmedPassenger || !booking.passenger) {
+        continue;
+      }
+
+      const name = `${booking.passenger.firstName ?? ''} ${booking.passenger.lastName ?? ''}`.trim();
+      if (!name || seen.has(name)) {
+        continue;
+      }
+      seen.add(name);
+      names.push(name);
+    }
+
+    return names;
+  }
+
+  private getOtherConfirmedPassengerNames(bookings: Booking[], currentPassengerId: string): string[] {
+    return this.getConfirmedPassengerNames(
+      bookings.filter((booking) => booking.passengerId !== currentPassengerId),
+    );
   }
 
   /**

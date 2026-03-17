@@ -11,6 +11,7 @@ import {
   IsArray,
   ArrayMinSize,
   ArrayMaxSize,
+  IsUUID,
 } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { TripStatus } from '../entities/trip.entity';
@@ -269,6 +270,20 @@ export class UpdateTripDto {
   @IsString()
   @IsOptional()
   vehicleId?: string | null;
+}
+
+export class DriverEmergencyContactsDto {
+  @ApiProperty({
+    description: "IDs des contacts d'urgence du conducteur a notifier (1 a 5 contacts)",
+    type: [String],
+    minItems: 1,
+    maxItems: 5,
+  })
+  @IsArray()
+  @ArrayMinSize(1, { message: "Vous devez selectionner au moins 1 contact d'urgence" })
+  @ArrayMaxSize(5, { message: "Vous ne pouvez pas selectionner plus de 5 contacts d'urgence" })
+  @IsUUID(undefined, { each: true, message: 'Chaque ID de contact doit etre un UUID valide' })
+  emergencyContactIds: string[];
 }
 
 export class SearchByPointsDto {
