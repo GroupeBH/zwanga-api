@@ -27,7 +27,10 @@ export class EmergencyContact {
   name: string; // Nom du contact d'urgence
 
   @Column()
-  phone: string; // Numéro de téléphone du contact
+  phone: string; // Numero de telephone du contact
+
+  @Column({ type: 'varchar', nullable: true })
+  email: string | null; // Email du contact d'urgence (optionnel)
 
   @Column({ type: 'varchar', nullable: true })
   relationship: string | null; // Relation (famille, ami, etc.)
@@ -41,4 +44,3 @@ export class EmergencyContact {
   @UpdateDateColumn()
   updatedAt: Date;
 }
-

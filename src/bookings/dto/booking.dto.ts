@@ -36,12 +36,12 @@ export class CreateBookingDto {
 
   @ApiProperty({ 
     minimum: 1,
-    maximum: 50,
-    description: 'Nombre de places à réserver. Le maximum est limité par le nombre de places disponibles dans le trajet (maximum 50 places par réservation).' 
+    maximum: 2,
+    description: 'Nombre de places à réserver. Maximum 2 places par réservation pour des raisons de sécurité du conducteur.' 
   })
   @IsNumber()
   @Min(1, { message: 'Le nombre de places doit être au moins 1' })
-  @Max(50, { message: 'Le nombre de places ne peut pas dépasser 50 par réservation' })
+  @Max(2, { message: 'Pour des raisons de sécurité du conducteur, vous ne pouvez pas réserver plus de 2 places par trajet' })
   @IsNotEmpty()
   numberOfSeats: number;
 

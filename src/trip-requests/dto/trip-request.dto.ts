@@ -5,6 +5,7 @@ import {
   IsDateString,
   IsOptional,
   Min,
+  Max,
   IsArray,
   ArrayMinSize,
   ArrayMaxSize,
@@ -64,11 +65,13 @@ export class CreateTripRequestDto {
 
   @ApiProperty({ 
     minimum: 1,
+    maximum: 2,
     description: 'Nombre de places nécessaires',
     example: 2,
   })
   @IsNumber()
   @Min(1)
+  @Max(2, { message: 'Pour des raisons de sécurité du conducteur, vous ne pouvez pas réserver plus de 2 places par trajet' })
   @IsNotEmpty()
   numberOfSeats: number;
 
@@ -231,11 +234,13 @@ export class UpdateTripRequestDto {
   @ApiProperty({ 
     required: false,
     minimum: 1,
+    maximum: 2,
     description: 'Nombre de places nécessaires',
     example: 2,
   })
   @IsNumber()
   @Min(1)
+  @Max(2, { message: 'Pour des raisons de sécurité du conducteur, vous ne pouvez pas réserver plus de 2 places par trajet' })
   @IsOptional()
   numberOfSeats?: number;
 

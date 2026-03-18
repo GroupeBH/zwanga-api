@@ -46,28 +46,13 @@ services:
       start_period: 10s
     restart: unless-stopped
 
-  ollama:
-    image: ollama/ollama:latest
-    container_name: zwanga-ollama
-    ports:
-      - "${OLLAMA_PORT:-11434}:11434"
-    volumes:
-      - ollama_data:/root/.ollama
-    networks:
-      - zwanga-network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
-
   api:
     build:
       context: .
       dockerfile: Dockerfile
       target: production
+      args:
+        NODE_BASE_IMAGE: ${NODE_BASE_IMAGE:-node:20-bookworm-slim}
     container_name: zwanga-api
     env_file:
       - .env
@@ -76,7 +61,6 @@ services:
       DATABASE_PORT: ${DATABASE_PORT:-5432}
       REDIS_HOST: redis
       REDIS_PORT: 6379
-      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
@@ -85,8 +69,6 @@ services:
       postgres:
         condition: service_healthy
       redis:
-        condition: service_healthy
-      ollama:
         condition: service_healthy
     volumes:
       - ./uploads:/app/uploads
@@ -100,10 +82,102 @@ services:
       retries: 3
       start_period: 40s
 
+  loki:
+    image: grafana/loki:2.9.8
+    container_name: zwanga-loki
+    command: -config.file=/etc/loki/config.yml
+    ports:
+      - "${LOKI_PORT:-3100}:3100"
+    volumes:
+      - ./docker/monitoring/loki-config.yml:/etc/loki/config.yml:ro
+      - loki_data:/loki
+    networks:
+      - zwanga-network
+    restart: unless-stopped
+
+  promtail:
+    image: grafana/promtail:2.9.8
+    container_name: zwanga-promtail
+    command: -config.file=/etc/promtail/config.yml
+    depends_on:
+      - loki
+    volumes:
+      - ./docker/monitoring/promtail-config.yml:/etc/promtail/config.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - zwanga-network
+    restart: unless-stopped
+
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.67.0
+    container_name: zwanga-redis-exporter
+    environment:
+      REDIS_ADDR: redis://redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - zwanga-network
+    restart: unless-stopped
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.16.0
+    container_name: zwanga-postgres-exporter
+    environment:
+      DATA_SOURCE_NAME: postgresql://${DATABASE_USER:-postgres}:${DATABASE_PASSWORD:-rosamystica97}@postgres:5432/${DATABASE_NAME:-zwangadb}?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - zwanga-network
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: zwanga-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./docker/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    depends_on:
+      - redis-exporter
+      - postgres-exporter
+      - promtail
+    networks:
+      - zwanga-network
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:10.4.7
+    container_name: zwanga-grafana
+    ports:
+      - "${GRAFANA_PORT:-3001}:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./docker/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+      - loki
+    networks:
+      - zwanga-network
+    restart: unless-stopped
+
 volumes:
   postgres_data:
   redis_data:
-  ollama_data:
+  loki_data:
+  prometheus_data:
+  grafana_data:
 
 networks:
   zwanga-network:

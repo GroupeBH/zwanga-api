@@ -10,12 +10,25 @@ import { Vehicle } from '../vehicles/entities/vehicle.entity';
 import { TripRequest } from '../trip-requests/entities/trip-request.entity';
 import { KycDocument } from '../users/entities/kyc-document.entity';
 import { NotificationsModule } from '../notifications/notifications.module';
+import { Rating } from '../ratings/entities/rating.entity';
+import { EmergencyContact } from '../safety/entities/emergency-contact.entity';
+import { MessagingModule } from '../messaging/messaging.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Trip, User, Booking, Vehicle, TripRequest, KycDocument]),
+    TypeOrmModule.forFeature([
+      Trip,
+      User,
+      Booking,
+      Vehicle,
+      TripRequest,
+      KycDocument,
+      Rating,
+      EmergencyContact,
+    ]),
     ScheduleModule,
     NotificationsModule,
+    MessagingModule,
   ],
   controllers: [TripsController],
   providers: [TripsService],

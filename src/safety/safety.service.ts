@@ -17,6 +17,7 @@ export interface SanitizedEmergencyContact {
   id: string;
   name: string;
   phone: string;
+  email: string | null;
   relationship: string | null;
   isActive: boolean;
   createdAt: Date;
@@ -723,6 +724,7 @@ export class SafetyService {
       id: contact.id,
       name: contact.name,
       phone: contact.phone,
+      email: contact.email,
       relationship: contact.relationship,
       isActive: contact.isActive,
       createdAt: contact.createdAt,

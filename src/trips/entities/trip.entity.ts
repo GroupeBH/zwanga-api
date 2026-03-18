@@ -108,13 +108,16 @@ export class Trip {
   lastLocationUpdateAt: Date | null;
 
   @Column({ type: 'boolean', default: false })
-  departureReminderNotified: boolean; // Indique si la notification de rappel de départ a été envoyée
+  departureReminderNotified: boolean;
+
+  @Column({ type: 'jsonb', default: () => "'[]'" })
+  driverSafetyEmergencyContactIds: string[];
 
   @Column({ type: 'boolean', default: false })
-  isPrivate: boolean; // Indique si le trajet est privé (créé depuis une demande de trajet)
+  isPrivate: boolean;
 
   @Column({ type: 'varchar', nullable: true })
-  tripRequestId: string | null; // ID de la demande de trajet à l'origine de ce trajet (si applicable)
+  tripRequestId: string | null;
 
   @CreateDateColumn()
   createdAt: Date;

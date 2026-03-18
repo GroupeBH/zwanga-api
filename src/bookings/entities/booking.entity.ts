@@ -125,6 +125,9 @@ export class Booking {
   @Column({ type: 'timestamp', nullable: true })
   droppedOffConfirmedAt: Date | null; // Date de confirmation par le passager
 
+  @Column({ type: 'jsonb', default: () => "'[]'" })
+  safetyEmergencyContactIds: string[]; // Contacts d'urgence choisis pour les notifications WhatsApp
+
   @CreateDateColumn()
   createdAt: Date;
 

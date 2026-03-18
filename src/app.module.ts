@@ -54,6 +54,8 @@ import { UserReport } from './safety/entities/user-report.entity';
 import { Notification } from './notifications/entities/notification.entity';
 import { FavoriteLocation } from './users/entities/favorite-location.entity';
 import { FavoritePlace } from './favorite-places/entities/favorite-place.entity';
+import { SupportTicket } from './support/entities/support-ticket.entity';
+import { SupportTicketMessage } from './support/entities/support-ticket-message.entity';
 
 const typeOrmEntities = [
   User,
@@ -75,6 +77,8 @@ const typeOrmEntities = [
   Notification,
   FavoritePlace,
   FavoriteLocation,
+  SupportTicket,
+  SupportTicketMessage,
 ];
 
 @Module({
