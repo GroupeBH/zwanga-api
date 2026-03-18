@@ -14,6 +14,7 @@ export class MessagingService {
   private readonly apiUrl: string;
   private readonly apiKey: string;
   private readonly from: string;
+  private readonly whatsappEnabled: boolean;
   private readonly keccelSmsUrl: string;
   private readonly keccelToken: string;
   private readonly keccelFrom: string;
@@ -40,6 +41,8 @@ export class MessagingService {
       this.configService.get<string>('INFOBIP_WHATSAPP_FROM') ||
       this.configService.get<string>('WHATSAPP_FROM') ||
       'Zwanga';
+    this.whatsappEnabled =
+      (this.configService.get<string>('WHATSAPP_ENABLED') || 'true').toLowerCase() !== 'false';
 
     this.keccelSmsUrl =
       this.configService.get<string>('KECCEL_SMS_URL') ||
@@ -63,7 +66,12 @@ export class MessagingService {
     const phoneForLog = this.maskPhone(formattedPhone);
     const preview = this.buildMessagePreview(message);
 
-    const canSendWhatsApp = !!(this.apiUrl && this.apiKey && this.from);
+    const canSendWhatsApp = !!(
+      this.whatsappEnabled &&
+      this.apiUrl &&
+      this.apiKey &&
+      this.from
+    );
     const canSendSms = !!(
       this.keccelSmsEnabled &&
       this.keccelSmsUrl &&
