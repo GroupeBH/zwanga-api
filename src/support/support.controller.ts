@@ -53,6 +53,14 @@ export class SupportController {
     return this.supportService.listFaq(query);
   }
 
+  @Get('config')
+  @Public()
+  @SensitiveThrottle(60, 60000)
+  @ApiOperation({ summary: 'Recuperer la configuration publique du support center' })
+  async getSupportConfig() {
+    return this.supportService.getSupportConfig();
+  }
+
   @Get('faq/:id')
   @Public()
   @SensitiveThrottle(60, 60000)
@@ -265,4 +273,3 @@ export class SupportController {
     return this.supportService.updateTicketStatus(id, req.user.userId, dto);
   }
 }
-

@@ -25,6 +25,21 @@ export class CreateFaqEntryDto {
   @IsOptional()
   category?: string;
 
+  @ApiProperty({ required: false, default: 'fr-CD' })
+  @IsString()
+  @IsOptional()
+  locale?: string;
+
+  @ApiProperty({ required: false })
+  @IsString()
+  @IsOptional()
+  audience?: string;
+
+  @ApiProperty({ required: false })
+  @IsString()
+  @IsOptional()
+  keywords?: string;
+
   @ApiProperty({ required: false, default: true })
   @IsBoolean()
   @IsOptional()
@@ -53,6 +68,21 @@ export class UpdateFaqEntryDto {
   category?: string;
 
   @ApiProperty({ required: false })
+  @IsString()
+  @IsOptional()
+  locale?: string;
+
+  @ApiProperty({ required: false })
+  @IsString()
+  @IsOptional()
+  audience?: string;
+
+  @ApiProperty({ required: false })
+  @IsString()
+  @IsOptional()
+  keywords?: string;
+
+  @ApiProperty({ required: false })
   @IsBoolean()
   @IsOptional()
   isPublished?: boolean;
@@ -73,6 +103,16 @@ export class ListFaqQueryDto {
   @IsString()
   @IsOptional()
   search?: string;
+
+  @ApiProperty({ required: false })
+  @IsString()
+  @IsOptional()
+  locale?: string;
+
+  @ApiProperty({ required: false })
+  @IsString()
+  @IsOptional()
+  audience?: string;
 
   @ApiProperty({ required: false, default: 1 })
   @Type(() => Number)

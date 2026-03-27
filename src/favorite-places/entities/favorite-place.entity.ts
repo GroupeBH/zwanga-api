@@ -58,6 +58,9 @@ export class FavoritePlace {
   @Column({ type: 'varchar', nullable: true })
   placeId: string | null; // Place ID de Google Maps (optionnel)
 
+  @Column({ type: 'text', nullable: true })
+  notes: string | null; // Notes/reperes utiles pour retrouver le lieu
+
   @CreateDateColumn()
   createdAt: Date;
 

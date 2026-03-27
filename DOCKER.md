@@ -28,6 +28,7 @@ DATABASE_PORT=5432
 
 # Redis
 REDIS_PORT=6379
+REDIS_HOST_PORT=6380
 REDIS_PASSWORD=
 
 # JWT
@@ -175,6 +176,7 @@ docker-compose ps
 
 1. Vérifiez que Redis est démarré : `docker-compose ps redis`
 2. Vérifiez la configuration dans `.env`
+3. Si vous avez déjà un Redis local sur `6379`, laissez `REDIS_PORT=6379` et changez seulement `REDIS_HOST_PORT` (par défaut `6380`)
 
 ### Reconstruire depuis zéro
 
@@ -199,7 +201,8 @@ Pour la production, assurez-vous de :
 
 - Le port par défaut de l'API est **5000** (configurable via `PORT`)
 - PostgreSQL utilise le port **5432** (configurable via `DATABASE_PORT`)
-- Redis utilise le port **6379** (configurable via `REDIS_PORT`)
+- Redis utilise le port **6379** à l'intérieur du réseau Docker
+- Redis est exposé sur l'hôte via **6380** par défaut (configurable via `REDIS_HOST_PORT`)
 - Les données sont persistées dans des volumes Docker
 - PostGIS est automatiquement installé lors de la première création du conteneur PostgreSQL
 

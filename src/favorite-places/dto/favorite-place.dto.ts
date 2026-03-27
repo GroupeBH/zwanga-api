@@ -41,6 +41,11 @@ export class CreateFavoritePlaceDto {
   @IsOptional()
   @IsString()
   placeId?: string;
+
+  @ApiPropertyOptional({ description: 'Additional landmark notes shown to the user' })
+  @IsOptional()
+  @IsString()
+  notes?: string;
 }
 
 export class UpdateFavoritePlaceDto {
@@ -74,6 +79,11 @@ export class UpdateFavoritePlaceDto {
   @IsOptional()
   @IsString()
   placeId?: string;
+
+  @ApiPropertyOptional({ description: 'Additional landmark notes shown to the user' })
+  @IsOptional()
+  @IsString()
+  notes?: string;
 }
 
 export class FavoritePlaceResponse {
@@ -97,6 +107,9 @@ export class FavoritePlaceResponse {
 
   @ApiPropertyOptional()
   placeId?: string | null;
+
+  @ApiPropertyOptional()
+  notes?: string | null;
 
   @ApiProperty()
   createdAt: Date;

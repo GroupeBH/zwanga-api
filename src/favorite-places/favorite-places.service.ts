@@ -55,6 +55,7 @@ export class FavoritePlacesService {
       type: createDto.type || FavoritePlaceType.OTHER,
       isDefault: createDto.isDefault || false,
       placeId: createDto.placeId || null,
+      notes: createDto.notes?.trim() || null,
     });
 
     const saved = await this.favoritePlaceRepository.save(favoritePlace);
@@ -183,6 +184,7 @@ export class FavoritePlacesService {
     if (updateDto.type !== undefined) place.type = updateDto.type;
     if (updateDto.isDefault !== undefined) place.isDefault = updateDto.isDefault;
     if (updateDto.placeId !== undefined) place.placeId = updateDto.placeId;
+    if (updateDto.notes !== undefined) place.notes = updateDto.notes?.trim() || null;
 
     const saved = await this.favoritePlaceRepository.save(place);
 
@@ -258,6 +260,7 @@ export class FavoritePlacesService {
       type: place.type,
       isDefault: place.isDefault,
       placeId: place.placeId,
+      notes: place.notes,
       createdAt: place.createdAt,
       updatedAt: place.updatedAt,
     };
