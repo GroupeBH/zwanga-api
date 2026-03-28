@@ -1,6 +1,5 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { ScheduleModule } from '@nestjs/schedule';
 import { TripsService } from './trips.service';
 import { TripsController } from './trips.controller';
 import { Trip } from './entities/trip.entity';
@@ -13,6 +12,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
 import { Rating } from '../ratings/entities/rating.entity';
 import { EmergencyContact } from '../safety/entities/emergency-contact.entity';
 import { MessagingModule } from '../messaging/messaging.module';
+import { RecurringTripTemplate } from './entities/recurring-trip-template.entity';
 
 @Module({
   imports: [
@@ -25,8 +25,8 @@ import { MessagingModule } from '../messaging/messaging.module';
       KycDocument,
       Rating,
       EmergencyContact,
+      RecurringTripTemplate,
     ]),
-    ScheduleModule,
     NotificationsModule,
     MessagingModule,
   ],

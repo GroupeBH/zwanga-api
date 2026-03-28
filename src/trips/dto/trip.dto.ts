@@ -12,9 +12,12 @@ import {
   ArrayMinSize,
   ArrayMaxSize,
   IsUUID,
+  IsInt,
+  Matches,
 } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { TripStatus } from '../entities/trip.entity';
+import { RecurringTripTemplateStatus } from '../entities/recurring-trip-template.entity';
 
 export class CreateTripDto {
   @ApiProperty()
@@ -284,6 +287,125 @@ export class DriverEmergencyContactsDto {
   @ArrayMaxSize(5, { message: "Vous ne pouvez pas selectionner plus de 5 contacts d'urgence" })
   @IsUUID(undefined, { each: true, message: 'Chaque ID de contact doit etre un UUID valide' })
   emergencyContactIds: string[];
+}
+
+export class CreateRecurringTripDto {
+  @ApiProperty()
+  @IsString()
+  @IsNotEmpty()
+  departureLocation: string;
+
+  @ApiProperty({
+    description: 'Coordonnees du point de depart [longitude, latitude]',
+    example: [15.2663, -4.325],
+    minItems: 2,
+    maxItems: 2,
+  })
+  @IsArray()
+  @ArrayMinSize(2)
+  @ArrayMaxSize(2)
+  @IsNumber({}, { each: true })
+  departureCoordinates: [number, number];
+
+  @ApiProperty()
+  @IsString()
+  @IsNotEmpty()
+  arrivalLocation: string;
+
+  @ApiProperty({
+    description: "Coordonnees du point d'arrivee [longitude, latitude]",
+    example: [15.3222, -4.4419],
+    minItems: 2,
+    maxItems: 2,
+  })
+  @IsArray()
+  @ArrayMinSize(2)
+  @ArrayMaxSize(2)
+  @IsNumber({}, { each: true })
+  arrivalCoordinates: [number, number];
+
+  @ApiProperty({
+    description: 'Date de debut du schema recurrent (format YYYY-MM-DD)',
+    example: '2026-03-30',
+  })
+  @IsDateString()
+  @IsNotEmpty()
+  startDate: string;
+
+  @ApiProperty({
+    required: false,
+    description: 'Date de fin optionnelle du schema recurrent (format YYYY-MM-DD)',
+    example: '2026-06-30',
+  })
+  @IsDateString()
+  @IsOptional()
+  endDate?: string;
+
+  @ApiProperty({
+    description: 'Heure de depart quotidienne (format HH:mm)',
+    example: '07:30',
+  })
+  @Matches(/^([01]\d|2[0-3]):([0-5]\d)$/)
+  @IsNotEmpty()
+  departureTime: string;
+
+  @ApiProperty({
+    description: 'Jours de repetition ISO (1 = lundi, 7 = dimanche)',
+    example: [1, 2, 3, 4, 5],
+    type: [Number],
+    minItems: 1,
+    maxItems: 7,
+  })
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(7)
+  @IsInt({ each: true })
+  @Min(1, { each: true })
+  @Max(7, { each: true })
+  weekdays: number[];
+
+  @ApiProperty({ minimum: 1, description: 'Nombre total de places disponibles dans le vehicule' })
+  @IsNumber()
+  @Min(1)
+  @IsNotEmpty()
+  totalSeats: number;
+
+  @ApiProperty({
+    minimum: 0,
+    description: 'Prix par place en francs congolais. Mettre 0 pour un trajet gratuit.',
+    example: 0,
+  })
+  @IsNumber()
+  @Min(0)
+  pricePerSeat: number;
+
+  @ApiProperty({
+    required: false,
+    default: false,
+    description: 'Indique si le trajet recurrent est gratuit.',
+    example: false,
+  })
+  @IsBoolean()
+  @IsOptional()
+  isFree?: boolean;
+
+  @ApiProperty({ required: false })
+  @IsString()
+  @IsOptional()
+  description?: string;
+
+  @ApiProperty({
+    description: 'ID du vehicule a associer au schema recurrent',
+  })
+  @IsString()
+  @IsNotEmpty()
+  vehicleId: string;
+}
+
+export class UpdateRecurringTripStatusDto {
+  @ApiProperty({ enum: RecurringTripTemplateStatus })
+  @IsEnum(RecurringTripTemplateStatus)
+  status: RecurringTripTemplateStatus;
 }
 
 export class SearchByPointsDto {

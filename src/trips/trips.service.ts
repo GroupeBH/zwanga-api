@@ -9,6 +9,10 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, Point, LessThan, MoreThan, In, Between, Brackets, Not, IsNull } from 'typeorm';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { Trip, TripStatus } from './entities/trip.entity';
+import {
+  RecurringTripTemplate,
+  RecurringTripTemplateStatus,
+} from './entities/recurring-trip-template.entity';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { Booking, BookingStatus } from '../bookings/entities/booking.entity';
 import { Vehicle } from '../vehicles/entities/vehicle.entity';
@@ -16,6 +20,7 @@ import { TripRequest } from '../trip-requests/entities/trip-request.entity';
 import { KycDocument, KycStatus } from '../users/entities/kyc-document.entity';
 import {
   CreateTripDto,
+  CreateRecurringTripDto,
   SearchTripsDto,
   UpdateTripDto,
   DriverEmergencyContactsDto,
@@ -68,14 +73,34 @@ export type SanitizedTrip = Omit<Trip, 'driver' | 'bookings' | 'departurePoint' 
   vehicle: SanitizedVehicle | null;
 };
 
+interface RecurringTripFutureMeta {
+  nextOccurrenceDate: string | null;
+  upcomingGeneratedTripsCount: number;
+}
+
+export type SanitizedRecurringTripTemplate = Omit<
+  RecurringTripTemplate,
+  'departurePoint' | 'arrivalPoint' | 'vehicle' | 'departureTimeMinutes'
+> & {
+  departureCoordinates: Coordinates;
+  arrivalCoordinates: Coordinates;
+  departureTime: string;
+  vehicle: SanitizedVehicle | null;
+  nextOccurrenceDate: string | null;
+  upcomingGeneratedTripsCount: number;
+};
+
 @Injectable()
 export class TripsService {
   private readonly logger = new Logger(TripsService.name);
   private readonly CACHE_TTL = 300; // 5 minutes
+  private readonly RECURRING_GENERATION_WINDOW_DAYS = 14;
 
   constructor(
     @InjectRepository(Trip)
     private tripRepository: Repository<Trip>,
+    @InjectRepository(RecurringTripTemplate)
+    private recurringTripTemplateRepository: Repository<RecurringTripTemplate>,
     @InjectRepository(Booking)
     private bookingRepository: Repository<Booking>,
     @InjectRepository(User)
@@ -101,18 +126,13 @@ export class TripsService {
     createTripDto: CreateTripDto,
     options?: { isPrivate?: boolean; tripRequestId?: string },
   ): Promise<SanitizedTrip> {
-    // Synchronize isFree with pricePerSeat
     const isFree = createTripDto.isFree ?? createTripDto.pricePerSeat === 0;
     const pricePerSeat = isFree ? 0 : createTripDto.pricePerSeat;
 
     const tripType = isFree ? 'gratuit' : 'payant';
-    this.logger.log(`Creating ${tripType} trip for user: ${driverId} from ${createTripDto.departureLocation} to ${createTripDto.arrivalLocation} (price: ${pricePerSeat} CDF)`);
-
-    const user = await this.userRepository.findOne({ where: { id: driverId } });
-    if (!user) {
-      this.logger.warn(`Trip creation failed: User not found - ${driverId}`);
-      throw new NotFoundException('Utilisateur non trouvé');
-    }
+    this.logger.log(
+      `Creating ${tripType} trip for user: ${driverId} from ${createTripDto.departureLocation} to ${createTripDto.arrivalLocation} (price: ${pricePerSeat} CDF)`,
+    );
 
     const {
       departureCoordinates,
@@ -122,66 +142,27 @@ export class TripsService {
       ...baseTripData
     } = createTripDto;
 
-    // Validate vehicle if provided
-    let vehicle: Vehicle | null = null;
-    if (vehicleId) {
-      vehicle = await this.vehicleRepository.findOne({
-        where: { id: vehicleId, ownerId: driverId },
-      });
-
-      if (!vehicle) {
-        this.logger.warn(
-          `Trip creation failed: Vehicle ${vehicleId} not found or does not belong to user ${driverId}`,
-        );
-        throw new BadRequestException(
-          'Véhicule non trouvé ou ne vous appartient pas',
-        );
-      }
-
-      if (!vehicle.isActive) {
-        this.logger.warn(
-          `Trip creation failed: Vehicle ${vehicleId} is not active`,
-        );
-        throw new BadRequestException('Le véhicule sélectionné n\'est pas actif');
-      }
-
-      // If user is a passenger and provides a vehicle, promote them to driver
-      if (user.role === UserRole.PASSENGER) {
-        this.logger.log(`Promoting user ${driverId} from passenger to driver (creating trip with vehicle)`);
-        user.role = UserRole.DRIVER;
-        user.isDriver = true;
-        await this.userRepository.save(user);
-        this.logger.log(`User ${driverId} successfully promoted to driver`);
-      }
-    } else {
-      // If no vehicle is provided, user must already be a driver
-      if (user.role !== 'driver') {
-        this.logger.warn(`Trip creation failed: User ${driverId} is not a driver and no vehicle provided`);
-        throw new BadRequestException('Vous devez être un conducteur ou fournir un véhicule pour créer un trajet');
-      }
-    }
+    const { vehicle } = await this.resolvePublishingContext(driverId, vehicleId || null);
 
     const trip = this.tripRepository.create({
       ...baseTripData,
       driverId,
-      vehicleId: vehicleId || null,
+      vehicleId: vehicle?.id ?? null,
       departureDate: new Date(departureDate),
       departurePoint: this.buildPointFromCoordinates(departureCoordinates),
       arrivalPoint: this.buildPointFromCoordinates(arrivalCoordinates),
       isFree,
       pricePerSeat,
       totalSeats: baseTripData.totalSeats,
-      availableSeats: baseTripData.totalSeats || baseTripData.totalSeats, // Initialiser availableSeats = totalSeats
+      availableSeats: baseTripData.totalSeats,
       isPrivate: options?.isPrivate ?? false,
       tripRequestId: options?.tripRequestId || null,
+      recurringTemplateId: null,
+      recurringOccurrenceDate: null,
     });
 
     const savedTrip = await this.tripRepository.save(trip);
-
-    // Invalidate cache
-    await this.cacheService.del(CacheService.getTripsListKey());
-    await this.cacheService.del(CacheService.getTripsListKey('all'));
-    await this.cacheService.del(CacheService.getTripsListKey('allTrips'));
+    await this.invalidateTripCaches();
 
     this.logger.log(`Trip created successfully: ${savedTrip.id} by user ${driverId}`);
     return this.findOne(savedTrip.id);
@@ -477,6 +458,117 @@ export class TripsService {
     this.logger.debug(`Found ${trips.length} trips for driver ${driverId}`);
     const sanitizedResults = await Promise.all(sanitized);
     return sanitizedResults;
+  }
+  async createRecurring(
+    driverId: string,
+    createRecurringTripDto: CreateRecurringTripDto,
+  ): Promise<SanitizedRecurringTripTemplate> {
+    this.logger.log(
+      `Creating recurring trip template for user ${driverId} from ${createRecurringTripDto.departureLocation} to ${createRecurringTripDto.arrivalLocation}`,
+    );
+
+    const { vehicle } = await this.resolvePublishingContext(
+      driverId,
+      createRecurringTripDto.vehicleId,
+      true,
+    );
+
+    if (!vehicle) {
+      throw new BadRequestException('Un vehicule actif est requis pour creer un trajet recurrent');
+    }
+
+    const startDate = this.parseDateOnly(createRecurringTripDto.startDate);
+    const endDate = createRecurringTripDto.endDate
+      ? this.parseDateOnly(createRecurringTripDto.endDate)
+      : null;
+
+    if (endDate && endDate < startDate) {
+      throw new BadRequestException('La date de fin doit etre posterieure a la date de debut');
+    }
+
+    const weekdays = this.normalizeWeekdays(createRecurringTripDto.weekdays);
+    const departureTimeMinutes = this.parseTimeToMinutes(createRecurringTripDto.departureTime);
+    const isFree =
+      createRecurringTripDto.isFree ?? createRecurringTripDto.pricePerSeat === 0;
+    const pricePerSeat = isFree ? 0 : createRecurringTripDto.pricePerSeat;
+
+    const template = this.recurringTripTemplateRepository.create({
+      driverId,
+      vehicleId: vehicle.id,
+      departureLocation: createRecurringTripDto.departureLocation,
+      departurePoint: this.buildPointFromCoordinates(
+        createRecurringTripDto.departureCoordinates,
+      ),
+      arrivalLocation: createRecurringTripDto.arrivalLocation,
+      arrivalPoint: this.buildPointFromCoordinates(createRecurringTripDto.arrivalCoordinates),
+      departureTimeMinutes,
+      weekdays,
+      startDate: this.formatDateOnly(startDate),
+      endDate: endDate ? this.formatDateOnly(endDate) : null,
+      totalSeats: createRecurringTripDto.totalSeats,
+      pricePerSeat,
+      isFree,
+      description: createRecurringTripDto.description?.trim() || null,
+      status: RecurringTripTemplateStatus.ACTIVE,
+      lastGeneratedDate: null,
+    });
+
+    const savedTemplate = await this.recurringTripTemplateRepository.save(template);
+    await this.generateTripsForTemplate(savedTemplate);
+
+    this.logger.log(`Recurring trip template ${savedTemplate.id} created successfully`);
+    return this.findRecurringById(savedTemplate.id, driverId);
+  }
+
+  async findRecurringByDriver(driverId: string): Promise<SanitizedRecurringTripTemplate[]> {
+    this.logger.debug(`Fetching recurring trip templates for driver: ${driverId}`);
+
+    const templates = await this.recurringTripTemplateRepository.find({
+      where: { driverId },
+      relations: ['vehicle'],
+      order: { updatedAt: 'DESC' },
+    });
+
+    const futureMeta = await this.buildRecurringTripFutureMeta(templates);
+    return Promise.all(
+      templates.map((template) =>
+        this.sanitizeRecurringTripTemplate(template, futureMeta.get(template.id)),
+      ),
+    );
+  }
+
+  async pauseRecurring(
+    templateId: string,
+    driverId: string,
+  ): Promise<SanitizedRecurringTripTemplate> {
+    const template = await this.findRecurringTemplateEntity(templateId, driverId);
+
+    if (template.status === RecurringTripTemplateStatus.PAUSED) {
+      return this.sanitizeRecurringTripTemplate(
+        template,
+        (await this.buildRecurringTripFutureMeta([template])).get(template.id),
+      );
+    }
+
+    template.status = RecurringTripTemplateStatus.PAUSED;
+    await this.recurringTripTemplateRepository.save(template);
+
+    return this.findRecurringById(template.id, driverId);
+  }
+
+  async resumeRecurring(
+    templateId: string,
+    driverId: string,
+  ): Promise<SanitizedRecurringTripTemplate> {
+    const template = await this.findRecurringTemplateEntity(templateId, driverId);
+
+    if (template.status !== RecurringTripTemplateStatus.ACTIVE) {
+      template.status = RecurringTripTemplateStatus.ACTIVE;
+      await this.recurringTripTemplateRepository.save(template);
+    }
+
+    await this.generateTripsForTemplate(template);
+    return this.findRecurringById(template.id, driverId);
   }
 
   /**
@@ -1077,6 +1169,385 @@ export class TripsService {
     }
   }
 
+  @Cron('0 */6 * * *')
+  async generateRecurringTrips() {
+    this.logger.debug('Running recurring trip generation cron job');
+
+    const templates = await this.recurringTripTemplateRepository.find({
+      where: { status: RecurringTripTemplateStatus.ACTIVE },
+    });
+
+    for (const template of templates) {
+      try {
+        await this.generateTripsForTemplate(template);
+      } catch (error) {
+        this.logger.error(
+          `Failed to generate recurring trips for template ${template.id}: ${error.message}`,
+          error.stack,
+        );
+      }
+    }
+  }
+
+  private async resolvePublishingContext(
+    driverId: string,
+    vehicleId?: string | null,
+    requireVehicle: boolean = false,
+  ): Promise<{ user: User; vehicle: Vehicle | null }> {
+    const user = await this.userRepository.findOne({ where: { id: driverId } });
+    if (!user) {
+      this.logger.warn(`Trip publication failed: User not found - ${driverId}`);
+      throw new NotFoundException('Utilisateur non trouve');
+    }
+
+    let vehicle: Vehicle | null = null;
+
+    if (vehicleId) {
+      vehicle = await this.vehicleRepository.findOne({
+        where: { id: vehicleId, ownerId: driverId },
+      });
+
+      if (!vehicle) {
+        this.logger.warn(
+          `Trip publication failed: Vehicle ${vehicleId} not found or does not belong to user ${driverId}`,
+        );
+        throw new BadRequestException('Vehicule non trouve ou ne vous appartient pas');
+      }
+
+      if (!vehicle.isActive) {
+        this.logger.warn(`Trip publication failed: Vehicle ${vehicleId} is not active`);
+        throw new BadRequestException('Le vehicule selectionne n est pas actif');
+      }
+
+      if (!this.isDriverRole(user.role)) {
+        this.logger.log(`Promoting user ${driverId} to driver for trip publication`);
+        user.role = UserRole.DRIVER;
+        user.isDriver = true;
+        await this.userRepository.save(user);
+      }
+    } else {
+      if (requireVehicle) {
+        throw new BadRequestException('Veuillez selectionner un vehicule actif');
+      }
+
+      if (!this.isDriverRole(user.role)) {
+        this.logger.warn(`Trip publication failed: User ${driverId} is not a driver`);
+        throw new BadRequestException(
+          'Vous devez etre conducteur ou fournir un vehicule pour creer un trajet',
+        );
+      }
+    }
+
+    return { user, vehicle };
+  }
+
+  private isDriverRole(role?: User['role'] | null): boolean {
+    return role === UserRole.DRIVER;
+  }
+
+  private async findRecurringTemplateEntity(
+    templateId: string,
+    driverId: string,
+  ): Promise<RecurringTripTemplate> {
+    const template = await this.recurringTripTemplateRepository.findOne({
+      where: { id: templateId, driverId },
+      relations: ['vehicle'],
+    });
+
+    if (!template) {
+      throw new NotFoundException('Trajet recurrent non trouve');
+    }
+
+    return template;
+  }
+
+  private async findRecurringById(
+    templateId: string,
+    driverId: string,
+  ): Promise<SanitizedRecurringTripTemplate> {
+    const template = await this.findRecurringTemplateEntity(templateId, driverId);
+    const futureMeta = await this.buildRecurringTripFutureMeta([template]);
+    return this.sanitizeRecurringTripTemplate(template, futureMeta.get(template.id));
+  }
+
+  private async generateTripsForTemplate(template: RecurringTripTemplate): Promise<number> {
+    if (template.status !== RecurringTripTemplateStatus.ACTIVE) {
+      return 0;
+    }
+
+    const now = new Date();
+    const today = this.startOfDay(now);
+    const templateStartDate = this.parseDateOnly(template.startDate);
+    const lastGeneratedDate = template.lastGeneratedDate
+      ? this.parseDateOnly(template.lastGeneratedDate)
+      : null;
+    const nextGenerationStart = lastGeneratedDate
+      ? this.addDays(lastGeneratedDate, 1)
+      : templateStartDate;
+    const generationStart = nextGenerationStart > today ? nextGenerationStart : today;
+    const windowEnd = this.addDays(today, this.RECURRING_GENERATION_WINDOW_DAYS);
+    const templateEndDate = template.endDate ? this.parseDateOnly(template.endDate) : null;
+    const generationEnd =
+      templateEndDate && templateEndDate < windowEnd ? templateEndDate : windowEnd;
+
+    if (generationStart > generationEnd) {
+      return 0;
+    }
+
+    const fromDate = this.formatDateOnly(generationStart);
+    const toDate = this.formatDateOnly(generationEnd);
+
+    const existingTrips = await this.tripRepository.find({
+      where: {
+        recurringTemplateId: template.id,
+        recurringOccurrenceDate: Between(fromDate, toDate),
+      },
+      select: ['id', 'recurringOccurrenceDate'],
+    });
+
+    const existingOccurrences = new Set(
+      existingTrips
+        .map((trip) => trip.recurringOccurrenceDate)
+        .filter((value): value is string => Boolean(value)),
+    );
+
+    const tripsToCreate: Trip[] = [];
+
+    for (
+      let cursor = new Date(generationStart);
+      cursor <= generationEnd;
+      cursor = this.addDays(cursor, 1)
+    ) {
+      const occurrenceDate = this.formatDateOnly(cursor);
+      if (!template.weekdays.includes(this.toIsoWeekday(cursor))) {
+        continue;
+      }
+
+      if (existingOccurrences.has(occurrenceDate)) {
+        continue;
+      }
+
+      const departureDate = this.combineDateAndTime(cursor, template.departureTimeMinutes);
+      if (departureDate <= now) {
+        continue;
+      }
+
+      tripsToCreate.push(
+        this.tripRepository.create({
+          driverId: template.driverId,
+          vehicleId: template.vehicleId,
+          departureLocation: template.departureLocation,
+          departurePoint: template.departurePoint,
+          arrivalLocation: template.arrivalLocation,
+          arrivalPoint: template.arrivalPoint,
+          departureDate,
+          totalSeats: template.totalSeats,
+          availableSeats: template.totalSeats,
+          pricePerSeat: template.isFree ? 0 : template.pricePerSeat,
+          isFree: template.isFree,
+          description: template.description ?? undefined,
+          status: TripStatus.PENDING,
+          isPrivate: false,
+          tripRequestId: null,
+          recurringTemplateId: template.id,
+          recurringOccurrenceDate: occurrenceDate,
+        }),
+      );
+    }
+
+    if (tripsToCreate.length > 0) {
+      await this.tripRepository.save(tripsToCreate);
+      await this.invalidateTripCaches();
+    }
+
+    template.lastGeneratedDate = toDate;
+    await this.recurringTripTemplateRepository.save(template);
+
+    return tripsToCreate.length;
+  }
+
+  private async buildRecurringTripFutureMeta(
+    templates: RecurringTripTemplate[],
+  ): Promise<Map<string, RecurringTripFutureMeta>> {
+    const meta = new Map<string, RecurringTripFutureMeta>();
+
+    if (templates.length === 0) {
+      return meta;
+    }
+
+    templates.forEach((template) => {
+      meta.set(template.id, {
+        nextOccurrenceDate: null,
+        upcomingGeneratedTripsCount: 0,
+      });
+    });
+
+    const templateIds = templates.map((template) => template.id);
+    const futureTrips = await this.tripRepository.find({
+      where: {
+        recurringTemplateId: In(templateIds),
+        departureDate: MoreThan(new Date()),
+        status: In([TripStatus.PENDING, TripStatus.ACTIVE]),
+      },
+      order: {
+        departureDate: 'ASC',
+      },
+    });
+
+    for (const trip of futureTrips) {
+      if (!trip.recurringTemplateId) {
+        continue;
+      }
+
+      const currentMeta = meta.get(trip.recurringTemplateId);
+      if (!currentMeta) {
+        continue;
+      }
+
+      currentMeta.upcomingGeneratedTripsCount += 1;
+      if (!currentMeta.nextOccurrenceDate) {
+        currentMeta.nextOccurrenceDate = trip.departureDate.toISOString();
+      }
+    }
+
+    for (const template of templates) {
+      const currentMeta = meta.get(template.id);
+      if (!currentMeta || currentMeta.nextOccurrenceDate) {
+        continue;
+      }
+
+      const nextOccurrence = this.computeNextOccurrenceDate(template);
+      currentMeta.nextOccurrenceDate = nextOccurrence ? nextOccurrence.toISOString() : null;
+    }
+
+    return meta;
+  }
+
+  private async sanitizeRecurringTripTemplate(
+    template: RecurringTripTemplate,
+    futureMeta?: RecurringTripFutureMeta,
+  ): Promise<SanitizedRecurringTripTemplate> {
+    const { departurePoint, arrivalPoint, departureTimeMinutes, vehicle, ...rest } = template;
+    let sanitizedVehicle: SanitizedVehicle | null = null;
+
+    if (vehicle) {
+      let photoUrl = vehicle.photoUrl;
+      if (photoUrl) {
+        photoUrl = await this.fileUploadService.getPresignedUrlIfS3Key(photoUrl) || photoUrl;
+      }
+
+      sanitizedVehicle = {
+        id: vehicle.id,
+        brand: vehicle.brand,
+        model: vehicle.model,
+        color: vehicle.color,
+        licensePlate: vehicle.licensePlate,
+        photoUrl,
+      };
+    }
+
+    return {
+      ...rest,
+      departureCoordinates: this.pointToCoordinates(departurePoint),
+      arrivalCoordinates: this.pointToCoordinates(arrivalPoint),
+      departureTime: this.formatMinutesAsTime(departureTimeMinutes),
+      vehicle: sanitizedVehicle,
+      nextOccurrenceDate: futureMeta?.nextOccurrenceDate ?? null,
+      upcomingGeneratedTripsCount: futureMeta?.upcomingGeneratedTripsCount ?? 0,
+    };
+  }
+
+  private async invalidateTripCaches(tripId?: string): Promise<void> {
+    if (tripId) {
+      await this.cacheService.del(CacheService.getTripKey(tripId));
+    }
+
+    await this.cacheService.del(CacheService.getTripsListKey());
+    await this.cacheService.del(CacheService.getTripsListKey('all'));
+    await this.cacheService.del(CacheService.getTripsListKey('allTrips'));
+  }
+
+  private parseDateOnly(value: string): Date {
+    const [year, month, day] = value.split('-').map((item) => Number(item));
+    return new Date(year, month - 1, day, 0, 0, 0, 0);
+  }
+
+  private formatDateOnly(date: Date): string {
+    const year = date.getFullYear();
+    const month = `${date.getMonth() + 1}`.padStart(2, '0');
+    const day = `${date.getDate()}`.padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }
+
+  private parseTimeToMinutes(value: string): number {
+    const [hours, minutes] = value.split(':').map((item) => Number(item));
+    return hours * 60 + minutes;
+  }
+
+  private formatMinutesAsTime(value: number): string {
+    const hours = `${Math.floor(value / 60)}`.padStart(2, '0');
+    const minutes = `${value % 60}`.padStart(2, '0');
+    return `${hours}:${minutes}`;
+  }
+
+  private normalizeWeekdays(weekdays: number[]): number[] {
+    return Array.from(
+      new Set(weekdays.filter((day) => Number.isInteger(day) && day >= 1 && day <= 7)),
+    ).sort((left, right) => left - right);
+  }
+
+  private combineDateAndTime(date: Date, departureTimeMinutes: number): Date {
+    const next = new Date(date);
+    next.setHours(Math.floor(departureTimeMinutes / 60), departureTimeMinutes % 60, 0, 0);
+    return next;
+  }
+
+  private startOfDay(value: Date): Date {
+    const next = new Date(value);
+    next.setHours(0, 0, 0, 0);
+    return next;
+  }
+
+  private addDays(value: Date, amount: number): Date {
+    const next = new Date(value);
+    next.setDate(next.getDate() + amount);
+    return next;
+  }
+
+  private toIsoWeekday(date: Date): number {
+    const weekday = date.getDay();
+    return weekday === 0 ? 7 : weekday;
+  }
+
+  private computeNextOccurrenceDate(template: RecurringTripTemplate): Date | null {
+    if (template.status !== RecurringTripTemplateStatus.ACTIVE) {
+      return null;
+    }
+
+    const now = new Date();
+    const startDate = this.parseDateOnly(template.startDate);
+    const endDate = template.endDate ? this.parseDateOnly(template.endDate) : null;
+    const cursor = this.startOfDay(startDate > now ? startDate : now);
+
+    for (let offset = 0; offset <= 365; offset += 1) {
+      const currentDate = this.addDays(cursor, offset);
+
+      if (endDate && currentDate > endDate) {
+        return null;
+      }
+
+      if (!template.weekdays.includes(this.toIsoWeekday(currentDate))) {
+        continue;
+      }
+
+      const departureDate = this.combineDateAndTime(currentDate, template.departureTimeMinutes);
+      if (departureDate > now) {
+        return departureDate;
+      }
+    }
+
+    return null;
+  }
   private buildPointFromCoordinates([longitude, latitude]: [number, number]): Point {
     return {
       type: 'Point',
@@ -2117,3 +2588,7 @@ export class TripsService {
     }
   }
 }
+
+
+
+

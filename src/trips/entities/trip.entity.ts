@@ -13,6 +13,7 @@ import {
 import { User } from '../../users/entities/user.entity';
 import { Booking } from '../../bookings/entities/booking.entity';
 import { Vehicle } from '../../vehicles/entities/vehicle.entity';
+import { RecurringTripTemplate } from './recurring-trip-template.entity';
 
 export enum TripStatus {
   PENDING = 'upcoming',
@@ -25,6 +26,7 @@ export enum TripStatus {
 @Index(['departureLocation'])
 @Index(['arrivalLocation'])
 @Index(['departureDate'])
+@Index(['recurringTemplateId', 'recurringOccurrenceDate'])
 export class Trip {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -118,6 +120,16 @@ export class Trip {
 
   @Column({ type: 'varchar', nullable: true })
   tripRequestId: string | null;
+
+  @Column({ type: 'varchar', nullable: true })
+  recurringTemplateId: string | null;
+
+  @ManyToOne(() => RecurringTripTemplate, { nullable: true, onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'recurringTemplateId' })
+  recurringTemplate: RecurringTripTemplate | null;
+
+  @Column({ type: 'date', nullable: true })
+  recurringOccurrenceDate: string | null;
 
   @CreateDateColumn()
   createdAt: Date;

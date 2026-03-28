@@ -39,6 +39,7 @@ import { User } from './users/entities/user.entity';
 import { KycDocument } from './users/entities/kyc-document.entity';
 import { Vehicle } from './vehicles/entities/vehicle.entity';
 import { Trip } from './trips/entities/trip.entity';
+import { RecurringTripTemplate } from './trips/entities/recurring-trip-template.entity';
 import { Booking } from './bookings/entities/booking.entity';
 import { Message } from './chat/entities/message.entity';
 import { Rating } from './ratings/entities/rating.entity';
@@ -62,6 +63,7 @@ const typeOrmEntities = [
   KycDocument,
   Vehicle,
   Trip,
+  RecurringTripTemplate,
   Booking,
   Message,
   Rating,
