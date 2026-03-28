@@ -19,13 +19,13 @@ export class FaqEntry {
   @Column('text')
   answer: string;
 
-  @Column({ nullable: true })
+  @Column({ type: 'varchar', nullable: true })
   category: string | null;
 
   @Column({ default: 'fr-CD' })
   locale: string;
 
-  @Column({ nullable: true })
+  @Column({ type: 'varchar', nullable: true })
   audience: string | null;
 
   @Column({ type: 'text', nullable: true })

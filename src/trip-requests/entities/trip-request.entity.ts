@@ -82,14 +82,14 @@ export class TripRequest {
   })
   status: TripRequestStatus;
 
-  @Column({ nullable: true })
+  @Column({ type: 'varchar', nullable: true })
   selectedDriverId: string | null; // Driver sélectionné par le passager
 
   @ManyToOne(() => User, { nullable: true })
   @JoinColumn({ name: 'selectedDriverId' })
   selectedDriver: User | null;
 
-  @Column({ nullable: true })
+  @Column({ type: 'varchar', nullable: true })
   selectedVehicleId: string | null; // Véhicule du driver sélectionné
 
   @ManyToOne(() => Vehicle, { nullable: true })

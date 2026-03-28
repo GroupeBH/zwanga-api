@@ -54,7 +54,7 @@ export class SupportTicket {
   @JoinColumn({ name: 'userId' })
   user: User;
 
-  @Column({ nullable: true })
+  @Column({ type: 'varchar', nullable: true })
   assignedAdminId: string | null;
 
   @ManyToOne(() => User, { nullable: true, onDelete: 'SET NULL' })
@@ -109,4 +109,3 @@ export class SupportTicket {
   @OneToMany(() => SupportTicketMessage, (message) => message.ticket)
   messages: SupportTicketMessage[];
 }
-
