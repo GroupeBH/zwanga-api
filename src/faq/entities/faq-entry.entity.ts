@@ -8,7 +8,7 @@ import {
 } from 'typeorm';
 
 @Entity('faq_entries')
-@Index(['isPublished', 'order'])
+@Index(['isPublished', 'locale', 'audience', 'order'])
 export class FaqEntry {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -19,8 +19,17 @@ export class FaqEntry {
   @Column('text')
   answer: string;
 
-  @Column({ nullable: true })
-  category: string;
+  @Column({ type: 'varchar', nullable: true })
+  category: string | null;
+
+  @Column({ default: 'fr-CD' })
+  locale: string;
+
+  @Column({ type: 'varchar', nullable: true })
+  audience: string | null;
+
+  @Column({ type: 'text', nullable: true })
+  keywords: string | null;
 
   @Column({ default: true })
   isPublished: boolean;

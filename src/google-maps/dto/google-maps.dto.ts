@@ -1,4 +1,4 @@
-import { IsString, IsOptional, IsNumber, IsEnum, IsArray, ValidateNested, IsLatitude, IsLongitude, IsBoolean } from 'class-validator';
+import { IsString, IsOptional, IsNumber, IsEnum, IsArray, ValidateNested, IsLatitude, IsLongitude, IsBoolean, IsInt, Min } from 'class-validator';
 import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
@@ -165,6 +165,61 @@ export class PlaceDetails {
 
   @ApiPropertyOptional()
   types?: string[];
+}
+
+export class LandmarkPlacesQueryDto {
+  @ApiPropertyOptional({ description: 'City key. For now only kinshasa is supported.', default: 'kinshasa' })
+  @IsOptional()
+  @IsString()
+  city?: string;
+
+  @ApiPropertyOptional({ description: 'Free-text filter on name, commune, category, address or keywords' })
+  @IsOptional()
+  @IsString()
+  search?: string;
+
+  @ApiPropertyOptional({ description: 'Filter by commune' })
+  @IsOptional()
+  @IsString()
+  commune?: string;
+
+  @ApiPropertyOptional({ description: 'Filter by category' })
+  @IsOptional()
+  @IsString()
+  category?: string;
+
+  @ApiPropertyOptional({ description: 'Maximum number of landmarks to return', default: 12 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  limit?: number = 12;
+}
+
+export class LandmarkPlace {
+  @ApiProperty()
+  id: string;
+
+  @ApiProperty()
+  name: string;
+
+  @ApiProperty()
+  query: string;
+
+  @ApiProperty()
+  address: string;
+
+  @ApiProperty()
+  commune: string;
+
+  @ApiProperty()
+  category: string;
+
+  @ApiPropertyOptional()
+  description?: string;
+
+  @ApiProperty({ type: [String] })
+  keywords: string[];
 }
 
 // ==================== Directions DTOs ====================

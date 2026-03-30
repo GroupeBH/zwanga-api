@@ -17,6 +17,8 @@ import {
   PlacesAutocompleteDto,
   PlaceDetailsDto,
   PlacesSearchDto,
+  LandmarkPlace,
+  LandmarkPlacesQueryDto,
   PlacePrediction,
   PlaceDetails,
   DirectionsDto,
@@ -24,6 +26,7 @@ import {
   TravelMode,
   Avoid,
 } from './dto/google-maps.dto';
+import { KINSHASA_LANDMARKS } from './data/kinshasa-landmarks';
 
 @Injectable()
 export class GoogleMapsService {
@@ -299,6 +302,45 @@ export class GoogleMapsService {
       this.logger.error(`Places search error: ${error.message}`, error.stack);
       throw new InternalServerErrorException('Échec de la recherche de lieux');
     }
+  }
+
+  async getLandmarks(dto: LandmarkPlacesQueryDto): Promise<LandmarkPlace[]> {
+    const city = dto.city?.trim().toLowerCase() || 'kinshasa';
+
+    if (city !== 'kinshasa') {
+      return [];
+    }
+
+    const normalizedSearch = dto.search?.trim().toLowerCase() || '';
+    const normalizedCommune = dto.commune?.trim().toLowerCase() || '';
+    const normalizedCategory = dto.category?.trim().toLowerCase() || '';
+    const limit = Math.min(Math.max(dto.limit ?? 12, 1), 30);
+
+    return KINSHASA_LANDMARKS.filter((landmark) => {
+      const matchesSearch =
+        !normalizedSearch ||
+        [
+          landmark.name,
+          landmark.query,
+          landmark.address,
+          landmark.commune,
+          landmark.category,
+          landmark.description,
+          ...landmark.keywords,
+        ]
+          .filter((value): value is string => typeof value === 'string' && value.length > 0)
+          .some((value) => value.toLowerCase().includes(normalizedSearch));
+
+      const matchesCommune =
+        !normalizedCommune ||
+        landmark.commune.toLowerCase().includes(normalizedCommune);
+
+      const matchesCategory =
+        !normalizedCategory ||
+        landmark.category.toLowerCase().includes(normalizedCategory);
+
+      return matchesSearch && matchesCommune && matchesCategory;
+    }).slice(0, limit);
   }
 
   /**

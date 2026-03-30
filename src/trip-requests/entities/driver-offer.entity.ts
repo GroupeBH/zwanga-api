@@ -39,7 +39,7 @@ export class DriverOffer {
   @JoinColumn({ name: 'driverId' })
   driver: User;
 
-  @Column({ nullable: true })
+  @Column({ type: 'varchar', nullable: true })
   vehicleId: string | null;
 
   @ManyToOne(() => Vehicle, { nullable: true })

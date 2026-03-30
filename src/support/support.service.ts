@@ -4,6 +4,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { SelectQueryBuilder, Repository } from 'typeorm';
 import { ChatService } from '../chat/chat.service';
@@ -85,6 +86,7 @@ export class SupportService {
     private readonly userRepository: Repository<User>,
     private readonly chatService: ChatService,
     private readonly faqService: FaqService,
+    private readonly configService: ConfigService,
   ) {}
 
   /* -------------------------------------------------------------------------- */
@@ -129,7 +131,73 @@ export class SupportService {
   /* -------------------------------------------------------------------------- */
 
   async listFaq(query: ListFaqQueryDto) {
-    return this.faqService.findAll(query);
+    return this.faqService.findAll({
+      ...query,
+      locale:
+        query.locale?.trim() ||
+        this.configService.get<string>('SUPPORT_DEFAULT_LOCALE') ||
+        'fr-CD',
+      audience:
+        query.audience?.trim() ||
+        this.configService.get<string>('SUPPORT_DEFAULT_AUDIENCE') ||
+        'mobile',
+    });
+  }
+
+  getSupportConfig() {
+    const locale =
+      this.configService.get<string>('SUPPORT_DEFAULT_LOCALE') || 'fr-CD';
+    const audience =
+      this.configService.get<string>('SUPPORT_DEFAULT_AUDIENCE') || 'mobile';
+    const phone = this.configService.get<string>('SUPPORT_PHONE')?.trim() || null;
+    const whatsapp = this.configService.get<string>('SUPPORT_WHATSAPP')?.trim() || null;
+    const email =
+      this.configService.get<string>('SUPPORT_EMAIL')?.trim() || 'support@zwanga.cd';
+
+    return {
+      locale,
+      faq: {
+        locale,
+        audience,
+      },
+      title:
+        this.configService.get<string>('SUPPORT_TITLE') ||
+        'Une aide simple pour tous',
+      subtitle:
+        this.configService.get<string>('SUPPORT_SUBTITLE') ||
+        'Cherchez une reponse ou laissez-nous un message si quelque chose vous bloque.',
+      contact: {
+        phone,
+        whatsapp,
+        email,
+      },
+      hours: [
+        {
+          label: 'Lundi - Vendredi',
+          value:
+            this.configService.get<string>('SUPPORT_HOURS_WEEKDAYS') ||
+            '8h00 - 20h00',
+        },
+        {
+          label: 'Samedi',
+          value:
+            this.configService.get<string>('SUPPORT_HOURS_SATURDAY') ||
+            '9h00 - 18h00',
+        },
+        {
+          label: 'Dimanche',
+          value:
+            this.configService.get<string>('SUPPORT_HOURS_SUNDAY') ||
+            '10h00 - 16h00',
+        },
+      ],
+      channels: {
+        ticket: true,
+        phone: Boolean(phone),
+        whatsapp: Boolean(whatsapp),
+        email: Boolean(email),
+      },
+    };
   }
 
   async getFaq(id: string) {

@@ -18,8 +18,10 @@ import {
   PlacesAutocompleteDto,
   PlaceDetailsDto,
   PlacesSearchDto,
+  LandmarkPlacesQueryDto,
   PlacePrediction,
   PlaceDetails,
+  LandmarkPlace,
   DirectionsDto,
   DirectionsResponse,
 } from './dto/google-maps.dto';
@@ -69,6 +71,14 @@ export class GoogleMapsController {
   @ApiResponse({ status: 200, description: 'Places found successfully', type: [PlaceDetails] })
   async placesSearch(@Query() dto: PlacesSearchDto): Promise<PlaceDetails[]> {
     return this.googleMapsService.placesSearch(dto);
+  }
+
+  @Get('places/landmarks')
+  @Public()
+  @ApiOperation({ summary: 'Get curated landmarks for a city, with Kinshasa enabled by default' })
+  @ApiResponse({ status: 200, description: 'Landmarks retrieved successfully', type: [LandmarkPlace] })
+  async getLandmarks(@Query() dto: LandmarkPlacesQueryDto): Promise<LandmarkPlace[]> {
+    return this.googleMapsService.getLandmarks(dto);
   }
 
   @Post('directions')

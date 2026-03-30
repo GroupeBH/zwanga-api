@@ -14,6 +14,7 @@ import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { TripsService } from './trips.service';
 import {
   CreateTripDto,
+  CreateRecurringTripDto,
   SearchTripsDto,
   UpdateTripDto,
   SearchByPointsDto,
@@ -95,6 +96,42 @@ export class TripsController {
   @ApiOperation({ summary: 'Get trips created by current user' })
   async findMyTrips(@Request() req) {
     return this.tripsService.findByDriver(req.user.userId);
+  }
+
+  @Post('recurring')
+  @Auth()
+  @SensitiveThrottle(10, 6000)
+  @ApiOperation({
+    summary: 'Create a recurring trip template',
+    description:
+      'Permet a un conducteur de creer un schema recurrent et de generer automatiquement les prochaines occurrences.',
+  })
+  async createRecurring(@Request() req, @Body() createRecurringTripDto: CreateRecurringTripDto) {
+    return this.tripsService.createRecurring(req.user.userId, createRecurringTripDto);
+  }
+
+  @Get('recurring/my')
+  @Auth()
+  @SensitiveThrottle(20, 6000)
+  @ApiOperation({ summary: 'Get recurring trip templates created by current user' })
+  async findMyRecurringTrips(@Request() req) {
+    return this.tripsService.findRecurringByDriver(req.user.userId);
+  }
+
+  @Put('recurring/:id/pause')
+  @Auth()
+  @SensitiveThrottle(10, 6000)
+  @ApiOperation({ summary: 'Pause a recurring trip template' })
+  async pauseRecurringTrip(@Request() req, @Param('id') id: string) {
+    return this.tripsService.pauseRecurring(id, req.user.userId);
+  }
+
+  @Put('recurring/:id/resume')
+  @Auth()
+  @SensitiveThrottle(10, 6000)
+  @ApiOperation({ summary: 'Resume a recurring trip template' })
+  async resumeRecurringTrip(@Request() req, @Param('id') id: string) {
+    return this.tripsService.resumeRecurring(id, req.user.userId);
   }
 
   @Get('all-trips')
