@@ -12,6 +12,7 @@ import { FileUploadService } from '../common/services/file-upload.service';
 import { MessagingService } from '../messaging/messaging.service';
 import { SafetyService } from '../safety/safety.service';
 import { SendWhatsAppNotificationDto } from './dto/send-whatsapp-notification.dto';
+import { GoogleMapsService } from '../google-maps/google-maps.service';
 
 @Injectable()
 export class BookingsService {
@@ -32,7 +33,88 @@ export class BookingsService {
     private fileUploadService: FileUploadService,
     private messagingService: MessagingService,
     private safetyService: SafetyService,
+    private googleMapsService: GoogleMapsService,
   ) {}
+
+  private buildPointFromLatLng(latitude: number, longitude: number): Point {
+    return {
+      type: 'Point',
+      coordinates: [Number(longitude), Number(latitude)],
+    };
+  }
+
+  private async geocodeAddressToPoint(
+    address?: string | null,
+    reference?: string | null,
+    context = 'address',
+  ): Promise<Point | null> {
+    const addressText = address?.trim();
+    if (!addressText) {
+      return null;
+    }
+
+    const referenceText = reference?.trim();
+    const queries = referenceText
+      ? [`${addressText}, ${referenceText}`, addressText]
+      : [addressText];
+    let bestResult: {
+      lat: number;
+      lng: number;
+      formattedAddress: string;
+      locationType?: string;
+      partialMatch?: boolean;
+    } | null = null;
+    let bestRank = Number.POSITIVE_INFINITY;
+
+    for (const query of queries) {
+      try {
+        const result = await this.googleMapsService.geocode({
+          address: query,
+          region: 'CD',
+        });
+        const rank = this.getGeocodePrecisionRank(result);
+        if (rank < bestRank) {
+          bestResult = result;
+          bestRank = rank;
+        }
+        if (rank === 0) {
+          break;
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.warn(`Unable to geocode ${context} "${query}": ${message}`);
+      }
+    }
+
+    if (!bestResult) {
+      return null;
+    }
+
+    this.logger.debug(
+      `Geocoded ${context} to "${bestResult.formattedAddress}" (${bestResult.locationType ?? 'UNKNOWN'}${bestResult.partialMatch ? ', partial match' : ''})`,
+    );
+    return this.buildPointFromLatLng(bestResult.lat, bestResult.lng);
+  }
+
+  private getGeocodePrecisionRank(result: {
+    locationType?: string;
+    partialMatch?: boolean;
+  }): number {
+    const isPrecise = ['ROOFTOP', 'RANGE_INTERPOLATED'].includes(
+      result.locationType ?? '',
+    );
+
+    if (isPrecise && !result.partialMatch) {
+      return 0;
+    }
+    if (!result.partialMatch) {
+      return 1;
+    }
+    if (isPrecise) {
+      return 2;
+    }
+    return 3;
+  }
 
   async create(passengerId: string, createBookingDto: CreateBookingDto): Promise<Booking> {
     this.logger.log(`Creating booking for passenger ${passengerId} on trip ${createBookingDto.tripId} (${createBookingDto.numberOfSeats} seats)`);
@@ -127,53 +209,45 @@ export class BookingsService {
       throw new BadRequestException(`Vous avez déjà une réservation ${statusText === 'pending or accepted' ? 'en attente ou acceptée' : 'en attente'} pour ce trajet`);
     }
 
-    // Build passenger origin point if coordinates are provided
-    let passengerOriginPoint: Point | null = null;
-    if (createBookingDto.passengerOriginCoordinates) {
-      passengerOriginPoint = {
-        type: 'Point',
-        coordinates: [
-          Number(createBookingDto.passengerOriginCoordinates.longitude),
-          Number(createBookingDto.passengerOriginCoordinates.latitude),
-        ],
-      };
-    }
-
     // Use trip's departure location as default if passenger origin is not specified
     const passengerOrigin = createBookingDto.passengerOrigin || trip.departureLocation;
-    
-    // If no coordinates provided but origin is specified, use trip's departure point
-    if (!passengerOriginPoint && createBookingDto.passengerOrigin) {
-      passengerOriginPoint = trip.departurePoint;
-    }
-
-    // Build passenger destination point if coordinates are provided
-    let passengerDestinationPoint: Point | null = null;
-    if (createBookingDto.passengerDestinationCoordinates) {
-      passengerDestinationPoint = {
-        type: 'Point',
-        coordinates: [
-          Number(createBookingDto.passengerDestinationCoordinates.longitude),
-          Number(createBookingDto.passengerDestinationCoordinates.latitude),
-        ],
-      };
-    }
+    const passengerOriginPoint = createBookingDto.passengerOriginCoordinates
+      ? this.buildPointFromLatLng(
+          createBookingDto.passengerOriginCoordinates.latitude,
+          createBookingDto.passengerOriginCoordinates.longitude,
+        )
+      : createBookingDto.passengerOrigin
+        ? await this.geocodeAddressToPoint(
+            createBookingDto.passengerOrigin,
+            createBookingDto.passengerOriginReference,
+            'passenger origin',
+          )
+        : trip.departurePoint;
 
     // Use trip's arrival location as default if passenger destination is not specified
     const passengerDestination = createBookingDto.passengerDestination || trip.arrivalLocation;
-    
-    // If no coordinates provided but destination is specified, use trip's arrival point
-    if (!passengerDestinationPoint && createBookingDto.passengerDestination) {
-      passengerDestinationPoint = trip.arrivalPoint;
-    }
+    const passengerDestinationPoint = createBookingDto.passengerDestinationCoordinates
+      ? this.buildPointFromLatLng(
+          createBookingDto.passengerDestinationCoordinates.latitude,
+          createBookingDto.passengerDestinationCoordinates.longitude,
+        )
+      : createBookingDto.passengerDestination
+        ? await this.geocodeAddressToPoint(
+            createBookingDto.passengerDestination,
+            createBookingDto.passengerDestinationReference,
+            'passenger destination',
+          )
+        : trip.arrivalPoint;
 
     const booking = this.bookingRepository.create({
       tripId: createBookingDto.tripId,
       passengerId,
       numberOfSeats: createBookingDto.numberOfSeats,
       passengerOrigin: passengerOrigin || null,
+      passengerOriginReference: createBookingDto.passengerOriginReference?.trim() || null,
       passengerOriginPoint,
       passengerDestination: passengerDestination || null,
+      passengerDestinationReference: createBookingDto.passengerDestinationReference?.trim() || null,
       passengerDestinationPoint,
     });
 

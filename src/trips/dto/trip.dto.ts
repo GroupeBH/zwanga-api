@@ -26,16 +26,26 @@ export class CreateTripDto {
   departureLocation: string;
 
   @ApiProperty({
+    required: false,
+    description: 'Reference ou repere connu donne par le conducteur pour le depart',
+    example: 'Devant la station, cote parking',
+  })
+  @IsString()
+  @IsOptional()
+  departureReference?: string;
+
+  @ApiProperty({
     description: 'Coordonnées du point de départ [longitude, latitude]',
     example: [15.2663, -4.325],
     minItems: 2,
     maxItems: 2,
   })
+  @IsOptional()
   @IsArray()
   @ArrayMinSize(2)
   @ArrayMaxSize(2)
   @IsNumber({}, { each: true })
-  departureCoordinates: [number, number];
+  departureCoordinates?: [number, number];
 
   @ApiProperty()
   @IsString()
@@ -43,16 +53,26 @@ export class CreateTripDto {
   arrivalLocation: string;
 
   @ApiProperty({
+    required: false,
+    description: 'Reference ou repere connu donne par le conducteur pour l\'arrivee',
+    example: 'Entree principale, pres du rond-point',
+  })
+  @IsString()
+  @IsOptional()
+  arrivalReference?: string;
+
+  @ApiProperty({
     description: 'Coordonnées du point d’arrivée [longitude, latitude]',
     example: [15.3222, -4.4419],
     minItems: 2,
     maxItems: 2,
   })
+  @IsOptional()
   @IsArray()
   @ArrayMinSize(2)
   @ArrayMaxSize(2)
   @IsNumber({}, { each: true })
-  arrivalCoordinates: [number, number];
+  arrivalCoordinates?: [number, number];
 
   @ApiProperty()
   @IsDateString()
@@ -205,6 +225,14 @@ export class UpdateTripDto {
 
   @ApiProperty({
     required: false,
+    description: 'Reference ou repere connu donne par le conducteur pour le depart',
+  })
+  @IsString()
+  @IsOptional()
+  departureReference?: string;
+
+  @ApiProperty({
+    required: false,
     description: 'Nouvelles coordonnées de départ [longitude, latitude]',
   })
   @IsOptional()
@@ -218,6 +246,14 @@ export class UpdateTripDto {
   @IsString()
   @IsOptional()
   arrivalLocation?: string;
+
+  @ApiProperty({
+    required: false,
+    description: 'Reference ou repere connu donne par le conducteur pour l\'arrivee',
+  })
+  @IsString()
+  @IsOptional()
+  arrivalReference?: string;
 
   @ApiProperty({
     required: false,
@@ -296,16 +332,26 @@ export class CreateRecurringTripDto {
   departureLocation: string;
 
   @ApiProperty({
+    required: false,
+    description: 'Reference ou repere connu donne par le conducteur pour le depart',
+    example: 'Devant la station, cote parking',
+  })
+  @IsString()
+  @IsOptional()
+  departureReference?: string;
+
+  @ApiProperty({
     description: 'Coordonnees du point de depart [longitude, latitude]',
     example: [15.2663, -4.325],
     minItems: 2,
     maxItems: 2,
   })
+  @IsOptional()
   @IsArray()
   @ArrayMinSize(2)
   @ArrayMaxSize(2)
   @IsNumber({}, { each: true })
-  departureCoordinates: [number, number];
+  departureCoordinates?: [number, number];
 
   @ApiProperty()
   @IsString()
@@ -313,16 +359,26 @@ export class CreateRecurringTripDto {
   arrivalLocation: string;
 
   @ApiProperty({
+    required: false,
+    description: 'Reference ou repere connu donne par le conducteur pour l\'arrivee',
+    example: 'Entree principale, pres du rond-point',
+  })
+  @IsString()
+  @IsOptional()
+  arrivalReference?: string;
+
+  @ApiProperty({
     description: "Coordonnees du point d'arrivee [longitude, latitude]",
     example: [15.3222, -4.4419],
     minItems: 2,
     maxItems: 2,
   })
+  @IsOptional()
   @IsArray()
   @ArrayMinSize(2)
   @ArrayMaxSize(2)
   @IsNumber({}, { each: true })
-  arrivalCoordinates: [number, number];
+  arrivalCoordinates?: [number, number];
 
   @ApiProperty({
     description: 'Date de debut du schema recurrent (format YYYY-MM-DD)',

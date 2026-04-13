@@ -11,6 +11,7 @@ import { CommonModule } from '../common/common.module';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { TripsModule } from '../trips/trips.module';
 import { BookingsModule } from '../bookings/bookings.module';
+import { GoogleMapsModule } from '../google-maps/google-maps.module';
 
 @Module({
   imports: [
@@ -20,6 +21,7 @@ import { BookingsModule } from '../bookings/bookings.module';
     NotificationsModule,
     TripsModule,
     BookingsModule,
+    GoogleMapsModule,
   ],
   controllers: [TripRequestsController],
   providers: [TripRequestsService],

@@ -31,6 +31,7 @@ import { NotificationService } from '../notifications/notifications.service';
 import { Rating } from '../ratings/entities/rating.entity';
 import { EmergencyContact } from '../safety/entities/emergency-contact.entity';
 import { MessagingService } from '../messaging/messaging.service';
+import { GoogleMapsService } from '../google-maps/google-maps.service';
 
 export type Coordinates = [number, number] | null;
 
@@ -119,6 +120,7 @@ export class TripsService {
     private fileUploadService: FileUploadService,
     private notificationService: NotificationService,
     private messagingService: MessagingService,
+    private googleMapsService: GoogleMapsService,
   ) { }
 
   async create(
@@ -143,14 +145,26 @@ export class TripsService {
     } = createTripDto;
 
     const { vehicle } = await this.resolvePublishingContext(driverId, vehicleId || null);
+    const departurePoint = await this.resolvePointFromCoordinatesOrAddress(
+      departureCoordinates,
+      baseTripData.departureLocation,
+      baseTripData.departureReference,
+      'trip departure',
+    );
+    const arrivalPoint = await this.resolvePointFromCoordinatesOrAddress(
+      arrivalCoordinates,
+      baseTripData.arrivalLocation,
+      baseTripData.arrivalReference,
+      'trip arrival',
+    );
 
     const trip = this.tripRepository.create({
       ...baseTripData,
       driverId,
       vehicleId: vehicle?.id ?? null,
       departureDate: new Date(departureDate),
-      departurePoint: this.buildPointFromCoordinates(departureCoordinates),
-      arrivalPoint: this.buildPointFromCoordinates(arrivalCoordinates),
+      departurePoint,
+      arrivalPoint,
       isFree,
       pricePerSeat,
       totalSeats: baseTripData.totalSeats,
@@ -294,7 +308,9 @@ export class TripsService {
         queryBuilder.andWhere(
           new Brackets((qb) => {
             qb.where(`trip.departureLocation ILIKE :${keywordParam}`)
-              .orWhere(`trip.arrivalLocation ILIKE :${keywordParam}`);
+              .orWhere(`trip.departureReference ILIKE :${keywordParam}`)
+              .orWhere(`trip.arrivalLocation ILIKE :${keywordParam}`)
+              .orWhere(`trip.arrivalReference ILIKE :${keywordParam}`);
           }),
           { [keywordParam]: `%${keyword}%` },
         );
@@ -302,15 +318,23 @@ export class TripsService {
     }
 
     if (searchTripsDto.departureLocation) {
-      queryBuilder.andWhere('trip.departureLocation ILIKE :departureLocation', {
-        departureLocation: `%${searchTripsDto.departureLocation}%`,
-      });
+      queryBuilder.andWhere(
+        new Brackets((qb) => {
+          qb.where('trip.departureLocation ILIKE :departureLocation')
+            .orWhere('trip.departureReference ILIKE :departureLocation');
+        }),
+        { departureLocation: `%${searchTripsDto.departureLocation}%` },
+      );
     }
 
     if (searchTripsDto.arrivalLocation) {
-      queryBuilder.andWhere('trip.arrivalLocation ILIKE :arrivalLocation', {
-        arrivalLocation: `%${searchTripsDto.arrivalLocation}%`,
-      });
+      queryBuilder.andWhere(
+        new Brackets((qb) => {
+          qb.where('trip.arrivalLocation ILIKE :arrivalLocation')
+            .orWhere('trip.arrivalReference ILIKE :arrivalLocation');
+        }),
+        { arrivalLocation: `%${searchTripsDto.arrivalLocation}%` },
+      );
     }
 
     if (searchTripsDto.minSeats) {
@@ -491,16 +515,28 @@ export class TripsService {
     const isFree =
       createRecurringTripDto.isFree ?? createRecurringTripDto.pricePerSeat === 0;
     const pricePerSeat = isFree ? 0 : createRecurringTripDto.pricePerSeat;
+    const departurePoint = await this.resolvePointFromCoordinatesOrAddress(
+      createRecurringTripDto.departureCoordinates,
+      createRecurringTripDto.departureLocation,
+      createRecurringTripDto.departureReference,
+      'recurring trip departure',
+    );
+    const arrivalPoint = await this.resolvePointFromCoordinatesOrAddress(
+      createRecurringTripDto.arrivalCoordinates,
+      createRecurringTripDto.arrivalLocation,
+      createRecurringTripDto.arrivalReference,
+      'recurring trip arrival',
+    );
 
     const template = this.recurringTripTemplateRepository.create({
       driverId,
       vehicleId: vehicle.id,
       departureLocation: createRecurringTripDto.departureLocation,
-      departurePoint: this.buildPointFromCoordinates(
-        createRecurringTripDto.departureCoordinates,
-      ),
+      departureReference: createRecurringTripDto.departureReference?.trim() || null,
+      departurePoint,
       arrivalLocation: createRecurringTripDto.arrivalLocation,
-      arrivalPoint: this.buildPointFromCoordinates(createRecurringTripDto.arrivalCoordinates),
+      arrivalReference: createRecurringTripDto.arrivalReference?.trim() || null,
+      arrivalPoint,
       departureTimeMinutes,
       weekdays,
       startDate: this.formatDateOnly(startDate),
@@ -685,12 +721,32 @@ export class TripsService {
       trip.departureDate = new Date(departureDate);
     }
 
-    if (departureCoordinates) {
-      trip.departurePoint = this.buildPointFromCoordinates(departureCoordinates);
+    const shouldRefreshDeparturePoint =
+      departureCoordinates ||
+      restPayload.departureLocation !== undefined ||
+      restPayload.departureReference !== undefined;
+
+    if (shouldRefreshDeparturePoint) {
+      trip.departurePoint = await this.resolvePointFromCoordinatesOrAddress(
+        departureCoordinates,
+        restPayload.departureLocation ?? trip.departureLocation,
+        restPayload.departureReference ?? trip.departureReference,
+        'trip departure',
+      );
     }
 
-    if (arrivalCoordinates) {
-      trip.arrivalPoint = this.buildPointFromCoordinates(arrivalCoordinates);
+    const shouldRefreshArrivalPoint =
+      arrivalCoordinates ||
+      restPayload.arrivalLocation !== undefined ||
+      restPayload.arrivalReference !== undefined;
+
+    if (shouldRefreshArrivalPoint) {
+      trip.arrivalPoint = await this.resolvePointFromCoordinatesOrAddress(
+        arrivalCoordinates,
+        restPayload.arrivalLocation ?? trip.arrivalLocation,
+        restPayload.arrivalReference ?? trip.arrivalReference,
+        'trip arrival',
+      );
     }
 
     // Synchronize isFree with pricePerSeat
@@ -1337,8 +1393,10 @@ export class TripsService {
           driverId: template.driverId,
           vehicleId: template.vehicleId,
           departureLocation: template.departureLocation,
+          departureReference: template.departureReference,
           departurePoint: template.departurePoint,
           arrivalLocation: template.arrivalLocation,
+          arrivalReference: template.arrivalReference,
           arrivalPoint: template.arrivalPoint,
           departureDate,
           totalSeats: template.totalSeats,
@@ -1548,11 +1606,102 @@ export class TripsService {
 
     return null;
   }
-  private buildPointFromCoordinates([longitude, latitude]: [number, number]): Point {
+  private buildPointFromCoordinates(coordinates?: [number, number] | null): Point | null {
+    if (!coordinates) {
+      return null;
+    }
+    const [longitude, latitude] = coordinates;
     return {
       type: 'Point',
       coordinates: [Number(longitude), Number(latitude)],
     };
+  }
+
+  private async resolvePointFromCoordinatesOrAddress(
+    coordinates: [number, number] | undefined | null,
+    address?: string | null,
+    reference?: string | null,
+    context = 'address',
+  ): Promise<Point | null> {
+    const coordinatesPoint = this.buildPointFromCoordinates(coordinates);
+    if (coordinatesPoint) {
+      return coordinatesPoint;
+    }
+
+    return this.geocodeAddressToPoint(address, reference, context);
+  }
+
+  private async geocodeAddressToPoint(
+    address?: string | null,
+    reference?: string | null,
+    context = 'address',
+  ): Promise<Point | null> {
+    const addressText = address?.trim();
+    if (!addressText) {
+      return null;
+    }
+
+    const referenceText = reference?.trim();
+    const queries = referenceText
+      ? [`${addressText}, ${referenceText}`, addressText]
+      : [addressText];
+    let bestResult: {
+      lat: number;
+      lng: number;
+      formattedAddress: string;
+      locationType?: string;
+      partialMatch?: boolean;
+    } | null = null;
+    let bestRank = Number.POSITIVE_INFINITY;
+
+    for (const query of queries) {
+      try {
+        const result = await this.googleMapsService.geocode({
+          address: query,
+          region: 'CD',
+        });
+        const rank = this.getGeocodePrecisionRank(result);
+        if (rank < bestRank) {
+          bestResult = result;
+          bestRank = rank;
+        }
+        if (rank === 0) {
+          break;
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.warn(`Unable to geocode ${context} "${query}": ${message}`);
+      }
+    }
+
+    if (!bestResult) {
+      return null;
+    }
+
+    this.logger.debug(
+      `Geocoded ${context} to "${bestResult.formattedAddress}" (${bestResult.locationType ?? 'UNKNOWN'}${bestResult.partialMatch ? ', partial match' : ''})`,
+    );
+    return this.buildPointFromCoordinates([bestResult.lng, bestResult.lat]);
+  }
+
+  private getGeocodePrecisionRank(result: {
+    locationType?: string;
+    partialMatch?: boolean;
+  }): number {
+    const isPrecise = ['ROOFTOP', 'RANGE_INTERPOLATED'].includes(
+      result.locationType ?? '',
+    );
+
+    if (isPrecise && !result.partialMatch) {
+      return 0;
+    }
+    if (!result.partialMatch) {
+      return 1;
+    }
+    if (isPrecise) {
+      return 2;
+    }
+    return 3;
   }
 
   private async sanitizeTrip(
@@ -1723,7 +1872,7 @@ export class TripsService {
     };
   }
 
-  private pointToCoordinates(point?: Point): Coordinates {
+  private pointToCoordinates(point?: Point | null): Coordinates {
     if (!point?.coordinates) {
       return null;
     }

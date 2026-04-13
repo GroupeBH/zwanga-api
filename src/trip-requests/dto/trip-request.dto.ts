@@ -19,16 +19,26 @@ export class CreateTripRequestDto {
   departureLocation: string;
 
   @ApiProperty({
+    required: false,
+    description: 'Reference ou repere connu pour faciliter la prise en charge',
+    example: 'Entree principale, devant la station',
+  })
+  @IsString()
+  @IsOptional()
+  departureReference?: string;
+
+  @ApiProperty({
     description: 'Coordonnées du point de départ [longitude, latitude]',
     example: [15.2663, -4.325],
     minItems: 2,
     maxItems: 2,
   })
+  @IsOptional()
   @IsArray()
   @ArrayMinSize(2)
   @ArrayMaxSize(2)
   @IsNumber({}, { each: true })
-  departureCoordinates: [number, number];
+  departureCoordinates?: [number, number];
 
   @ApiProperty()
   @IsString()
@@ -36,16 +46,26 @@ export class CreateTripRequestDto {
   arrivalLocation: string;
 
   @ApiProperty({
+    required: false,
+    description: 'Reference ou repere connu pour faciliter la depose',
+    example: 'Portail noir, a cote du supermarche',
+  })
+  @IsString()
+  @IsOptional()
+  arrivalReference?: string;
+
+  @ApiProperty({
     description: 'Coordonnées du point d\'arrivée [longitude, latitude]',
     example: [15.3222, -4.4419],
     minItems: 2,
     maxItems: 2,
   })
+  @IsOptional()
   @IsArray()
   @ArrayMinSize(2)
   @ArrayMaxSize(2)
   @IsNumber({}, { each: true })
-  arrivalCoordinates: [number, number];
+  arrivalCoordinates?: [number, number];
 
   @ApiProperty({
     description: 'Date/heure de départ minimum souhaitée',
@@ -133,6 +153,52 @@ export class CreateDriverOfferDto {
   @IsString()
   @IsOptional()
   message?: string;
+
+  @ApiProperty({
+    required: false,
+    description: 'Reference ou repere propose par le conducteur pour la prise en charge',
+    example: 'Je m\'arrete devant la station',
+  })
+  @IsString()
+  @IsOptional()
+  departureReference?: string;
+
+  @ApiProperty({
+    required: false,
+    description: 'Coordonnees de prise en charge proposees par le conducteur [longitude, latitude]',
+    example: [15.2663, -4.325],
+    minItems: 2,
+    maxItems: 2,
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMinSize(2)
+  @ArrayMaxSize(2)
+  @IsNumber({}, { each: true })
+  departureCoordinates?: [number, number];
+
+  @ApiProperty({
+    required: false,
+    description: 'Reference ou repere propose par le conducteur pour la depose',
+    example: 'Depose possible au parking principal',
+  })
+  @IsString()
+  @IsOptional()
+  arrivalReference?: string;
+
+  @ApiProperty({
+    required: false,
+    description: 'Coordonnees de depose proposees par le conducteur [longitude, latitude]',
+    example: [15.3222, -4.4419],
+    minItems: 2,
+    maxItems: 2,
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMinSize(2)
+  @ArrayMaxSize(2)
+  @IsNumber({}, { each: true })
+  arrivalCoordinates?: [number, number];
 }
 
 export class AcceptDriverOfferDto {
@@ -172,6 +238,52 @@ export class AcceptTripRequestDto {
   @Min(1)
   @IsOptional()
   totalSeats?: number;
+
+  @ApiProperty({
+    required: false,
+    description: 'Reference ou repere ajoute par le conducteur pour la prise en charge',
+    example: 'Je vous prends devant la station',
+  })
+  @IsString()
+  @IsOptional()
+  departureReference?: string;
+
+  @ApiProperty({
+    required: false,
+    description: 'Coordonnees de prise en charge ajoutees par le conducteur [longitude, latitude]',
+    example: [15.2663, -4.325],
+    minItems: 2,
+    maxItems: 2,
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMinSize(2)
+  @ArrayMaxSize(2)
+  @IsNumber({}, { each: true })
+  departureCoordinates?: [number, number];
+
+  @ApiProperty({
+    required: false,
+    description: 'Reference ou repere ajoute par le conducteur pour la depose',
+    example: 'Depose au parking principal',
+  })
+  @IsString()
+  @IsOptional()
+  arrivalReference?: string;
+
+  @ApiProperty({
+    required: false,
+    description: 'Coordonnees de depose ajoutees par le conducteur [longitude, latitude]',
+    example: [15.3222, -4.4419],
+    minItems: 2,
+    maxItems: 2,
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMinSize(2)
+  @ArrayMaxSize(2)
+  @IsNumber({}, { each: true })
+  arrivalCoordinates?: [number, number];
 }
 
 export class UpdateTripRequestDto {
@@ -179,6 +291,14 @@ export class UpdateTripRequestDto {
   @IsString()
   @IsOptional()
   departureLocation?: string;
+
+  @ApiProperty({
+    required: false,
+    description: 'Reference ou repere connu pour faciliter la prise en charge',
+  })
+  @IsString()
+  @IsOptional()
+  departureReference?: string;
 
   @ApiProperty({
     required: false,
@@ -198,6 +318,14 @@ export class UpdateTripRequestDto {
   @IsString()
   @IsOptional()
   arrivalLocation?: string;
+
+  @ApiProperty({
+    required: false,
+    description: 'Reference ou repere connu pour faciliter la depose',
+  })
+  @IsString()
+  @IsOptional()
+  arrivalReference?: string;
 
   @ApiProperty({
     required: false,
