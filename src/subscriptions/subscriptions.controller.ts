@@ -1,14 +1,30 @@
-import { Controller, Get, Post, Body, Param, Request } from '@nestjs/common';
+import { Controller, Get, Post, Body, Param, Request, Query, Put } from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { SubscriptionsService } from './subscriptions.service';
-import { SubscriptionPlan } from './entities/subscription.entity';
 import { Auth } from '../auth/decorators/auth.decorator';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
+import {
+  CreateDocumentFundingRequestDto,
+  ListDocumentFundingRequestsQueryDto,
+  SubscribeDto,
+  UpdateDocumentFundingRequestStatusDto,
+} from './dto/subscription.dto';
+import { Roles } from '../common/decorators/roles.decorator';
+import { UserRole } from '../users/entities/user.entity';
+import { Public } from '../common/decorators/public.decorator';
 
 @ApiTags('Subscriptions')
 @Controller('subscriptions')
 export class SubscriptionsController {
   constructor(private readonly subscriptionsService: SubscriptionsService) {}
+
+  @Get('plans')
+  @Public()
+  @SensitiveThrottle(60, 60000)
+  @ApiOperation({ summary: 'List premium subscription plans and benefits' })
+  async getPlans() {
+    return this.subscriptionsService.getPlans();
+  }
 
   @Post('trial')
   @Auth()
@@ -22,8 +38,8 @@ export class SubscriptionsController {
   @Auth()
   @SensitiveThrottle(5, 60000)
   @ApiOperation({ summary: 'Subscribe to a plan' })
-  async subscribe(@Request() req, @Body('plan') plan: SubscriptionPlan) {
-    return this.subscriptionsService.subscribe(req.user.userId, plan);
+  async subscribe(@Request() req, @Body() dto: SubscribeDto) {
+    return this.subscriptionsService.subscribe(req.user.userId, dto.plan);
   }
 
   @Get('my-subscription')
@@ -47,10 +63,62 @@ export class SubscriptionsController {
   @SensitiveThrottle(30, 60000)
   @ApiOperation({ summary: 'Check subscription status' })
   async checkStatus(@Request() req) {
-    const isActive = await this.subscriptionsService.checkSubscriptionStatus(
+    return this.subscriptionsService.getPremiumOverview(req.user.userId);
+  }
+
+  @Get('premium-overview')
+  @Auth()
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'Get premium subscription benefits for the current driver' })
+  async getPremiumOverview(@Request() req) {
+    return this.subscriptionsService.getPremiumOverview(req.user.userId);
+  }
+
+  @Post('document-funding-requests')
+  @Auth()
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({ summary: 'Create a document funding request for a premium driver' })
+  async createDocumentFundingRequest(
+    @Request() req,
+    @Body() dto: CreateDocumentFundingRequestDto,
+  ) {
+    return this.subscriptionsService.createDocumentFundingRequest(req.user.userId, dto);
+  }
+
+  @Get('document-funding-requests/my')
+  @Auth()
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'Get my document funding requests' })
+  async getMyDocumentFundingRequests(@Request() req) {
+    return this.subscriptionsService.getMyDocumentFundingRequests(req.user.userId);
+  }
+
+  @Get('document-funding-requests')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'List document funding requests (Admin)' })
+  async getDocumentFundingRequests(
+    @Query() query: ListDocumentFundingRequestsQueryDto,
+  ) {
+    return this.subscriptionsService.getDocumentFundingRequests(query);
+  }
+
+  @Put('document-funding-requests/:requestId/status')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(20, 60000)
+  @ApiOperation({ summary: 'Update a document funding request status (Admin)' })
+  async updateDocumentFundingRequestStatus(
+    @Request() req,
+    @Param('requestId') requestId: string,
+    @Body() dto: UpdateDocumentFundingRequestStatusDto,
+  ) {
+    return this.subscriptionsService.updateDocumentFundingRequestStatus(
+      requestId,
       req.user.userId,
+      dto,
     );
-    return { isActive };
   }
 }
 

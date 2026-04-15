@@ -19,6 +19,7 @@ import { TripsService } from '../trips/trips.service';
 import { BookingsService } from '../bookings/bookings.service';
 import { BookingStatus } from '../bookings/entities/booking.entity';
 import { GoogleMapsService } from '../google-maps/google-maps.service';
+import { SubscriptionsService } from '../subscriptions/subscriptions.service';
 
 export interface SanitizedUser {
   id: string;
@@ -26,6 +27,8 @@ export interface SanitizedUser {
   lastName: string;
   phone: string;
   profilePicture: string | null;
+  isPremium: boolean;
+  premiumBadge: boolean;
 }
 
 export interface SanitizedVehicle {
@@ -113,6 +116,7 @@ export class TripRequestsService {
     private tripsService: TripsService,
     private bookingsService: BookingsService,
     private googleMapsService: GoogleMapsService,
+    private subscriptionsService: SubscriptionsService,
   ) { }
 
   async create(passengerId: string, createTripRequestDto: CreateTripRequestDto): Promise<SanitizedTripRequest> {
@@ -1268,6 +1272,7 @@ export class TripRequestsService {
     const profilePicture = user.profilePicture
       ? await this.fileUploadService.getPresignedUrlIfS3Key(user.profilePicture)
       : null;
+    const premium = await this.subscriptionsService.getPremiumOverview(user.id);
 
     return {
       id: user.id,
@@ -1275,6 +1280,8 @@ export class TripRequestsService {
       lastName: user.lastName,
       phone: user.phone,
       profilePicture: profilePicture || user.profilePicture,
+      isPremium: premium.isPremium,
+      premiumBadge: premium.premiumBadgeEnabled,
     };
   }
 

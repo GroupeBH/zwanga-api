@@ -36,6 +36,7 @@ export class DailyEngagementNotificationService {
 
     let sentCount = 0;
     let failedCount = 0;
+    let skippedCount = 0;
 
     for (const user of usersWithToken) {
       const isDriverProfile = user.isDriver || user.role === UserRole.DRIVER;
@@ -47,7 +48,7 @@ export class DailyEngagementNotificationService {
         : 'Demande un trajet et profite de la communaute des conducteurs Zwanga qui vont dans ta direction.';
 
       try {
-        await this.notificationService.sendNotification(
+        const sent = await this.notificationService.sendAutomaticNotification(
           user.fcmToken!,
           title,
           body,
@@ -57,7 +58,11 @@ export class DailyEngagementNotificationService {
           },
           user.id,
         );
-        sentCount += 1;
+        if (sent) {
+          sentCount += 1;
+        } else {
+          skippedCount += 1;
+        }
       } catch (error) {
         failedCount += 1;
         this.logger.warn(
@@ -67,8 +72,7 @@ export class DailyEngagementNotificationService {
     }
 
     this.logger.log(
-      `Daily engagement push finished - sent: ${sentCount}, failed: ${failedCount}, total eligible: ${usersWithToken.length}`,
+      `Daily engagement push finished - sent: ${sentCount}, skipped: ${skippedCount}, failed: ${failedCount}, total eligible: ${usersWithToken.length}`,
     );
   }
 }
-

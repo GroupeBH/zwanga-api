@@ -159,11 +159,12 @@ export class TripAvailabilityNotificationService {
     )}`;
 
     try {
-      await this.notificationService.sendNotification(
+      await this.notificationService.sendAutomaticNotification(
         user.fcmToken!,
         title,
         body,
         {
+          type: 'trip_recommendation',
           tripId: trips[0].id,
         },
         user.id,

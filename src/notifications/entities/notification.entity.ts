@@ -20,6 +20,7 @@ export enum NotificationStatus {
 @Index(['userId', 'createdAt'])
 @Index(['userId', 'isRead'])
 @Index(['userId', 'isActive'])
+@Index(['userId', 'isAutomatic', 'createdAt'])
 @Index(['status'])
 export class Notification {
   @PrimaryGeneratedColumn('uuid')
@@ -43,6 +44,9 @@ export class Notification {
 
   @Column({ type: 'jsonb', nullable: true })
   data: Record<string, any> | null; // Données supplémentaires de la notification
+
+  @Column({ type: 'boolean', default: false })
+  isAutomatic: boolean; // Si la notification vient d'un job automatique non critique
 
   @Column({
     type: 'enum',

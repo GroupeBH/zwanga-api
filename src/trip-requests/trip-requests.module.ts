@@ -12,6 +12,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
 import { TripsModule } from '../trips/trips.module';
 import { BookingsModule } from '../bookings/bookings.module';
 import { GoogleMapsModule } from '../google-maps/google-maps.module';
+import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
 
 @Module({
   imports: [
@@ -22,6 +23,7 @@ import { GoogleMapsModule } from '../google-maps/google-maps.module';
     TripsModule,
     BookingsModule,
     GoogleMapsModule,
+    SubscriptionsModule,
   ],
   controllers: [TripRequestsController],
   providers: [TripRequestsService],

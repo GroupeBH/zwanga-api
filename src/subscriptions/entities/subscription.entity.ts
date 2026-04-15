@@ -57,6 +57,21 @@ export class Subscription {
   @Column({ type: 'decimal', precision: 10, scale: 2 })
   amount: number;
 
+  @Column({ type: 'boolean', default: true })
+  premiumBadgeEnabled: boolean;
+
+  @Column({ type: 'boolean', default: true })
+  featuredTripsEnabled: boolean;
+
+  @Column({ type: 'boolean', default: true })
+  documentFundingEnabled: boolean;
+
+  @Column({ type: 'decimal', precision: 12, scale: 2, nullable: true })
+  documentFundingLimit: number | null;
+
+  @Column({ type: 'varchar', length: 8, default: 'CDF' })
+  documentFundingCurrency: string;
+
   @Column({ nullable: true })
   paymentReference: string;
 

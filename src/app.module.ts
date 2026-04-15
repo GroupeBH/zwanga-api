@@ -44,6 +44,7 @@ import { Booking } from './bookings/entities/booking.entity';
 import { Message } from './chat/entities/message.entity';
 import { Rating } from './ratings/entities/rating.entity';
 import { Subscription } from './subscriptions/entities/subscription.entity';
+import { DocumentFundingRequest } from './subscriptions/entities/document-funding-request.entity';
 import { Conversation } from './chat/entities/conversation.entity';
 import { ConversationParticipant } from './chat/entities/conversation-participant.entity';
 import { FaqEntry } from './faq/entities/faq-entry.entity';
@@ -68,6 +69,7 @@ const typeOrmEntities = [
   Message,
   Rating,
   Subscription,
+  DocumentFundingRequest,
   Conversation,
   ConversationParticipant,
   FaqEntry,
