@@ -32,6 +32,7 @@ export interface PremiumSubscriptionFeatures {
 @Injectable()
 export class SubscriptionsService {
   private readonly logger = new Logger(SubscriptionsService.name);
+  private readonly DEFAULT_SUBSCRIPTION_CURRENCY = 'USD';
   private readonly DEFAULT_DOCUMENT_FUNDING_CURRENCY = 'CDF';
 
   constructor(
@@ -51,18 +52,19 @@ export class SubscriptionsService {
     const user = await this.getDriverUser(userId);
     await this.ensureNoActiveSubscription(userId, 'User already has an active subscription');
 
-    const trialPeriodDays = this.configService.get<number>('TRIAL_PERIOD_DAYS') || 7;
+    const trialPeriodDays = this.getNumberConfig('TRIAL_PERIOD_DAYS', 7);
     const startDate = new Date();
     const endDate = new Date();
     endDate.setDate(endDate.getDate() + trialPeriodDays);
 
     const subscription = this.subscriptionRepository.create({
       userId: user.id,
-      plan: SubscriptionPlan.MONTHLY,
+      plan: SubscriptionPlan.PRO,
       status: SubscriptionStatus.ACTIVE,
       startDate,
       endDate,
       amount: 0,
+      currency: this.getSubscriptionCurrency(),
       premiumBadgeEnabled: true,
       featuredTripsEnabled: true,
       documentFundingEnabled: false,
@@ -79,22 +81,28 @@ export class SubscriptionsService {
   }
 
   getPlans() {
-    return Object.values(SubscriptionPlan).map((plan) => ({
-      plan,
-      amount: this.getSubscriptionPrice(plan),
-      currency: this.getDocumentFundingCurrency(),
-      premiumBadgeEnabled: true,
-      featuredTripsEnabled: true,
-      documentFundingEnabled: true,
-      documentFundingLimit: this.getDocumentFundingLimit(),
-      eligibleDocumentTypes: Object.values(AdministrativeDocumentType),
-    }));
+    return [
+      {
+        plan: SubscriptionPlan.PRO,
+        amount: this.getSubscriptionPrice(),
+        currency: this.getSubscriptionCurrency(),
+        premiumBadgeEnabled: true,
+        featuredTripsEnabled: true,
+        documentFundingEnabled: true,
+        documentFundingLimit: this.getDocumentFundingLimit(),
+        documentFundingCurrency: this.getDocumentFundingCurrency(),
+        eligibleDocumentTypes: Object.values(AdministrativeDocumentType),
+      },
+    ];
   }
 
   async subscribe(userId: string, plan: SubscriptionPlan): Promise<Subscription> {
     this.logger.log(`Creating subscription for user: ${userId} - Plan: ${plan}`);
 
     const user = await this.getDriverUser(userId);
+    if (plan !== SubscriptionPlan.PRO) {
+      throw new BadRequestException('Le seul abonnement disponible est le pack pro');
+    }
 
     // Cancel existing active subscription before creating the new paid period.
     await this.subscriptionRepository.update(
@@ -102,9 +110,9 @@ export class SubscriptionsService {
       { status: SubscriptionStatus.CANCELLED },
     );
 
-    const subscriptionPrice = this.getSubscriptionPrice(plan);
+    const subscriptionPrice = this.getSubscriptionPrice();
     const startDate = new Date();
-    const endDate = this.calculateEndDate(startDate, plan);
+    const endDate = this.calculateEndDate(startDate);
 
     // Mock payment - in production, integrate with payment gateway.
     const paymentReference = `PAY-${Date.now()}-${userId.substring(0, 8)}`;
@@ -116,6 +124,7 @@ export class SubscriptionsService {
       startDate,
       endDate,
       amount: subscriptionPrice,
+      currency: this.getSubscriptionCurrency(),
       premiumBadgeEnabled: true,
       featuredTripsEnabled: true,
       documentFundingEnabled: true,
@@ -323,26 +332,27 @@ export class SubscriptionsService {
     }
   }
 
-  private getSubscriptionPrice(plan: SubscriptionPlan): number {
-    const monthlyPrice = this.configService.get<number>('SUBSCRIPTION_PRICE') || 5000;
-    if (plan === SubscriptionPlan.YEARLY) {
-      return this.configService.get<number>('SUBSCRIPTION_YEARLY_PRICE') || monthlyPrice * 12;
-    }
-    return monthlyPrice;
+  private getSubscriptionPrice(): number {
+    return this.getNumberConfig('SUBSCRIPTION_PRO_PRICE_USD', 2);
   }
 
-  private calculateEndDate(startDate: Date, plan: SubscriptionPlan): Date {
+  private calculateEndDate(startDate: Date): Date {
     const endDate = new Date(startDate);
-    if (plan === SubscriptionPlan.YEARLY) {
-      endDate.setFullYear(endDate.getFullYear() + 1);
-    } else {
-      endDate.setMonth(endDate.getMonth() + 1);
-    }
+    endDate.setDate(
+      endDate.getDate() + this.getNumberConfig('SUBSCRIPTION_PRO_DURATION_DAYS', 30),
+    );
     return endDate;
   }
 
   private getDocumentFundingLimit(): number {
-    return this.configService.get<number>('SUBSCRIPTION_DOCUMENT_FUNDING_LIMIT') || 50000;
+    return this.getNumberConfig('SUBSCRIPTION_DOCUMENT_FUNDING_LIMIT', 50000);
+  }
+
+  private getSubscriptionCurrency(): string {
+    return (
+      this.configService.get<string>('SUBSCRIPTION_PRO_CURRENCY') ||
+      this.DEFAULT_SUBSCRIPTION_CURRENCY
+    ).toUpperCase();
   }
 
   private getDocumentFundingCurrency(): string {
@@ -350,6 +360,12 @@ export class SubscriptionsService {
       this.configService.get<string>('SUBSCRIPTION_DOCUMENT_FUNDING_CURRENCY') ||
       this.DEFAULT_DOCUMENT_FUNDING_CURRENCY
     ).toUpperCase();
+  }
+
+  private getNumberConfig(key: string, fallback: number): number {
+    const rawValue = this.configService.get<string | number>(key);
+    const parsed = Number(rawValue);
+    return Number.isFinite(parsed) ? parsed : fallback;
   }
 
   private buildPremiumFeatures(

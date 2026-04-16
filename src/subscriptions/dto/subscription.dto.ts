@@ -1,5 +1,6 @@
 import {
   IsEnum,
+  IsIn,
   IsNotEmpty,
   IsNumber,
   IsOptional,
@@ -16,11 +17,14 @@ import {
 
 export class SubscribeDto {
   @ApiProperty({
-    enum: SubscriptionPlan,
+    enum: [SubscriptionPlan.PRO],
     enumName: 'SubscriptionPlan',
-    example: SubscriptionPlan.MONTHLY,
+    example: SubscriptionPlan.PRO,
   })
   @IsEnum(SubscriptionPlan)
+  @IsIn([SubscriptionPlan.PRO], {
+    message: 'Le seul abonnement disponible est le pack pro',
+  })
   @IsNotEmpty()
   plan: SubscriptionPlan;
 }
