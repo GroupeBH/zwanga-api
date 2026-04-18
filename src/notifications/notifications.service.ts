@@ -2,9 +2,11 @@ import * as admin from 'firebase-admin';
 import { Injectable, OnModuleInit, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, MoreThan, Repository } from 'typeorm';
 import { Notification, NotificationStatus } from './entities/notification.entity';
 import { User } from '../users/entities/user.entity';
+
+const AUTOMATIC_NOTIFICATION_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000;
 
 @Injectable()
 export class NotificationService implements OnModuleInit {
@@ -66,10 +68,60 @@ export class NotificationService implements OnModuleInit {
     body: string,
     data?: Record<string, any>,
     userId?: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
+    return this.sendNotificationInternal(fcmToken, title, body, data, userId, false);
+  }
+
+  async sendAutomaticNotification(
+    fcmToken: string,
+    title: string,
+    body: string,
+    data: Record<string, any> | undefined,
+    userId: string,
+  ): Promise<boolean> {
+    if (!userId) {
+      this.logger.warn('Automatic notification skipped because userId is missing');
+      return false;
+    }
+
+    const canSend = await this.canSendAutomaticNotification(userId);
+    if (!canSend) {
+      this.logger.debug(
+        `Automatic notification skipped for user ${userId}: weekly limit reached`,
+      );
+      return false;
+    }
+
+    return this.sendNotificationInternal(fcmToken, title, body, data, userId, true);
+  }
+
+  private async canSendAutomaticNotification(userId: string): Promise<boolean> {
+    const since = new Date(Date.now() - AUTOMATIC_NOTIFICATION_COOLDOWN_MS);
+    const existingNotification = await this.notificationRepository.findOne({
+      where: {
+        userId,
+        isAutomatic: true,
+        status: In([NotificationStatus.PENDING, NotificationStatus.SENT]),
+        createdAt: MoreThan(since),
+      },
+      order: { createdAt: 'DESC' },
+      select: ['id'],
+    });
+
+    return !existingNotification;
+  }
+
+  private async sendNotificationInternal(
+    fcmToken: string,
+    title: string,
+    body: string,
+    data?: Record<string, any>,
+    userId?: string,
+    isAutomatic = false,
+  ): Promise<boolean> {
     if (!this.firebaseApp) {
       this.logger.warn('FCM not configured, skipping notification');
-      return;
+      return false;
     }
 
     // Créer l'enregistrement de notification en base de données
@@ -79,6 +131,7 @@ export class NotificationService implements OnModuleInit {
       title,
       body,
       data: data || null,
+      isAutomatic,
       status: NotificationStatus.PENDING,
     });
 
@@ -103,6 +156,7 @@ export class NotificationService implements OnModuleInit {
       await this.notificationRepository.save(savedNotification);
       
       this.logger.log(`Notification sent successfully - Title: ${title}, MessageId: ${messageId}`);
+      return true;
     } catch (error) {
       // Mettre à jour la notification avec le statut d'échec
       savedNotification.status = NotificationStatus.FAILED;
@@ -110,6 +164,7 @@ export class NotificationService implements OnModuleInit {
       await this.notificationRepository.save(savedNotification);
       
       this.logger.error(`Error sending notification: ${error.message}`, error.stack);
+      return false;
     }
   }
 
@@ -133,6 +188,7 @@ export class NotificationService implements OnModuleInit {
         title,
         body,
         data: data || null,
+        isAutomatic: false,
         status: NotificationStatus.PENDING,
       }),
     );

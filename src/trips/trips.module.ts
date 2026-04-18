@@ -13,6 +13,8 @@ import { Rating } from '../ratings/entities/rating.entity';
 import { EmergencyContact } from '../safety/entities/emergency-contact.entity';
 import { MessagingModule } from '../messaging/messaging.module';
 import { RecurringTripTemplate } from './entities/recurring-trip-template.entity';
+import { GoogleMapsModule } from '../google-maps/google-maps.module';
+import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
 
 @Module({
   imports: [
@@ -29,6 +31,8 @@ import { RecurringTripTemplate } from './entities/recurring-trip-template.entity
     ]),
     NotificationsModule,
     MessagingModule,
+    GoogleMapsModule,
+    SubscriptionsModule,
   ],
   controllers: [TripsController],
   providers: [TripsService],

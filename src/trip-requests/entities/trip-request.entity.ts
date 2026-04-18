@@ -41,24 +41,32 @@ export class TripRequest {
   @Column()
   departureLocation: string;
 
+  @Column({ type: 'text', nullable: true })
+  departureReference: string | null;
+
   @Index('IDX_trip_requests_departure_point', { spatial: true })
   @Column({
     type: 'geography',
     spatialFeatureType: 'Point',
     srid: 4326,
+    nullable: true,
   })
-  departurePoint: Point;
+  departurePoint: Point | null;
 
   @Column()
   arrivalLocation: string;
+
+  @Column({ type: 'text', nullable: true })
+  arrivalReference: string | null;
 
   @Index('IDX_trip_requests_arrival_point', { spatial: true })
   @Column({
     type: 'geography',
     spatialFeatureType: 'Point',
     srid: 4326,
+    nullable: true,
   })
-  arrivalPoint: Point;
+  arrivalPoint: Point | null;
 
   @Column({ type: 'timestamp' })
   departureDateMin: Date; // Date/heure de départ minimum souhaitée

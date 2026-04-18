@@ -1,4 +1,5 @@
 import {
+  type Point,
   Entity,
   PrimaryGeneratedColumn,
   Column,
@@ -57,6 +58,28 @@ export class DriverOffer {
 
   @Column({ type: 'text', nullable: true })
   message: string | null; // Message optionnel du driver
+
+  @Column({ type: 'text', nullable: true })
+  departureReference: string | null;
+
+  @Column({
+    type: 'geography',
+    spatialFeatureType: 'Point',
+    srid: 4326,
+    nullable: true,
+  })
+  departurePoint: Point | null;
+
+  @Column({ type: 'text', nullable: true })
+  arrivalReference: string | null;
+
+  @Column({
+    type: 'geography',
+    spatialFeatureType: 'Point',
+    srid: 4326,
+    nullable: true,
+  })
+  arrivalPoint: Point | null;
 
   @Column({
     type: 'enum',

@@ -48,24 +48,32 @@ export class Trip {
   @Column()
   departureLocation: string;
 
+  @Column({ type: 'text', nullable: true })
+  departureReference: string | null;
+
   @Index('IDX_trips_departure_point', { spatial: true })
   @Column({
     type: 'geography',
     spatialFeatureType: 'Point',
     srid: 4326,
+    nullable: true,
   })
-  departurePoint: Point;
+  departurePoint: Point | null;
 
   @Column()
   arrivalLocation: string;
+
+  @Column({ type: 'text', nullable: true })
+  arrivalReference: string | null;
 
   @Index('IDX_trips_arrival_point', { spatial: true })
   @Column({
     type: 'geography',
     spatialFeatureType: 'Point',
     srid: 4326,
+    nullable: true,
   })
-  arrivalPoint: Point;
+  arrivalPoint: Point | null;
 
   @Column({ type: 'timestamp' })
   departureDate: Date;
@@ -104,7 +112,7 @@ export class Trip {
     srid: 4326,
     nullable: true,
   })
-  currentLocation: Point;
+  currentLocation: Point | null;
 
   @Column({ type: 'timestamp', nullable: true })
   lastLocationUpdateAt: Date | null;

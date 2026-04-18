@@ -40,6 +40,12 @@ export class GeocodeResponse {
   @ApiPropertyOptional()
   placeId?: string;
 
+  @ApiPropertyOptional({ description: 'Google geometry location type, e.g. ROOFTOP or APPROXIMATE' })
+  locationType?: string;
+
+  @ApiPropertyOptional({ description: 'Indicates that Google returned a partial match' })
+  partialMatch?: boolean;
+
   @ApiPropertyOptional()
   addressComponents?: {
     longName: string;

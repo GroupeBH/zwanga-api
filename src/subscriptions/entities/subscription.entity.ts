@@ -17,6 +17,7 @@ export enum SubscriptionStatus {
 }
 
 export enum SubscriptionPlan {
+  PRO = 'pro',
   MONTHLY = 'monthly',
   YEARLY = 'yearly',
 }
@@ -37,7 +38,7 @@ export class Subscription {
   @Column({
     type: 'enum',
     enum: SubscriptionPlan,
-    default: SubscriptionPlan.MONTHLY,
+    default: SubscriptionPlan.PRO,
   })
   plan: SubscriptionPlan;
 
@@ -56,6 +57,24 @@ export class Subscription {
 
   @Column({ type: 'decimal', precision: 10, scale: 2 })
   amount: number;
+
+  @Column({ type: 'varchar', length: 8, default: 'USD' })
+  currency: string;
+
+  @Column({ type: 'boolean', default: true })
+  premiumBadgeEnabled: boolean;
+
+  @Column({ type: 'boolean', default: true })
+  featuredTripsEnabled: boolean;
+
+  @Column({ type: 'boolean', default: true })
+  documentFundingEnabled: boolean;
+
+  @Column({ type: 'decimal', precision: 12, scale: 2, nullable: true })
+  documentFundingLimit: number | null;
+
+  @Column({ type: 'varchar', length: 8, default: 'CDF' })
+  documentFundingCurrency: string;
 
   @Column({ nullable: true })
   paymentReference: string;

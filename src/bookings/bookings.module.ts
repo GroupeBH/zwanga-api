@@ -8,6 +8,7 @@ import { User } from '../users/entities/user.entity';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { MessagingModule } from '../messaging/messaging.module';
 import { SafetyModule } from '../safety/safety.module';
+import { GoogleMapsModule } from '../google-maps/google-maps.module';
 
 @Module({
   imports: [
@@ -15,6 +16,7 @@ import { SafetyModule } from '../safety/safety.module';
     NotificationsModule,
     MessagingModule,
     SafetyModule,
+    GoogleMapsModule,
   ],
   controllers: [BookingsController],
   providers: [BookingsService],

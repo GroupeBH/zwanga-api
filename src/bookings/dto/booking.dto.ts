@@ -54,6 +54,15 @@ export class CreateBookingDto {
   @IsOptional()
   passengerOrigin?: string;
 
+  @ApiProperty({
+    description: 'Reference ou repere connu pour faciliter la prise en charge du passager',
+    required: false,
+    example: 'Devant la pharmacie, portail bleu',
+  })
+  @IsString()
+  @IsOptional()
+  passengerOriginReference?: string;
+
   @ApiProperty({ 
     description: 'Coordonnées géographiques du point de départ du passager (optionnel)', 
     required: false,
@@ -72,6 +81,15 @@ export class CreateBookingDto {
   @IsString()
   @IsOptional()
   passengerDestination?: string;
+
+  @ApiProperty({
+    description: 'Reference ou repere connu pour faciliter la depose du passager',
+    required: false,
+    example: 'Entree principale, pres du rond-point',
+  })
+  @IsString()
+  @IsOptional()
+  passengerDestinationReference?: string;
 
   @ApiProperty({ 
     description: 'Coordonnées géographiques de la destination du passager (optionnel)', 

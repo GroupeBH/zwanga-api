@@ -19,15 +19,17 @@ Ce setup permet de simuler un reverse proxy et un load balancer avec Nginx devan
 
 ## Base de donnees utilisee
 
-Le host/port DB des instances `api-1` et `api-2` vient de `.env`:
+Le host/port DB des instances `api-1` et `api-2` utilise des variables reservees a Docker Compose:
 
-- `DATABASE_HOST`
-- `DATABASE_PORT`
+- `DOCKER_DATABASE_HOST` (defaut: `postgres`)
+- `DOCKER_DATABASE_PORT` (defaut: `5432`)
+
+Cela permet de garder `DATABASE_HOST=localhost` dans `.env` pour les executions locales hors Docker.
 
 Exemple:
 
-- `DATABASE_HOST=host.docker.internal` -> utilise votre PostgreSQL local/host
-- `DATABASE_HOST=postgres` -> utilise le service PostgreSQL du compose
+- `DOCKER_DATABASE_HOST=host.docker.internal` -> utilise votre PostgreSQL local/host
+- `DOCKER_DATABASE_HOST=postgres` -> utilise le service PostgreSQL du compose
 
 ## Demarrage
 

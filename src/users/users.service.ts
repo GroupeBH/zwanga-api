@@ -26,6 +26,7 @@ import { KeccelOtpService } from '../keccel-otp/keccel-otp.service';
 import { Express } from 'express';
 import { UserRole } from './entities/user.entity';
 import { DataSource } from 'typeorm';
+import { SubscriptionsService } from '../subscriptions/subscriptions.service';
 
 @Injectable()
 export class UsersService {
@@ -51,6 +52,7 @@ export class UsersService {
     private fileUploadService: FileUploadService,
     private kycValidationService: KycValidationService,
     private keccelOtpService: KeccelOtpService,
+    private subscriptionsService: SubscriptionsService,
     private readonly dataSource: DataSource,
     private configService: ConfigService,
   ) { }
@@ -132,9 +134,14 @@ export class UsersService {
 
     // Convert S3 keys to presigned URLs
     const enrichedUser = await this.enrichUserWithPresignedUrls(user);
+    const premium = await this.subscriptionsService.getPremiumOverview(user.id);
 
     return {
-      user: this.toSafeUser(enrichedUser),
+      user: {
+        ...this.toSafeUser(enrichedUser),
+        isPremium: premium.isPremium,
+        premiumBadge: premium.premiumBadgeEnabled,
+      },
       stats: {
         vehicles: user.vehicles?.length ?? 0,
         tripsAsDriver,
@@ -843,6 +850,7 @@ export class UsersService {
     const enrichedUser = await this.enrichUserWithPresignedUrls(user);
 
     // Préparer les véhicules (si driver)
+    const premium = await this.subscriptionsService.getPremiumOverview(user.id);
     const vehicles = user.isDriver && user.vehicles
       ? await Promise.all(
         user.vehicles
@@ -871,6 +879,8 @@ export class UsersService {
       profilePicture: enrichedUser.profilePicture,
       role: user.role,
       isDriver: user.isDriver,
+      isPremium: premium.isPremium,
+      premiumBadge: premium.premiumBadgeEnabled,
       status: user.status,
       isEmailVerified: user.isEmailVerified,
       isPhoneVerified: user.isPhoneVerified,

@@ -49,6 +49,9 @@ export class Booking {
   @Column({ type: 'varchar', nullable: true })
   passengerOrigin: string | null;
 
+  @Column({ type: 'text', nullable: true })
+  passengerOriginReference: string | null;
+
   @Index('IDX_bookings_passenger_origin_point', { spatial: true })
   @Column({
     type: 'geography',
@@ -60,6 +63,9 @@ export class Booking {
 
   @Column({ type: 'varchar', nullable: true })
   passengerDestination: string | null;
+
+  @Column({ type: 'text', nullable: true })
+  passengerDestinationReference: string | null;
 
   @Index('IDX_bookings_passenger_destination_point', { spatial: true })
   @Column({

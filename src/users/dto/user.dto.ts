@@ -99,6 +99,12 @@ export class PublicUserInfoDto {
   @ApiProperty({ description: 'Indique si l\'utilisateur est conducteur' })
   isDriver: boolean;
 
+  @ApiProperty({ description: 'Indique si le conducteur a un abonnement premium actif' })
+  isPremium: boolean;
+
+  @ApiProperty({ description: 'Indique si le badge premium doit etre affiche' })
+  premiumBadge: boolean;
+
   @ApiProperty({ description: 'Statut de l\'utilisateur' })
   status: string;
 

@@ -16,8 +16,8 @@ services:
     environment:
       NODE_ENV: production
       PORT: 5200
-      DATABASE_HOST: ${DATABASE_HOST:-postgres}
-      DATABASE_PORT: ${DATABASE_PORT:-5432}
+      DATABASE_HOST: ${DOCKER_DATABASE_HOST:-postgres}
+      DATABASE_PORT: ${DOCKER_DATABASE_PORT:-5432}
       REDIS_HOST: redis
       REDIS_PORT: 6379
     extra_hosts:
@@ -56,8 +56,8 @@ services:
     environment:
       NODE_ENV: production
       PORT: 5200
-      DATABASE_HOST: ${DATABASE_HOST:-postgres}
-      DATABASE_PORT: ${DATABASE_PORT:-5432}
+      DATABASE_HOST: ${DOCKER_DATABASE_HOST:-postgres}
+      DATABASE_PORT: ${DOCKER_DATABASE_PORT:-5432}
       REDIS_HOST: redis
       REDIS_PORT: 6379
     extra_hosts:

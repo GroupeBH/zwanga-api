@@ -18,6 +18,8 @@ import { NotificationService } from '../notifications/notifications.service';
 import { TripsService } from '../trips/trips.service';
 import { BookingsService } from '../bookings/bookings.service';
 import { BookingStatus } from '../bookings/entities/booking.entity';
+import { GoogleMapsService } from '../google-maps/google-maps.service';
+import { SubscriptionsService } from '../subscriptions/subscriptions.service';
 
 export interface SanitizedUser {
   id: string;
@@ -25,6 +27,8 @@ export interface SanitizedUser {
   lastName: string;
   phone: string;
   profilePicture: string | null;
+  isPremium: boolean;
+  premiumBadge: boolean;
 }
 
 export interface SanitizedVehicle {
@@ -44,6 +48,10 @@ export interface SanitizedDriverOffer {
   pricePerSeat: number;
   availableSeats: number;
   message: string | null;
+  departureReference: string | null;
+  departureCoordinates: [number, number] | null;
+  arrivalReference: string | null;
+  arrivalCoordinates: [number, number] | null;
   status: DriverOfferStatus;
   createdAt: Date;
 }
@@ -52,7 +60,9 @@ export interface SanitizedDriverOfferWithTripRequest extends SanitizedDriverOffe
   tripRequest: {
     id: string;
     departureLocation: string;
+    departureReference: string | null;
     arrivalLocation: string;
+    arrivalReference: string | null;
     departureDateMin: Date;
     departureDateMax: Date;
     numberOfSeats: number;
@@ -66,7 +76,9 @@ export interface SanitizedTripRequest {
   id: string;
   passenger: SanitizedUser;
   departureLocation: string;
+  departureReference: string | null;
   arrivalLocation: string;
+  arrivalReference: string | null;
   departureCoordinates: [number, number] | null;
   arrivalCoordinates: [number, number] | null;
   departureDateMin: Date;
@@ -103,6 +115,8 @@ export class TripRequestsService {
     private notificationService: NotificationService,
     private tripsService: TripsService,
     private bookingsService: BookingsService,
+    private googleMapsService: GoogleMapsService,
+    private subscriptionsService: SubscriptionsService,
   ) { }
 
   async create(passengerId: string, createTripRequestDto: CreateTripRequestDto): Promise<SanitizedTripRequest> {
@@ -136,8 +150,18 @@ export class TripRequestsService {
     const tripRequest = this.tripRequestRepository.create({
       ...rest,
       passengerId,
-      departurePoint: this.buildPointFromCoordinates(departureCoordinates),
-      arrivalPoint: this.buildPointFromCoordinates(arrivalCoordinates),
+      departurePoint: await this.resolvePointFromCoordinatesOrAddress(
+        departureCoordinates,
+        rest.departureLocation,
+        rest.departureReference,
+        'trip request departure',
+      ),
+      arrivalPoint: await this.resolvePointFromCoordinatesOrAddress(
+        arrivalCoordinates,
+        rest.arrivalLocation,
+        rest.arrivalReference,
+        'trip request arrival',
+      ),
       departureDateMin: minDate,
       departureDateMax: maxDate,
     });
@@ -198,8 +222,21 @@ export class TripRequestsService {
       tripRequest.departureLocation = updateTripRequestDto.departureLocation;
     }
 
-    if (departureCoordinates) {
-      tripRequest.departurePoint = this.buildPointFromCoordinates(departureCoordinates);
+    if (updateTripRequestDto.departureReference !== undefined) {
+      tripRequest.departureReference = updateTripRequestDto.departureReference?.trim() || null;
+    }
+
+    const shouldRefreshDeparturePoint =
+      updateTripRequestDto.departureLocation !== undefined ||
+      updateTripRequestDto.departureReference !== undefined;
+
+    if (departureCoordinates || shouldRefreshDeparturePoint) {
+      tripRequest.departurePoint = await this.resolvePointFromCoordinatesOrAddress(
+        departureCoordinates,
+        tripRequest.departureLocation,
+        tripRequest.departureReference,
+        'trip request departure',
+      );
     }
 
     // Update arrival location and coordinates if provided
@@ -207,8 +244,21 @@ export class TripRequestsService {
       tripRequest.arrivalLocation = updateTripRequestDto.arrivalLocation;
     }
 
-    if (arrivalCoordinates) {
-      tripRequest.arrivalPoint = this.buildPointFromCoordinates(arrivalCoordinates);
+    if (updateTripRequestDto.arrivalReference !== undefined) {
+      tripRequest.arrivalReference = updateTripRequestDto.arrivalReference?.trim() || null;
+    }
+
+    const shouldRefreshArrivalPoint =
+      updateTripRequestDto.arrivalLocation !== undefined ||
+      updateTripRequestDto.arrivalReference !== undefined;
+
+    if (arrivalCoordinates || shouldRefreshArrivalPoint) {
+      tripRequest.arrivalPoint = await this.resolvePointFromCoordinatesOrAddress(
+        arrivalCoordinates,
+        tripRequest.arrivalLocation,
+        tripRequest.arrivalReference,
+        'trip request arrival',
+      );
     }
 
     // Update dates if provided
@@ -528,7 +578,13 @@ export class TripRequestsService {
       throw new BadRequestException('Vous avez déjà fait une offre pour cette demande');
     }
 
-    const { proposedDepartureDate, vehicleId, ...rest } = createDriverOfferDto;
+    const {
+      proposedDepartureDate,
+      vehicleId,
+      departureCoordinates,
+      arrivalCoordinates,
+      ...rest
+    } = createDriverOfferDto;
     const proposedDate = new Date(proposedDepartureDate);
 
     // Validate proposed date is within the range
@@ -573,6 +629,22 @@ export class TripRequestsService {
       tripRequestId,
       driverId,
       vehicleId: vehicleId || null,
+      departurePoint: departureCoordinates || rest.departureReference
+        ? await this.resolvePointFromCoordinatesOrAddress(
+            departureCoordinates,
+            tripRequest.departureLocation,
+            rest.departureReference,
+            'driver offer departure',
+          )
+        : null,
+      arrivalPoint: arrivalCoordinates || rest.arrivalReference
+        ? await this.resolvePointFromCoordinatesOrAddress(
+            arrivalCoordinates,
+            tripRequest.arrivalLocation,
+            rest.arrivalReference,
+            'driver offer arrival',
+          )
+        : null,
       proposedDepartureDate: proposedDate,
     });
 
@@ -785,22 +857,23 @@ export class TripRequestsService {
       throw new NotFoundException('Offre acceptée non trouvée');
     }
 
-    // Get coordinates
-    const departureCoordinates = this.pointToCoordinates(tripRequest.departurePoint);
-    const arrivalCoordinates = this.pointToCoordinates(tripRequest.arrivalPoint);
-
-    if (!departureCoordinates || !arrivalCoordinates) {
-      throw new BadRequestException('Les coordonnées de départ ou d\'arrivée sont manquantes');
-    }
+    const departureCoordinates =
+      this.pointToCoordinates(acceptedOffer.departurePoint) ??
+      this.pointToCoordinates(tripRequest.departurePoint);
+    const arrivalCoordinates =
+      this.pointToCoordinates(acceptedOffer.arrivalPoint) ??
+      this.pointToCoordinates(tripRequest.arrivalPoint);
 
     // Create Trip from TripRequest (private by default)
     const trip = await this.tripsService.create(
       driverId,
       {
         departureLocation: tripRequest.departureLocation,
+        departureReference: acceptedOffer.departureReference || tripRequest.departureReference || undefined,
         arrivalLocation: tripRequest.arrivalLocation,
-        departureCoordinates,
-        arrivalCoordinates,
+        arrivalReference: acceptedOffer.arrivalReference || tripRequest.arrivalReference || undefined,
+        departureCoordinates: departureCoordinates ?? undefined,
+        arrivalCoordinates: arrivalCoordinates ?? undefined,
         departureDate: acceptedOffer.proposedDepartureDate.toISOString(),
         totalSeats: acceptedOffer.availableSeats,
         pricePerSeat: tripRequest.selectedPricePerSeat || 0,
@@ -818,6 +891,10 @@ export class TripRequestsService {
     await this.bookingsService.create(tripRequest.passengerId, {
       tripId: trip.id,
       numberOfSeats: tripRequest.numberOfSeats,
+      passengerOrigin: tripRequest.departureLocation,
+      passengerOriginReference: tripRequest.departureReference || undefined,
+      passengerDestination: tripRequest.arrivalLocation,
+      passengerDestinationReference: tripRequest.arrivalReference || undefined,
     });
 
     // Accept the booking automatically
@@ -952,13 +1029,12 @@ export class TripRequestsService {
       departureDate = tripRequest.departureDateMin;
     }
 
-    // Get coordinates
-    const departureCoordinates = this.pointToCoordinates(tripRequest.departurePoint);
-    const arrivalCoordinates = this.pointToCoordinates(tripRequest.arrivalPoint);
-
-    if (!departureCoordinates || !arrivalCoordinates) {
-      throw new BadRequestException('Les coordonnées de départ ou d\'arrivée sont manquantes');
-    }
+    const departureCoordinates =
+      acceptDto.departureCoordinates ??
+      this.pointToCoordinates(tripRequest.departurePoint);
+    const arrivalCoordinates =
+      acceptDto.arrivalCoordinates ??
+      this.pointToCoordinates(tripRequest.arrivalPoint);
 
     // Create Trip from TripRequest (private by default)
     // The trip is created with the number of seats requested by the passenger (or more if driver specified)
@@ -966,9 +1042,11 @@ export class TripRequestsService {
       driverId,
       {
         departureLocation: tripRequest.departureLocation,
+        departureReference: acceptDto.departureReference || tripRequest.departureReference || undefined,
         arrivalLocation: tripRequest.arrivalLocation,
-        departureCoordinates,
-        arrivalCoordinates,
+        arrivalReference: acceptDto.arrivalReference || tripRequest.arrivalReference || undefined,
+        departureCoordinates: departureCoordinates ?? undefined,
+        arrivalCoordinates: arrivalCoordinates ?? undefined,
         departureDate: departureDate.toISOString(),
         totalSeats: totalSeats, // Use calculated totalSeats (passenger's request or driver's override)
         pricePerSeat: pricePerSeat, // Driver's proposed price (or 0 if not specified)
@@ -986,6 +1064,10 @@ export class TripRequestsService {
     await this.bookingsService.create(tripRequest.passengerId, {
       tripId: trip.id,
       numberOfSeats: tripRequest.numberOfSeats, // Use the number of seats requested by the passenger
+      passengerOrigin: tripRequest.departureLocation,
+      passengerOriginReference: tripRequest.departureReference || undefined,
+      passengerDestination: tripRequest.arrivalLocation,
+      passengerDestinationReference: tripRequest.arrivalReference || undefined,
     });
 
     // Accept the booking automatically
@@ -1076,14 +1158,105 @@ export class TripRequestsService {
     this.logger.log(`Trip request ${tripRequestId} cancelled`);
   }
 
-  private buildPointFromCoordinates([longitude, latitude]: [number, number]): Point {
+  private buildPointFromCoordinates(coordinates?: [number, number] | null): Point | null {
+    if (!coordinates) {
+      return null;
+    }
+    const [longitude, latitude] = coordinates;
     return {
       type: 'Point',
       coordinates: [Number(longitude), Number(latitude)],
     };
   }
 
-  private pointToCoordinates(point?: Point): [number, number] | null {
+  private async resolvePointFromCoordinatesOrAddress(
+    coordinates: [number, number] | undefined | null,
+    address?: string | null,
+    reference?: string | null,
+    context = 'address',
+  ): Promise<Point | null> {
+    const coordinatesPoint = this.buildPointFromCoordinates(coordinates);
+    if (coordinatesPoint) {
+      return coordinatesPoint;
+    }
+
+    return this.geocodeAddressToPoint(address, reference, context);
+  }
+
+  private async geocodeAddressToPoint(
+    address?: string | null,
+    reference?: string | null,
+    context = 'address',
+  ): Promise<Point | null> {
+    const addressText = address?.trim();
+    if (!addressText) {
+      return null;
+    }
+
+    const referenceText = reference?.trim();
+    const queries = referenceText
+      ? [`${addressText}, ${referenceText}`, addressText]
+      : [addressText];
+    let bestResult: {
+      lat: number;
+      lng: number;
+      formattedAddress: string;
+      locationType?: string;
+      partialMatch?: boolean;
+    } | null = null;
+    let bestRank = Number.POSITIVE_INFINITY;
+
+    for (const query of queries) {
+      try {
+        const result = await this.googleMapsService.geocode({
+          address: query,
+          region: 'CD',
+        });
+        const rank = this.getGeocodePrecisionRank(result);
+        if (rank < bestRank) {
+          bestResult = result;
+          bestRank = rank;
+        }
+        if (rank === 0) {
+          break;
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.warn(`Unable to geocode ${context} "${query}": ${message}`);
+      }
+    }
+
+    if (!bestResult) {
+      return null;
+    }
+
+    this.logger.debug(
+      `Geocoded ${context} to "${bestResult.formattedAddress}" (${bestResult.locationType ?? 'UNKNOWN'}${bestResult.partialMatch ? ', partial match' : ''})`,
+    );
+    return this.buildPointFromCoordinates([bestResult.lng, bestResult.lat]);
+  }
+
+  private getGeocodePrecisionRank(result: {
+    locationType?: string;
+    partialMatch?: boolean;
+  }): number {
+    const isPrecise = ['ROOFTOP', 'RANGE_INTERPOLATED'].includes(
+      result.locationType ?? '',
+    );
+
+    if (isPrecise && !result.partialMatch) {
+      return 0;
+    }
+    if (!result.partialMatch) {
+      return 1;
+    }
+    if (isPrecise) {
+      return 2;
+    }
+    return 3;
+  }
+
+  private pointToCoordinates(point?: Point | null): [number, number] | null {
     if (!point?.coordinates) {
       return null;
     }
@@ -1099,6 +1272,7 @@ export class TripRequestsService {
     const profilePicture = user.profilePicture
       ? await this.fileUploadService.getPresignedUrlIfS3Key(user.profilePicture)
       : null;
+    const premium = await this.subscriptionsService.getPremiumOverview(user.id);
 
     return {
       id: user.id,
@@ -1106,6 +1280,8 @@ export class TripRequestsService {
       lastName: user.lastName,
       phone: user.phone,
       profilePicture: profilePicture || user.profilePicture,
+      isPremium: premium.isPremium,
+      premiumBadge: premium.premiumBadgeEnabled,
     };
   }
 
@@ -1147,6 +1323,10 @@ export class TripRequestsService {
       pricePerSeat: Number(offer.pricePerSeat),
       availableSeats: offer.availableSeats,
       message: offer.message,
+      departureReference: offer.departureReference,
+      departureCoordinates: this.pointToCoordinates(offer.departurePoint),
+      arrivalReference: offer.arrivalReference,
+      arrivalCoordinates: this.pointToCoordinates(offer.arrivalPoint),
       status: offer.status,
       createdAt: offer.createdAt,
     };
@@ -1185,12 +1365,18 @@ export class TripRequestsService {
       pricePerSeat: Number(offer.pricePerSeat),
       availableSeats: offer.availableSeats,
       message: offer.message,
+      departureReference: offer.departureReference,
+      departureCoordinates: this.pointToCoordinates(offer.departurePoint),
+      arrivalReference: offer.arrivalReference,
+      arrivalCoordinates: this.pointToCoordinates(offer.arrivalPoint),
       status: offer.status,
       createdAt: offer.createdAt,
       tripRequest: {
         id: offer.tripRequest.id,
         departureLocation: offer.tripRequest.departureLocation,
+        departureReference: offer.tripRequest.departureReference,
         arrivalLocation: offer.tripRequest.arrivalLocation,
+        arrivalReference: offer.tripRequest.arrivalReference,
         departureDateMin: offer.tripRequest.departureDateMin,
         departureDateMax: offer.tripRequest.departureDateMax,
         numberOfSeats: offer.tripRequest.numberOfSeats,
@@ -1215,7 +1401,9 @@ export class TripRequestsService {
       id: tripRequest.id,
       passenger,
       departureLocation: tripRequest.departureLocation,
+      departureReference: tripRequest.departureReference,
       arrivalLocation: tripRequest.arrivalLocation,
+      arrivalReference: tripRequest.arrivalReference,
       departureCoordinates: this.pointToCoordinates(tripRequest.departurePoint),
       arrivalCoordinates: this.pointToCoordinates(tripRequest.arrivalPoint),
       departureDateMin: tripRequest.departureDateMin,

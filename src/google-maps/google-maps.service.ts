@@ -48,6 +48,38 @@ export class GoogleMapsService {
     this.apiKey = apiKey || '';
   }
 
+  private selectBestGeocodeResult(results: any[]): any {
+    const isPrecise = (result: any) =>
+      ['ROOFTOP', 'RANGE_INTERPOLATED'].includes(
+        result.geometry?.location_type,
+      );
+
+    return (
+      results.find((result) => !result.partial_match && isPrecise(result)) ||
+      results.find((result) => !result.partial_match) ||
+      results.find((result) => isPrecise(result)) ||
+      results[0]
+    );
+  }
+
+  private mapGeocodeResult(result: any): GeocodeResponse {
+    const location = result.geometry.location;
+
+    return {
+      formattedAddress: result.formatted_address,
+      lat: location.lat,
+      lng: location.lng,
+      placeId: result.place_id,
+      locationType: result.geometry?.location_type,
+      partialMatch: result.partial_match ?? false,
+      addressComponents: result.address_components?.map((component: any) => ({
+        longName: component.long_name,
+        shortName: component.short_name,
+        types: component.types,
+      })),
+    };
+  }
+
   /**
    * Geocode an address to coordinates
    */
@@ -76,20 +108,9 @@ export class GoogleMapsService {
         );
       }
 
-      const result = response.data.results[0];
-      const location = result.geometry.location;
-
-      return {
-        formattedAddress: result.formatted_address,
-        lat: location.lat,
-        lng: location.lng,
-        placeId: result.place_id,
-        addressComponents: result.address_components?.map((component: any) => ({
-          longName: component.long_name,
-          shortName: component.short_name,
-          types: component.types,
-        })),
-      };
+      return this.mapGeocodeResult(
+        this.selectBestGeocodeResult(response.data.results),
+      );
     } catch (error) {
       if (error instanceof BadRequestException) {
         throw error;
@@ -123,20 +144,9 @@ export class GoogleMapsService {
         );
       }
 
-      const result = response.data.results[0];
-      const location = result.geometry.location;
-
-      return {
-        formattedAddress: result.formatted_address,
-        lat: location.lat,
-        lng: location.lng,
-        placeId: result.place_id,
-        addressComponents: result.address_components?.map((component: any) => ({
-          longName: component.long_name,
-          shortName: component.short_name,
-          types: component.types,
-        })),
-      };
+      return this.mapGeocodeResult(
+        this.selectBestGeocodeResult(response.data.results),
+      );
     } catch (error) {
       if (error instanceof BadRequestException) {
         throw error;
