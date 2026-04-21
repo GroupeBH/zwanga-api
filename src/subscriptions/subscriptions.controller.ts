@@ -1,4 +1,13 @@
-import { Controller, Get, Post, Body, Param, Request, Query, Put } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Post,
+  Body,
+  Param,
+  Request,
+  Query,
+  Put,
+} from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { SubscriptionsService } from './subscriptions.service';
 import { Auth } from '../auth/decorators/auth.decorator';
@@ -9,6 +18,7 @@ import {
   SubscribeDto,
   UpdateDocumentFundingRequestStatusDto,
 } from './dto/subscription.dto';
+import { FlexPayCallbackDto } from '../payments/dto/payment.dto';
 import { Roles } from '../common/decorators/roles.decorator';
 import { UserRole } from '../users/entities/user.entity';
 import { Public } from '../common/decorators/public.decorator';
@@ -37,9 +47,33 @@ export class SubscriptionsController {
   @Post('subscribe')
   @Auth()
   @SensitiveThrottle(5, 60000)
-  @ApiOperation({ summary: 'Subscribe to a plan' })
+  @ApiOperation({ summary: 'Initiate payment for a premium subscription' })
   async subscribe(@Request() req, @Body() dto: SubscribeDto) {
-    return this.subscriptionsService.subscribe(req.user.userId, dto.plan);
+    return this.subscriptionsService.subscribe(req.user.userId, dto);
+  }
+
+  @Post('flexpay/callback')
+  @Public()
+  @SensitiveThrottle(120, 60000)
+  @ApiOperation({ summary: 'Receive FlexPay payment callback' })
+  async handleFlexPayCallback(@Body() dto: FlexPayCallbackDto) {
+    return this.subscriptionsService.handleFlexPayCallback(dto);
+  }
+
+  @Get('payments/:orderNumber/status')
+  @Auth()
+  @SensitiveThrottle(20, 60000)
+  @ApiOperation({
+    summary: 'Check FlexPay payment status and activate if paid',
+  })
+  async checkPaymentStatus(
+    @Request() req,
+    @Param('orderNumber') orderNumber: string,
+  ) {
+    return this.subscriptionsService.checkPaymentStatus(
+      req.user.userId,
+      orderNumber,
+    );
   }
 
   @Get('my-subscription')
@@ -69,7 +103,9 @@ export class SubscriptionsController {
   @Get('premium-overview')
   @Auth()
   @SensitiveThrottle(30, 60000)
-  @ApiOperation({ summary: 'Get premium subscription benefits for the current driver' })
+  @ApiOperation({
+    summary: 'Get premium subscription benefits for the current driver',
+  })
   async getPremiumOverview(@Request() req) {
     return this.subscriptionsService.getPremiumOverview(req.user.userId);
   }
@@ -77,12 +113,17 @@ export class SubscriptionsController {
   @Post('document-funding-requests')
   @Auth()
   @SensitiveThrottle(10, 60000)
-  @ApiOperation({ summary: 'Create a document funding request for a premium driver' })
+  @ApiOperation({
+    summary: 'Create a document funding request for a premium driver',
+  })
   async createDocumentFundingRequest(
     @Request() req,
     @Body() dto: CreateDocumentFundingRequestDto,
   ) {
-    return this.subscriptionsService.createDocumentFundingRequest(req.user.userId, dto);
+    return this.subscriptionsService.createDocumentFundingRequest(
+      req.user.userId,
+      dto,
+    );
   }
 
   @Get('document-funding-requests/my')
@@ -90,7 +131,9 @@ export class SubscriptionsController {
   @SensitiveThrottle(30, 60000)
   @ApiOperation({ summary: 'Get my document funding requests' })
   async getMyDocumentFundingRequests(@Request() req) {
-    return this.subscriptionsService.getMyDocumentFundingRequests(req.user.userId);
+    return this.subscriptionsService.getMyDocumentFundingRequests(
+      req.user.userId,
+    );
   }
 
   @Get('document-funding-requests')
@@ -121,4 +164,3 @@ export class SubscriptionsController {
     );
   }
 }
-

@@ -21,6 +21,7 @@ import { TripsModule } from './trips/trips.module';
 import { BookingsModule } from './bookings/bookings.module';
 import { ChatModule } from './chat/chat.module';
 import { RatingsModule } from './ratings/ratings.module';
+import { PaymentsModule } from './payments/payments.module';
 import { SubscriptionsModule } from './subscriptions/subscriptions.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { AdminModule } from './admin/admin.module';
@@ -43,6 +44,7 @@ import { RecurringTripTemplate } from './trips/entities/recurring-trip-template.
 import { Booking } from './bookings/entities/booking.entity';
 import { Message } from './chat/entities/message.entity';
 import { Rating } from './ratings/entities/rating.entity';
+import { PaymentTransaction } from './payments/entities/payment-transaction.entity';
 import { Subscription } from './subscriptions/entities/subscription.entity';
 import { DocumentFundingRequest } from './subscriptions/entities/document-funding-request.entity';
 import { Conversation } from './chat/entities/conversation.entity';
@@ -68,6 +70,7 @@ const typeOrmEntities = [
   Booking,
   Message,
   Rating,
+  PaymentTransaction,
   Subscription,
   DocumentFundingRequest,
   Conversation,
@@ -92,10 +95,7 @@ const typeOrmEntities = [
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],
       useFactory: (configService: ConfigService) => ({
-        ...((
-          databaseUrl: string | undefined,
-          isDevelopment: boolean,
-        ) => {
+        ...((databaseUrl: string | undefined, isDevelopment: boolean) => {
           const baseConfig = {
             type: 'postgres' as const,
             entities: typeOrmEntities,
@@ -127,7 +127,10 @@ const typeOrmEntities = [
             password: configService.get<string>('DATABASE_PASSWORD'),
             database: configService.get<string>('DATABASE_NAME'),
           };
-        })(configService.get<string>('DATABASE_URL'), configService.get<string>('NODE_ENV') === 'development'),
+        })(
+          configService.get<string>('DATABASE_URL'),
+          configService.get<string>('NODE_ENV') === 'development',
+        ),
       }),
       inject: [ConfigService],
     }),
@@ -156,6 +159,7 @@ const typeOrmEntities = [
     BookingsModule,
     ChatModule,
     RatingsModule,
+    PaymentsModule,
     SubscriptionsModule,
     NotificationsModule,
     AdminModule,

@@ -3,11 +3,16 @@ import { ValidationPipe, BadRequestException } from '@nestjs/common';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { ConfigService } from '@nestjs/config';
 import { NestExpressApplication } from '@nestjs/platform-express';
+import { WINSTON_MODULE_NEST_PROVIDER } from 'nest-winston';
 import { join } from 'path';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    bufferLogs: true,
+  });
+
+  app.useLogger(app.get(WINSTON_MODULE_NEST_PROVIDER));
 
   const configService = app.get(ConfigService);
   const apiPrefix = configService.get<string>('API_PREFIX') || 'api/v1';
@@ -25,12 +30,14 @@ async function bootstrap() {
         enableImplicitConversion: true,
       },
       exceptionFactory: (errors) => {
-        const messages = errors.map((error) => {
-          const constraints = error.constraints
-            ? Object.values(error.constraints)
-            : [`${error.property} has invalid value`];
-          return constraints;
-        }).flat();
+        const messages = errors
+          .map((error) => {
+            const constraints = error.constraints
+              ? Object.values(error.constraints)
+              : [`${error.property} has invalid value`];
+            return constraints;
+          })
+          .flat();
         return new BadRequestException({
           error: 'Bad Request',
           message: messages,
@@ -47,7 +54,8 @@ async function bootstrap() {
       ?.split(',')
       .map((origin) => origin.trim())
       .filter((origin) => origin.length > 0) ?? [];
-  const isProduction = (configService.get<string>('NODE_ENV') || 'development') === 'production';
+  const isProduction =
+    (configService.get<string>('NODE_ENV') || 'development') === 'production';
 
   app.enableCors({
     origin: (origin, callback) => {
@@ -106,6 +114,7 @@ async function bootstrap() {
     .addTag('Bookings', 'Booking management endpoints')
     .addTag('Chat', 'Chat endpoints')
     .addTag('Ratings', 'Rating endpoints')
+    .addTag('Payments', 'Payment endpoints')
     .addTag('Subscriptions', 'Subscription endpoints')
     .addTag('Admin', 'Admin endpoints')
     .addTag('Support', 'Support & helpdesk endpoints')
@@ -119,8 +128,12 @@ async function bootstrap() {
   const host = configService.get<string>('HOST') || '0.0.0.0';
   await app.listen(port, host);
 
-  console.log(`Application zwanga backend is running on host ${host} and port ${port}`);
-  console.log(`Swagger documentation: http://localhost:${port}/${apiPrefix}/docs`);
+  console.log(
+    `Application zwanga backend is running on host ${host} and port ${port}`,
+  );
+  console.log(
+    `Swagger documentation: http://localhost:${port}/${apiPrefix}/docs`,
+  );
 }
 
 bootstrap();
