@@ -98,7 +98,7 @@ export class SubscriptionsService {
     const user = await this.getDriverUser(userId);
     await this.ensureNoActiveSubscription(
       userId,
-      'User already has an active subscription',
+      'Vous avez deja un abonnement actif',
     );
 
     const trialPeriodDays = this.getNumberConfig('TRIAL_PERIOD_DAYS', 7);
@@ -584,7 +584,7 @@ export class SubscriptionsService {
         orderNumber: payment?.orderNumber ?? null,
         status: payment?.status ?? null,
         statusCode: payment?.providerStatusCode ?? null,
-        message: payment?.providerMessage ?? null,
+        message: this.paymentsService.getClientPaymentMessage(payment),
         paymentUrl: payment?.paymentUrl ?? null,
         amount: Number(payment?.amount ?? subscription.amount),
         currency: payment?.currency ?? subscription.currency,
@@ -605,7 +605,7 @@ export class SubscriptionsService {
       paymentTransactionId: payment?.id ?? subscription.paymentTransactionId,
       paymentStatus: payment?.status ?? null,
       paymentStatusCode: payment?.providerStatusCode ?? null,
-      message: payment?.providerMessage ?? null,
+      message: this.paymentsService.getClientPaymentMessage(payment),
     };
   }
 
@@ -654,7 +654,7 @@ export class SubscriptionsService {
       this.logger.warn(
         `Subscription operation failed: User ${userId} not found`,
       );
-      throw new NotFoundException('User not found');
+      throw new NotFoundException('Utilisateur introuvable');
     }
 
     if (!user.isDriver && user.role !== UserRole.DRIVER) {

@@ -121,7 +121,8 @@ export class PaymentsService {
     } catch (error) {
       const errorMessage = this.getErrorMessage(error);
       savedTransaction.status = PaymentStatus.FAILED;
-      savedTransaction.providerMessage = errorMessage;
+      savedTransaction.providerMessage =
+        this.translatePaymentMessage(errorMessage) ?? errorMessage;
       await this.paymentTransactionRepository.save(savedTransaction);
       this.logger.error(
         `Payment initiation failed: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, method=${savedTransaction.method}, message=${errorMessage}`,
@@ -136,12 +137,19 @@ export class PaymentsService {
 
     savedTransaction.orderNumber = flexPayResponse.orderNumber;
     savedTransaction.providerStatusCode = flexPayResponse.code;
-    savedTransaction.providerMessage = flexPayResponse.message;
     savedTransaction.paymentUrl = flexPayResponse.paymentUrl;
+    savedTransaction.providerMessage = this.getInitiationSuccessMessage(
+      savedTransaction.method,
+      savedTransaction.paymentUrl,
+      flexPayResponse.message,
+    );
     savedTransaction.rawInitiationResponse = flexPayResponse.raw;
 
     if (!this.flexPayService.isSuccessfulCode(flexPayResponse.code)) {
       savedTransaction.status = PaymentStatus.FAILED;
+      savedTransaction.providerMessage = this.getInitiationFailureMessage(
+        flexPayResponse.message,
+      );
       await this.paymentTransactionRepository.save(savedTransaction);
       if (this.looksLikeFlexPayTokenError(flexPayResponse.message)) {
         this.logger.error(
@@ -151,9 +159,7 @@ export class PaymentsService {
       this.logger.warn(
         `Payment refused by FlexPay: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, code=${flexPayResponse.code}, message=${flexPayResponse.message ?? 'none'}`,
       );
-      throw new BadRequestException(
-        flexPayResponse.message || 'FlexPay a refuse la requete de paiement',
-      );
+      throw new BadRequestException(savedTransaction.providerMessage);
     }
 
     savedTransaction.status = PaymentStatus.INITIATED;
@@ -193,7 +199,7 @@ export class PaymentsService {
 
     if (!this.flexPayService.isSuccessfulCode(callback.code)) {
       transaction.status = PaymentStatus.FAILED;
-      transaction.providerMessage = 'Paiement FlexPay non abouti';
+      transaction.providerMessage = 'Le paiement a echoue';
       const savedTransaction =
         await this.paymentTransactionRepository.save(transaction);
       this.logger.warn(
@@ -204,7 +210,8 @@ export class PaymentsService {
 
     if (this.shouldVerifyFlexPayCallbacks()) {
       if (!transaction.orderNumber) {
-        transaction.providerMessage = 'Callback FlexPay recu sans orderNumber';
+        transaction.providerMessage =
+          'Notification de paiement recue, mais le numero de commande FlexPay est manquant';
         const savedTransaction =
           await this.paymentTransactionRepository.save(transaction);
         this.logger.warn(
@@ -221,13 +228,13 @@ export class PaymentsService {
           `FlexPay callback verification failed: paymentId=${transaction.id}, reference=${transaction.reference}, orderNumber=${transaction.orderNumber}, message=${errorMessage}`,
         );
         transaction.providerMessage =
-          'Callback recu, verification FlexPay en attente';
+          'Notification de paiement recue. Verification du paiement en cours';
         return this.paymentTransactionRepository.save(transaction);
       }
     }
 
     transaction.status = PaymentStatus.SUCCEEDED;
-    transaction.providerMessage = 'Paiement FlexPay confirme';
+    transaction.providerMessage = 'Paiement confirme avec succes';
     transaction.paidAt = transaction.paidAt ?? new Date();
     const savedTransaction =
       await this.paymentTransactionRepository.save(transaction);
@@ -257,6 +264,51 @@ export class PaymentsService {
 
   isSuccessfulPayment(transaction: PaymentTransaction): boolean {
     return transaction.status === PaymentStatus.SUCCEEDED;
+  }
+
+  getClientPaymentMessage(
+    transaction: Pick<
+      PaymentTransaction,
+      'status' | 'method' | 'paymentUrl' | 'providerMessage'
+    > | null,
+  ): string | null {
+    if (!transaction) {
+      return null;
+    }
+
+    const translatedProviderMessage = this.translatePaymentMessage(
+      transaction.providerMessage,
+    );
+    if (translatedProviderMessage) {
+      return translatedProviderMessage;
+    }
+
+    switch (transaction.status) {
+      case PaymentStatus.SUCCEEDED:
+        return 'Paiement confirme avec succes';
+      case PaymentStatus.FAILED:
+        return 'Le paiement a echoue';
+      case PaymentStatus.CANCELLED:
+        return 'Le paiement a ete annule';
+      case PaymentStatus.INITIATED:
+        if (transaction.paymentUrl) {
+          return 'Redirection vers la page de paiement en cours';
+        }
+        if (transaction.method === PaymentMethod.MOBILE_MONEY) {
+          return 'Demande de paiement envoyee. Veuillez valider sur votre telephone';
+        }
+        return 'Paiement initialise. Verification en cours';
+      case PaymentStatus.PENDING:
+      default:
+        return 'Paiement en attente de confirmation';
+    }
+  }
+
+  formatPaymentForClient(transaction: PaymentTransaction): PaymentTransaction {
+    return {
+      ...transaction,
+      providerMessage: this.getClientPaymentMessage(transaction),
+    };
   }
 
   normalizeFlexPayCallback(dto: FlexPayCallbackDto): NormalizedFlexPayCallback {
@@ -317,10 +369,12 @@ export class PaymentsService {
     const previousStatus = transaction.status;
     transaction.providerStatusCode =
       checkResult.transaction?.status ?? checkResult.code;
-    transaction.providerMessage = checkResult.message;
     transaction.rawCheckResponse = checkResult.raw;
 
     if (!this.flexPayService.isSuccessfulCode(checkResult.code)) {
+      transaction.providerMessage = this.getCheckFailureMessage(
+        checkResult.message,
+      );
       const savedTransaction =
         await this.paymentTransactionRepository.save(transaction);
       this.logger.warn(
@@ -331,8 +385,9 @@ export class PaymentsService {
 
     const providerTransaction = checkResult.transaction;
     if (!providerTransaction) {
-      transaction.providerMessage =
-        checkResult.message || 'Transaction FlexPay introuvable';
+      transaction.providerMessage = this.getMissingTransactionMessage(
+        checkResult.message,
+      );
       const savedTransaction =
         await this.paymentTransactionRepository.save(transaction);
       this.logger.warn(
@@ -341,16 +396,27 @@ export class PaymentsService {
       return savedTransaction;
     }
 
+    const normalizedProviderReference = providerTransaction.reference?.trim();
+    const normalizedTransactionReference = transaction.reference?.trim();
+    const normalizedOrderNumber =
+      providerTransaction.orderNumber?.trim() ?? transaction.orderNumber?.trim();
+
     if (
-      providerTransaction.reference &&
-      providerTransaction.reference !== transaction.reference
+      normalizedProviderReference &&
+      normalizedProviderReference !== normalizedTransactionReference
     ) {
-      this.logger.warn(
-        `FlexPay check reference mismatch: paymentId=${transaction.id}, expectedReference=${transaction.reference}, providerReference=${providerTransaction.reference}, orderNumber=${providerTransaction.orderNumber ?? transaction.orderNumber ?? 'none'}`,
-      );
-      throw new BadRequestException(
-        'La reference FlexPay ne correspond pas a cette transaction',
-      );
+      if (normalizedProviderReference === normalizedOrderNumber) {
+        this.logger.warn(
+          `FlexPay check returned orderNumber in reference field: paymentId=${transaction.id}, expectedReference=${transaction.reference}, providerReference=${providerTransaction.reference}, orderNumber=${normalizedOrderNumber ?? 'none'}`,
+        );
+      } else {
+        this.logger.warn(
+          `FlexPay check reference mismatch: paymentId=${transaction.id}, expectedReference=${transaction.reference}, providerReference=${providerTransaction.reference}, orderNumber=${providerTransaction.orderNumber ?? transaction.orderNumber ?? 'none'}`,
+        );
+        throw new BadRequestException(
+          'La reference FlexPay ne correspond pas a cette transaction',
+        );
+      }
     }
 
     transaction.orderNumber =
@@ -358,8 +424,7 @@ export class PaymentsService {
 
     if (this.flexPayService.isSuccessfulTransaction(providerTransaction)) {
       transaction.status = PaymentStatus.SUCCEEDED;
-      transaction.providerMessage =
-        checkResult.message || 'Paiement FlexPay confirme';
+      transaction.providerMessage = 'Paiement confirme avec succes';
       transaction.paidAt = transaction.paidAt ?? new Date();
       const savedTransaction =
         await this.paymentTransactionRepository.save(transaction);
@@ -371,8 +436,11 @@ export class PaymentsService {
 
     if (providerTransaction.status === '1') {
       transaction.status = PaymentStatus.FAILED;
-      transaction.providerMessage =
-        checkResult.message || 'Paiement FlexPay echoue';
+      transaction.providerMessage = 'Le paiement a echoue';
+    } else {
+      transaction.providerMessage = this.getPendingPaymentMessage(
+        checkResult.message,
+      );
     }
 
     const savedTransaction =
@@ -535,6 +603,148 @@ export class PaymentsService {
 
   private getErrorStack(error: unknown): string | undefined {
     return error instanceof Error ? error.stack : undefined;
+  }
+
+  private getInitiationSuccessMessage(
+    method: PaymentMethod,
+    paymentUrl: string | null,
+    rawMessage?: string | null,
+  ): string {
+    if (paymentUrl) {
+      return 'Redirection vers la page de paiement en cours';
+    }
+
+    if (method === PaymentMethod.MOBILE_MONEY) {
+      return 'Demande de paiement envoyee. Veuillez valider sur votre telephone';
+    }
+
+    return (
+      this.translatePaymentMessage(rawMessage) ??
+      'Paiement initialise avec succes'
+    );
+  }
+
+  private getInitiationFailureMessage(rawMessage?: string | null): string {
+    if (this.looksLikeFlexPayTokenError(rawMessage)) {
+      return 'Le service de paiement est momentanement indisponible';
+    }
+
+    return (
+      this.translatePaymentMessage(rawMessage) ??
+      'La demande de paiement a ete refusee'
+    );
+  }
+
+  private getCheckFailureMessage(rawMessage?: string | null): string {
+    return (
+      this.translatePaymentMessage(rawMessage) ??
+      'Verification du paiement impossible pour le moment'
+    );
+  }
+
+  private getMissingTransactionMessage(rawMessage?: string | null): string {
+    return (
+      this.translatePaymentMessage(rawMessage) ??
+      "Aucune transaction de paiement n'a ete trouvee"
+    );
+  }
+
+  private getPendingPaymentMessage(rawMessage?: string | null): string {
+    return (
+      this.translatePaymentMessage(rawMessage) ??
+      'Paiement en attente de confirmation'
+    );
+  }
+
+  private translatePaymentMessage(
+    message: string | null | undefined,
+  ): string | null {
+    const trimmedMessage = message?.trim();
+    if (!trimmedMessage) {
+      return null;
+    }
+
+    const normalizedMessage = this.normalizeMessage(trimmedMessage);
+
+    if (
+      normalizedMessage.includes('transaction envoyee avec succes') &&
+      normalizedMessage.includes('push')
+    ) {
+      return 'Demande de paiement envoyee. Veuillez valider sur votre telephone';
+    }
+
+    if (normalizedMessage.includes('transaction envoyee avec succes')) {
+      return 'Demande de paiement envoyee avec succes';
+    }
+
+    if (
+      normalizedMessage.includes('redirection en cours') ||
+      normalizedMessage.includes('redirect')
+    ) {
+      return 'Redirection vers la page de paiement en cours';
+    }
+
+    if (
+      normalizedMessage.includes('aucune transaction trouvee') ||
+      normalizedMessage.includes('no transaction found')
+    ) {
+      return "Aucune transaction de paiement n'a ete trouvee";
+    }
+
+    if (
+      normalizedMessage.includes('une transaction trouvee') ||
+      normalizedMessage.includes('transaction found')
+    ) {
+      return 'Paiement en attente de confirmation';
+    }
+
+    if (
+      normalizedMessage.includes('paiement flexpay non abouti') ||
+      normalizedMessage.includes('paiement flexpay echoue') ||
+      normalizedMessage.includes('payment failed') ||
+      normalizedMessage.includes('transaction failed')
+    ) {
+      return 'Le paiement a echoue';
+    }
+
+    if (
+      normalizedMessage.includes('paiement flexpay confirme') ||
+      normalizedMessage.includes('payment confirmed')
+    ) {
+      return 'Paiement confirme avec succes';
+    }
+
+    if (
+      normalizedMessage.includes('callback recu verification flexpay en attente')
+    ) {
+      return 'Notification de paiement recue. Verification du paiement en cours';
+    }
+
+    if (
+      normalizedMessage.includes('callback flexpay recu sans ordernumber') ||
+      normalizedMessage.includes('numero de commande flexpay est manquant')
+    ) {
+      return 'Notification de paiement recue, mais le numero de commande FlexPay est manquant';
+    }
+
+    if (
+      normalizedMessage.includes('flexpay a refuse la requete de paiement') ||
+      normalizedMessage.includes('payment refused') ||
+      normalizedMessage.includes('request refused')
+    ) {
+      return 'La demande de paiement a ete refusee';
+    }
+
+    return trimmedMessage;
+  }
+
+  private normalizeMessage(message: string): string {
+    return message
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim();
   }
 
   private looksLikeFlexPayTokenError(

@@ -27,9 +27,10 @@ export class PaymentsController {
     @Request() req,
     @Param('orderNumber') orderNumber: string,
   ) {
-    return this.paymentsService.checkPaymentStatus(
+    const payment = await this.paymentsService.checkPaymentStatus(
       orderNumber,
       req.user.userId,
     );
+    return this.paymentsService.formatPaymentForClient(payment);
   }
 }

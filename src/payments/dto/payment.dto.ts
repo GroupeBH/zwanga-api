@@ -14,8 +14,10 @@ export class InitiatePaymentDto {
     enumName: 'PaymentMethod',
     example: PaymentMethod.MOBILE_MONEY,
   })
-  @IsEnum(PaymentMethod)
-  @IsNotEmpty()
+  @IsEnum(PaymentMethod, {
+    message: 'La methode de paiement selectionnee est invalide',
+  })
+  @IsNotEmpty({ message: 'La methode de paiement est requise' })
   method: PaymentMethod;
 
   @ApiProperty({
@@ -23,9 +25,11 @@ export class InitiatePaymentDto {
     description: 'Numero du client au format international pour Mobile Money',
     example: '243891234567',
   })
-  @IsString()
+  @IsString({ message: 'Le numero de telephone doit etre une chaine de caracteres' })
   @IsOptional()
-  @MaxLength(20)
+  @MaxLength(20, {
+    message: 'Le numero de telephone ne peut pas depasser 20 caracteres',
+  })
   phone?: string;
 }
 

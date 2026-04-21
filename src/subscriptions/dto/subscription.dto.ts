@@ -23,11 +23,13 @@ export class SubscribeDto {
     enumName: 'SubscriptionPlan',
     example: SubscriptionPlan.PRO,
   })
-  @IsEnum(SubscriptionPlan)
+  @IsEnum(SubscriptionPlan, {
+    message: "Le type d'abonnement selectionne est invalide",
+  })
   @IsIn([SubscriptionPlan.PRO], {
     message: 'Le seul abonnement disponible est le pack pro',
   })
-  @IsNotEmpty()
+  @IsNotEmpty({ message: "Le type d'abonnement est requis" })
   plan: SubscriptionPlan;
 
   @ApiProperty({
@@ -35,8 +37,10 @@ export class SubscribeDto {
     enumName: 'PaymentMethod',
     example: PaymentMethod.MOBILE_MONEY,
   })
-  @IsEnum(PaymentMethod)
-  @IsNotEmpty()
+  @IsEnum(PaymentMethod, {
+    message: 'La methode de paiement selectionnee est invalide',
+  })
+  @IsNotEmpty({ message: 'La methode de paiement est requise' })
   paymentMethod: PaymentMethod;
 
   @ApiProperty({
@@ -44,9 +48,11 @@ export class SubscribeDto {
     description: 'Numero du client pour Mobile Money, commence obligatoirement par +243',
     example: '+243891234567',
   })
-  @IsString()
+  @IsString({ message: 'Le numero de telephone doit etre une chaine de caracteres' })
   @IsOptional()
-  @MaxLength(20)
+  @MaxLength(20, {
+    message: 'Le numero de telephone ne peut pas depasser 20 caracteres',
+  })
   @Matches(/^\+243\d{9}$/, {
     message:
       'Le numero de telephone doit commencer par +243, par exemple +243891234567',
