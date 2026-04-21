@@ -9,11 +9,14 @@ import {
   Index,
 } from 'typeorm';
 import { User } from '../../users/entities/user.entity';
+import { PaymentTransaction } from '../../payments/entities/payment-transaction.entity';
 
 export enum SubscriptionStatus {
+  PENDING = 'pending',
   ACTIVE = 'active',
   EXPIRED = 'expired',
   CANCELLED = 'cancelled',
+  PAYMENT_FAILED = 'payment_failed',
 }
 
 export enum SubscriptionPlan {
@@ -76,8 +79,17 @@ export class Subscription {
   @Column({ type: 'varchar', length: 8, default: 'CDF' })
   documentFundingCurrency: string;
 
-  @Column({ nullable: true })
-  paymentReference: string;
+  @Index()
+  @Column({ type: 'varchar', length: 120, nullable: true })
+  paymentReference: string | null;
+
+  @Index()
+  @Column({ type: 'uuid', nullable: true })
+  paymentTransactionId: string | null;
+
+  @ManyToOne(() => PaymentTransaction, { nullable: true })
+  @JoinColumn({ name: 'paymentTransactionId' })
+  paymentTransaction: PaymentTransaction | null;
 
   @Column({ default: false })
   isTrial: boolean;
@@ -88,4 +100,3 @@ export class Subscription {
   @UpdateDateColumn()
   updatedAt: Date;
 }
-

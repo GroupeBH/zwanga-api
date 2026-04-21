@@ -1,8 +1,17 @@
-import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+  Logger,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, MoreThan, Repository } from 'typeorm';
+import { In, MoreThan, Not, Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
-import { Subscription, SubscriptionStatus, SubscriptionPlan } from './entities/subscription.entity';
+import {
+  Subscription,
+  SubscriptionStatus,
+  SubscriptionPlan,
+} from './entities/subscription.entity';
 import {
   AdministrativeDocumentType,
   DocumentFundingRequest,
@@ -11,8 +20,17 @@ import {
 import {
   CreateDocumentFundingRequestDto,
   ListDocumentFundingRequestsQueryDto,
+  SubscribeDto,
   UpdateDocumentFundingRequestStatusDto,
 } from './dto/subscription.dto';
+import {
+  PaymentMethod,
+  PaymentPurpose,
+  PaymentStatus,
+  PaymentTransaction,
+} from '../payments/entities/payment-transaction.entity';
+import { FlexPayCallbackDto } from '../payments/dto/payment.dto';
+import { PaymentsService } from '../payments/payments.service';
 import { User, UserRole } from '../users/entities/user.entity';
 import { CacheService } from '../common/services/cache.service';
 
@@ -27,6 +45,33 @@ export interface PremiumSubscriptionFeatures {
   subscriptionId: string | null;
   plan: SubscriptionPlan | null;
   endDate: Date | null;
+}
+
+export interface SubscriptionPaymentResponse {
+  subscription: Subscription;
+  payment: {
+    transactionId: string | null;
+    method: PaymentMethod | null;
+    reference: string | null;
+    orderNumber: string | null;
+    status: PaymentStatus | null;
+    statusCode: string | null;
+    message: string | null;
+    paymentUrl: string | null;
+    amount: number;
+    currency: string;
+  };
+}
+
+export interface FlexPayCallbackResponse {
+  received: boolean;
+  verified: boolean;
+  subscriptionId: string;
+  status: SubscriptionStatus;
+  paymentTransactionId: string | null;
+  paymentStatus: PaymentStatus | null;
+  paymentStatusCode: string | null;
+  message: string | null;
 }
 
 @Injectable()
@@ -44,13 +89,17 @@ export class SubscriptionsService {
     private userRepository: Repository<User>,
     private configService: ConfigService,
     private cacheService: CacheService,
+    private paymentsService: PaymentsService,
   ) {}
 
   async createTrial(userId: string): Promise<Subscription> {
     this.logger.log(`Creating trial subscription for user: ${userId}`);
 
     const user = await this.getDriverUser(userId);
-    await this.ensureNoActiveSubscription(userId, 'User already has an active subscription');
+    await this.ensureNoActiveSubscription(
+      userId,
+      'User already has an active subscription',
+    );
 
     const trialPeriodDays = this.getNumberConfig('TRIAL_PERIOD_DAYS', 7);
     const startDate = new Date();
@@ -73,10 +122,13 @@ export class SubscriptionsService {
       isTrial: true,
     });
 
-    const savedSubscription = await this.subscriptionRepository.save(subscription);
+    const savedSubscription =
+      await this.subscriptionRepository.save(subscription);
     await this.invalidatePremiumCaches();
 
-    this.logger.log(`Trial subscription created successfully: ${savedSubscription.id} for user ${userId} (${trialPeriodDays} days)`);
+    this.logger.log(
+      `Trial subscription created successfully: ${savedSubscription.id} for user ${userId} (${trialPeriodDays} days)`,
+    );
     return savedSubscription;
   }
 
@@ -91,22 +143,31 @@ export class SubscriptionsService {
         documentFundingEnabled: true,
         documentFundingLimit: this.getDocumentFundingLimit(),
         documentFundingCurrency: this.getDocumentFundingCurrency(),
+        paymentMethods: Object.values(PaymentMethod),
         eligibleDocumentTypes: Object.values(AdministrativeDocumentType),
       },
     ];
   }
 
-  async subscribe(userId: string, plan: SubscriptionPlan): Promise<Subscription> {
-    this.logger.log(`Creating subscription for user: ${userId} - Plan: ${plan}`);
+  async subscribe(
+    userId: string,
+    dto: SubscribeDto,
+  ): Promise<SubscriptionPaymentResponse> {
+    this.logger.log(
+      `Creating subscription payment for user: ${userId} - Plan: ${dto.plan}`,
+    );
 
     const user = await this.getDriverUser(userId);
-    if (plan !== SubscriptionPlan.PRO) {
-      throw new BadRequestException('Le seul abonnement disponible est le pack pro');
+    if (dto.plan !== SubscriptionPlan.PRO) {
+      throw new BadRequestException(
+        'Le seul abonnement disponible est le pack pro',
+      );
     }
 
-    // Cancel existing active subscription before creating the new paid period.
+    await this.ensurePaymentMethodIsUsable(dto);
+
     await this.subscriptionRepository.update(
-      { userId: user.id, status: SubscriptionStatus.ACTIVE },
+      { userId: user.id, status: SubscriptionStatus.PENDING },
       { status: SubscriptionStatus.CANCELLED },
     );
 
@@ -114,13 +175,10 @@ export class SubscriptionsService {
     const startDate = new Date();
     const endDate = this.calculateEndDate(startDate);
 
-    // Mock payment - in production, integrate with payment gateway.
-    const paymentReference = `PAY-${Date.now()}-${userId.substring(0, 8)}`;
-
     const subscription = this.subscriptionRepository.create({
       userId: user.id,
-      plan,
-      status: SubscriptionStatus.ACTIVE,
+      plan: dto.plan,
+      status: SubscriptionStatus.PENDING,
       startDate,
       endDate,
       amount: subscriptionPrice,
@@ -130,15 +188,97 @@ export class SubscriptionsService {
       documentFundingEnabled: true,
       documentFundingLimit: this.getDocumentFundingLimit(),
       documentFundingCurrency: this.getDocumentFundingCurrency(),
-      paymentReference,
+      paymentReference: null,
+      paymentTransactionId: null,
       isTrial: false,
     });
 
-    const savedSubscription = await this.subscriptionRepository.save(subscription);
-    await this.invalidatePremiumCaches();
+    let savedSubscription =
+      await this.subscriptionRepository.save(subscription);
+    let payment: PaymentTransaction;
 
-    this.logger.log(`Subscription created successfully: ${savedSubscription.id} for user ${userId} - Plan: ${plan}, Amount: ${subscriptionPrice}, Payment Ref: ${paymentReference}`);
-    return savedSubscription;
+    try {
+      payment = await this.paymentsService.initiatePayment({
+        userId: user.id,
+        purpose: PaymentPurpose.SUBSCRIPTION_PRO,
+        relatedEntityType: 'subscription',
+        relatedEntityId: savedSubscription.id,
+        method: dto.paymentMethod,
+        phone: dto.phone,
+        amount: subscriptionPrice,
+        currency: this.getSubscriptionCurrency(),
+        description: 'Abonnement Zwanga Pro',
+        callbackUrl: this.getSubscriptionFlexPayCallbackUrl(),
+        approveUrl: dto.approveUrl,
+        cancelUrl: dto.cancelUrl,
+        declineUrl: dto.declineUrl,
+        referencePrefix: 'SUB',
+      });
+    } catch (error) {
+      const errorMessage = this.getErrorMessage(error);
+      savedSubscription.status = SubscriptionStatus.PAYMENT_FAILED;
+      await this.subscriptionRepository.save(savedSubscription);
+      this.logger.error(
+        `Subscription payment initiation failed: subscriptionId=${savedSubscription.id}, userId=${user.id}, method=${dto.paymentMethod}, message=${errorMessage}`,
+        this.getErrorStack(error),
+      );
+      throw error;
+    }
+
+    savedSubscription.paymentReference = payment.reference;
+    savedSubscription.paymentTransactionId = payment.id;
+    savedSubscription =
+      await this.subscriptionRepository.save(savedSubscription);
+
+    this.logger.log(
+      `Subscription payment initialized: ${savedSubscription.id} for user ${userId}, amount ${subscriptionPrice} ${savedSubscription.currency}, payment ${payment.id}`,
+    );
+
+    return this.buildPaymentResponse(savedSubscription, payment);
+  }
+
+  async handleFlexPayCallback(
+    dto: FlexPayCallbackDto,
+  ): Promise<FlexPayCallbackResponse> {
+    this.logger.log('Subscription FlexPay callback received');
+    const payment = await this.paymentsService.handleFlexPayCallback(dto);
+    const subscription = await this.findSubscriptionForPayment(payment);
+    const savedSubscription = await this.applyPaymentToSubscription(
+      subscription,
+      payment,
+    );
+    this.logger.log(
+      `Subscription callback applied: subscriptionId=${savedSubscription.id}, paymentId=${payment.id}, paymentStatus=${payment.status}, subscriptionStatus=${savedSubscription.status}`,
+    );
+
+    return this.buildCallbackResponse(
+      savedSubscription,
+      payment,
+      payment.status === PaymentStatus.SUCCEEDED,
+    );
+  }
+
+  async checkPaymentStatus(
+    userId: string,
+    orderNumber: string,
+  ): Promise<SubscriptionPaymentResponse> {
+    this.logger.log(
+      `Subscription payment status check requested: userId=${userId}, orderNumber=${orderNumber}`,
+    );
+    const payment = await this.paymentsService.checkPaymentStatus(
+      orderNumber,
+      userId,
+    );
+    const subscription = await this.findSubscriptionForPayment(payment);
+    const savedSubscription = await this.applyPaymentToSubscription(
+      subscription,
+      payment,
+    );
+    this.logger.log(
+      `Subscription payment status check applied: subscriptionId=${savedSubscription.id}, paymentId=${payment.id}, paymentStatus=${payment.status}, subscriptionStatus=${savedSubscription.status}`,
+    );
+
+    return this.buildPaymentResponse(savedSubscription, payment);
   }
 
   async getActiveSubscription(userId: string): Promise<Subscription | null> {
@@ -161,11 +301,15 @@ export class SubscriptionsService {
       subscription.status = SubscriptionStatus.EXPIRED;
       await this.subscriptionRepository.save(subscription);
       await this.invalidatePremiumCaches();
-      this.logger.log(`Subscription ${subscription.id} expired for user ${userId}`);
+      this.logger.log(
+        `Subscription ${subscription.id} expired for user ${userId}`,
+      );
       return null;
     }
 
-    this.logger.debug(`Active subscription found for user ${userId}: ${subscription.id}`);
+    this.logger.debug(
+      `Active subscription found for user ${userId}: ${subscription.id}`,
+    );
     return subscription;
   }
 
@@ -177,7 +321,9 @@ export class SubscriptionsService {
       order: { createdAt: 'DESC' },
     });
 
-    this.logger.debug(`Found ${subscriptions.length} subscriptions for user ${userId}`);
+    this.logger.debug(
+      `Found ${subscriptions.length} subscriptions for user ${userId}`,
+    );
     return subscriptions;
   }
 
@@ -186,7 +332,9 @@ export class SubscriptionsService {
     return Boolean(await this.getActiveSubscription(userId));
   }
 
-  async getPremiumOverview(userId: string): Promise<PremiumSubscriptionFeatures> {
+  async getPremiumOverview(
+    userId: string,
+  ): Promise<PremiumSubscriptionFeatures> {
     const subscription = await this.getActiveSubscription(userId);
     return this.buildPremiumFeatures(subscription);
   }
@@ -254,7 +402,9 @@ export class SubscriptionsService {
       documentType: dto.documentType,
       documentName: dto.documentName?.trim() || null,
       amountRequested: dto.amountRequested ?? null,
-      currency: dto.currency?.trim().toUpperCase() || subscription.documentFundingCurrency,
+      currency:
+        dto.currency?.trim().toUpperCase() ||
+        subscription.documentFundingCurrency,
       description: dto.description?.trim() || null,
       status: DocumentFundingRequestStatus.PENDING,
       adminNote: null,
@@ -265,7 +415,9 @@ export class SubscriptionsService {
     return this.documentFundingRequestRepository.save(request);
   }
 
-  async getMyDocumentFundingRequests(userId: string): Promise<DocumentFundingRequest[]> {
+  async getMyDocumentFundingRequests(
+    userId: string,
+  ): Promise<DocumentFundingRequest[]> {
     return this.documentFundingRequestRepository.find({
       where: { driverId: userId },
       relations: ['subscription'],
@@ -305,10 +457,203 @@ export class SubscriptionsService {
     return this.documentFundingRequestRepository.save(request);
   }
 
+  private async ensurePaymentMethodIsUsable(dto: SubscribeDto): Promise<void> {
+    if (
+      dto.paymentMethod === PaymentMethod.MOBILE_MONEY &&
+      !dto.phone?.trim()
+    ) {
+      throw new BadRequestException(
+        'Le numero de telephone est requis pour payer par Mobile Money',
+      );
+    }
+
+    if (dto.paymentMethod === PaymentMethod.MOBILE_MONEY) {
+      const normalizedPhone = dto.phone?.trim().replace(/[\s()-]/g, '');
+      if (!normalizedPhone || !/^\+243\d{9}$/.test(normalizedPhone)) {
+        throw new BadRequestException(
+          'Le numero Mobile Money doit commencer par +243, par exemple +243891234567',
+        );
+      }
+    }
+
+    if (
+      dto.paymentMethod !== PaymentMethod.MOBILE_MONEY &&
+      dto.paymentMethod !== PaymentMethod.CARD
+    ) {
+      throw new BadRequestException('Methode de paiement non supportee');
+    }
+  }
+
+  private async findSubscriptionForPayment(
+    payment: PaymentTransaction,
+  ): Promise<Subscription> {
+    if (payment.purpose !== PaymentPurpose.SUBSCRIPTION_PRO) {
+      throw new BadRequestException(
+        'Cette transaction ne correspond pas a un abonnement Pro',
+      );
+    }
+
+    const subscription = await this.subscriptionRepository.findOne({
+      where: [
+        { paymentTransactionId: payment.id },
+        { paymentReference: payment.reference },
+        ...(payment.relatedEntityId ? [{ id: payment.relatedEntityId }] : []),
+      ],
+      order: { createdAt: 'DESC' },
+    });
+
+    if (subscription) {
+      return subscription;
+    }
+
+    throw new NotFoundException('Abonnement lie au paiement introuvable');
+  }
+
+  private async applyPaymentToSubscription(
+    subscription: Subscription,
+    payment: PaymentTransaction,
+  ): Promise<Subscription> {
+    subscription.paymentReference = payment.reference;
+    subscription.paymentTransactionId = payment.id;
+
+    if (payment.status === PaymentStatus.SUCCEEDED) {
+      return this.activatePaidSubscription(subscription, payment);
+    }
+
+    if (payment.status === PaymentStatus.FAILED) {
+      subscription.status = SubscriptionStatus.PAYMENT_FAILED;
+      this.logger.warn(
+        `Subscription marked payment_failed: subscriptionId=${subscription.id}, paymentId=${payment.id}, reference=${payment.reference}`,
+      );
+    }
+
+    const savedSubscription =
+      await this.subscriptionRepository.save(subscription);
+    this.logger.log(
+      `Subscription payment state saved: subscriptionId=${savedSubscription.id}, paymentId=${payment.id}, paymentStatus=${payment.status}, subscriptionStatus=${savedSubscription.status}`,
+    );
+    return savedSubscription;
+  }
+
+  private async activatePaidSubscription(
+    subscription: Subscription,
+    payment: PaymentTransaction,
+  ): Promise<Subscription> {
+    await this.subscriptionRepository.update(
+      {
+        userId: subscription.userId,
+        status: SubscriptionStatus.ACTIVE,
+        id: Not(subscription.id),
+      },
+      { status: SubscriptionStatus.CANCELLED },
+    );
+
+    const startDate = new Date();
+    subscription.status = SubscriptionStatus.ACTIVE;
+    subscription.startDate = startDate;
+    subscription.endDate = this.calculateEndDate(startDate);
+    subscription.paymentReference = payment.reference;
+    subscription.paymentTransactionId = payment.id;
+    subscription.premiumBadgeEnabled = true;
+    subscription.featuredTripsEnabled = true;
+    subscription.documentFundingEnabled = true;
+    subscription.documentFundingLimit = this.getDocumentFundingLimit();
+    subscription.documentFundingCurrency = this.getDocumentFundingCurrency();
+
+    const savedSubscription =
+      await this.subscriptionRepository.save(subscription);
+    await this.invalidatePremiumCaches();
+
+    this.logger.log(
+      `Paid subscription activated: subscriptionId=${savedSubscription.id}, userId=${savedSubscription.userId}, paymentId=${payment.id}, reference=${payment.reference}, endDate=${savedSubscription.endDate.toISOString()}`,
+    );
+
+    return savedSubscription;
+  }
+
+  private buildPaymentResponse(
+    subscription: Subscription,
+    payment: PaymentTransaction | null,
+  ): SubscriptionPaymentResponse {
+    return {
+      subscription,
+      payment: {
+        transactionId: payment?.id ?? subscription.paymentTransactionId,
+        method: payment?.method ?? null,
+        reference: payment?.reference ?? subscription.paymentReference,
+        orderNumber: payment?.orderNumber ?? null,
+        status: payment?.status ?? null,
+        statusCode: payment?.providerStatusCode ?? null,
+        message: payment?.providerMessage ?? null,
+        paymentUrl: payment?.paymentUrl ?? null,
+        amount: Number(payment?.amount ?? subscription.amount),
+        currency: payment?.currency ?? subscription.currency,
+      },
+    };
+  }
+
+  private buildCallbackResponse(
+    subscription: Subscription,
+    payment: PaymentTransaction | null,
+    verified: boolean,
+  ): FlexPayCallbackResponse {
+    return {
+      received: true,
+      verified,
+      subscriptionId: subscription.id,
+      status: subscription.status,
+      paymentTransactionId: payment?.id ?? subscription.paymentTransactionId,
+      paymentStatus: payment?.status ?? null,
+      paymentStatusCode: payment?.providerStatusCode ?? null,
+      message: payment?.providerMessage ?? null,
+    };
+  }
+
+  private getSubscriptionFlexPayCallbackUrl(): string {
+    const explicitUrl = this.configService
+      .get<string>('FLEXPAY_SUBSCRIPTION_CALLBACK_URL')
+      ?.trim();
+    if (explicitUrl) {
+      return explicitUrl;
+    }
+
+    const configuredBaseUrl =
+      this.configService.get<string>('FLEXPAY_CALLBACK_BASE_URL')?.trim() ||
+      this.configService.get<string>('PUBLIC_API_BASE_URL')?.trim();
+
+    if (configuredBaseUrl) {
+      return this.joinUrl(configuredBaseUrl, 'subscriptions/flexpay/callback');
+    }
+
+    const port = this.configService.get<string | number>('PORT') || 5200;
+    const configuredHost =
+      this.configService.get<string>('HOST')?.trim() || 'localhost';
+    const host = configuredHost === '0.0.0.0' ? 'localhost' : configuredHost;
+    const apiPrefix =
+      this.configService.get<string>('API_PREFIX')?.trim() || 'api/v1';
+
+    return this.joinUrl(
+      `http://${host}:${port}`,
+      apiPrefix,
+      'subscriptions/flexpay/callback',
+    );
+  }
+
+  private joinUrl(...parts: string[]): string {
+    return parts
+      .map((part, index) =>
+        index === 0 ? part.replace(/\/+$/, '') : part.replace(/^\/+|\/+$/g, ''),
+      )
+      .filter(Boolean)
+      .join('/');
+  }
+
   private async getDriverUser(userId: string): Promise<User> {
     const user = await this.userRepository.findOne({ where: { id: userId } });
     if (!user) {
-      this.logger.warn(`Subscription operation failed: User ${userId} not found`);
+      this.logger.warn(
+        `Subscription operation failed: User ${userId} not found`,
+      );
       throw new NotFoundException('User not found');
     }
 
@@ -327,19 +672,29 @@ export class SubscriptionsService {
   ): Promise<void> {
     const activeSubscription = await this.getActiveSubscription(userId);
     if (activeSubscription) {
-      this.logger.warn(`Subscription operation failed: User ${userId} already has active subscription`);
+      this.logger.warn(
+        `Subscription operation failed: User ${userId} already has active subscription`,
+      );
       throw new BadRequestException(errorMessage);
     }
   }
 
   private getSubscriptionPrice(): number {
-    return this.getNumberConfig('SUBSCRIPTION_PRO_PRICE_USD', 2);
+    return this.getFirstNumberConfig(
+      [
+        'SUBSCRIPTION_PRO_PRICE',
+        'SUBSCRIPTION_PRO_PRICE_USD',
+        'SUBSCRIPTION_PRICE',
+      ],
+      2,
+    );
   }
 
   private calculateEndDate(startDate: Date): Date {
     const endDate = new Date(startDate);
     endDate.setDate(
-      endDate.getDate() + this.getNumberConfig('SUBSCRIPTION_PRO_DURATION_DAYS', 30),
+      endDate.getDate() +
+        this.getNumberConfig('SUBSCRIPTION_PRO_DURATION_DAYS', 30),
     );
     return endDate;
   }
@@ -349,16 +704,34 @@ export class SubscriptionsService {
   }
 
   private getSubscriptionCurrency(): string {
-    return (
-      this.configService.get<string>('SUBSCRIPTION_PRO_CURRENCY') ||
-      this.DEFAULT_SUBSCRIPTION_CURRENCY
-    ).toUpperCase();
+    const explicitCurrency =
+      this.configService.get<string>('SUBSCRIPTION_PRO_CURRENCY')?.trim() ||
+      this.configService.get<string>('SUBSCRIPTION_CURRENCY')?.trim();
+
+    if (explicitCurrency) {
+      return explicitCurrency.toUpperCase();
+    }
+
+    const hasLegacyCdfPrice = Boolean(
+      this.configService.get<string | number>('SUBSCRIPTION_PRICE'),
+    );
+    const hasExplicitProPrice = Boolean(
+      this.configService.get<string | number>('SUBSCRIPTION_PRO_PRICE') ||
+        this.configService.get<string | number>('SUBSCRIPTION_PRO_PRICE_USD'),
+    );
+
+    if (hasLegacyCdfPrice && !hasExplicitProPrice) {
+      return 'CDF';
+    }
+
+    return this.DEFAULT_SUBSCRIPTION_CURRENCY;
   }
 
   private getDocumentFundingCurrency(): string {
     return (
-      this.configService.get<string>('SUBSCRIPTION_DOCUMENT_FUNDING_CURRENCY') ||
-      this.DEFAULT_DOCUMENT_FUNDING_CURRENCY
+      this.configService.get<string>(
+        'SUBSCRIPTION_DOCUMENT_FUNDING_CURRENCY',
+      ) || this.DEFAULT_DOCUMENT_FUNDING_CURRENCY
     ).toUpperCase();
   }
 
@@ -368,18 +741,33 @@ export class SubscriptionsService {
     return Number.isFinite(parsed) ? parsed : fallback;
   }
 
+  private getFirstNumberConfig(keys: string[], fallback: number): number {
+    for (const key of keys) {
+      const rawValue = this.configService.get<string | number>(key);
+      const parsed = Number(rawValue);
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+
+    return fallback;
+  }
+
   private buildPremiumFeatures(
     subscription: Subscription | null,
   ): PremiumSubscriptionFeatures {
     return {
       isActive: Boolean(subscription),
-      isPremium: Boolean(subscription?.premiumBadgeEnabled || subscription?.featuredTripsEnabled),
+      isPremium: Boolean(
+        subscription?.premiumBadgeEnabled || subscription?.featuredTripsEnabled,
+      ),
       premiumBadgeEnabled: Boolean(subscription?.premiumBadgeEnabled),
       featuredTripsEnabled: Boolean(subscription?.featuredTripsEnabled),
       documentFundingEnabled: Boolean(subscription?.documentFundingEnabled),
       documentFundingLimit: subscription?.documentFundingLimit ?? null,
       documentFundingCurrency:
-        subscription?.documentFundingCurrency ?? this.getDocumentFundingCurrency(),
+        subscription?.documentFundingCurrency ??
+        this.getDocumentFundingCurrency(),
       subscriptionId: subscription?.id ?? null,
       plan: subscription?.plan ?? null,
       endDate: subscription?.endDate ?? null,
@@ -390,5 +778,13 @@ export class SubscriptionsService {
     await this.cacheService.del(CacheService.getTripsListKey());
     await this.cacheService.del(CacheService.getTripsListKey('all'));
     await this.cacheService.del(CacheService.getTripsListKey('allTrips'));
+  }
+
+  private getErrorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+  }
+
+  private getErrorStack(error: unknown): string | undefined {
+    return error instanceof Error ? error.stack : undefined;
   }
 }

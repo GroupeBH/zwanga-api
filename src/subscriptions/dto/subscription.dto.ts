@@ -5,10 +5,12 @@ import {
   IsNumber,
   IsOptional,
   IsString,
+  Matches,
   MaxLength,
   Min,
 } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
+import { PaymentMethod } from '../../payments/entities/payment-transaction.entity';
 import { SubscriptionPlan } from '../entities/subscription.entity';
 import {
   AdministrativeDocumentType,
@@ -27,6 +29,68 @@ export class SubscribeDto {
   })
   @IsNotEmpty()
   plan: SubscriptionPlan;
+
+  @ApiProperty({
+    enum: PaymentMethod,
+    enumName: 'PaymentMethod',
+    example: PaymentMethod.MOBILE_MONEY,
+  })
+  @IsEnum(PaymentMethod)
+  @IsNotEmpty()
+  paymentMethod: PaymentMethod;
+
+  @ApiProperty({
+    required: false,
+    description: 'Numero du client pour Mobile Money, commence obligatoirement par +243',
+    example: '+243891234567',
+  })
+  @IsString()
+  @IsOptional()
+  @MaxLength(20)
+  @Matches(/^\+243\d{9}$/, {
+    message:
+      'Le numero de telephone doit commencer par +243, par exemple +243891234567',
+  })
+  phone?: string;
+
+  @ApiProperty({
+    required: false,
+    description: 'URL de redirection apres paiement carte approuve',
+    example: 'zwanga://subscriptions/payment?status=success',
+  })
+  @Matches(
+    /^[a-z][a-z0-9+.-]*:\/\//i,
+    { message: 'approveUrl doit etre une URL valide' },
+  )
+  @IsOptional()
+  @MaxLength(500)
+  approveUrl?: string;
+
+  @ApiProperty({
+    required: false,
+    description: 'URL de redirection apres annulation du paiement carte',
+    example: 'zwanga://subscriptions/payment?status=cancel',
+  })
+  @Matches(
+    /^[a-z][a-z0-9+.-]*:\/\//i,
+    { message: 'cancelUrl doit etre une URL valide' },
+  )
+  @IsOptional()
+  @MaxLength(500)
+  cancelUrl?: string;
+
+  @ApiProperty({
+    required: false,
+    description: 'URL de redirection apres echec du paiement carte',
+    example: 'zwanga://subscriptions/payment?status=decline',
+  })
+  @Matches(
+    /^[a-z][a-z0-9+.-]*:\/\//i,
+    { message: 'declineUrl doit etre une URL valide' },
+  )
+  @IsOptional()
+  @MaxLength(500)
+  declineUrl?: string;
 }
 
 export class CreateDocumentFundingRequestDto {

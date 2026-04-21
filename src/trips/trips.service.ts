@@ -103,6 +103,7 @@ export class TripsService {
   private readonly logger = new Logger(TripsService.name);
   private readonly CACHE_TTL = 300; // 5 minutes
   private readonly RECURRING_GENERATION_WINDOW_DAYS = 14;
+  private readonly DAILY_FREE_TRIP_PUBLICATION_LIMIT = 5;
 
   constructor(
     @InjectRepository(Trip)
@@ -153,6 +154,7 @@ export class TripsService {
     } = createTripDto;
 
     const { vehicle } = await this.resolvePublishingContext(driverId, vehicleId || null);
+    await this.ensureDailyTripPublicationQuota(driverId);
     const departurePoint = await this.resolvePointFromCoordinatesOrAddress(
       departureCoordinates,
       baseTripData.departureLocation,
@@ -1431,15 +1433,28 @@ export class TripsService {
       );
     }
 
-    if (tripsToCreate.length > 0) {
-      await this.tripRepository.save(tripsToCreate);
+    const publishableTrips = await this.applyDailyTripPublicationQuota(
+      template.driverId,
+      tripsToCreate,
+    );
+
+    if (publishableTrips.length > 0) {
+      await this.tripRepository.save(publishableTrips);
       await this.invalidateTripCaches();
     }
 
-    template.lastGeneratedDate = toDate;
+    if (publishableTrips.length < tripsToCreate.length) {
+      const lastPublishedTrip = publishableTrips[publishableTrips.length - 1];
+      if (lastPublishedTrip?.recurringOccurrenceDate) {
+        template.lastGeneratedDate = lastPublishedTrip.recurringOccurrenceDate;
+      }
+    } else {
+      template.lastGeneratedDate = toDate;
+    }
+
     await this.recurringTripTemplateRepository.save(template);
 
-    return tripsToCreate.length;
+    return publishableTrips.length;
   }
 
   private async buildRecurringTripFutureMeta(
@@ -1541,6 +1556,66 @@ export class TripsService {
     await this.cacheService.del(CacheService.getTripsListKey());
     await this.cacheService.del(CacheService.getTripsListKey('all'));
     await this.cacheService.del(CacheService.getTripsListKey('allTrips'));
+  }
+
+  private async ensureDailyTripPublicationQuota(driverId: string): Promise<void> {
+    const remainingQuota = await this.getRemainingDailyTripPublicationQuota(driverId);
+
+    if (remainingQuota === null || remainingQuota > 0) {
+      return;
+    }
+
+    this.logger.warn(
+      `Trip publication blocked: driver ${driverId} reached the daily free limit`,
+    );
+    throw new BadRequestException(
+      `Les conducteurs sans abonnement ne peuvent publier que ${this.DAILY_FREE_TRIP_PUBLICATION_LIMIT} trajets par jour. Vous avez deja atteint cette limite aujourd hui.`,
+    );
+  }
+
+  private async applyDailyTripPublicationQuota(
+    driverId: string,
+    tripsToCreate: Trip[],
+  ): Promise<Trip[]> {
+    if (tripsToCreate.length === 0) {
+      return tripsToCreate;
+    }
+
+    const remainingQuota = await this.getRemainingDailyTripPublicationQuota(driverId);
+
+    if (remainingQuota === null || tripsToCreate.length <= remainingQuota) {
+      return tripsToCreate;
+    }
+
+    this.logger.warn(
+      `Recurring trip generation limited for driver ${driverId}: ${remainingQuota}/${tripsToCreate.length} trip(s) can be published today`,
+    );
+
+    return tripsToCreate.slice(0, remainingQuota);
+  }
+
+  private async getRemainingDailyTripPublicationQuota(
+    driverId: string,
+  ): Promise<number | null> {
+    const premium = await this.subscriptionsService.getPremiumOverview(driverId);
+
+    if (premium.isActive) {
+      return null;
+    }
+
+    const todayStart = this.startOfDay(new Date());
+    const tomorrowStart = this.addDays(todayStart, 1);
+    const publishedToday = await this.tripRepository
+      .createQueryBuilder('trip')
+      .where('trip.driverId = :driverId', { driverId })
+      .andWhere('trip.createdAt >= :todayStart', { todayStart })
+      .andWhere('trip.createdAt < :tomorrowStart', { tomorrowStart })
+      .getCount();
+
+    return Math.max(
+      this.DAILY_FREE_TRIP_PUBLICATION_LIMIT - publishedToday,
+      0,
+    );
   }
 
   private parseDateOnly(value: string): Date {
