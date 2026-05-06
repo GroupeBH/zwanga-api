@@ -152,7 +152,11 @@ export class TripsController {
   @Put(':id')
   @Auth()
   @SensitiveThrottle(10, 6000)
-  @ApiOperation({ summary: 'Update a trip' })
+  @ApiOperation({
+    summary: 'Update a trip',
+    description:
+      "Permet de modifier un trajet existant, y compris l'adresse de depart et/ou d'arrivee.",
+  })
   async update(
     @Request() req,
     @Param('id') id: string,
@@ -211,7 +215,10 @@ export class TripsController {
   @Delete(':id')
   @Auth()
   @SensitiveThrottle(10, 6000)
-  @ApiOperation({ summary: 'Delete a trip (only completed, cancelled, or expired trips can be deleted)' })
+  @ApiOperation({
+    summary:
+      'Delete a trip (always allowed for completed/cancelled/expired trips, or if no booking has been accepted yet)',
+  })
   async remove(@Request() req, @Param('id') id: string) {
     await this.tripsService.remove(id, req.user.userId);
     return { message: 'Trajet supprimé avec succès' };
