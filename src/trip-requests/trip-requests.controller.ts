@@ -26,7 +26,8 @@ export class TripRequestsController {
   @SensitiveThrottle(10, 60000)
   @ApiOperation({
     summary: 'Create a trip request',
-    description: 'Permet à un passager de créer une demande de trajet avec un délai pour le départ. Les drivers pourront ensuite faire des offres.',
+    description:
+      "Permet a un passager de creer une demande de trajet avec un delai pour le depart. Le KYC passager n'est pas requis pour cette action. Les drivers pourront ensuite faire des offres.",
   })
   // @ApiBearerAuth()
   async create(@Request() req, @Body() createTripRequestDto: CreateTripRequestDto) {
@@ -156,7 +157,8 @@ export class TripRequestsController {
   @SensitiveThrottle(10, 60000)
   @ApiOperation({
     summary: 'Update a trip request',
-    description: 'Permet au passager de modifier sa demande de trajet. La modification n\'est possible que si aucun driver n\'a été sélectionné et qu\'aucune offre n\'a été acceptée.',
+    description:
+      "Permet au passager de modifier sa demande de trajet (dont l'adresse de depart et/ou d'arrivee). La modification n'est possible que si aucun driver n'a ete selectionne et qu'aucune offre n'a ete acceptee.",
   })
   async update(
     @Request() req,
@@ -179,4 +181,3 @@ export class TripRequestsController {
     return { message: 'Trip request cancelled successfully' };
   }
 }
-

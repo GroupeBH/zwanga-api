@@ -25,7 +25,11 @@ export class BookingsController {
   @Auth()
   // @Roles(UserRole.PASSENGER)
   @SensitiveThrottle(10, 60000) // 10 requests per minute per IP
-  @ApiOperation({ summary: 'Create a new booking' })
+  @ApiOperation({
+    summary: 'Create a new booking',
+    description:
+      "La reservation d'un trajet par un passager ne requiert pas un KYC approuve. Seul un compte suspendu est bloque via l'authentification.",
+  })
   async create(@Request() req, @Body() createBookingDto: CreateBookingDto) {
     return this.bookingsService.create(req.user.userId, createBookingDto);
   }

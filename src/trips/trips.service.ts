@@ -932,21 +932,31 @@ export class TripsService {
       this.logger.warn(`Trip deletion failed: Trip ${id} not found for driver ${driverId}`);
       throw new NotFoundException('Trajet non trouve');
     }
-
-    // Check if trip is completed or expired
+    // A trip can always be deleted when terminal (completed/cancelled/expired).
+    // Otherwise, allow deletion only if no passenger booking was accepted/in progress.
     const now = new Date();
     const twoHoursAgo = new Date(now.getTime() - 2 * 60 * 60 * 1000);
     const isExpired = trip.status === TripStatus.PENDING && trip.departureDate < twoHoursAgo;
     const isCompleted = trip.status === TripStatus.COMPLETED;
     const isCancelled = trip.status === TripStatus.CANCELLED;
+    const hasAcceptedOrInProgressBooking = (trip.bookings ?? []).some(
+      (booking) =>
+        booking.status === BookingStatus.ACCEPTED ||
+        booking.status === BookingStatus.COMPLETED ||
+        booking.pickedUp ||
+        booking.pickedUpConfirmedByPassenger ||
+        booking.droppedOff ||
+        booking.droppedOffConfirmedByPassenger,
+    );
 
-    // Only allow deletion of completed, cancelled, or expired trips
-    if (!isCompleted && !isCancelled && !isExpired) {
+    const canDeleteByStatus = isCompleted || isCancelled || isExpired;
+
+    if (!canDeleteByStatus && hasAcceptedOrInProgressBooking) {
       this.logger.warn(
-        `Trip deletion failed: Trip ${id} is not completed, cancelled, or expired (status: ${trip.status})`,
+        `Trip deletion failed: Trip ${id} has accepted/in-progress booking(s) and cannot be deleted in status ${trip.status}`,
       );
       throw new BadRequestException(
-        'Vous ne pouvez supprimer que les trajets terminés, annulés ou expirés',
+        'Vous ne pouvez pas supprimer ce trajet car une reservation a deja ete acceptee',
       );
     }
 
@@ -2874,7 +2884,3 @@ export class TripsService {
     }
   }
 }
-
-
-
-

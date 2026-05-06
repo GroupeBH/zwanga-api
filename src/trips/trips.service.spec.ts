@@ -1,6 +1,8 @@
 import { BadRequestException } from '@nestjs/common';
 import { TripsService } from './trips.service';
 import { UserRole } from '../users/entities/user.entity';
+import { TripStatus } from './entities/trip.entity';
+import { BookingStatus } from '../bookings/entities/booking.entity';
 
 describe('TripsService daily trip publication quota', () => {
   let service: any;
@@ -115,5 +117,98 @@ describe('TripsService daily trip publication quota', () => {
     );
 
     expect(result).toEqual([{ id: '1' }, { id: '2' }]);
+  });
+});
+
+describe('TripsService trip deletion rules', () => {
+  let service: any;
+  let tripRepository: {
+    findOne: jest.Mock;
+    remove: jest.Mock;
+  };
+  let bookingRepository: { delete: jest.Mock };
+  let cacheService: { del: jest.Mock };
+
+  beforeEach(() => {
+    tripRepository = {
+      findOne: jest.fn(),
+      remove: jest.fn().mockResolvedValue(undefined),
+    };
+    bookingRepository = {
+      delete: jest.fn().mockResolvedValue(undefined),
+    };
+    cacheService = {
+      del: jest.fn().mockResolvedValue(undefined),
+    };
+
+    service = new TripsService(
+      tripRepository as any,
+      {} as any,
+      bookingRepository as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      cacheService as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+    );
+  });
+
+  it('allows deleting a non-terminal trip when there is no accepted/in-progress booking', async () => {
+    const trip = {
+      id: 'trip-1',
+      driverId: 'driver-1',
+      status: TripStatus.ACTIVE,
+      departureDate: new Date(Date.now() + 60 * 60 * 1000),
+      bookings: [
+        {
+          id: 'booking-pending',
+          status: BookingStatus.PENDING,
+          pickedUp: false,
+          pickedUpConfirmedByPassenger: false,
+          droppedOff: false,
+          droppedOffConfirmedByPassenger: false,
+        },
+      ],
+    };
+
+    tripRepository.findOne.mockResolvedValue(trip);
+
+    await expect(service.remove('trip-1', 'driver-1')).resolves.toBeUndefined();
+    expect(bookingRepository.delete).toHaveBeenCalledWith({ tripId: 'trip-1' });
+    expect(tripRepository.remove).toHaveBeenCalledWith(trip);
+  });
+
+  it('blocks deleting a non-terminal trip when a booking is already accepted', async () => {
+    const trip = {
+      id: 'trip-2',
+      driverId: 'driver-1',
+      status: TripStatus.ACTIVE,
+      departureDate: new Date(Date.now() + 60 * 60 * 1000),
+      bookings: [
+        {
+          id: 'booking-accepted',
+          status: BookingStatus.ACCEPTED,
+          pickedUp: false,
+          pickedUpConfirmedByPassenger: false,
+          droppedOff: false,
+          droppedOffConfirmedByPassenger: false,
+        },
+      ],
+    };
+
+    tripRepository.findOne.mockResolvedValue(trip);
+
+    await expect(service.remove('trip-2', 'driver-1')).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+    expect(bookingRepository.delete).not.toHaveBeenCalled();
+    expect(tripRepository.remove).not.toHaveBeenCalled();
   });
 });
