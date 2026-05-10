@@ -2375,7 +2375,7 @@ export class TripsService {
 
       await this.notificationService.sendToMultiple(fcmTokens, title, body, data, userIds);
       this.logger.log(`Notified ${fcmTokens.length} passengers about trip ${trip.id} departure`);
-    } catch (error) {
+    } catch (error: any) {
       this.logger.error(
         `Error notifying about trip departure ${trip.id}: ${error.message}`,
         error.stack,
@@ -2463,7 +2463,7 @@ export class TripsService {
       );
 
       this.logger.log(`Notified driver ${trip.driverId} about expired trip ${trip.id}`);
-    } catch (error) {
+    } catch (error: any) {
       this.logger.error(
         `Error notifying driver about trip expiration: ${error.message}`,
         error.stack,
@@ -2526,7 +2526,7 @@ export class TripsService {
       this.logger.log(
         `Notified ${fcmTokens.length} passengers about expired trip ${trip.id}`,
       );
-    } catch (error) {
+    } catch (error: any) {
       this.logger.error(
         `Error notifying passengers about trip expiration: ${error.message}`,
         error.stack,
@@ -2618,7 +2618,7 @@ export class TripsService {
       this.logger.log(
         `[DriverEmergencyContact][${eventType}] trip ${trip.id}: ${sent} sent, ${failed} failed`,
       );
-    } catch (error) {
+    } catch (error: any) {
       this.logger.error(
         `Error notifying driver emergency contacts for trip ${trip.id}: ${error.message}`,
         error.stack,
@@ -2718,7 +2718,7 @@ export class TripsService {
           `[EmergencyContact][trip_end_without_dropoff] trip ${trip.id}: ${sent} sent, ${failed} failed`,
         );
       }
-    } catch (error) {
+    } catch (error: any) {
       this.logger.error(
         `Error notifying emergency contacts for missing dropoff on trip ${trip.id}: ${error.message}`,
         error.stack,
@@ -2808,7 +2808,7 @@ export class TripsService {
       this.logger.log(
         `Notified driver ${trip.driverId} about upcoming expiration for trip ${trip.id}`,
       );
-    } catch (error) {
+    } catch (error: any) {
       this.logger.error(
         `Error notifying driver about upcoming expiration: ${error.message}`,
         error.stack,
@@ -2876,7 +2876,7 @@ export class TripsService {
       this.logger.log(
         `Notified ${fcmTokens.length} passengers about upcoming expiration for trip ${trip.id}`,
       );
-    } catch (error) {
+    } catch (error: any) {
       this.logger.error(
         `Error notifying passengers about upcoming expiration: ${error.message}`,
         error.stack,

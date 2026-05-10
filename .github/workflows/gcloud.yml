@@ -1,0 +1,51 @@
+name: Deploy NestJS to Cloud Run
+
+on:
+  push:
+    branches:
+      - main  # Se déclenche lors d'un push sur la branche main
+
+env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  REGION: europe-west1
+  SERVICE_NAME: backend-covoiturage
+  REPOSITORY: nestjs-repo
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Google Auth
+        uses: 'google-github-actions/auth@v2'
+        with:
+          credentials_json: '${{ secrets.GCP_SA_KEY }}'
+
+      - name: Set up Cloud SDK
+        uses: 'google-github-actions/setup-gcloud@v2'
+
+      - name: Authorize Docker
+        run: gcloud auth configure-docker europe-west9-docker.pkg.dev
+
+      - name: Build and Push Container
+        run: |-
+          DOCKER_TAG="europe-west9-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.SERVICE_NAME }}:${{ github.sha }}"
+          docker build -t $DOCKER_TAG .
+          docker push $DOCKER_TAG
+
+      - name: Inject Environment Variables
+        run: |-
+          echo "${{ secrets.ENV_VARS }}" > .env
+
+      - name: Deploy to Cloud Run
+        run: |-
+          gcloud run deploy ${{ env.SERVICE_NAME }} \
+            --image europe-west9-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.SERVICE_NAME }}:${{ github.sha }} \
+            --region ${{ env.REGION }} \
+            --platform managed \
+            --env-vars-file .env \
+            --allow-unauthenticated \
+            --quiet
