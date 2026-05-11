@@ -384,7 +384,7 @@ export class UsersService {
           }
           this.logger.warn(`[KYC Upload] Status set to REJECTED`);
         }
-      } catch (error) {
+      } catch (error: any) {
         this.logger.error(`[KYC Upload] ❌ KYC validation ERROR for user: ${userId}:`);
         this.logger.error(`[KYC Upload] Error message: ${error.message}`);
         this.logger.error(`[KYC Upload] Error stack: ${error.stack}`);
@@ -472,7 +472,7 @@ export class UsersService {
       // Convert S3 keys to presigned URLs
       return await this.enrichKycWithPresignedUrls(savedKyc);
 
-    } catch (error) {
+    } catch (error: any) {
       await queryRunner.rollbackTransaction();
       this.logger.error(`Transaction failed for user ${userId}`, error.stack);
 
@@ -488,7 +488,7 @@ export class UsersService {
         ]);
 
         this.logger.log(`S3 files cleaned up successfully for user: ${userId}`);
-      } catch (cleanupError) {
+      } catch (cleanupError: any) {
         // If cleanup fails, we log the error but still throw the original transaction error.
         this.logger.error(
           `FATAL: Failed to clean up S3 files after transaction rollback. Orphaned files remaining.`,

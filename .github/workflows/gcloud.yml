@@ -1,15 +1,15 @@
-name: Deploy NestJS to Cloud Run
+name: zwanga-api Cloud Run deployment
 
 on:
   push:
     branches:
-      - main  # Se déclenche lors d'un push sur la branche main
+      - master
 
 env:
   PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
-  REGION: europe-west1
-  SERVICE_NAME: backend-covoiturage
-  REPOSITORY: nestjs-repo
+  REGION: europe-west9
+  SERVICE_NAME: zwanga-api
+  REPOSITORY: zwanga-api
 
 jobs:
   deploy:
