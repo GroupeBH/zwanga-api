@@ -725,6 +725,9 @@ export class TripsService {
     if (updateTripDto.status === TripStatus.COMPLETED && trip.status !== TripStatus.COMPLETED) {
       return this.completeTrip(id, driverId);
     }
+    if (updateTripDto.status === TripStatus.ACTIVE && trip.status !== TripStatus.ACTIVE) {
+      return this.startTrip(id, driverId);
+    }
 
     const {
       departureDate,
@@ -987,6 +990,13 @@ export class TripsService {
     this.logger.log(`Trip ${id} deleted successfully`);
   }
 
+  async ensureDriverCanStartTrip(
+    driverId: string,
+    excludedTripId?: string,
+  ): Promise<void> {
+    await this.ensureDriverHasNoActiveTrip(driverId, excludedTripId);
+  }
+
   async startTrip(tripId: string, driverId: string): Promise<SanitizedTrip> {
     this.logger.log(`Starting trip ${tripId} by driver ${driverId}`);
 
@@ -1005,6 +1015,8 @@ export class TripsService {
       throw new BadRequestException(`Impossible de démarrer le trajet. Statut actuel : ${trip.status}`);
     }
 
+    await this.ensureDriverCanStartTrip(driverId, tripId);
+
     // Calculate total accepted seats
     const acceptedBookings = trip.bookings?.filter(
       (booking) => booking.status === BookingStatus.ACCEPTED,
@@ -1018,7 +1030,19 @@ export class TripsService {
     // Update trip status to ACTIVE and set startedAt
     trip.status = TripStatus.ACTIVE;
     trip.startedAt = new Date();
-    await this.tripRepository.save(trip);
+    try {
+      await this.tripRepository.save(trip);
+    } catch (error) {
+      if (this.isOneActiveTripConstraintViolation(error)) {
+        this.logger.warn(
+          `Trip start blocked by active-trip constraint for driver ${driverId}`,
+        );
+        throw new BadRequestException(
+          'Vous avez deja un trajet en cours. Terminez ou interrompez ce trajet avant d en demarrer un autre.',
+        );
+      }
+      throw error;
+    }
 
     // Invalidate cache
     await this.cacheService.del(CacheService.getTripKey(tripId));
@@ -1566,6 +1590,43 @@ export class TripsService {
     await this.cacheService.del(CacheService.getTripsListKey());
     await this.cacheService.del(CacheService.getTripsListKey('all'));
     await this.cacheService.del(CacheService.getTripsListKey('allTrips'));
+  }
+
+  private async ensureDriverHasNoActiveTrip(
+    driverId: string,
+    excludedTripId?: string,
+  ): Promise<void> {
+    const where = excludedTripId
+      ? { driverId, status: TripStatus.ACTIVE, id: Not(excludedTripId) }
+      : { driverId, status: TripStatus.ACTIVE };
+    const activeTrip = await this.tripRepository.findOne({
+      where,
+      select: ['id'],
+    });
+
+    if (!activeTrip) {
+      return;
+    }
+
+    this.logger.warn(
+      `Trip start failed: driver ${driverId} already has active trip ${activeTrip.id}`,
+    );
+    throw new BadRequestException(
+      'Vous avez deja un trajet en cours. Terminez ou interrompez ce trajet avant d en demarrer un autre.',
+    );
+  }
+
+  private isOneActiveTripConstraintViolation(error: unknown): boolean {
+    const databaseError = error as {
+      code?: string;
+      constraint?: string;
+      detail?: string;
+    };
+    return (
+      databaseError?.code === '23505' &&
+      (databaseError.constraint === 'IDX_trips_one_active_per_driver' ||
+        databaseError.detail?.includes('IDX_trips_one_active_per_driver') === true)
+    );
   }
 
   private async ensureDailyTripPublicationQuota(driverId: string): Promise<void> {

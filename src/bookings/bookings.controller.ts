@@ -96,7 +96,7 @@ export class BookingsController {
   @Put(':id/cancel')
   @Auth()
   @SensitiveThrottle(10, 60000)
-  @ApiOperation({ summary: 'Cancel a booking' })
+  @ApiOperation({ summary: 'Cancel a booking (passenger or driver before pickup)' })
   async cancel(@Request() req, @Param('id') id: string) {
     await this.bookingsService.cancel(id, req.user.userId);
     return { message: 'Booking cancelled successfully' };

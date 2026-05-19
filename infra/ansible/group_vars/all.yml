@@ -1,0 +1,20 @@
+---
+project_name: zwanga
+deploy_path: /opt/zwanga
+local_env_file: "{{ playbook_dir }}/../env/production.env"
+
+app_port: 5200
+api_health_path: /api/v1/health
+app_healthcheck_path: "{{ api_health_path }}"
+
+app_image_repository: ""
+app_image_tag: latest
+
+domain: ""
+caddy_email: ""
+admin_cidrs: []
+
+cloudwatch_region: eu-central-1
+cloudwatch_instance_name: zwanga-api
+
+docker_restart_policy: unless-stopped

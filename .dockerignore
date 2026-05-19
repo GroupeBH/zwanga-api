@@ -60,6 +60,7 @@ Dockerfile*
 .github
 .gitlab-ci.yml
 .travis.yml
+infra
 
 # Misc
 .eslintcache

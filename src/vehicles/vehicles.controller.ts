@@ -21,7 +21,7 @@ export class VehiclesController {
 
   @Post()
   @Auth()
-  @SensitiveThrottle(5, 60000)
+  @SensitiveThrottle(15, 60000)
   @ApiOperation({ summary: 'Create a new vehicle' })
   async create(@Request() req, @Body() createVehicleDto: CreateVehicleDto) {
     return this.vehiclesService.create(req.user.userId, createVehicleDto);

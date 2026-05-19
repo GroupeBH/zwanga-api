@@ -23,17 +23,37 @@ export class VehiclesService {
     private fileUploadService: FileUploadService,
   ) {}
 
+  private normalizeVehiclePayload(vehicleData: Partial<Vehicle>): Partial<Vehicle> {
+    return {
+      ...vehicleData,
+      brand: vehicleData.brand?.trim(),
+      model: vehicleData.model?.trim(),
+      color: vehicleData.color?.trim(),
+      licensePlate: vehicleData.licensePlate?.trim().toUpperCase(),
+    };
+  }
+
+  private async invalidateOwnerVehiclesCache(ownerId: string): Promise<void> {
+    try {
+      await this.cacheService.del(CacheService.getVehiclesByOwnerKey(ownerId));
+    } catch (cacheError) {
+      this.logger.warn(`Failed to invalidate cache for owner ${ownerId}: ${cacheError.message}`);
+    }
+  }
+
   async create(ownerId: string, vehicleData: Partial<Vehicle>): Promise<Vehicle> {
-    this.logger.log(`Creating vehicle for owner: ${ownerId} (${vehicleData.brand} ${vehicleData.model})`);
+    const normalizedVehicleData = this.normalizeVehiclePayload(vehicleData);
+
+    this.logger.log(`Creating vehicle for owner: ${ownerId} (${normalizedVehicleData.brand} ${normalizedVehicleData.model})`);
     
     try {
       // Validate required fields
-      if (!vehicleData.brand || !vehicleData.model || !vehicleData.color || !vehicleData.licensePlate) {
+      if (!normalizedVehicleData.brand || !normalizedVehicleData.model || !normalizedVehicleData.color || !normalizedVehicleData.licensePlate) {
         const missingFields: string[] = [];
-        if (!vehicleData.brand) missingFields.push('brand');
-        if (!vehicleData.model) missingFields.push('model');
-        if (!vehicleData.color) missingFields.push('color');
-        if (!vehicleData.licensePlate) missingFields.push('licensePlate');
+        if (!normalizedVehicleData.brand) missingFields.push('brand');
+        if (!normalizedVehicleData.model) missingFields.push('model');
+        if (!normalizedVehicleData.color) missingFields.push('color');
+        if (!normalizedVehicleData.licensePlate) missingFields.push('licensePlate');
         
         this.logger.warn(`Vehicle creation failed: Missing required fields: ${missingFields.join(', ')}`);
         throw new BadRequestException(
@@ -49,36 +69,56 @@ export class VehiclesService {
       }
 
       // Check if license plate already exists (before attempting save)
-      const existingVehicle = await this.vehicleRepository.findOne({
-        where: { licensePlate: vehicleData.licensePlate },
-      });
+      const existingVehicle = await this.vehicleRepository
+        .createQueryBuilder('vehicle')
+        .where('UPPER(vehicle.licensePlate) = :licensePlate', {
+          licensePlate: normalizedVehicleData.licensePlate,
+        })
+        .getOne();
 
       if (existingVehicle) {
+        if (existingVehicle.ownerId === ownerId) {
+          if (existingVehicle.isActive) {
+            throw new BadRequestException(
+              `Ce véhicule (${normalizedVehicleData.licensePlate}) est déjà enregistré dans votre profil`
+            );
+          }
+
+          this.logger.log(
+            `Reactivating vehicle ${existingVehicle.id} for owner ${ownerId} with license plate ${normalizedVehicleData.licensePlate}`
+          );
+
+          Object.assign(existingVehicle, normalizedVehicleData, {
+            ownerId,
+            isActive: true,
+          });
+
+          const reactivatedVehicle = await this.vehicleRepository.save(existingVehicle);
+          await this.invalidateOwnerVehiclesCache(ownerId);
+
+          return reactivatedVehicle;
+        }
+
         this.logger.warn(
-          `Vehicle creation failed: License plate ${vehicleData.licensePlate} already exists (vehicle ID: ${existingVehicle.id})`
+          `Vehicle creation failed: License plate ${normalizedVehicleData.licensePlate} already exists (vehicle ID: ${existingVehicle.id})`
         );
         throw new BadRequestException(
-          `Cette plaque d'immatriculation (${vehicleData.licensePlate}) est déjà utilisée par un autre véhicule`
+          `Cette plaque d'immatriculation (${normalizedVehicleData.licensePlate}) est déjà utilisée par un autre véhicule`
         );
       }
 
       // Create vehicle entity
       const vehicle = this.vehicleRepository.create({
-        ...vehicleData,
+        ...normalizedVehicleData,
         ownerId,
-        isActive: vehicleData.isActive !== undefined ? vehicleData.isActive : true,
+        isActive: normalizedVehicleData.isActive !== undefined ? normalizedVehicleData.isActive : true,
       });
 
       // Save vehicle to database
       const savedVehicle = await this.vehicleRepository.save(vehicle);
       
       // Invalidate cache (non-blocking, don't fail if cache fails)
-      try {
-        await this.cacheService.del(CacheService.getVehiclesByOwnerKey(ownerId));
-      } catch (cacheError) {
-        this.logger.warn(`Failed to invalidate cache for owner ${ownerId}: ${cacheError.message}`);
-        // Don't throw, cache invalidation is not critical
-      }
+      await this.invalidateOwnerVehiclesCache(ownerId);
 
       this.logger.log(`Vehicle created successfully: ${savedVehicle.id} for owner ${ownerId}`);
       return savedVehicle;
@@ -96,7 +136,7 @@ export class VehiclesService {
         // Check for unique constraint violation (PostgreSQL error code 23505)
         if (errorMessage.includes('23505') || errorMessage.includes('unique constraint') || errorMessage.includes('duplicate key')) {
           this.logger.error(
-            `Vehicle creation failed: Unique constraint violation for license plate ${vehicleData.licensePlate}`,
+            `Vehicle creation failed: Unique constraint violation for license plate ${normalizedVehicleData.licensePlate}`,
             error.stack
           );
           throw new BadRequestException(

@@ -212,3 +212,114 @@ describe('TripsService trip deletion rules', () => {
     expect(tripRepository.remove).not.toHaveBeenCalled();
   });
 });
+
+describe('TripsService trip start rules', () => {
+  let service: any;
+  let tripRepository: {
+    findOne: jest.Mock;
+    save: jest.Mock;
+  };
+  let cacheService: { del: jest.Mock };
+
+  const pendingTrip = {
+    id: 'trip-1',
+    driverId: 'driver-1',
+    status: TripStatus.PENDING,
+    availableSeats: 2,
+    bookings: [],
+  };
+
+  beforeEach(() => {
+    tripRepository = {
+      findOne: jest.fn(),
+      save: jest.fn().mockImplementation((trip) => Promise.resolve(trip)),
+    };
+    cacheService = {
+      del: jest.fn().mockResolvedValue(undefined),
+    };
+
+    service = new TripsService(
+      tripRepository as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      cacheService as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+    );
+
+    jest.spyOn(service, 'findOne').mockResolvedValue({ id: 'trip-1' });
+    jest
+      .spyOn(service, 'notifyDriverEmergencyContacts')
+      .mockResolvedValue(undefined);
+    jest.spyOn(service, 'notifyNearbyUsersAboutTripStart').mockResolvedValue(undefined);
+    jest
+      .spyOn(service, 'notifyBookedPassengersAboutTripStart')
+      .mockResolvedValue(undefined);
+  });
+
+  it('blocks starting a trip when the driver already has an active trip', async () => {
+    tripRepository.findOne
+      .mockResolvedValueOnce({ ...pendingTrip })
+      .mockResolvedValueOnce({ id: 'active-trip' });
+
+    await expect(service.startTrip('trip-1', 'driver-1')).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+
+    expect(tripRepository.save).not.toHaveBeenCalled();
+  });
+
+  it('starts a pending trip when the driver has no other active trip', async () => {
+    tripRepository.findOne
+      .mockResolvedValueOnce({ ...pendingTrip })
+      .mockResolvedValueOnce(null);
+
+    await expect(service.startTrip('trip-1', 'driver-1')).resolves.toEqual({
+      id: 'trip-1',
+    });
+
+    expect(tripRepository.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'trip-1',
+        status: TripStatus.ACTIVE,
+        startedAt: expect.any(Date),
+      }),
+    );
+  });
+
+  it('returns a domain error when the database active-trip constraint is hit', async () => {
+    tripRepository.findOne
+      .mockResolvedValueOnce({ ...pendingTrip })
+      .mockResolvedValueOnce(null);
+    tripRepository.save.mockRejectedValueOnce({
+      code: '23505',
+      constraint: 'IDX_trips_one_active_per_driver',
+    });
+
+    await expect(service.startTrip('trip-1', 'driver-1')).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+  });
+
+  it('routes status=ACTIVE updates through startTrip', async () => {
+    tripRepository.findOne.mockResolvedValueOnce({ ...pendingTrip });
+    const startTripSpy = jest
+      .spyOn(service, 'startTrip')
+      .mockResolvedValue({ id: 'trip-1' });
+
+    await expect(
+      service.update('trip-1', 'driver-1', { status: TripStatus.ACTIVE }),
+    ).resolves.toEqual({ id: 'trip-1' });
+
+    expect(startTripSpy).toHaveBeenCalledWith('trip-1', 'driver-1');
+  });
+});
