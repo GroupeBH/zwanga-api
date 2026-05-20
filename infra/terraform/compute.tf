@@ -21,7 +21,7 @@ data "aws_ami" "ubuntu" {
 resource "aws_key_pair" "deploy" {
   count = local.create_key_pair ? 1 : 0
 
-  key_name   = "${local.name_prefix}-deploy"
+  key_name   = local.managed_key_name
   public_key = trimspace(local.resolved_ssh_public_key)
 }
 

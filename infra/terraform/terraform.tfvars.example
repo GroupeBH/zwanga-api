@@ -21,12 +21,14 @@ ami_id                     = ""
 instance_type              = "t3.micro"
 secondary_instance_enabled = true
 root_volume_size_gb        = 30
-key_name                   = "CHANGE_ME_EXISTING_EC2_KEYPAIR"
 admin_cidr                 = "203.0.113.10/32"
 
-# Backward-compatible alternative if you want Terraform to create the key pair.
+# In GitHub Actions, the workflow derives ssh_public_key from EC2_SSH_PRIVATE_KEY
+# and Terraform creates the matching EC2 key pair automatically.
+#
+# Local alternatives:
 # ssh_public_key_path = "~/.ssh/zwanga.pub"
-# existing_key_name   = "CHANGE_ME_EXISTING_EC2_KEYPAIR"
+# key_name            = "CHANGE_ME_EXISTING_EC2_KEYPAIR"
 
 # Public access
 domain_name = "api.example.com"

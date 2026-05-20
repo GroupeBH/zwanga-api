@@ -8,6 +8,8 @@ ANSIBLE_DIR="${ROOT_DIR}/ansible"
 AWS_REGION="${AWS_REGION:-}"
 KEY_NAME="${KEY_NAME:-}"
 PRIVATE_KEY_PATH="${PRIVATE_KEY_PATH:-}"
+SSH_PUBLIC_KEY="${SSH_PUBLIC_KEY:-}"
+SSH_PUBLIC_KEY_FILE="${SSH_PUBLIC_KEY_FILE:-}"
 ADMIN_CIDR="${ADMIN_CIDR:-}"
 ALLOWED_SSH_CIDR_BLOCKS_JSON="${ALLOWED_SSH_CIDR_BLOCKS_JSON:-}"
 DOMAIN="${DOMAIN:-}"
@@ -45,6 +47,8 @@ usage() {
 Usage:
   ./infra/deploy.sh \
     --private-key <path_to_private_key.pem> \
+    [--ssh-public-key <ssh_public_key>] \
+    [--ssh-public-key-file <path_to_public_key.pub>] \
     [--aws-region <region>] \
     [--key-name <aws_key_pair_name>] \
     [--admin-cidr <your_public_ip/32>] \
@@ -84,6 +88,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --private-key)
       PRIVATE_KEY_PATH="$2"
+      shift 2
+      ;;
+    --ssh-public-key)
+      SSH_PUBLIC_KEY="$2"
+      shift 2
+      ;;
+    --ssh-public-key-file)
+      SSH_PUBLIC_KEY_FILE="$2"
       shift 2
       ;;
     --admin-cidr)
@@ -189,8 +201,8 @@ fi
 
 if [[ ! -f "${TF_VARS_FILE}" ]]; then
   missing_args=()
-  if [[ -z "${KEY_NAME}" ]]; then
-    missing_args+=("--key-name")
+  if [[ -z "${KEY_NAME}" && -z "${SSH_PUBLIC_KEY}" && -z "${SSH_PUBLIC_KEY_FILE}" ]]; then
+    missing_args+=("--key-name or --ssh-public-key-file")
   fi
   if [[ -z "${ADMIN_CIDR}" ]]; then
     missing_args+=("--admin-cidr")
@@ -208,6 +220,11 @@ fi
 
 if [[ ! -f "${PRIVATE_KEY_PATH}" ]]; then
   echo "Private key not found: ${PRIVATE_KEY_PATH}" >&2
+  exit 1
+fi
+
+if [[ -n "${SSH_PUBLIC_KEY_FILE}" && ! -f "${SSH_PUBLIC_KEY_FILE}" ]]; then
+  echo "SSH public key file not found: ${SSH_PUBLIC_KEY_FILE}" >&2
   exit 1
 fi
 
@@ -234,6 +251,10 @@ for bin in terraform ansible-playbook ssh python3; do
 done
 
 PRIVATE_KEY_PATH="$(realpath "${PRIVATE_KEY_PATH}")"
+if [[ -n "${SSH_PUBLIC_KEY_FILE}" ]]; then
+  SSH_PUBLIC_KEY_FILE="$(realpath "${SSH_PUBLIC_KEY_FILE}")"
+  SSH_PUBLIC_KEY="$(tr -d '\r\n' < "${SSH_PUBLIC_KEY_FILE}")"
+fi
 if [[ -n "${APP_ENV_FILE}" ]]; then
   APP_ENV_FILE="$(realpath "${APP_ENV_FILE}")"
 fi
@@ -253,7 +274,11 @@ fi
 if [[ -n "${AWS_REGION}" ]]; then
   TF_APPLY_ARGS+=(-var "aws_region=${AWS_REGION}")
 fi
-if [[ -n "${KEY_NAME}" ]]; then
+if [[ -n "${SSH_PUBLIC_KEY}" ]]; then
+  TF_APPLY_ARGS+=(-var "ssh_public_key=${SSH_PUBLIC_KEY}")
+  TF_APPLY_ARGS+=(-var "key_name=")
+  TF_APPLY_ARGS+=(-var "existing_key_name=")
+elif [[ -n "${KEY_NAME}" ]]; then
   TF_APPLY_ARGS+=(-var "key_name=${KEY_NAME}")
 fi
 if [[ -n "${ADMIN_CIDR}" ]]; then
