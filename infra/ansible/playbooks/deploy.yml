@@ -171,7 +171,7 @@
         state: directory
         owner: "{{ deploy_user }}"
         group: "{{ deploy_user }}"
-        mode: "0750"
+        mode: "0755"
 
     - name: Render Docker Compose file
       ansible.builtin.template:
@@ -179,7 +179,7 @@
         dest: "{{ deploy_path }}/docker-compose.yml"
         owner: "{{ deploy_user }}"
         group: "{{ deploy_user }}"
-        mode: "0640"
+        mode: "0644"
 
     - name: Render Caddyfile
       ansible.builtin.template:
@@ -187,7 +187,7 @@
         dest: "{{ deploy_path }}/Caddyfile"
         owner: "{{ deploy_user }}"
         group: "{{ deploy_user }}"
-        mode: "0640"
+        mode: "0644"
 
     - name: Copy app env file
       ansible.builtin.copy:

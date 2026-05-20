@@ -27,9 +27,15 @@ Par defaut:
 
 Postgres et Redis restent externes a AWS. Il faut autoriser les Elastic IPs des EC2 cote fournisseur DB/cache.
 
+## Notes de correction
+
+Les incidents et correctifs appliques pendant la mise en place du deploiement
+sont documentes dans `infra/DEPLOYMENT_FIXES.md`.
+
 ## CI/CD GitHub Actions
 
-Le workflow `.github/workflows/aws.yml` se lance sur chaque push vers `master`.
+Le workflow `.github/workflows/aws.yml` se lance sur chaque push vers la branche
+configuree dans le fichier workflow, actuellement `release`.
 
 Il fait:
 
