@@ -199,7 +199,48 @@ Evolution recommandee:
 - Ajouter une etape de migration controlee avant le redemarrage applicatif,
   avec un job unique ou un conteneur temporaire execute une seule fois.
 
-## 6. Checklist avant relance du workflow
+## 6. Ansible `admin_cidrs` recu comme chaine
+
+Probleme:
+
+- Le playbook echouait pendant la configuration UFW:
+
+```text
+The `loop` value must resolve to a 'list', not 'str'.
+```
+
+Cause:
+
+- `deploy.sh` passait `admin_cidrs` avec la syntaxe Ansible `key=value`.
+- Avec cette syntaxe, meme une valeur JSON comme `["1.2.3.4/32"]` peut etre
+  interpretee comme une chaine au lieu d'une liste.
+
+Changement applique:
+
+- `deploy.sh` transmet maintenant `admin_cidrs` comme objet JSON:
+
+```bash
+--extra-vars '{"admin_cidrs":[...]}'
+```
+
+- Le playbook normalise aussi `admin_cidrs` en `effective_admin_cidrs`, afin
+  d'accepter une vraie liste ou une chaine JSON.
+- Les regles UFW bouclent maintenant sur `effective_admin_cidrs`.
+
+Fichiers concernes:
+
+- `infra/deploy.sh`
+- `infra/ansible/playbooks/deploy.yml`
+
+Verification:
+
+```bash
+sudo ufw status numbered
+```
+
+Les CIDR attendus doivent apparaitre sur le port 22.
+
+## 7. Checklist avant relance du workflow
 
 Secrets GitHub requis:
 

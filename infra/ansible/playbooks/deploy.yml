@@ -14,6 +14,15 @@
       ansible.builtin.set_fact:
         effective_app_env_file: "{{ app_env_file | default(local_env_file, true) }}"
 
+    - name: Normalize admin CIDRs
+      ansible.builtin.set_fact:
+        effective_admin_cidrs: >-
+          {{
+            admin_cidrs
+            if (admin_cidrs is sequence and admin_cidrs is not string)
+            else ((admin_cidrs | default('[]', true)) | from_json)
+          }}
+
     - name: Validate app image repository input
       ansible.builtin.assert:
         that:
@@ -30,8 +39,8 @@
     - name: Validate admin CIDRs for SSH firewall rules
       ansible.builtin.assert:
         that:
-          - admin_cidrs is defined
-          - admin_cidrs | length > 0
+          - effective_admin_cidrs is defined
+          - effective_admin_cidrs | length > 0
         fail_msg: "admin_cidrs must contain at least one CIDR, usually the GitHub runner /32 plus your admin IP."
 
     - name: Validate private IP inventory data for the Caddy upstream mesh
@@ -346,7 +355,7 @@
 
     - name: Allow SSH from admin CIDRs
       ansible.builtin.command: "ufw allow from {{ item }} to any port 22 proto tcp"
-      loop: "{{ admin_cidrs }}"
+      loop: "{{ effective_admin_cidrs }}"
 
     - name: Allow private Caddy-to-app traffic on app port
       ansible.builtin.command: "ufw allow from {{ hostvars[item].private_ip }} to any port {{ app_port }} proto tcp"

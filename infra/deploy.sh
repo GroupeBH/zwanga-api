@@ -450,7 +450,7 @@ echo "==> Running Ansible playbook"
 ANSIBLE_ARGS=(
   -i "${ANSIBLE_DIR}/inventory.ini"
   "${ANSIBLE_DIR}/playbooks/deploy.yml"
-  --extra-vars "admin_cidrs=${ADMIN_CIDRS_JSON}"
+  --extra-vars "{\"admin_cidrs\":${ADMIN_CIDRS_JSON}}"
   --extra-vars "app_image_repository=${APP_IMAGE_REPOSITORY}"
   --extra-vars "app_image_tag=${APP_IMAGE_TAG}"
   --extra-vars "app_port=${APP_PORT}"
