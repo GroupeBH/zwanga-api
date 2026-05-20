@@ -42,7 +42,7 @@ export class VehiclesService {
   private async invalidateOwnerVehiclesCache(ownerId: string): Promise<void> {
     try {
       await this.cacheService.del(CacheService.getVehiclesByOwnerKey(ownerId));
-    } catch (cacheError) {
+    } catch (cacheError: any) {
       this.logger.warn(`Failed to invalidate cache for owner ${ownerId}: ${cacheError.message}`);
     }
   }
@@ -107,7 +107,10 @@ export class VehiclesService {
       const vehicle = this.vehicleRepository.create({
         ...sanitizedVehicleData,
         ownerId,
-        isActive: normalizedVehicleData.isActive !== undefined ? normalizedVehicleData.isActive : true,
+        isActive:
+          sanitizedVehicleData.isActive !== undefined
+            ? sanitizedVehicleData.isActive
+            : true,
       });
 
       const savedVehicle = await this.vehicleRepository.save(vehicle);

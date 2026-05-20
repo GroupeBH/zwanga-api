@@ -1152,7 +1152,7 @@ export class TripsService {
 
       await this.notificationService.sendToMultiple(fcmTokens, title, body, data, userIds);
       this.logger.log(`Notified ${fcmTokens.length} users about trip ${trip.id} start`);
-    } catch (error) {
+    } catch (error: any) {
       this.logger.error(`Error notifying nearby users about trip start: ${error.message}`, error.stack);
     }
   }
@@ -1201,7 +1201,7 @@ export class TripsService {
 
       await this.notificationService.sendToMultiple(fcmTokens, title, body, data, userIds);
       this.logger.log(`Notified ${fcmTokens.length} passengers about trip ${trip.id} start`);
-    } catch (error) {
+    } catch (error: any) {
       this.logger.error(`Error notifying booked passengers about trip start: ${error.message}`, error.stack);
     }
   }
@@ -1267,7 +1267,7 @@ export class TripsService {
       }
 
       this.logger.log(`Notified ${fcmTokens.length} passengers about trip ${trip.id} pause`);
-    } catch (error) {
+    } catch (error: any) {
       this.logger.error(`Error notifying passengers about trip pause: ${error.message}`, error.stack);
     }
   }
@@ -1283,7 +1283,7 @@ export class TripsService {
     for (const template of templates) {
       try {
         await this.generateTripsForTemplate(template);
-      } catch (error) {
+      } catch (error: any) {
         this.logger.error(
           `Failed to generate recurring trips for template ${template.id}: ${error.message}`,
           error.stack,
