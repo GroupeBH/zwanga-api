@@ -29,6 +29,24 @@ export class VehiclesService {
     private fileUploadService: FileUploadService,
   ) {}
 
+  private normalizeVehiclePayload(vehicleData: Partial<Vehicle>): Partial<Vehicle> {
+    return {
+      ...vehicleData,
+      brand: vehicleData.brand?.trim(),
+      model: vehicleData.model?.trim(),
+      color: vehicleData.color?.trim(),
+      licensePlate: vehicleData.licensePlate?.trim().toUpperCase(),
+    };
+  }
+
+  private async invalidateOwnerVehiclesCache(ownerId: string): Promise<void> {
+    try {
+      await this.cacheService.del(CacheService.getVehiclesByOwnerKey(ownerId));
+    } catch (cacheError) {
+      this.logger.warn(`Failed to invalidate cache for owner ${ownerId}: ${cacheError.message}`);
+    }
+  }
+
   async create(ownerId: string, vehicleData: Partial<Vehicle>): Promise<Vehicle> {
     this.logger.log(
       `Creating vehicle for owner: ${ownerId} (${vehicleData.brand} ${vehicleData.model})`,
@@ -89,7 +107,7 @@ export class VehiclesService {
       const vehicle = this.vehicleRepository.create({
         ...sanitizedVehicleData,
         ownerId,
-        isActive: vehicleData.isActive !== undefined ? vehicleData.isActive : true,
+        isActive: normalizedVehicleData.isActive !== undefined ? normalizedVehicleData.isActive : true,
       });
 
       const savedVehicle = await this.vehicleRepository.save(vehicle);

@@ -1,0 +1,340 @@
+---
+- name: Deploy Zwanga backend and Caddy on EC2 nodes
+  hosts: app
+  serial: 1
+  any_errors_fatal: true
+  become: true
+  vars:
+    deploy_user: "{{ ansible_user | default('ubuntu') }}"
+    dockerhub_username: "{{ lookup('env', 'DOCKERHUB_USERNAME') | default('', true) }}"
+    dockerhub_token: "{{ lookup('env', 'DOCKERHUB_TOKEN') | default('', true) }}"
+
+  pre_tasks:
+    - name: Select app env file
+      ansible.builtin.set_fact:
+        effective_app_env_file: "{{ app_env_file | default(local_env_file, true) }}"
+
+    - name: Validate app image repository input
+      ansible.builtin.assert:
+        that:
+          - app_image_repository is defined
+          - app_image_repository | length > 0
+        fail_msg: "app_image_repository is required, for example gbhsarl/zwanga-backend."
+
+    - name: Validate Docker Hub credentials completeness
+      ansible.builtin.assert:
+        that:
+          - (dockerhub_username | length == 0 and dockerhub_token | length == 0) or (dockerhub_username | length > 0 and dockerhub_token | length > 0)
+        fail_msg: "Set both DOCKERHUB_USERNAME and DOCKERHUB_TOKEN together, or leave both unset."
+
+    - name: Validate admin CIDRs for SSH firewall rules
+      ansible.builtin.assert:
+        that:
+          - admin_cidrs is defined
+          - admin_cidrs | length > 0
+        fail_msg: "admin_cidrs must contain at least one CIDR, usually the GitHub runner /32 plus your admin IP."
+
+    - name: Validate private IP inventory data for the Caddy upstream mesh
+      ansible.builtin.assert:
+        that:
+          - hostvars[item].private_ip is defined
+          - hostvars[item].private_ip | length > 0
+        fail_msg: "Each app host must define private_ip in the inventory."
+      loop: "{{ groups['app'] }}"
+      run_once: true
+      delegate_to: localhost
+      become: false
+
+    - name: Check local production environment file
+      ansible.builtin.stat:
+        path: "{{ effective_app_env_file }}"
+      delegate_to: localhost
+      become: false
+      register: env_file_stat
+
+    - name: Stop when production environment file is missing
+      ansible.builtin.fail:
+        msg: "Create {{ effective_app_env_file }} from env/production.env.example or provide app_env_file before deploying."
+      when: not env_file_stat.stat.exists
+
+  tasks:
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Install base packages
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - fail2ban
+          - gnupg
+          - lsb-release
+          - unattended-upgrades
+          - ufw
+        state: present
+
+    - name: Add Docker apt key
+      ansible.builtin.apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Add Docker apt repository
+      ansible.builtin.apt_repository:
+        repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_facts['distribution_release'] }} stable"
+        state: present
+        filename: docker
+
+    - name: Install Docker packages
+      ansible.builtin.apt:
+        update_cache: true
+        name:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: present
+
+    - name: Ensure Docker is enabled and running
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Add deploy user to docker group
+      ansible.builtin.user:
+        name: "{{ deploy_user }}"
+        groups: docker
+        append: true
+
+    - name: Install unattended-upgrades periodic policy
+      ansible.builtin.copy:
+        dest: /etc/apt/apt.conf.d/20auto-upgrades
+        owner: root
+        group: root
+        mode: "0640"
+        content: |
+          APT::Periodic::Update-Package-Lists "1";
+          APT::Periodic::Unattended-Upgrade "1";
+          APT::Periodic::Download-Upgradeable-Packages "1";
+
+    - name: Ensure unattended-upgrades is enabled
+      ansible.builtin.service:
+        name: unattended-upgrades
+        state: started
+        enabled: true
+
+    - name: Install fail2ban SSH jail
+      ansible.builtin.copy:
+        dest: /etc/fail2ban/jail.d/sshd.local
+        owner: root
+        group: root
+        mode: "0640"
+        content: |
+          [sshd]
+          enabled = true
+          port = ssh
+          banaction = ufw
+          maxretry = 5
+          findtime = 10m
+          bantime = 1h
+      notify: Restart fail2ban
+
+    - name: Install SSH hardening override
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config.d/99-zwanga-hardening.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          PermitRootLogin no
+          PasswordAuthentication no
+          KbdInteractiveAuthentication no
+          ChallengeResponseAuthentication no
+          PubkeyAuthentication yes
+          X11Forwarding no
+          MaxAuthTries 3
+          LoginGraceTime 30
+      notify: Restart ssh
+
+    - name: Ensure fail2ban is enabled and running
+      ansible.builtin.service:
+        name: fail2ban
+        state: started
+        enabled: true
+
+    - name: Ensure application directory exists
+      ansible.builtin.file:
+        path: "{{ deploy_path }}"
+        state: directory
+        owner: "{{ deploy_user }}"
+        group: "{{ deploy_user }}"
+        mode: "0750"
+
+    - name: Render Docker Compose file
+      ansible.builtin.template:
+        src: ../templates/docker-compose.yml.j2
+        dest: "{{ deploy_path }}/docker-compose.yml"
+        owner: "{{ deploy_user }}"
+        group: "{{ deploy_user }}"
+        mode: "0640"
+
+    - name: Render Caddyfile
+      ansible.builtin.template:
+        src: ../templates/Caddyfile.j2
+        dest: "{{ deploy_path }}/Caddyfile"
+        owner: "{{ deploy_user }}"
+        group: "{{ deploy_user }}"
+        mode: "0640"
+
+    - name: Copy app env file
+      ansible.builtin.copy:
+        src: "{{ effective_app_env_file }}"
+        dest: "{{ deploy_path }}/.env"
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Log in to Docker Hub when credentials are provided
+      ansible.builtin.command:
+        argv:
+          - docker
+          - login
+          - --username
+          - "{{ dockerhub_username }}"
+          - --password-stdin
+        stdin: "{{ dockerhub_token }}"
+      no_log: true
+      when: dockerhub_username | length > 0
+
+    - name: Pull application image
+      ansible.builtin.command: docker compose pull app
+      args:
+        chdir: "{{ deploy_path }}"
+
+    - name: Start containers
+      ansible.builtin.command: docker compose up -d --remove-orphans
+      args:
+        chdir: "{{ deploy_path }}"
+
+    - name: Wait for app container readiness
+      block:
+        - name: Poll Docker container state
+          ansible.builtin.command:
+            argv:
+              - docker
+              - inspect
+              - --format
+              - "{% raw %}{{.State.Status}}|{{if .State.Health}}{{.State.Health.Status}}{{else}}missing-healthcheck{{end}}{% endraw %}"
+              - zwanga-api
+          register: app_container_state_result
+          changed_when: false
+          retries: 20
+          delay: 5
+          until: app_container_state_result.stdout in ["running|healthy", "running|missing-healthcheck"]
+      rescue:
+        - name: Capture docker compose services after failed readiness check
+          ansible.builtin.command: docker compose ps
+          args:
+            chdir: "{{ deploy_path }}"
+          register: compose_ps_result
+          changed_when: false
+
+        - name: Print docker compose services after failed readiness check
+          ansible.builtin.debug:
+            var: compose_ps_result.stdout_lines
+
+        - name: Capture application logs after failed readiness check
+          ansible.builtin.command: docker compose logs app --tail=100
+          args:
+            chdir: "{{ deploy_path }}"
+          register: app_logs_result
+          changed_when: false
+
+        - name: Print application logs after failed readiness check
+          ansible.builtin.debug:
+            var: app_logs_result.stdout_lines
+
+        - name: Fail when container never becomes ready
+          ansible.builtin.fail:
+            msg: "The Zwanga API container never reached a ready state."
+
+    - name: Validate Caddy configuration
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - exec
+          - -T
+          - caddy
+          - caddy
+          - validate
+          - --config
+          - /etc/caddy/Caddyfile
+      args:
+        chdir: "{{ deploy_path }}"
+      changed_when: false
+
+    - name: Show docker compose services
+      ansible.builtin.command: docker compose ps
+      args:
+        chdir: "{{ deploy_path }}"
+      register: compose_ps_result
+      changed_when: false
+
+    - name: Print docker compose services
+      ansible.builtin.debug:
+        var: compose_ps_result.stdout_lines
+
+    - name: Reset UFW rules
+      ansible.builtin.command: ufw --force reset
+
+    - name: Default deny incoming
+      ansible.builtin.command: ufw default deny incoming
+
+    - name: Default allow outgoing
+      ansible.builtin.command: ufw default allow outgoing
+
+    - name: Set UFW logging to low
+      ansible.builtin.command: ufw logging low
+
+    - name: Allow SSH from admin CIDRs
+      ansible.builtin.command: "ufw allow from {{ item }} to any port 22 proto tcp"
+      loop: "{{ admin_cidrs }}"
+
+    - name: Allow private Caddy-to-app traffic on app port
+      ansible.builtin.command: "ufw allow from {{ hostvars[item].private_ip }} to any port {{ app_port }} proto tcp"
+      loop: "{{ groups['app'] }}"
+
+    - name: Allow HTTP
+      ansible.builtin.command: ufw allow 80/tcp
+
+    - name: Allow HTTPS
+      ansible.builtin.command: ufw allow 443/tcp
+
+    - name: Enable UFW
+      ansible.builtin.command: ufw --force enable
+
+    - name: Apply pending SSH/fail2ban restarts before reconnecting
+      ansible.builtin.meta: flush_handlers
+
+    - name: Reset SSH connection after firewall and SSH hardening changes
+      ansible.builtin.meta: reset_connection
+
+    - name: Confirm SSH after firewall changes
+      ansible.builtin.wait_for_connection:
+        delay: 2
+        timeout: 60
+
+  handlers:
+    - name: Restart fail2ban
+      ansible.builtin.service:
+        name: fail2ban
+        state: restarted
+
+    - name: Restart ssh
+      ansible.builtin.service:
+        name: ssh
+        state: restarted

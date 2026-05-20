@@ -844,6 +844,8 @@ export class TripRequestsService {
       throw new BadRequestException('Un trajet a déjà été créé à partir de cette demande !');
     }
 
+    await this.tripsService.ensureDriverCanStartTrip(driverId);
+
     // Get the accepted offer to get the proposed departure date
     const acceptedOffer = await this.driverOfferRepository.findOne({
       where: {

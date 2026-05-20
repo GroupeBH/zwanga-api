@@ -94,44 +94,48 @@ const typeOrmEntities = [
     LoggerModule,
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],
-      useFactory: (configService: ConfigService) => ({
-        ...((databaseUrl: string | undefined, isDevelopment: boolean) => {
-          const baseConfig = {
-            type: 'postgres' as const,
-            entities: typeOrmEntities,
-            synchronize: true,
-            // Disable SQL query logging to keep logs clean
-            // Set to ['error', 'warn'] if you want to see TypeORM errors/warnings only
-            logging: false,
-          };
+      useFactory: (configService: ConfigService) => {
+        const nodeEnv = configService.get<string>('NODE_ENV') || 'development';
+        const typeormSynchronize =
+          nodeEnv !== 'production' &&
+          configService.get<string>('TYPEORM_SYNCHRONIZE') === 'true';
 
-          if (databaseUrl) {
-            const sslDisabled = databaseUrl.includes('sslmode=disable');
+        return {
+          ...((databaseUrl: string | undefined) => {
+            const baseConfig = {
+              type: 'postgres' as const,
+              entities: typeOrmEntities,
+              synchronize: typeormSynchronize,
+              // Disable SQL query logging to keep logs clean
+              // Set to ['error', 'warn'] if you want to see TypeORM errors/warnings only
+              logging: false,
+            };
+
+            if (databaseUrl) {
+              const sslDisabled = databaseUrl.includes('sslmode=disable');
+              return {
+                ...baseConfig,
+                url: databaseUrl,
+                ssl: sslDisabled
+                  ? undefined
+                  : {
+                      rejectUnauthorized: false,
+                    },
+                extra: sslDisabled ? undefined : { sslmode: 'require' },
+              };
+            }
+
             return {
               ...baseConfig,
-              url: databaseUrl,
-              ssl: sslDisabled
-                ? undefined
-                : {
-                    rejectUnauthorized: false,
-                  },
-              extra: sslDisabled ? undefined : { sslmode: 'require' },
+              host: configService.get<string>('DATABASE_HOST'),
+              port: configService.get<number>('DATABASE_PORT'),
+              username: configService.get<string>('DATABASE_USER'),
+              password: configService.get<string>('DATABASE_PASSWORD'),
+              database: configService.get<string>('DATABASE_NAME'),
             };
-          }
-
-          return {
-            ...baseConfig,
-            host: configService.get<string>('DATABASE_HOST'),
-            port: configService.get<number>('DATABASE_PORT'),
-            username: configService.get<string>('DATABASE_USER'),
-            password: configService.get<string>('DATABASE_PASSWORD'),
-            database: configService.get<string>('DATABASE_NAME'),
-          };
-        })(
-          configService.get<string>('DATABASE_URL'),
-          configService.get<string>('NODE_ENV') === 'development',
-        ),
-      }),
+          })(configService.get<string>('DATABASE_URL')),
+        };
+      },
       inject: [ConfigService],
     }),
     CacheModule.register({

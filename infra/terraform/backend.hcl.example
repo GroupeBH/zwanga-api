@@ -1,0 +1,9 @@
+# Terraform S3 backend configuration.
+# Copy to backend.hcl locally, or put the full content in GitHub secret
+# TF_BACKEND_CONFIG_CONTENT for CI/CD.
+
+bucket       = "CHANGE_ME_TF_STATE_BUCKET"
+key          = "zwanga/eu-central-1/terraform.tfstate"
+region       = "eu-central-1"
+encrypt      = true
+use_lockfile = true
