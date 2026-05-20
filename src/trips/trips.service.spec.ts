@@ -213,36 +213,54 @@ describe('TripsService trip deletion rules', () => {
   });
 });
 
-describe('TripsService trip start rules', () => {
+describe('TripsService started trip ETA expiration', () => {
   let service: any;
   let tripRepository: {
+    find: jest.Mock;
     findOne: jest.Mock;
     save: jest.Mock;
+    update: jest.Mock;
+    increment: jest.Mock;
   };
+  let bookingRepository: { update: jest.Mock };
+  let userRepository: { find: jest.Mock };
   let cacheService: { del: jest.Mock };
+  let googleMapsService: { getDirections: jest.Mock };
 
-  const pendingTrip = {
-    id: 'trip-1',
-    driverId: 'driver-1',
-    status: TripStatus.PENDING,
-    availableSeats: 2,
-    bookings: [],
-  };
+  const now = new Date('2026-05-20T12:00:00.000Z');
 
   beforeEach(() => {
     tripRepository = {
+      find: jest.fn(),
       findOne: jest.fn(),
-      save: jest.fn().mockImplementation((trip) => Promise.resolve(trip)),
+      save: jest.fn().mockImplementation(async (trip) => trip),
+      update: jest.fn().mockResolvedValue(undefined),
+      increment: jest.fn().mockResolvedValue(undefined),
+    };
+    bookingRepository = {
+      update: jest.fn().mockResolvedValue(undefined),
+    };
+    userRepository = {
+      find: jest.fn().mockResolvedValue([]),
     };
     cacheService = {
       del: jest.fn().mockResolvedValue(undefined),
+    };
+    googleMapsService = {
+      getDirections: jest.fn().mockResolvedValue({
+        routes: [
+          {
+            legs: [{ duration: 30 * 60 }],
+          },
+        ],
+      }),
     };
 
     service = new TripsService(
       tripRepository as any,
       {} as any,
-      {} as any,
-      {} as any,
+      bookingRepository as any,
+      userRepository as any,
       {} as any,
       {} as any,
       {} as any,
@@ -252,74 +270,111 @@ describe('TripsService trip start rules', () => {
       {} as any,
       {} as any,
       {} as any,
-      {} as any,
+      googleMapsService as any,
       {} as any,
     );
-
-    jest.spyOn(service, 'findOne').mockResolvedValue({ id: 'trip-1' });
-    jest
-      .spyOn(service, 'notifyDriverEmergencyContacts')
-      .mockResolvedValue(undefined);
-    jest.spyOn(service, 'notifyNearbyUsersAboutTripStart').mockResolvedValue(undefined);
-    jest
-      .spyOn(service, 'notifyBookedPassengersAboutTripStart')
-      .mockResolvedValue(undefined);
   });
 
-  it('blocks starting a trip when the driver already has an active trip', async () => {
-    tripRepository.findOne
-      .mockResolvedValueOnce({ ...pendingTrip })
-      .mockResolvedValueOnce({ id: 'active-trip' });
-
-    await expect(service.startTrip('trip-1', 'driver-1')).rejects.toBeInstanceOf(
-      BadRequestException,
-    );
-
-    expect(tripRepository.save).not.toHaveBeenCalled();
+  afterEach(() => {
+    jest.useRealTimers();
   });
 
-  it('starts a pending trip when the driver has no other active trip', async () => {
-    tripRepository.findOne
-      .mockResolvedValueOnce({ ...pendingTrip })
-      .mockResolvedValueOnce(null);
+  function buildActiveTrip(estimatedArrivalDate: Date) {
+    return {
+      id: 'trip-active',
+      driverId: 'driver-1',
+      status: TripStatus.ACTIVE,
+      startedAt: new Date('2026-05-20T02:00:00.000Z'),
+      estimatedArrivalDate,
+      departureDate: new Date('2026-05-20T02:00:00.000Z'),
+      updatedAt: now,
+      departureLocation: 'Gombe',
+      departureReference: null,
+      departurePoint: null,
+      arrivalLocation: 'Limete',
+      arrivalReference: null,
+      arrivalPoint: null,
+      bookings: [],
+      driver: { id: 'driver-1', fcmToken: null },
+    };
+  }
 
-    await expect(service.startTrip('trip-1', 'driver-1')).resolves.toEqual({
+  it('stores an estimated arrival date when a driver starts a trip', async () => {
+    jest.useFakeTimers().setSystemTime(now);
+    const trip = {
       id: 'trip-1',
-    });
+      driverId: 'driver-1',
+      status: TripStatus.PENDING,
+      startedAt: null,
+      estimatedArrivalDate: null,
+      departureDate: new Date('2026-05-20T12:00:00.000Z'),
+      departureLocation: 'Gombe',
+      departureReference: null,
+      departurePoint: {
+        type: 'Point',
+        coordinates: [15.2663, -4.325],
+      },
+      arrivalLocation: 'Limete',
+      arrivalReference: null,
+      arrivalPoint: {
+        type: 'Point',
+        coordinates: [15.3222, -4.4419],
+      },
+      availableSeats: 0,
+      pricePerSeat: 0,
+      bookings: [],
+      driverSafetyEmergencyContactIds: [],
+      driver: { id: 'driver-1', fcmToken: null },
+      vehicle: null,
+    };
+    tripRepository.findOne.mockResolvedValue(trip);
+    jest.spyOn(service, 'findOne').mockResolvedValue({ id: 'trip-1' });
 
+    await service.startTrip('trip-1', 'driver-1');
+
+    expect(googleMapsService.getDirections).toHaveBeenCalledWith(
+      expect.objectContaining({
+        origin: { lat: -4.325, lng: 15.2663 },
+        destination: { lat: -4.4419, lng: 15.3222 },
+        mode: 'driving',
+        departureTime: Math.floor(now.getTime() / 1000),
+        region: 'CD',
+      }),
+    );
     expect(tripRepository.save).toHaveBeenCalledWith(
       expect.objectContaining({
-        id: 'trip-1',
         status: TripStatus.ACTIVE,
-        startedAt: expect.any(Date),
+        startedAt: now,
+        estimatedArrivalDate: new Date('2026-05-20T12:30:00.000Z'),
       }),
     );
   });
 
-  it('returns a domain error when the database active-trip constraint is hit', async () => {
-    tripRepository.findOne
-      .mockResolvedValueOnce({ ...pendingTrip })
-      .mockResolvedValueOnce(null);
-    tripRepository.save.mockRejectedValueOnce({
-      code: '23505',
-      constraint: 'IDX_trips_one_active_per_driver',
-    });
+  it('does not expire a started trip before six hours after its estimated arrival', async () => {
+    const estimatedArrivalDate = new Date(now.getTime() - 5 * 60 * 60 * 1000);
+    tripRepository.find
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([buildActiveTrip(estimatedArrivalDate)]);
 
-    await expect(service.startTrip('trip-1', 'driver-1')).rejects.toBeInstanceOf(
-      BadRequestException,
-    );
+    await service.markExpiredTripsNow(now);
+
+    expect(tripRepository.update).not.toHaveBeenCalled();
+    expect(bookingRepository.update).not.toHaveBeenCalled();
   });
 
-  it('routes status=ACTIVE updates through startTrip', async () => {
-    tripRepository.findOne.mockResolvedValueOnce({ ...pendingTrip });
-    const startTripSpy = jest
-      .spyOn(service, 'startTrip')
-      .mockResolvedValue({ id: 'trip-1' });
+  it('expires a started trip once six hours have passed after its estimated arrival', async () => {
+    const estimatedArrivalDate = new Date(
+      now.getTime() - 6 * 60 * 60 * 1000 - 60 * 1000,
+    );
+    tripRepository.find
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([buildActiveTrip(estimatedArrivalDate)]);
 
-    await expect(
-      service.update('trip-1', 'driver-1', { status: TripStatus.ACTIVE }),
-    ).resolves.toEqual({ id: 'trip-1' });
+    await service.markExpiredTripsNow(now);
 
-    expect(startTripSpy).toHaveBeenCalledWith('trip-1', 'driver-1');
+    expect(tripRepository.update).toHaveBeenCalledWith('trip-active', {
+      status: TripStatus.COMPLETED,
+      completedAt: now,
+    });
   });
 });

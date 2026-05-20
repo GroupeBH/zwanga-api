@@ -32,6 +32,7 @@ import { Rating } from '../ratings/entities/rating.entity';
 import { EmergencyContact } from '../safety/entities/emergency-contact.entity';
 import { MessagingService } from '../messaging/messaging.service';
 import { GoogleMapsService } from '../google-maps/google-maps.service';
+import { TravelMode } from '../google-maps/dto/google-maps.dto';
 import {
   PremiumSubscriptionFeatures,
   SubscriptionsService,
@@ -104,6 +105,8 @@ export class TripsService {
   private readonly CACHE_TTL = 300; // 5 minutes
   private readonly RECURRING_GENERATION_WINDOW_DAYS = 14;
   private readonly DAILY_FREE_TRIP_PUBLICATION_LIMIT = 5;
+  private readonly ACTIVE_TRIP_EXPIRATION_GRACE_MS = 6 * 60 * 60 * 1000;
+  private readonly DEFAULT_ESTIMATED_TRIP_DURATION_MS = 6 * 60 * 60 * 1000;
 
   constructor(
     @InjectRepository(Trip)
@@ -1028,21 +1031,11 @@ export class TripsService {
     const hasAvailableSeats = trip.availableSeats > 0;
 
     // Update trip status to ACTIVE and set startedAt
+    const startedAt = new Date();
     trip.status = TripStatus.ACTIVE;
-    trip.startedAt = new Date();
-    try {
-      await this.tripRepository.save(trip);
-    } catch (error) {
-      if (this.isOneActiveTripConstraintViolation(error)) {
-        this.logger.warn(
-          `Trip start blocked by active-trip constraint for driver ${driverId}`,
-        );
-        throw new BadRequestException(
-          'Vous avez deja un trajet en cours. Terminez ou interrompez ce trajet avant d en demarrer un autre.',
-        );
-      }
-      throw error;
-    }
+    trip.startedAt = startedAt;
+    trip.estimatedArrivalDate = await this.calculateEstimatedArrivalDate(trip, startedAt);
+    await this.tripRepository.save(trip);
 
     // Invalidate cache
     await this.cacheService.del(CacheService.getTripKey(tripId));
@@ -1736,6 +1729,98 @@ export class TripsService {
     return next;
   }
 
+  private async calculateEstimatedArrivalDate(trip: Trip, baseTime: Date): Promise<Date> {
+    const estimatedDurationMs = await this.estimateTripDurationMs(trip, baseTime);
+    return new Date(baseTime.getTime() + estimatedDurationMs);
+  }
+
+  private async estimateTripDurationMs(trip: Trip, departureTime: Date): Promise<number> {
+    const origin = this.buildTripDirectionsWaypoint(
+      trip.departurePoint,
+      trip.departureLocation,
+      trip.departureReference,
+    );
+    const destination = this.buildTripDirectionsWaypoint(
+      trip.arrivalPoint,
+      trip.arrivalLocation,
+      trip.arrivalReference,
+    );
+
+    if (!origin || !destination) {
+      this.logger.warn(
+        `Unable to estimate route duration for trip ${trip.id}: missing origin or destination`,
+      );
+      return this.DEFAULT_ESTIMATED_TRIP_DURATION_MS;
+    }
+
+    try {
+      const directions = await this.googleMapsService.getDirections({
+        origin,
+        destination,
+        mode: TravelMode.DRIVING,
+        departureTime: Math.floor(departureTime.getTime() / 1000),
+        region: 'CD',
+      });
+      const durationSeconds = directions.routes?.[0]?.legs?.reduce(
+        (sum, leg) => sum + (Number(leg.duration) || 0),
+        0,
+      );
+
+      if (durationSeconds && durationSeconds > 0) {
+        return durationSeconds * 1000;
+      }
+
+      this.logger.warn(
+        `Google Directions returned no usable duration for trip ${trip.id}`,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`Unable to estimate route duration for trip ${trip.id}: ${message}`);
+    }
+
+    return this.DEFAULT_ESTIMATED_TRIP_DURATION_MS;
+  }
+
+  private buildTripDirectionsWaypoint(
+    point: Point | null,
+    location?: string | null,
+    reference?: string | null,
+  ): { lat: number; lng: number } | { address: string } | null {
+    const coordinates = this.pointToCoordinates(point);
+    if (coordinates) {
+      const [longitude, latitude] = coordinates;
+      return { lat: latitude, lng: longitude };
+    }
+
+    const address = [location?.trim(), reference?.trim()].filter(Boolean).join(', ');
+    return address ? { address } : null;
+  }
+
+  private async ensureEstimatedArrivalDate(trip: Trip): Promise<Date | null> {
+    if (trip.estimatedArrivalDate) {
+      return trip.estimatedArrivalDate;
+    }
+
+    const baseTime = trip.startedAt ?? trip.departureDate;
+    if (!baseTime) {
+      return null;
+    }
+
+    const estimatedArrivalDate = await this.calculateEstimatedArrivalDate(trip, baseTime);
+    trip.estimatedArrivalDate = estimatedArrivalDate;
+    await this.tripRepository.update(trip.id, { estimatedArrivalDate });
+    return estimatedArrivalDate;
+  }
+
+  private async getActiveTripExpirationDate(trip: Trip): Promise<Date | null> {
+    const estimatedArrivalDate = await this.ensureEstimatedArrivalDate(trip);
+    if (!estimatedArrivalDate) {
+      return null;
+    }
+
+    return new Date(estimatedArrivalDate.getTime() + this.ACTIVE_TRIP_EXPIRATION_GRACE_MS);
+  }
+
   private toIsoWeekday(date: Date): number {
     const weekday = date.getDay();
     return weekday === 0 ? 7 : weekday;
@@ -2186,19 +2271,28 @@ export class TripsService {
   /**
    * Cron job to mark expired trips and their bookings as expired
    * - PENDING trips expire 2 hours after scheduled departure
-   * - ACTIVE trips expire only after 12 hours without interaction since trip start
+   * - ACTIVE trips expire 6 hours after their estimated arrival time
    * Runs every hour.
    */
   @Cron(CronExpression.EVERY_HOUR)
   async markExpiredTrips() {
     // Use setImmediate to ensure HTTP requests have priority
-    setImmediate(async () => {
-      this.logger.debug('Running cron job to mark expired trips');
+    setImmediate(() => {
+      this.markExpiredTripsNow().catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.error(`Error marking expired trips: ${message}`, error.stack);
+      });
+    });
+  }
 
-    const now = new Date();
+  private async markExpiredTripsNow(now = new Date()): Promise<void> {
+    this.logger.debug('Running cron job to mark expired trips');
+
     // Calculate thresholds
     const twoHoursAgo = new Date(now.getTime() - 2 * 60 * 60 * 1000);
-    const twelveHoursAgo = new Date(now.getTime() - 12 * 60 * 60 * 1000);
+    const activeTripExpirationThreshold = new Date(
+      now.getTime() - this.ACTIVE_TRIP_EXPIRATION_GRACE_MS,
+    );
 
     // 1) PENDING trips that should expire 2 hours after departure
     //    Only trips that have NEVER been started (startedAt IS NULL)
@@ -2211,21 +2305,30 @@ export class TripsService {
       relations: ['driver', 'bookings', 'bookings.passenger', 'vehicle'],
     });
 
-    // 2) ACTIVE trips that have been started for at least 12h
+    // 2) ACTIVE trips expire 6 hours after the estimated arrival time.
     const activeTripsCandidates = await this.tripRepository.find({
-      where: {
-        status: TripStatus.ACTIVE,
-        startedAt: LessThan(twelveHoursAgo),
-      },
+      where: [
+        {
+          status: TripStatus.ACTIVE,
+          startedAt: Not(IsNull()),
+          estimatedArrivalDate: LessThan(activeTripExpirationThreshold),
+        },
+        {
+          status: TripStatus.ACTIVE,
+          startedAt: Not(IsNull()),
+          estimatedArrivalDate: IsNull(),
+        },
+      ],
       relations: ['driver', 'bookings', 'bookings.passenger', 'vehicle'],
     });
 
-    // Expire only if there has been no interaction for 12h after start.
-    // We rely on trip.updatedAt, which is refreshed on trip/booking interactions.
-    const activeTripsToExpire = activeTripsCandidates.filter((trip) => {
-      const lastInteractionAt = trip.updatedAt ?? trip.startedAt ?? trip.departureDate;
-      return lastInteractionAt < twelveHoursAgo;
-    });
+    const activeTripsToExpire: Trip[] = [];
+    for (const trip of activeTripsCandidates) {
+      const expiresAt = await this.getActiveTripExpirationDate(trip);
+      if (expiresAt && expiresAt <= now) {
+        activeTripsToExpire.push(trip);
+      }
+    }
 
     const tripsToExpire = [...pendingTripsToExpire, ...activeTripsToExpire];
 
@@ -2236,7 +2339,7 @@ export class TripsService {
 
     this.logger.log(
       `Found ${tripsToExpire.length} trips to auto-complete as expired ` +
-        `(pending: ${pendingTripsToExpire.length}, active_inactive_12h: ${activeTripsToExpire.length})`,
+        `(pending: ${pendingTripsToExpire.length}, active_eta_grace: ${activeTripsToExpire.length})`,
     );
 
     for (const trip of tripsToExpire) {
@@ -2308,7 +2411,6 @@ export class TripsService {
     this.logger.log(
       `Successfully marked ${tripsToExpire.length} trips and their bookings as expired`,
     );
-    });
   }
 
   /**

@@ -21,7 +21,7 @@ export class VehiclesController {
 
   @Post()
   @Auth()
-  @SensitiveThrottle(15, 60000)
+  @SensitiveThrottle(20, 6000)
   @ApiOperation({ summary: 'Create a new vehicle' })
   async create(@Request() req, @Body() createVehicleDto: CreateVehicleDto) {
     return this.vehiclesService.create(req.user.userId, createVehicleDto);
@@ -29,7 +29,7 @@ export class VehiclesController {
 
   @Get()
   @Auth()
-  @SensitiveThrottle(30, 60000)
+  @SensitiveThrottle(30, 6000)
   @ApiOperation({ summary: 'Get all vehicles of the current user' })
   async findAll(@Request() req) {
     return this.vehiclesService.findAllByOwner(req.user.userId);
@@ -37,7 +37,7 @@ export class VehiclesController {
 
   @Get(':id')
   @Auth()
-  @SensitiveThrottle(30, 60000)
+  @SensitiveThrottle(30, 6000)
   @ApiOperation({ summary: 'Get a vehicle by ID' })
   async findOne(@Request() req, @Param('id') id: string) {
     return this.vehiclesService.findOne(id, req.user.userId);
@@ -45,7 +45,7 @@ export class VehiclesController {
 
   @Put(':id')
   @Auth()
-  @SensitiveThrottle(10, 60000)
+  @SensitiveThrottle(10, 6000)
   @ApiOperation({ summary: 'Update a vehicle' })
   async update(
     @Request() req,
@@ -57,7 +57,7 @@ export class VehiclesController {
 
   @Delete(':id')
   @Auth()
-  @SensitiveThrottle(10, 60000)
+  @SensitiveThrottle(10, 6000)
   @ApiOperation({ summary: 'Deactivate a vehicle (can be used even if linked to trips)' })
   async remove(@Request() req, @Param('id') id: string) {
     await this.vehiclesService.remove(id, req.user.userId);

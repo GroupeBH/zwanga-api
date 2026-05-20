@@ -108,6 +108,9 @@ export class Trip {
   startedAt: Date | null;
 
   @Column({ type: 'timestamp', nullable: true })
+  estimatedArrivalDate: Date | null;
+
+  @Column({ type: 'timestamp', nullable: true })
   completedAt: Date;
 
   @Column({
