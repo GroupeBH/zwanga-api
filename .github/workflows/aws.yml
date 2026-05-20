@@ -245,8 +245,9 @@ jobs:
           set -euo pipefail
           mkdir -p "$GITHUB_WORKSPACE/.tmp" "$GITHUB_WORKSPACE/infra/ansible/env"
 
-          printf '%s\n' "$EC2_SSH_PRIVATE_KEY" > "$GITHUB_WORKSPACE/.tmp/zwanga.pem"
-          chmod 600 "$GITHUB_WORKSPACE/.tmp/zwanga.pem"
+          printf '%s\n' "$EC2_SSH_PRIVATE_KEY" | tr -d '\r' > "$GITHUB_WORKSPACE/.tmp/deploy-ssh-key.pem"
+          chmod 600 "$GITHUB_WORKSPACE/.tmp/deploy-ssh-key.pem"
+          ssh-keygen -y -f "$GITHUB_WORKSPACE/.tmp/deploy-ssh-key.pem" > "$GITHUB_WORKSPACE/.tmp/deploy-ssh-key.pub"
 
           printf '%s\n' "$ANSIBLE_PRODUCTION_ENV" > "$GITHUB_WORKSPACE/infra/ansible/env/production.env"
           chmod 600 "$GITHUB_WORKSPACE/infra/ansible/env/production.env"
@@ -296,7 +297,8 @@ jobs:
           chmod +x ./infra/deploy.sh
 
           args=(
-            --private-key "$GITHUB_WORKSPACE/.tmp/zwanga.pem"
+            --private-key "$GITHUB_WORKSPACE/.tmp/deploy-ssh-key.pem"
+            --ssh-public-key-file "$GITHUB_WORKSPACE/.tmp/deploy-ssh-key.pub"
             --app-env-file "$GITHUB_WORKSPACE/infra/ansible/env/production.env"
             --app-image-repository "$APP_IMAGE_REPOSITORY"
             --app-image-tag "$APP_IMAGE_TAG"

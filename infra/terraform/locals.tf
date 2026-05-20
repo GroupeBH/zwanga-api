@@ -24,6 +24,7 @@ locals {
   input_existing_key_name = var.existing_key_name != null && var.existing_key_name != "" ? var.existing_key_name : null
   resolved_ssh_public_key = var.ssh_public_key != null && var.ssh_public_key != "" ? var.ssh_public_key : try(file(pathexpand(coalesce(var.ssh_public_key_path, ""))), null)
   create_key_pair         = local.resolved_ssh_public_key != null && local.input_key_name == null && local.input_existing_key_name == null
+  managed_key_name        = local.resolved_ssh_public_key != null ? "${local.name_prefix}-deploy-${substr(sha1(nonsensitive(local.resolved_ssh_public_key)), 0, 8)}" : null
   selected_key_name       = try(coalesce(local.input_key_name, local.input_existing_key_name, aws_key_pair.deploy[0].key_name), null)
   selected_ami_id         = var.ami_id != "" ? var.ami_id : data.aws_ami.ubuntu.id
   public_ip               = var.allocate_elastic_ip ? aws_eip.primary[0].public_ip : aws_instance.primary.public_ip

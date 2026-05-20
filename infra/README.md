@@ -58,7 +58,7 @@ Mode autonome:
 Secrets requis:
 
 - `AWS_ROLE_TO_ASSUME`: role IAM assume par GitHub Actions via OIDC. L'ancien nom `AWS_ROLE_ARN` reste accepte.
-- `EC2_SSH_PRIVATE_KEY`: cle privee SSH correspondant au key pair EC2.
+- `EC2_SSH_PRIVATE_KEY`: cle privee SSH utilisee par GitHub Actions. Le workflow derive la cle publique et Terraform cree le key pair EC2 correspondant.
 - `ANSIBLE_PRODUCTION_ENV`: contenu complet du fichier `.env` de production.
 - `DOCKERHUB_TOKEN`: token Docker Hub.
 - `INFRA_REPO_TOKEN`: token GitHub pour declencher `zwanga-infra`, requis seulement si `INFRA_REPOSITORY` est defini.
@@ -92,7 +92,7 @@ cp infra/terraform/terraform.tfvars.example infra/terraform/terraform.tfvars
 
 Valeurs importantes dans `terraform.tfvars`:
 
-- `key_name`: key pair EC2 existant.
+- `key_name`: optionnel en local seulement, si vous voulez reutiliser un key pair EC2 existant. En CI, ne le mettez pas dans `TFVARS_CONTENT`; le workflow genere la cle publique depuis `EC2_SSH_PRIVATE_KEY`.
 - `admin_cidr`: IP admin en `/32`.
 - `secondary_instance_enabled`: active le second noeud.
 - `domain_name` et `caddy_email`: domaine TLS Caddy.
