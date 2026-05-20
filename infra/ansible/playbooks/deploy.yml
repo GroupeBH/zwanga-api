@@ -209,10 +209,28 @@
       no_log: true
       when: dockerhub_username | length > 0
 
-    - name: Pull application image
+    - name: Pull Docker images
       ansible.builtin.command: docker compose pull app
       args:
         chdir: "{{ deploy_path }}"
+
+    - name: Pull Caddy image
+      ansible.builtin.command: docker image pull caddy:2.8-alpine
+
+    - name: Validate rendered Caddy configuration before starting containers
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --rm
+          - --volume
+          - "{{ deploy_path }}/Caddyfile:/etc/caddy/Caddyfile:ro"
+          - caddy:2.8-alpine
+          - caddy
+          - validate
+          - --config
+          - /etc/caddy/Caddyfile
+      changed_when: false
 
     - name: Start containers
       ansible.builtin.command: docker compose up -d --remove-orphans
@@ -261,21 +279,47 @@
           ansible.builtin.fail:
             msg: "The Zwanga API container never reached a ready state."
 
-    - name: Validate Caddy configuration
-      ansible.builtin.command:
-        argv:
-          - docker
-          - compose
-          - exec
-          - -T
-          - caddy
-          - caddy
-          - validate
-          - --config
-          - /etc/caddy/Caddyfile
-      args:
-        chdir: "{{ deploy_path }}"
-      changed_when: false
+    - name: Wait for Caddy container to stay running
+      block:
+        - name: Poll Caddy container state
+          ansible.builtin.command:
+            argv:
+              - docker
+              - inspect
+              - --format
+              - "{% raw %}{{.State.Status}}{% endraw %}"
+              - caddy
+          register: caddy_container_state_result
+          changed_when: false
+          retries: 20
+          delay: 5
+          until: caddy_container_state_result.stdout == "running"
+      rescue:
+        - name: Capture docker compose services after failed Caddy start
+          ansible.builtin.command: docker compose ps
+          args:
+            chdir: "{{ deploy_path }}"
+          register: compose_ps_result
+          changed_when: false
+
+        - name: Print docker compose services after failed Caddy start
+          ansible.builtin.debug:
+            var: compose_ps_result.stdout_lines
+
+        - name: Capture Caddy logs after failed start
+          ansible.builtin.command: docker compose logs caddy --tail=200
+          args:
+            chdir: "{{ deploy_path }}"
+          register: caddy_logs_result
+          changed_when: false
+
+        - name: Print Caddy logs after failed start
+          ansible.builtin.debug:
+            var: caddy_logs_result.stdout_lines
+
+        - name: Fail when Caddy never becomes ready
+          ansible.builtin.fail:
+            msg: "The Caddy container never reached a stable running state."
 
     - name: Show docker compose services
       ansible.builtin.command: docker compose ps
