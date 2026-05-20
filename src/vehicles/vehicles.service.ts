@@ -1,6 +1,12 @@
-import { Injectable, NotFoundException, Logger, BadRequestException, InternalServerErrorException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  Logger,
+  BadRequestException,
+  InternalServerErrorException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, In, QueryFailedError } from 'typeorm';
+import { Repository, In } from 'typeorm';
 import { Vehicle } from './entities/vehicle.entity';
 import { User } from '../users/entities/user.entity';
 import { Trip, TripStatus } from '../trips/entities/trip.entity';
@@ -24,125 +30,123 @@ export class VehiclesService {
   ) {}
 
   async create(ownerId: string, vehicleData: Partial<Vehicle>): Promise<Vehicle> {
-    this.logger.log(`Creating vehicle for owner: ${ownerId} (${vehicleData.brand} ${vehicleData.model})`);
-    
+    this.logger.log(
+      `Creating vehicle for owner: ${ownerId} (${vehicleData.brand} ${vehicleData.model})`,
+    );
+
+    const sanitizedVehicleData = this.sanitizeVehicleData(vehicleData);
+    const normalizedLicensePlate = sanitizedVehicleData.licensePlate;
+
     try {
-      // Validate required fields
-      if (!vehicleData.brand || !vehicleData.model || !vehicleData.color || !vehicleData.licensePlate) {
+      if (
+        !sanitizedVehicleData.brand ||
+        !sanitizedVehicleData.model ||
+        !sanitizedVehicleData.color ||
+        !normalizedLicensePlate
+      ) {
         const missingFields: string[] = [];
-        if (!vehicleData.brand) missingFields.push('brand');
-        if (!vehicleData.model) missingFields.push('model');
-        if (!vehicleData.color) missingFields.push('color');
-        if (!vehicleData.licensePlate) missingFields.push('licensePlate');
-        
-        this.logger.warn(`Vehicle creation failed: Missing required fields: ${missingFields.join(', ')}`);
+        if (!sanitizedVehicleData.brand) missingFields.push('brand');
+        if (!sanitizedVehicleData.model) missingFields.push('model');
+        if (!sanitizedVehicleData.color) missingFields.push('color');
+        if (!normalizedLicensePlate) missingFields.push('licensePlate');
+
+        this.logger.warn(
+          `Vehicle creation failed: Missing required fields: ${missingFields.join(', ')}`,
+        );
         throw new BadRequestException(
-          `Champs requis manquants : ${missingFields.join(', ')}`
+          `Champs requis manquants : ${missingFields.join(', ')}`,
         );
       }
 
-      // Check if owner exists
       const owner = await this.userRepository.findOne({ where: { id: ownerId } });
       if (!owner) {
         this.logger.warn(`Vehicle creation failed: Owner ${ownerId} not found`);
-        throw new NotFoundException('Propriétaire non trouvé');
+        throw new NotFoundException('Proprietaire non trouve');
       }
 
-      // Check if license plate already exists (before attempting save)
-      const existingVehicle = await this.vehicleRepository.findOne({
-        where: { licensePlate: vehicleData.licensePlate },
-      });
+      const existingVehicle = await this.findByNormalizedLicensePlate(
+        normalizedLicensePlate,
+      );
 
       if (existingVehicle) {
+        if (existingVehicle.ownerId === ownerId) {
+          return this.reactivateOrUpdateExistingVehicle(
+            existingVehicle,
+            ownerId,
+            sanitizedVehicleData,
+            normalizedLicensePlate,
+          );
+        }
+
         this.logger.warn(
-          `Vehicle creation failed: License plate ${vehicleData.licensePlate} already exists (vehicle ID: ${existingVehicle.id})`
+          `Vehicle creation failed: License plate ${normalizedLicensePlate} already exists (vehicle ID: ${existingVehicle.id}, owner: ${existingVehicle.ownerId})`,
         );
         throw new BadRequestException(
-          `Cette plaque d'immatriculation (${vehicleData.licensePlate}) est déjà utilisée par un autre véhicule`
+          `Cette plaque d'immatriculation (${normalizedLicensePlate}) est deja utilisee par un autre vehicule`,
         );
       }
 
-      // Create vehicle entity
       const vehicle = this.vehicleRepository.create({
-        ...vehicleData,
+        ...sanitizedVehicleData,
         ownerId,
         isActive: vehicleData.isActive !== undefined ? vehicleData.isActive : true,
       });
 
-      // Save vehicle to database
       const savedVehicle = await this.vehicleRepository.save(vehicle);
-      
-      // Invalidate cache (non-blocking, don't fail if cache fails)
-      try {
-        await this.cacheService.del(CacheService.getVehiclesByOwnerKey(ownerId));
-      } catch (cacheError) {
-        this.logger.warn(`Failed to invalidate cache for owner ${ownerId}: ${cacheError.message}`);
-        // Don't throw, cache invalidation is not critical
-      }
+      await this.invalidateVehicleCaches(ownerId);
 
-      this.logger.log(`Vehicle created successfully: ${savedVehicle.id} for owner ${ownerId}`);
+      this.logger.log(
+        `Vehicle created successfully: ${savedVehicle.id} for owner ${ownerId}`,
+      );
       return savedVehicle;
-
     } catch (error) {
-      // Re-throw known exceptions (BadRequestException, NotFoundException)
       if (error instanceof BadRequestException || error instanceof NotFoundException) {
         throw error;
       }
 
-      // Handle database constraint violations (unique constraint on licensePlate)
-      if (error instanceof QueryFailedError) {
-        const errorMessage = error.message || '';
-        
-        // Check for unique constraint violation (PostgreSQL error code 23505)
-        if (errorMessage.includes('23505') || errorMessage.includes('unique constraint') || errorMessage.includes('duplicate key')) {
-          this.logger.error(
-            `Vehicle creation failed: Unique constraint violation for license plate ${vehicleData.licensePlate}`,
-            error.stack
-          );
-          throw new BadRequestException(
-            `Cette plaque d'immatriculation (${vehicleData.licensePlate}) est déjà utilisée`
+      if (this.isUniqueConstraintError(error)) {
+        const existingVehicle = await this.findByNormalizedLicensePlate(
+          normalizedLicensePlate ?? vehicleData.licensePlate ?? '',
+        );
+        if (existingVehicle?.ownerId === ownerId) {
+          return this.reactivateOrUpdateExistingVehicle(
+            existingVehicle,
+            ownerId,
+            sanitizedVehicleData,
+            existingVehicle.licensePlate,
           );
         }
 
-        // Handle other database errors
         this.logger.error(
-          `Vehicle creation failed: Database error for owner ${ownerId}`,
-          error.stack
+          `Vehicle creation failed: Unique constraint violation for license plate ${normalizedLicensePlate}`,
+          error instanceof Error ? error.stack : undefined,
         );
-        throw new InternalServerErrorException(
-          'Erreur lors de la sauvegarde du véhicule dans la base de données'
+        throw new BadRequestException(
+          `Cette plaque d'immatriculation (${normalizedLicensePlate}) est deja utilisee par un autre vehicule`,
         );
       }
 
-      // Handle unexpected errors
       this.logger.error(
         `Vehicle creation failed: Unexpected error for owner ${ownerId}`,
-        error.stack
+        error instanceof Error ? error.stack : undefined,
       );
       throw new InternalServerErrorException(
-        'Une erreur inattendue s\'est produite lors de la création du véhicule'
+        "Une erreur inattendue s'est produite lors de la creation du vehicule",
       );
     }
   }
 
   async findAllByOwner(ownerId: string): Promise<Vehicle[]> {
     this.logger.debug(`Fetching vehicles for owner: ${ownerId}`);
-    
+
     const cacheKey = CacheService.getVehiclesByOwnerKey(ownerId);
     const cached = await this.cacheService.get<Vehicle[]>(cacheKey);
-    
+
     if (cached) {
-      this.logger.debug(`Returning ${cached.length} vehicles from cache for owner ${ownerId}`);
-      // Convert S3 keys to presigned URLs even for cached data
-      return await Promise.all(
-        cached.map(async (vehicle) => {
-          const enriched = { ...vehicle };
-          if (enriched.photoUrl) {
-            enriched.photoUrl = await this.fileUploadService.getPresignedUrlIfS3Key(enriched.photoUrl) || enriched.photoUrl;
-          }
-          return enriched;
-        }),
+      this.logger.debug(
+        `Returning ${cached.length} vehicles from cache for owner ${ownerId}`,
       );
+      return Promise.all(cached.map((vehicle) => this.enrichVehiclePhotoUrl(vehicle)));
     }
 
     const vehicles = await this.vehicleRepository.find({
@@ -150,89 +154,88 @@ export class VehiclesService {
       order: { createdAt: 'DESC' },
     });
 
-    // Cache vehicles with S3 keys (not presigned URLs)
     await this.cacheService.set(cacheKey, vehicles, this.CACHE_TTL);
-    
-    // Convert S3 keys to presigned URLs before returning
+
     const enrichedVehicles = await Promise.all(
-      vehicles.map(async (vehicle) => {
-        const enriched = { ...vehicle };
-        if (enriched.photoUrl) {
-          enriched.photoUrl = await this.fileUploadService.getPresignedUrlIfS3Key(enriched.photoUrl) || enriched.photoUrl;
-        }
-        return enriched;
-      }),
+      vehicles.map((vehicle) => this.enrichVehiclePhotoUrl(vehicle)),
     );
 
-    this.logger.debug(`Fetched ${vehicles.length} vehicles from database for owner ${ownerId}`);
+    this.logger.debug(
+      `Fetched ${vehicles.length} vehicles from database for owner ${ownerId}`,
+    );
     return enrichedVehicles;
   }
 
   async findOne(id: string, ownerId: string): Promise<Vehicle> {
     this.logger.debug(`Fetching vehicle ${id} for owner ${ownerId}`);
-    
+
     const cacheKey = CacheService.getVehicleKey(id);
     const cached = await this.cacheService.get<Vehicle>(cacheKey);
-    
+
     if (cached && cached.ownerId === ownerId) {
       this.logger.debug(`Vehicle ${id} returned from cache`);
-      // Convert S3 key to presigned URL even for cached data
-      const enriched = { ...cached };
-      if (enriched.photoUrl) {
-        enriched.photoUrl = await this.fileUploadService.getPresignedUrlIfS3Key(enriched.photoUrl) || enriched.photoUrl;
-      }
-      return enriched;
+      return this.enrichVehiclePhotoUrl(cached);
     }
 
-    const vehicle = await this.vehicleRepository.findOne({
-      where: { id, ownerId },
-    });
+    const vehicle = await this.findOwnedVehicleEntity(id, ownerId);
 
-    if (!vehicle) {
-      this.logger.warn(`Vehicle not found: ${id} for owner ${ownerId}`);
-      throw new NotFoundException('Vehicle not found');
-    }
-
-    // Cache vehicle with S3 key (not presigned URL)
     await this.cacheService.set(cacheKey, vehicle, this.CACHE_TTL);
-    
-    // Convert S3 key to presigned URL before returning
-    const enriched = { ...vehicle };
-    if (enriched.photoUrl) {
-      enriched.photoUrl = await this.fileUploadService.getPresignedUrlIfS3Key(enriched.photoUrl) || enriched.photoUrl;
-    }
-    
+
     this.logger.debug(`Vehicle ${id} fetched from database`);
-    return enriched;
+    return this.enrichVehiclePhotoUrl(vehicle);
   }
 
-  async update(id: string, ownerId: string, updateData: Partial<Vehicle>): Promise<Vehicle> {
+  async update(
+    id: string,
+    ownerId: string,
+    updateData: Partial<Vehicle>,
+  ): Promise<Vehicle> {
     this.logger.log(`Updating vehicle ${id} for owner ${ownerId}`);
-    
-    const vehicle = await this.findOne(id, ownerId);
-    Object.assign(vehicle, updateData);
-    const updatedVehicle = await this.vehicleRepository.save(vehicle);
-    
-    // Invalidate cache
-    await this.cacheService.del(CacheService.getVehicleKey(id));
-    await this.cacheService.del(CacheService.getVehiclesByOwnerKey(ownerId));
 
-    // Convert S3 key to presigned URL before returning
-    const enriched = { ...updatedVehicle };
-    if (enriched.photoUrl) {
-      enriched.photoUrl = await this.fileUploadService.getPresignedUrlIfS3Key(enriched.photoUrl) || enriched.photoUrl;
+    const vehicle = await this.findOwnedVehicleEntity(id, ownerId);
+    const sanitizedUpdateData = this.sanitizeVehicleData(updateData);
+
+    if (updateData.licensePlate !== undefined) {
+      const normalizedLicensePlate = sanitizedUpdateData.licensePlate;
+      if (!normalizedLicensePlate) {
+        throw new BadRequestException("La plaque d'immatriculation est requise");
+      }
+
+      const existingVehicle = await this.findByNormalizedLicensePlate(
+        normalizedLicensePlate,
+      );
+      if (existingVehicle && existingVehicle.id !== id) {
+        throw new BadRequestException(
+          `Cette plaque d'immatriculation (${normalizedLicensePlate}) est deja utilisee par un autre vehicule`,
+        );
+      }
     }
 
+    Object.assign(vehicle, sanitizedUpdateData);
+
+    let updatedVehicle: Vehicle;
+    try {
+      updatedVehicle = await this.vehicleRepository.save(vehicle);
+    } catch (error) {
+      if (this.isUniqueConstraintError(error)) {
+        throw new BadRequestException(
+          `Cette plaque d'immatriculation (${vehicle.licensePlate}) est deja utilisee par un autre vehicule`,
+        );
+      }
+      throw error;
+    }
+
+    await this.invalidateVehicleCaches(ownerId, id);
+
     this.logger.log(`Vehicle ${id} updated successfully`);
-    return enriched;
+    return this.enrichVehiclePhotoUrl(updatedVehicle);
   }
 
   async remove(id: string, ownerId: string): Promise<void> {
     this.logger.log(`Deactivating vehicle ${id} for owner ${ownerId}`);
-    
-    const vehicle = await this.findOne(id, ownerId);
-    
-    // Check if vehicle is associated with active or pending trips
+
+    const vehicle = await this.findOwnedVehicleEntity(id, ownerId);
+
     const activeTrips = await this.tripRepository.find({
       where: {
         vehicleId: id,
@@ -245,21 +248,141 @@ export class VehiclesService {
         `Vehicle deactivation failed: Vehicle ${id} is associated with ${activeTrips.length} active or pending trip(s)`,
       );
       throw new BadRequestException(
-        `Impossible de désactiver ce véhicule. Il est associé à ${activeTrips.length} trajet(s) en cours ou en attente.`,
+        `Impossible de desactiver ce vehicule. Il est associe a ${activeTrips.length} trajet(s) en cours ou en attente.`,
       );
     }
-    
-    // Instead of deleting, deactivate the vehicle
-    // This allows the vehicle to remain linked to existing trips (completed, cancelled, expired)
-    // but prevents it from being used in new trips
+
     vehicle.isActive = false;
     await this.vehicleRepository.save(vehicle);
-    
-    // Invalidate cache
-    await this.cacheService.del(CacheService.getVehicleKey(id));
-    await this.cacheService.del(CacheService.getVehiclesByOwnerKey(ownerId));
+
+    await this.invalidateVehicleCaches(ownerId, id);
 
     this.logger.log(`Vehicle ${id} deactivated successfully`);
   }
-}
 
+  private async findOwnedVehicleEntity(id: string, ownerId: string): Promise<Vehicle> {
+    const vehicle = await this.vehicleRepository.findOne({
+      where: { id, ownerId },
+    });
+
+    if (!vehicle) {
+      this.logger.warn(`Vehicle not found: ${id} for owner ${ownerId}`);
+      throw new NotFoundException('Vehicle not found');
+    }
+
+    return vehicle;
+  }
+
+  private async enrichVehiclePhotoUrl(vehicle: Vehicle): Promise<Vehicle> {
+    const enriched = { ...vehicle };
+    if (enriched.photoUrl) {
+      enriched.photoUrl =
+        (await this.fileUploadService.getPresignedUrlIfS3Key(enriched.photoUrl)) ||
+        enriched.photoUrl;
+    }
+    return enriched as Vehicle;
+  }
+
+  private sanitizeVehicleData(vehicleData: Partial<Vehicle>): Partial<Vehicle> {
+    const sanitized: Partial<Vehicle> = { ...vehicleData };
+
+    if (vehicleData.brand !== undefined) {
+      sanitized.brand = vehicleData.brand.trim();
+    }
+    if (vehicleData.model !== undefined) {
+      sanitized.model = vehicleData.model.trim();
+    }
+    if (vehicleData.color !== undefined) {
+      sanitized.color = vehicleData.color.trim();
+    }
+    if (vehicleData.licensePlate !== undefined) {
+      sanitized.licensePlate = this.normalizeLicensePlate(vehicleData.licensePlate);
+    }
+    if (vehicleData.photoUrl !== undefined) {
+      const photoUrl = vehicleData.photoUrl.trim();
+      sanitized.photoUrl = photoUrl || undefined;
+    }
+
+    return sanitized;
+  }
+
+  private normalizeLicensePlate(licensePlate?: string | null): string {
+    return (licensePlate ?? '').trim().toUpperCase().replace(/[\s-]+/g, '');
+  }
+
+  private async findByNormalizedLicensePlate(
+    licensePlate: string,
+  ): Promise<Vehicle | null> {
+    const normalizedLicensePlate = this.normalizeLicensePlate(licensePlate);
+    if (!normalizedLicensePlate) {
+      return null;
+    }
+
+    return this.vehicleRepository
+      .createQueryBuilder('vehicle')
+      .where(
+        "UPPER(REPLACE(REPLACE(vehicle.\"licensePlate\", ' ', ''), '-', '')) = :licensePlate",
+        { licensePlate: normalizedLicensePlate },
+      )
+      .getOne();
+  }
+
+  private async reactivateOrUpdateExistingVehicle(
+    vehicle: Vehicle,
+    ownerId: string,
+    vehicleData: Partial<Vehicle>,
+    normalizedLicensePlate: string,
+  ): Promise<Vehicle> {
+    this.logger.log(
+      `Vehicle with license plate ${normalizedLicensePlate} already belongs to owner ${ownerId}; reactivating/updating vehicle ${vehicle.id}`,
+    );
+
+    vehicle.brand = vehicleData.brand ?? vehicle.brand;
+    vehicle.model = vehicleData.model ?? vehicle.model;
+    vehicle.color = vehicleData.color ?? vehicle.color;
+    vehicle.licensePlate = normalizedLicensePlate;
+    vehicle.photoUrl = vehicleData.photoUrl ?? vehicle.photoUrl;
+    vehicle.isActive = true;
+
+    const savedVehicle = await this.vehicleRepository.save(vehicle);
+    await this.invalidateVehicleCaches(ownerId, vehicle.id);
+    return savedVehicle;
+  }
+
+  private async invalidateVehicleCaches(
+    ownerId: string,
+    vehicleId?: string,
+  ): Promise<void> {
+    try {
+      if (vehicleId) {
+        await this.cacheService.del(CacheService.getVehicleKey(vehicleId));
+      }
+      await this.cacheService.del(CacheService.getVehiclesByOwnerKey(ownerId));
+    } catch (cacheError) {
+      const message =
+        cacheError instanceof Error ? cacheError.message : String(cacheError);
+      this.logger.warn(
+        `Failed to invalidate vehicle cache for owner ${ownerId}: ${message}`,
+      );
+    }
+  }
+
+  private isUniqueConstraintError(error: unknown): boolean {
+    const queryError = error as {
+      code?: string;
+      message?: string;
+      driverError?: { code?: string; message?: string };
+    };
+    const code = queryError?.code ?? queryError?.driverError?.code;
+    const message = `${queryError?.message ?? ''} ${
+      queryError?.driverError?.message ?? ''
+    }`;
+
+    return (
+      code === '23505' ||
+      message.includes('23505') ||
+      message.includes('unique constraint') ||
+      message.includes('duplicate key')
+    );
+  }
+}
