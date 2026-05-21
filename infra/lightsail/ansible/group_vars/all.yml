@@ -15,4 +15,4 @@ caddy_email: ""
 admin_cidrs: []
 
 docker_restart_policy: unless-stopped
-run_db_migrations: true
+run_db_migrations: false

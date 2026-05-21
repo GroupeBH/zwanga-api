@@ -36,7 +36,7 @@ env:
   LIGHTSAIL_KEY_PAIR_NAME: ${{ vars.LIGHTSAIL_KEY_PAIR_NAME || '' }}
   ADMIN_CIDR: ${{ vars.ADMIN_CIDR || '' }}
   ADMIN_SSH_CIDR_BLOCKS: ${{ vars.ADMIN_SSH_CIDR_BLOCKS || '[]' }}
-  RUN_DB_MIGRATIONS: ${{ vars.RUN_DB_MIGRATIONS || 'true' }}
+  RUN_DB_MIGRATIONS: ${{ vars.RUN_DB_MIGRATIONS || 'false' }}
 
 jobs:
   infra-validate:

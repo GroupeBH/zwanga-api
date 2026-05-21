@@ -1,0 +1,100 @@
+---
+- name: Run Zwanga TypeORM migrations from Lightsail
+  hosts: app
+  become: true
+  vars:
+    dockerhub_username: "{{ lookup('env', 'DOCKERHUB_USERNAME') | default('', true) }}"
+    dockerhub_token: "{{ lookup('env', 'DOCKERHUB_TOKEN') | default('', true) }}"
+    migration_env_file_remote: /tmp/zwanga-migration.env
+
+  pre_tasks:
+    - name: Select migration env file
+      ansible.builtin.set_fact:
+        effective_app_env_file: "{{ app_env_file | default(local_env_file, true) }}"
+
+    - name: Validate app image repository input
+      ansible.builtin.assert:
+        that:
+          - app_image_repository is defined
+          - app_image_repository | length > 0
+        fail_msg: "app_image_repository is required, for example gbhsarl/zwanga-backend."
+
+    - name: Validate Docker Hub credentials completeness
+      ansible.builtin.assert:
+        that:
+          - (dockerhub_username | length == 0 and dockerhub_token | length == 0) or (dockerhub_username | length > 0 and dockerhub_token | length > 0)
+        fail_msg: "Set both DOCKERHUB_USERNAME and DOCKERHUB_TOKEN together, or leave both unset."
+
+    - name: Check local production environment file
+      ansible.builtin.stat:
+        path: "{{ effective_app_env_file }}"
+      delegate_to: localhost
+      become: false
+      register: env_file_stat
+
+    - name: Stop when production environment file is missing
+      ansible.builtin.fail:
+        msg: "Create {{ effective_app_env_file }} from env/production.env.example or provide app_env_file before running migrations."
+      when: not env_file_stat.stat.exists
+
+  tasks:
+    - name: Verify Docker is installed on the Lightsail instance
+      ansible.builtin.command: docker version
+      changed_when: false
+
+    - name: Run migrations in one-shot container
+      block:
+        - name: Copy migration env file
+          ansible.builtin.copy:
+            src: "{{ effective_app_env_file }}"
+            dest: "{{ migration_env_file_remote }}"
+            owner: root
+            group: root
+            mode: "0600"
+
+        - name: Log in to Docker Hub when credentials are provided
+          ansible.builtin.command:
+            argv:
+              - docker
+              - login
+              - --username
+              - "{{ dockerhub_username }}"
+              - --password-stdin
+            stdin: "{{ dockerhub_token }}"
+          no_log: true
+          when: dockerhub_username | length > 0
+
+        - name: Pull application image
+          ansible.builtin.command: "docker image pull {{ app_image_repository }}:{{ app_image_tag | default('latest') }}"
+
+        - name: Run TypeORM migrations
+          ansible.builtin.command:
+            argv:
+              - docker
+              - run
+              - --rm
+              - --network
+              - host
+              - --env-file
+              - "{{ migration_env_file_remote }}"
+              - --env
+              - NODE_ENV=production
+              - --env
+              - TYPEORM_SYNCHRONIZE=false
+              - "{{ app_image_repository }}:{{ app_image_tag | default('latest') }}"
+              - npm
+              - run
+              - migration:run:prod
+          register: typeorm_migrations_result
+          changed_when: "'has been executed successfully' in typeorm_migrations_result.stdout"
+
+        - name: Print TypeORM migration output
+          ansible.builtin.debug:
+            var: typeorm_migrations_result.stdout_lines
+          when: typeorm_migrations_result is defined
+
+      always:
+        - name: Remove temporary migration env file
+          ansible.builtin.file:
+            path: "{{ migration_env_file_remote }}"
+            state: absent
