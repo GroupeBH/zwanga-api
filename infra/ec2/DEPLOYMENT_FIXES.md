@@ -66,11 +66,11 @@ Changement applique:
 Fichiers concernes:
 
 - `.github/workflows/aws.yml`
-- `infra/deploy.sh`
-- `infra/terraform/compute.tf`
-- `infra/terraform/locals.tf`
-- `infra/terraform/terraform.tfvars.example`
-- `infra/README.md`
+- `infra/ec2/deploy.sh`
+- `infra/ec2/terraform/compute.tf`
+- `infra/ec2/terraform/locals.tf`
+- `infra/ec2/terraform/terraform.tfvars.example`
+- `infra/ec2/README.md`
 
 Regle actuelle:
 
@@ -119,7 +119,7 @@ Changement applique:
 
 Fichier concerne:
 
-- `infra/ansible/playbooks/deploy.yml`
+- `infra/ec2/ansible/playbooks/deploy.yml`
 
 Verification:
 
@@ -154,7 +154,7 @@ Changement applique:
 
 Fichier concerne:
 
-- `infra/ansible/playbooks/deploy.yml`
+- `infra/ec2/ansible/playbooks/deploy.yml`
 
 Verification rapide sur une instance:
 
@@ -177,27 +177,65 @@ Permissions attendues:
 
 ## 5. Migrations base de donnees
 
-Etat actuel:
-
-- Le workflow AWS deploie l'image Docker et l'infra.
-- Il ne lance pas encore de migration TypeORM automatiquement.
-- `TYPEORM_SYNCHRONIZE=false` reste la norme, y compris en prod.
-
-Probleme evite:
+Probleme:
 
 - TypeORM ne doit pas modifier le schema automatiquement au demarrage de
   l'application, surtout avec deux instances applicatives.
+- Les changements SQL manuels peuvent etre oublies pendant un deploiement.
+- Une contrainte comme `IDX_trips_one_active_per_driver` doit etre appliquee
+  de facon controlee, apres verification des donnees existantes.
 
-Action manuelle requise pour les changements SQL:
+Changement applique:
+
+- Ajout d'un `DataSource` TypeORM CLI compile dans `dist/database/data-source.js`.
+- Ajout des scripts `migration:*` dans `package.json`.
+- Ajout des premieres migrations TypeORM:
+  - backfill de `trips.totalSeats` depuis `trips.availableSeats`;
+  - creation controlee de l'index unique partiel
+    `IDX_trips_one_active_per_driver`.
+- Ansible lance `npm run migration:run:prod` dans un conteneur temporaire de
+  l'image Docker cible.
+- Cette etape s'execute uniquement sur le noeud `primary`, avant le redemarrage
+  des conteneurs applicatifs.
+- `TYPEORM_SYNCHRONIZE=false` reste force dans Docker Compose et dans le
+  conteneur de migration.
+
+Fichiers concernes:
+
+- `src/database/data-source.ts`
+- `src/database/typeorm-options.ts`
+- `src/database/entities.ts`
+- `src/database/migrations/*.ts`
+- `src/app.module.ts`
+- `package.json`
+- `.github/workflows/aws.yml`
+- `infra/ec2/deploy.sh`
+- `infra/ec2/ansible/group_vars/all.yml`
+- `infra/ec2/ansible/playbooks/deploy.yml`
+
+Verification locale:
 
 ```bash
-psql "$DATABASE_URL" -f migrations/prevent-multiple-active-driver-trips.sql
+npm run build
+npm run migration:show
 ```
 
-Evolution recommandee:
+Verification sur EC2:
 
-- Ajouter une etape de migration controlee avant le redemarrage applicatif,
-  avec un job unique ou un conteneur temporaire execute une seule fois.
+```bash
+cd /opt/zwanga
+sudo docker run --rm --network host --env-file .env \
+  --env NODE_ENV=production \
+  --env TYPEORM_SYNCHRONIZE=false \
+  gbhsarl/zwanga:latest npm run migration:show
+```
+
+Option d'urgence:
+
+- Variable GitHub `RUN_DB_MIGRATIONS=false` pour relancer un deploiement sans
+  executer les migrations.
+- A utiliser seulement temporairement, car l'application deployee peut attendre
+  le nouveau schema.
 
 ## 6. Ansible `admin_cidrs` recu comme chaine
 
@@ -229,8 +267,8 @@ Changement applique:
 
 Fichiers concernes:
 
-- `infra/deploy.sh`
-- `infra/ansible/playbooks/deploy.yml`
+- `infra/ec2/deploy.sh`
+- `infra/ec2/ansible/playbooks/deploy.yml`
 
 Verification:
 

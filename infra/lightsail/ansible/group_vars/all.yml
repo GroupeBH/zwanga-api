@@ -14,7 +14,5 @@ domain: ""
 caddy_email: ""
 admin_cidrs: []
 
-cloudwatch_region: eu-central-1
-cloudwatch_instance_name: zwanga-api
-
 docker_restart_policy: unless-stopped
+run_db_migrations: true

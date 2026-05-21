@@ -20,6 +20,7 @@ APP_IMAGE_TAG="${APP_IMAGE_TAG:-}"
 APP_ENV_FILE="${APP_ENV_FILE:-}"
 APP_HEALTHCHECK_PATH="${APP_HEALTHCHECK_PATH:-/api/v1/health}"
 APP_PORT="${APP_PORT:-5200}"
+RUN_DB_MIGRATIONS="${RUN_DB_MIGRATIONS:-true}"
 INSTANCE_TYPE="${INSTANCE_TYPE:-}"
 TF_VARS_FILE="${TF_VARS_FILE:-${TF_DIR}/terraform.tfvars}"
 TF_BACKEND_CONFIG_FILE="${TF_BACKEND_CONFIG_FILE:-${TF_DIR}/backend.hcl}"
@@ -45,7 +46,7 @@ trap cleanup EXIT
 usage() {
   cat <<EOF
 Usage:
-  ./infra/deploy.sh \
+  ./infra/ec2/deploy.sh \
     --private-key <path_to_private_key.pem> \
     [--ssh-public-key <ssh_public_key>] \
     [--ssh-public-key-file <path_to_public_key.pub>] \
@@ -62,6 +63,7 @@ Usage:
     [--app-env-file <path_to_env_file>] \
     [--app-healthcheck-path </api/v1/health>] \
     [--app-port <5200>] \
+    [--run-db-migrations <true|false>] \
     [--tfvars <path_to_terraform.tfvars>] \
     [--tf-backend-config <path_to_backend.hcl>] \
     [--tf-state-bucket <s3_bucket>] \
@@ -140,6 +142,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --app-port)
       APP_PORT="$2"
+      shift 2
+      ;;
+    --run-db-migrations)
+      RUN_DB_MIGRATIONS="$2"
       shift 2
       ;;
     --tfvars)
@@ -240,6 +246,11 @@ fi
 
 if [[ "${TF_BACKEND_USE_LOCKFILE}" != "true" && "${TF_BACKEND_USE_LOCKFILE}" != "false" ]]; then
   echo "TF_BACKEND_USE_LOCKFILE must be true or false: ${TF_BACKEND_USE_LOCKFILE}" >&2
+  exit 1
+fi
+
+if [[ "${RUN_DB_MIGRATIONS}" != "true" && "${RUN_DB_MIGRATIONS}" != "false" ]]; then
+  echo "RUN_DB_MIGRATIONS must be true or false: ${RUN_DB_MIGRATIONS}" >&2
   exit 1
 fi
 
@@ -456,6 +467,7 @@ ANSIBLE_ARGS=(
   --extra-vars "app_port=${APP_PORT}"
   --extra-vars "app_healthcheck_path=${APP_HEALTHCHECK_PATH}"
   --extra-vars "api_health_path=${APP_HEALTHCHECK_PATH}"
+  --extra-vars "run_db_migrations=${RUN_DB_MIGRATIONS}"
   --extra-vars "cloudwatch_region=${AWS_REGION}"
   --extra-vars "cloudwatch_instance_name=${INSTANCE_NAME}"
 )
