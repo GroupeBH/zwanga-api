@@ -1,0 +1,27 @@
+project_name = "zwanga"
+environment  = "prod"
+aws_region   = "eu-central-1"
+
+# Budget cible: 15 USD/mois hors taxes, DNS externe, DB/Redis externes et excedents de trafic.
+# small_3_0 est le choix par defaut pour rester dans cette enveloppe avec une IP publique IPv4.
+bundle_id             = "small_3_0"
+ip_address_type       = "ipv4"
+monthly_budget_usd    = 15
+estimated_monthly_usd = 12
+
+# Laissez key_pair_name vide pour utiliser la cle par defaut Lightsail de la region.
+# En CI, mettez la cle privee par defaut correspondante dans LIGHTSAIL_SSH_PRIVATE_KEY.
+# key_pair_name = "existing-lightsail-key"
+
+# Remplacez par votre IP publique admin en /32.
+admin_cidr = "41.243.252.139/32"
+
+domain_name = "api.zwanga-app.com"
+caddy_email = "dev.gbh.sarl@gmail.com"
+
+app_image_repository = "gbhsarl/zwanga-backend"
+app_image_tag        = "latest"
+
+extra_tags = {
+  Owner = "zwanga"
+}

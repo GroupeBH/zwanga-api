@@ -1,5 +1,5 @@
 ---
-- name: Deploy Zwanga backend and Caddy on EC2 nodes
+- name: Deploy Zwanga backend and Caddy on Lightsail
   hosts: app
   serial: 1
   any_errors_fatal: true
@@ -222,6 +222,38 @@
       ansible.builtin.command: docker compose pull app
       args:
         chdir: "{{ deploy_path }}"
+
+    - name: Run TypeORM migrations from primary node
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --rm
+          - --network
+          - host
+          - --env-file
+          - "{{ deploy_path }}/.env"
+          - --env
+          - NODE_ENV=production
+          - --env
+          - TYPEORM_SYNCHRONIZE=false
+          - "{{ app_image_repository }}:{{ app_image_tag | default('latest') }}"
+          - npm
+          - run
+          - migration:run:prod
+      register: typeorm_migrations_result
+      changed_when: "'has been executed successfully' in typeorm_migrations_result.stdout"
+      when:
+        - run_db_migrations | bool
+        - inventory_hostname == groups['app'][0]
+
+    - name: Print TypeORM migration output
+      ansible.builtin.debug:
+        var: typeorm_migrations_result.stdout_lines
+      when:
+        - run_db_migrations | bool
+        - inventory_hostname == groups['app'][0]
+        - typeorm_migrations_result is defined
 
     - name: Pull Caddy image
       ansible.builtin.command: docker image pull caddy:2.8-alpine
