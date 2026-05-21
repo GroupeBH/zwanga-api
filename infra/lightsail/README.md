@@ -64,7 +64,7 @@ Variables recommandees:
 - `ADMIN_SSH_CIDR_BLOCKS`: liste JSON d'IPs admin autorisees, par exemple `["203.0.113.10/32"]`.
 - `LIGHTSAIL_BUNDLE_ID`: `small_3_0` par defaut.
 - `LIGHTSAIL_KEY_PAIR_NAME`: nom d'une cle Lightsail existante, seulement si vous ne voulez pas la cle par defaut.
-- `RUN_DB_MIGRATIONS`: `true` par defaut.
+- `RUN_DB_MIGRATIONS`: `false` par defaut sur Lightsail. Gardez les migrations dans le workflow dedie.
 
 Le workflow ajoute automatiquement l'IP du runner GitHub aux CIDR SSH pendant le
 deploiement. Ajoutez aussi votre IP admin pour pouvoir vous connecter apres le
@@ -105,3 +105,16 @@ Ou en surchargeant l'image:
 
 Pointez votre domaine vers l'output Terraform `public_ip`. Si `domain_name` est
 configure, Caddy demandera automatiquement un certificat Let's Encrypt.
+
+## Migrations DB
+
+Le deploiement Lightsail ne lance pas les migrations par defaut. Utilisez le
+workflow `.github/workflows/aws-lightsail-migrations.yml` apres le deploiement,
+quand la base managée est joignable et que les variables DB du secret
+`LIGHTSAIL_ANSIBLE_PRODUCTION_ENV` ou `ANSIBLE_PRODUCTION_ENV` sont correctes.
+
+Ce workflow est manuel. Il prend un input `app_image_tag`, ouvre SSH pour l'IP
+du runner GitHub dans les ports Lightsail via Terraform, puis lance
+`npm run migration:run:prod` dans un conteneur one-shot sur l'instance
+Lightsail. La migration part donc de l'IP statique Lightsail, pas directement
+du runner GitHub.
