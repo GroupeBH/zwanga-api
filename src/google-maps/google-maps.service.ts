@@ -14,6 +14,7 @@ import {
   GeocodeDto,
   ReverseGeocodeDto,
   GeocodeResponse,
+  GeocodeAddressComponent,
   PlacesAutocompleteDto,
   PlaceDetailsDto,
   PlacesSearchDto,
@@ -27,6 +28,8 @@ import {
   Avoid,
 } from './dto/google-maps.dto';
 import { KINSHASA_LANDMARKS } from './data/kinshasa-landmarks';
+
+type GeocodePrecisionLevel = 'EXACT' | 'HIGH' | 'MEDIUM' | 'LOW';
 
 @Injectable()
 export class GoogleMapsService {
@@ -62,8 +65,161 @@ export class GoogleMapsService {
     );
   }
 
+  private mapAddressComponents(
+    components: any[] = [],
+  ): GeocodeAddressComponent[] {
+    return components.map((component: any) => ({
+      longName: component.long_name,
+      shortName: component.short_name,
+      types: component.types,
+    }));
+  }
+
+  private findAddressComponent(
+    components: GeocodeAddressComponent[] | undefined,
+    ...types: string[]
+  ): GeocodeAddressComponent | undefined {
+    return components?.find((component) =>
+      types.some((type) => component.types.includes(type)),
+    );
+  }
+
+  private getComponentLongName(
+    components: GeocodeAddressComponent[] | undefined,
+    ...types: string[]
+  ): string | undefined {
+    return this.findAddressComponent(components, ...types)?.longName;
+  }
+
+  private getComponentShortName(
+    components: GeocodeAddressComponent[] | undefined,
+    ...types: string[]
+  ): string | undefined {
+    return this.findAddressComponent(components, ...types)?.shortName;
+  }
+
+  private mapStructuredAddress(
+    components: GeocodeAddressComponent[] | undefined,
+  ): GeocodeResponse['addressDetails'] {
+    const streetNumber = this.getComponentLongName(components, 'street_number');
+    const street = this.getComponentLongName(components, 'route');
+    const fullStreet =
+      [streetNumber, street].filter(Boolean).join(' ') || undefined;
+
+    return {
+      streetNumber,
+      street,
+      fullStreet,
+      neighborhood: this.getComponentLongName(components, 'neighborhood'),
+      sublocality: this.getComponentLongName(components, 'sublocality'),
+      commune:
+        this.getComponentLongName(components, 'sublocality_level_1') ??
+        this.getComponentLongName(components, 'sublocality') ??
+        this.getComponentLongName(components, 'administrative_area_level_3'),
+      city:
+        this.getComponentLongName(components, 'locality') ??
+        this.getComponentLongName(components, 'postal_town'),
+      district: this.getComponentLongName(
+        components,
+        'administrative_area_level_2',
+      ),
+      province: this.getComponentLongName(
+        components,
+        'administrative_area_level_1',
+      ),
+      country: this.getComponentLongName(components, 'country'),
+      countryCode: this.getComponentShortName(components, 'country'),
+      postalCode: this.getComponentLongName(components, 'postal_code'),
+      premise: this.getComponentLongName(components, 'premise'),
+      subpremise: this.getComponentLongName(components, 'subpremise'),
+    };
+  }
+
+  private mapGeocodeBounds(bounds: any): GeocodeResponse['bounds'] {
+    if (!bounds?.northeast || !bounds?.southwest) {
+      return undefined;
+    }
+
+    return {
+      northeast: {
+        lat: bounds.northeast.lat,
+        lng: bounds.northeast.lng,
+      },
+      southwest: {
+        lat: bounds.southwest.lat,
+        lng: bounds.southwest.lng,
+      },
+    };
+  }
+
+  private mapPlusCode(plusCode: any): GeocodeResponse['plusCode'] {
+    if (!plusCode) {
+      return undefined;
+    }
+
+    return {
+      globalCode: plusCode.global_code,
+      compoundCode: plusCode.compound_code,
+    };
+  }
+
+  private hasAnyType(
+    resultTypes: string[] | undefined,
+    expectedTypes: string[],
+  ): boolean {
+    return expectedTypes.some((type) => resultTypes?.includes(type));
+  }
+
+  private getGeocodePrecision(result: any): GeocodeResponse['precision'] {
+    const locationType = result.geometry?.location_type;
+    const resultTypes = result.types ?? [];
+    const partialMatch = result.partial_match ?? false;
+    const isStreetLevel = this.hasAnyType(resultTypes, [
+      'street_address',
+      'route',
+      'intersection',
+      'premise',
+      'subpremise',
+    ]);
+    const isExactAddress =
+      !partialMatch &&
+      locationType === 'ROOFTOP' &&
+      this.hasAnyType(resultTypes, ['street_address', 'premise', 'subpremise']);
+
+    let level: GeocodePrecisionLevel = 'LOW';
+    if (isExactAddress) {
+      level = 'EXACT';
+    } else if (
+      !partialMatch &&
+      ['ROOFTOP', 'RANGE_INTERPOLATED'].includes(locationType)
+    ) {
+      level = 'HIGH';
+    } else if (
+      !partialMatch &&
+      (locationType === 'GEOMETRIC_CENTER' ||
+        isStreetLevel ||
+        this.hasAnyType(resultTypes, [
+          'point_of_interest',
+          'establishment',
+          'plus_code',
+        ]))
+    ) {
+      level = 'MEDIUM';
+    }
+
+    return {
+      level,
+      isExactAddress,
+      isStreetLevel,
+      isApproximate: partialMatch || locationType === 'APPROXIMATE',
+    };
+  }
+
   private mapGeocodeResult(result: any): GeocodeResponse {
     const location = result.geometry.location;
+    const addressComponents = this.mapAddressComponents(
+      result.address_components,
+    );
 
     return {
       formattedAddress: result.formatted_address,
@@ -72,11 +228,13 @@ export class GoogleMapsService {
       placeId: result.place_id,
       locationType: result.geometry?.location_type,
       partialMatch: result.partial_match ?? false,
-      addressComponents: result.address_components?.map((component: any) => ({
-        longName: component.long_name,
-        shortName: component.short_name,
-        types: component.types,
-      })),
+      resultTypes: result.types ?? [],
+      addressComponents,
+      addressDetails: this.mapStructuredAddress(addressComponents),
+      viewport: this.mapGeocodeBounds(result.geometry?.viewport),
+      bounds: this.mapGeocodeBounds(result.geometry?.bounds),
+      plusCode: this.mapPlusCode(result.plus_code),
+      precision: this.getGeocodePrecision(result),
     };
   }
 
@@ -94,12 +252,22 @@ export class GoogleMapsService {
         params.region = dto.region;
       }
 
+      if (dto.language) {
+        params.language = dto.language;
+      }
+
+      if (dto.components) {
+        params.components = dto.components;
+      }
+
       const response = await firstValueFrom(
         this.httpService.get(`${this.baseUrl}/geocode/json`, { params }),
       );
 
       if (response.data.status === 'ZERO_RESULTS') {
-        throw new BadRequestException('Aucun résultat trouvé pour cette adresse');
+        throw new BadRequestException(
+          'Aucun résultat trouvé pour cette adresse',
+        );
       }
 
       if (response.data.status !== 'OK') {
@@ -116,7 +284,7 @@ export class GoogleMapsService {
         throw error;
       }
       this.logger.error(`Geocoding error: ${error.message}`, error.stack);
-      throw new InternalServerErrorException('Échec du géocodage de l\'adresse');
+      throw new InternalServerErrorException("Échec du géocodage de l'adresse");
     }
   }
 
@@ -130,12 +298,30 @@ export class GoogleMapsService {
         key: this.apiKey,
       };
 
+      if (dto.language) {
+        params.language = dto.language;
+      }
+
+      if (dto.region) {
+        params.region = dto.region;
+      }
+
+      if (dto.resultType) {
+        params.result_type = dto.resultType;
+      }
+
+      if (dto.locationType) {
+        params.location_type = dto.locationType;
+      }
+
       const response = await firstValueFrom(
         this.httpService.get(`${this.baseUrl}/geocode/json`, { params }),
       );
 
       if (response.data.status === 'ZERO_RESULTS') {
-        throw new BadRequestException('Aucun résultat trouvé pour ces coordonnées');
+        throw new BadRequestException(
+          'Aucun résultat trouvé pour ces coordonnées',
+        );
       }
 
       if (response.data.status !== 'OK') {
@@ -151,15 +337,22 @@ export class GoogleMapsService {
       if (error instanceof BadRequestException) {
         throw error;
       }
-      this.logger.error(`Reverse geocoding error: ${error.message}`, error.stack);
-      throw new InternalServerErrorException('Échec du géocodage inverse des coordonnées');
+      this.logger.error(
+        `Reverse geocoding error: ${error.message}`,
+        error.stack,
+      );
+      throw new InternalServerErrorException(
+        'Échec du géocodage inverse des coordonnées',
+      );
     }
   }
 
   /**
    * Get place autocomplete predictions
    */
-  async placesAutocomplete(dto: PlacesAutocompleteDto): Promise<PlacePrediction[]> {
+  async placesAutocomplete(
+    dto: PlacesAutocompleteDto,
+  ): Promise<PlacePrediction[]> {
     try {
       const params: Record<string, string> = {
         input: dto.input,
@@ -182,14 +375,19 @@ export class GoogleMapsService {
       }
 
       const response = await firstValueFrom(
-        this.httpService.get(`${this.baseUrl}/place/autocomplete/json`, { params }),
+        this.httpService.get(`${this.baseUrl}/place/autocomplete/json`, {
+          params,
+        }),
       );
 
       if (response.data.status === 'ZERO_RESULTS') {
         return [];
       }
 
-      if (response.data.status !== 'OK' && response.data.status !== 'ZERO_RESULTS') {
+      if (
+        response.data.status !== 'OK' &&
+        response.data.status !== 'ZERO_RESULTS'
+      ) {
         throw new BadRequestException(
           `Places autocomplete failed: ${response.data.status}${response.data.error_message ? ` - ${response.data.error_message}` : ''}`,
         );
@@ -205,8 +403,13 @@ export class GoogleMapsService {
       if (error instanceof BadRequestException) {
         throw error;
       }
-      this.logger.error(`Places autocomplete error: ${error.message}`, error.stack);
-      throw new InternalServerErrorException('Échec de la récupération de l\'autocomplétion des lieux');
+      this.logger.error(
+        `Places autocomplete error: ${error.message}`,
+        error.stack,
+      );
+      throw new InternalServerErrorException(
+        "Échec de la récupération de l'autocomplétion des lieux",
+      );
     }
   }
 
@@ -218,7 +421,8 @@ export class GoogleMapsService {
       const params: Record<string, string> = {
         place_id: dto.placeId,
         key: this.apiKey,
-        fields: 'place_id,formatted_address,geometry,name,international_phone_number,website,rating,types',
+        fields:
+          'place_id,formatted_address,geometry,name,international_phone_number,website,rating,types',
       };
 
       if (dto.language) {
@@ -254,7 +458,9 @@ export class GoogleMapsService {
         throw error;
       }
       this.logger.error(`Place details error: ${error.message}`, error.stack);
-      throw new InternalServerErrorException('Échec de la récupération des détails du lieu');
+      throw new InternalServerErrorException(
+        'Échec de la récupération des détails du lieu',
+      );
     }
   }
 
@@ -280,14 +486,19 @@ export class GoogleMapsService {
       }
 
       const response = await firstValueFrom(
-        this.httpService.get(`${this.baseUrl}/place/textsearch/json`, { params }),
+        this.httpService.get(`${this.baseUrl}/place/textsearch/json`, {
+          params,
+        }),
       );
 
       if (response.data.status === 'ZERO_RESULTS') {
         return [];
       }
 
-      if (response.data.status !== 'OK' && response.data.status !== 'ZERO_RESULTS') {
+      if (
+        response.data.status !== 'OK' &&
+        response.data.status !== 'ZERO_RESULTS'
+      ) {
         throw new BadRequestException(
           `Places search failed: ${response.data.status}${response.data.error_message ? ` - ${response.data.error_message}` : ''}`,
         );
@@ -338,7 +549,10 @@ export class GoogleMapsService {
           landmark.description,
           ...landmark.keywords,
         ]
-          .filter((value): value is string => typeof value === 'string' && value.length > 0)
+          .filter(
+            (value): value is string =>
+              typeof value === 'string' && value.length > 0,
+          )
           .some((value) => value.toLowerCase().includes(normalizedSearch));
 
       const matchesCommune =
@@ -436,7 +650,9 @@ export class GoogleMapsService {
       );
 
       if (response.data.status === 'ZERO_RESULTS') {
-        throw new BadRequestException('Aucun itinéraire trouvé entre le départ et la destination');
+        throw new BadRequestException(
+          'Aucun itinéraire trouvé entre le départ et la destination',
+        );
       }
 
       if (response.data.status !== 'OK') {
@@ -508,7 +724,9 @@ export class GoogleMapsService {
         throw error;
       }
       // this.logger.error(`Directions error: ${error.message}`, error.stack);
-      throw new InternalServerErrorException('Échec de la récupération des directions');
+      throw new InternalServerErrorException(
+        'Échec de la récupération des directions',
+      );
     }
   }
 

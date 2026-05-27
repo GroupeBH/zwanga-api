@@ -19,6 +19,22 @@ export class PaymentsController {
     return this.paymentsService.handleFlexPayCallback(dto);
   }
 
+  @Get('my-transactions')
+  @Auth()
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({
+    summary: 'Get all payment transactions for the current user',
+  })
+  async getMyTransactions(@Request() req) {
+    const transactions = await this.paymentsService.findUserTransactions(
+      req.user.userId,
+    );
+
+    return transactions.map((transaction) =>
+      this.paymentsService.formatPaymentForClient(transaction),
+    );
+  }
+
   @Get(':orderNumber/status')
   @Auth()
   @SensitiveThrottle(20, 60000)
