@@ -71,7 +71,7 @@ export class UsersController {
         cniBack: { type: 'string', format: 'binary' },
         selfie: { type: 'string', format: 'binary' },
       },
-      required: ['cniFront', 'cniBack', 'selfie'],
+      required: ['cniBack', 'selfie'],
     },
   })
   @ApiOperation({ summary: 'Upload KYC documents' })

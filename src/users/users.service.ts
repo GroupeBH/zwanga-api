@@ -261,9 +261,9 @@ export class UsersService {
     const cniBackFile = files?.cniBack?.[0];
     const selfieFile = files?.selfie?.[0];
 
-    if (cniFrontFiles.length === 0 || cniFrontFiles.length > 2) {
+    if (cniFrontFiles.length > 2) {
       throw new BadRequestException(
-        `ÉCHEC : Nombre de photos CNI invalide. Veuillez fournir 1 ou 2 photos du recto de votre carte d'identité (${cniFrontFiles.length} fourni${cniFrontFiles.length > 1 ? 'es' : 'e'}).`
+        `ÉCHEC : Nombre de photos CNI invalide. Vous pouvez fournir au maximum 2 photos du recto de votre carte d'identité (${cniFrontFiles.length} fournies).`
       );
     }
 
@@ -273,21 +273,22 @@ export class UsersService {
       if (!selfieFile) missingFiles.push('selfie (photo selfie)');
 
       throw new BadRequestException(
-        `ÉCHEC : Fichiers manquants. Veuillez fournir tous les documents requis.\n\nFichiers manquants : ${missingFiles.join(', ')}\n\nTous les fichiers suivants sont requis :\n- cniFront : 1 ou 2 photos du recto de votre carte d'identité\n- cniBack : Photo du verso de votre carte d'identité\n- selfie : Photo selfie de vous-même`
+        `ÉCHEC : Fichiers manquants. Veuillez fournir tous les documents requis.\n\nFichiers manquants : ${missingFiles.join(', ')}\n\nTous les fichiers suivants sont requis :\n- cniBack : Photo du verso de votre carte d'identité\n- selfie : Photo selfie de vous-même`
       );
     }
 
     // 4. S3 File Upload (External execution, before the transaction starts)
-    const cniFrontUrls = await Promise.all(
+    const uploadedCniFrontUrls = await Promise.all(
       cniFrontFiles.map(file => this.fileUploadService.saveFile(file, 'kyc'))
     );
+    const cniFrontUrls = uploadedCniFrontUrls.filter((url): url is string => Boolean(url));
     const [cniBackUrl, selfieUrl] = await Promise.all([
       this.fileUploadService.saveFile(cniBackFile, 'kyc'),
       this.fileUploadService.saveFile(selfieFile, 'kyc'),
     ]);
 
     // Keep first CNI front URL for backward compatibility
-    const cniFrontUrl = cniFrontUrls[0];
+    const cniFrontUrl = cniFrontUrls[0] ?? null;
 
     // 5. KYC Validation (with error handling)
     let kycStatus = KycStatus.PENDING;
@@ -306,7 +307,7 @@ export class UsersService {
     });
     this.logger.log(`[KYC Upload] Selfie file: ${selfieFile.originalname} (${selfieFile.size} bytes)`);
 
-    if (kycValidationEnabled) {
+    if (kycValidationEnabled && cniFrontFiles.length > 0) {
       try {
         this.logger.log(`[KYC Upload] Starting AI validation for user: ${userId}`);
         const cniFrontBuffers = cniFrontFiles.map(file => file.buffer);
@@ -399,6 +400,11 @@ export class UsersService {
         this.logger.warn(`[KYC Upload] ⚠️ KYC validation service unavailable - Status set to PENDING for manual review`);
         this.logger.warn(`[KYC Upload] User will be notified that manual review is required`);
       }
+    } else if (kycValidationEnabled) {
+      rejectionReason = `VALIDATION MANUELLE REQUISE : Le recto de la carte d'identité n'a pas été fourni. La validation automatique ne peut pas comparer le document au selfie.`;
+      this.logger.warn(`[KYC Upload] ⚠️ KYC validation skipped because cniFront was not provided`);
+      this.logger.warn(`[KYC Upload] Action: Keeping status as PENDING for manual review`);
+      kycStatus = KycStatus.PENDING;
     } else {
       const kycEnabledConfig = this.configService.get<string>('AWS_REKOGNITION_KYC_ENABLED');
       const accessKeyId = this.configService.get<string>('AWS_ACCESS_KEY_ID');

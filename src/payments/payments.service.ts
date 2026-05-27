@@ -262,6 +262,15 @@ export class PaymentsService {
     return this.checkTransactionAndApply(transaction);
   }
 
+  async findUserTransactions(userId: string): Promise<PaymentTransaction[]> {
+    this.logger.debug(`Fetching payment transactions for userId=${userId}`);
+
+    return this.paymentTransactionRepository.find({
+      where: { userId },
+      order: { createdAt: 'DESC' },
+    });
+  }
+
   isSuccessfulPayment(transaction: PaymentTransaction): boolean {
     return transaction.status === PaymentStatus.SUCCEEDED;
   }

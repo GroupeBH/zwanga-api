@@ -27,11 +27,11 @@ export class KycDocument {
   @JoinColumn({ name: 'userId' })
   user: User;
 
-  @Column({ nullable: true })
-  cniFrontUrl: string;
+  @Column({ type: 'varchar', nullable: true })
+  cniFrontUrl: string | null;
 
   @Column({ type: 'jsonb', nullable: true })
-  cniFrontUrls: string[]; // Array of CNI front photo URLs (1 or 2 photos)
+  cniFrontUrls: string[] | null; // Array of CNI front photo URLs (0, 1, or 2 photos)
 
   @Column({ nullable: true })
   cniBackUrl: string;
