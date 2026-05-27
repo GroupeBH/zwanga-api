@@ -1,0 +1,230 @@
+name: AWS Lightsail DB Migrations
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_image_tag:
+        description: Docker image tag containing the migrations to run
+        required: true
+        default: latest
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: zwanga-aws-lightsail-migrations
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.LIGHTSAIL_AWS_REGION || vars.AWS_REGION || 'eu-central-1' }}
+  TF_STATE_BUCKET: ${{ vars.LIGHTSAIL_TF_STATE_BUCKET || secrets.LIGHTSAIL_TF_STATE_BUCKET || vars.TF_STATE_BUCKET || secrets.TF_STATE_BUCKET }}
+  TF_STATE_KEY: ${{ vars.LIGHTSAIL_TF_STATE_KEY || '' }}
+  TF_STATE_REGION: ${{ vars.LIGHTSAIL_TF_STATE_REGION || vars.TF_STATE_REGION || vars.LIGHTSAIL_AWS_REGION || vars.AWS_REGION || 'eu-central-1' }}
+  TF_BACKEND_USE_LOCKFILE: ${{ vars.TF_BACKEND_USE_LOCKFILE || 'true' }}
+  TF_LOCK_TABLE: ${{ vars.LIGHTSAIL_TF_LOCK_TABLE || vars.TF_LOCK_TABLE || secrets.LIGHTSAIL_TF_STATE_LOCK_TABLE || secrets.TF_STATE_LOCK_TABLE }}
+  APP_IMAGE_REPOSITORY: ${{ vars.APP_IMAGE_REPOSITORY }}
+  DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+  DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+  DOMAIN_NAME: ${{ vars.LIGHTSAIL_DOMAIN_NAME || vars.DOMAIN_NAME || '' }}
+  CADDY_EMAIL: ${{ vars.LIGHTSAIL_CADDY_EMAIL || vars.CADDY_EMAIL || vars.CADDY_ACME_EMAIL || '' }}
+  INSTANCE_NAME: ${{ vars.LIGHTSAIL_INSTANCE_NAME || vars.INSTANCE_NAME || '' }}
+  LIGHTSAIL_BUNDLE_ID: ${{ vars.LIGHTSAIL_BUNDLE_ID || 'small_3_0' }}
+  LIGHTSAIL_KEY_PAIR_NAME: ${{ vars.LIGHTSAIL_KEY_PAIR_NAME || '' }}
+  ADMIN_CIDR: ${{ vars.ADMIN_CIDR || '' }}
+  ADMIN_SSH_CIDR_BLOCKS: ${{ vars.ADMIN_SSH_CIDR_BLOCKS || '[]' }}
+
+jobs:
+  migrate:
+    name: Run TypeORM migrations
+    runs-on: ubuntu-latest
+    env:
+      APP_IMAGE_TAG: ${{ github.event.inputs.app_image_tag }}
+      TFVARS_CONTENT: ${{ secrets.LIGHTSAIL_TFVARS_CONTENT }}
+      TF_BACKEND_CONFIG_CONTENT: ${{ secrets.LIGHTSAIL_TF_BACKEND_CONFIG_CONTENT }}
+      LIGHTSAIL_SSH_PRIVATE_KEY: ${{ secrets.LIGHTSAIL_SSH_PRIVATE_KEY || secrets.EC2_SSH_PRIVATE_KEY }}
+      LIGHTSAIL_SSH_PUBLIC_KEY: ${{ secrets.LIGHTSAIL_SSH_PUBLIC_KEY }}
+      ANSIBLE_PRODUCTION_ENV: ${{ secrets.LIGHTSAIL_ANSIBLE_PRODUCTION_ENV || secrets.ANSIBLE_PRODUCTION_ENV }}
+      AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME || secrets.AWS_ROLE_ARN }}
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Validate migration configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${AWS_ROLE_TO_ASSUME:?Configure AWS_ROLE_TO_ASSUME secret, or legacy AWS_ROLE_ARN}"
+          : "${LIGHTSAIL_SSH_PRIVATE_KEY:?Configure LIGHTSAIL_SSH_PRIVATE_KEY secret, or reuse EC2_SSH_PRIVATE_KEY}"
+          : "${ANSIBLE_PRODUCTION_ENV:?Configure LIGHTSAIL_ANSIBLE_PRODUCTION_ENV or ANSIBLE_PRODUCTION_ENV secret with the production .env content}"
+          : "${APP_IMAGE_REPOSITORY:?Configure APP_IMAGE_REPOSITORY repository variable}"
+          : "${APP_IMAGE_TAG:?Provide the Docker image tag to migrate}"
+
+          if [[ -z "${TF_BACKEND_CONFIG_CONTENT}" && -z "${TF_STATE_BUCKET}" ]]; then
+            echo "Configure either LIGHTSAIL_TF_BACKEND_CONFIG_CONTENT secret or LIGHTSAIL_TF_STATE_BUCKET/TF_STATE_BUCKET variable or secret."
+            exit 1
+          fi
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Ansible
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install ansible
+
+      - name: Write migration files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/.tmp" "$GITHUB_WORKSPACE/infra/lightsail/ansible/env"
+
+          printf '%s\n' "$LIGHTSAIL_SSH_PRIVATE_KEY" | tr -d '\r' > "$GITHUB_WORKSPACE/.tmp/lightsail-ssh-key.pem"
+          chmod 600 "$GITHUB_WORKSPACE/.tmp/lightsail-ssh-key.pem"
+
+          printf '%s\n' "$ANSIBLE_PRODUCTION_ENV" > "$GITHUB_WORKSPACE/infra/lightsail/ansible/env/production.env"
+          chmod 600 "$GITHUB_WORKSPACE/infra/lightsail/ansible/env/production.env"
+
+          if [[ -n "${TF_BACKEND_CONFIG_CONTENT}" ]]; then
+            printf '%s\n' "$TF_BACKEND_CONFIG_CONTENT" > "$GITHUB_WORKSPACE/infra/lightsail/terraform/backend.hcl"
+          fi
+
+          if [[ -n "${TFVARS_CONTENT}" ]]; then
+            printf '%s\n' "$TFVARS_CONTENT" > "$GITHUB_WORKSPACE/infra/lightsail/terraform/terraform.tfvars"
+          fi
+
+      - name: Build SSH allowlist
+        id: ssh_cidrs
+        shell: bash
+        run: |
+          set -euo pipefail
+          runner_ip="$(curl -fsS https://checkip.amazonaws.com | tr -d '\n')"
+
+          RUNNER_CIDR="${runner_ip}/32" python3 - <<'PY'
+          import json
+          import os
+
+          runner = os.environ["RUNNER_CIDR"]
+          configured = os.environ.get("ADMIN_SSH_CIDR_BLOCKS", "[]").strip()
+
+          try:
+              values = json.loads(configured)
+              if isinstance(values, str):
+                  values = [values]
+          except json.JSONDecodeError:
+              values = [part.strip() for part in configured.split(",") if part.strip()]
+
+          cidrs = []
+          for value in [runner, *values]:
+              if value and value not in cidrs:
+                  cidrs.append(value)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"json={json.dumps(cidrs)}\n")
+          PY
+
+      - name: Refresh Lightsail SSH allowlist
+        shell: bash
+        run: |
+          set -euo pipefail
+          tf_dir="$GITHUB_WORKSPACE/infra/lightsail/terraform"
+          tf_backend_config_file="$tf_dir/backend.hcl"
+
+          init_args=(-reconfigure)
+          if [[ -f "${tf_backend_config_file}" ]]; then
+            init_args+=("-backend-config=${tf_backend_config_file}")
+          fi
+          if [[ -n "${TF_STATE_BUCKET}" ]]; then
+            init_args+=("-backend-config=bucket=${TF_STATE_BUCKET}")
+          fi
+          if [[ -n "${TF_STATE_KEY}" ]]; then
+            init_args+=("-backend-config=key=${TF_STATE_KEY}")
+          else
+            init_args+=("-backend-config=key=zwanga/lightsail/${AWS_REGION}/terraform.tfstate")
+          fi
+          if [[ -n "${TF_STATE_REGION}" ]]; then
+            init_args+=("-backend-config=region=${TF_STATE_REGION}")
+          fi
+          init_args+=("-backend-config=encrypt=true")
+          init_args+=("-backend-config=use_lockfile=${TF_BACKEND_USE_LOCKFILE}")
+          if [[ -n "${TF_LOCK_TABLE}" ]]; then
+            init_args+=("-backend-config=dynamodb_table=${TF_LOCK_TABLE}")
+          fi
+
+          terraform -chdir="${tf_dir}" init "${init_args[@]}"
+          terraform -chdir="${tf_dir}" state show aws_lightsail_instance.app >/dev/null
+
+          apply_args=(-auto-approve)
+          if [[ -f "${tf_dir}/terraform.tfvars" ]]; then
+            apply_args+=(-var-file="${tf_dir}/terraform.tfvars")
+          fi
+          apply_args+=(-var "aws_region=${AWS_REGION}")
+          apply_args+=(-var "app_image_repository=${APP_IMAGE_REPOSITORY}")
+          apply_args+=(-var "app_image_tag=${APP_IMAGE_TAG}")
+          apply_args+=(-var "allowed_ssh_cidr_blocks=${{ steps.ssh_cidrs.outputs.json }}")
+
+          if [[ -n "${LIGHTSAIL_BUNDLE_ID}" ]]; then
+            apply_args+=(-var "bundle_id=${LIGHTSAIL_BUNDLE_ID}")
+          fi
+          if [[ -n "${LIGHTSAIL_KEY_PAIR_NAME}" ]]; then
+            apply_args+=(-var "key_pair_name=${LIGHTSAIL_KEY_PAIR_NAME}")
+          fi
+          if [[ -n "${LIGHTSAIL_SSH_PUBLIC_KEY}" ]]; then
+            apply_args+=(-var "ssh_public_key=${LIGHTSAIL_SSH_PUBLIC_KEY}")
+            apply_args+=(-var "key_pair_name=")
+          fi
+          if [[ -n "${ADMIN_CIDR}" ]]; then
+            apply_args+=(-var "admin_cidr=${ADMIN_CIDR}")
+          fi
+          if [[ -n "${DOMAIN_NAME}" ]]; then
+            apply_args+=(-var "domain_name=${DOMAIN_NAME}")
+          fi
+          if [[ -n "${CADDY_EMAIL}" ]]; then
+            apply_args+=(-var "caddy_email=${CADDY_EMAIL}")
+          fi
+          if [[ -n "${INSTANCE_NAME}" ]]; then
+            apply_args+=(-var "instance_name=${INSTANCE_NAME}")
+          fi
+
+          terraform -chdir="${tf_dir}" apply "${apply_args[@]}"
+
+      - name: Render Ansible inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          tf_dir="$GITHUB_WORKSPACE/infra/lightsail/terraform"
+          public_ip="$(terraform -chdir="${tf_dir}" output -raw deploy_public_ip)"
+
+          cat > "$GITHUB_WORKSPACE/infra/lightsail/ansible/inventory.ini" <<EOF
+          [app]
+          primary ansible_host=${public_ip} ansible_user=ubuntu ansible_ssh_private_key_file=$GITHUB_WORKSPACE/.tmp/lightsail-ssh-key.pem ansible_ssh_common_args="-o StrictHostKeyChecking=accept-new"
+
+          [app:vars]
+          ansible_python_interpreter=/usr/bin/python3
+          EOF
+
+      - name: Run migrations on Lightsail
+        shell: bash
+        run: |
+          set -euo pipefail
+          ansible-playbook \
+            -i "$GITHUB_WORKSPACE/infra/lightsail/ansible/inventory.ini" \
+            "$GITHUB_WORKSPACE/infra/lightsail/ansible/playbooks/migrate.yml" \
+            --extra-vars "app_image_repository=${APP_IMAGE_REPOSITORY}" \
+            --extra-vars "app_image_tag=${APP_IMAGE_TAG}" \
+            --extra-vars "app_env_file=$GITHUB_WORKSPACE/infra/lightsail/ansible/env/production.env"
