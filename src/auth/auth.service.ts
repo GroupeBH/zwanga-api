@@ -1,16 +1,36 @@
-import { Injectable, UnauthorizedException, Logger, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  UnauthorizedException,
+  Logger,
+  BadRequestException,
+} from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { OAuth2Client } from 'google-auth-library';
+import {
+  createPublicKey,
+  verify as verifySignature,
+  type JsonWebKey,
+} from 'crypto';
 import * as bcrypt from 'bcrypt';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { KycDocument, KycStatus } from '../users/entities/kyc-document.entity';
-import { RegisterDto, LoginDto, RefreshTokenDto, AuthResponseDto } from './dto/auth.dto';
+import {
+  RegisterDto,
+  LoginDto,
+  RefreshTokenDto,
+  AuthResponseDto,
+  AppleMobileAuthDto,
+} from './dto/auth.dto';
 import { FileUploadService } from '../common/services/file-upload.service';
 import { VehiclesService } from '../vehicles/vehicles.service';
 
+const APPLE_ISSUER = 'https://appleid.apple.com';
+const APPLE_PUBLIC_KEYS_URL = 'https://appleid.apple.com/auth/keys';
+const APPLE_KEYS_CACHE_MS = 6 * 60 * 60 * 1000;
+const TOKEN_CLOCK_TOLERANCE_SECONDS = 300;
 
 interface MulterFile {
   fieldname: string;
@@ -24,10 +44,48 @@ interface MulterFile {
   path?: string;
 }
 
+interface AppleJwk extends JsonWebKey {
+  kid: string;
+  kty: string;
+  use?: string;
+  alg?: string;
+}
+
+interface AppleJwksResponse {
+  keys: AppleJwk[];
+}
+
+interface AppleJwtHeader {
+  alg?: string;
+  kid?: string;
+  typ?: string;
+}
+
+interface AppleIdTokenPayload {
+  iss?: string;
+  aud?: string | string[];
+  exp?: number;
+  iat?: number;
+  sub?: string;
+  email?: string;
+  email_verified?: string | boolean;
+  nonce?: string;
+}
+
+interface AppleAuthProfile {
+  appleId: string;
+  email?: string;
+  firstName?: string;
+  lastName?: string;
+  emailVerified: boolean;
+}
+
 @Injectable()
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
   private readonly googleClient: OAuth2Client;
+  private applePublicKeys: AppleJwk[] = [];
+  private applePublicKeysExpiresAt = 0;
 
   constructor(
     @InjectRepository(User)
@@ -52,7 +110,8 @@ export class AuthService {
   ): Promise<AuthResponseDto> {
     console.log('registerDto', registerDto);
     console.log('files', files);
-    const { phone, pin, firstName, lastName, role, isDriver, vehicle } = registerDto;
+    const { phone, pin, firstName, lastName, role, isDriver, vehicle } =
+      registerDto;
     const resolvedIsDriver = isDriver ?? role === UserRole.DRIVER;
 
     // Check if user already exists
@@ -118,7 +177,9 @@ export class AuthService {
     const savedUser = await this.userRepository.save(user);
 
     if (vehicle && !resolvedIsDriver) {
-      throw new BadRequestException('Les informations du véhicule sont uniquement autorisées pour les conducteurs');
+      throw new BadRequestException(
+        'Les informations du véhicule sont uniquement autorisées pour les conducteurs',
+      );
     }
 
     if (vehicle && resolvedIsDriver) {
@@ -184,45 +245,72 @@ export class AuthService {
     return user;
   }
 
-  async login(loginDto: LoginDto) {
-    // Find user by phone
-    const user = await this.userRepository.findOne({ where: { phone: loginDto.phone } });
-
-    if (!user) {
-      this.logger.warn(`Login failed: User not found for phone: ${loginDto.phone}`);
-      throw new UnauthorizedException('Numéro de téléphone ou code PIN invalide');
-    }
-
+  private assertUserCanAuthenticate(user: User): void {
     if (user.status === UserStatus.SUSPENDED) {
       throw new UnauthorizedException('Compte suspendu');
     }
+
+    if (user.status === UserStatus.INACTIVE || !user.isActive) {
+      throw new UnauthorizedException('Compte désactivé');
+    }
+  }
+
+  async login(loginDto: LoginDto) {
+    // Find user by phone
+    const user = await this.userRepository.findOne({
+      where: { phone: loginDto.phone },
+    });
+
+    if (!user) {
+      this.logger.warn(
+        `Login failed: User not found for phone: ${loginDto.phone}`,
+      );
+      throw new UnauthorizedException(
+        'Numéro de téléphone ou code PIN invalide',
+      );
+    }
+
+    this.assertUserCanAuthenticate(user);
 
     // Handle PIN validation or reset
     if (loginDto.newPin) {
       // User wants to reset PIN (forgot old PIN)
       this.logger.log(`PIN reset requested during login for user ${user.id}`);
-      
+
       // Hash the new PIN
       const saltRounds = 10;
       const hashedNewPin = await bcrypt.hash(loginDto.newPin, saltRounds);
-      
+
       // Update user password with new hashed PIN
       user.password = hashedNewPin;
       await this.userRepository.save(user);
-      
-      this.logger.log(`PIN reset successfully during login for user ${user.id}`);
+
+      this.logger.log(
+        `PIN reset successfully during login for user ${user.id}`,
+      );
     } else if (loginDto.pin) {
       // Normal login with PIN validation
-      const validatedUser = await this.validateUser(loginDto.phone, loginDto.pin);
-      
+      const validatedUser = await this.validateUser(
+        loginDto.phone,
+        loginDto.pin,
+      );
+
       if (!validatedUser) {
-        this.logger.warn(`Login failed: Invalid PIN for phone: ${loginDto.phone}`);
-        throw new UnauthorizedException('Numéro de téléphone ou code PIN invalide. Si vous avez oublié votre code PIN, fournissez un newPin pour le réinitialiser.');
+        this.logger.warn(
+          `Login failed: Invalid PIN for phone: ${loginDto.phone}`,
+        );
+        throw new UnauthorizedException(
+          'Numéro de téléphone ou code PIN invalide. Si vous avez oublié votre code PIN, fournissez un newPin pour le réinitialiser.',
+        );
       }
     } else {
       // No PIN provided and no newPin provided
-      this.logger.warn(`Login failed: No PIN provided for phone: ${loginDto.phone}`);
-      throw new UnauthorizedException('Le code PIN est requis. Si vous avez oublié votre code PIN, fournissez un newPin pour le réinitialiser.');
+      this.logger.warn(
+        `Login failed: No PIN provided for phone: ${loginDto.phone}`,
+      );
+      throw new UnauthorizedException(
+        'Le code PIN est requis. Si vous avez oublié votre code PIN, fournissez un newPin pour le réinitialiser.',
+      );
     }
 
     // Update last login
@@ -231,7 +319,7 @@ export class AuthService {
 
     const tokens = await this.generateTokens(user);
 
-    console.log("user status is", user.status);
+    console.log('user status is', user.status);
 
     return {
       accessToken: tokens.accessToken,
@@ -255,14 +343,14 @@ export class AuthService {
         },
       );
 
-      console.log("jwt payload:", payload)
+      console.log('jwt payload:', payload);
 
       const user = await this.userRepository.findOne({
         where: { id: payload.sub },
       });
 
-      console.log("user refresh token", user?.refreshToken);
-      console.log("refresh token dto", refreshTokenDto.refreshToken);
+      console.log('user refresh token', user?.refreshToken);
+      console.log('refresh token dto', refreshTokenDto.refreshToken);
 
       if (!user || user.refreshToken !== refreshTokenDto.refreshToken) {
         throw new UnauthorizedException('Token de rafraîchissement invalide');
@@ -344,20 +432,30 @@ export class AuthService {
     }
   }
 
-  async googleMobileLogin(idToken: string, phone?: string): Promise<AuthResponseDto> {
+  async googleMobileLogin(
+    idToken: string,
+    phone?: string,
+  ): Promise<AuthResponseDto> {
     const googleProfile = await this.verifyGoogleIdToken(idToken);
     // Reuse existing linking/creation logic
-    return this.validateGoogleUser({
-      googleId: googleProfile.googleId,
-      email: googleProfile.email,
-      firstName: googleProfile.firstName,
-      lastName: googleProfile.lastName,
-      profilePicture: googleProfile.profilePicture,
-    }, phone);
+    return this.validateGoogleUser(
+      {
+        googleId: googleProfile.googleId,
+        email: googleProfile.email,
+        firstName: googleProfile.firstName,
+        lastName: googleProfile.lastName,
+        profilePicture: googleProfile.profilePicture,
+      },
+      phone,
+    );
   }
 
-  async validateGoogleUser(googleProfile: any, phone?: string): Promise<AuthResponseDto> {
-    const { googleId, email, firstName, lastName, profilePicture } = googleProfile;
+  async validateGoogleUser(
+    googleProfile: any,
+    phone?: string,
+  ): Promise<AuthResponseDto> {
+    const { googleId, email, firstName, lastName, profilePicture } =
+      googleProfile;
 
     // Check if user exists with this Google ID
     let user = await this.userRepository.findOne({
@@ -366,15 +464,16 @@ export class AuthService {
 
     // LOGIN Google (déjà inscrit) : on ne requiert pas phone
     if (user) {
-      if (user.status === UserStatus.SUSPENDED) {
-        throw new UnauthorizedException('Compte suspendu');
-      }
+      this.assertUserCanAuthenticate(user);
 
       user.lastLoginAt = new Date();
       await this.userRepository.save(user);
 
       const tokens = await this.generateTokens(user);
-      return { accessToken: tokens.accessToken, refreshToken: tokens.refreshToken };
+      return {
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
+      };
     }
 
     if (!user) {
@@ -384,15 +483,21 @@ export class AuthService {
       });
 
       if (user) {
+        this.assertUserCanAuthenticate(user);
+
         // Link Google account to existing user
         user.googleId = googleId;
         user.isEmailVerified = true;
 
         // If phone provided and user has no phone, set it
         if (phone && !user.phone) {
-          const phoneOwner = await this.userRepository.findOne({ where: { phone } });
+          const phoneOwner = await this.userRepository.findOne({
+            where: { phone },
+          });
           if (phoneOwner && phoneOwner.id !== user.id) {
-            throw new UnauthorizedException('Ce numéro de téléphone est déjà utilisé');
+            throw new UnauthorizedException(
+              'Ce numéro de téléphone est déjà utilisé',
+            );
           }
           user.phone = phone;
         }
@@ -404,13 +509,19 @@ export class AuthService {
       } else {
         // Create new user with Google account
         if (!phone) {
-          throw new UnauthorizedException('Le numéro de téléphone est requis pour la première inscription Google');
+          throw new UnauthorizedException(
+            'Le numéro de téléphone est requis pour la première inscription Google',
+          );
         }
 
         // Ensure phone is not already used
-        const phoneOwner = await this.userRepository.findOne({ where: { phone } });
+        const phoneOwner = await this.userRepository.findOne({
+          where: { phone },
+        });
         if (phoneOwner) {
-          throw new UnauthorizedException('Ce numéro de téléphone est déjà utilisé');
+          throw new UnauthorizedException(
+            'Ce numéro de téléphone est déjà utilisé',
+          );
         }
 
         user = this.userRepository.create({
@@ -432,15 +543,310 @@ export class AuthService {
       }
     }
 
-    if (user.status === UserStatus.SUSPENDED) {
-      throw new UnauthorizedException('Compte suspendu');
-    }
+    this.assertUserCanAuthenticate(user);
 
     // Update last login
     user.lastLoginAt = new Date();
     await this.userRepository.save(user);
 
     // Generate tokens
+    const tokens = await this.generateTokens(user);
+
+    return {
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+    };
+  }
+
+  private getAppleAudiences(): string[] {
+    const raw =
+      this.configService.get<string>('APPLE_CLIENT_IDS') ||
+      this.configService.get<string>('APPLE_CLIENT_ID') ||
+      '';
+
+    return raw
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+  }
+
+  private decodeJwtPart<T>(value: string, message: string): T {
+    try {
+      return JSON.parse(Buffer.from(value, 'base64url').toString('utf8')) as T;
+    } catch {
+      throw new UnauthorizedException(message);
+    }
+  }
+
+  private async getApplePublicKeys(forceRefresh = false): Promise<AppleJwk[]> {
+    const now = Date.now();
+    if (
+      !forceRefresh &&
+      this.applePublicKeys.length > 0 &&
+      this.applePublicKeysExpiresAt > now
+    ) {
+      return this.applePublicKeys;
+    }
+
+    try {
+      const response = await fetch(APPLE_PUBLIC_KEYS_URL);
+      if (!response.ok) {
+        throw new Error(
+          `Apple keys request failed with status ${response.status}`,
+        );
+      }
+
+      const jwks = (await response.json()) as AppleJwksResponse;
+      if (!Array.isArray(jwks.keys) || jwks.keys.length === 0) {
+        throw new Error('Apple keys response did not include keys');
+      }
+
+      this.applePublicKeys = jwks.keys;
+      this.applePublicKeysExpiresAt = now + APPLE_KEYS_CACHE_MS;
+      return this.applePublicKeys;
+    } catch (error) {
+      this.logger.error('Unable to fetch Apple public keys', error);
+      throw new UnauthorizedException('Apple OAuth is currently unavailable');
+    }
+  }
+
+  private isAppleAudienceAllowed(
+    audience: string | string[] | undefined,
+    allowedAudiences: string[],
+  ): boolean {
+    if (!audience) {
+      return false;
+    }
+
+    const tokenAudiences = Array.isArray(audience) ? audience : [audience];
+    return tokenAudiences.some((aud) => allowedAudiences.includes(aud));
+  }
+
+  private isAppleEmailVerified(value: string | boolean | undefined): boolean {
+    return value === true || value === 'true' || value === '1';
+  }
+
+  private validateAppleClaims(
+    payload: AppleIdTokenPayload,
+    allowedAudiences: string[],
+    expectedNonce?: string,
+  ): void {
+    if (!payload.sub) {
+      throw new UnauthorizedException('Invalid Apple token payload');
+    }
+
+    if (payload.iss !== APPLE_ISSUER) {
+      throw new UnauthorizedException('Invalid Apple token issuer');
+    }
+
+    if (!this.isAppleAudienceAllowed(payload.aud, allowedAudiences)) {
+      throw new UnauthorizedException('Invalid Apple token audience');
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    if (!payload.exp || payload.exp + TOKEN_CLOCK_TOLERANCE_SECONDS < now) {
+      throw new UnauthorizedException('Apple token has expired');
+    }
+
+    if (payload.iat && payload.iat - TOKEN_CLOCK_TOLERANCE_SECONDS > now) {
+      throw new UnauthorizedException('Invalid Apple token issued-at time');
+    }
+
+    if (expectedNonce && payload.nonce !== expectedNonce) {
+      throw new UnauthorizedException('Invalid Apple token nonce');
+    }
+  }
+
+  private async verifyAppleIdToken(
+    idToken: string,
+    expectedNonce?: string,
+  ): Promise<Pick<AppleAuthProfile, 'appleId' | 'email' | 'emailVerified'>> {
+    const allowedAudiences = this.getAppleAudiences();
+    if (allowedAudiences.length === 0) {
+      this.logger.error('Missing APPLE_CLIENT_IDS / APPLE_CLIENT_ID');
+      throw new UnauthorizedException('Apple OAuth is not configured');
+    }
+
+    const tokenParts = idToken.split('.');
+    if (tokenParts.length !== 3) {
+      throw new UnauthorizedException('Invalid Apple token');
+    }
+
+    const [encodedHeader, encodedPayload, encodedSignature] = tokenParts;
+    const header = this.decodeJwtPart<AppleJwtHeader>(
+      encodedHeader,
+      'Invalid Apple token header',
+    );
+    const payload = this.decodeJwtPart<AppleIdTokenPayload>(
+      encodedPayload,
+      'Invalid Apple token payload',
+    );
+
+    if (header.alg !== 'RS256' || !header.kid) {
+      throw new UnauthorizedException('Invalid Apple token header');
+    }
+
+    let appleKeys = await this.getApplePublicKeys();
+    let appleKey = appleKeys.find((key) => key.kid === header.kid);
+
+    if (!appleKey) {
+      appleKeys = await this.getApplePublicKeys(true);
+      appleKey = appleKeys.find((key) => key.kid === header.kid);
+    }
+
+    if (!appleKey) {
+      throw new UnauthorizedException('Invalid Apple token key');
+    }
+
+    const signingInput = `${encodedHeader}.${encodedPayload}`;
+    const publicKey = createPublicKey({ key: appleKey, format: 'jwk' });
+    const signature = Buffer.from(encodedSignature, 'base64url');
+    const isSignatureValid = verifySignature(
+      'RSA-SHA256',
+      Buffer.from(signingInput),
+      publicKey,
+      signature,
+    );
+
+    if (!isSignatureValid) {
+      throw new UnauthorizedException('Invalid Apple token signature');
+    }
+
+    this.validateAppleClaims(payload, allowedAudiences, expectedNonce);
+    const appleId = payload.sub;
+    if (!appleId) {
+      throw new UnauthorizedException('Invalid Apple token payload');
+    }
+
+    return {
+      appleId,
+      email: payload.email,
+      emailVerified: this.isAppleEmailVerified(payload.email_verified),
+    };
+  }
+
+  async appleMobileLogin(dto: AppleMobileAuthDto): Promise<AuthResponseDto> {
+    const appleProfile = await this.verifyAppleIdToken(dto.idToken, dto.nonce);
+
+    return this.validateAppleUser(
+      {
+        ...appleProfile,
+        firstName: dto.firstName,
+        lastName: dto.lastName,
+      },
+      dto.phone,
+      dto,
+    );
+  }
+
+  async validateAppleUser(
+    appleProfile: AppleAuthProfile,
+    phone?: string,
+    signupOptions?: Pick<AppleMobileAuthDto, 'role' | 'isDriver' | 'vehicle'>,
+  ): Promise<AuthResponseDto> {
+    const { appleId, email, firstName, lastName, emailVerified } = appleProfile;
+
+    let user = await this.userRepository.findOne({
+      where: { appleId },
+    });
+
+    if (user) {
+      this.assertUserCanAuthenticate(user);
+
+      user.lastLoginAt = new Date();
+      await this.userRepository.save(user);
+
+      const tokens = await this.generateTokens(user);
+      return {
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
+      };
+    }
+
+    if (email) {
+      user = await this.userRepository.findOne({
+        where: { email },
+      });
+    }
+
+    if (user) {
+      this.assertUserCanAuthenticate(user);
+
+      user.appleId = appleId;
+      user.isEmailVerified = user.isEmailVerified || emailVerified;
+
+      if (phone && !user.phone) {
+        const phoneOwner = await this.userRepository.findOne({
+          where: { phone },
+        });
+        if (phoneOwner && phoneOwner.id !== user.id) {
+          throw new UnauthorizedException(
+            'Ce numéro de téléphone est déjà utilisé',
+          );
+        }
+        user.phone = phone;
+      }
+
+      if (firstName && !user.firstName) {
+        user.firstName = firstName;
+      }
+
+      if (lastName && !user.lastName) {
+        user.lastName = lastName;
+      }
+
+      await this.userRepository.save(user);
+    } else {
+      if (!phone) {
+        throw new UnauthorizedException(
+          'Le numéro de téléphone est requis pour la première inscription Apple',
+        );
+      }
+
+      const phoneOwner = await this.userRepository.findOne({
+        where: { phone },
+      });
+      if (phoneOwner) {
+        throw new UnauthorizedException(
+          'Ce numéro de téléphone est déjà utilisé',
+        );
+      }
+
+      const role = signupOptions?.role ?? UserRole.PASSENGER;
+      const isDriver = signupOptions?.isDriver ?? role === UserRole.DRIVER;
+      const vehicle = signupOptions?.vehicle;
+
+      if (vehicle && !isDriver) {
+        throw new BadRequestException(
+          'Les informations du vehicule sont uniquement autorisees pour les conducteurs',
+        );
+      }
+
+      user = this.userRepository.create({
+        appleId,
+        email,
+        phone,
+        firstName: firstName ?? '',
+        lastName: lastName ?? '',
+        role,
+        isDriver,
+        status: UserStatus.PENDING_KYC,
+        isEmailVerified: emailVerified,
+        isPhoneVerified: false,
+      });
+
+      user = await this.userRepository.save(user);
+      if (vehicle && isDriver) {
+        await this.vehiclesService.create(user.id, vehicle);
+      }
+      this.logger.log(`New user created via Apple OAuth: ${user.id}`);
+    }
+
+    this.assertUserCanAuthenticate(user);
+
+    user.lastLoginAt = new Date();
+    await this.userRepository.save(user);
+
     const tokens = await this.generateTokens(user);
 
     return {
@@ -466,7 +872,8 @@ export class AuthService {
     // Refresh token: 3 weeks (21d)
     const refreshToken = await this.jwtService.signAsync(payload, {
       secret: this.configService.get<string>('JWT_REFRESH_SECRET'),
-      expiresIn: this.configService.get<string>('JWT_REFRESH_EXPIRES_IN') || '90d',
+      expiresIn:
+        this.configService.get<string>('JWT_REFRESH_EXPIRES_IN') || '90d',
     });
 
     // Save tokens to user
@@ -477,4 +884,3 @@ export class AuthService {
     return { accessToken, refreshToken };
   }
 }
-
