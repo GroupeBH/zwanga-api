@@ -1,5 +1,6 @@
 import {
   IsBoolean,
+  IsEnum,
   IsNotEmpty,
   IsOptional,
   IsString,
@@ -38,7 +39,11 @@ export class RegisterDto {
   @Matches(/^\d{4}$/, { message: 'PIN must be exactly 4 digits' })
   pin: string;
 
-  @ApiProperty({ required: false, example: true, description: 'Indique si utilisateur est conducteur' })
+  @ApiProperty({
+    required: false,
+    example: true,
+    description: 'Indique si utilisateur est conducteur',
+  })
   @IsBoolean()
   @IsOptional()
   isDriver?: boolean;
@@ -128,6 +133,83 @@ export class GoogleMobileAuthDto {
   @IsString()
   @IsOptional()
   phone?: string;
+}
+
+export class AppleMobileAuthDto {
+  @ApiProperty({
+    description: 'Apple identity token obtenu cote mobile (Sign in with Apple)',
+  })
+  @IsString()
+  @IsNotEmpty()
+  idToken: string;
+
+  @ApiProperty({
+    description: 'Nonce envoye a Apple au moment de la demande, si utilise',
+    required: false,
+  })
+  @Transform(toTrimmedString)
+  @IsString()
+  @IsOptional()
+  nonce?: string;
+
+  @ApiProperty({
+    description: 'Numero de telephone requis au premier login Apple',
+    example: '+243900000000',
+    required: false,
+  })
+  @Transform(toTrimmedString)
+  @IsString()
+  @IsOptional()
+  phone?: string;
+
+  @ApiProperty({
+    description:
+      'Prenom fourni par Apple uniquement lors de la premiere autorisation',
+    required: false,
+  })
+  @Transform(toTrimmedString)
+  @IsString()
+  @IsOptional()
+  firstName?: string;
+
+  @ApiProperty({
+    description:
+      'Nom fourni par Apple uniquement lors de la premiere autorisation',
+    required: false,
+  })
+  @Transform(toTrimmedString)
+  @IsString()
+  @IsOptional()
+  lastName?: string;
+
+  @ApiProperty({
+    enum: UserRole,
+    example: UserRole.PASSENGER,
+    required: false,
+    description: 'Role choisi pendant la premiere inscription Apple',
+  })
+  @IsEnum(UserRole)
+  @IsOptional()
+  role?: UserRole;
+
+  @ApiProperty({
+    required: false,
+    example: false,
+    description: 'Indique si utilisateur est conducteur',
+  })
+  @IsBoolean()
+  @IsOptional()
+  isDriver?: boolean;
+
+  @ApiProperty({
+    required: false,
+    type: () => CreateVehicleDto,
+    description: 'Infos vehicule pour la premiere inscription Apple conducteur',
+  })
+  @ValidateNested()
+  @IsOptional()
+  @Type(() => CreateVehicleDto)
+  vehicle?: CreateVehicleDto;
 }
 
 export class AuthResponseDto {

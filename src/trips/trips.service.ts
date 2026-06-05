@@ -728,6 +728,9 @@ export class TripsService {
     if (updateTripDto.status === TripStatus.COMPLETED && trip.status !== TripStatus.COMPLETED) {
       return this.completeTrip(id, driverId);
     }
+    if (updateTripDto.status === TripStatus.ACTIVE && trip.status !== TripStatus.ACTIVE) {
+      return this.startTrip(id, driverId);
+    }
 
     const {
       departureDate,
@@ -990,6 +993,13 @@ export class TripsService {
     this.logger.log(`Trip ${id} deleted successfully`);
   }
 
+  async ensureDriverCanStartTrip(
+    driverId: string,
+    excludedTripId?: string,
+  ): Promise<void> {
+    await this.ensureDriverHasNoActiveTrip(driverId, excludedTripId);
+  }
+
   async startTrip(tripId: string, driverId: string): Promise<SanitizedTrip> {
     this.logger.log(`Starting trip ${tripId} by driver ${driverId}`);
 
@@ -1007,6 +1017,8 @@ export class TripsService {
       this.logger.warn(`Trip start failed: Trip ${tripId} is not in PENDING status (current: ${trip.status})`);
       throw new BadRequestException(`Impossible de démarrer le trajet. Statut actuel : ${trip.status}`);
     }
+
+    await this.ensureDriverCanStartTrip(driverId, tripId);
 
     // Calculate total accepted seats
     const acceptedBookings = trip.bookings?.filter(
@@ -1140,7 +1152,7 @@ export class TripsService {
 
       await this.notificationService.sendToMultiple(fcmTokens, title, body, data, userIds);
       this.logger.log(`Notified ${fcmTokens.length} users about trip ${trip.id} start`);
-    } catch (error) {
+    } catch (error: any) {
       this.logger.error(`Error notifying nearby users about trip start: ${error.message}`, error.stack);
     }
   }
@@ -1189,7 +1201,7 @@ export class TripsService {
 
       await this.notificationService.sendToMultiple(fcmTokens, title, body, data, userIds);
       this.logger.log(`Notified ${fcmTokens.length} passengers about trip ${trip.id} start`);
-    } catch (error) {
+    } catch (error: any) {
       this.logger.error(`Error notifying booked passengers about trip start: ${error.message}`, error.stack);
     }
   }
@@ -1255,7 +1267,7 @@ export class TripsService {
       }
 
       this.logger.log(`Notified ${fcmTokens.length} passengers about trip ${trip.id} pause`);
-    } catch (error) {
+    } catch (error: any) {
       this.logger.error(`Error notifying passengers about trip pause: ${error.message}`, error.stack);
     }
   }
@@ -1271,7 +1283,7 @@ export class TripsService {
     for (const template of templates) {
       try {
         await this.generateTripsForTemplate(template);
-      } catch (error) {
+      } catch (error: any) {
         this.logger.error(
           `Failed to generate recurring trips for template ${template.id}: ${error.message}`,
           error.stack,
@@ -1571,6 +1583,43 @@ export class TripsService {
     await this.cacheService.del(CacheService.getTripsListKey());
     await this.cacheService.del(CacheService.getTripsListKey('all'));
     await this.cacheService.del(CacheService.getTripsListKey('allTrips'));
+  }
+
+  private async ensureDriverHasNoActiveTrip(
+    driverId: string,
+    excludedTripId?: string,
+  ): Promise<void> {
+    const where = excludedTripId
+      ? { driverId, status: TripStatus.ACTIVE, id: Not(excludedTripId) }
+      : { driverId, status: TripStatus.ACTIVE };
+    const activeTrip = await this.tripRepository.findOne({
+      where,
+      select: ['id'],
+    });
+
+    if (!activeTrip) {
+      return;
+    }
+
+    this.logger.warn(
+      `Trip start failed: driver ${driverId} already has active trip ${activeTrip.id}`,
+    );
+    throw new BadRequestException(
+      'Vous avez deja un trajet en cours. Terminez ou interrompez ce trajet avant d en demarrer un autre.',
+    );
+  }
+
+  private isOneActiveTripConstraintViolation(error: unknown): boolean {
+    const databaseError = error as {
+      code?: string;
+      constraint?: string;
+      detail?: string;
+    };
+    return (
+      databaseError?.code === '23505' &&
+      (databaseError.constraint === 'IDX_trips_one_active_per_driver' ||
+        databaseError.detail?.includes('IDX_trips_one_active_per_driver') === true)
+    );
   }
 
   private async ensureDailyTripPublicationQuota(driverId: string): Promise<void> {

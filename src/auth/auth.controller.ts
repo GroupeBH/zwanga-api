@@ -12,11 +12,25 @@ import {
   Res,
 } from '@nestjs/common';
 import { FileFieldsInterceptor } from '@nestjs/platform-express';
-import { ApiTags, ApiOperation, ApiResponse, ApiConsumes, ApiBody, ApiBearerAuth } from '@nestjs/swagger';
+import {
+  ApiTags,
+  ApiOperation,
+  ApiResponse,
+  ApiConsumes,
+  ApiBody,
+  ApiBearerAuth,
+} from '@nestjs/swagger';
 import { AuthGuard } from '@nestjs/passport';
 import type { Request, Response } from 'express';
 import { AuthService } from './auth.service';
-import { RegisterDto, LoginDto, RefreshTokenDto, AuthResponseDto, GoogleMobileAuthDto } from './dto/auth.dto';
+import {
+  RegisterDto,
+  LoginDto,
+  RefreshTokenDto,
+  AuthResponseDto,
+  GoogleMobileAuthDto,
+  AppleMobileAuthDto,
+} from './dto/auth.dto';
 import { Public } from '../common/decorators/public.decorator';
 import { UserRole } from '../users/entities/user.entity';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
@@ -60,7 +74,11 @@ export class AuthController {
       type: 'object',
       properties: {
         phone: { type: 'string', example: '+243900000000' },
-        pin: { type: 'string', example: '1234', description: 'PIN à 4 chiffres' },
+        pin: {
+          type: 'string',
+          example: '1234',
+          description: 'PIN à 4 chiffres',
+        },
         firstName: { type: 'string', example: 'John' },
         lastName: { type: 'string', example: 'Doe' },
         role: {
@@ -76,7 +94,8 @@ export class AuthController {
         },
         vehicle: {
           type: 'object',
-          description: 'Informations du véhicule (optionnel, conducteurs uniquement)',
+          description:
+            'Informations du véhicule (optionnel, conducteurs uniquement)',
           properties: {
             brand: { type: 'string', example: 'Toyota' },
             model: { type: 'string', example: 'Corolla' },
@@ -93,7 +112,7 @@ export class AuthController {
         cniImage: {
           type: 'string',
           format: 'binary',
-          description: 'Image de la pièce d\'identité (optionnel)',
+          description: "Image de la pièce d'identité (optionnel)",
         },
         selfieImage: {
           type: 'string',
@@ -155,11 +174,26 @@ export class AuthController {
   @Public()
   @SensitiveThrottle(20, 60000)
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Google Sign-In (mobile): idToken + phone -> JWT tokens' })
+  @ApiOperation({
+    summary: 'Google Sign-In (mobile): idToken + phone -> JWT tokens',
+  })
   @ApiResponse({ status: 200, type: AuthResponseDto })
   @ApiResponse({ status: 401, description: 'Invalid Google token' })
   async googleMobile(@Body() dto: GoogleMobileAuthDto) {
     return this.authService.googleMobileLogin(dto.idToken, dto.phone);
+  }
+
+  @Post('apple/mobile')
+  @Public()
+  @SensitiveThrottle(20, 60000)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Apple Sign-In (mobile): identityToken + phone -> JWT tokens',
+  })
+  @ApiResponse({ status: 200, type: AuthResponseDto })
+  @ApiResponse({ status: 401, description: 'Invalid Apple token' })
+  async appleMobile(@Body() dto: AppleMobileAuthDto) {
+    return this.authService.appleMobileLogin(dto);
   }
 
   @Get('google')
@@ -179,8 +213,9 @@ export class AuthController {
   @ApiResponse({ status: 401, description: 'Authentication failed' })
   async googleAuthCallback(@Req() req: Request, @Res() res: Response) {
     const googleProfile = req.user;
-    const authResponse = await this.authService.validateGoogleUser(googleProfile);
-    
+    const authResponse =
+      await this.authService.validateGoogleUser(googleProfile);
+
     // Redirect to frontend with tokens in query params or return JSON
     // You can customize this based on your frontend needs
     const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
@@ -189,4 +224,3 @@ export class AuthController {
     );
   }
 }
-

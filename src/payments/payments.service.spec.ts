@@ -9,6 +9,7 @@ describe('PaymentsService', () => {
     create: jest.Mock;
     save: jest.Mock;
     findOne: jest.Mock;
+    find: jest.Mock;
   };
   let configService: {
     get: jest.Mock;
@@ -29,6 +30,7 @@ describe('PaymentsService', () => {
         ...payload,
       })),
       findOne: jest.fn(),
+      find: jest.fn(),
     };
     configService = {
       get: jest.fn((key: string) => {
@@ -83,6 +85,32 @@ describe('PaymentsService', () => {
     expect(payment.providerMessage).toBe(
       'Redirection vers la page de paiement en cours',
     );
+  });
+
+  it('returns the current user payment transactions from newest to oldest', async () => {
+    const transactions = [
+      {
+        id: 'payment-2',
+        userId: 'user-1',
+        status: PaymentStatus.SUCCEEDED,
+        createdAt: new Date('2026-05-02T10:00:00.000Z'),
+      },
+      {
+        id: 'payment-1',
+        userId: 'user-1',
+        status: PaymentStatus.FAILED,
+        createdAt: new Date('2026-05-01T10:00:00.000Z'),
+      },
+    ];
+    paymentTransactionRepository.find.mockResolvedValue(transactions);
+
+    const result = await service.findUserTransactions('user-1');
+
+    expect(paymentTransactionRepository.find).toHaveBeenCalledWith({
+      where: { userId: 'user-1' },
+      order: { createdAt: 'DESC' },
+    });
+    expect(result).toBe(transactions);
   });
 
   it('accepts a FlexPay check response when the reference field mirrors the order number', async () => {

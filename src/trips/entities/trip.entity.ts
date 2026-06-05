@@ -27,6 +27,10 @@ export enum TripStatus {
 @Index(['arrivalLocation'])
 @Index(['departureDate'])
 @Index(['recurringTemplateId', 'recurringOccurrenceDate'])
+@Index('IDX_trips_one_active_per_driver', ['driverId'], {
+  unique: true,
+  where: `"status" = 'ongoing'`,
+})
 export class Trip {
   @PrimaryGeneratedColumn('uuid')
   id: string;

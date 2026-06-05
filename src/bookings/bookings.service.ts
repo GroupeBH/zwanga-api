@@ -469,17 +469,35 @@ export class BookingsService {
     return updatedBooking;
   }
 
-  async cancel(bookingId: string, passengerId: string): Promise<void> {
-    this.logger.log(`Cancelling booking ${bookingId} by passenger ${passengerId}`);
+  async cancel(bookingId: string, userId: string): Promise<void> {
+    this.logger.log(`Cancelling booking ${bookingId} by user ${userId}`);
     
     const booking = await this.bookingRepository.findOne({
-      where: { id: bookingId, passengerId },
-      relations: ['passenger'],
+      where: { id: bookingId },
+      relations: ['passenger', 'trip', 'trip.driver'],
     });
 
     if (!booking) {
-      this.logger.warn(`Booking cancellation failed: Booking ${bookingId} not found for passenger ${passengerId}`);
+      this.logger.warn(`Booking cancellation failed: Booking ${bookingId} not found`);
       throw new NotFoundException('Réservation non trouvée');
+    }
+
+    const isPassenger = booking.passengerId === userId;
+    const isDriver = booking.trip.driverId === userId;
+
+    if (!isPassenger && !isDriver) {
+      this.logger.warn(`Booking cancellation failed: User ${userId} is not allowed to cancel booking ${bookingId}`);
+      throw new ForbiddenException('Accès refusé');
+    }
+
+    if (isDriver && booking.status !== BookingStatus.ACCEPTED) {
+      this.logger.warn(`Booking cancellation failed: Driver ${userId} tried to cancel booking ${bookingId} with status ${booking.status}`);
+      throw new BadRequestException('Le conducteur peut annuler uniquement une réservation acceptée');
+    }
+
+    if (isDriver && (booking.pickedUp || booking.pickedUpConfirmedByPassenger)) {
+      this.logger.warn(`Booking cancellation failed: Driver ${userId} tried to cancel booking ${bookingId} after pickup`);
+      throw new BadRequestException('Impossible d\'annuler cette réservation : le passager a déjà embarqué');
     }
 
     if (booking.status === BookingStatus.COMPLETED) {
@@ -509,12 +527,12 @@ export class BookingsService {
         availableSeats: newAvailableSeats,
       });
       this.logger.log(
-        `Restored ${booking.numberOfSeats} seats for trip ${trip.id} (booking ${bookingId} cancelled by passenger). New available seats: ${newAvailableSeats} (totalSeats: ${trip.totalSeats})`,
+        `Restored ${booking.numberOfSeats} seats for trip ${trip.id} (booking ${bookingId} cancelled by ${isDriver ? 'driver' : 'passenger'}). New available seats: ${newAvailableSeats} (totalSeats: ${trip.totalSeats})`,
       );
     }
 
     // Si c'est un trajet privé, terminer automatiquement le trajet et notifier le driver
-    if (trip.isPrivate) {
+    if (isPassenger && trip.isPrivate) {
       this.logger.log(`Private trip ${trip.id} - Passenger cancelled booking. Terminating trip automatically.`);
       
       // Terminer le trajet
@@ -525,10 +543,14 @@ export class BookingsService {
       // Notifier le driver
       await this.notifyDriverAboutPrivateTripCancellation(trip, booking);
     }
+
+    if (isDriver) {
+      await this.notifyPassengerOfStatusChange(booking, BookingStatus.CANCELLED);
+    }
     
     // Invalidate cache
     await this.cacheService.del(CacheService.getBookingKey(bookingId));
-    await this.cacheService.del(CacheService.getBookingsByPassengerKey(passengerId));
+    await this.cacheService.del(CacheService.getBookingsByPassengerKey(booking.passengerId));
     await this.cacheService.del(CacheService.getBookingsByTripKey(booking.tripId));
     await this.cacheService.del(CacheService.getTripKey(booking.tripId));
 

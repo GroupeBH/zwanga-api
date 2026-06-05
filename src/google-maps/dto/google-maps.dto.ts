@@ -1,4 +1,16 @@
-import { IsString, IsOptional, IsNumber, IsEnum, IsArray, ValidateNested, IsLatitude, IsLongitude, IsBoolean, IsInt, Min } from 'class-validator';
+import {
+  IsString,
+  IsOptional,
+  IsNumber,
+  IsEnum,
+  IsArray,
+  ValidateNested,
+  IsLatitude,
+  IsLongitude,
+  IsBoolean,
+  IsInt,
+  Min,
+} from 'class-validator';
 import { Type } from 'class-transformer';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
@@ -13,6 +25,21 @@ export class GeocodeDto {
   @IsOptional()
   @IsString()
   region?: string;
+
+  @ApiPropertyOptional({
+    description: 'Language code for returned address text (e.g., "fr")',
+  })
+  @IsOptional()
+  @IsString()
+  language?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Google components filter, e.g. "country:CD|locality:Kinshasa"',
+  })
+  @IsOptional()
+  @IsString()
+  components?: string;
 }
 
 export class ReverseGeocodeDto {
@@ -25,6 +52,127 @@ export class ReverseGeocodeDto {
   @Type(() => Number)
   @IsLongitude()
   lng: number;
+
+  @ApiPropertyOptional({
+    description: 'Language code for returned address text (e.g., "fr")',
+  })
+  @IsOptional()
+  @IsString()
+  language?: string;
+
+  @ApiPropertyOptional({ description: 'Region code (e.g., "CD" for Congo)' })
+  @IsOptional()
+  @IsString()
+  region?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Reverse geocoding result type filter, e.g. "street_address|premise|route"',
+  })
+  @IsOptional()
+  @IsString()
+  resultType?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Reverse geocoding location type filter, e.g. "ROOFTOP|RANGE_INTERPOLATED"',
+  })
+  @IsOptional()
+  @IsString()
+  locationType?: string;
+}
+
+export class GeocodeLatLng {
+  @ApiProperty()
+  lat: number;
+
+  @ApiProperty()
+  lng: number;
+}
+
+export class GeocodeBounds {
+  @ApiProperty({ type: GeocodeLatLng })
+  northeast: GeocodeLatLng;
+
+  @ApiProperty({ type: GeocodeLatLng })
+  southwest: GeocodeLatLng;
+}
+
+export class GeocodeAddressComponent {
+  @ApiProperty()
+  longName: string;
+
+  @ApiProperty()
+  shortName: string;
+
+  @ApiProperty({ type: [String] })
+  types: string[];
+}
+
+export class StructuredAddressDetails {
+  @ApiPropertyOptional()
+  streetNumber?: string;
+
+  @ApiPropertyOptional()
+  street?: string;
+
+  @ApiPropertyOptional()
+  fullStreet?: string;
+
+  @ApiPropertyOptional()
+  neighborhood?: string;
+
+  @ApiPropertyOptional()
+  sublocality?: string;
+
+  @ApiPropertyOptional()
+  commune?: string;
+
+  @ApiPropertyOptional()
+  city?: string;
+
+  @ApiPropertyOptional()
+  district?: string;
+
+  @ApiPropertyOptional()
+  province?: string;
+
+  @ApiPropertyOptional()
+  country?: string;
+
+  @ApiPropertyOptional()
+  countryCode?: string;
+
+  @ApiPropertyOptional()
+  postalCode?: string;
+
+  @ApiPropertyOptional()
+  premise?: string;
+
+  @ApiPropertyOptional()
+  subpremise?: string;
+}
+
+export class GeocodePlusCode {
+  @ApiPropertyOptional()
+  globalCode?: string;
+
+  @ApiPropertyOptional()
+  compoundCode?: string;
+}
+
+export class GeocodePrecision {
+  @ApiProperty({ enum: ['EXACT', 'HIGH', 'MEDIUM', 'LOW'] })
+  level: 'EXACT' | 'HIGH' | 'MEDIUM' | 'LOW';
+
+  @ApiProperty()
+  isExactAddress: boolean;
+
+  @ApiProperty()
+  isStreetLevel: boolean;
+
+  @ApiProperty()
+  isApproximate: boolean;
 }
 
 export class GeocodeResponse {
@@ -40,18 +188,39 @@ export class GeocodeResponse {
   @ApiPropertyOptional()
   placeId?: string;
 
-  @ApiPropertyOptional({ description: 'Google geometry location type, e.g. ROOFTOP or APPROXIMATE' })
+  @ApiPropertyOptional({
+    description: 'Google geometry location type, e.g. ROOFTOP or APPROXIMATE',
+  })
   locationType?: string;
 
-  @ApiPropertyOptional({ description: 'Indicates that Google returned a partial match' })
+  @ApiPropertyOptional({
+    description: 'Indicates that Google returned a partial match',
+  })
   partialMatch?: boolean;
 
-  @ApiPropertyOptional()
-  addressComponents?: {
-    longName: string;
-    shortName: string;
-    types: string[];
-  }[];
+  @ApiPropertyOptional({
+    type: [String],
+    description: 'Google result types, e.g. street_address, route, locality',
+  })
+  resultTypes?: string[];
+
+  @ApiPropertyOptional({ type: [GeocodeAddressComponent] })
+  addressComponents?: GeocodeAddressComponent[];
+
+  @ApiPropertyOptional({ type: StructuredAddressDetails })
+  addressDetails?: StructuredAddressDetails;
+
+  @ApiPropertyOptional({ type: GeocodeBounds })
+  viewport?: GeocodeBounds;
+
+  @ApiPropertyOptional({ type: GeocodeBounds })
+  bounds?: GeocodeBounds;
+
+  @ApiPropertyOptional({ type: GeocodePlusCode })
+  plusCode?: GeocodePlusCode;
+
+  @ApiPropertyOptional({ type: GeocodePrecision })
+  precision?: GeocodePrecision;
 }
 
 // ==================== Places DTOs ====================
@@ -174,12 +343,18 @@ export class PlaceDetails {
 }
 
 export class LandmarkPlacesQueryDto {
-  @ApiPropertyOptional({ description: 'City key. For now only kinshasa is supported.', default: 'kinshasa' })
+  @ApiPropertyOptional({
+    description: 'City key. For now only kinshasa is supported.',
+    default: 'kinshasa',
+  })
   @IsOptional()
   @IsString()
   city?: string;
 
-  @ApiPropertyOptional({ description: 'Free-text filter on name, commune, category, address or keywords' })
+  @ApiPropertyOptional({
+    description:
+      'Free-text filter on name, commune, category, address or keywords',
+  })
   @IsOptional()
   @IsString()
   search?: string;
@@ -194,7 +369,10 @@ export class LandmarkPlacesQueryDto {
   @IsString()
   category?: string;
 
-  @ApiPropertyOptional({ description: 'Maximum number of landmarks to return', default: 12 })
+  @ApiPropertyOptional({
+    description: 'Maximum number of landmarks to return',
+    default: 12,
+  })
   @IsOptional()
   @Type(() => Number)
   @IsInt()
@@ -277,7 +455,10 @@ export class DirectionsDto {
   @Type(() => WaypointDto)
   destination: WaypointDto;
 
-  @ApiPropertyOptional({ description: 'Intermediate waypoints', type: [WaypointDto] })
+  @ApiPropertyOptional({
+    description: 'Intermediate waypoints',
+    type: [WaypointDto],
+  })
   @IsOptional()
   @IsArray()
   @ValidateNested({ each: true })
@@ -289,7 +470,11 @@ export class DirectionsDto {
   @IsEnum(TravelMode)
   mode?: TravelMode;
 
-  @ApiPropertyOptional({ description: 'Avoid specific features', enum: Avoid, isArray: true })
+  @ApiPropertyOptional({
+    description: 'Avoid specific features',
+    enum: Avoid,
+    isArray: true,
+  })
   @IsOptional()
   @IsArray()
   @IsEnum(Avoid, { each: true })
@@ -402,4 +587,3 @@ export class DirectionsResponse {
   @ApiPropertyOptional()
   errorMessage?: string;
 }
-

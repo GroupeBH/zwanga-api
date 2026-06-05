@@ -40,6 +40,10 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
         throw new UnauthorizedException('Account is suspended');
       }
 
+      if (user.status === UserStatus.INACTIVE || !user.isActive) {
+        throw new UnauthorizedException('Account is deactivated');
+      }
+
       // Retourner les informations qui seront attachées à req.user
       return {
         userId: user.id,

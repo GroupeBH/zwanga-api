@@ -44,6 +44,9 @@ export class User {
   googleId: string;
 
   @Column({ unique: true, nullable: true })
+  appleId: string;
+
+  @Column({ unique: true, nullable: true })
   phone: string;
 
   @Column({ nullable: true })
@@ -72,8 +75,8 @@ export class User {
   })
   status: UserStatus;
 
-  @Column({ nullable: true })
-  fcmToken: string;
+  @Column({ type: 'varchar', nullable: true })
+  fcmToken: string | null;
 
   @Column({ default: false })
   isEmailVerified: boolean;
@@ -130,7 +133,9 @@ export class User {
   @OneToMany(() => KycDocument, (kycDocument) => kycDocument.user)
   kycDocuments: KycDocument[];
 
-  @OneToMany(() => FavoriteLocation, (favoriteLocation) => favoriteLocation.user)
+  @OneToMany(
+    () => FavoriteLocation,
+    (favoriteLocation) => favoriteLocation.user,
+  )
   favoriteLocations: FavoriteLocation[];
 }
-

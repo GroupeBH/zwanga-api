@@ -1,0 +1,21 @@
+---
+project_name: zwanga
+deploy_path: /opt/zwanga
+local_env_file: "{{ playbook_dir }}/../env/production.env"
+
+app_port: 5200
+api_health_path: /api/v1/health
+app_healthcheck_path: "{{ api_health_path }}"
+
+app_image_repository: ""
+app_image_tag: latest
+
+domain: ""
+caddy_email: ""
+admin_cidrs: []
+# Keep SSH open in the host firewall because Lightsail public ports already
+# restrict SSH sources and can be updated before Ansible connects.
+restrict_ssh_with_host_firewall: false
+
+docker_restart_policy: unless-stopped
+run_db_migrations: false

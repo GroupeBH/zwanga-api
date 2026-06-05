@@ -1,0 +1,344 @@
+name: AWS CI/CD
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      app_image_tag:
+        description: Existing Docker image tag to deploy instead of building a new one
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: zwanga-aws-production
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION || 'eu-central-1' }}
+  TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET || secrets.TF_STATE_BUCKET }}
+  TF_STATE_KEY: ${{ vars.TF_STATE_KEY || 'zwanga/eu-central-1/terraform.tfstate' }}
+  TF_STATE_REGION: ${{ vars.TF_STATE_REGION || vars.AWS_REGION || 'eu-central-1' }}
+  TF_BACKEND_USE_LOCKFILE: ${{ vars.TF_BACKEND_USE_LOCKFILE || 'true' }}
+  TF_LOCK_TABLE: ${{ vars.TF_LOCK_TABLE || secrets.TF_STATE_LOCK_TABLE }}
+  APP_IMAGE_REPOSITORY: ${{ vars.APP_IMAGE_REPOSITORY }}
+  DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+  DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+  DOMAIN_NAME: ${{ vars.DOMAIN_NAME || '' }}
+  CADDY_EMAIL: ${{ vars.CADDY_EMAIL || vars.CADDY_ACME_EMAIL || '' }}
+  INSTANCE_NAME: ${{ vars.INSTANCE_NAME || '' }}
+  INSTANCE_TYPE: ${{ vars.INSTANCE_TYPE || '' }}
+  ADMIN_CIDR: ${{ vars.ADMIN_CIDR || '' }}
+  ADMIN_SSH_CIDR_BLOCKS: ${{ vars.ADMIN_SSH_CIDR_BLOCKS || '[]' }}
+  RUN_DB_MIGRATIONS: ${{ vars.RUN_DB_MIGRATIONS || 'true' }}
+  INFRA_REPOSITORY: ${{ vars.INFRA_REPOSITORY || '' }}
+
+jobs:
+  infra-validate:
+    name: Validate infrastructure code
+    runs-on: ubuntu-latest
+    if: vars.INFRA_REPOSITORY == ''
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Terraform format
+        run: terraform -chdir=infra/ec2/terraform fmt -recursive
+
+      - name: Terraform init without backend
+        run: terraform -chdir=infra/ec2/terraform init -backend=false
+
+      - name: Terraform validate
+        run: terraform -chdir=infra/ec2/terraform validate
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Ansible
+        run: |
+          python -m pip install --upgrade pip
+          pip install ansible
+
+      - name: Ansible syntax check
+        run: |
+          ansible-playbook \
+            -i infra/ec2/ansible/inventory.example.ini \
+            infra/ec2/ansible/playbooks/deploy.yml \
+            --syntax-check \
+            --extra-vars '{"admin_cidrs":["203.0.113.10/32"],"app_image_repository":"example/zwanga-backend","app_image_tag":"latest","app_port":5200,"app_healthcheck_path":"/api/v1/health","cloudwatch_region":"eu-central-1","cloudwatch_instance_name":"zwanga-api","app_env_file":"infra/ec2/ansible/env/production.env.example"}'
+
+  build-image:
+    name: Build and push Docker image
+    runs-on: ubuntu-latest
+    outputs:
+      app_image_tag: ${{ steps.image.outputs.tag }}
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Use requested image tag
+        id: manual
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.app_image_tag != ''
+        shell: bash
+        run: |
+          echo "tag=${{ github.event.inputs.app_image_tag }}" >> "$GITHUB_OUTPUT"
+
+      - name: Validate Docker Hub configuration
+        if: steps.manual.outputs.tag == ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${APP_IMAGE_REPOSITORY:?Configure repository variable APP_IMAGE_REPOSITORY, for example gbhsarl/zwanga-backend}"
+          : "${DOCKERHUB_USERNAME:?Configure repository variable DOCKERHUB_USERNAME}"
+          : "${DOCKERHUB_TOKEN:?Configure repository secret DOCKERHUB_TOKEN}"
+
+      - name: Set up Node.js
+        if: steps.manual.outputs.tag == ''
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install dependencies
+        if: steps.manual.outputs.tag == ''
+        run: npm ci --legacy-peer-deps
+
+      - name: Build application
+        if: steps.manual.outputs.tag == ''
+        run: npm run build
+
+      - name: Set up Docker Buildx
+        if: steps.manual.outputs.tag == ''
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        if: steps.manual.outputs.tag == ''
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
+
+      - name: Prepare image tags
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -n "${{ steps.manual.outputs.tag }}" ]]; then
+            echo "tag=${{ steps.manual.outputs.tag }}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          tags="docker.io/${APP_IMAGE_REPOSITORY}:${GITHUB_SHA},docker.io/${APP_IMAGE_REPOSITORY}:latest"
+          echo "docker_tags=${tags}" >> "$GITHUB_OUTPUT"
+          echo "tag=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image
+        if: steps.manual.outputs.tag == ''
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          target: production
+          push: true
+          platforms: linux/amd64
+          tags: ${{ steps.image.outputs.docker_tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  dispatch-infra-repo:
+    name: Trigger zwanga-infra deployment
+    runs-on: ubuntu-latest
+    needs: build-image
+    if: vars.INFRA_REPOSITORY != ''
+    env:
+      APP_IMAGE_TAG: ${{ needs.build-image.outputs.app_image_tag }}
+      INFRA_REPO_TOKEN: ${{ secrets.INFRA_REPO_TOKEN || secrets.GH_PAT }}
+    steps:
+      - name: Validate infra repository dispatch configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${INFRA_REPOSITORY:?Configure repository variable INFRA_REPOSITORY, for example owner/zwanga-infra}"
+          : "${INFRA_REPO_TOKEN:?Configure INFRA_REPO_TOKEN secret with repo access to dispatch the infra workflow}"
+          : "${APP_IMAGE_TAG:?Missing Docker image tag from build job}"
+
+      - name: Dispatch deployment event
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsS \
+            -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${INFRA_REPO_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${INFRA_REPOSITORY}/dispatches" \
+            -d "{\"event_type\":\"deploy-nest-api\",\"client_payload\":{\"app_image_tag\":\"${APP_IMAGE_TAG}\"}}"
+
+  deploy:
+    name: Provision AWS and deploy image
+    runs-on: ubuntu-latest
+    needs:
+      - infra-validate
+      - build-image
+    if: vars.INFRA_REPOSITORY == ''
+    env:
+      APP_IMAGE_TAG: ${{ needs.build-image.outputs.app_image_tag }}
+      TFVARS_CONTENT: ${{ secrets.TFVARS_CONTENT }}
+      TF_BACKEND_CONFIG_CONTENT: ${{ secrets.TF_BACKEND_CONFIG_CONTENT }}
+      EC2_SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_PRIVATE_KEY }}
+      ANSIBLE_PRODUCTION_ENV: ${{ secrets.ANSIBLE_PRODUCTION_ENV }}
+      AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME || secrets.AWS_ROLE_ARN }}
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Validate deployment configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${AWS_ROLE_TO_ASSUME:?Configure AWS_ROLE_TO_ASSUME secret, or legacy AWS_ROLE_ARN}"
+          : "${EC2_SSH_PRIVATE_KEY:?Configure EC2_SSH_PRIVATE_KEY secret}"
+          : "${ANSIBLE_PRODUCTION_ENV:?Configure ANSIBLE_PRODUCTION_ENV secret with the production .env content}"
+          : "${APP_IMAGE_REPOSITORY:?Configure APP_IMAGE_REPOSITORY repository variable}"
+          : "${APP_IMAGE_TAG:?Missing Docker image tag from build job}"
+
+          if [[ -z "${TF_BACKEND_CONFIG_CONTENT}" && -z "${TF_STATE_BUCKET}" ]]; then
+            echo "Configure either TF_BACKEND_CONFIG_CONTENT secret or TF_STATE_BUCKET variable/secret."
+            exit 1
+          fi
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Ansible
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install ansible
+
+      - name: Write deployment files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/.tmp" "$GITHUB_WORKSPACE/infra/ec2/ansible/env"
+
+          printf '%s\n' "$EC2_SSH_PRIVATE_KEY" | tr -d '\r' > "$GITHUB_WORKSPACE/.tmp/deploy-ssh-key.pem"
+          chmod 600 "$GITHUB_WORKSPACE/.tmp/deploy-ssh-key.pem"
+          ssh-keygen -y -f "$GITHUB_WORKSPACE/.tmp/deploy-ssh-key.pem" > "$GITHUB_WORKSPACE/.tmp/deploy-ssh-key.pub"
+
+          printf '%s\n' "$ANSIBLE_PRODUCTION_ENV" > "$GITHUB_WORKSPACE/infra/ec2/ansible/env/production.env"
+          chmod 600 "$GITHUB_WORKSPACE/infra/ec2/ansible/env/production.env"
+
+          if [[ -n "${TF_BACKEND_CONFIG_CONTENT}" ]]; then
+            printf '%s\n' "$TF_BACKEND_CONFIG_CONTENT" > "$GITHUB_WORKSPACE/infra/ec2/terraform/backend.hcl"
+          fi
+
+          if [[ -n "${TFVARS_CONTENT}" ]]; then
+            printf '%s\n' "$TFVARS_CONTENT" > "$GITHUB_WORKSPACE/infra/ec2/terraform/terraform.tfvars"
+          fi
+
+      - name: Build SSH allowlist
+        id: ssh_cidrs
+        shell: bash
+        run: |
+          set -euo pipefail
+          runner_ip="$(curl -fsS https://checkip.amazonaws.com | tr -d '\n')"
+
+          RUNNER_CIDR="${runner_ip}/32" python3 - <<'PY'
+          import json
+          import os
+
+          runner = os.environ["RUNNER_CIDR"]
+          configured = os.environ.get("ADMIN_SSH_CIDR_BLOCKS", "[]").strip()
+
+          try:
+              values = json.loads(configured)
+              if isinstance(values, str):
+                  values = [values]
+          except json.JSONDecodeError:
+              values = [part.strip() for part in configured.split(",") if part.strip()]
+
+          cidrs = []
+          for value in [runner, *values]:
+              if value and value not in cidrs:
+                  cidrs.append(value)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"json={json.dumps(cidrs)}\n")
+          PY
+
+      - name: Deploy with Terraform and Ansible
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x ./infra/ec2/deploy.sh
+
+          args=(
+            --private-key "$GITHUB_WORKSPACE/.tmp/deploy-ssh-key.pem"
+            --ssh-public-key-file "$GITHUB_WORKSPACE/.tmp/deploy-ssh-key.pub"
+            --app-env-file "$GITHUB_WORKSPACE/infra/ec2/ansible/env/production.env"
+            --app-image-repository "$APP_IMAGE_REPOSITORY"
+            --app-image-tag "$APP_IMAGE_TAG"
+            --allowed-ssh-cidr-blocks-json '${{ steps.ssh_cidrs.outputs.json }}'
+            --run-db-migrations "$RUN_DB_MIGRATIONS"
+          )
+
+          if [[ -n "${AWS_REGION}" ]]; then
+            args+=(--aws-region "$AWS_REGION")
+          fi
+          if [[ -n "${TF_STATE_BUCKET}" ]]; then
+            args+=(--tf-state-bucket "$TF_STATE_BUCKET")
+          fi
+          if [[ -n "${TF_STATE_KEY}" ]]; then
+            args+=(--tf-state-key "$TF_STATE_KEY")
+          fi
+          if [[ -n "${TF_STATE_REGION}" ]]; then
+            args+=(--tf-state-region "$TF_STATE_REGION")
+          fi
+          if [[ -n "${TF_BACKEND_USE_LOCKFILE}" ]]; then
+            args+=(--tf-backend-use-lockfile "$TF_BACKEND_USE_LOCKFILE")
+          fi
+          if [[ -n "${TF_LOCK_TABLE}" ]]; then
+            args+=(--tf-lock-table "$TF_LOCK_TABLE")
+          fi
+          if [[ -n "${ADMIN_CIDR}" ]]; then
+            args+=(--admin-cidr "$ADMIN_CIDR")
+          fi
+          if [[ -n "${DOMAIN_NAME}" ]]; then
+            args+=(--domain "$DOMAIN_NAME")
+          fi
+          if [[ -n "${CADDY_EMAIL}" ]]; then
+            args+=(--email "$CADDY_EMAIL")
+          fi
+          if [[ -n "${INSTANCE_TYPE}" ]]; then
+            args+=(--instance-type "$INSTANCE_TYPE")
+          fi
+          if [[ -n "${INSTANCE_NAME}" ]]; then
+            args+=(--instance-name "$INSTANCE_NAME")
+          fi
+
+          ./infra/ec2/deploy.sh "${args[@]}"

@@ -6,17 +6,32 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DeepPartial, Not } from 'typeorm';
+import { Repository, DeepPartial, Not, In, DataSource } from 'typeorm';
 import type { Point } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcrypt';
 import { User, UserStatus } from './entities/user.entity';
 import { KycDocument, KycStatus } from './entities/kyc-document.entity';
-import { FavoriteLocation, FavoriteLocationType } from './entities/favorite-location.entity';
-import { UpdateProfileDto, UploadKycDto, SendPhoneVerificationOtpDto, VerifyPhoneOtpDto, PhoneVerificationContext, ChangePinDto, PublicUserInfoDto } from './dto/user.dto';
-import { CreateFavoriteLocationDto, UpdateFavoriteLocationDto, FavoriteLocationResponse } from './dto/favorite-location.dto';
-import { Trip } from '../trips/entities/trip.entity';
-import { Booking } from '../bookings/entities/booking.entity';
+import {
+  FavoriteLocation,
+  FavoriteLocationType,
+} from './entities/favorite-location.entity';
+import {
+  UpdateProfileDto,
+  UploadKycDto,
+  SendPhoneVerificationOtpDto,
+  VerifyPhoneOtpDto,
+  PhoneVerificationContext,
+  ChangePinDto,
+  PublicUserInfoDto,
+} from './dto/user.dto';
+import {
+  CreateFavoriteLocationDto,
+  UpdateFavoriteLocationDto,
+  FavoriteLocationResponse,
+} from './dto/favorite-location.dto';
+import { Trip, TripStatus } from '../trips/entities/trip.entity';
+import { Booking, BookingStatus } from '../bookings/entities/booking.entity';
 import { Message } from '../chat/entities/message.entity';
 import { Rating } from '../ratings/entities/rating.entity';
 import { Vehicle } from '../vehicles/entities/vehicle.entity';
@@ -25,7 +40,6 @@ import { KycValidationService } from '../common/services/kyc-validation.service'
 import { KeccelOtpService } from '../keccel-otp/keccel-otp.service';
 import { Express } from 'express';
 import { UserRole } from './entities/user.entity';
-import { DataSource } from 'typeorm';
 import { SubscriptionsService } from '../subscriptions/subscriptions.service';
 
 @Injectable()
@@ -55,11 +69,50 @@ export class UsersService {
     private subscriptionsService: SubscriptionsService,
     private readonly dataSource: DataSource,
     private configService: ConfigService,
-  ) { }
+  ) {}
 
   private toSafeUser(user: User) {
     const { password, refreshToken, ...safeUser } = user;
     return safeUser;
+  }
+
+  private collectAccountFiles(
+    user: User,
+    kycDocuments: KycDocument[],
+  ): string[] {
+    const filePaths = [
+      user.profilePicture,
+      ...kycDocuments.flatMap((document) => [
+        document.cniFrontUrl,
+        ...(Array.isArray(document.cniFrontUrls) ? document.cniFrontUrls : []),
+        document.cniBackUrl,
+        document.selfieUrl,
+      ]),
+    ];
+
+    return Array.from(
+      new Set(filePaths.filter((filePath): filePath is string => !!filePath)),
+    );
+  }
+
+  private async deleteAccountFiles(
+    filePaths: string[],
+    userId: string,
+  ): Promise<void> {
+    const results = await Promise.allSettled(
+      filePaths.map((filePath) => this.fileUploadService.deleteFile(filePath)),
+    );
+
+    results.forEach((result, index) => {
+      if (result.status === 'rejected') {
+        const reason: unknown = result.reason;
+        const reasonMessage =
+          reason instanceof Error ? reason.message : String(reason);
+        this.logger.warn(
+          `Failed to delete account file for user ${userId}: ${filePaths[index]} - ${reasonMessage}`,
+        );
+      }
+    });
   }
 
   /**
@@ -67,7 +120,10 @@ export class UsersService {
    */
   private async enrichUserWithPresignedUrls(user: User): Promise<User> {
     if (user.profilePicture) {
-      user.profilePicture = await this.fileUploadService.getPresignedUrlIfS3Key(user.profilePicture) || user.profilePicture;
+      user.profilePicture =
+        (await this.fileUploadService.getPresignedUrlIfS3Key(
+          user.profilePicture,
+        )) || user.profilePicture;
     }
     return user;
   }
@@ -75,23 +131,34 @@ export class UsersService {
   /**
    * Convert S3 keys to presigned URLs for KYC documents
    */
-  private async enrichKycWithPresignedUrls(kyc: KycDocument): Promise<KycDocument> {
+  private async enrichKycWithPresignedUrls(
+    kyc: KycDocument,
+  ): Promise<KycDocument> {
     if (kyc.cniFrontUrl) {
-      kyc.cniFrontUrl = await this.fileUploadService.getPresignedUrlIfS3Key(kyc.cniFrontUrl) || kyc.cniFrontUrl;
+      kyc.cniFrontUrl =
+        (await this.fileUploadService.getPresignedUrlIfS3Key(
+          kyc.cniFrontUrl,
+        )) || kyc.cniFrontUrl;
     }
     // Handle array of CNI front URLs
     if (kyc.cniFrontUrls && Array.isArray(kyc.cniFrontUrls)) {
       kyc.cniFrontUrls = await Promise.all(
-        kyc.cniFrontUrls.map(url =>
-          this.fileUploadService.getPresignedUrlIfS3Key(url).then(presigned => presigned || url)
-        )
+        kyc.cniFrontUrls.map((url) =>
+          this.fileUploadService
+            .getPresignedUrlIfS3Key(url)
+            .then((presigned) => presigned || url),
+        ),
       );
     }
     if (kyc.cniBackUrl) {
-      kyc.cniBackUrl = await this.fileUploadService.getPresignedUrlIfS3Key(kyc.cniBackUrl) || kyc.cniBackUrl;
+      kyc.cniBackUrl =
+        (await this.fileUploadService.getPresignedUrlIfS3Key(kyc.cniBackUrl)) ||
+        kyc.cniBackUrl;
     }
     if (kyc.selfieUrl) {
-      kyc.selfieUrl = await this.fileUploadService.getPresignedUrlIfS3Key(kyc.selfieUrl) || kyc.selfieUrl;
+      kyc.selfieUrl =
+        (await this.fileUploadService.getPresignedUrlIfS3Key(kyc.selfieUrl)) ||
+        kyc.selfieUrl;
     }
     return kyc;
   }
@@ -114,23 +181,19 @@ export class UsersService {
 
   async getProfileSummary(userId: string) {
     const user = await this.findOne(userId);
-    console.log("this user:", user);
+    console.log('this user:', user);
 
-    const [
-      tripsAsDriver,
-      bookingsAsPassenger,
-      bookingsAsDriver,
-      messagesSent,
-    ] = await Promise.all([
-      this.tripRepository.count({ where: { driverId: userId } }),
-      this.bookingRepository.count({ where: { passengerId: userId } }),
-      this.bookingRepository
-        .createQueryBuilder('booking')
-        .innerJoin('booking.trip', 'trip')
-        .where('trip.driverId = :userId', { userId })
-        .getCount(),
-      this.messageRepository.count({ where: { senderId: userId } }),
-    ]);
+    const [tripsAsDriver, bookingsAsPassenger, bookingsAsDriver, messagesSent] =
+      await Promise.all([
+        this.tripRepository.count({ where: { driverId: userId } }),
+        this.bookingRepository.count({ where: { passengerId: userId } }),
+        this.bookingRepository
+          .createQueryBuilder('booking')
+          .innerJoin('booking.trip', 'trip')
+          .where('trip.driverId = :userId', { userId })
+          .getCount(),
+        this.messageRepository.count({ where: { senderId: userId } }),
+      ]);
 
     // Convert S3 keys to presigned URLs
     const enrichedUser = await this.enrichUserWithPresignedUrls(user);
@@ -152,6 +215,149 @@ export class UsersService {
     };
   }
 
+  async deactivateAccount(userId: string): Promise<{ message: string }> {
+    this.logger.warn(`Deleting account for user: ${userId}`);
+
+    const user = await this.findOne(userId);
+
+    const alreadyDeleted =
+      user.status === UserStatus.INACTIVE &&
+      !user.isActive &&
+      !user.email &&
+      !user.phone &&
+      !user.googleId &&
+      !user.appleId;
+
+    if (alreadyDeleted) {
+      return { message: 'Compte déjà supprimé' };
+    }
+
+    const kycDocuments = (await this.kycDocumentRepository.find({
+      where: { userId },
+    })) as KycDocument[];
+    const filesToDelete = this.collectAccountFiles(user, kycDocuments);
+    const now = new Date();
+    const cancellableBookingStatuses = [
+      BookingStatus.PENDING,
+      BookingStatus.ACCEPTED,
+    ];
+
+    const activeDriverTrips = await this.tripRepository.find({
+      select: ['id'],
+      where: {
+        driverId: userId,
+        status: In([TripStatus.PENDING, TripStatus.ACTIVE]),
+      },
+    });
+    const activeDriverTripIds = activeDriverTrips.map((trip) => trip.id);
+    const activeDriverTripIdSet = new Set(activeDriverTripIds);
+
+    const passengerBookingsToCancel = await this.bookingRepository.find({
+      where: {
+        passengerId: userId,
+        status: In(cancellableBookingStatuses),
+      },
+      relations: ['trip'],
+    });
+    const passengerBookingIds = passengerBookingsToCancel.map(
+      (booking) => booking.id,
+    );
+    const seatsToRestoreByTrip = new Map<
+      string,
+      { availableSeats: number; totalSeats: number | null; seats: number }
+    >();
+
+    for (const booking of passengerBookingsToCancel) {
+      if (
+        activeDriverTripIdSet.has(booking.tripId) ||
+        !booking.trip ||
+        ![TripStatus.PENDING, TripStatus.ACTIVE].includes(booking.trip.status)
+      ) {
+        continue;
+      }
+
+      const current = seatsToRestoreByTrip.get(booking.tripId) ?? {
+        availableSeats: booking.trip.availableSeats,
+        totalSeats: booking.trip.totalSeats,
+        seats: 0,
+      };
+      current.seats += booking.numberOfSeats;
+      seatsToRestoreByTrip.set(booking.tripId, current);
+    }
+
+    await this.dataSource.transaction(async (manager) => {
+      const userRepository = manager.getRepository(User);
+      const vehicleRepository = manager.getRepository(Vehicle);
+      const kycDocumentRepository = manager.getRepository(KycDocument);
+      const favoriteLocationRepository =
+        manager.getRepository(FavoriteLocation);
+      const tripRepository = manager.getRepository(Trip);
+      const bookingRepository = manager.getRepository(Booking);
+
+      if (passengerBookingIds.length > 0) {
+        await bookingRepository.update(
+          { id: In(passengerBookingIds) },
+          { status: BookingStatus.CANCELLED, cancelledAt: now },
+        );
+
+        for (const [tripId, restore] of seatsToRestoreByTrip.entries()) {
+          const maxSeats =
+            restore.totalSeats ?? restore.availableSeats + restore.seats;
+          await tripRepository.update(tripId, {
+            availableSeats: Math.min(
+              maxSeats,
+              restore.availableSeats + restore.seats,
+            ),
+          });
+        }
+      }
+
+      if (activeDriverTripIds.length > 0) {
+        await bookingRepository.update(
+          {
+            tripId: In(activeDriverTripIds),
+            status: In(cancellableBookingStatuses),
+          },
+          { status: BookingStatus.CANCELLED, cancelledAt: now },
+        );
+        await tripRepository.update(
+          { id: In(activeDriverTripIds) },
+          { status: TripStatus.CANCELLED },
+        );
+      }
+
+      await favoriteLocationRepository.delete({ userId });
+      await kycDocumentRepository.delete({ userId });
+      await vehicleRepository.update({ ownerId: userId }, { isActive: false });
+      await userRepository.update(userId, {
+        email: () => 'NULL',
+        googleId: () => 'NULL',
+        appleId: () => 'NULL',
+        phone: () => 'NULL',
+        password: () => 'NULL',
+        firstName: 'Compte',
+        lastName: 'supprimé',
+        profilePicture: () => 'NULL',
+        role: UserRole.PASSENGER,
+        status: UserStatus.INACTIVE,
+        fcmToken: null,
+        isEmailVerified: false,
+        isPhoneVerified: false,
+        isActive: false,
+        isDriver: false,
+        accessToken: null,
+        refreshToken: null,
+        lastLoginAt: () => 'NULL',
+      });
+    });
+
+    await this.deleteAccountFiles(filesToDelete, userId);
+
+    this.logger.warn(`Account deleted for user: ${userId}`);
+
+    return { message: 'Compte supprimé avec succès' };
+  }
+
   async findByEmail(email: string): Promise<User | null> {
     return this.userRepository.findOne({ where: { email } });
   }
@@ -171,7 +377,9 @@ export class UsersService {
       });
 
       if (existingUser) {
-        this.logger.warn(`Profile update failed: Phone ${updateProfileDto.phone} already exists`);
+        this.logger.warn(
+          `Profile update failed: Phone ${updateProfileDto.phone} already exists`,
+        );
         throw new BadRequestException('Ce numéro de téléphone existe déjà');
       }
     }
@@ -239,21 +447,25 @@ export class UsersService {
     }
 
     // 2. Existing KYC Check Logic (Allow RETRY if REJECTED)
-    const existingKyc = await this.kycDocumentRepository.findOne({ where: { userId } });
+    const existingKyc = await this.kycDocumentRepository.findOne({
+      where: { userId },
+    });
 
     if (existingKyc) {
       if (existingKyc.status === KycStatus.APPROVED) {
         throw new BadRequestException(
-          'ÉCHEC : Votre document KYC a déjà été approuvé. Vous ne pouvez pas soumettre un nouveau document KYC.'
+          'ÉCHEC : Votre document KYC a déjà été approuvé. Vous ne pouvez pas soumettre un nouveau document KYC.',
         );
       }
       if (existingKyc.status === KycStatus.PENDING) {
         throw new BadRequestException(
-          'ÉCHEC : Vous avez déjà un document KYC en attente de vérification. Veuillez patienter pendant que nous examinons votre demande.'
+          'ÉCHEC : Vous avez déjà un document KYC en attente de vérification. Veuillez patienter pendant que nous examinons votre demande.',
         );
       }
       // If REJECTED, we continue: the new document will replace/update the old one
-      this.logger.log(`[KYC Upload] Previous KYC was REJECTED, allowing new submission`);
+      this.logger.log(
+        `[KYC Upload] Previous KYC was REJECTED, allowing new submission`,
+      );
     }
 
     // 3. File Presence Check
@@ -261,9 +473,9 @@ export class UsersService {
     const cniBackFile = files?.cniBack?.[0];
     const selfieFile = files?.selfie?.[0];
 
-    if (cniFrontFiles.length === 0 || cniFrontFiles.length > 2) {
+    if (cniFrontFiles.length > 2) {
       throw new BadRequestException(
-        `ÉCHEC : Nombre de photos CNI invalide. Veuillez fournir 1 ou 2 photos du recto de votre carte d'identité (${cniFrontFiles.length} fourni${cniFrontFiles.length > 1 ? 'es' : 'e'}).`
+        `ÉCHEC : Nombre de photos CNI invalide. Vous pouvez fournir au maximum 2 photos du recto de votre carte d'identité (${cniFrontFiles.length} fournies).`,
       );
     }
 
@@ -273,13 +485,16 @@ export class UsersService {
       if (!selfieFile) missingFiles.push('selfie (photo selfie)');
 
       throw new BadRequestException(
-        `ÉCHEC : Fichiers manquants. Veuillez fournir tous les documents requis.\n\nFichiers manquants : ${missingFiles.join(', ')}\n\nTous les fichiers suivants sont requis :\n- cniFront : 1 ou 2 photos du recto de votre carte d'identité\n- cniBack : Photo du verso de votre carte d'identité\n- selfie : Photo selfie de vous-même`
+        `ÉCHEC : Fichiers manquants. Veuillez fournir tous les documents requis.\n\nFichiers manquants : ${missingFiles.join(', ')}\n\nTous les fichiers suivants sont requis :\n- cniBack : Photo du verso de votre carte d'identité\n- selfie : Photo selfie de vous-même`,
       );
     }
 
     // 4. S3 File Upload (External execution, before the transaction starts)
-    const cniFrontUrls = await Promise.all(
-      cniFrontFiles.map(file => this.fileUploadService.saveFile(file, 'kyc'))
+    const uploadedCniFrontUrls = await Promise.all(
+      cniFrontFiles.map((file) => this.fileUploadService.saveFile(file, 'kyc')),
+    );
+    const cniFrontUrls = uploadedCniFrontUrls.filter((url): url is string =>
+      Boolean(url),
     );
     const [cniBackUrl, selfieUrl] = await Promise.all([
       this.fileUploadService.saveFile(cniBackFile, 'kyc'),
@@ -287,7 +502,7 @@ export class UsersService {
     ]);
 
     // Keep first CNI front URL for backward compatibility
-    const cniFrontUrl = cniFrontUrls[0];
+    const cniFrontUrl = cniFrontUrls[0] ?? null;
 
     // 5. KYC Validation (with error handling)
     let kycStatus = KycStatus.PENDING;
@@ -295,21 +510,32 @@ export class UsersService {
     let isApprovalConfirmed = false;
 
     // Only perform KYC validation if AWS Rekognition is enabled
-    const kycValidationEnabled = this.configService.get<string>('AWS_REKOGNITION_KYC_ENABLED') === 'true';
+    const kycValidationEnabled =
+      this.configService.get<string>('AWS_REKOGNITION_KYC_ENABLED') === 'true';
 
     this.logger.log(`[KYC Upload] ========================================`);
     this.logger.log(`[KYC Upload] Processing KYC upload for user: ${userId}`);
-    this.logger.log(`[KYC Upload] KYC validation enabled: ${kycValidationEnabled}`);
-    this.logger.log(`[KYC Upload] CNI front files: ${cniFrontFiles.length} photo(s)`);
+    this.logger.log(
+      `[KYC Upload] KYC validation enabled: ${kycValidationEnabled}`,
+    );
+    this.logger.log(
+      `[KYC Upload] CNI front files: ${cniFrontFiles.length} photo(s)`,
+    );
     cniFrontFiles.forEach((file, idx) => {
-      this.logger.log(`[KYC Upload]   - CNI front ${idx + 1}: ${file.originalname} (${file.size} bytes)`);
+      this.logger.log(
+        `[KYC Upload]   - CNI front ${idx + 1}: ${file.originalname} (${file.size} bytes)`,
+      );
     });
-    this.logger.log(`[KYC Upload] Selfie file: ${selfieFile.originalname} (${selfieFile.size} bytes)`);
+    this.logger.log(
+      `[KYC Upload] Selfie file: ${selfieFile.originalname} (${selfieFile.size} bytes)`,
+    );
 
-    if (kycValidationEnabled) {
+    if (kycValidationEnabled && cniFrontFiles.length > 0) {
       try {
-        this.logger.log(`[KYC Upload] Starting AI validation for user: ${userId}`);
-        const cniFrontBuffers = cniFrontFiles.map(file => file.buffer);
+        this.logger.log(
+          `[KYC Upload] Starting AI validation for user: ${userId}`,
+        );
+        const cniFrontBuffers = cniFrontFiles.map((file) => file.buffer);
         const validationResult = await this.kycValidationService.validateKyc(
           cniFrontBuffers,
           selfieFile.buffer,
@@ -317,21 +543,32 @@ export class UsersService {
 
         this.logger.log(`[KYC Upload] Validation result received:`);
         this.logger.log(`[KYC Upload]   - Valid: ${validationResult.isValid}`);
-        this.logger.log(`[KYC Upload]   - Face match: ${validationResult.faceMatch.matched} (similarity: ${validationResult.faceMatch.similarity.toFixed(2)}%)`);
-        this.logger.log(`[KYC Upload]   - CNI face detected: ${validationResult.faceDetection.cniFront}`);
-        this.logger.log(`[KYC Upload]   - Selfie face detected: ${validationResult.faceDetection.selfie}`);
+        this.logger.log(
+          `[KYC Upload]   - Face match: ${validationResult.faceMatch.matched} (similarity: ${validationResult.faceMatch.similarity.toFixed(2)}%)`,
+        );
+        this.logger.log(
+          `[KYC Upload]   - CNI face detected: ${validationResult.faceDetection.cniFront}`,
+        );
+        this.logger.log(
+          `[KYC Upload]   - Selfie face detected: ${validationResult.faceDetection.selfie}`,
+        );
         if (validationResult.reason) {
-          this.logger.log(`[KYC Upload]   - Reason: ${validationResult.reason}`);
+          this.logger.log(
+            `[KYC Upload]   - Reason: ${validationResult.reason}`,
+          );
         }
 
         if (validationResult.isValid) {
           kycStatus = KycStatus.APPROVED;
           isApprovalConfirmed = true;
-          this.logger.log(`[KYC Upload] ✅ KYC validation SUCCESSFUL for user: ${userId} - Status set to APPROVED`);
+          this.logger.log(
+            `[KYC Upload] ✅ KYC validation SUCCESSFUL for user: ${userId} - Status set to APPROVED`,
+          );
         } else {
           kycStatus = KycStatus.REJECTED;
           // Construire un message d'erreur détaillé avec toutes les informations
-          let detailedReason = validationResult.reason || 'ÉCHEC : Validation KYC échouée';
+          let detailedReason =
+            validationResult.reason || 'ÉCHEC : Validation KYC échouée';
 
           // Ajouter les détails techniques si disponibles
           if (validationResult.details) {
@@ -354,11 +591,14 @@ export class UsersService {
               detailedReason += `\n- Score de similarité : ${details.similarityScore.toFixed(1)}% (minimum requis : ${details.minRequiredSimilarity || this.configService.get<string>('AWS_REKOGNITION_KYC_MIN_SIMILARITY') || '80'}%)`;
             }
 
-            if (details.cniQuality !== undefined || details.selfieQuality !== undefined) {
+            if (
+              details.cniQuality !== undefined ||
+              details.selfieQuality !== undefined
+            ) {
               detailedReason += '\n- Qualité des images :';
               if (details.cniQuality !== undefined) {
                 if (Array.isArray(details.cniQuality)) {
-                  detailedReason += `\n  • CNI : ${details.cniQuality.map(q => q.toFixed(1)).join('%, ')}%`;
+                  detailedReason += `\n  • CNI : ${details.cniQuality.map((q) => q.toFixed(1)).join('%, ')}%`;
                 } else {
                   detailedReason += `\n  • CNI : ${details.cniQuality.toFixed(1)}%`;
                 }
@@ -377,15 +617,21 @@ export class UsersService {
           }
 
           rejectionReason = detailedReason;
-          this.logger.warn(`[KYC Upload] ❌ KYC validation FAILED for user: ${userId}`);
+          this.logger.warn(
+            `[KYC Upload] ❌ KYC validation FAILED for user: ${userId}`,
+          );
           this.logger.warn(`[KYC Upload] Reason: ${validationResult.reason}`);
           if (validationResult.details?.issue) {
-            this.logger.warn(`[KYC Upload] Issue type: ${validationResult.details.issue}`);
+            this.logger.warn(
+              `[KYC Upload] Issue type: ${validationResult.details.issue}`,
+            );
           }
           this.logger.warn(`[KYC Upload] Status set to REJECTED`);
         }
       } catch (error: any) {
-        this.logger.error(`[KYC Upload] ❌ KYC validation ERROR for user: ${userId}:`);
+        this.logger.error(
+          `[KYC Upload] ❌ KYC validation ERROR for user: ${userId}:`,
+        );
         this.logger.error(`[KYC Upload] Error message: ${error.message}`);
         this.logger.error(`[KYC Upload] Error stack: ${error.stack}`);
 
@@ -396,25 +642,54 @@ export class UsersService {
         const errorMessage = error.message || 'Erreur inconnue';
         rejectionReason = `VALIDATION MANUELLE REQUISE : Le service de validation automatique n'est pas disponible actuellement.\n\nVotre demande sera examinée manuellement par notre équipe dans les plus brefs délais.\n\nRaison technique : ${errorMessage}`;
 
-        this.logger.warn(`[KYC Upload] ⚠️ KYC validation service unavailable - Status set to PENDING for manual review`);
-        this.logger.warn(`[KYC Upload] User will be notified that manual review is required`);
+        this.logger.warn(
+          `[KYC Upload] ⚠️ KYC validation service unavailable - Status set to PENDING for manual review`,
+        );
+        this.logger.warn(
+          `[KYC Upload] User will be notified that manual review is required`,
+        );
       }
+    } else if (kycValidationEnabled) {
+      rejectionReason = `VALIDATION MANUELLE REQUISE : Le recto de la carte d'identité n'a pas été fourni. La validation automatique ne peut pas comparer le document au selfie.`;
+      this.logger.warn(
+        `[KYC Upload] ⚠️ KYC validation skipped because cniFront was not provided`,
+      );
+      this.logger.warn(
+        `[KYC Upload] Action: Keeping status as PENDING for manual review`,
+      );
+      kycStatus = KycStatus.PENDING;
     } else {
-      const kycEnabledConfig = this.configService.get<string>('AWS_REKOGNITION_KYC_ENABLED');
+      const kycEnabledConfig = this.configService.get<string>(
+        'AWS_REKOGNITION_KYC_ENABLED',
+      );
       const accessKeyId = this.configService.get<string>('AWS_ACCESS_KEY_ID');
-      const secretAccessKey = this.configService.get<string>('AWS_SECRET_ACCESS_KEY');
+      const secretAccessKey = this.configService.get<string>(
+        'AWS_SECRET_ACCESS_KEY',
+      );
 
       this.logger.warn(`[KYC Upload] ⚠️ KYC validation is DISABLED`);
-      this.logger.warn(`[KYC Upload] Reason: AWS_REKOGNITION_KYC_ENABLED="${kycEnabledConfig || 'NOT SET'}" (must be "true" to enable)`);
+      this.logger.warn(
+        `[KYC Upload] Reason: AWS_REKOGNITION_KYC_ENABLED="${kycEnabledConfig || 'NOT SET'}" (must be "true" to enable)`,
+      );
 
       if (!accessKeyId || !secretAccessKey) {
-        this.logger.warn(`[KYC Upload] Additional issue: AWS credentials not configured`);
-        this.logger.warn(`[KYC Upload]   - AWS_ACCESS_KEY_ID: ${accessKeyId ? 'configured' : 'NOT SET'}`);
-        this.logger.warn(`[KYC Upload]   - AWS_SECRET_ACCESS_KEY: ${secretAccessKey ? 'configured' : 'NOT SET'}`);
+        this.logger.warn(
+          `[KYC Upload] Additional issue: AWS credentials not configured`,
+        );
+        this.logger.warn(
+          `[KYC Upload]   - AWS_ACCESS_KEY_ID: ${accessKeyId ? 'configured' : 'NOT SET'}`,
+        );
+        this.logger.warn(
+          `[KYC Upload]   - AWS_SECRET_ACCESS_KEY: ${secretAccessKey ? 'configured' : 'NOT SET'}`,
+        );
       }
 
-      this.logger.warn(`[KYC Upload] Action: Keeping status as PENDING for manual review`);
-      this.logger.warn(`[KYC Upload] To enable AI validation, set AWS_REKOGNITION_KYC_ENABLED=true and configure AWS credentials`);
+      this.logger.warn(
+        `[KYC Upload] Action: Keeping status as PENDING for manual review`,
+      );
+      this.logger.warn(
+        `[KYC Upload] To enable AI validation, set AWS_REKOGNITION_KYC_ENABLED=true and configure AWS credentials`,
+      );
 
       // When KYC validation is disabled, keep status as PENDING for manual review
       kycStatus = KycStatus.PENDING;
@@ -429,21 +704,20 @@ export class UsersService {
     await queryRunner.connect();
     await queryRunner.startTransaction();
 
-
     try {
       // Prepare the KYC document (TypeORM FIX: Pass the 'user' object)
       let kycDocument = existingKyc
         ? this.kycDocumentRepository.merge(existingKyc, {})
         : this.kycDocumentRepository.create({
-          userId, // <-- TypeORM BUG FIX: Pass the user object
-          cniFrontUrl,
-          cniFrontUrls, // Store array of CNI front URLs
-          cniBackUrl,
-          selfieUrl,
-          status: kycStatus,
-          rejectionReason,
-          documentNumber: uploadKycDto.documentNumber,
-        });
+            userId, // <-- TypeORM BUG FIX: Pass the user object
+            cniFrontUrl,
+            cniFrontUrls, // Store array of CNI front URLs
+            cniBackUrl,
+            selfieUrl,
+            status: kycStatus,
+            rejectionReason,
+            documentNumber: uploadKycDto.documentNumber,
+          });
 
       kycDocument = queryRunner.manager.merge(KycDocument, kycDocument, {
         user: user, // <-- TypeORM BUG FIX: Pass the user object
@@ -462,27 +736,32 @@ export class UsersService {
       if (isApprovalConfirmed) {
         user.status = UserStatus.ACTIVE;
         await queryRunner.manager.save(user); // Transactional user save
-        this.logger.log(`User ${userId} status updated to ACTIVE after KYC approval`);
+        this.logger.log(
+          `User ${userId} status updated to ACTIVE after KYC approval`,
+        );
       }
 
       await queryRunner.commitTransaction();
 
-      this.logger.log(`KYC documents uploaded successfully for user: ${userId} (Status: ${kycStatus})`);
+      this.logger.log(
+        `KYC documents uploaded successfully for user: ${userId} (Status: ${kycStatus})`,
+      );
 
       // Convert S3 keys to presigned URLs
       return await this.enrichKycWithPresignedUrls(savedKyc);
-
     } catch (error: any) {
       await queryRunner.rollbackTransaction();
       this.logger.error(`Transaction failed for user ${userId}`, error.stack);
 
       // 7. NEW: S3 File Cleanup Process 🗑️
       try {
-        this.logger.warn(`Transaction failed. Starting cleanup for S3 files for user: ${userId}`);
+        this.logger.warn(
+          `Transaction failed. Starting cleanup for S3 files for user: ${userId}`,
+        );
 
         // Parallel deletion of all uploaded files
         await Promise.all([
-          ...cniFrontUrls.map(url => this.fileUploadService.deleteFile(url)),
+          ...cniFrontUrls.map((url) => this.fileUploadService.deleteFile(url)),
           this.fileUploadService.deleteFile(cniBackUrl),
           this.fileUploadService.deleteFile(selfieUrl),
         ]);
@@ -492,7 +771,7 @@ export class UsersService {
         // If cleanup fails, we log the error but still throw the original transaction error.
         this.logger.error(
           `FATAL: Failed to clean up S3 files after transaction rollback. Orphaned files remaining.`,
-          cleanupError.stack
+          cleanupError.stack,
         );
       }
 
@@ -502,14 +781,13 @@ export class UsersService {
     }
   }
 
-
   async getKycStatus(userId: string): Promise<KycDocument | null> {
     const kyc = await this.kycDocumentRepository.findOneBy({
-      userId: userId
+      userId: userId,
     });
 
     this.logger.log(`Fetching KYC status for user: ${kyc} ${userId}`);
-    console.log("kyc", kyc);
+    console.log('kyc', kyc);
 
     if (!kyc) {
       return null;
@@ -517,10 +795,10 @@ export class UsersService {
 
     const thisUserKyc = await this.enrichKycWithPresignedUrls(kyc);
 
-    console.log("thiskyc", thisUserKyc);
+    console.log('thiskyc', thisUserKyc);
 
     // Convert S3 keys to presigned URLs before returning
-    return thisUserKyc
+    return thisUserKyc;
   }
 
   async updateFcmToken(userId: string, fcmToken: string): Promise<void> {
@@ -541,7 +819,9 @@ export class UsersService {
   async sendPhoneVerificationOtp(
     sendOtpDto: SendPhoneVerificationOtpDto,
   ): Promise<{ message: string }> {
-    this.logger.log(`Sending phone verification OTP to: ${sendOtpDto.phone} (context: ${sendOtpDto.context})`);
+    this.logger.log(
+      `Sending phone verification OTP to: ${sendOtpDto.phone} (context: ${sendOtpDto.context})`,
+    );
 
     // Check if phone number already exists in database
     const existingUser = await this.userRepository.findOne({
@@ -552,14 +832,25 @@ export class UsersService {
     if (sendOtpDto.context === PhoneVerificationContext.REGISTRATION) {
       // For registration: if user exists, return error
       if (existingUser) {
-        this.logger.warn(`Registration failed: Phone ${sendOtpDto.phone} already exists`);
-        throw new BadRequestException('Ce numéro de téléphone est déjà utilisé');
+        this.logger.warn(
+          `Registration failed: Phone ${sendOtpDto.phone} already exists`,
+        );
+        throw new BadRequestException(
+          'Ce numéro de téléphone est déjà utilisé',
+        );
       }
-    } else if (sendOtpDto.context === PhoneVerificationContext.LOGIN || sendOtpDto.context === PhoneVerificationContext.UPDATE) {
+    } else if (
+      sendOtpDto.context === PhoneVerificationContext.LOGIN ||
+      sendOtpDto.context === PhoneVerificationContext.UPDATE
+    ) {
       // For login or update: if user doesn't exist, return error
       if (!existingUser) {
-        this.logger.warn(`Login/Update failed: Phone ${sendOtpDto.phone} not found`);
-        throw new BadRequestException('Aucun compte trouvé avec ce numéro de téléphone');
+        this.logger.warn(
+          `Login/Update failed: Phone ${sendOtpDto.phone} not found`,
+        );
+        throw new BadRequestException(
+          'Aucun compte trouvé avec ce numéro de téléphone',
+        );
       }
     }
 
@@ -567,7 +858,9 @@ export class UsersService {
     const message = 'Votre code de vérification Zwanga est : %OTP%';
     await this.keccelOtpService.sendOtp(sendOtpDto.phone.trim(), message);
 
-    this.logger.log(`Phone verification OTP sent successfully to ${sendOtpDto.phone} (context: ${sendOtpDto.context})`);
+    this.logger.log(
+      `Phone verification OTP sent successfully to ${sendOtpDto.phone} (context: ${sendOtpDto.context})`,
+    );
     return { message: 'Code de vérification envoyé avec succès' };
   }
 
@@ -588,12 +881,16 @@ export class UsersService {
     );
 
     if (!verificationResult.valid) {
-      this.logger.warn(`Phone verification failed: Invalid OTP for phone ${verifyOtpDto.phone}`);
+      this.logger.warn(
+        `Phone verification failed: Invalid OTP for phone ${verifyOtpDto.phone}`,
+      );
       throw new BadRequestException('Code OTP invalide ou expiré');
     }
 
     // Just return the verification result without modifying any user data
-    this.logger.log(`Phone OTP verified successfully for: ${verifyOtpDto.phone}`);
+    this.logger.log(
+      `Phone OTP verified successfully for: ${verifyOtpDto.phone}`,
+    );
     return {
       message: 'Code OTP vérifié avec succès',
       valid: true,
@@ -603,7 +900,9 @@ export class UsersService {
   // ==================== PIN Management Methods ====================
 
   async changePin(userId: string, changePinDto: ChangePinDto): Promise<void> {
-    this.logger.log(`Changing PIN for user ${userId}${changePinDto.oldPin ? ' (with old PIN verification)' : ' (old PIN not provided - reset mode)'}`);
+    this.logger.log(
+      `Changing PIN for user ${userId}${changePinDto.oldPin ? ' (with old PIN verification)' : ' (old PIN not provided - reset mode)'}`,
+    );
 
     const user = await this.findOne(userId);
 
@@ -611,26 +910,41 @@ export class UsersService {
     if (changePinDto.oldPin) {
       // Check if user has a PIN set
       if (!user.password) {
-        this.logger.warn(`PIN change failed: User ${userId} does not have a PIN set but provided old PIN`);
-        throw new BadRequestException('Aucun code PIN défini pour ce compte. Veuillez d\'abord définir un code PIN.');
+        this.logger.warn(
+          `PIN change failed: User ${userId} does not have a PIN set but provided old PIN`,
+        );
+        throw new BadRequestException(
+          "Aucun code PIN défini pour ce compte. Veuillez d'abord définir un code PIN.",
+        );
       }
 
       // Verify old PIN
-      const isOldPinValid = await bcrypt.compare(changePinDto.oldPin, user.password);
+      const isOldPinValid = await bcrypt.compare(
+        changePinDto.oldPin,
+        user.password,
+      );
 
       if (!isOldPinValid) {
-        this.logger.warn(`PIN change failed: Invalid old PIN for user ${userId}`);
+        this.logger.warn(
+          `PIN change failed: Invalid old PIN for user ${userId}`,
+        );
         throw new UnauthorizedException('Ancien code PIN invalide');
       }
 
       // Check if new PIN is different from old PIN
       if (changePinDto.oldPin === changePinDto.newPin) {
-        this.logger.warn(`PIN change failed: New PIN is the same as old PIN for user ${userId}`);
-        throw new BadRequestException('Le nouveau code PIN doit être différent de l\'ancien');
+        this.logger.warn(
+          `PIN change failed: New PIN is the same as old PIN for user ${userId}`,
+        );
+        throw new BadRequestException(
+          "Le nouveau code PIN doit être différent de l'ancien",
+        );
       }
     } else {
       // Old PIN not provided - allow PIN reset (user forgot their PIN)
-      this.logger.log(`PIN reset requested for user ${userId} (old PIN not provided)`);
+      this.logger.log(
+        `PIN reset requested for user ${userId} (old PIN not provided)`,
+      );
       // No verification needed, proceed with PIN reset
     }
 
@@ -642,18 +956,28 @@ export class UsersService {
     user.password = hashedNewPin;
     await this.userRepository.save(user);
 
-    this.logger.log(`PIN ${changePinDto.oldPin ? 'changed' : 'reset'} successfully for user ${userId}`);
+    this.logger.log(
+      `PIN ${changePinDto.oldPin ? 'changed' : 'reset'} successfully for user ${userId}`,
+    );
   }
 
   // ==================== Favorite Locations Methods ====================
 
-  async createFavoriteLocation(userId: string, createDto: CreateFavoriteLocationDto): Promise<FavoriteLocationResponse> {
-    this.logger.log(`Creating favorite location for user ${userId}: ${createDto.name}`);
+  async createFavoriteLocation(
+    userId: string,
+    createDto: CreateFavoriteLocationDto,
+  ): Promise<FavoriteLocationResponse> {
+    this.logger.log(
+      `Creating favorite location for user ${userId}: ${createDto.name}`,
+    );
 
     // Build Point from coordinates
     const point: Point = {
       type: 'Point',
-      coordinates: [createDto.coordinates.longitude, createDto.coordinates.latitude],
+      coordinates: [
+        createDto.coordinates.longitude,
+        createDto.coordinates.latitude,
+      ],
     };
 
     // If setting as default, unset other defaults of the same type
@@ -684,7 +1008,9 @@ export class UsersService {
     return this.mapFavoriteLocationToResponse(saved);
   }
 
-  async findAllFavoriteLocations(userId: string): Promise<FavoriteLocationResponse[]> {
+  async findAllFavoriteLocations(
+    userId: string,
+  ): Promise<FavoriteLocationResponse[]> {
     this.logger.debug(`Fetching favorite locations for user ${userId}`);
 
     const locations = await this.favoriteLocationRepository.find({
@@ -695,13 +1021,18 @@ export class UsersService {
     return locations.map((loc) => this.mapFavoriteLocationToResponse(loc));
   }
 
-  async findFavoriteLocationById(userId: string, locationId: string): Promise<FavoriteLocationResponse> {
+  async findFavoriteLocationById(
+    userId: string,
+    locationId: string,
+  ): Promise<FavoriteLocationResponse> {
     const location = await this.favoriteLocationRepository.findOne({
       where: { id: locationId, userId },
     });
 
     if (!location) {
-      this.logger.warn(`Favorite location ${locationId} not found for user ${userId}`);
+      this.logger.warn(
+        `Favorite location ${locationId} not found for user ${userId}`,
+      );
       throw new NotFoundException('Lieu favori non trouvé');
     }
 
@@ -713,14 +1044,18 @@ export class UsersService {
     locationId: string,
     updateDto: UpdateFavoriteLocationDto,
   ): Promise<FavoriteLocationResponse> {
-    this.logger.log(`Updating favorite location ${locationId} for user ${userId}`);
+    this.logger.log(
+      `Updating favorite location ${locationId} for user ${userId}`,
+    );
 
     const location = await this.favoriteLocationRepository.findOne({
       where: { id: locationId, userId },
     });
 
     if (!location) {
-      this.logger.warn(`Favorite location ${locationId} not found for user ${userId}`);
+      this.logger.warn(
+        `Favorite location ${locationId} not found for user ${userId}`,
+      );
       throw new NotFoundException('Lieu favori non trouvé');
     }
 
@@ -742,7 +1077,10 @@ export class UsersService {
     if (updateDto.coordinates) {
       location.point = {
         type: 'Point',
-        coordinates: [updateDto.coordinates.longitude, updateDto.coordinates.latitude],
+        coordinates: [
+          updateDto.coordinates.longitude,
+          updateDto.coordinates.latitude,
+        ],
       };
     }
 
@@ -750,7 +1088,8 @@ export class UsersService {
     if (updateDto.name !== undefined) location.name = updateDto.name;
     if (updateDto.address !== undefined) location.address = updateDto.address;
     if (updateDto.type !== undefined) location.type = updateDto.type;
-    if (updateDto.isDefault !== undefined) location.isDefault = updateDto.isDefault;
+    if (updateDto.isDefault !== undefined)
+      location.isDefault = updateDto.isDefault;
     if (updateDto.notes !== undefined) location.notes = updateDto.notes;
 
     const updated = await this.favoriteLocationRepository.save(location);
@@ -759,15 +1098,22 @@ export class UsersService {
     return this.mapFavoriteLocationToResponse(updated);
   }
 
-  async deleteFavoriteLocation(userId: string, locationId: string): Promise<void> {
-    this.logger.log(`Deleting favorite location ${locationId} for user ${userId}`);
+  async deleteFavoriteLocation(
+    userId: string,
+    locationId: string,
+  ): Promise<void> {
+    this.logger.log(
+      `Deleting favorite location ${locationId} for user ${userId}`,
+    );
 
     const location = await this.favoriteLocationRepository.findOne({
       where: { id: locationId, userId },
     });
 
     if (!location) {
-      this.logger.warn(`Favorite location ${locationId} not found for user ${userId}`);
+      this.logger.warn(
+        `Favorite location ${locationId} not found for user ${userId}`,
+      );
       throw new NotFoundException('Lieu favori non trouvé');
     }
 
@@ -775,7 +1121,10 @@ export class UsersService {
     this.logger.log(`Favorite location deleted successfully: ${locationId}`);
   }
 
-  async getDefaultFavoriteLocation(userId: string, type?: FavoriteLocationType): Promise<FavoriteLocationResponse | null> {
+  async getDefaultFavoriteLocation(
+    userId: string,
+    type?: FavoriteLocationType,
+  ): Promise<FavoriteLocationResponse | null> {
     const where: any = { userId, isDefault: true };
     if (type) {
       where.type = type;
@@ -786,7 +1135,9 @@ export class UsersService {
     return location ? this.mapFavoriteLocationToResponse(location) : null;
   }
 
-  private mapFavoriteLocationToResponse(location: FavoriteLocation): FavoriteLocationResponse {
+  private mapFavoriteLocationToResponse(
+    location: FavoriteLocation,
+  ): FavoriteLocationResponse {
     const point = location.point as any;
     return {
       id: location.id,
@@ -820,20 +1171,21 @@ export class UsersService {
       throw new NotFoundException('Utilisateur non trouvé');
     }
 
+    if (user.status === UserStatus.INACTIVE || !user.isActive) {
+      throw new NotFoundException('Utilisateur non trouvé');
+    }
+
     // Calculer les statistiques
-    const [
-      tripsAsDriver,
-      bookingsAsPassenger,
-      bookingsAsDriver,
-    ] = await Promise.all([
-      this.tripRepository.count({ where: { driverId: userId } }),
-      this.bookingRepository.count({ where: { passengerId: userId } }),
-      this.bookingRepository
-        .createQueryBuilder('booking')
-        .innerJoin('booking.trip', 'trip')
-        .where('trip.driverId = :userId', { userId })
-        .getCount(),
-    ]);
+    const [tripsAsDriver, bookingsAsPassenger, bookingsAsDriver] =
+      await Promise.all([
+        this.tripRepository.count({ where: { driverId: userId } }),
+        this.bookingRepository.count({ where: { passengerId: userId } }),
+        this.bookingRepository
+          .createQueryBuilder('booking')
+          .innerJoin('booking.trip', 'trip')
+          .where('trip.driverId = :userId', { userId })
+          .getCount(),
+      ]);
 
     // Calculer la note moyenne et le nombre total de notes
     const ratingStats = await this.ratingRepository
@@ -843,34 +1195,42 @@ export class UsersService {
       .where('rating.ratedUserId = :userId', { userId })
       .getRawOne();
 
-    const averageRating = ratingStats?.average ? parseFloat(ratingStats.average) : null;
-    const totalRatings = ratingStats?.total ? parseInt(ratingStats.total, 10) : 0;
+    const averageRating = ratingStats?.average
+      ? parseFloat(ratingStats.average)
+      : null;
+    const totalRatings = ratingStats?.total
+      ? parseInt(ratingStats.total, 10)
+      : 0;
 
     // Enrichir la photo de profil avec presigned URL si nécessaire
     const enrichedUser = await this.enrichUserWithPresignedUrls(user);
 
     // Préparer les véhicules (si driver)
     const premium = await this.subscriptionsService.getPremiumOverview(user.id);
-    const vehicles = user.isDriver && user.vehicles
-      ? await Promise.all(
-        user.vehicles
-          .filter((v) => v.isActive)
-          .map(async (vehicle) => {
-            let photoUrl = vehicle.photoUrl;
-            if (photoUrl) {
-              photoUrl = await this.fileUploadService.getPresignedUrlIfS3Key(photoUrl) || photoUrl;
-            }
-            return {
-              id: vehicle.id,
-              brand: vehicle.brand,
-              model: vehicle.model,
-              color: vehicle.color,
-              licensePlate: vehicle.licensePlate,
-              photoUrl,
-            };
-          }),
-      )
-      : undefined;
+    const vehicles =
+      user.isDriver && user.vehicles
+        ? await Promise.all(
+            user.vehicles
+              .filter((v) => v.isActive)
+              .map(async (vehicle) => {
+                let photoUrl = vehicle.photoUrl;
+                if (photoUrl) {
+                  photoUrl =
+                    (await this.fileUploadService.getPresignedUrlIfS3Key(
+                      photoUrl,
+                    )) || photoUrl;
+                }
+                return {
+                  id: vehicle.id,
+                  brand: vehicle.brand,
+                  model: vehicle.model,
+                  color: vehicle.color,
+                  licensePlate: vehicle.licensePlate,
+                  photoUrl,
+                };
+              }),
+          )
+        : undefined;
 
     return {
       id: user.id,
@@ -897,4 +1257,3 @@ export class UsersService {
     };
   }
 }
-
