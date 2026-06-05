@@ -75,7 +75,7 @@ export class User {
   })
   status: UserStatus;
 
-  @Column({ nullable: true })
+  @Column({ type: 'varchar', nullable: true })
   fcmToken: string | null;
 
   @Column({ default: false })

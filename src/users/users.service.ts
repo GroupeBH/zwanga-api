@@ -6,7 +6,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DeepPartial, Not } from 'typeorm';
+import { Repository, DeepPartial, Not, In, DataSource } from 'typeorm';
 import type { Point } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcrypt';
@@ -30,8 +30,8 @@ import {
   UpdateFavoriteLocationDto,
   FavoriteLocationResponse,
 } from './dto/favorite-location.dto';
-import { Trip } from '../trips/entities/trip.entity';
-import { Booking } from '../bookings/entities/booking.entity';
+import { Trip, TripStatus } from '../trips/entities/trip.entity';
+import { Booking, BookingStatus } from '../bookings/entities/booking.entity';
 import { Message } from '../chat/entities/message.entity';
 import { Rating } from '../ratings/entities/rating.entity';
 import { Vehicle } from '../vehicles/entities/vehicle.entity';
@@ -40,7 +40,6 @@ import { KycValidationService } from '../common/services/kyc-validation.service'
 import { KeccelOtpService } from '../keccel-otp/keccel-otp.service';
 import { Express } from 'express';
 import { UserRole } from './entities/user.entity';
-import { DataSource } from 'typeorm';
 import { SubscriptionsService } from '../subscriptions/subscriptions.service';
 
 @Injectable()
@@ -75,6 +74,45 @@ export class UsersService {
   private toSafeUser(user: User) {
     const { password, refreshToken, ...safeUser } = user;
     return safeUser;
+  }
+
+  private collectAccountFiles(
+    user: User,
+    kycDocuments: KycDocument[],
+  ): string[] {
+    const filePaths = [
+      user.profilePicture,
+      ...kycDocuments.flatMap((document) => [
+        document.cniFrontUrl,
+        ...(Array.isArray(document.cniFrontUrls) ? document.cniFrontUrls : []),
+        document.cniBackUrl,
+        document.selfieUrl,
+      ]),
+    ];
+
+    return Array.from(
+      new Set(filePaths.filter((filePath): filePath is string => !!filePath)),
+    );
+  }
+
+  private async deleteAccountFiles(
+    filePaths: string[],
+    userId: string,
+  ): Promise<void> {
+    const results = await Promise.allSettled(
+      filePaths.map((filePath) => this.fileUploadService.deleteFile(filePath)),
+    );
+
+    results.forEach((result, index) => {
+      if (result.status === 'rejected') {
+        const reason: unknown = result.reason;
+        const reasonMessage =
+          reason instanceof Error ? reason.message : String(reason);
+        this.logger.warn(
+          `Failed to delete account file for user ${userId}: ${filePaths[index]} - ${reasonMessage}`,
+        );
+      }
+    });
   }
 
   /**
@@ -178,24 +216,146 @@ export class UsersService {
   }
 
   async deactivateAccount(userId: string): Promise<{ message: string }> {
-    this.logger.warn(`Deactivating account for user: ${userId}`);
+    this.logger.warn(`Deleting account for user: ${userId}`);
 
     const user = await this.findOne(userId);
 
-    if (user.status === UserStatus.INACTIVE && !user.isActive) {
-      return { message: 'Compte déjà désactivé' };
+    const alreadyDeleted =
+      user.status === UserStatus.INACTIVE &&
+      !user.isActive &&
+      !user.email &&
+      !user.phone &&
+      !user.googleId &&
+      !user.appleId;
+
+    if (alreadyDeleted) {
+      return { message: 'Compte déjà supprimé' };
     }
 
-    user.status = UserStatus.INACTIVE;
-    user.isActive = false;
-    user.accessToken = null;
-    user.refreshToken = null;
-    user.fcmToken = null;
-    await this.userRepository.save(user);
+    const kycDocuments = (await this.kycDocumentRepository.find({
+      where: { userId },
+    })) as KycDocument[];
+    const filesToDelete = this.collectAccountFiles(user, kycDocuments);
+    const now = new Date();
+    const cancellableBookingStatuses = [
+      BookingStatus.PENDING,
+      BookingStatus.ACCEPTED,
+    ];
 
-    this.logger.warn(`Account deactivated for user: ${userId}`);
+    const activeDriverTrips = await this.tripRepository.find({
+      select: ['id'],
+      where: {
+        driverId: userId,
+        status: In([TripStatus.PENDING, TripStatus.ACTIVE]),
+      },
+    });
+    const activeDriverTripIds = activeDriverTrips.map((trip) => trip.id);
+    const activeDriverTripIdSet = new Set(activeDriverTripIds);
 
-    return { message: 'Compte désactivé avec succès' };
+    const passengerBookingsToCancel = await this.bookingRepository.find({
+      where: {
+        passengerId: userId,
+        status: In(cancellableBookingStatuses),
+      },
+      relations: ['trip'],
+    });
+    const passengerBookingIds = passengerBookingsToCancel.map(
+      (booking) => booking.id,
+    );
+    const seatsToRestoreByTrip = new Map<
+      string,
+      { availableSeats: number; totalSeats: number | null; seats: number }
+    >();
+
+    for (const booking of passengerBookingsToCancel) {
+      if (
+        activeDriverTripIdSet.has(booking.tripId) ||
+        !booking.trip ||
+        ![TripStatus.PENDING, TripStatus.ACTIVE].includes(booking.trip.status)
+      ) {
+        continue;
+      }
+
+      const current = seatsToRestoreByTrip.get(booking.tripId) ?? {
+        availableSeats: booking.trip.availableSeats,
+        totalSeats: booking.trip.totalSeats,
+        seats: 0,
+      };
+      current.seats += booking.numberOfSeats;
+      seatsToRestoreByTrip.set(booking.tripId, current);
+    }
+
+    await this.dataSource.transaction(async (manager) => {
+      const userRepository = manager.getRepository(User);
+      const vehicleRepository = manager.getRepository(Vehicle);
+      const kycDocumentRepository = manager.getRepository(KycDocument);
+      const favoriteLocationRepository =
+        manager.getRepository(FavoriteLocation);
+      const tripRepository = manager.getRepository(Trip);
+      const bookingRepository = manager.getRepository(Booking);
+
+      if (passengerBookingIds.length > 0) {
+        await bookingRepository.update(
+          { id: In(passengerBookingIds) },
+          { status: BookingStatus.CANCELLED, cancelledAt: now },
+        );
+
+        for (const [tripId, restore] of seatsToRestoreByTrip.entries()) {
+          const maxSeats =
+            restore.totalSeats ?? restore.availableSeats + restore.seats;
+          await tripRepository.update(tripId, {
+            availableSeats: Math.min(
+              maxSeats,
+              restore.availableSeats + restore.seats,
+            ),
+          });
+        }
+      }
+
+      if (activeDriverTripIds.length > 0) {
+        await bookingRepository.update(
+          {
+            tripId: In(activeDriverTripIds),
+            status: In(cancellableBookingStatuses),
+          },
+          { status: BookingStatus.CANCELLED, cancelledAt: now },
+        );
+        await tripRepository.update(
+          { id: In(activeDriverTripIds) },
+          { status: TripStatus.CANCELLED },
+        );
+      }
+
+      await favoriteLocationRepository.delete({ userId });
+      await kycDocumentRepository.delete({ userId });
+      await vehicleRepository.update({ ownerId: userId }, { isActive: false });
+      await userRepository.update(userId, {
+        email: () => 'NULL',
+        googleId: () => 'NULL',
+        appleId: () => 'NULL',
+        phone: () => 'NULL',
+        password: () => 'NULL',
+        firstName: 'Compte',
+        lastName: 'supprimé',
+        profilePicture: () => 'NULL',
+        role: UserRole.PASSENGER,
+        status: UserStatus.INACTIVE,
+        fcmToken: null,
+        isEmailVerified: false,
+        isPhoneVerified: false,
+        isActive: false,
+        isDriver: false,
+        accessToken: null,
+        refreshToken: null,
+        lastLoginAt: () => 'NULL',
+      });
+    });
+
+    await this.deleteAccountFiles(filesToDelete, userId);
+
+    this.logger.warn(`Account deleted for user: ${userId}`);
+
+    return { message: 'Compte supprimé avec succès' };
   }
 
   async findByEmail(email: string): Promise<User | null> {

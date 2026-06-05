@@ -53,14 +53,14 @@ export class UsersController {
   @Auth()
   @HttpCode(HttpStatus.OK)
   @SensitiveThrottle(5, 60000)
-  @ApiOperation({ summary: 'Deactivate current user account' })
+  @ApiOperation({ summary: 'Delete current user account' })
   @ApiResponse({
     status: 200,
-    description: 'Account deactivated successfully',
+    description: 'Account deleted successfully',
     schema: {
       type: 'object',
       properties: {
-        message: { type: 'string', example: 'Compte désactivé avec succès' },
+        message: { type: 'string', example: 'Compte supprimé avec succès' },
       },
     },
   })

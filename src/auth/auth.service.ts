@@ -781,7 +781,7 @@ export class AuthService {
         });
         if (phoneOwner && phoneOwner.id !== user.id) {
           throw new UnauthorizedException(
-            'Ce numÃ©ro de tÃ©lÃ©phone est dÃ©jÃ  utilisÃ©',
+            'Ce numéro de téléphone est déjà utilisé',
           );
         }
         user.phone = phone;
@@ -799,7 +799,7 @@ export class AuthService {
     } else {
       if (!phone) {
         throw new UnauthorizedException(
-          'Le numÃ©ro de tÃ©lÃ©phone est requis pour la premiÃ¨re inscription Apple',
+          'Le numéro de téléphone est requis pour la première inscription Apple',
         );
       }
 
@@ -808,7 +808,7 @@ export class AuthService {
       });
       if (phoneOwner) {
         throw new UnauthorizedException(
-          'Ce numÃ©ro de tÃ©lÃ©phone est dÃ©jÃ  utilisÃ©',
+          'Ce numéro de téléphone est déjà utilisé',
         );
       }
 
