@@ -26,7 +26,7 @@ export class KycDocument {
   @ManyToOne(() => User, (user) => user.kycDocuments)
   @JoinColumn({ name: 'userId' })
   user: User;
-
+                                              
   @Column({ type: 'varchar', nullable: true })
   cniFrontUrl: string | null;
 

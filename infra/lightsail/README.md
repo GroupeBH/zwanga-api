@@ -70,6 +70,12 @@ Le workflow ajoute automatiquement l'IP du runner GitHub aux CIDR SSH pendant le
 deploiement. Ajoutez aussi votre IP admin pour pouvoir vous connecter apres le
 run.
 
+Sur Lightsail, la restriction par IP de SSH se fait dans les ports publics
+geres par Terraform. Le firewall local `ufw` laisse donc le port 22 ouvert par
+defaut (`restrict_ssh_with_host_firewall: false`) afin qu'un nouveau runner
+GitHub, avec une IP differente du run precedent, ne soit pas bloque avant
+qu'Ansible puisse se connecter.
+
 ## Deploiement local
 
 Depuis la racine du projet:

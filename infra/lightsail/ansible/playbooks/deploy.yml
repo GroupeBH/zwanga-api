@@ -36,7 +36,7 @@
           - (dockerhub_username | length == 0 and dockerhub_token | length == 0) or (dockerhub_username | length > 0 and dockerhub_token | length > 0)
         fail_msg: "Set both DOCKERHUB_USERNAME and DOCKERHUB_TOKEN together, or leave both unset."
 
-    - name: Validate admin CIDRs for SSH firewall rules
+    - name: Validate admin CIDRs for the Lightsail SSH firewall
       ansible.builtin.assert:
         that:
           - effective_admin_cidrs is defined
@@ -385,9 +385,14 @@
     - name: Set UFW logging to low
       ansible.builtin.command: ufw logging low
 
-    - name: Allow SSH from admin CIDRs
+    - name: Allow SSH through host firewall
+      ansible.builtin.command: ufw allow 22/tcp
+      when: not (restrict_ssh_with_host_firewall | bool)
+
+    - name: Allow SSH from admin CIDRs through host firewall
       ansible.builtin.command: "ufw allow from {{ item }} to any port 22 proto tcp"
       loop: "{{ effective_admin_cidrs }}"
+      when: restrict_ssh_with_host_firewall | bool
 
     - name: Allow private Caddy-to-app traffic on app port
       ansible.builtin.command: "ufw allow from {{ hostvars[item].private_ip }} to any port {{ app_port }} proto tcp"

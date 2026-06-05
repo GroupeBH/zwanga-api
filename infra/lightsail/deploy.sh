@@ -430,6 +430,8 @@ wait_for_host_ssh() {
       fi
       echo "Target IP: ${host_ip}" >&2
       echo "Private key path: ${PRIVATE_KEY_PATH}" >&2
+      echo "Terraform SSH CIDRs: ${ADMIN_CIDRS_JSON}" >&2
+      echo "If this is an existing instance, the local UFW firewall may still only allow SSH from CIDRs used by a previous deploy." >&2
       return 1
     fi
 
