@@ -327,7 +327,9 @@ describe('TripsService started trip ETA expiration', () => {
       driver: { id: 'driver-1', fcmToken: null },
       vehicle: null,
     };
-    tripRepository.findOne.mockResolvedValue(trip);
+    tripRepository.findOne
+      .mockResolvedValueOnce(trip)
+      .mockResolvedValueOnce(null);
     jest.spyOn(service, 'findOne').mockResolvedValue({ id: 'trip-1' });
 
     await service.startTrip('trip-1', 'driver-1');

@@ -12,13 +12,14 @@ import { TripRequest, TripRequestStatus } from './entities/trip-request.entity';
 import { DriverOffer, DriverOfferStatus } from './entities/driver-offer.entity';
 import { User, UserRole } from '../users/entities/user.entity';
 import { Vehicle } from '../vehicles/entities/vehicle.entity';
-import { CreateTripRequestDto, CreateDriverOfferDto, AcceptDriverOfferDto, AcceptTripRequestDto, UpdateTripRequestDto } from './dto/trip-request.dto';
+import { CreateTripRequestDto, CreateDriverOfferDto, AcceptDriverOfferDto, AcceptTripRequestDto, UpdateTripRequestDto, RecommendTripRequestPriceDto } from './dto/trip-request.dto';
 import { FileUploadService } from '../common/services/file-upload.service';
 import { NotificationService } from '../notifications/notifications.service';
 import { TripsService } from '../trips/trips.service';
 import { BookingsService } from '../bookings/bookings.service';
 import { BookingStatus } from '../bookings/entities/booking.entity';
 import { GoogleMapsService } from '../google-maps/google-maps.service';
+import { TravelMode } from '../google-maps/dto/google-maps.dto';
 import { SubscriptionsService } from '../subscriptions/subscriptions.service';
 
 export interface SanitizedUser {
@@ -97,10 +98,20 @@ export interface SanitizedTripRequest {
   updatedAt: Date;
 }
 
+export interface TripRequestPriceRecommendation {
+  currency: 'CDF';
+  distanceMeters: number | null;
+  numberOfSeats: number;
+  pricePerKmPerPassenger: number;
+  recommendedPricePerSeat: number | null;
+  recommendedTotalPrice: number | null;
+}
+
 @Injectable()
 export class TripRequestsService {
   private readonly logger = new Logger(TripRequestsService.name);
   private readonly MAX_SEATS_PER_PASSENGER = 2;
+  private readonly RECOMMENDED_PRICE_PER_KM_PER_PASSENGER = 4500;
 
   constructor(
     @InjectRepository(TripRequest)
@@ -147,21 +158,30 @@ export class TripRequestsService {
       throw new BadRequestException('La date de départ minimum ne peut pas être dans le passé');
     }
 
+    const departurePoint = await this.resolvePointFromCoordinatesOrAddress(
+      departureCoordinates,
+      rest.departureLocation,
+      rest.departureReference,
+      'trip request departure',
+    );
+    const arrivalPoint = await this.resolvePointFromCoordinatesOrAddress(
+      arrivalCoordinates,
+      rest.arrivalLocation,
+      rest.arrivalReference,
+      'trip request arrival',
+    );
+    const recommendedPrice = rest.maxPricePerSeat ?? await this.calculateRecommendedPricePerSeat(
+      departurePoint,
+      arrivalPoint,
+      'trip request creation',
+    );
+
     const tripRequest = this.tripRequestRepository.create({
       ...rest,
+      maxPricePerSeat: recommendedPrice,
       passengerId,
-      departurePoint: await this.resolvePointFromCoordinatesOrAddress(
-        departureCoordinates,
-        rest.departureLocation,
-        rest.departureReference,
-        'trip request departure',
-      ),
-      arrivalPoint: await this.resolvePointFromCoordinatesOrAddress(
-        arrivalCoordinates,
-        rest.arrivalLocation,
-        rest.arrivalReference,
-        'trip request arrival',
-      ),
+      departurePoint,
+      arrivalPoint,
       departureDateMin: minDate,
       departureDateMax: maxDate,
     });
@@ -173,6 +193,44 @@ export class TripRequestsService {
     await this.notifyDriversAboutTripRequest(saved);
 
     return this.findOne(saved.id, passengerId);
+  }
+
+  async recommendPrice(payload: RecommendTripRequestPriceDto): Promise<TripRequestPriceRecommendation> {
+    const numberOfSeats = payload.numberOfSeats ?? 1;
+
+    if (numberOfSeats < 1 || numberOfSeats > this.MAX_SEATS_PER_PASSENGER) {
+      throw new BadRequestException(
+        `Pour des raisons de securite du conducteur, vous ne pouvez pas reserver plus de ${this.MAX_SEATS_PER_PASSENGER} places par trajet`,
+      );
+    }
+
+    const departurePoint = await this.resolvePointFromCoordinatesOrAddress(
+      payload.departureCoordinates,
+      payload.departureLocation,
+      payload.departureReference,
+      'trip request price departure',
+    );
+    const arrivalPoint = await this.resolvePointFromCoordinatesOrAddress(
+      payload.arrivalCoordinates,
+      payload.arrivalLocation,
+      payload.arrivalReference,
+      'trip request price arrival',
+    );
+    const distanceMeters = await this.calculateRouteDistanceMeters(
+      departurePoint,
+      arrivalPoint,
+      'trip request price recommendation',
+    );
+    const recommendedPricePerSeat = this.buildRecommendedPricePerSeat(distanceMeters);
+
+    return {
+      currency: 'CDF',
+      distanceMeters,
+      numberOfSeats,
+      pricePerKmPerPassenger: this.RECOMMENDED_PRICE_PER_KM_PER_PASSENGER,
+      recommendedPricePerSeat,
+      recommendedTotalPrice: recommendedPricePerSeat === null ? null : recommendedPricePerSeat * numberOfSeats,
+    };
   }
 
   async update(passengerId: string, tripRequestId: string, updateTripRequestDto: UpdateTripRequestDto): Promise<SanitizedTripRequest> {
@@ -291,6 +349,20 @@ export class TripRequestsService {
 
     if (updateTripRequestDto.maxPricePerSeat !== undefined) {
       tripRequest.maxPricePerSeat = updateTripRequestDto.maxPricePerSeat;
+    } else if (
+      departureCoordinates ||
+      arrivalCoordinates ||
+      shouldRefreshDeparturePoint ||
+      shouldRefreshArrivalPoint
+    ) {
+      const recommendedPrice = await this.calculateRecommendedPricePerSeat(
+        tripRequest.departurePoint,
+        tripRequest.arrivalPoint,
+        `trip request ${tripRequest.id} update`,
+      );
+      if (recommendedPrice !== null) {
+        tripRequest.maxPricePerSeat = recommendedPrice;
+      }
     }
 
     if (updateTripRequestDto.description !== undefined) {
@@ -1169,6 +1241,100 @@ export class TripRequestsService {
       type: 'Point',
       coordinates: [Number(longitude), Number(latitude)],
     };
+  }
+
+  private async calculateRecommendedPricePerSeat(
+    departurePoint: Point | null,
+    arrivalPoint: Point | null,
+    context: string,
+  ): Promise<number | null> {
+    const distanceMeters = await this.calculateRouteDistanceMeters(
+      departurePoint,
+      arrivalPoint,
+      context,
+    );
+
+    return this.buildRecommendedPricePerSeat(distanceMeters);
+  }
+
+  private buildRecommendedPricePerSeat(distanceMeters: number | null): number | null {
+    if (typeof distanceMeters !== 'number' || !Number.isFinite(distanceMeters) || distanceMeters <= 0) {
+      return null;
+    }
+
+    return Math.round((distanceMeters / 1000) * this.RECOMMENDED_PRICE_PER_KM_PER_PASSENGER);
+  }
+
+  private async calculateRouteDistanceMeters(
+    departurePoint: Point | null,
+    arrivalPoint: Point | null,
+    context: string,
+  ): Promise<number | null> {
+    const departureCoordinates = this.pointToCoordinates(departurePoint);
+    const arrivalCoordinates = this.pointToCoordinates(arrivalPoint);
+
+    if (!departureCoordinates || !arrivalCoordinates) {
+      return null;
+    }
+
+    const [departureLongitude, departureLatitude] = departureCoordinates;
+    const [arrivalLongitude, arrivalLatitude] = arrivalCoordinates;
+
+    try {
+      const directions = await this.googleMapsService.getDirections({
+        origin: { lat: departureLatitude, lng: departureLongitude },
+        destination: { lat: arrivalLatitude, lng: arrivalLongitude },
+        mode: TravelMode.DRIVING,
+        region: 'CD',
+      });
+      const distanceMeters = directions.routes?.[0]?.legs?.reduce(
+        (sum, leg) => sum + (Number(leg.distance) || 0),
+        0,
+      );
+
+      if (distanceMeters && distanceMeters > 0) {
+        return Math.round(distanceMeters);
+      }
+
+      this.logger.warn(`Google Directions returned no usable distance for ${context}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`Unable to calculate route distance for ${context}: ${message}`);
+    }
+
+    return this.calculateStraightLineDistanceMeters(
+      { latitude: departureLatitude, longitude: departureLongitude },
+      { latitude: arrivalLatitude, longitude: arrivalLongitude },
+    );
+  }
+
+  private calculateStraightLineDistanceMeters(
+    departure: { latitude: number; longitude: number },
+    arrival: { latitude: number; longitude: number },
+  ): number | null {
+    if (
+      !Number.isFinite(departure.latitude) ||
+      !Number.isFinite(departure.longitude) ||
+      !Number.isFinite(arrival.latitude) ||
+      !Number.isFinite(arrival.longitude)
+    ) {
+      return null;
+    }
+
+    const toRadians = (value: number) => (value * Math.PI) / 180;
+    const earthRadiusMeters = 6371000;
+    const latitudeDelta = toRadians(arrival.latitude - departure.latitude);
+    const longitudeDelta = toRadians(arrival.longitude - departure.longitude);
+    const departureLatitude = toRadians(departure.latitude);
+    const arrivalLatitude = toRadians(arrival.latitude);
+    const haversine =
+      Math.sin(latitudeDelta / 2) ** 2 +
+      Math.cos(departureLatitude) *
+        Math.cos(arrivalLatitude) *
+        Math.sin(longitudeDelta / 2) ** 2;
+    const centralAngle = 2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine));
+
+    return Math.round(earthRadiusMeters * centralAngle);
   }
 
   private async resolvePointFromCoordinatesOrAddress(

@@ -207,6 +207,9 @@ export class TripsService {
     }
 
     const now = new Date();
+    const activeTripExpirationThreshold = this.getActiveTripExpirationThreshold(now);
+    const activeTripFallbackExpirationThreshold =
+      this.getActiveTripFallbackExpirationThreshold(now);
     // Include PENDING trips with future departure dates OR ACTIVE trips with available seats
     // Exclude private trips (created from trip requests)
     const trips = await this.tripRepository.find({
@@ -218,8 +221,15 @@ export class TripsService {
         },
         {
           status: TripStatus.ACTIVE,
-          departureDate: MoreThan(now),
           availableSeats: MoreThan(0),
+          estimatedArrivalDate: MoreThan(activeTripExpirationThreshold),
+          isPrivate: false, // Exclude private trips
+        },
+        {
+          status: TripStatus.ACTIVE,
+          availableSeats: MoreThan(0),
+          estimatedArrivalDate: IsNull(),
+          departureDate: MoreThan(activeTripFallbackExpirationThreshold),
           isPrivate: false, // Exclude private trips
         },
       ],
@@ -275,27 +285,44 @@ export class TripsService {
     this.logger.log(`Searching trips with filters: ${JSON.stringify(searchTripsDto)}`);
 
     const now = new Date();
+    const activeTripExpirationThreshold = this.getActiveTripExpirationThreshold(now);
+    const activeTripFallbackExpirationThreshold =
+      this.getActiveTripFallbackExpirationThreshold(now);
     const queryBuilder = this.tripRepository
       .createQueryBuilder('trip')
       .leftJoinAndSelect('trip.driver', 'driver')
       .leftJoinAndSelect('trip.vehicle', 'vehicle')
       .leftJoinAndSelect('trip.bookings', 'bookings')
       .leftJoinAndSelect('bookings.passenger', 'bookingPassenger')
-      .where(
+      .where('trip.isPrivate = :isPrivate', { isPrivate: false })
+      .andWhere(
         new Brackets((qb) => {
-          qb.where('trip.isPrivate = :isPrivate', { isPrivate: false })
-            .andWhere('trip.departureDate > :now', { now })
-            .andWhere(
-              new Brackets((qb2) => {
-                qb2.where('trip.status = :pendingStatus', { pendingStatus: TripStatus.PENDING })
-                  .orWhere(
-                    new Brackets((qb3) => {
-                      qb3.where('trip.status = :activeStatus', { activeStatus: TripStatus.ACTIVE })
-                        .andWhere('trip.availableSeats > 0');
-                    })
-                  );
-              })
-            );
+          qb.where(
+            new Brackets((pendingQb) => {
+              pendingQb
+                .where('trip.status = :pendingStatus', { pendingStatus: TripStatus.PENDING })
+                .andWhere('trip.departureDate > :now', { now });
+            }),
+          ).orWhere(
+            new Brackets((activeQb) => {
+              activeQb
+                .where('trip.status = :activeStatus', { activeStatus: TripStatus.ACTIVE })
+                .andWhere('trip.availableSeats > 0')
+                .andWhere(
+                  new Brackets((expirationQb) => {
+                    expirationQb
+                      .where(
+                        'trip.estimatedArrivalDate IS NOT NULL AND trip.estimatedArrivalDate > :activeTripExpirationThreshold',
+                        { activeTripExpirationThreshold },
+                      )
+                      .orWhere(
+                        'trip.estimatedArrivalDate IS NULL AND trip.departureDate > :activeTripFallbackExpirationThreshold',
+                        { activeTripFallbackExpirationThreshold },
+                      );
+                  }),
+                );
+            }),
+          );
         }),
       );
 
@@ -309,48 +336,29 @@ export class TripsService {
       });
     }
 
-    if (searchTripsDto.keywords?.trim()) {
-      const keywords = Array.from(
-        new Set(
-          searchTripsDto.keywords
-            .trim()
-            .split(/\s+/)
-            .map((keyword) => keyword.trim())
-            .filter(Boolean),
-        ),
-      ).slice(0, 8);
-
-      keywords.forEach((keyword, index) => {
-        const keywordParam = `keyword${index}`;
-        queryBuilder.andWhere(
-          new Brackets((qb) => {
-            qb.where(`trip.departureLocation ILIKE :${keywordParam}`)
-              .orWhere(`trip.departureReference ILIKE :${keywordParam}`)
-              .orWhere(`trip.arrivalLocation ILIKE :${keywordParam}`)
-              .orWhere(`trip.arrivalReference ILIKE :${keywordParam}`);
-          }),
-          { [keywordParam]: `%${keyword}%` },
-        );
-      });
-    }
-
-    if (searchTripsDto.departureLocation) {
+    const routeSearchTerms = this.buildRouteSearchTerms(searchTripsDto);
+    if (routeSearchTerms.length > 0) {
       queryBuilder.andWhere(
         new Brackets((qb) => {
-          qb.where('trip.departureLocation ILIKE :departureLocation')
-            .orWhere('trip.departureReference ILIKE :departureLocation');
-        }),
-        { departureLocation: `%${searchTripsDto.departureLocation}%` },
-      );
-    }
+          routeSearchTerms.forEach((term, index) => {
+            const routeTermParam = `routeTerm${index}`;
+            const condition = new Brackets((termQb) => {
+              termQb
+                .where(`trip.departureLocation ILIKE :${routeTermParam}`)
+                .orWhere(`trip.departureReference ILIKE :${routeTermParam}`)
+                .orWhere(`trip.arrivalLocation ILIKE :${routeTermParam}`)
+                .orWhere(`trip.arrivalReference ILIKE :${routeTermParam}`);
+            });
+            const parameters = { [routeTermParam]: `%${term}%` };
 
-    if (searchTripsDto.arrivalLocation) {
-      queryBuilder.andWhere(
-        new Brackets((qb) => {
-          qb.where('trip.arrivalLocation ILIKE :arrivalLocation')
-            .orWhere('trip.arrivalReference ILIKE :arrivalLocation');
+            if (index === 0) {
+              qb.where(condition, parameters);
+              return;
+            }
+
+            qb.orWhere(condition, parameters);
+          });
         }),
-        { arrivalLocation: `%${searchTripsDto.arrivalLocation}%` },
       );
     }
 
@@ -386,10 +394,11 @@ export class TripsService {
       [depLng, depLat] = searchTripsDto.departureCoordinates as [number, number];
       const departureRadiusMeters =
         (searchTripsDto.departureRadiusKm ?? 50) * 1000;
+      const departureSearchPoint = this.getDepartureSearchPointExpression();
 
       queryBuilder.andWhere(
         `ST_DWithin(
-          trip.departurePoint,
+          ${departureSearchPoint},
           ST_SetSRID(ST_MakePoint(:depLng, :depLat), 4326)::geography,
           :depRadius
         )`,
@@ -428,9 +437,10 @@ export class TripsService {
     }
 
     if (hasDepartureCoords && depLng !== undefined && depLat !== undefined) {
+      const departureSearchPoint = this.getDepartureSearchPointExpression();
       queryBuilder.orderBy(
         `ST_Distance(
-          trip.departurePoint,
+          ${departureSearchPoint},
           ST_SetSRID(ST_MakePoint(:depLng, :depLat), 4326)::geography
         )`,
         'ASC',
@@ -1721,6 +1731,49 @@ export class TripsService {
     const next = new Date(value);
     next.setHours(0, 0, 0, 0);
     return next;
+  }
+
+  private getActiveTripExpirationThreshold(now: Date): Date {
+    return new Date(now.getTime() - this.ACTIVE_TRIP_EXPIRATION_GRACE_MS);
+  }
+
+  private getActiveTripFallbackExpirationThreshold(now: Date): Date {
+    return new Date(
+      now.getTime() -
+        this.DEFAULT_ESTIMATED_TRIP_DURATION_MS -
+        this.ACTIVE_TRIP_EXPIRATION_GRACE_MS,
+    );
+  }
+
+  private getDepartureSearchPointExpression(): string {
+    return `CASE
+      WHEN "trip"."status" = :activeStatus THEN COALESCE("trip"."currentLocation", "trip"."departurePoint")
+      ELSE "trip"."departurePoint"
+    END`;
+  }
+
+  private buildRouteSearchTerms(searchTripsDto: SearchTripsDto): string[] {
+    const rawSearchText = [
+      searchTripsDto.keywords,
+      searchTripsDto.departureLocation,
+      searchTripsDto.arrivalLocation,
+    ]
+      .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+      .join(' ');
+
+    if (!rawSearchText) {
+      return [];
+    }
+
+    return Array.from(
+      new Set(
+        rawSearchText
+          .trim()
+          .split(/\s+/)
+          .map((term) => term.trim())
+          .filter((term) => term.length >= 2),
+      ),
+    ).slice(0, 8);
   }
 
   private addDays(value: Date, amount: number): Date {
