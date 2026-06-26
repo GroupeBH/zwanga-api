@@ -11,7 +11,7 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { TripRequestsService } from './trip-requests.service';
-import { CreateTripRequestDto, CreateDriverOfferDto, AcceptDriverOfferDto, AcceptTripRequestDto, UpdateTripRequestDto } from './dto/trip-request.dto';
+import { CreateTripRequestDto, CreateDriverOfferDto, AcceptDriverOfferDto, AcceptTripRequestDto, UpdateTripRequestDto, RecommendTripRequestPriceDto } from './dto/trip-request.dto';
 import { Auth } from '../auth/decorators/auth.decorator';
 import { Public } from '../common/decorators/public.decorator';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
@@ -65,6 +65,18 @@ export class TripRequestsController {
   // @ApiBearerAuth()
   async findMyOffers(@Request() req) {
     return this.tripRequestsService.findByDriver(req.user.userId);
+  }
+
+  @Post('recommended-price')
+  @Auth()
+  @SensitiveThrottle(20, 60000)
+  @ApiOperation({
+    summary: 'Recommend a trip request price',
+    description:
+      'Calcule le prix recommande pour une demande de trajet avec la regle 4500 FC par kilometre et par passager.',
+  })
+  async recommendPrice(@Body() payload: RecommendTripRequestPriceDto) {
+    return this.tripRequestsService.recommendPrice(payload);
   }
 
   @Get(':id')
