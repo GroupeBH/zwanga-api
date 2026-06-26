@@ -7,7 +7,14 @@ import {
 } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
 import { ConfigService } from '@nestjs/config';
-import { firstValueFrom, catchError, throwError, retryWhen, concatMap, timer } from 'rxjs';
+import {
+  firstValueFrom,
+  catchError,
+  throwError,
+  retryWhen,
+  concatMap,
+  timer,
+} from 'rxjs';
 import { AxiosError } from 'axios';
 import {
   SendOtpDto,
@@ -36,7 +43,7 @@ export class KeccelOtpService {
     const token = this.configService.get<string>('KECCEL_TOKEN');
     if (!token) {
       throw new Error('KECCEL_TOKEN is not defined in environment variables');
-    } 
+    }
     this.token = token;
 
     const from = this.configService.get<string>('KECCEL_FROM');
@@ -74,36 +81,49 @@ export class KeccelOtpService {
     length?: number,
     lifetime?: number,
   ): Promise<SendOtpResponse> {
-    this.logger.log(`Sending OTP to phone: ${phone}`);
+    this.logger.log(`Sending OTP to phone: ${this.maskPhone(phone)}`);
 
     if (!phone || !phone.trim()) {
       throw new BadRequestException('Le numéro de téléphone est requis');
     }
-    this.logger.debug(`Token: ${this.token}`);
+    const normalizedPhone = this.normalizePhoneForKeccel(phone);
+
+    this.logger.debug(`Token: ${this.maskToken(this.token)}`);
     this.logger.debug(`From: ${this.from}`);
-    this.logger.debug(`Phone: ${phone.trim()}`);
+    this.logger.debug(`Phone: ${this.maskPhone(normalizedPhone)}`);
     this.logger.debug(`Message: ${message || this.defaultMessage}`);
     this.logger.debug(`Length: ${length}`);
     this.logger.debug(`Lifetime: ${lifetime}`);
 
     // Build request body as JSON
     const otpLength = length !== undefined ? length : this.defaultLength;
-    const otpLifetime = lifetime !== undefined ? lifetime : this.defaultLifetime;
+    const otpLifetime =
+      lifetime !== undefined ? lifetime : this.defaultLifetime;
 
     // Validate length
     if (otpLength < 4 || otpLength > 8) {
-      throw new BadRequestException('La longueur du code OTP doit être entre 4 et 8');
+      throw new BadRequestException(
+        'La longueur du code OTP doit être entre 4 et 8',
+      );
     }
 
     // Validate lifetime
     if (otpLifetime < 60) {
-      throw new BadRequestException('La durée de vie du code OTP doit être d\'au moins 60 secondes');
+      throw new BadRequestException(
+        "La durée de vie du code OTP doit être d'au moins 60 secondes",
+      );
+    }
+
+    if (otpLifetime > 600) {
+      throw new BadRequestException(
+        'La duree de vie du code OTP doit etre inferieure ou egale a 600 secondes',
+      );
     }
 
     const requestBody: any = {
       token: this.token,
       from: this.from,
-      to: phone.trim(),
+      to: normalizedPhone,
       message: message || this.defaultMessage,
       length: otpLength,
       lifetime: otpLifetime,
@@ -111,46 +131,54 @@ export class KeccelOtpService {
 
     try {
       this.logger.debug(`Calling Keccel OTP Generate API: ${this.generateUrl}`);
-      this.logger.debug(`Request body: ${JSON.stringify(requestBody)}`);
+      this.logger.debug(
+        `Request body: ${JSON.stringify(this.redactRequestBody(requestBody))}`,
+      );
 
       const response = await firstValueFrom(
-        this.httpService.post<KeccelOtpGenerateResponse>(this.generateUrl, requestBody, {
-          headers: {
-            'Content-Type': 'application/json',
-          },
-        }).pipe(
-          retryWhen((errors) =>
-            errors.pipe(
-              concatMap((error, index: number) => {
-                if (index >= 1) {
-                  return throwError(() => error);
-                }
-                return timer(1000);
-              }),
+        this.httpService
+          .post<KeccelOtpGenerateResponse>(this.generateUrl, requestBody, {
+            headers: {
+              'Content-Type': 'application/json',
+            },
+          })
+          .pipe(
+            retryWhen((errors) =>
+              errors.pipe(
+                concatMap((error, index: number) => {
+                  if (index >= 1) {
+                    return throwError(() => error);
+                  }
+                  return timer(1000);
+                }),
+              ),
             ),
+            catchError((error: AxiosError) => {
+              this.logger.error(
+                `Keccel OTP Generate API error: ${error.message}`,
+                error.stack,
+              );
+              return throwError(
+                () =>
+                  new HttpException(
+                    `Failed to send OTP: ${error.message}`,
+                    error.response?.status || HttpStatus.INTERNAL_SERVER_ERROR,
+                  ),
+              );
+            }),
           ),
-          catchError((error: AxiosError) => {
-            this.logger.error(
-              `Keccel OTP Generate API error: ${error.message}`,
-              error.stack,
-            );
-            return throwError(
-              () =>
-                new HttpException(
-                  `Failed to send OTP: ${error.message}`,
-                  error.response?.status || HttpStatus.INTERNAL_SERVER_ERROR,
-                ),
-            );
-          }),
-        ),
       );
 
       const data = response.data;
 
-      this.logger.debug(`Keccel OTP Generate API response: ${JSON.stringify(data)}`);
+      this.logger.debug(
+        `Keccel OTP Generate API response: ${JSON.stringify(data)}`,
+      );
 
-      if (data.status === 'SENT') {
-        this.logger.log(`OTP sent successfully to ${phone}`);
+      if (this.isGenerateSuccess(data)) {
+        this.logger.log(
+          `OTP sent successfully to ${this.maskPhone(normalizedPhone)}`,
+        );
         return {
           success: true,
           message: data.description || 'Code OTP envoyé avec succès',
@@ -163,17 +191,17 @@ export class KeccelOtpService {
         this.logger.error(
           `API Error details - Status: ${data.status}, Description: ${data.description}, From parameter: ${this.from}`,
         );
-        
+
         // Provide more helpful error message for common issues
-        let errorMessage = data.description || 'Échec de l\'envoi du code OTP';
-        if (data.description?.includes('FROM') || data.description?.includes('from')) {
+        let errorMessage = data.description || "Échec de l'envoi du code OTP";
+        if (
+          data.description?.includes('FROM') ||
+          data.description?.includes('from')
+        ) {
           errorMessage = `Erreur de configuration : Paramètre FROM invalide. Veuillez vérifier la variable d'environnement KECCEL_FROM. Valeur actuelle : ${this.from}`;
         }
-        
-        throw new HttpException(
-          errorMessage,
-          HttpStatus.BAD_REQUEST,
-        );
+
+        throw new HttpException(errorMessage, HttpStatus.BAD_REQUEST);
       }
     } catch (error) {
       if (error instanceof HttpException) {
@@ -185,7 +213,7 @@ export class KeccelOtpService {
         error.stack,
       );
       throw new HttpException(
-        'Une erreur inattendue s\'est produite lors de l\'envoi du code OTP',
+        "Une erreur inattendue s'est produite lors de l'envoi du code OTP",
         HttpStatus.INTERNAL_SERVER_ERROR,
       );
     }
@@ -199,7 +227,7 @@ export class KeccelOtpService {
    * @throws HttpException only if HTTP or API error occurs, not if OTP is invalid
    */
   async verifyOtp(phone: string, otp: string): Promise<VerifyOtpResponse> {
-    this.logger.log(`Verifying OTP for phone: ${phone}`);
+    this.logger.log(`Verifying OTP for phone: ${this.maskPhone(phone)}`);
 
     if (!phone || !phone.trim()) {
       throw new BadRequestException('Le numéro de téléphone est requis');
@@ -209,63 +237,73 @@ export class KeccelOtpService {
       throw new BadRequestException('Le code OTP est requis');
     }
 
+    const normalizedPhone = this.normalizePhoneForKeccel(phone);
+
     // Build request body as JSON
     const requestBody = {
       token: this.token,
       from: this.from,
-      to: phone.trim(),
+      to: normalizedPhone,
       otp: otp.trim(),
     };
 
     try {
       this.logger.debug(`Calling Keccel OTP Validate API: ${this.validateUrl}`);
-      this.logger.debug(`Request body: ${JSON.stringify(requestBody)}`);
+      this.logger.debug(
+        `Request body: ${JSON.stringify(this.redactRequestBody(requestBody))}`,
+      );
 
       const response = await firstValueFrom(
-        this.httpService.request<KeccelOtpValidateResponse>({
-          method: 'GET',
-          url: this.validateUrl,
-          data: requestBody,
-          headers: {
-            'Content-Type': 'application/json',
-          },
-        }).pipe(
-          retryWhen((errors) =>
-            errors.pipe(
-              concatMap((error, index) => {
-                if (index >= 1) {
-                  return throwError(() => error);
-                }
-                return timer(1000);
-              }),
+        this.httpService
+          .request<KeccelOtpValidateResponse>({
+            method: 'GET',
+            url: this.validateUrl,
+            data: requestBody,
+            headers: {
+              'Content-Type': 'application/json',
+            },
+          })
+          .pipe(
+            retryWhen((errors) =>
+              errors.pipe(
+                concatMap((error, index) => {
+                  if (index >= 1) {
+                    return throwError(() => error);
+                  }
+                  return timer(1000);
+                }),
+              ),
             ),
+            catchError((error: AxiosError) => {
+              this.logger.error(
+                `Keccel OTP Validate API error: ${error.message}`,
+                error.stack,
+              );
+              return throwError(
+                () =>
+                  new HttpException(
+                    `Failed to verify OTP: ${error.message}`,
+                    error.response?.status || HttpStatus.INTERNAL_SERVER_ERROR,
+                  ),
+              );
+            }),
           ),
-          catchError((error: AxiosError) => {
-            this.logger.error(
-              `Keccel OTP Validate API error: ${error.message}`,
-              error.stack,
-            );
-            return throwError(
-              () =>
-                new HttpException(
-                  `Failed to verify OTP: ${error.message}`,
-                  error.response?.status || HttpStatus.INTERNAL_SERVER_ERROR,
-                ),
-            );
-          }),
-        ),
       );
 
       const data = response.data;
 
-      this.logger.debug(`Keccel OTP Validate API response: ${JSON.stringify(data)}`);
+      this.logger.debug(
+        `Keccel OTP Validate API response: ${JSON.stringify(data)}`,
+      );
 
       // Check if the API call was successful (not HTTP error)
       // Even if OTP is invalid, we return a valid response
-      const isValid = data.success === 'True' && data.statusOTP === 'VALID';
+      const isValid =
+        String(data.success || '').toLowerCase() === 'true' &&
+        String(data.statusOTP || '').toUpperCase() === 'VALID';
 
       this.logger.log(
-        `OTP verification ${isValid ? 'succeeded' : 'failed'} for ${phone}`,
+        `OTP verification ${isValid ? 'succeeded' : 'failed'} for ${this.maskPhone(normalizedPhone)}`,
       );
 
       return {
@@ -287,5 +325,71 @@ export class KeccelOtpService {
       );
     }
   }
-}
 
+  private normalizePhoneForKeccel(phone: string): string {
+    const defaultCountryCode = (
+      this.configService.get<string>('DEFAULT_COUNTRY_CODE') || '+243'
+    ).replace(/\D/g, '');
+
+    let normalized = phone.trim().replace(/[\s().-]/g, '');
+
+    if (normalized.startsWith('+')) {
+      normalized = normalized.slice(1);
+    }
+
+    if (normalized.startsWith('00')) {
+      normalized = normalized.slice(2);
+    }
+
+    if (normalized.startsWith('0')) {
+      normalized = `${defaultCountryCode}${normalized.slice(1)}`;
+    } else if (
+      defaultCountryCode &&
+      !normalized.startsWith(defaultCountryCode) &&
+      /^\d{8,10}$/.test(normalized)
+    ) {
+      normalized = `${defaultCountryCode}${normalized}`;
+    }
+
+    if (!/^\d{8,15}$/.test(normalized)) {
+      throw new BadRequestException(
+        'Le numero de telephone doit etre au format international, par exemple +243900000000',
+      );
+    }
+
+    return normalized;
+  }
+
+  private isGenerateSuccess(data: KeccelOtpGenerateResponse): boolean {
+    return String(data?.status || '').toUpperCase() === 'SENT';
+  }
+
+  private redactRequestBody(body: Record<string, any>): Record<string, any> {
+    return {
+      ...body,
+      token: this.maskToken(String(body.token || '')),
+      to: this.maskPhone(String(body.to || '')),
+    };
+  }
+
+  private maskPhone(phone: string): string {
+    const cleaned = phone.replace(/\s+/g, '');
+    if (cleaned.length <= 6) {
+      return cleaned;
+    }
+
+    return `${cleaned.slice(0, 4)}***${cleaned.slice(-3)}`;
+  }
+
+  private maskToken(token: string): string {
+    if (!token) {
+      return 'n/a';
+    }
+
+    if (token.length <= 6) {
+      return '***';
+    }
+
+    return `${token.slice(0, 3)}***${token.slice(-3)}`;
+  }
+}

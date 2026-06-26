@@ -32,6 +32,7 @@ import { KeccelOtpModule } from './keccel-otp/keccel-otp.module';
 import { TripRequestsModule } from './trip-requests/trip-requests.module';
 import { SafetyModule } from './safety/safety.module';
 import { GoogleMapsModule } from './google-maps/google-maps.module';
+import { YandexMapsModule } from './yandex-maps/yandex-maps.module';
 import { FavoritePlacesModule } from './favorite-places/favorite-places.module';
 import { ChatbotModule } from './chatbot/chatbot.module';
 import { buildTypeOrmModuleOptions } from './database/typeorm-options';
@@ -82,6 +83,7 @@ import { buildTypeOrmModuleOptions } from './database/typeorm-options';
     TripRequestsModule,
     SafetyModule,
     GoogleMapsModule,
+    YandexMapsModule,
     FavoritePlacesModule,
     ChatbotModule,
   ],
