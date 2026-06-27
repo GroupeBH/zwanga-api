@@ -100,6 +100,8 @@ export interface SanitizedTripRequest {
 
 export interface TripRequestPriceRecommendation {
   currency: 'CDF';
+  baseDistanceKm: number;
+  additionalPricePerKmPerPassenger: number;
   distanceMeters: number | null;
   numberOfSeats: number;
   pricePerKmPerPassenger: number;
@@ -111,7 +113,9 @@ export interface TripRequestPriceRecommendation {
 export class TripRequestsService {
   private readonly logger = new Logger(TripRequestsService.name);
   private readonly MAX_SEATS_PER_PASSENGER = 2;
-  private readonly RECOMMENDED_PRICE_PER_KM_PER_PASSENGER = 4500;
+  private readonly RECOMMENDED_BASE_DISTANCE_KM = 3;
+  private readonly RECOMMENDED_BASE_PRICE_PER_KM_PER_PASSENGER = 4500;
+  private readonly RECOMMENDED_ADDITIONAL_PRICE_PER_KM_PER_PASSENGER = 750;
 
   constructor(
     @InjectRepository(TripRequest)
@@ -225,9 +229,11 @@ export class TripRequestsService {
 
     return {
       currency: 'CDF',
+      baseDistanceKm: this.RECOMMENDED_BASE_DISTANCE_KM,
+      additionalPricePerKmPerPassenger: this.RECOMMENDED_ADDITIONAL_PRICE_PER_KM_PER_PASSENGER,
       distanceMeters,
       numberOfSeats,
-      pricePerKmPerPassenger: this.RECOMMENDED_PRICE_PER_KM_PER_PASSENGER,
+      pricePerKmPerPassenger: this.RECOMMENDED_BASE_PRICE_PER_KM_PER_PASSENGER,
       recommendedPricePerSeat,
       recommendedTotalPrice: recommendedPricePerSeat === null ? null : recommendedPricePerSeat * numberOfSeats,
     };
@@ -1262,7 +1268,14 @@ export class TripRequestsService {
       return null;
     }
 
-    return Math.round((distanceMeters / 1000) * this.RECOMMENDED_PRICE_PER_KM_PER_PASSENGER);
+    const distanceKm = distanceMeters / 1000;
+    const baseDistanceKm = Math.min(distanceKm, this.RECOMMENDED_BASE_DISTANCE_KM);
+    const additionalDistanceKm = Math.max(distanceKm - this.RECOMMENDED_BASE_DISTANCE_KM, 0);
+    const basePrice = baseDistanceKm * this.RECOMMENDED_BASE_PRICE_PER_KM_PER_PASSENGER;
+    const additionalPrice =
+      additionalDistanceKm * this.RECOMMENDED_ADDITIONAL_PRICE_PER_KM_PER_PASSENGER;
+
+    return Math.round(basePrice + additionalPrice);
   }
 
   private async calculateRouteDistanceMeters(
