@@ -127,7 +127,7 @@ describe('TripsService trip deletion rules', () => {
     findOne: jest.Mock;
     remove: jest.Mock;
   };
-  let bookingRepository: { delete: jest.Mock };
+  let bookingRepository: { update: jest.Mock; delete: jest.Mock };
   let cacheService: { del: jest.Mock };
 
   beforeEach(() => {
@@ -136,6 +136,7 @@ describe('TripsService trip deletion rules', () => {
       remove: jest.fn().mockResolvedValue(undefined),
     };
     bookingRepository = {
+      update: jest.fn().mockResolvedValue(undefined),
       delete: jest.fn().mockResolvedValue(undefined),
     };
     cacheService = {
@@ -183,11 +184,18 @@ describe('TripsService trip deletion rules', () => {
     tripRepository.findOne.mockResolvedValue(trip);
 
     await expect(service.remove('trip-1', 'driver-1')).resolves.toBeUndefined();
+    expect(bookingRepository.update).toHaveBeenCalledWith(
+      ['booking-pending'],
+      expect.objectContaining({
+        status: BookingStatus.CANCELLED,
+        cancelledAt: expect.any(Date),
+      }),
+    );
     expect(bookingRepository.delete).toHaveBeenCalledWith({ tripId: 'trip-1' });
     expect(tripRepository.remove).toHaveBeenCalledWith(trip);
   });
 
-  it('blocks deleting a non-terminal trip when a booking is already accepted', async () => {
+  it('cancels an accepted booking without pickup and deletes the trip', async () => {
     const trip = {
       id: 'trip-2',
       driverId: 'driver-1',
@@ -207,11 +215,128 @@ describe('TripsService trip deletion rules', () => {
 
     tripRepository.findOne.mockResolvedValue(trip);
 
-    await expect(service.remove('trip-2', 'driver-1')).rejects.toBeInstanceOf(
+    await expect(service.remove('trip-2', 'driver-1')).resolves.toBeUndefined();
+    expect(bookingRepository.update).toHaveBeenCalledWith(
+      ['booking-accepted'],
+      expect.objectContaining({
+        status: BookingStatus.CANCELLED,
+        cancelledAt: expect.any(Date),
+      }),
+    );
+    expect(bookingRepository.delete).toHaveBeenCalledWith({ tripId: 'trip-2' });
+    expect(tripRepository.remove).toHaveBeenCalledWith(trip);
+  });
+
+  it('blocks deletion while a passenger is on board', async () => {
+    const trip = {
+      id: 'trip-3',
+      driverId: 'driver-1',
+      status: TripStatus.ACTIVE,
+      departureDate: new Date(),
+      bookings: [
+        {
+          id: 'booking-on-board',
+          status: BookingStatus.ACCEPTED,
+          pickedUp: true,
+          pickedUpConfirmedByPassenger: false,
+          droppedOff: false,
+          droppedOffConfirmedByPassenger: false,
+        },
+      ],
+    };
+
+    tripRepository.findOne.mockResolvedValue(trip);
+
+    await expect(service.remove('trip-3', 'driver-1')).rejects.toBeInstanceOf(
       BadRequestException,
     );
+    expect(bookingRepository.update).not.toHaveBeenCalled();
     expect(bookingRepository.delete).not.toHaveBeenCalled();
     expect(tripRepository.remove).not.toHaveBeenCalled();
+  });
+
+  it('allows deletion after the passenger has been dropped off', async () => {
+    const trip = {
+      id: 'trip-4',
+      driverId: 'driver-1',
+      status: TripStatus.ACTIVE,
+      departureDate: new Date(),
+      bookings: [
+        {
+          id: 'booking-dropped-off',
+          status: BookingStatus.ACCEPTED,
+          pickedUp: true,
+          pickedUpConfirmedByPassenger: true,
+          droppedOff: true,
+          droppedOffConfirmedByPassenger: false,
+        },
+      ],
+    };
+
+    tripRepository.findOne.mockResolvedValue(trip);
+
+    await expect(service.remove('trip-4', 'driver-1')).resolves.toBeUndefined();
+    expect(bookingRepository.update).not.toHaveBeenCalled();
+    expect(bookingRepository.delete).toHaveBeenCalledWith({ tripId: 'trip-4' });
+    expect(tripRepository.remove).toHaveBeenCalledWith(trip);
+  });
+
+  it('allows deletion when dropoff is recorded only by its timestamp', async () => {
+    const trip = {
+      id: 'trip-dropoff-timestamp',
+      driverId: 'driver-1',
+      status: TripStatus.ACTIVE,
+      departureDate: new Date(),
+      bookings: [
+        {
+          id: 'booking-dropoff-timestamp',
+          status: BookingStatus.ACCEPTED,
+          pickedUp: true,
+          pickedUpAt: new Date(Date.now() - 30 * 60 * 1000),
+          pickedUpConfirmedByPassenger: true,
+          droppedOff: false,
+          droppedOffAt: new Date(),
+          droppedOffConfirmedByPassenger: false,
+        },
+      ],
+    };
+
+    tripRepository.findOne.mockResolvedValue(trip);
+
+    await expect(
+      service.remove('trip-dropoff-timestamp', 'driver-1'),
+    ).resolves.toBeUndefined();
+    expect(bookingRepository.update).not.toHaveBeenCalled();
+    expect(bookingRepository.delete).toHaveBeenCalledWith({
+      tripId: 'trip-dropoff-timestamp',
+    });
+    expect(tripRepository.remove).toHaveBeenCalledWith(trip);
+  });
+
+  it('allows deletion for a completed booking with legacy dropoff flags', async () => {
+    const trip = {
+      id: 'trip-5',
+      driverId: 'driver-1',
+      status: TripStatus.COMPLETED,
+      departureDate: new Date(),
+      bookings: [
+        {
+          id: 'booking-completed',
+          status: BookingStatus.COMPLETED,
+          pickedUp: true,
+          pickedUpConfirmedByPassenger: true,
+          droppedOff: false,
+          droppedOffConfirmedByPassenger: false,
+        },
+      ],
+    };
+
+    tripRepository.findOne.mockResolvedValue(trip);
+
+    await expect(service.remove('trip-5', 'driver-1')).resolves.toBeUndefined();
+    expect(bookingRepository.update).not.toHaveBeenCalled();
+    expect(bookingRepository.delete).toHaveBeenCalledWith({ tripId: 'trip-5' });
+    expect(tripRepository.remove).toHaveBeenCalledWith(trip);
   });
 });
 
