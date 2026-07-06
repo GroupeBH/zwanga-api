@@ -39,6 +39,19 @@ export interface InitiatePaymentInput {
   referencePrefix?: string;
 }
 
+export interface InitiatePayoutInput {
+  userId: string;
+  purpose?: string;
+  relatedEntityType?: string | null;
+  relatedEntityId?: string | null;
+  phone: string;
+  amount: number;
+  currency: string;
+  description: string;
+  callbackUrl?: string;
+  referencePrefix?: string;
+}
+
 export interface NormalizedFlexPayCallback {
   code: string;
   reference: string;
@@ -171,6 +184,93 @@ export class PaymentsService {
     );
 
     return savedTransaction;
+  }
+
+  async initiatePayout(
+    input: InitiatePayoutInput,
+  ): Promise<PaymentTransaction> {
+    this.ensurePayoutInputIsUsable(input);
+    const callbackUrl =
+      input.callbackUrl || this.getGenericFlexPayCallbackUrl();
+
+    const transaction = this.paymentTransactionRepository.create({
+      userId: input.userId,
+      purpose: input.purpose || PaymentPurpose.DRIVER_PAYOUT,
+      relatedEntityType: input.relatedEntityType ?? null,
+      relatedEntityId: input.relatedEntityId ?? null,
+      provider: PaymentProvider.FLEXPAY,
+      method: PaymentMethod.MOBILE_MONEY,
+      status: PaymentStatus.PENDING,
+      reference: this.generatePaymentReference(
+        input.referencePrefix,
+        input.userId,
+      ),
+      orderNumber: null,
+      providerReference: null,
+      providerStatusCode: null,
+      providerMessage: null,
+      amount: input.amount,
+      currency: input.currency.toUpperCase(),
+      description: input.description,
+      phone: input.phone,
+      paymentUrl: null,
+      callbackUrl,
+      rawInitiationResponse: null,
+      rawCallbackPayload: null,
+      rawCheckResponse: null,
+      paidAt: null,
+    });
+
+    let savedTransaction =
+      await this.paymentTransactionRepository.save(transaction);
+
+    this.logger.log(
+      `Payout transaction created: id=${savedTransaction.id}, reference=${savedTransaction.reference}, userId=${savedTransaction.userId}, amount=${savedTransaction.amount} ${savedTransaction.currency}, related=${savedTransaction.relatedEntityType ?? 'none'}:${savedTransaction.relatedEntityId ?? 'none'}`,
+    );
+
+    try {
+      const flexPayResponse = await this.flexPayService.initiatePayout({
+        reference: savedTransaction.reference,
+        phone: input.phone,
+        amount: input.amount,
+        currency: savedTransaction.currency,
+        callbackUrl,
+      });
+
+      savedTransaction.orderNumber = flexPayResponse.orderNumber;
+      savedTransaction.providerStatusCode = flexPayResponse.code;
+      savedTransaction.providerMessage =
+        flexPayResponse.message || 'Paiement chauffeur initialise';
+      savedTransaction.rawInitiationResponse = flexPayResponse.raw;
+
+      if (!this.flexPayService.isSuccessfulCode(flexPayResponse.code)) {
+        savedTransaction.status = PaymentStatus.FAILED;
+        savedTransaction.providerMessage = this.getInitiationFailureMessage(
+          flexPayResponse.message,
+        );
+        await this.paymentTransactionRepository.save(savedTransaction);
+        throw new BadRequestException(savedTransaction.providerMessage);
+      }
+
+      savedTransaction.status = PaymentStatus.INITIATED;
+      savedTransaction =
+        await this.paymentTransactionRepository.save(savedTransaction);
+      this.logger.log(
+        `Payout initialized: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, orderNumber=${savedTransaction.orderNumber ?? 'none'}, status=${savedTransaction.status}`,
+      );
+      return savedTransaction;
+    } catch (error) {
+      const errorMessage = this.getErrorMessage(error);
+      savedTransaction.status = PaymentStatus.FAILED;
+      savedTransaction.providerMessage =
+        this.translatePaymentMessage(errorMessage) ?? errorMessage;
+      await this.paymentTransactionRepository.save(savedTransaction);
+      this.logger.error(
+        `Payout initiation failed: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, message=${errorMessage}`,
+        this.getErrorStack(error),
+      );
+      throw error;
+    }
   }
 
   async handleFlexPayCallback(
@@ -544,6 +644,26 @@ export class PaymentsService {
     if (input.method === PaymentMethod.MOBILE_MONEY && !input.phone?.trim()) {
       throw new BadRequestException(
         'Le numero de telephone est requis pour payer par Mobile Money',
+      );
+    }
+
+    if (!Number.isFinite(input.amount) || input.amount <= 0) {
+      throw new BadRequestException('Le montant du paiement est invalide');
+    }
+
+    if (!input.currency?.trim()) {
+      throw new BadRequestException('La devise du paiement est requise');
+    }
+  }
+
+  private ensurePayoutInputIsUsable(input: InitiatePayoutInput): void {
+    if (!input.userId?.trim()) {
+      throw new BadRequestException('Le chauffeur est requis');
+    }
+
+    if (!input.phone?.trim()) {
+      throw new BadRequestException(
+        'Le numero de telephone est requis pour le paiement chauffeur',
       );
     }
 

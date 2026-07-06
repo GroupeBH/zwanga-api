@@ -9,7 +9,7 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { BookingsService } from './bookings.service';
-import { CreateBookingDto, UpdateBookingStatusDto, RejectBookingDto, ConfirmPickupDto, ConfirmDropoffDto, ReportBookingProblemDto, UpdatePassengerLocationDto } from './dto/booking.dto';
+import { CreateBookingDto, UpdateBookingStatusDto, RejectBookingDto, ConfirmPickupDto, ConfirmDropoffDto, ReportBookingProblemDto, UpdatePassengerLocationDto, UpdateBookingPaymentModeDto } from './dto/booking.dto';
 import { SendWhatsAppNotificationDto } from './dto/send-whatsapp-notification.dto';
 import { Auth } from '../auth/decorators/auth.decorator';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
@@ -59,6 +59,26 @@ export class BookingsController {
       id,
       req.user.userId,
       dto,
+    );
+  }
+
+  @Put(':id/payment-mode')
+  @Auth()
+  @SensitiveThrottle(20, 60000)
+  @ApiOperation({
+    summary: 'Update payment mode for a booking',
+    description:
+      'Permet au passager de changer entre paiement electronique, points Zwanga et paiement physique avant la cloture de la reservation.',
+  })
+  async updatePaymentMode(
+    @Request() req,
+    @Param('id') id: string,
+    @Body() dto: UpdateBookingPaymentModeDto,
+  ) {
+    return this.bookingsService.updatePaymentMode(
+      id,
+      req.user.userId,
+      dto.paymentMode,
     );
   }
 
@@ -205,7 +225,7 @@ export class BookingsController {
   @SensitiveThrottle(20, 60000)
   @ApiOperation({ summary: 'Confirm dropoff by passenger' })
   async confirmDropoffByPassenger(@Request() req, @Param('id') id: string, @Body() dto: ConfirmDropoffDto) {
-    return this.bookingsService.confirmDropoffByPassenger(id, req.user.userId);
+    return this.bookingsService.confirmDropoffByPassenger(id, req.user.userId, dto);
   }
 
   @Post(':id/report-problem')

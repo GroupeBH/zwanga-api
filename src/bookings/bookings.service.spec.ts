@@ -22,6 +22,14 @@ describe('BookingsService trip payments', () => {
     findTransactionById: jest.Mock;
     findLatestTransactionForRelatedEntity: jest.Mock;
   };
+  let walletService: {
+    payForBooking: jest.Mock;
+    refundBookingPayment: jest.Mock;
+    awardLoyaltyForBooking: jest.Mock;
+  };
+  let driverSettlementsService: {
+    recordCompletedBookingEarning: jest.Mock;
+  };
   let service: BookingsService;
 
   const booking = {
@@ -51,6 +59,7 @@ describe('BookingsService trip payments', () => {
     bookingRepository = {
       findOne: jest.fn(),
       save: jest.fn((payload: unknown) => Promise.resolve(payload)),
+      remove: jest.fn((payload: unknown) => Promise.resolve(payload)),
     };
     cacheService = { del: jest.fn() };
     configService = {
@@ -68,6 +77,14 @@ describe('BookingsService trip payments', () => {
       findTransactionById: jest.fn(),
       findLatestTransactionForRelatedEntity: jest.fn(),
     };
+    walletService = {
+      payForBooking: jest.fn(),
+      refundBookingPayment: jest.fn(),
+      awardLoyaltyForBooking: jest.fn(),
+    };
+    driverSettlementsService = {
+      recordCompletedBookingEarning: jest.fn(),
+    };
 
     service = new BookingsService(
       bookingRepository as any,
@@ -81,6 +98,8 @@ describe('BookingsService trip payments', () => {
       {} as any,
       configService as any,
       paymentsService as any,
+      walletService as any,
+      driverSettlementsService as any,
     );
   });
 
@@ -177,5 +196,43 @@ describe('BookingsService trip payments', () => {
     );
     expect(result.booking.paymentStatus).toBe(BookingPaymentStatus.SUCCEEDED);
     expect(result.payment.status).toBe(PaymentStatus.SUCCEEDED);
+  });
+
+  it('blocks pickup when an electronic booking has not been paid', async () => {
+    bookingRepository.findOne.mockResolvedValue({
+      ...booking,
+      paymentStatus: BookingPaymentStatus.PENDING,
+      trip: {
+        ...booking.trip,
+        driverId: 'driver-1',
+      },
+    });
+
+    await expect(
+      service.confirmPickup('booking-1', 'driver-1'),
+    ).rejects.toThrow('doit etre payee avant le demarrage');
+
+    expect(bookingRepository.save).not.toHaveBeenCalled();
+  });
+
+  it('finalizes a completed prepaid booking with loyalty and driver earning', async () => {
+    await (service as any).finalizeCompletedBooking({
+      ...booking,
+      status: BookingStatus.COMPLETED,
+      paymentStatus: BookingPaymentStatus.SUCCEEDED,
+      paymentMode: TripPaymentMode.ELECTRONIC,
+      trip: {
+        ...booking.trip,
+        driverId: 'driver-1',
+      },
+    });
+
+    expect(walletService.awardLoyaltyForBooking).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'booking-1' }),
+      5000,
+    );
+    expect(
+      driverSettlementsService.recordCompletedBookingEarning,
+    ).toHaveBeenCalledWith(expect.objectContaining({ id: 'booking-1' }));
   });
 });

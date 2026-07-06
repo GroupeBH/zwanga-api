@@ -36,6 +36,8 @@ import { YandexMapsModule } from './yandex-maps/yandex-maps.module';
 import { FavoritePlacesModule } from './favorite-places/favorite-places.module';
 import { ChatbotModule } from './chatbot/chatbot.module';
 import { buildTypeOrmModuleOptions } from './database/typeorm-options';
+import { WalletModule } from './wallet/wallet.module';
+import { DriverSettlementsModule } from './driver-settlements/driver-settlements.module';
 
 @Module({
   imports: [
@@ -86,6 +88,8 @@ import { buildTypeOrmModuleOptions } from './database/typeorm-options';
     YandexMapsModule,
     FavoritePlacesModule,
     ChatbotModule,
+    WalletModule,
+    DriverSettlementsModule,
   ],
   controllers: [AppController],
   providers: [

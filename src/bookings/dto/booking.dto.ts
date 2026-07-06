@@ -139,7 +139,7 @@ export class CreateBookingDto {
     enum: TripPaymentMode,
     enumName: 'TripPaymentMode',
     description:
-      'Mode de reglement du trajet: paiement electronique via FlexPay ou paiement physique a l arrivee',
+      'Mode de reglement du trajet: paiement electronique via FlexPay, points Zwanga ou paiement physique a l arrivee',
     example: TripPaymentMode.ELECTRONIC,
   })
   @IsEnum(TripPaymentMode, {
@@ -184,6 +184,34 @@ export class ConfirmDropoffDto {
   })
   @IsOptional()
   confirmed?: boolean; // Pour compatibilité, mais toujours true quand appelé
+  @ApiProperty({
+    required: false,
+    enum: TripPaymentMode,
+    enumName: 'TripPaymentMode',
+    description:
+      'Mode de reglement choisi au moment de la depose: paiement electronique, points Zwanga ou paiement physique',
+    example: TripPaymentMode.CASH,
+  })
+  @IsEnum(TripPaymentMode, {
+    message: 'Le mode de paiement selectionne est invalide',
+  })
+  @IsOptional()
+  paymentMode?: TripPaymentMode;
+}
+
+export class UpdateBookingPaymentModeDto {
+  @ApiProperty({
+    enum: TripPaymentMode,
+    enumName: 'TripPaymentMode',
+    description:
+      'Nouveau mode de reglement du trajet: paiement electronique via FlexPay, points Zwanga ou paiement physique',
+    example: TripPaymentMode.CASH,
+  })
+  @IsEnum(TripPaymentMode, {
+    message: 'Le mode de paiement selectionne est invalide',
+  })
+  @IsNotEmpty()
+  paymentMode: TripPaymentMode;
 }
 
 export class ReportBookingProblemDto {

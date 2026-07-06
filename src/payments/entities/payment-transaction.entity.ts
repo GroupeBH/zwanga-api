@@ -28,6 +28,8 @@ export enum PaymentPurpose {
   GENERIC = 'generic',
   SUBSCRIPTION_PRO = 'subscription_pro',
   TRIP_BOOKING = 'trip_booking',
+  WALLET_TOP_UP = 'wallet_top_up',
+  DRIVER_PAYOUT = 'driver_payout',
 }
 
 @Entity('payment_transactions')

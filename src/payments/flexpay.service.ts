@@ -32,6 +32,14 @@ export interface FlexPayInitiatePaymentResult {
   raw: Record<string, unknown>;
 }
 
+export interface FlexPayInitiatePayoutInput {
+  reference: string;
+  phone: string;
+  amount: number;
+  currency: string;
+  callbackUrl: string;
+}
+
 export interface FlexPayTransactionStatus {
   orderNumber: string | null;
   reference: string | null;
@@ -71,6 +79,53 @@ export class FlexPayService {
     }
 
     return this.initiateMobileMoneyPayment(input);
+  }
+
+  async initiatePayout(
+    input: FlexPayInitiatePayoutInput,
+  ): Promise<FlexPayInitiatePaymentResult> {
+    if (!input.phone?.trim()) {
+      throw new BadRequestException(
+        'Le numero de telephone est requis pour un paiement chauffeur',
+      );
+    }
+
+    const body = {
+      merchant: this.getMerchantCode(),
+      type: '1',
+      phone: this.normalizePhone(input.phone),
+      reference: input.reference,
+      amount: this.formatAmount(input.amount),
+      currency: input.currency,
+      callbackUrl: input.callbackUrl,
+    };
+    const url = this.getMerchantPayoutUrl();
+
+    this.logger.log(
+      `FlexPay merchant payout request: url=${url}, merchant=${body.merchant}, reference=${body.reference}, phone=${this.maskPhone(body.phone)}, amount=${body.amount} ${body.currency}`,
+    );
+
+    try {
+      const response = await firstValueFrom(
+        this.httpService.post<Record<string, unknown>>(url, body, {
+          headers: {
+            Authorization: this.getBearerToken(),
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+          timeout: this.getRequestTimeoutMs(),
+        }),
+      );
+
+      const normalizedResponse = this.normalizeInitiateResponse(response.data);
+      this.logger.log(
+        `FlexPay merchant payout response: reference=${input.reference}, code=${normalizedResponse.code}, orderNumber=${normalizedResponse.orderNumber ?? 'none'}, message=${normalizedResponse.message ?? 'none'}`,
+      );
+
+      return normalizedResponse;
+    } catch (error) {
+      this.handleHttpError(error, 'Paiement chauffeur FlexPay');
+    }
   }
 
   async checkTransaction(
@@ -315,6 +370,19 @@ export class FlexPayService {
       this.getOptionalConfig('FLEXPAY_MOBILE_BASE_URL') ||
         this.defaultMobileBaseUrl,
       'api/rest/v1/paymentService',
+    );
+  }
+
+  private getMerchantPayoutUrl(): string {
+    const explicitUrl = this.getOptionalConfig('FLEXPAY_PAYOUT_SERVICE_URL');
+    if (explicitUrl) {
+      return explicitUrl;
+    }
+
+    return this.joinUrl(
+      this.getOptionalConfig('FLEXPAY_MOBILE_BASE_URL') ||
+        this.defaultMobileBaseUrl,
+      'api/rest/v1/merchantPayOutService',
     );
   }
 

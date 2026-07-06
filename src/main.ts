@@ -115,6 +115,8 @@ async function bootstrap() {
     .addTag('Chat', 'Chat endpoints')
     .addTag('Ratings', 'Rating endpoints')
     .addTag('Payments', 'Payment endpoints')
+    .addTag('Wallet', 'Points wallet endpoints')
+    .addTag('Driver Settlements', 'Driver earnings and payout endpoints')
     .addTag('Subscriptions', 'Subscription endpoints')
     .addTag('Admin', 'Admin endpoints')
     .addTag('Support', 'Support & helpdesk endpoints')
