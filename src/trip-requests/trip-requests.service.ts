@@ -12,7 +12,14 @@ import { TripRequest, TripRequestStatus } from './entities/trip-request.entity';
 import { DriverOffer, DriverOfferStatus } from './entities/driver-offer.entity';
 import { User, UserRole } from '../users/entities/user.entity';
 import { Vehicle } from '../vehicles/entities/vehicle.entity';
-import { CreateTripRequestDto, CreateDriverOfferDto, AcceptDriverOfferDto, AcceptTripRequestDto, UpdateTripRequestDto, RecommendTripRequestPriceDto } from './dto/trip-request.dto';
+import {
+  CreateTripRequestDto,
+  CreateDriverOfferDto,
+  AcceptDriverOfferDto,
+  AcceptTripRequestDto,
+  UpdateTripRequestDto,
+  RecommendTripRequestPriceDto,
+} from './dto/trip-request.dto';
 import { FileUploadService } from '../common/services/file-upload.service';
 import { NotificationService } from '../notifications/notifications.service';
 import { TripsService } from '../trips/trips.service';
@@ -21,6 +28,9 @@ import { BookingStatus } from '../bookings/entities/booking.entity';
 import { GoogleMapsService } from '../google-maps/google-maps.service';
 import { TravelMode } from '../google-maps/dto/google-maps.dto';
 import { SubscriptionsService } from '../subscriptions/subscriptions.service';
+import { WeatherAwarenessService } from '../weather/weather-awareness.service';
+import { WeatherRouteImpact } from '../weather/weather.types';
+import { TripPaymentMode } from '../payments/enums/trip-payment-mode.enum';
 
 export interface SanitizedUser {
   id: string;
@@ -57,7 +67,8 @@ export interface SanitizedDriverOffer {
   createdAt: Date;
 }
 
-export interface SanitizedDriverOfferWithTripRequest extends SanitizedDriverOffer {
+export interface SanitizedDriverOfferWithTripRequest
+  extends SanitizedDriverOffer {
   tripRequest: {
     id: string;
     departureLocation: string;
@@ -68,6 +79,7 @@ export interface SanitizedDriverOfferWithTripRequest extends SanitizedDriverOffe
     departureDateMax: Date;
     numberOfSeats: number;
     maxPricePerSeat: number | null;
+    paymentMode: TripPaymentMode;
     status: TripRequestStatus;
     passenger: SanitizedUser;
   };
@@ -86,6 +98,7 @@ export interface SanitizedTripRequest {
   departureDateMax: Date;
   numberOfSeats: number;
   maxPricePerSeat: number | null;
+  paymentMode: TripPaymentMode;
   description: string | null;
   status: TripRequestStatus;
   selectedDriver: SanitizedUser | null;
@@ -100,18 +113,23 @@ export interface SanitizedTripRequest {
 
 export interface TripRequestPriceRecommendation {
   currency: 'CDF';
+  baseDistanceKm: number;
+  additionalPricePerKmPerPassenger: number;
   distanceMeters: number | null;
   numberOfSeats: number;
   pricePerKmPerPassenger: number;
   recommendedPricePerSeat: number | null;
   recommendedTotalPrice: number | null;
+  weatherImpact: WeatherRouteImpact;
 }
 
 @Injectable()
 export class TripRequestsService {
   private readonly logger = new Logger(TripRequestsService.name);
   private readonly MAX_SEATS_PER_PASSENGER = 2;
-  private readonly RECOMMENDED_PRICE_PER_KM_PER_PASSENGER = 4500;
+  private readonly RECOMMENDED_BASE_DISTANCE_KM = 3;
+  private readonly RECOMMENDED_BASE_PRICE_PER_KM_PER_PASSENGER = 4500;
+  private readonly RECOMMENDED_ADDITIONAL_PRICE_PER_KM_PER_PASSENGER = 750;
 
   constructor(
     @InjectRepository(TripRequest)
@@ -128,12 +146,18 @@ export class TripRequestsService {
     private bookingsService: BookingsService,
     private googleMapsService: GoogleMapsService,
     private subscriptionsService: SubscriptionsService,
-  ) { }
+    private weatherAwarenessService: WeatherAwarenessService,
+  ) {}
 
-  async create(passengerId: string, createTripRequestDto: CreateTripRequestDto): Promise<SanitizedTripRequest> {
+  async create(
+    passengerId: string,
+    createTripRequestDto: CreateTripRequestDto,
+  ): Promise<SanitizedTripRequest> {
     this.logger.log(`Creating trip request for passenger: ${passengerId}`);
 
-    const passenger = await this.userRepository.findOne({ where: { id: passengerId } });
+    const passenger = await this.userRepository.findOne({
+      where: { id: passengerId },
+    });
     if (!passenger) {
       throw new NotFoundException('Utilisateur non trouvé');
     }
@@ -144,18 +168,28 @@ export class TripRequestsService {
       );
     }
 
-    const { departureCoordinates, arrivalCoordinates, departureDateMin, departureDateMax, ...rest } = createTripRequestDto;
+    const {
+      departureCoordinates,
+      arrivalCoordinates,
+      departureDateMin,
+      departureDateMax,
+      ...rest
+    } = createTripRequestDto;
 
     // Validate dates
     const minDate = new Date(departureDateMin);
     const maxDate = new Date(departureDateMax);
 
     if (minDate >= maxDate) {
-      throw new BadRequestException('La date de départ minimum doit être antérieure à la date maximum');
+      throw new BadRequestException(
+        'La date de départ minimum doit être antérieure à la date maximum',
+      );
     }
 
     if (minDate < new Date()) {
-      throw new BadRequestException('La date de départ minimum ne peut pas être dans le passé');
+      throw new BadRequestException(
+        'La date de départ minimum ne peut pas être dans le passé',
+      );
     }
 
     const departurePoint = await this.resolvePointFromCoordinatesOrAddress(
@@ -170,14 +204,17 @@ export class TripRequestsService {
       rest.arrivalReference,
       'trip request arrival',
     );
-    const recommendedPrice = rest.maxPricePerSeat ?? await this.calculateRecommendedPricePerSeat(
-      departurePoint,
-      arrivalPoint,
-      'trip request creation',
-    );
+    const recommendedPrice =
+      rest.maxPricePerSeat ??
+      (await this.calculateRecommendedPricePerSeat(
+        departurePoint,
+        arrivalPoint,
+        'trip request creation',
+      ));
 
     const tripRequest = this.tripRequestRepository.create({
       ...rest,
+      paymentMode: rest.paymentMode ?? TripPaymentMode.CASH,
       maxPricePerSeat: recommendedPrice,
       passengerId,
       departurePoint,
@@ -195,7 +232,9 @@ export class TripRequestsService {
     return this.findOne(saved.id, passengerId);
   }
 
-  async recommendPrice(payload: RecommendTripRequestPriceDto): Promise<TripRequestPriceRecommendation> {
+  async recommendPrice(
+    payload: RecommendTripRequestPriceDto,
+  ): Promise<TripRequestPriceRecommendation> {
     const numberOfSeats = payload.numberOfSeats ?? 1;
 
     if (numberOfSeats < 1 || numberOfSeats > this.MAX_SEATS_PER_PASSENGER) {
@@ -221,20 +260,40 @@ export class TripRequestsService {
       arrivalPoint,
       'trip request price recommendation',
     );
-    const recommendedPricePerSeat = this.buildRecommendedPricePerSeat(distanceMeters);
+    const weatherImpact = await this.weatherAwarenessService.getRouteImpact(
+      this.pointToCoordinates(departurePoint),
+      this.pointToCoordinates(arrivalPoint),
+    );
+    const recommendedPricePerSeat = this.buildRecommendedPricePerSeat(
+      distanceMeters,
+      weatherImpact.priceMultiplier,
+    );
 
     return {
       currency: 'CDF',
+      baseDistanceKm: this.RECOMMENDED_BASE_DISTANCE_KM,
+      additionalPricePerKmPerPassenger:
+        this.RECOMMENDED_ADDITIONAL_PRICE_PER_KM_PER_PASSENGER,
       distanceMeters,
       numberOfSeats,
-      pricePerKmPerPassenger: this.RECOMMENDED_PRICE_PER_KM_PER_PASSENGER,
+      pricePerKmPerPassenger: this.RECOMMENDED_BASE_PRICE_PER_KM_PER_PASSENGER,
       recommendedPricePerSeat,
-      recommendedTotalPrice: recommendedPricePerSeat === null ? null : recommendedPricePerSeat * numberOfSeats,
+      recommendedTotalPrice:
+        recommendedPricePerSeat === null
+          ? null
+          : recommendedPricePerSeat * numberOfSeats,
+      weatherImpact,
     };
   }
 
-  async update(passengerId: string, tripRequestId: string, updateTripRequestDto: UpdateTripRequestDto): Promise<SanitizedTripRequest> {
-    this.logger.log(`Updating trip request ${tripRequestId} by passenger ${passengerId}`);
+  async update(
+    passengerId: string,
+    tripRequestId: string,
+    updateTripRequestDto: UpdateTripRequestDto,
+  ): Promise<SanitizedTripRequest> {
+    this.logger.log(
+      `Updating trip request ${tripRequestId} by passenger ${passengerId}`,
+    );
 
     const tripRequest = await this.tripRequestRepository.findOne({
       where: { id: tripRequestId, passengerId },
@@ -242,19 +301,34 @@ export class TripRequestsService {
     });
 
     if (!tripRequest) {
-      this.logger.warn(`Trip request update failed: Trip request ${tripRequestId} not found for passenger ${passengerId}`);
-      throw new NotFoundException('Demande de trajet non trouvée ou vous n\'êtes pas le propriétaire');
+      this.logger.warn(
+        `Trip request update failed: Trip request ${tripRequestId} not found for passenger ${passengerId}`,
+      );
+      throw new NotFoundException(
+        "Demande de trajet non trouvée ou vous n'êtes pas le propriétaire",
+      );
     }
 
     // Check if trip request can be updated (only PENDING or OFFERS_RECEIVED, no driver selected)
     if (tripRequest.status === TripRequestStatus.DRIVER_SELECTED) {
-      this.logger.warn(`Trip request update failed: Driver already selected for trip request ${tripRequestId}`);
-      throw new BadRequestException('Vous ne pouvez pas modifier une demande pour laquelle un driver a été sélectionné');
+      this.logger.warn(
+        `Trip request update failed: Driver already selected for trip request ${tripRequestId}`,
+      );
+      throw new BadRequestException(
+        'Vous ne pouvez pas modifier une demande pour laquelle un driver a été sélectionné',
+      );
     }
 
-    if (tripRequest.status === TripRequestStatus.CANCELLED || tripRequest.status === TripRequestStatus.EXPIRED) {
-      this.logger.warn(`Trip request update failed: Trip request ${tripRequestId} is ${tripRequest.status}`);
-      throw new BadRequestException('Vous ne pouvez pas modifier une demande annulée ou expirée');
+    if (
+      tripRequest.status === TripRequestStatus.CANCELLED ||
+      tripRequest.status === TripRequestStatus.EXPIRED
+    ) {
+      this.logger.warn(
+        `Trip request update failed: Trip request ${tripRequestId} is ${tripRequest.status}`,
+      );
+      throw new BadRequestException(
+        'Vous ne pouvez pas modifier une demande annulée ou expirée',
+      );
     }
 
     // Check if any offer has been accepted
@@ -263,8 +337,12 @@ export class TripRequestsService {
     );
 
     if (hasAcceptedOffer) {
-      this.logger.warn(`Trip request update failed: An offer has been accepted for trip request ${tripRequestId}`);
-      throw new BadRequestException('Vous ne pouvez pas modifier une demande pour laquelle une offre a été acceptée');
+      this.logger.warn(
+        `Trip request update failed: An offer has been accepted for trip request ${tripRequestId}`,
+      );
+      throw new BadRequestException(
+        'Vous ne pouvez pas modifier une demande pour laquelle une offre a été acceptée',
+      );
     }
 
     const {
@@ -281,7 +359,8 @@ export class TripRequestsService {
     }
 
     if (updateTripRequestDto.departureReference !== undefined) {
-      tripRequest.departureReference = updateTripRequestDto.departureReference?.trim() || null;
+      tripRequest.departureReference =
+        updateTripRequestDto.departureReference?.trim() || null;
     }
 
     const shouldRefreshDeparturePoint =
@@ -289,12 +368,13 @@ export class TripRequestsService {
       updateTripRequestDto.departureReference !== undefined;
 
     if (departureCoordinates || shouldRefreshDeparturePoint) {
-      tripRequest.departurePoint = await this.resolvePointFromCoordinatesOrAddress(
-        departureCoordinates,
-        tripRequest.departureLocation,
-        tripRequest.departureReference,
-        'trip request departure',
-      );
+      tripRequest.departurePoint =
+        await this.resolvePointFromCoordinatesOrAddress(
+          departureCoordinates,
+          tripRequest.departureLocation,
+          tripRequest.departureReference,
+          'trip request departure',
+        );
     }
 
     // Update arrival location and coordinates if provided
@@ -303,7 +383,8 @@ export class TripRequestsService {
     }
 
     if (updateTripRequestDto.arrivalReference !== undefined) {
-      tripRequest.arrivalReference = updateTripRequestDto.arrivalReference?.trim() || null;
+      tripRequest.arrivalReference =
+        updateTripRequestDto.arrivalReference?.trim() || null;
     }
 
     const shouldRefreshArrivalPoint =
@@ -311,26 +392,35 @@ export class TripRequestsService {
       updateTripRequestDto.arrivalReference !== undefined;
 
     if (arrivalCoordinates || shouldRefreshArrivalPoint) {
-      tripRequest.arrivalPoint = await this.resolvePointFromCoordinatesOrAddress(
-        arrivalCoordinates,
-        tripRequest.arrivalLocation,
-        tripRequest.arrivalReference,
-        'trip request arrival',
-      );
+      tripRequest.arrivalPoint =
+        await this.resolvePointFromCoordinatesOrAddress(
+          arrivalCoordinates,
+          tripRequest.arrivalLocation,
+          tripRequest.arrivalReference,
+          'trip request arrival',
+        );
     }
 
     // Update dates if provided
     if (departureDateMin || departureDateMax) {
-      const minDate = departureDateMin ? new Date(departureDateMin) : tripRequest.departureDateMin;
-      const maxDate = departureDateMax ? new Date(departureDateMax) : tripRequest.departureDateMax;
+      const minDate = departureDateMin
+        ? new Date(departureDateMin)
+        : tripRequest.departureDateMin;
+      const maxDate = departureDateMax
+        ? new Date(departureDateMax)
+        : tripRequest.departureDateMax;
 
       // Validate dates
       if (minDate >= maxDate) {
-        throw new BadRequestException('La date de départ minimum doit être antérieure à la date maximum');
+        throw new BadRequestException(
+          'La date de départ minimum doit être antérieure à la date maximum',
+        );
       }
 
       if (minDate < new Date()) {
-        throw new BadRequestException('La date de départ minimum ne peut pas être dans le passé');
+        throw new BadRequestException(
+          'La date de départ minimum ne peut pas être dans le passé',
+        );
       }
 
       tripRequest.departureDateMin = minDate;
@@ -365,6 +455,10 @@ export class TripRequestsService {
       }
     }
 
+    if (updateTripRequestDto.paymentMode !== undefined) {
+      tripRequest.paymentMode = updateTripRequestDto.paymentMode;
+    }
+
     if (updateTripRequestDto.description !== undefined) {
       tripRequest.description = updateTripRequestDto.description;
     }
@@ -380,7 +474,9 @@ export class TripRequestsService {
     return this.findOne(updated.id, passengerId);
   }
 
-  private async notifyDriversAboutTripRequest(tripRequest: TripRequest): Promise<void> {
+  private async notifyDriversAboutTripRequest(
+    tripRequest: TripRequest,
+  ): Promise<void> {
     try {
       // Get all active drivers with FCM tokens, excluding the passenger who created the request
       const drivers = await this.userRepository.find({
@@ -397,7 +493,9 @@ export class TripRequestsService {
       );
 
       if (driversWithTokens.length === 0) {
-        this.logger.debug('No drivers with FCM tokens found (excluding passenger), skipping notifications');
+        this.logger.debug(
+          'No drivers with FCM tokens found (excluding passenger), skipping notifications',
+        );
         return;
       }
 
@@ -417,10 +515,21 @@ export class TripRequestsService {
         departureDateMax: tripRequest.departureDateMax.toISOString(),
       };
 
-      await this.notificationService.sendToMultiple(fcmTokens, title, body, data, driverIds);
-      this.logger.log(`Notified ${fcmTokens.length} drivers about trip request ${tripRequest.id} (excluded passenger ${tripRequest.passengerId})`);
+      await this.notificationService.sendToMultiple(
+        fcmTokens,
+        title,
+        body,
+        data,
+        driverIds,
+      );
+      this.logger.log(
+        `Notified ${fcmTokens.length} drivers about trip request ${tripRequest.id} (excluded passenger ${tripRequest.passengerId})`,
+      );
     } catch (error) {
-      this.logger.error(`Error notifying drivers about trip request ${tripRequest.id}: ${error.message}`, error.stack);
+      this.logger.error(
+        `Error notifying drivers about trip request ${tripRequest.id}: ${error.message}`,
+        error.stack,
+      );
       // Don't throw error, just log it - trip request creation should succeed even if notification fails
     }
   }
@@ -433,9 +542,19 @@ export class TripRequestsService {
     // Include PENDING and OFFERS_RECEIVED statuses (no offer accepted yet)
     // Exclude DRIVER_SELECTED (which means an offer was accepted)
     const tripRequests = await this.tripRequestRepository.find({
-      relations: ['passenger', 'selectedDriver', 'selectedVehicle', 'driverOffers', 'driverOffers.driver', 'driverOffers.vehicle'],
+      relations: [
+        'passenger',
+        'selectedDriver',
+        'selectedVehicle',
+        'driverOffers',
+        'driverOffers.driver',
+        'driverOffers.vehicle',
+      ],
       where: {
-        status: In([TripRequestStatus.PENDING, TripRequestStatus.OFFERS_RECEIVED]),
+        status: In([
+          TripRequestStatus.PENDING,
+          TripRequestStatus.OFFERS_RECEIVED,
+        ]),
         departureDateMax: MoreThan(now), // Exclure les demandes expirées
       },
       order: { createdAt: 'DESC' },
@@ -449,7 +568,9 @@ export class TripRequestsService {
       return !hasAcceptedOffer;
     });
 
-    return Promise.all(visibleTripRequests.map((tr) => this.sanitizeTripRequest(tr)));
+    return Promise.all(
+      visibleTripRequests.map((tr) => this.sanitizeTripRequest(tr)),
+    );
   }
 
   async findOne(id: string, userId?: string): Promise<SanitizedTripRequest> {
@@ -473,7 +594,9 @@ export class TripRequestsService {
 
     const isPassenger = userId && tripRequest.passengerId === userId;
     const isSelectedDriver =
-      userId && tripRequest.selectedDriverId && tripRequest.selectedDriverId === userId;
+      userId &&
+      tripRequest.selectedDriverId &&
+      tripRequest.selectedDriverId === userId;
 
     const hasAcceptedOffer = tripRequest.driverOffers?.some(
       (offer) => offer.status === DriverOfferStatus.ACCEPTED,
@@ -482,12 +605,16 @@ export class TripRequestsService {
     const userAcceptedOffer = userId
       ? tripRequest.driverOffers?.find(
           (offer) =>
-            offer.driverId === userId && offer.status === DriverOfferStatus.ACCEPTED,
+            offer.driverId === userId &&
+            offer.status === DriverOfferStatus.ACCEPTED,
         )
       : undefined;
 
     // Si aucune offre n'est acceptée, garder le comportement existant (visibilité large)
-    if (!hasAcceptedOffer && tripRequest.status !== TripRequestStatus.DRIVER_SELECTED) {
+    if (
+      !hasAcceptedOffer &&
+      tripRequest.status !== TripRequestStatus.DRIVER_SELECTED
+    ) {
       if (userId && !isPassenger) {
         const hasOffer = tripRequest.driverOffers?.some(
           (offer) => offer.driverId === userId,
@@ -495,8 +622,9 @@ export class TripRequestsService {
         if (!hasOffer) {
           // Ne montrer au driver que ses propres offres
           tripRequest.driverOffers =
-            tripRequest.driverOffers?.filter((offer) => offer.driverId === userId) ||
-            [];
+            tripRequest.driverOffers?.filter(
+              (offer) => offer.driverId === userId,
+            ) || [];
         }
       }
 
@@ -532,12 +660,19 @@ export class TripRequestsService {
     return this.sanitizeTripRequest(tripRequest);
   }
 
-  async getOffersForTripRequest(tripRequestId: string, userId?: string): Promise<SanitizedDriverOffer[]> {
+  async getOffersForTripRequest(
+    tripRequestId: string,
+    userId?: string,
+  ): Promise<SanitizedDriverOffer[]> {
     this.logger.debug(`Fetching offers for trip request: ${tripRequestId}`);
 
     const tripRequest = await this.tripRequestRepository.findOne({
       where: { id: tripRequestId },
-      relations: ['driverOffers', 'driverOffers.driver', 'driverOffers.vehicle'],
+      relations: [
+        'driverOffers',
+        'driverOffers.driver',
+        'driverOffers.vehicle',
+      ],
     });
 
     if (!tripRequest) {
@@ -546,14 +681,18 @@ export class TripRequestsService {
 
     // Only passenger can see all offers
     if (userId && tripRequest.passengerId !== userId) {
-      throw new ForbiddenException('Seul le passager peut voir toutes les offres');
+      throw new ForbiddenException(
+        'Seul le passager peut voir toutes les offres',
+      );
     }
 
     if (!tripRequest.driverOffers || tripRequest.driverOffers.length === 0) {
       return [];
     }
 
-    return Promise.all(tripRequest.driverOffers.map((offer) => this.sanitizeDriverOffer(offer)));
+    return Promise.all(
+      tripRequest.driverOffers.map((offer) => this.sanitizeDriverOffer(offer)),
+    );
   }
 
   async findByPassenger(passengerId: string): Promise<SanitizedTripRequest[]> {
@@ -565,14 +704,23 @@ export class TripRequestsService {
         passenger: { id: passengerId },
         departureDateMax: MoreThan(now), // Exclure les demandes expirées
       },
-      relations: ['passenger', 'selectedDriver', 'selectedVehicle', 'driverOffers', 'driverOffers.driver', 'driverOffers.vehicle'],
+      relations: [
+        'passenger',
+        'selectedDriver',
+        'selectedVehicle',
+        'driverOffers',
+        'driverOffers.driver',
+        'driverOffers.vehicle',
+      ],
       order: { createdAt: 'DESC' },
     });
 
     return Promise.all(tripRequests.map((tr) => this.sanitizeTripRequest(tr)));
   }
 
-  async findByDriver(driverId: string): Promise<SanitizedDriverOfferWithTripRequest[]> {
+  async findByDriver(
+    driverId: string,
+  ): Promise<SanitizedDriverOfferWithTripRequest[]> {
     this.logger.debug(`Fetching driver offers for driver: ${driverId}`);
 
     const offers = await this.driverOfferRepository.find({
@@ -581,7 +729,9 @@ export class TripRequestsService {
       order: { createdAt: 'DESC' },
     });
 
-    return Promise.all(offers.map((offer) => this.sanitizeDriverOfferWithTripRequest(offer)));
+    return Promise.all(
+      offers.map((offer) => this.sanitizeDriverOfferWithTripRequest(offer)),
+    );
   }
 
   async createDriverOffer(
@@ -589,9 +739,13 @@ export class TripRequestsService {
     tripRequestId: string,
     createDriverOfferDto: CreateDriverOfferDto,
   ): Promise<SanitizedDriverOffer> {
-    this.logger.log(`Creating driver offer for trip request: ${tripRequestId} by driver: ${driverId}`);
+    this.logger.log(
+      `Creating driver offer for trip request: ${tripRequestId} by driver: ${driverId}`,
+    );
 
-    const driver = await this.userRepository.findOne({ where: { id: driverId } });
+    const driver = await this.userRepository.findOne({
+      where: { id: driverId },
+    });
     if (!driver) {
       throw new NotFoundException('Utilisateur non trouvé');
     }
@@ -618,11 +772,18 @@ export class TripRequestsService {
 
     // Check if trip request status allows new offers
     if (tripRequest.status === TripRequestStatus.DRIVER_SELECTED) {
-      throw new BadRequestException('Cette demande de trajet n\'accepte plus d\'offres car un driver a déjà été sélectionné');
+      throw new BadRequestException(
+        "Cette demande de trajet n'accepte plus d'offres car un driver a déjà été sélectionné",
+      );
     }
 
-    if (tripRequest.status !== TripRequestStatus.PENDING && tripRequest.status !== TripRequestStatus.OFFERS_RECEIVED) {
-      throw new BadRequestException('Cette demande de trajet n\'accepte plus d\'offres');
+    if (
+      tripRequest.status !== TripRequestStatus.PENDING &&
+      tripRequest.status !== TripRequestStatus.OFFERS_RECEIVED
+    ) {
+      throw new BadRequestException(
+        "Cette demande de trajet n'accepte plus d'offres",
+      );
     }
 
     // Check if any offer has been accepted (double check even if status is not DRIVER_SELECTED yet)
@@ -631,11 +792,15 @@ export class TripRequestsService {
     );
 
     if (hasAcceptedOffer) {
-      throw new BadRequestException('Cette demande de trajet n\'accepte plus d\'offres car une offre a déjà été acceptée');
+      throw new BadRequestException(
+        "Cette demande de trajet n'accepte plus d'offres car une offre a déjà été acceptée",
+      );
     }
 
     if (tripRequest.passengerId === driverId) {
-      throw new BadRequestException('Vous ne pouvez pas faire une offre sur votre propre demande');
+      throw new BadRequestException(
+        'Vous ne pouvez pas faire une offre sur votre propre demande',
+      );
     }
 
     // Check if driver already made an offer
@@ -647,7 +812,9 @@ export class TripRequestsService {
       },
     });
     if (existingOffer) {
-      throw new BadRequestException('Vous avez déjà fait une offre pour cette demande');
+      throw new BadRequestException(
+        'Vous avez déjà fait une offre pour cette demande',
+      );
     }
 
     const {
@@ -660,14 +827,20 @@ export class TripRequestsService {
     const proposedDate = new Date(proposedDepartureDate);
 
     // Validate proposed date is within the range
-    if (proposedDate < tripRequest.departureDateMin || proposedDate > tripRequest.departureDateMax) {
+    if (
+      proposedDate < tripRequest.departureDateMin ||
+      proposedDate > tripRequest.departureDateMax
+    ) {
       throw new BadRequestException(
         `La date proposée doit être entre ${tripRequest.departureDateMin.toISOString()} et ${tripRequest.departureDateMax.toISOString()}`,
       );
     }
 
     // Validate price if maxPricePerSeat is set
-    if (tripRequest.maxPricePerSeat !== null && createDriverOfferDto.pricePerSeat > tripRequest.maxPricePerSeat) {
+    if (
+      tripRequest.maxPricePerSeat !== null &&
+      createDriverOfferDto.pricePerSeat > tripRequest.maxPricePerSeat
+    ) {
       throw new BadRequestException(
         `Le prix proposé (${createDriverOfferDto.pricePerSeat}) dépasse le prix maximum accepté (${tripRequest.maxPricePerSeat})`,
       );
@@ -688,11 +861,15 @@ export class TripRequestsService {
       });
 
       if (!vehicle) {
-        throw new BadRequestException('Véhicule non trouvé ou ne vous appartient pas');
+        throw new BadRequestException(
+          'Véhicule non trouvé ou ne vous appartient pas',
+        );
       }
 
       if (!vehicle.isActive) {
-        throw new BadRequestException('Le véhicule sélectionné n\'est pas actif');
+        throw new BadRequestException(
+          "Le véhicule sélectionné n'est pas actif",
+        );
       }
     }
 
@@ -701,22 +878,24 @@ export class TripRequestsService {
       tripRequestId,
       driverId,
       vehicleId: vehicleId || null,
-      departurePoint: departureCoordinates || rest.departureReference
-        ? await this.resolvePointFromCoordinatesOrAddress(
-            departureCoordinates,
-            tripRequest.departureLocation,
-            rest.departureReference,
-            'driver offer departure',
-          )
-        : null,
-      arrivalPoint: arrivalCoordinates || rest.arrivalReference
-        ? await this.resolvePointFromCoordinatesOrAddress(
-            arrivalCoordinates,
-            tripRequest.arrivalLocation,
-            rest.arrivalReference,
-            'driver offer arrival',
-          )
-        : null,
+      departurePoint:
+        departureCoordinates || rest.departureReference
+          ? await this.resolvePointFromCoordinatesOrAddress(
+              departureCoordinates,
+              tripRequest.departureLocation,
+              rest.departureReference,
+              'driver offer departure',
+            )
+          : null,
+      arrivalPoint:
+        arrivalCoordinates || rest.arrivalReference
+          ? await this.resolvePointFromCoordinatesOrAddress(
+              arrivalCoordinates,
+              tripRequest.arrivalLocation,
+              rest.arrivalReference,
+              'driver offer arrival',
+            )
+          : null,
       proposedDepartureDate: proposedDate,
     });
 
@@ -738,7 +917,10 @@ export class TripRequestsService {
     });
 
     // Notify the passenger about the new driver offer
-    await this.notifyPassengerAboutDriverOffer(tripRequest, offerWithRelations!);
+    await this.notifyPassengerAboutDriverOffer(
+      tripRequest,
+      offerWithRelations!,
+    );
 
     return this.sanitizeDriverOffer(offerWithRelations!);
   }
@@ -755,11 +937,15 @@ export class TripRequestsService {
       });
 
       if (!passenger || !passenger.fcmToken) {
-        this.logger.debug(`Passenger ${tripRequest.passengerId} has no FCM token, skipping notification`);
+        this.logger.debug(
+          `Passenger ${tripRequest.passengerId} has no FCM token, skipping notification`,
+        );
         return;
       }
 
-      const driverName = offer.driver ? `${offer.driver.firstName} ${offer.driver.lastName}` : 'Un conducteur';
+      const driverName = offer.driver
+        ? `${offer.driver.firstName} ${offer.driver.lastName}`
+        : 'Un conducteur';
       const title = 'Nouvelle offre reçue';
       const body = `${driverName} a fait une offre pour votre demande de trajet de ${tripRequest.departureLocation} à ${tripRequest.arrivalLocation}`;
 
@@ -779,9 +965,14 @@ export class TripRequestsService {
         data,
         tripRequest.passengerId,
       );
-      this.logger.log(`Notified passenger ${tripRequest.passengerId} about driver offer ${offer.id}`);
+      this.logger.log(
+        `Notified passenger ${tripRequest.passengerId} about driver offer ${offer.id}`,
+      );
     } catch (error) {
-      this.logger.error(`Error notifying passenger about driver offer ${offer.id}: ${error.message}`, error.stack);
+      this.logger.error(
+        `Error notifying passenger about driver offer ${offer.id}: ${error.message}`,
+        error.stack,
+      );
       // Don't throw error, just log it - offer creation should succeed even if notification fails
     }
   }
@@ -798,11 +989,15 @@ export class TripRequestsService {
       });
 
       if (!driver || !driver.fcmToken) {
-        this.logger.debug(`Driver ${offer.driverId} has no FCM token, skipping notification`);
+        this.logger.debug(
+          `Driver ${offer.driverId} has no FCM token, skipping notification`,
+        );
         return;
       }
 
-      const passengerName = tripRequest.passenger ? `${tripRequest.passenger.firstName} ${tripRequest.passenger.lastName}` : 'Un passager';
+      const passengerName = tripRequest.passenger
+        ? `${tripRequest.passenger.firstName} ${tripRequest.passenger.lastName}`
+        : 'Un passager';
       const title = '✅ Offre acceptée';
       const body = `${passengerName} a accepté votre offre pour le trajet de ${tripRequest.departureLocation} à ${tripRequest.arrivalLocation}. Vous pouvez maintenant démarrer le trajet.`;
 
@@ -823,40 +1018,65 @@ export class TripRequestsService {
         data,
         offer.driverId,
       );
-      this.logger.log(`Notified driver ${offer.driverId} about offer acceptance ${offer.id}`);
+      this.logger.log(
+        `Notified driver ${offer.driverId} about offer acceptance ${offer.id}`,
+      );
     } catch (error) {
-      this.logger.error(`Error notifying driver about offer acceptance ${offer.id}: ${error.message}`, error.stack);
+      this.logger.error(
+        `Error notifying driver about offer acceptance ${offer.id}: ${error.message}`,
+        error.stack,
+      );
       // Don't throw error, just log it - offer acceptance should succeed even if notification fails
     }
   }
 
-  async acceptDriverOffer(passengerId: string, tripRequestId: string, acceptDto: AcceptDriverOfferDto): Promise<SanitizedTripRequest> {
-    this.logger.log(`Accepting driver offer ${acceptDto.offerId} for trip request ${tripRequestId} by passenger ${passengerId}`);
+  async acceptDriverOffer(
+    passengerId: string,
+    tripRequestId: string,
+    acceptDto: AcceptDriverOfferDto,
+  ): Promise<SanitizedTripRequest> {
+    this.logger.log(
+      `Accepting driver offer ${acceptDto.offerId} for trip request ${tripRequestId} by passenger ${passengerId}`,
+    );
 
     const tripRequest = await this.tripRequestRepository.findOne({
       where: { id: tripRequestId, passengerId },
-      relations: ['passenger', 'driverOffers', 'driverOffers.driver', 'driverOffers.vehicle'],
+      relations: [
+        'passenger',
+        'driverOffers',
+        'driverOffers.driver',
+        'driverOffers.vehicle',
+      ],
     });
 
     if (!tripRequest) {
-      throw new NotFoundException('Demande de trajet non trouvée ou vous n\'êtes pas le propriétaire');
+      throw new NotFoundException(
+        "Demande de trajet non trouvée ou vous n'êtes pas le propriétaire",
+      );
     }
 
     if (tripRequest.status === TripRequestStatus.DRIVER_SELECTED) {
-      throw new BadRequestException('Un driver a déjà été sélectionné pour cette demande');
+      throw new BadRequestException(
+        'Un driver a déjà été sélectionné pour cette demande',
+      );
     }
 
-    if (tripRequest.status === TripRequestStatus.CANCELLED || tripRequest.status === TripRequestStatus.EXPIRED) {
-      throw new BadRequestException('Cette demande n\'accepte plus d\'offres');
+    if (
+      tripRequest.status === TripRequestStatus.CANCELLED ||
+      tripRequest.status === TripRequestStatus.EXPIRED
+    ) {
+      throw new BadRequestException("Cette demande n'accepte plus d'offres");
     }
 
-    const offer = tripRequest.driverOffers?.find((o) => o.id === acceptDto.offerId);
+    const offer = tripRequest.driverOffers?.find(
+      (o) => o.id === acceptDto.offerId,
+    );
     if (!offer) {
       throw new NotFoundException('Offre du conducteur non trouvée');
     }
 
     if (offer.status !== DriverOfferStatus.PENDING) {
-      throw new BadRequestException('Cette offre n\'est plus disponible');
+      throw new BadRequestException("Cette offre n'est plus disponible");
     }
 
     // Accept the offer
@@ -865,9 +1085,11 @@ export class TripRequestsService {
     await this.driverOfferRepository.save(offer);
 
     // Reject all other pending offers
-    const otherOffers = tripRequest.driverOffers?.filter(
-      (o) => o.id !== acceptDto.offerId && o.status === DriverOfferStatus.PENDING,
-    ) || [];
+    const otherOffers =
+      tripRequest.driverOffers?.filter(
+        (o) =>
+          o.id !== acceptDto.offerId && o.status === DriverOfferStatus.PENDING,
+      ) || [];
 
     for (const otherOffer of otherOffers) {
       otherOffer.status = DriverOfferStatus.REJECTED;
@@ -884,7 +1106,9 @@ export class TripRequestsService {
 
     await this.tripRequestRepository.save(tripRequest);
 
-    this.logger.log(`Driver offer ${acceptDto.offerId} accepted for trip request ${tripRequestId}`);
+    this.logger.log(
+      `Driver offer ${acceptDto.offerId} accepted for trip request ${tripRequestId}`,
+    );
 
     // Notify the driver that their offer was accepted
     await this.notifyDriverAboutOfferAcceptance(tripRequest, offer);
@@ -893,7 +1117,9 @@ export class TripRequestsService {
   }
 
   async startTripFromRequest(tripRequestId: string, driverId: string) {
-    this.logger.log(`Starting trip from request ${tripRequestId} by driver ${driverId}`);
+    this.logger.log(
+      `Starting trip from request ${tripRequestId} by driver ${driverId}`,
+    );
 
     const tripRequest = await this.tripRequestRepository.findOne({
       where: { id: tripRequestId },
@@ -905,15 +1131,21 @@ export class TripRequestsService {
     }
 
     if (tripRequest.status !== TripRequestStatus.DRIVER_SELECTED) {
-      throw new BadRequestException('Un driver doit être sélectionné avant de lancer le trajet');
+      throw new BadRequestException(
+        'Un driver doit être sélectionné avant de lancer le trajet',
+      );
     }
 
     if (tripRequest.selectedDriverId !== driverId) {
-      throw new ForbiddenException('Vous n\'êtes pas le driver sélectionné pour cette demande');
+      throw new ForbiddenException(
+        "Vous n'êtes pas le driver sélectionné pour cette demande",
+      );
     }
 
     if (tripRequest.tripId) {
-      throw new BadRequestException('Un trajet a déjà été créé à partir de cette demande !');
+      throw new BadRequestException(
+        'Un trajet a déjà été créé à partir de cette demande !',
+      );
     }
 
     await this.tripsService.ensureDriverCanStartTrip(driverId);
@@ -943,9 +1175,15 @@ export class TripRequestsService {
       driverId,
       {
         departureLocation: tripRequest.departureLocation,
-        departureReference: acceptedOffer.departureReference || tripRequest.departureReference || undefined,
+        departureReference:
+          acceptedOffer.departureReference ||
+          tripRequest.departureReference ||
+          undefined,
         arrivalLocation: tripRequest.arrivalLocation,
-        arrivalReference: acceptedOffer.arrivalReference || tripRequest.arrivalReference || undefined,
+        arrivalReference:
+          acceptedOffer.arrivalReference ||
+          tripRequest.arrivalReference ||
+          undefined,
         departureCoordinates: departureCoordinates ?? undefined,
         arrivalCoordinates: arrivalCoordinates ?? undefined,
         departureDate: acceptedOffer.proposedDepartureDate.toISOString(),
@@ -969,11 +1207,17 @@ export class TripRequestsService {
       passengerOriginReference: tripRequest.departureReference || undefined,
       passengerDestination: tripRequest.arrivalLocation,
       passengerDestinationReference: tripRequest.arrivalReference || undefined,
+      paymentMode: tripRequest.paymentMode,
     });
 
     // Accept the booking automatically
-    const bookings = await this.bookingsService.findAllByTrip(trip.id, driverId);
-    const passengerBooking = bookings.find((b) => b.passengerId === tripRequest.passengerId);
+    const bookings = await this.bookingsService.findAllByTrip(
+      trip.id,
+      driverId,
+    );
+    const passengerBooking = bookings.find(
+      (b) => b.passengerId === tripRequest.passengerId,
+    );
     if (passengerBooking) {
       await this.bookingsService.acceptBooking(passengerBooking.id, driverId);
     }
@@ -1005,10 +1249,14 @@ export class TripRequestsService {
     tripRequestId: string,
     acceptDto: AcceptTripRequestDto,
   ): Promise<{ trip: any; tripRequest: SanitizedTripRequest }> {
-    this.logger.log(`Driver ${driverId} accepte la demande de trajet ${tripRequestId}`);
+    this.logger.log(
+      `Driver ${driverId} accepte la demande de trajet ${tripRequestId}`,
+    );
 
     // Verify driver exists
-    const driver = await this.userRepository.findOne({ where: { id: driverId } });
+    const driver = await this.userRepository.findOne({
+      where: { id: driverId },
+    });
     if (!driver) {
       throw new NotFoundException('Utilisateur non trouvé');
     }
@@ -1031,21 +1279,32 @@ export class TripRequestsService {
 
     // Check if trip request can be accepted
     if (tripRequest.status === TripRequestStatus.DRIVER_SELECTED) {
-      throw new BadRequestException('Cette demande de trajet a déjà été acceptée par un autre driver');
+      throw new BadRequestException(
+        'Cette demande de trajet a déjà été acceptée par un autre driver',
+      );
     }
 
-    if (tripRequest.status === TripRequestStatus.CANCELLED || tripRequest.status === TripRequestStatus.EXPIRED) {
-      throw new BadRequestException('Cette demande de trajet n\'est plus disponible');
+    if (
+      tripRequest.status === TripRequestStatus.CANCELLED ||
+      tripRequest.status === TripRequestStatus.EXPIRED
+    ) {
+      throw new BadRequestException(
+        "Cette demande de trajet n'est plus disponible",
+      );
     }
 
     // Check if driver is not the passenger
     if (tripRequest.passengerId === driverId) {
-      throw new BadRequestException('Vous ne pouvez pas accepter votre propre demande');
+      throw new BadRequestException(
+        'Vous ne pouvez pas accepter votre propre demande',
+      );
     }
 
     // Check if trip request already has a trip created
     if (tripRequest.tripId) {
-      throw new BadRequestException('Un trajet a déjà été créé à partir de cette demande');
+      throw new BadRequestException(
+        'Un trajet a déjà été créé à partir de cette demande',
+      );
     }
 
     // Use the maximum price accepted by the passenger, or 0 (free trip) if not specified
@@ -1071,11 +1330,15 @@ export class TripRequestsService {
       });
 
       if (!vehicle) {
-        throw new BadRequestException('Véhicule non trouvé ou ne vous appartient pas');
+        throw new BadRequestException(
+          'Véhicule non trouvé ou ne vous appartient pas',
+        );
       }
 
       if (!vehicle.isActive) {
-        throw new BadRequestException('Le véhicule sélectionné n\'est pas actif');
+        throw new BadRequestException(
+          "Le véhicule sélectionné n'est pas actif",
+        );
       }
     } else {
       // Get first active vehicle if no vehicle specified
@@ -1084,7 +1347,9 @@ export class TripRequestsService {
       });
 
       if (!vehicle) {
-        throw new BadRequestException('Vous devez avoir au moins un véhicule actif pour accepter une demande');
+        throw new BadRequestException(
+          'Vous devez avoir au moins un véhicule actif pour accepter une demande',
+        );
       }
     }
 
@@ -1093,7 +1358,10 @@ export class TripRequestsService {
     if (acceptDto.departureDate) {
       departureDate = new Date(acceptDto.departureDate);
       // Validate date is within range
-      if (departureDate < tripRequest.departureDateMin || departureDate > tripRequest.departureDateMax) {
+      if (
+        departureDate < tripRequest.departureDateMin ||
+        departureDate > tripRequest.departureDateMax
+      ) {
         throw new BadRequestException(
           `La date de départ doit être entre ${tripRequest.departureDateMin.toISOString()} et ${tripRequest.departureDateMax.toISOString()}`,
         );
@@ -1116,9 +1384,15 @@ export class TripRequestsService {
       driverId,
       {
         departureLocation: tripRequest.departureLocation,
-        departureReference: acceptDto.departureReference || tripRequest.departureReference || undefined,
+        departureReference:
+          acceptDto.departureReference ||
+          tripRequest.departureReference ||
+          undefined,
         arrivalLocation: tripRequest.arrivalLocation,
-        arrivalReference: acceptDto.arrivalReference || tripRequest.arrivalReference || undefined,
+        arrivalReference:
+          acceptDto.arrivalReference ||
+          tripRequest.arrivalReference ||
+          undefined,
         departureCoordinates: departureCoordinates ?? undefined,
         arrivalCoordinates: arrivalCoordinates ?? undefined,
         departureDate: departureDate.toISOString(),
@@ -1142,11 +1416,17 @@ export class TripRequestsService {
       passengerOriginReference: tripRequest.departureReference || undefined,
       passengerDestination: tripRequest.arrivalLocation,
       passengerDestinationReference: tripRequest.arrivalReference || undefined,
+      paymentMode: tripRequest.paymentMode,
     });
 
     // Accept the booking automatically
-    const bookings = await this.bookingsService.findAllByTrip(trip.id, driverId);
-    const passengerBooking = bookings.find((b) => b.passengerId === tripRequest.passengerId);
+    const bookings = await this.bookingsService.findAllByTrip(
+      trip.id,
+      driverId,
+    );
+    const passengerBooking = bookings.find(
+      (b) => b.passengerId === tripRequest.passengerId,
+    );
     if (passengerBooking) {
       await this.bookingsService.acceptBooking(passengerBooking.id, driverId);
     }
@@ -1194,10 +1474,14 @@ export class TripRequestsService {
         );
       }
     } catch (error) {
-      this.logger.error(`Failed to notify passenger about trip request acceptance: ${error.message}`);
+      this.logger.error(
+        `Failed to notify passenger about trip request acceptance: ${error.message}`,
+      );
     }
 
-    this.logger.log(`Trip request ${tripRequestId} accepted by driver ${driverId}, trip ${trip.id} created`);
+    this.logger.log(
+      `Trip request ${tripRequestId} accepted by driver ${driverId}, trip ${trip.id} created`,
+    );
 
     return {
       trip,
@@ -1206,18 +1490,24 @@ export class TripRequestsService {
   }
 
   async cancel(passengerId: string, tripRequestId: string): Promise<void> {
-    this.logger.log(`Cancelling trip request ${tripRequestId} by passenger ${passengerId}`);
+    this.logger.log(
+      `Cancelling trip request ${tripRequestId} by passenger ${passengerId}`,
+    );
 
     const tripRequest = await this.tripRequestRepository.findOne({
       where: { id: tripRequestId, passengerId },
     });
 
     if (!tripRequest) {
-      throw new NotFoundException('Demande de trajet non trouvée ou vous n\'êtes pas le propriétaire');
+      throw new NotFoundException(
+        "Demande de trajet non trouvée ou vous n'êtes pas le propriétaire",
+      );
     }
 
     if (tripRequest.status === TripRequestStatus.DRIVER_SELECTED) {
-      throw new BadRequestException('Vous ne pouvez pas annuler une demande pour laquelle un driver a été sélectionné');
+      throw new BadRequestException(
+        'Vous ne pouvez pas annuler une demande pour laquelle un driver a été sélectionné',
+      );
     }
 
     tripRequest.status = TripRequestStatus.CANCELLED;
@@ -1232,7 +1522,9 @@ export class TripRequestsService {
     this.logger.log(`Trip request ${tripRequestId} cancelled`);
   }
 
-  private buildPointFromCoordinates(coordinates?: [number, number] | null): Point | null {
+  private buildPointFromCoordinates(
+    coordinates?: [number, number] | null,
+  ): Point | null {
     if (!coordinates) {
       return null;
     }
@@ -1253,16 +1545,50 @@ export class TripRequestsService {
       arrivalPoint,
       context,
     );
+    const weatherImpact = await this.weatherAwarenessService.getRouteImpact(
+      this.pointToCoordinates(departurePoint),
+      this.pointToCoordinates(arrivalPoint),
+    );
 
-    return this.buildRecommendedPricePerSeat(distanceMeters);
+    return this.buildRecommendedPricePerSeat(
+      distanceMeters,
+      weatherImpact.priceMultiplier,
+    );
   }
 
-  private buildRecommendedPricePerSeat(distanceMeters: number | null): number | null {
-    if (typeof distanceMeters !== 'number' || !Number.isFinite(distanceMeters) || distanceMeters <= 0) {
+  private buildRecommendedPricePerSeat(
+    distanceMeters: number | null,
+    priceMultiplier = 1,
+  ): number | null {
+    if (
+      typeof distanceMeters !== 'number' ||
+      !Number.isFinite(distanceMeters) ||
+      distanceMeters <= 0
+    ) {
       return null;
     }
 
-    return Math.round((distanceMeters / 1000) * this.RECOMMENDED_PRICE_PER_KM_PER_PASSENGER);
+    const distanceKm = distanceMeters / 1000;
+    const baseDistanceKm = Math.min(
+      distanceKm,
+      this.RECOMMENDED_BASE_DISTANCE_KM,
+    );
+    const additionalDistanceKm = Math.max(
+      distanceKm - this.RECOMMENDED_BASE_DISTANCE_KM,
+      0,
+    );
+    const basePrice =
+      baseDistanceKm * this.RECOMMENDED_BASE_PRICE_PER_KM_PER_PASSENGER;
+    const additionalPrice =
+      additionalDistanceKm *
+      this.RECOMMENDED_ADDITIONAL_PRICE_PER_KM_PER_PASSENGER;
+
+    const safeMultiplier =
+      Number.isFinite(priceMultiplier) && priceMultiplier >= 1
+        ? priceMultiplier
+        : 1;
+
+    return Math.round((basePrice + additionalPrice) * safeMultiplier);
   }
 
   private async calculateRouteDistanceMeters(
@@ -1296,10 +1622,14 @@ export class TripRequestsService {
         return Math.round(distanceMeters);
       }
 
-      this.logger.warn(`Google Directions returned no usable distance for ${context}`);
+      this.logger.warn(
+        `Google Directions returned no usable distance for ${context}`,
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.logger.warn(`Unable to calculate route distance for ${context}: ${message}`);
+      this.logger.warn(
+        `Unable to calculate route distance for ${context}: ${message}`,
+      );
     }
 
     return this.calculateStraightLineDistanceMeters(
@@ -1332,7 +1662,8 @@ export class TripRequestsService {
       Math.cos(departureLatitude) *
         Math.cos(arrivalLatitude) *
         Math.sin(longitudeDelta / 2) ** 2;
-    const centralAngle = 2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine));
+    const centralAngle =
+      2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine));
 
     return Math.round(earthRadiusMeters * centralAngle);
   }
@@ -1453,14 +1784,18 @@ export class TripRequestsService {
     };
   }
 
-  private async sanitizeVehicle(vehicle?: Vehicle): Promise<SanitizedVehicle | null> {
+  private async sanitizeVehicle(
+    vehicle?: Vehicle,
+  ): Promise<SanitizedVehicle | null> {
     if (!vehicle) {
       return null;
     }
 
     let photoUrl = vehicle.photoUrl;
     if (photoUrl) {
-      photoUrl = await this.fileUploadService.getPresignedUrlIfS3Key(photoUrl) || photoUrl;
+      photoUrl =
+        (await this.fileUploadService.getPresignedUrlIfS3Key(photoUrl)) ||
+        photoUrl;
     }
 
     return {
@@ -1473,7 +1808,9 @@ export class TripRequestsService {
     };
   }
 
-  private async sanitizeDriverOffer(offer: DriverOffer): Promise<SanitizedDriverOffer> {
+  private async sanitizeDriverOffer(
+    offer: DriverOffer,
+  ): Promise<SanitizedDriverOffer> {
     if (!offer.driver) {
       throw new Error(`Driver offer ${offer.id} has no driver associated`);
     }
@@ -1508,11 +1845,15 @@ export class TripRequestsService {
     }
 
     if (!offer.tripRequest) {
-      throw new Error(`Driver offer ${offer.id} has no trip request associated`);
+      throw new Error(
+        `Driver offer ${offer.id} has no trip request associated`,
+      );
     }
 
     if (!offer.tripRequest.passenger) {
-      throw new Error(`Trip request ${offer.tripRequest.id} has no passenger associated`);
+      throw new Error(
+        `Trip request ${offer.tripRequest.id} has no passenger associated`,
+      );
     }
 
     const driver = await this.sanitizeUser(offer.driver);
@@ -1522,7 +1863,9 @@ export class TripRequestsService {
 
     const passenger = await this.sanitizeUser(offer.tripRequest.passenger);
     if (!passenger) {
-      throw new Error(`Failed to sanitize passenger for trip request ${offer.tripRequest.id}`);
+      throw new Error(
+        `Failed to sanitize passenger for trip request ${offer.tripRequest.id}`,
+      );
     }
 
     return {
@@ -1548,21 +1891,30 @@ export class TripRequestsService {
         departureDateMin: offer.tripRequest.departureDateMin,
         departureDateMax: offer.tripRequest.departureDateMax,
         numberOfSeats: offer.tripRequest.numberOfSeats,
-        maxPricePerSeat: offer.tripRequest.maxPricePerSeat ? Number(offer.tripRequest.maxPricePerSeat) : null,
+        maxPricePerSeat: offer.tripRequest.maxPricePerSeat
+          ? Number(offer.tripRequest.maxPricePerSeat)
+          : null,
+        paymentMode: offer.tripRequest.paymentMode,
         status: offer.tripRequest.status,
         passenger,
       },
     };
   }
 
-  private async sanitizeTripRequest(tripRequest: TripRequest): Promise<SanitizedTripRequest> {
+  private async sanitizeTripRequest(
+    tripRequest: TripRequest,
+  ): Promise<SanitizedTripRequest> {
     if (!tripRequest.passenger) {
-      throw new Error(`Trip request ${tripRequest.id} has no passenger associated`);
+      throw new Error(
+        `Trip request ${tripRequest.id} has no passenger associated`,
+      );
     }
 
     const passenger = await this.sanitizeUser(tripRequest.passenger);
     if (!passenger) {
-      throw new Error(`Failed to sanitize passenger for trip request ${tripRequest.id}`);
+      throw new Error(
+        `Failed to sanitize passenger for trip request ${tripRequest.id}`,
+      );
     }
 
     return {
@@ -1577,16 +1929,29 @@ export class TripRequestsService {
       departureDateMin: tripRequest.departureDateMin,
       departureDateMax: tripRequest.departureDateMax,
       numberOfSeats: tripRequest.numberOfSeats,
-      maxPricePerSeat: tripRequest.maxPricePerSeat ? Number(tripRequest.maxPricePerSeat) : null,
+      maxPricePerSeat: tripRequest.maxPricePerSeat
+        ? Number(tripRequest.maxPricePerSeat)
+        : null,
+      paymentMode: tripRequest.paymentMode,
       description: tripRequest.description,
       status: tripRequest.status,
-      selectedDriver: await this.sanitizeUser(tripRequest.selectedDriver || undefined),
-      selectedVehicle: await this.sanitizeVehicle(tripRequest.selectedVehicle || undefined),
-      selectedPricePerSeat: tripRequest.selectedPricePerSeat ? Number(tripRequest.selectedPricePerSeat) : null,
+      selectedDriver: await this.sanitizeUser(
+        tripRequest.selectedDriver || undefined,
+      ),
+      selectedVehicle: await this.sanitizeVehicle(
+        tripRequest.selectedVehicle || undefined,
+      ),
+      selectedPricePerSeat: tripRequest.selectedPricePerSeat
+        ? Number(tripRequest.selectedPricePerSeat)
+        : null,
       selectedAt: tripRequest.selectedAt,
       tripId: tripRequest.tripId,
       driverOffers: tripRequest.driverOffers
-        ? await Promise.all(tripRequest.driverOffers.map((offer) => this.sanitizeDriverOffer(offer)))
+        ? await Promise.all(
+            tripRequest.driverOffers.map((offer) =>
+              this.sanitizeDriverOffer(offer),
+            ),
+          )
         : [],
       createdAt: tripRequest.createdAt,
       updatedAt: tripRequest.updatedAt,
@@ -1605,35 +1970,39 @@ export class TripRequestsService {
     setImmediate(async () => {
       this.logger.debug('Running cron job to mark expired trip requests');
 
-    const now = new Date();
+      const now = new Date();
 
-    // Find all pending trip requests with departureDateMax in the past
-    const expiredRequests = await this.tripRequestRepository.find({
-      where: {
-        status: TripRequestStatus.PENDING,
-        departureDateMax: LessThan(now),
-      },
-      relations: ['passenger'],
-    });
+      // Find all pending trip requests with departureDateMax in the past
+      const expiredRequests = await this.tripRequestRepository.find({
+        where: {
+          status: TripRequestStatus.PENDING,
+          departureDateMax: LessThan(now),
+        },
+        relations: ['passenger'],
+      });
 
-    if (expiredRequests.length === 0) {
-      this.logger.debug('No expired trip requests found');
-      return;
-    }
+      if (expiredRequests.length === 0) {
+        this.logger.debug('No expired trip requests found');
+        return;
+      }
 
-    this.logger.log(`Found ${expiredRequests.length} expired trip requests to mark as expired`);
+      this.logger.log(
+        `Found ${expiredRequests.length} expired trip requests to mark as expired`,
+      );
 
-    // Mark all expired requests
-    await this.tripRequestRepository.update(
-      {
-        id: In(expiredRequests.map((r) => r.id)),
-      },
-      {
-        status: TripRequestStatus.EXPIRED,
-      },
-    );
+      // Mark all expired requests
+      await this.tripRequestRepository.update(
+        {
+          id: In(expiredRequests.map((r) => r.id)),
+        },
+        {
+          status: TripRequestStatus.EXPIRED,
+        },
+      );
 
-    this.logger.log(`Successfully marked ${expiredRequests.length} trip requests as expired`);
+      this.logger.log(
+        `Successfully marked ${expiredRequests.length} trip requests as expired`,
+      );
     });
   }
 
@@ -1645,58 +2014,66 @@ export class TripRequestsService {
   async notifyAboutUpcomingTripRequestExpiration() {
     // Use setImmediate to ensure HTTP requests have priority
     setImmediate(async () => {
-      this.logger.debug('Running cron job to notify about upcoming trip request expiration');
+      this.logger.debug(
+        'Running cron job to notify about upcoming trip request expiration',
+      );
 
-    const now = new Date();
-    const thirtyMinutesFromNow = new Date(now.getTime() + 30 * 60 * 1000); // 30 minutes from now
+      const now = new Date();
+      const thirtyMinutesFromNow = new Date(now.getTime() + 30 * 60 * 1000); // 30 minutes from now
 
-    // Find all pending trip requests expiring in the next 30 minutes that haven't been notified yet
-    const requestsExpiringSoon = await this.tripRequestRepository.find({
-      where: {
-        status: TripRequestStatus.PENDING,
-        departureDateMax: Between(now, thirtyMinutesFromNow),
-        expirationNotificationSent: false,
-      },
-      relations: ['passenger'],
-    });
+      // Find all pending trip requests expiring in the next 30 minutes that haven't been notified yet
+      const requestsExpiringSoon = await this.tripRequestRepository.find({
+        where: {
+          status: TripRequestStatus.PENDING,
+          departureDateMax: Between(now, thirtyMinutesFromNow),
+          expirationNotificationSent: false,
+        },
+        relations: ['passenger'],
+      });
 
-    if (requestsExpiringSoon.length === 0) {
-      this.logger.debug('No trip requests expiring soon found');
-      return;
-    }
-
-    this.logger.log(`Found ${requestsExpiringSoon.length} trip requests expiring soon`);
-
-    for (const tripRequest of requestsExpiringSoon) {
-      try {
-        // Notify passenger about upcoming expiration
-        await this.notifyPassengerAboutUpcomingExpiration(tripRequest);
-
-        // Mark notification as sent
-        tripRequest.expirationNotificationSent = true;
-        await this.tripRequestRepository.save(tripRequest);
-      } catch (error) {
-        this.logger.error(
-          `Error notifying passenger about trip request expiration ${tripRequest.id}: ${error.message}`,
-          error.stack,
-        );
+      if (requestsExpiringSoon.length === 0) {
+        this.logger.debug('No trip requests expiring soon found');
+        return;
       }
-    }
 
-    this.logger.log(
-      `Successfully notified about ${requestsExpiringSoon.length} trip requests expiring soon`,
-    );
+      this.logger.log(
+        `Found ${requestsExpiringSoon.length} trip requests expiring soon`,
+      );
+
+      for (const tripRequest of requestsExpiringSoon) {
+        try {
+          // Notify passenger about upcoming expiration
+          await this.notifyPassengerAboutUpcomingExpiration(tripRequest);
+
+          // Mark notification as sent
+          tripRequest.expirationNotificationSent = true;
+          await this.tripRequestRepository.save(tripRequest);
+        } catch (error) {
+          this.logger.error(
+            `Error notifying passenger about trip request expiration ${tripRequest.id}: ${error.message}`,
+            error.stack,
+          );
+        }
+      }
+
+      this.logger.log(
+        `Successfully notified about ${requestsExpiringSoon.length} trip requests expiring soon`,
+      );
     });
   }
 
   /**
    * Notify passenger about upcoming trip request expiration
    */
-  private async notifyPassengerAboutUpcomingExpiration(tripRequest: TripRequest): Promise<void> {
+  private async notifyPassengerAboutUpcomingExpiration(
+    tripRequest: TripRequest,
+  ): Promise<void> {
     const passenger = tripRequest.passenger;
 
     if (!passenger || !passenger.fcmToken) {
-      this.logger.debug(`Passenger ${tripRequest.passengerId} has no FCM token, skipping notification`);
+      this.logger.debug(
+        `Passenger ${tripRequest.passengerId} has no FCM token, skipping notification`,
+      );
       return;
     }
 

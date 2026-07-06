@@ -13,6 +13,7 @@ import {
 import { User } from '../../users/entities/user.entity';
 import { Vehicle } from '../../vehicles/entities/vehicle.entity';
 import { DriverOffer } from './driver-offer.entity';
+import { TripPaymentMode } from '../../payments/enums/trip-payment-mode.enum';
 
 export enum TripRequestStatus {
   PENDING = 'pending', // En attente d'offres
@@ -80,6 +81,9 @@ export class TripRequest {
   @Column({ type: 'decimal', precision: 10, scale: 2, nullable: true })
   maxPricePerSeat: number | null; // Prix maximum par place accepté (optionnel)
 
+  @Column({ type: 'varchar', length: 30, default: TripPaymentMode.CASH })
+  paymentMode: TripPaymentMode;
+
   @Column({ type: 'text', nullable: true })
   description: string | null;
 
@@ -125,4 +129,3 @@ export class TripRequest {
   @OneToMany(() => DriverOffer, (offer) => offer.tripRequest)
   driverOffers: DriverOffer[];
 }
-

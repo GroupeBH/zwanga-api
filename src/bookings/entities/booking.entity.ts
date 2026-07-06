@@ -8,11 +8,13 @@ import {
   ManyToOne,
   OneToMany,
   JoinColumn,
-  Index
+  Index,
 } from 'typeorm';
 import { User } from '../../users/entities/user.entity';
 import { Trip } from '../../trips/entities/trip.entity';
 import { Message } from '../../chat/entities/message.entity';
+import { PaymentTransaction } from '../../payments/entities/payment-transaction.entity';
+import { TripPaymentMode } from '../../payments/enums/trip-payment-mode.enum';
 
 export enum BookingStatus {
   PENDING = 'pending',
@@ -21,6 +23,15 @@ export enum BookingStatus {
   CANCELLED = 'cancelled',
   COMPLETED = 'completed',
   EXPIRED = 'expired',
+}
+
+export enum BookingPaymentStatus {
+  NOT_REQUIRED = 'not_required',
+  PENDING = 'pending',
+  INITIATED = 'initiated',
+  SUCCEEDED = 'succeeded',
+  FAILED = 'failed',
+  CANCELLED = 'cancelled',
 }
 
 @Entity('bookings')
@@ -98,6 +109,38 @@ export class Booking {
   })
   status: BookingStatus;
 
+  @Column({
+    type: 'enum',
+    enum: BookingPaymentStatus,
+    enumName: 'bookings_payment_status_enum',
+    default: BookingPaymentStatus.NOT_REQUIRED,
+  })
+  paymentStatus: BookingPaymentStatus;
+
+  @Column({ type: 'decimal', precision: 10, scale: 2, nullable: true })
+  paymentAmount: number | null;
+
+  @Column({ type: 'varchar', length: 8, default: 'CDF' })
+  paymentCurrency: string;
+
+  @Column({ type: 'varchar', length: 30, default: TripPaymentMode.CASH })
+  paymentMode: TripPaymentMode;
+
+  @Index()
+  @Column({ type: 'varchar', length: 120, nullable: true })
+  paymentReference: string | null;
+
+  @Index()
+  @Column({ type: 'uuid', nullable: true })
+  paymentTransactionId: string | null;
+
+  @ManyToOne(() => PaymentTransaction, { nullable: true })
+  @JoinColumn({ name: 'paymentTransactionId' })
+  paymentTransaction: PaymentTransaction | null;
+
+  @Column({ type: 'timestamp', nullable: true })
+  paidAt: Date | null;
+
   @Column({ type: 'text', nullable: true })
   rejectionReason: string | null;
 
@@ -143,4 +186,3 @@ export class Booking {
   @OneToMany(() => Message, (message) => message.booking)
   messages: Message[];
 }
-

@@ -217,7 +217,7 @@ export class TripsController {
   @SensitiveThrottle(10, 6000)
   @ApiOperation({
     summary:
-      'Delete a trip (always allowed for completed/cancelled/expired trips, or if no booking has been accepted yet)',
+      'Delete a trip unless a passenger has boarded and has not yet been dropped off',
   })
   async remove(@Request() req, @Param('id') id: string) {
     await this.tripsService.remove(id, req.user.userId);
