@@ -27,6 +27,7 @@ export enum PaymentStatus {
 export enum PaymentPurpose {
   GENERIC = 'generic',
   SUBSCRIPTION_PRO = 'subscription_pro',
+  TRIP_BOOKING = 'trip_booking',
 }
 
 @Entity('payment_transactions')

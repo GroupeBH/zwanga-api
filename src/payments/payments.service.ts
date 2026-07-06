@@ -271,6 +271,39 @@ export class PaymentsService {
     });
   }
 
+  async findTransactionById(
+    id: string,
+    userId?: string,
+  ): Promise<PaymentTransaction> {
+    const transaction = await this.paymentTransactionRepository.findOne({
+      where: {
+        id,
+        ...(userId ? { userId } : {}),
+      },
+    });
+
+    if (!transaction) {
+      throw new NotFoundException('Transaction de paiement introuvable');
+    }
+
+    return transaction;
+  }
+
+  async findLatestTransactionForRelatedEntity(
+    relatedEntityType: string,
+    relatedEntityId: string,
+    userId?: string,
+  ): Promise<PaymentTransaction | null> {
+    return this.paymentTransactionRepository.findOne({
+      where: {
+        relatedEntityType,
+        relatedEntityId,
+        ...(userId ? { userId } : {}),
+      },
+      order: { createdAt: 'DESC' },
+    });
+  }
+
   isSuccessfulPayment(transaction: PaymentTransaction): boolean {
     return transaction.status === PaymentStatus.SUCCEEDED;
   }

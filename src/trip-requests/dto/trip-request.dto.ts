@@ -4,6 +4,7 @@ import {
   IsNumber,
   IsDateString,
   IsOptional,
+  IsEnum,
   Min,
   Max,
   IsArray,
@@ -11,6 +12,7 @@ import {
   ArrayMaxSize,
 } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
+import { TripPaymentMode } from '../../payments/enums/trip-payment-mode.enum';
 
 export class CreateTripRequestDto {
   @ApiProperty()
@@ -55,7 +57,7 @@ export class CreateTripRequestDto {
   arrivalReference?: string;
 
   @ApiProperty({
-    description: 'Coordonnées du point d\'arrivée [longitude, latitude]',
+    description: "Coordonnées du point d'arrivée [longitude, latitude]",
     example: [15.3222, -4.4419],
     minItems: 2,
     maxItems: 2,
@@ -83,7 +85,7 @@ export class CreateTripRequestDto {
   @IsNotEmpty()
   departureDateMax: string;
 
-  @ApiProperty({ 
+  @ApiProperty({
     minimum: 1,
     maximum: 2,
     description: 'Nombre de places nécessaires',
@@ -91,11 +93,14 @@ export class CreateTripRequestDto {
   })
   @IsNumber()
   @Min(1)
-  @Max(2, { message: 'Pour des raisons de sécurité du conducteur, vous ne pouvez pas réserver plus de 2 places par trajet' })
+  @Max(2, {
+    message:
+      'Pour des raisons de sécurité du conducteur, vous ne pouvez pas réserver plus de 2 places par trajet',
+  })
   @IsNotEmpty()
   numberOfSeats: number;
 
-  @ApiProperty({ 
+  @ApiProperty({
     required: false,
     minimum: 0,
     description: 'Prix maximum par place accepté (optionnel)',
@@ -106,6 +111,20 @@ export class CreateTripRequestDto {
   @IsOptional()
   maxPricePerSeat?: number;
 
+  @ApiProperty({
+    required: false,
+    enum: TripPaymentMode,
+    enumName: 'TripPaymentMode',
+    description:
+      'Mode de reglement: paiement electronique via FlexPay ou paiement physique a l arrivee',
+    example: TripPaymentMode.ELECTRONIC,
+  })
+  @IsEnum(TripPaymentMode, {
+    message: 'Le mode de paiement selectionne est invalide',
+  })
+  @IsOptional()
+  paymentMode?: TripPaymentMode;
+
   @ApiProperty({ required: false })
   @IsString()
   @IsOptional()
@@ -115,7 +134,8 @@ export class CreateTripRequestDto {
 export class RecommendTripRequestPriceDto {
   @ApiProperty({
     required: false,
-    description: 'Adresse de depart, utilisee si les coordonnees ne sont pas fournies',
+    description:
+      'Adresse de depart, utilisee si les coordonnees ne sont pas fournies',
   })
   @IsString()
   @IsOptional()
@@ -145,7 +165,8 @@ export class RecommendTripRequestPriceDto {
 
   @ApiProperty({
     required: false,
-    description: 'Adresse d arrivee, utilisee si les coordonnees ne sont pas fournies',
+    description:
+      'Adresse d arrivee, utilisee si les coordonnees ne sont pas fournies',
   })
   @IsString()
   @IsOptional()
@@ -196,7 +217,7 @@ export class CreateDriverOfferDto {
   @IsNotEmpty()
   proposedDepartureDate: string;
 
-  @ApiProperty({ 
+  @ApiProperty({
     minimum: 0,
     description: 'Prix proposé par place',
     example: 4500,
@@ -206,7 +227,7 @@ export class CreateDriverOfferDto {
   @IsNotEmpty()
   pricePerSeat: number;
 
-  @ApiProperty({ 
+  @ApiProperty({
     minimum: 1,
     description: 'Nombre de places disponibles',
     example: 4,
@@ -231,8 +252,9 @@ export class CreateDriverOfferDto {
 
   @ApiProperty({
     required: false,
-    description: 'Reference ou repere propose par le conducteur pour la prise en charge',
-    example: 'Je m\'arrete devant la station',
+    description:
+      'Reference ou repere propose par le conducteur pour la prise en charge',
+    example: "Je m'arrete devant la station",
   })
   @IsString()
   @IsOptional()
@@ -240,7 +262,8 @@ export class CreateDriverOfferDto {
 
   @ApiProperty({
     required: false,
-    description: 'Coordonnees de prise en charge proposees par le conducteur [longitude, latitude]',
+    description:
+      'Coordonnees de prise en charge proposees par le conducteur [longitude, latitude]',
     example: [15.2663, -4.325],
     minItems: 2,
     maxItems: 2,
@@ -263,7 +286,8 @@ export class CreateDriverOfferDto {
 
   @ApiProperty({
     required: false,
-    description: 'Coordonnees de depose proposees par le conducteur [longitude, latitude]',
+    description:
+      'Coordonnees de depose proposees par le conducteur [longitude, latitude]',
     example: [15.3222, -4.4419],
     minItems: 2,
     maxItems: 2,
@@ -278,7 +302,7 @@ export class CreateDriverOfferDto {
 
 export class AcceptDriverOfferDto {
   @ApiProperty({
-    description: 'ID de l\'offre du driver à accepter',
+    description: "ID de l'offre du driver à accepter",
   })
   @IsString()
   @IsNotEmpty()
@@ -288,7 +312,8 @@ export class AcceptDriverOfferDto {
 export class AcceptTripRequestDto {
   @ApiProperty({
     required: false,
-    description: 'ID du véhicule à utiliser (doit appartenir au driver). Si non fourni, le premier véhicule actif sera utilisé.',
+    description:
+      'ID du véhicule à utiliser (doit appartenir au driver). Si non fourni, le premier véhicule actif sera utilisé.',
   })
   @IsString()
   @IsOptional()
@@ -296,7 +321,8 @@ export class AcceptTripRequestDto {
 
   @ApiProperty({
     required: false,
-    description: 'Date/heure de départ proposée. Si non fournie, utilise la date minimum de la demande.',
+    description:
+      'Date/heure de départ proposée. Si non fournie, utilise la date minimum de la demande.',
     example: '2025-12-20T10:00:00Z',
   })
   @IsDateString()
@@ -306,7 +332,8 @@ export class AcceptTripRequestDto {
   @ApiProperty({
     required: false,
     minimum: 1,
-    description: 'Nombre total de places disponibles dans le véhicule. Si non fourni, sera déterminé automatiquement. Doit être au moins égal au nombre de places demandées par le passager.',
+    description:
+      'Nombre total de places disponibles dans le véhicule. Si non fourni, sera déterminé automatiquement. Doit être au moins égal au nombre de places demandées par le passager.',
     example: 4,
   })
   @IsNumber()
@@ -316,7 +343,8 @@ export class AcceptTripRequestDto {
 
   @ApiProperty({
     required: false,
-    description: 'Reference ou repere ajoute par le conducteur pour la prise en charge',
+    description:
+      'Reference ou repere ajoute par le conducteur pour la prise en charge',
     example: 'Je vous prends devant la station',
   })
   @IsString()
@@ -325,7 +353,8 @@ export class AcceptTripRequestDto {
 
   @ApiProperty({
     required: false,
-    description: 'Coordonnees de prise en charge ajoutees par le conducteur [longitude, latitude]',
+    description:
+      'Coordonnees de prise en charge ajoutees par le conducteur [longitude, latitude]',
     example: [15.2663, -4.325],
     minItems: 2,
     maxItems: 2,
@@ -348,7 +377,8 @@ export class AcceptTripRequestDto {
 
   @ApiProperty({
     required: false,
-    description: 'Coordonnees de depose ajoutees par le conducteur [longitude, latitude]',
+    description:
+      'Coordonnees de depose ajoutees par le conducteur [longitude, latitude]',
     example: [15.3222, -4.4419],
     minItems: 2,
     maxItems: 2,
@@ -404,7 +434,7 @@ export class UpdateTripRequestDto {
 
   @ApiProperty({
     required: false,
-    description: 'Coordonnées du point d\'arrivée [longitude, latitude]',
+    description: "Coordonnées du point d'arrivée [longitude, latitude]",
     example: [15.3222, -4.4419],
     minItems: 2,
     maxItems: 2,
@@ -434,7 +464,7 @@ export class UpdateTripRequestDto {
   @IsOptional()
   departureDateMax?: string;
 
-  @ApiProperty({ 
+  @ApiProperty({
     required: false,
     minimum: 1,
     maximum: 2,
@@ -443,11 +473,14 @@ export class UpdateTripRequestDto {
   })
   @IsNumber()
   @Min(1)
-  @Max(2, { message: 'Pour des raisons de sécurité du conducteur, vous ne pouvez pas réserver plus de 2 places par trajet' })
+  @Max(2, {
+    message:
+      'Pour des raisons de sécurité du conducteur, vous ne pouvez pas réserver plus de 2 places par trajet',
+  })
   @IsOptional()
   numberOfSeats?: number;
 
-  @ApiProperty({ 
+  @ApiProperty({
     required: false,
     minimum: 0,
     description: 'Prix maximum par place accepté (optionnel)',
@@ -458,9 +491,22 @@ export class UpdateTripRequestDto {
   @IsOptional()
   maxPricePerSeat?: number;
 
+  @ApiProperty({
+    required: false,
+    enum: TripPaymentMode,
+    enumName: 'TripPaymentMode',
+    description:
+      'Mode de reglement: paiement electronique via FlexPay ou paiement physique a l arrivee',
+    example: TripPaymentMode.ELECTRONIC,
+  })
+  @IsEnum(TripPaymentMode, {
+    message: 'Le mode de paiement selectionne est invalide',
+  })
+  @IsOptional()
+  paymentMode?: TripPaymentMode;
+
   @ApiProperty({ required: false })
   @IsString()
   @IsOptional()
   description?: string;
 }
-

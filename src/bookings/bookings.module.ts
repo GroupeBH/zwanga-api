@@ -9,6 +9,7 @@ import { NotificationsModule } from '../notifications/notifications.module';
 import { MessagingModule } from '../messaging/messaging.module';
 import { SafetyModule } from '../safety/safety.module';
 import { GoogleMapsModule } from '../google-maps/google-maps.module';
+import { PaymentsModule } from '../payments/payments.module';
 
 @Module({
   imports: [
@@ -17,6 +18,7 @@ import { GoogleMapsModule } from '../google-maps/google-maps.module';
     MessagingModule,
     SafetyModule,
     GoogleMapsModule,
+    PaymentsModule,
   ],
   controllers: [BookingsController],
   providers: [BookingsService],

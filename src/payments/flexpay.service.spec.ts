@@ -44,7 +44,7 @@ describe('FlexPayService', () => {
     const result = await service.initiatePayment({
       ...baseInput,
       method: PaymentMethod.MOBILE_MONEY,
-      phone: '243 891 234 567',
+      phone: '+243 891 234 567',
     });
 
     expect(httpService.post).toHaveBeenCalledWith(

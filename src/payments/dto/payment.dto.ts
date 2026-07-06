@@ -1,23 +1,18 @@
-import {
-  IsEnum,
-  IsNotEmpty,
-  IsOptional,
-  IsString,
-  MaxLength,
-} from 'class-validator';
+import { IsEnum, IsOptional, IsString, MaxLength } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { PaymentMethod } from '../entities/payment-transaction.entity';
 
 export class InitiatePaymentDto {
   @ApiProperty({
+    required: true,
     enum: PaymentMethod,
     enumName: 'PaymentMethod',
     example: PaymentMethod.MOBILE_MONEY,
+    description: 'Canal technique utilise pour la transaction FlexPay.',
   })
   @IsEnum(PaymentMethod, {
     message: 'La methode de paiement selectionnee est invalide',
   })
-  @IsNotEmpty({ message: 'La methode de paiement est requise' })
   method: PaymentMethod;
 
   @ApiProperty({
@@ -25,12 +20,44 @@ export class InitiatePaymentDto {
     description: 'Numero du client au format international pour Mobile Money',
     example: '243891234567',
   })
-  @IsString({ message: 'Le numero de telephone doit etre une chaine de caracteres' })
+  @IsString({
+    message: 'Le numero de telephone doit etre une chaine de caracteres',
+  })
   @IsOptional()
   @MaxLength(20, {
     message: 'Le numero de telephone ne peut pas depasser 20 caracteres',
   })
   phone?: string;
+
+  @ApiProperty({
+    required: false,
+    description: 'URL appelee apres un paiement carte approuve',
+    example: 'zwanga://payments/trips?status=success',
+  })
+  @IsString()
+  @IsOptional()
+  @MaxLength(1000)
+  approveUrl?: string;
+
+  @ApiProperty({
+    required: false,
+    description: 'URL appelee apres une annulation du paiement carte',
+    example: 'zwanga://payments/trips?status=cancel',
+  })
+  @IsString()
+  @IsOptional()
+  @MaxLength(1000)
+  cancelUrl?: string;
+
+  @ApiProperty({
+    required: false,
+    description: 'URL appelee apres un refus du paiement carte',
+    example: 'zwanga://payments/trips?status=decline',
+  })
+  @IsString()
+  @IsOptional()
+  @MaxLength(1000)
+  declineUrl?: string;
 }
 
 export class FlexPayCallbackDto {

@@ -37,6 +37,7 @@ import {
   PremiumSubscriptionFeatures,
   SubscriptionsService,
 } from '../subscriptions/subscriptions.service';
+import { WeatherAwarenessService } from '../weather/weather-awareness.service';
 
 export type Coordinates = [number, number] | null;
 
@@ -133,6 +134,7 @@ export class TripsService {
     private messagingService: MessagingService,
     private googleMapsService: GoogleMapsService,
     private subscriptionsService: SubscriptionsService,
+    private weatherAwarenessService: WeatherAwarenessService,
   ) { }
 
   async create(
@@ -948,42 +950,49 @@ export class TripsService {
       this.logger.warn(`Trip deletion failed: Trip ${id} not found for driver ${driverId}`);
       throw new NotFoundException('Trajet non trouve');
     }
-    // A trip can always be deleted when terminal (completed/cancelled/expired).
-    // Otherwise, allow deletion only if no passenger booking was accepted/in progress.
-    const now = new Date();
-    const twoHoursAgo = new Date(now.getTime() - 2 * 60 * 60 * 1000);
-    const isExpired = trip.status === TripStatus.PENDING && trip.departureDate < twoHoursAgo;
-    const isCompleted = trip.status === TripStatus.COMPLETED;
-    const isCancelled = trip.status === TripStatus.CANCELLED;
-    const hasAcceptedOrInProgressBooking = (trip.bookings ?? []).some(
+    const bookings = trip.bookings ?? [];
+    const hasPassengerOnBoard = bookings.some(
       (booking) =>
-        booking.status === BookingStatus.ACCEPTED ||
-        booking.status === BookingStatus.COMPLETED ||
-        booking.pickedUp ||
-        booking.pickedUpConfirmedByPassenger ||
-        booking.droppedOff ||
-        booking.droppedOffConfirmedByPassenger,
+        this.hasBookingEmbarked(booking) &&
+        !this.hasBookingBeenDroppedOff(booking),
     );
 
-    const canDeleteByStatus = isCompleted || isCancelled || isExpired;
-
-    if (!canDeleteByStatus && hasAcceptedOrInProgressBooking) {
+    if (hasPassengerOnBoard) {
       this.logger.warn(
-        `Trip deletion failed: Trip ${id} has accepted/in-progress booking(s) and cannot be deleted in status ${trip.status}`,
+        `Trip deletion failed: Trip ${id} still has at least one passenger on board`,
       );
       throw new BadRequestException(
-        'Vous ne pouvez pas supprimer ce trajet car une reservation a deja ete acceptee',
+        'Vous ne pouvez pas supprimer ce trajet car un passager a embarque et n a pas encore ete depose',
       );
     }
 
     // If trip has bookings, we need to handle them
-    if (trip.bookings && trip.bookings.length > 0) {
+    if (bookings.length > 0) {
       this.logger.log(
-        `Trip ${id} has ${trip.bookings.length} bookings. Handling them before deletion.`,
+        `Trip ${id} has ${bookings.length} bookings. Handling them before deletion.`,
       );
 
-      // Get all booking IDs
-      const bookingIds = trip.bookings.map((booking) => booking.id);
+      const bookingIds = bookings.map((booking) => booking.id);
+      const cancellableBookingIds = bookings
+        .filter(
+          (booking) =>
+            !this.hasBookingEmbarked(booking) &&
+            !this.hasBookingBeenDroppedOff(booking) &&
+            [BookingStatus.PENDING, BookingStatus.ACCEPTED].includes(
+              booking.status,
+            ),
+        )
+        .map((booking) => booking.id);
+
+      if (cancellableBookingIds.length > 0) {
+        await this.bookingRepository.update(cancellableBookingIds, {
+          status: BookingStatus.CANCELLED,
+          cancelledAt: new Date(),
+        });
+        this.logger.log(
+          `Cancelled ${cancellableBookingIds.length} non-boarded bookings before deleting trip ${id}`,
+        );
+      }
 
       // Delete all bookings associated with this trip
       // This will also handle cascade deletion of related messages if configured
@@ -1001,6 +1010,25 @@ export class TripsService {
     await this.cacheService.del(CacheService.getTripsListKey('all'));
 
     this.logger.log(`Trip ${id} deleted successfully`);
+  }
+
+  private hasBookingEmbarked(booking: Booking): boolean {
+    return Boolean(
+      booking.pickedUp ||
+        booking.pickedUpConfirmedByPassenger ||
+        booking.pickedUpAt ||
+        booking.pickedUpConfirmedAt,
+    );
+  }
+
+  private hasBookingBeenDroppedOff(booking: Booking): boolean {
+    return Boolean(
+      booking.status === BookingStatus.COMPLETED ||
+        booking.droppedOff ||
+        booking.droppedOffConfirmedByPassenger ||
+        booking.droppedOffAt ||
+        booking.droppedOffConfirmedAt,
+    );
   }
 
   async ensureDriverCanStartTrip(
@@ -1803,7 +1831,10 @@ export class TripsService {
       this.logger.warn(
         `Unable to estimate route duration for trip ${trip.id}: missing origin or destination`,
       );
-      return this.DEFAULT_ESTIMATED_TRIP_DURATION_MS;
+      return this.applyWeatherEtaMultiplier(
+        trip,
+        this.DEFAULT_ESTIMATED_TRIP_DURATION_MS,
+      );
     }
 
     try {
@@ -1820,7 +1851,10 @@ export class TripsService {
       );
 
       if (durationSeconds && durationSeconds > 0) {
-        return durationSeconds * 1000;
+        return this.applyWeatherEtaMultiplier(
+          trip,
+          durationSeconds * 1000,
+        );
       }
 
       this.logger.warn(
@@ -1831,7 +1865,22 @@ export class TripsService {
       this.logger.warn(`Unable to estimate route duration for trip ${trip.id}: ${message}`);
     }
 
-    return this.DEFAULT_ESTIMATED_TRIP_DURATION_MS;
+    return this.applyWeatherEtaMultiplier(
+      trip,
+      this.DEFAULT_ESTIMATED_TRIP_DURATION_MS,
+    );
+  }
+
+  private async applyWeatherEtaMultiplier(
+    trip: Trip,
+    estimatedDurationMs: number,
+  ): Promise<number> {
+    const weatherImpact = await this.weatherAwarenessService.getRouteImpact(
+      this.pointToCoordinates(trip.currentLocation ?? trip.departurePoint),
+      this.pointToCoordinates(trip.arrivalPoint),
+    );
+
+    return Math.round(estimatedDurationMs * weatherImpact.etaMultiplier);
   }
 
   private buildTripDirectionsWaypoint(

@@ -15,6 +15,7 @@ import { MessagingModule } from '../messaging/messaging.module';
 import { RecurringTripTemplate } from './entities/recurring-trip-template.entity';
 import { GoogleMapsModule } from '../google-maps/google-maps.module';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
+import { WeatherModule } from '../weather/weather.module';
 
 @Module({
   imports: [
@@ -33,10 +34,10 @@ import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
     MessagingModule,
     GoogleMapsModule,
     SubscriptionsModule,
+    WeatherModule,
   ],
   controllers: [TripsController],
   providers: [TripsService],
   exports: [TripsService],
 })
 export class TripsModule {}
-
