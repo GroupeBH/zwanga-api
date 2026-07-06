@@ -12,14 +12,22 @@ import { BookingsService } from './bookings.service';
 import { CreateBookingDto, UpdateBookingStatusDto, RejectBookingDto, ConfirmPickupDto, ConfirmDropoffDto, ReportBookingProblemDto, UpdatePassengerLocationDto } from './dto/booking.dto';
 import { SendWhatsAppNotificationDto } from './dto/send-whatsapp-notification.dto';
 import { Auth } from '../auth/decorators/auth.decorator';
-import { Roles } from '../common/decorators/roles.decorator';
-import { UserRole } from '../users/entities/user.entity';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
+import { Public } from '../common/decorators/public.decorator';
+import { FlexPayCallbackDto, InitiatePaymentDto } from '../payments/dto/payment.dto';
 
 @ApiTags('Bookings')
 @Controller('bookings')
 export class BookingsController {
   constructor(private readonly bookingsService: BookingsService) { }
+
+  @Post('flexpay/callback')
+  @Public()
+  @SensitiveThrottle(120, 60000)
+  @ApiOperation({ summary: 'Receive FlexPay payment callback for trip bookings' })
+  async handleFlexPayCallback(@Body() dto: FlexPayCallbackDto) {
+    return this.bookingsService.handleFlexPayCallback(dto);
+  }
 
   @Post()
   @Auth()
@@ -32,6 +40,42 @@ export class BookingsController {
   })
   async create(@Request() req, @Body() createBookingDto: CreateBookingDto) {
     return this.bookingsService.create(req.user.userId, createBookingDto);
+  }
+
+  @Post(':id/pay')
+  @Auth()
+  @SensitiveThrottle(5, 60000)
+  @ApiOperation({
+    summary: 'Initiate electronic payment for a booking',
+    description:
+      "Calcule le montant cote backend a partir du prix du trajet et du nombre de places, puis initialise le paiement FlexPay.",
+  })
+  async initiatePayment(
+    @Request() req,
+    @Param('id') id: string,
+    @Body() dto: InitiatePaymentDto,
+  ) {
+    return this.bookingsService.initiateBookingPayment(
+      id,
+      req.user.userId,
+      dto,
+    );
+  }
+
+  @Get('payments/:orderNumber/status')
+  @Auth()
+  @SensitiveThrottle(20, 60000)
+  @ApiOperation({
+    summary: 'Check a trip booking payment status and update the booking',
+  })
+  async checkPaymentStatus(
+    @Request() req,
+    @Param('orderNumber') orderNumber: string,
+  ) {
+    return this.bookingsService.checkBookingPaymentStatus(
+      req.user.userId,
+      orderNumber,
+    );
   }
 
   @Get('my-bookings')

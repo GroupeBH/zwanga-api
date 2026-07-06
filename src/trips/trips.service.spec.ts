@@ -62,6 +62,7 @@ describe('TripsService daily trip publication quota', () => {
       {} as any,
       {} as any,
       subscriptionsService as any,
+      {} as any,
     );
 
     jest.spyOn(service, 'findOne').mockResolvedValue({ id: 'trip-1' });
@@ -157,6 +158,7 @@ describe('TripsService trip deletion rules', () => {
       {} as any,
       {} as any,
       {} as any,
+      {} as any,
     );
   });
 
@@ -226,6 +228,7 @@ describe('TripsService started trip ETA expiration', () => {
   let userRepository: { find: jest.Mock };
   let cacheService: { del: jest.Mock };
   let googleMapsService: { getDirections: jest.Mock };
+  let weatherAwarenessService: { getRouteImpact: jest.Mock };
 
   const now = new Date('2026-05-20T12:00:00.000Z');
 
@@ -255,6 +258,16 @@ describe('TripsService started trip ETA expiration', () => {
         ],
       }),
     };
+    weatherAwarenessService = {
+      getRouteImpact: jest.fn().mockResolvedValue({
+        heavyRain: false,
+        dataAvailable: true,
+        priceMultiplier: 1,
+        etaMultiplier: 1,
+        evaluatedZoneIds: ['cd-kinshasa-gombe'],
+        affectedZoneIds: [],
+      }),
+    };
 
     service = new TripsService(
       tripRepository as any,
@@ -272,6 +285,7 @@ describe('TripsService started trip ETA expiration', () => {
       {} as any,
       googleMapsService as any,
       {} as any,
+      weatherAwarenessService as any,
     );
   });
 
@@ -299,9 +313,8 @@ describe('TripsService started trip ETA expiration', () => {
     };
   }
 
-  it('stores an estimated arrival date when a driver starts a trip', async () => {
-    jest.useFakeTimers().setSystemTime(now);
-    const trip = {
+  function buildPendingTrip() {
+    return {
       id: 'trip-1',
       driverId: 'driver-1',
       status: TripStatus.PENDING,
@@ -320,6 +333,7 @@ describe('TripsService started trip ETA expiration', () => {
         type: 'Point',
         coordinates: [15.3222, -4.4419],
       },
+      currentLocation: null,
       availableSeats: 0,
       pricePerSeat: 0,
       bookings: [],
@@ -327,6 +341,11 @@ describe('TripsService started trip ETA expiration', () => {
       driver: { id: 'driver-1', fcmToken: null },
       vehicle: null,
     };
+  }
+
+  it('stores an estimated arrival date when a driver starts a trip', async () => {
+    jest.useFakeTimers().setSystemTime(now);
+    const trip = buildPendingTrip();
     tripRepository.findOne
       .mockResolvedValueOnce(trip)
       .mockResolvedValueOnce(null);
@@ -348,6 +367,31 @@ describe('TripsService started trip ETA expiration', () => {
         status: TripStatus.ACTIVE,
         startedAt: now,
         estimatedArrivalDate: new Date('2026-05-20T12:30:00.000Z'),
+      }),
+    );
+  });
+
+  it('increases the ETA by 40 percent during heavy rain', async () => {
+    jest.useFakeTimers().setSystemTime(now);
+    const trip = buildPendingTrip();
+    weatherAwarenessService.getRouteImpact.mockResolvedValueOnce({
+      heavyRain: true,
+      dataAvailable: true,
+      priceMultiplier: 1.3,
+      etaMultiplier: 1.4,
+      evaluatedZoneIds: ['cd-kinshasa-gombe'],
+      affectedZoneIds: ['cd-kinshasa-gombe'],
+    });
+    tripRepository.findOne
+      .mockResolvedValueOnce(trip)
+      .mockResolvedValueOnce(null);
+    jest.spyOn(service, 'findOne').mockResolvedValue({ id: 'trip-1' });
+
+    await service.startTrip('trip-1', 'driver-1');
+
+    expect(tripRepository.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        estimatedArrivalDate: new Date('2026-05-20T12:42:00.000Z'),
       }),
     );
   });

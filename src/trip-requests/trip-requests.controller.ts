@@ -73,7 +73,7 @@ export class TripRequestsController {
   @ApiOperation({
     summary: 'Recommend a trip request price',
     description:
-      'Calcule le prix recommande pour une demande de trajet: 4500 FC par kilometre et par passager sur les 3 premiers km, puis 750 FC par km supplementaire.',
+      'Calcule le prix recommande pour une demande de trajet: 4500 FC par kilometre et par passager sur les 3 premiers km, puis 750 FC par km supplementaire. Une forte pluie dans une zone du parcours applique un coefficient de 1.3.',
   })
   async recommendPrice(@Body() payload: RecommendTripRequestPriceDto) {
     return this.tripRequestsService.recommendPrice(payload);

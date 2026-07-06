@@ -21,6 +21,15 @@ Generic payments can use:
 - `POST /api/v1/payments/flexpay/callback`
 - `GET /api/v1/payments/:orderNumber/status`
 
+Trip booking payments use:
+
+- `POST /api/v1/bookings/:id/pay`
+- `POST /api/v1/bookings/flexpay/callback`
+- `GET /api/v1/bookings/payments/:orderNumber/status`
+
+The booking amount is calculated by the backend from
+`trip.pricePerSeat * booking.numberOfSeats`; the app does not send the amount.
+
 ## Mobile Money request
 
 ```json
@@ -95,11 +104,15 @@ FLEXPAY_REQUEST_TIMEOUT_MS=30000
 FLEXPAY_CALLBACK_URL=
 FLEXPAY_CALLBACK_BASE_URL=https://api.zwanga.cd/api/v1
 FLEXPAY_SUBSCRIPTION_CALLBACK_URL=
+FLEXPAY_BOOKING_CALLBACK_URL=
 FLEXPAY_VERIFY_CALLBACKS=true
 
 # Subscription amount charged in-app.
 SUBSCRIPTION_PRO_PRICE=5000
 SUBSCRIPTION_PRO_CURRENCY=CDF
+
+# Trip booking payments.
+TRIP_PAYMENT_CURRENCY=CDF
 
 # Fallback card redirect URLs when the client does not send them.
 FLEXPAY_CARD_APPROVE_URL=https://zwanga-app.com/subscriptions/payment/success

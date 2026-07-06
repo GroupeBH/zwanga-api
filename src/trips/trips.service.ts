@@ -37,6 +37,7 @@ import {
   PremiumSubscriptionFeatures,
   SubscriptionsService,
 } from '../subscriptions/subscriptions.service';
+import { WeatherAwarenessService } from '../weather/weather-awareness.service';
 
 export type Coordinates = [number, number] | null;
 
@@ -133,6 +134,7 @@ export class TripsService {
     private messagingService: MessagingService,
     private googleMapsService: GoogleMapsService,
     private subscriptionsService: SubscriptionsService,
+    private weatherAwarenessService: WeatherAwarenessService,
   ) { }
 
   async create(
@@ -1803,7 +1805,10 @@ export class TripsService {
       this.logger.warn(
         `Unable to estimate route duration for trip ${trip.id}: missing origin or destination`,
       );
-      return this.DEFAULT_ESTIMATED_TRIP_DURATION_MS;
+      return this.applyWeatherEtaMultiplier(
+        trip,
+        this.DEFAULT_ESTIMATED_TRIP_DURATION_MS,
+      );
     }
 
     try {
@@ -1820,7 +1825,10 @@ export class TripsService {
       );
 
       if (durationSeconds && durationSeconds > 0) {
-        return durationSeconds * 1000;
+        return this.applyWeatherEtaMultiplier(
+          trip,
+          durationSeconds * 1000,
+        );
       }
 
       this.logger.warn(
@@ -1831,7 +1839,22 @@ export class TripsService {
       this.logger.warn(`Unable to estimate route duration for trip ${trip.id}: ${message}`);
     }
 
-    return this.DEFAULT_ESTIMATED_TRIP_DURATION_MS;
+    return this.applyWeatherEtaMultiplier(
+      trip,
+      this.DEFAULT_ESTIMATED_TRIP_DURATION_MS,
+    );
+  }
+
+  private async applyWeatherEtaMultiplier(
+    trip: Trip,
+    estimatedDurationMs: number,
+  ): Promise<number> {
+    const weatherImpact = await this.weatherAwarenessService.getRouteImpact(
+      this.pointToCoordinates(trip.currentLocation ?? trip.departurePoint),
+      this.pointToCoordinates(trip.arrivalPoint),
+    );
+
+    return Math.round(estimatedDurationMs * weatherImpact.etaMultiplier);
   }
 
   private buildTripDirectionsWaypoint(

@@ -1,11 +1,39 @@
-import { Injectable, NotFoundException, BadRequestException, Logger, ForbiddenException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+  Logger,
+  ForbiddenException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { ConfigService } from '@nestjs/config';
 import { Repository, In } from 'typeorm';
 import type { Point } from 'typeorm';
-import { Booking, BookingStatus } from './entities/booking.entity';
+import {
+  Booking,
+  BookingPaymentStatus,
+  BookingStatus,
+} from './entities/booking.entity';
 import { Trip, TripStatus } from '../trips/entities/trip.entity';
 import { User } from '../users/entities/user.entity';
-import { CreateBookingDto, UpdateBookingStatusDto, ReportBookingProblemDto, UpdatePassengerLocationDto } from './dto/booking.dto';
+import {
+  CreateBookingDto,
+  UpdateBookingStatusDto,
+  ReportBookingProblemDto,
+  UpdatePassengerLocationDto,
+} from './dto/booking.dto';
+import {
+  FlexPayCallbackDto,
+  InitiatePaymentDto,
+} from '../payments/dto/payment.dto';
+import {
+  PaymentMethod,
+  PaymentPurpose,
+  PaymentStatus,
+  PaymentTransaction,
+} from '../payments/entities/payment-transaction.entity';
+import { PaymentsService } from '../payments/payments.service';
+import { TripPaymentMode } from '../payments/enums/trip-payment-mode.enum';
 import { CacheService } from '../common/services/cache.service';
 import { NotificationService } from '../notifications/notifications.service';
 import { FileUploadService } from '../common/services/file-upload.service';
@@ -14,12 +42,41 @@ import { SafetyService } from '../safety/safety.service';
 import { SendWhatsAppNotificationDto } from './dto/send-whatsapp-notification.dto';
 import { GoogleMapsService } from '../google-maps/google-maps.service';
 
+export interface BookingPaymentResponse {
+  booking: Booking;
+  payment: {
+    transactionId: string | null;
+    method: PaymentTransaction['method'] | null;
+    reference: string | null;
+    orderNumber: string | null;
+    status: PaymentStatus | null;
+    statusCode: string | null;
+    message: string | null;
+    paymentUrl: string | null;
+    amount: number;
+    currency: string;
+  };
+}
+
+export interface BookingFlexPayCallbackResponse {
+  received: boolean;
+  verified: boolean;
+  bookingId: string;
+  bookingPaymentStatus: BookingPaymentStatus;
+  paymentTransactionId: string | null;
+  paymentStatus: PaymentStatus | null;
+  paymentStatusCode: string | null;
+  message: string | null;
+}
+
 @Injectable()
 export class BookingsService {
   private readonly logger = new Logger(BookingsService.name);
   private readonly CACHE_TTL = 180; // 3 minutes
   private readonly DESTINATION_PROXIMITY_THRESHOLD_METERS = 1000; // 1 km
   private readonly MAX_SEATS_PER_PASSENGER = 2;
+  private readonly BOOKING_RELATED_ENTITY_TYPE = 'booking';
+  private readonly DEFAULT_TRIP_PAYMENT_CURRENCY = 'CDF';
 
   constructor(
     @InjectRepository(Booking)
@@ -34,6 +91,8 @@ export class BookingsService {
     private messagingService: MessagingService,
     private safetyService: SafetyService,
     private googleMapsService: GoogleMapsService,
+    private configService: ConfigService,
+    private paymentsService: PaymentsService,
   ) {}
 
   private buildPointFromLatLng(latitude: number, longitude: number): Point {
@@ -116,9 +175,14 @@ export class BookingsService {
     return 3;
   }
 
-  async create(passengerId: string, createBookingDto: CreateBookingDto): Promise<Booking> {
-    this.logger.log(`Creating booking for passenger ${passengerId} on trip ${createBookingDto.tripId} (${createBookingDto.numberOfSeats} seats)`);
-    
+  async create(
+    passengerId: string,
+    createBookingDto: CreateBookingDto,
+  ): Promise<Booking> {
+    this.logger.log(
+      `Creating booking for passenger ${passengerId} on trip ${createBookingDto.tripId} (${createBookingDto.numberOfSeats} seats)`,
+    );
+
     // Validate numberOfSeats input
     if (!createBookingDto.numberOfSeats || createBookingDto.numberOfSeats < 1) {
       throw new BadRequestException('Le nombre de places doit être au moins 1');
@@ -136,34 +200,53 @@ export class BookingsService {
     });
 
     if (!trip) {
-      this.logger.warn(`Booking creation failed: Trip ${createBookingDto.tripId} not found`);
+      this.logger.warn(
+        `Booking creation failed: Trip ${createBookingDto.tripId} not found`,
+      );
       throw new NotFoundException('Trajet non trouvé');
     }
 
     if (trip.driverId === passengerId) {
-      this.logger.warn(`Booking creation failed: Passenger ${passengerId} tried to book own trip ${createBookingDto.tripId}`);
-      throw new BadRequestException('Vous ne pouvez pas réserver votre propre trajet');
+      this.logger.warn(
+        `Booking creation failed: Passenger ${passengerId} tried to book own trip ${createBookingDto.tripId}`,
+      );
+      throw new BadRequestException(
+        'Vous ne pouvez pas réserver votre propre trajet',
+      );
     }
 
     // Vérifier que le trajet a des places totales définies
     if (trip.totalSeats === null || trip.totalSeats === undefined) {
-      this.logger.warn(`Booking creation failed: Trip ${createBookingDto.tripId} has no totalSeats defined`);
-      throw new BadRequestException('Ce trajet n\'a pas de nombre de places défini');
+      this.logger.warn(
+        `Booking creation failed: Trip ${createBookingDto.tripId} has no totalSeats defined`,
+      );
+      throw new BadRequestException(
+        "Ce trajet n'a pas de nombre de places défini",
+      );
     }
 
     // Vérifier que availableSeats est défini et valide
     if (trip.availableSeats === null || trip.availableSeats === undefined) {
-      this.logger.warn(`Booking creation failed: Trip ${createBookingDto.tripId} has no availableSeats defined`);
-      throw new BadRequestException('Ce trajet n\'a pas de places disponibles définies');
+      this.logger.warn(
+        `Booking creation failed: Trip ${createBookingDto.tripId} has no availableSeats defined`,
+      );
+      throw new BadRequestException(
+        "Ce trajet n'a pas de places disponibles définies",
+      );
     }
 
     // Allow booking for PENDING trips OR ACTIVE trips with available seats
     const isPendingTrip = trip.status === TripStatus.PENDING;
-    const isActiveTripWithSeats = trip.status === TripStatus.ACTIVE && trip.availableSeats > 0;
-    
+    const isActiveTripWithSeats =
+      trip.status === TripStatus.ACTIVE && trip.availableSeats > 0;
+
     if (!isPendingTrip && !isActiveTripWithSeats) {
-      this.logger.warn(`Booking creation failed: Trip ${createBookingDto.tripId} is not available for booking (status: ${trip.status}, availableSeats: ${trip.availableSeats})`);
-      throw new BadRequestException('Ce trajet n\'est pas disponible pour la réservation. Seuls les trajets en attente ou les trajets actifs avec des places disponibles peuvent être réservés.');
+      this.logger.warn(
+        `Booking creation failed: Trip ${createBookingDto.tripId} is not available for booking (status: ${trip.status}, availableSeats: ${trip.availableSeats})`,
+      );
+      throw new BadRequestException(
+        "Ce trajet n'est pas disponible pour la réservation. Seuls les trajets en attente ou les trajets actifs avec des places disponibles peuvent être réservés.",
+      );
     }
 
     // Vérifier les places disponibles directement (les places sont déduites immédiatement à la création)
@@ -189,10 +272,11 @@ export class BookingsService {
 
     // Check if user already has a pending or accepted booking for this trip
     // For ACTIVE trips, also check ACCEPTED bookings to prevent double booking
-    const statusesToCheck = trip.status === TripStatus.ACTIVE
-      ? [BookingStatus.PENDING, BookingStatus.ACCEPTED]
-      : [BookingStatus.PENDING];
-    
+    const statusesToCheck =
+      trip.status === TripStatus.ACTIVE
+        ? [BookingStatus.PENDING, BookingStatus.ACCEPTED]
+        : [BookingStatus.PENDING];
+
     const existingBooking = await this.bookingRepository.findOne({
       where: {
         tripId: createBookingDto.tripId,
@@ -202,15 +286,19 @@ export class BookingsService {
     });
 
     if (existingBooking) {
-      const statusText = trip.status === TripStatus.ACTIVE 
-        ? 'pending or accepted' 
-        : 'pending';
-      this.logger.warn(`Booking creation failed: Passenger ${passengerId} already has ${statusText} booking for trip ${createBookingDto.tripId}`);
-      throw new BadRequestException(`Vous avez déjà une réservation ${statusText === 'pending or accepted' ? 'en attente ou acceptée' : 'en attente'} pour ce trajet`);
+      const statusText =
+        trip.status === TripStatus.ACTIVE ? 'pending or accepted' : 'pending';
+      this.logger.warn(
+        `Booking creation failed: Passenger ${passengerId} already has ${statusText} booking for trip ${createBookingDto.tripId}`,
+      );
+      throw new BadRequestException(
+        `Vous avez déjà une réservation ${statusText === 'pending or accepted' ? 'en attente ou acceptée' : 'en attente'} pour ce trajet`,
+      );
     }
 
     // Use trip's departure location as default if passenger origin is not specified
-    const passengerOrigin = createBookingDto.passengerOrigin || trip.departureLocation;
+    const passengerOrigin =
+      createBookingDto.passengerOrigin || trip.departureLocation;
     const passengerOriginPoint = createBookingDto.passengerOriginCoordinates
       ? this.buildPointFromLatLng(
           createBookingDto.passengerOriginCoordinates.latitude,
@@ -225,49 +313,73 @@ export class BookingsService {
         : trip.departurePoint;
 
     // Use trip's arrival location as default if passenger destination is not specified
-    const passengerDestination = createBookingDto.passengerDestination || trip.arrivalLocation;
-    const passengerDestinationPoint = createBookingDto.passengerDestinationCoordinates
-      ? this.buildPointFromLatLng(
-          createBookingDto.passengerDestinationCoordinates.latitude,
-          createBookingDto.passengerDestinationCoordinates.longitude,
-        )
-      : createBookingDto.passengerDestination
-        ? await this.geocodeAddressToPoint(
-            createBookingDto.passengerDestination,
-            createBookingDto.passengerDestinationReference,
-            'passenger destination',
+    const passengerDestination =
+      createBookingDto.passengerDestination || trip.arrivalLocation;
+    const passengerDestinationPoint =
+      createBookingDto.passengerDestinationCoordinates
+        ? this.buildPointFromLatLng(
+            createBookingDto.passengerDestinationCoordinates.latitude,
+            createBookingDto.passengerDestinationCoordinates.longitude,
           )
-        : trip.arrivalPoint;
+        : createBookingDto.passengerDestination
+          ? await this.geocodeAddressToPoint(
+              createBookingDto.passengerDestination,
+              createBookingDto.passengerDestinationReference,
+              'passenger destination',
+            )
+          : trip.arrivalPoint;
+
+    const paymentAmount = this.calculateBookingPaymentAmount(
+      trip,
+      createBookingDto.numberOfSeats,
+    );
+    const paymentCurrency = this.getTripPaymentCurrency();
+    const paymentMode =
+      createBookingDto.paymentMode ?? TripPaymentMode.CASH;
 
     const booking = this.bookingRepository.create({
       tripId: createBookingDto.tripId,
       passengerId,
       numberOfSeats: createBookingDto.numberOfSeats,
       passengerOrigin: passengerOrigin || null,
-      passengerOriginReference: createBookingDto.passengerOriginReference?.trim() || null,
+      passengerOriginReference:
+        createBookingDto.passengerOriginReference?.trim() || null,
       passengerOriginPoint,
       passengerDestination: passengerDestination || null,
-      passengerDestinationReference: createBookingDto.passengerDestinationReference?.trim() || null,
+      passengerDestinationReference:
+        createBookingDto.passengerDestinationReference?.trim() || null,
       passengerDestinationPoint,
+      paymentStatus:
+        paymentAmount > 0 && paymentMode === TripPaymentMode.ELECTRONIC
+          ? BookingPaymentStatus.PENDING
+          : BookingPaymentStatus.NOT_REQUIRED,
+      paymentAmount,
+      paymentCurrency,
+      paymentMode,
     });
 
     const savedBooking = await this.bookingRepository.save(booking);
-    
+
     // Recharger le trip pour avoir les données les plus récentes (évite les conditions de course)
     const updatedTrip = await this.tripRepository.findOne({
       where: { id: trip.id },
     });
 
     if (!updatedTrip) {
-      this.logger.error(`Trip ${trip.id} not found after booking creation. Rolling back booking.`);
+      this.logger.error(
+        `Trip ${trip.id} not found after booking creation. Rolling back booking.`,
+      );
       await this.bookingRepository.remove(savedBooking);
-      throw new NotFoundException('Trajet non trouvé après création de la réservation');
+      throw new NotFoundException(
+        'Trajet non trouvé après création de la réservation',
+      );
     }
 
     // Déduire immédiatement les places disponibles du trip
     // Les places sont déduites dès la création (même en PENDING) pour éviter les sur-réservations
-    const newAvailableSeats = updatedTrip.availableSeats - createBookingDto.numberOfSeats;
-    
+    const newAvailableSeats =
+      updatedTrip.availableSeats - createBookingDto.numberOfSeats;
+
     // Vérification de sécurité : s'assurer que les places ne deviennent pas négatives
     if (newAvailableSeats < 0) {
       this.logger.error(
@@ -280,16 +392,20 @@ export class BookingsService {
     }
 
     // S'assurer que availableSeats ne dépasse pas totalSeats
-    if (updatedTrip.totalSeats !== null && newAvailableSeats > updatedTrip.totalSeats) {
+    if (
+      updatedTrip.totalSeats !== null &&
+      newAvailableSeats > updatedTrip.totalSeats
+    ) {
       this.logger.warn(
         `Calculated available seats (${newAvailableSeats}) exceeds total seats (${updatedTrip.totalSeats}). Clamping to total seats.`,
       );
     }
 
-    const finalAvailableSeats = updatedTrip.totalSeats !== null
-      ? Math.max(0, Math.min(newAvailableSeats, updatedTrip.totalSeats))
-      : Math.max(0, newAvailableSeats);
-    
+    const finalAvailableSeats =
+      updatedTrip.totalSeats !== null
+        ? Math.max(0, Math.min(newAvailableSeats, updatedTrip.totalSeats))
+        : Math.max(0, newAvailableSeats);
+
     await this.tripRepository.update(trip.id, {
       availableSeats: finalAvailableSeats,
     });
@@ -299,11 +415,19 @@ export class BookingsService {
     );
 
     // Invalidate cache
-    await this.cacheService.del(CacheService.getBookingsByTripKey(createBookingDto.tripId));
-    await this.cacheService.del(CacheService.getBookingsByPassengerKey(passengerId));
-    await this.cacheService.del(CacheService.getTripKey(createBookingDto.tripId));
+    await this.cacheService.del(
+      CacheService.getBookingsByTripKey(createBookingDto.tripId),
+    );
+    await this.cacheService.del(
+      CacheService.getBookingsByPassengerKey(passengerId),
+    );
+    await this.cacheService.del(
+      CacheService.getTripKey(createBookingDto.tripId),
+    );
 
-    this.logger.log(`Booking created successfully: ${savedBooking.id} for passenger ${passengerId} on trip ${createBookingDto.tripId}`);
+    this.logger.log(
+      `Booking created successfully: ${savedBooking.id} for passenger ${passengerId} on trip ${createBookingDto.tripId}`,
+    );
 
     await this.notifyDriverOfNewBooking(trip, passengerId, savedBooking);
     return savedBooking;
@@ -311,12 +435,14 @@ export class BookingsService {
 
   async findAllByPassenger(passengerId: string): Promise<Booking[]> {
     this.logger.debug(`Fetching bookings for passenger: ${passengerId}`);
-    
+
     const cacheKey = CacheService.getBookingsByPassengerKey(passengerId);
     const cached = await this.cacheService.get<Booking[]>(cacheKey);
-    
+
     if (cached) {
-      this.logger.debug(`Returning ${cached.length} bookings from cache for passenger ${passengerId}`);
+      this.logger.debug(
+        `Returning ${cached.length} bookings from cache for passenger ${passengerId}`,
+      );
       return cached;
     }
 
@@ -327,27 +453,35 @@ export class BookingsService {
     });
 
     await this.cacheService.set(cacheKey, bookings, this.CACHE_TTL);
-    this.logger.debug(`Fetched ${bookings.length} bookings from database for passenger ${passengerId}`);
+    this.logger.debug(
+      `Fetched ${bookings.length} bookings from database for passenger ${passengerId}`,
+    );
     return bookings;
   }
 
   async findAllByTrip(tripId: string, driverId: string): Promise<Booking[]> {
-    this.logger.debug(`Fetching bookings for trip ${tripId} by driver ${driverId}`);
-    
+    this.logger.debug(
+      `Fetching bookings for trip ${tripId} by driver ${driverId}`,
+    );
+
     const trip = await this.tripRepository.findOne({
       where: { id: tripId, driverId },
     });
 
     if (!trip) {
-      this.logger.warn(`Get bookings failed: Trip ${tripId} not found for driver ${driverId}`);
+      this.logger.warn(
+        `Get bookings failed: Trip ${tripId} not found for driver ${driverId}`,
+      );
       throw new NotFoundException('Trajet non trouvé');
     }
 
     const cacheKey = CacheService.getBookingsByTripKey(tripId);
     const cached = await this.cacheService.get<Booking[]>(cacheKey);
-    
+
     if (cached) {
-      this.logger.debug(`Returning ${cached.length} bookings from cache for trip ${tripId}`);
+      this.logger.debug(
+        `Returning ${cached.length} bookings from cache for trip ${tripId}`,
+      );
       return cached;
     }
 
@@ -358,16 +492,18 @@ export class BookingsService {
     });
 
     await this.cacheService.set(cacheKey, bookings, this.CACHE_TTL);
-    this.logger.debug(`Fetched ${bookings.length} bookings from database for trip ${tripId}`);
+    this.logger.debug(
+      `Fetched ${bookings.length} bookings from database for trip ${tripId}`,
+    );
     return bookings;
   }
 
   async findOne(id: string): Promise<Booking> {
     this.logger.debug(`Fetching booking: ${id}`);
-    
+
     const cacheKey = CacheService.getBookingKey(id);
     const cached = await this.cacheService.get<Booking>(cacheKey);
-    
+
     if (cached) {
       this.logger.debug(`Booking ${id} returned from cache`);
       return cached;
@@ -388,30 +524,162 @@ export class BookingsService {
     return booking;
   }
 
+  async initiateBookingPayment(
+    bookingId: string,
+    passengerId: string,
+    dto: InitiatePaymentDto,
+  ): Promise<BookingPaymentResponse> {
+    this.logger.log(
+      `Initiating trip payment for booking ${bookingId} by passenger ${passengerId}`,
+    );
+
+    const booking = await this.bookingRepository.findOne({
+      where: { id: bookingId },
+      relations: ['trip', 'passenger'],
+    });
+
+    if (!booking) {
+      throw new NotFoundException('Reservation non trouvee');
+    }
+
+    this.ensurePassengerOwnsBooking(booking, passengerId);
+    this.ensureBookingCanBePaid(booking);
+
+    const amount = this.calculateBookingPaymentAmount(
+      booking.trip,
+      booking.numberOfSeats,
+    );
+    const currency = this.getTripPaymentCurrency();
+
+    booking.paymentAmount = amount;
+    booking.paymentCurrency = currency;
+
+    if (amount <= 0) {
+      booking.paymentStatus = BookingPaymentStatus.NOT_REQUIRED;
+      booking.paidAt = booking.paidAt ?? new Date();
+      const savedBooking = await this.bookingRepository.save(booking);
+      await this.invalidateBookingCaches(savedBooking);
+      return this.buildPaymentResponse(savedBooking, null);
+    }
+
+    if (booking.paymentStatus === BookingPaymentStatus.SUCCEEDED) {
+      const paidPayment = await this.findCurrentPaymentForBooking(
+        booking,
+        passengerId,
+      );
+      return this.buildPaymentResponse(booking, paidPayment);
+    }
+
+    const reusablePayment = await this.findReusablePaymentForBooking(
+      booking,
+      passengerId,
+      dto.method,
+    );
+    if (reusablePayment) {
+      const savedBooking = await this.applyPaymentToBooking(
+        booking,
+        reusablePayment,
+      );
+      return this.buildPaymentResponse(savedBooking, reusablePayment);
+    }
+
+    const payment = await this.paymentsService.initiatePayment({
+      userId: passengerId,
+      purpose: PaymentPurpose.TRIP_BOOKING,
+      relatedEntityType: this.BOOKING_RELATED_ENTITY_TYPE,
+      relatedEntityId: booking.id,
+      method: dto.method,
+      phone: dto.phone,
+      amount,
+      currency,
+      description: this.buildTripPaymentDescription(booking),
+      callbackUrl: this.getBookingFlexPayCallbackUrl(),
+      approveUrl: dto.approveUrl,
+      cancelUrl: dto.cancelUrl,
+      declineUrl: dto.declineUrl,
+      referencePrefix: 'TRIP',
+    });
+
+    const savedBooking = await this.applyPaymentToBooking(booking, payment);
+    this.logger.log(
+      `Trip payment initialized: bookingId=${savedBooking.id}, paymentId=${payment.id}, amount=${amount} ${currency}`,
+    );
+
+    return this.buildPaymentResponse(savedBooking, payment);
+  }
+
+  async handleFlexPayCallback(
+    dto: FlexPayCallbackDto,
+  ): Promise<BookingFlexPayCallbackResponse> {
+    this.logger.log('Booking FlexPay callback received');
+
+    const payment = await this.paymentsService.handleFlexPayCallback(dto);
+    const booking = await this.findBookingForPayment(payment);
+    const savedBooking = await this.applyPaymentToBooking(booking, payment);
+
+    this.logger.log(
+      `Booking payment callback applied: bookingId=${savedBooking.id}, paymentId=${payment.id}, paymentStatus=${payment.status}, bookingPaymentStatus=${savedBooking.paymentStatus}`,
+    );
+
+    return this.buildCallbackResponse(
+      savedBooking,
+      payment,
+      payment.status === PaymentStatus.SUCCEEDED,
+    );
+  }
+
+  async checkBookingPaymentStatus(
+    passengerId: string,
+    orderNumber: string,
+  ): Promise<BookingPaymentResponse> {
+    this.logger.log(
+      `Booking payment status check requested: passengerId=${passengerId}, orderNumber=${orderNumber}`,
+    );
+
+    const payment = await this.paymentsService.checkPaymentStatus(
+      orderNumber,
+      passengerId,
+    );
+    const booking = await this.findBookingForPayment(payment, passengerId);
+    const savedBooking = await this.applyPaymentToBooking(booking, payment);
+
+    return this.buildPaymentResponse(savedBooking, payment);
+  }
+
   async updateStatus(
     bookingId: string,
     driverId: string,
     updateStatusDto: UpdateBookingStatusDto,
   ): Promise<Booking> {
-    this.logger.log(`Updating booking ${bookingId} status to ${updateStatusDto.status} by driver ${driverId}`);
-    
+    this.logger.log(
+      `Updating booking ${bookingId} status to ${updateStatusDto.status} by driver ${driverId}`,
+    );
+
     const booking = await this.bookingRepository.findOne({
       where: { id: bookingId },
       relations: ['trip'],
     });
 
     if (!booking) {
-      this.logger.warn(`Booking status update failed: Booking ${bookingId} not found`);
+      this.logger.warn(
+        `Booking status update failed: Booking ${bookingId} not found`,
+      );
       throw new NotFoundException('Réservation non trouvée');
     }
 
     if (booking.trip.driverId !== driverId) {
-      this.logger.warn(`Booking status update failed: Driver ${driverId} tried to update booking ${bookingId} (owner: ${booking.trip.driverId})`);
-      throw new BadRequestException('Seul le conducteur du trajet peut modifier le statut de la réservation');
+      this.logger.warn(
+        `Booking status update failed: Driver ${driverId} tried to update booking ${bookingId} (owner: ${booking.trip.driverId})`,
+      );
+      throw new BadRequestException(
+        'Seul le conducteur du trajet peut modifier le statut de la réservation',
+      );
     }
 
     const oldStatus = booking.status;
-    const trip = await this.tripRepository.findOne({ where: { id: booking.tripId } });
+    const trip = await this.tripRepository.findOne({
+      where: { id: booking.tripId },
+    });
 
     if (!trip) {
       throw new NotFoundException('Trajet non trouvé');
@@ -424,9 +692,16 @@ export class BookingsService {
     } else if (updateStatusDto.status === BookingStatus.CANCELLED) {
       booking.cancelledAt = new Date();
       // Remettre les places disponibles si la réservation était en PENDING ou ACCEPTED
-      if (oldStatus === BookingStatus.PENDING || oldStatus === BookingStatus.ACCEPTED) {
-        const maxSeats = trip.totalSeats ?? trip.availableSeats + booking.numberOfSeats; // Fallback si totalSeats est null
-        const newAvailableSeats = Math.min(maxSeats, trip.availableSeats + booking.numberOfSeats);
+      if (
+        oldStatus === BookingStatus.PENDING ||
+        oldStatus === BookingStatus.ACCEPTED
+      ) {
+        const maxSeats =
+          trip.totalSeats ?? trip.availableSeats + booking.numberOfSeats; // Fallback si totalSeats est null
+        const newAvailableSeats = Math.min(
+          maxSeats,
+          trip.availableSeats + booking.numberOfSeats,
+        );
         await this.tripRepository.update(trip.id, {
           availableSeats: newAvailableSeats,
         });
@@ -436,15 +711,26 @@ export class BookingsService {
       }
     } else if (updateStatusDto.status === BookingStatus.REJECTED) {
       if (!updateStatusDto.rejectionReason?.trim()) {
-        this.logger.warn(`Driver ${driverId} tried to reject booking ${bookingId} without reason`);
-        throw new BadRequestException('Un motif de refus est requis lors du rejet d\'une réservation');
+        this.logger.warn(
+          `Driver ${driverId} tried to reject booking ${bookingId} without reason`,
+        );
+        throw new BadRequestException(
+          "Un motif de refus est requis lors du rejet d'une réservation",
+        );
       }
       booking.rejectionReason = updateStatusDto.rejectionReason.trim();
       booking.acceptedAt = null;
       // Remettre les places disponibles si la réservation était en PENDING ou ACCEPTED
-      if (oldStatus === BookingStatus.PENDING || oldStatus === BookingStatus.ACCEPTED) {
-        const maxSeats = trip.totalSeats ?? trip.availableSeats + booking.numberOfSeats; // Fallback si totalSeats est null
-        const newAvailableSeats = Math.min(maxSeats, trip.availableSeats + booking.numberOfSeats);
+      if (
+        oldStatus === BookingStatus.PENDING ||
+        oldStatus === BookingStatus.ACCEPTED
+      ) {
+        const maxSeats =
+          trip.totalSeats ?? trip.availableSeats + booking.numberOfSeats; // Fallback si totalSeats est null
+        const newAvailableSeats = Math.min(
+          maxSeats,
+          trip.availableSeats + booking.numberOfSeats,
+        );
         await this.tripRepository.update(trip.id, {
           availableSeats: newAvailableSeats,
         });
@@ -458,27 +744,35 @@ export class BookingsService {
 
     booking.status = updateStatusDto.status;
     const updatedBooking = await this.bookingRepository.save(booking);
-    
+
     // Invalidate cache
     await this.cacheService.del(CacheService.getBookingKey(bookingId));
-    await this.cacheService.del(CacheService.getBookingsByTripKey(booking.tripId));
-    await this.cacheService.del(CacheService.getBookingsByPassengerKey(booking.passengerId));
+    await this.cacheService.del(
+      CacheService.getBookingsByTripKey(booking.tripId),
+    );
+    await this.cacheService.del(
+      CacheService.getBookingsByPassengerKey(booking.passengerId),
+    );
     await this.cacheService.del(CacheService.getTripKey(booking.tripId));
 
-    this.logger.log(`Booking ${bookingId} status updated to ${updateStatusDto.status} successfully`);
+    this.logger.log(
+      `Booking ${bookingId} status updated to ${updateStatusDto.status} successfully`,
+    );
     return updatedBooking;
   }
 
   async cancel(bookingId: string, userId: string): Promise<void> {
     this.logger.log(`Cancelling booking ${bookingId} by user ${userId}`);
-    
+
     const booking = await this.bookingRepository.findOne({
       where: { id: bookingId },
       relations: ['passenger', 'trip', 'trip.driver'],
     });
 
     if (!booking) {
-      this.logger.warn(`Booking cancellation failed: Booking ${bookingId} not found`);
+      this.logger.warn(
+        `Booking cancellation failed: Booking ${bookingId} not found`,
+      );
       throw new NotFoundException('Réservation non trouvée');
     }
 
@@ -486,27 +780,44 @@ export class BookingsService {
     const isDriver = booking.trip.driverId === userId;
 
     if (!isPassenger && !isDriver) {
-      this.logger.warn(`Booking cancellation failed: User ${userId} is not allowed to cancel booking ${bookingId}`);
+      this.logger.warn(
+        `Booking cancellation failed: User ${userId} is not allowed to cancel booking ${bookingId}`,
+      );
       throw new ForbiddenException('Accès refusé');
     }
 
     if (isDriver && booking.status !== BookingStatus.ACCEPTED) {
-      this.logger.warn(`Booking cancellation failed: Driver ${userId} tried to cancel booking ${bookingId} with status ${booking.status}`);
-      throw new BadRequestException('Le conducteur peut annuler uniquement une réservation acceptée');
+      this.logger.warn(
+        `Booking cancellation failed: Driver ${userId} tried to cancel booking ${bookingId} with status ${booking.status}`,
+      );
+      throw new BadRequestException(
+        'Le conducteur peut annuler uniquement une réservation acceptée',
+      );
     }
 
-    if (isDriver && (booking.pickedUp || booking.pickedUpConfirmedByPassenger)) {
-      this.logger.warn(`Booking cancellation failed: Driver ${userId} tried to cancel booking ${bookingId} after pickup`);
-      throw new BadRequestException('Impossible d\'annuler cette réservation : le passager a déjà embarqué');
+    if (
+      isDriver &&
+      (booking.pickedUp || booking.pickedUpConfirmedByPassenger)
+    ) {
+      this.logger.warn(
+        `Booking cancellation failed: Driver ${userId} tried to cancel booking ${bookingId} after pickup`,
+      );
+      throw new BadRequestException(
+        "Impossible d'annuler cette réservation : le passager a déjà embarqué",
+      );
     }
 
     if (booking.status === BookingStatus.COMPLETED) {
-      this.logger.warn(`Booking cancellation failed: Booking ${bookingId} is already completed`);
-      throw new BadRequestException('Impossible d\'annuler une réservation terminée');
+      this.logger.warn(
+        `Booking cancellation failed: Booking ${bookingId} is already completed`,
+      );
+      throw new BadRequestException(
+        "Impossible d'annuler une réservation terminée",
+      );
     }
 
     const oldStatus = booking.status;
-    const trip = await this.tripRepository.findOne({ 
+    const trip = await this.tripRepository.findOne({
       where: { id: booking.tripId },
       relations: ['driver'],
     });
@@ -520,9 +831,16 @@ export class BookingsService {
     await this.bookingRepository.save(booking);
 
     // Remettre les places disponibles si la réservation était en PENDING ou ACCEPTED
-    if (oldStatus === BookingStatus.PENDING || oldStatus === BookingStatus.ACCEPTED) {
-      const maxSeats = trip.totalSeats ?? trip.availableSeats + booking.numberOfSeats; // Fallback si totalSeats est null
-      const newAvailableSeats = Math.min(maxSeats, trip.availableSeats + booking.numberOfSeats);
+    if (
+      oldStatus === BookingStatus.PENDING ||
+      oldStatus === BookingStatus.ACCEPTED
+    ) {
+      const maxSeats =
+        trip.totalSeats ?? trip.availableSeats + booking.numberOfSeats; // Fallback si totalSeats est null
+      const newAvailableSeats = Math.min(
+        maxSeats,
+        trip.availableSeats + booking.numberOfSeats,
+      );
       await this.tripRepository.update(trip.id, {
         availableSeats: newAvailableSeats,
       });
@@ -533,8 +851,10 @@ export class BookingsService {
 
     // Si c'est un trajet privé, terminer automatiquement le trajet et notifier le driver
     if (isPassenger && trip.isPrivate) {
-      this.logger.log(`Private trip ${trip.id} - Passenger cancelled booking. Terminating trip automatically.`);
-      
+      this.logger.log(
+        `Private trip ${trip.id} - Passenger cancelled booking. Terminating trip automatically.`,
+      );
+
       // Terminer le trajet
       trip.status = TripStatus.COMPLETED;
       trip.completedAt = new Date();
@@ -545,13 +865,20 @@ export class BookingsService {
     }
 
     if (isDriver) {
-      await this.notifyPassengerOfStatusChange(booking, BookingStatus.CANCELLED);
+      await this.notifyPassengerOfStatusChange(
+        booking,
+        BookingStatus.CANCELLED,
+      );
     }
-    
+
     // Invalidate cache
     await this.cacheService.del(CacheService.getBookingKey(bookingId));
-    await this.cacheService.del(CacheService.getBookingsByPassengerKey(booking.passengerId));
-    await this.cacheService.del(CacheService.getBookingsByTripKey(booking.tripId));
+    await this.cacheService.del(
+      CacheService.getBookingsByPassengerKey(booking.passengerId),
+    );
+    await this.cacheService.del(
+      CacheService.getBookingsByTripKey(booking.tripId),
+    );
     await this.cacheService.del(CacheService.getTripKey(booking.tripId));
 
     this.logger.log(`Booking ${bookingId} cancelled successfully!`);
@@ -560,14 +887,19 @@ export class BookingsService {
   /**
    * Notifie le conducteur qu'un trajet privé a été terminé à cause de l'annulation du passager
    */
-  private async notifyDriverAboutPrivateTripCancellation(trip: Trip, cancelledBooking: Booking): Promise<void> {
+  private async notifyDriverAboutPrivateTripCancellation(
+    trip: Trip,
+    cancelledBooking: Booking,
+  ): Promise<void> {
     try {
       if (!trip.driver?.fcmToken) {
-        this.logger.debug(`Driver ${trip.driverId} has no FCM token, skipping notification`);
+        this.logger.debug(
+          `Driver ${trip.driverId} has no FCM token, skipping notification`,
+        );
         return;
       }
 
-      const passengerName = cancelledBooking.passenger 
+      const passengerName = cancelledBooking.passenger
         ? `${cancelledBooking.passenger.firstName} ${cancelledBooking.passenger.lastName}`
         : 'Le passager';
 
@@ -590,7 +922,9 @@ export class BookingsService {
         data,
         trip.driverId,
       );
-      this.logger.log(`Notified driver ${trip.driverId} about private trip ${trip.id} cancellation`);
+      this.logger.log(
+        `Notified driver ${trip.driverId} about private trip ${trip.id} cancellation`,
+      );
     } catch (error) {
       this.logger.error(
         `Error notifying driver about private trip cancellation ${trip.id}: ${error.message}`,
@@ -607,12 +941,20 @@ export class BookingsService {
     return booking;
   }
 
-  async rejectBooking(bookingId: string, driverId: string, reason: string): Promise<Booking> {
+  async rejectBooking(
+    bookingId: string,
+    driverId: string,
+    reason: string,
+  ): Promise<Booking> {
     const booking = await this.updateStatus(bookingId, driverId, {
       status: BookingStatus.REJECTED,
       rejectionReason: reason,
     });
-    await this.notifyPassengerOfStatusChange(booking, BookingStatus.REJECTED, reason);
+    await this.notifyPassengerOfStatusChange(
+      booking,
+      BookingStatus.REJECTED,
+      reason,
+    );
     return booking;
   }
 
@@ -641,7 +983,9 @@ export class BookingsService {
 
     // Convert S3 key to presigned URL
     const profilePicture = driver.profilePicture
-      ? await this.fileUploadService.getPresignedUrlIfS3Key(driver.profilePicture)
+      ? await this.fileUploadService.getPresignedUrlIfS3Key(
+          driver.profilePicture,
+        )
       : null;
 
     return {
@@ -653,6 +997,314 @@ export class BookingsService {
         profilePicture: profilePicture || driver.profilePicture,
       },
     };
+  }
+
+  private ensurePassengerOwnsBooking(
+    booking: Booking,
+    passengerId: string,
+  ): void {
+    if (booking.passengerId !== passengerId) {
+      throw new ForbiddenException('Acces refuse');
+    }
+  }
+
+  private ensureBookingCanBePaid(booking: Booking): void {
+    if (booking.paymentMode !== TripPaymentMode.ELECTRONIC) {
+      throw new BadRequestException(
+        'Cette reservation doit etre reglee en especes a l arrivee',
+      );
+    }
+
+    if (
+      [
+        BookingStatus.CANCELLED,
+        BookingStatus.REJECTED,
+        BookingStatus.COMPLETED,
+        BookingStatus.EXPIRED,
+      ].includes(booking.status)
+    ) {
+      throw new BadRequestException(
+        'Cette reservation ne peut plus etre payee',
+      );
+    }
+
+    if (booking.status !== BookingStatus.ACCEPTED) {
+      throw new BadRequestException(
+        'La reservation doit etre acceptee par le conducteur avant le paiement',
+      );
+    }
+
+    if (
+      booking.trip?.status === TripStatus.CANCELLED ||
+      booking.trip?.status === TripStatus.COMPLETED
+    ) {
+      throw new BadRequestException('Ce trajet ne peut plus etre paye');
+    }
+  }
+
+  private calculateBookingPaymentAmount(
+    trip: Trip,
+    numberOfSeats: number,
+  ): number {
+    const pricePerSeat = Number(trip.pricePerSeat ?? 0);
+    const seats = Number(numberOfSeats ?? 0);
+
+    if (
+      !Number.isFinite(pricePerSeat) ||
+      !Number.isFinite(seats) ||
+      pricePerSeat <= 0 ||
+      seats <= 0 ||
+      trip.isFree
+    ) {
+      return 0;
+    }
+
+    return Math.round(pricePerSeat * seats);
+  }
+
+  private getTripPaymentCurrency(): string {
+    return (
+      this.configService.get<string>('TRIP_PAYMENT_CURRENCY')?.trim() ||
+      this.DEFAULT_TRIP_PAYMENT_CURRENCY
+    ).toUpperCase();
+  }
+
+  private async findCurrentPaymentForBooking(
+    booking: Booking,
+    passengerId?: string,
+  ): Promise<PaymentTransaction | null> {
+    if (booking.paymentTransactionId) {
+      try {
+        return await this.paymentsService.findTransactionById(
+          booking.paymentTransactionId,
+          passengerId,
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.warn(
+          `Unable to load payment ${booking.paymentTransactionId} for booking ${booking.id}: ${message}`,
+        );
+      }
+    }
+
+    return this.paymentsService.findLatestTransactionForRelatedEntity(
+      this.BOOKING_RELATED_ENTITY_TYPE,
+      booking.id,
+      passengerId,
+    );
+  }
+
+  private async findReusablePaymentForBooking(
+    booking: Booking,
+    passengerId: string,
+    paymentMethod?: PaymentMethod,
+  ): Promise<PaymentTransaction | null> {
+    const payment = await this.findCurrentPaymentForBooking(
+      booking,
+      passengerId,
+    );
+
+    if (!payment) {
+      return null;
+    }
+
+    if (paymentMethod && payment.method !== paymentMethod) {
+      return null;
+    }
+
+    return [PaymentStatus.PENDING, PaymentStatus.INITIATED].includes(
+      payment.status,
+    )
+      ? payment
+      : null;
+  }
+
+  private async findBookingForPayment(
+    payment: PaymentTransaction,
+    passengerId?: string,
+  ): Promise<Booking> {
+    if (
+      payment.purpose !== PaymentPurpose.TRIP_BOOKING ||
+      payment.relatedEntityType !== this.BOOKING_RELATED_ENTITY_TYPE
+    ) {
+      throw new BadRequestException(
+        'Cette transaction ne correspond pas a une reservation de trajet',
+      );
+    }
+
+    const withPassenger = <T extends Record<string, unknown>>(where: T) =>
+      passengerId ? { ...where, passengerId } : where;
+    const where = [
+      withPassenger({ paymentTransactionId: payment.id }),
+      withPassenger({ paymentReference: payment.reference }),
+      ...(payment.relatedEntityId
+        ? [withPassenger({ id: payment.relatedEntityId })]
+        : []),
+    ];
+
+    const booking = await this.bookingRepository.findOne({
+      where,
+      relations: ['trip', 'passenger'],
+      order: { createdAt: 'DESC' },
+    });
+
+    if (!booking) {
+      throw new NotFoundException('Reservation liee au paiement introuvable');
+    }
+
+    return booking;
+  }
+
+  private async applyPaymentToBooking(
+    booking: Booking,
+    payment: PaymentTransaction,
+  ): Promise<Booking> {
+    booking.paymentReference = payment.reference;
+    booking.paymentTransactionId = payment.id;
+    booking.paymentAmount = Number(
+      payment.amount ?? booking.paymentAmount ?? 0,
+    );
+    booking.paymentCurrency =
+      payment.currency ||
+      booking.paymentCurrency ||
+      this.getTripPaymentCurrency();
+    booking.paymentStatus = this.mapPaymentStatus(payment.status);
+
+    if (payment.status === PaymentStatus.SUCCEEDED) {
+      booking.paidAt = payment.paidAt ?? booking.paidAt ?? new Date();
+    }
+
+    const savedBooking = await this.bookingRepository.save(booking);
+    await this.invalidateBookingCaches(savedBooking);
+    return savedBooking;
+  }
+
+  private mapPaymentStatus(status: PaymentStatus): BookingPaymentStatus {
+    switch (status) {
+      case PaymentStatus.SUCCEEDED:
+        return BookingPaymentStatus.SUCCEEDED;
+      case PaymentStatus.FAILED:
+        return BookingPaymentStatus.FAILED;
+      case PaymentStatus.CANCELLED:
+        return BookingPaymentStatus.CANCELLED;
+      case PaymentStatus.INITIATED:
+        return BookingPaymentStatus.INITIATED;
+      case PaymentStatus.PENDING:
+      default:
+        return BookingPaymentStatus.PENDING;
+    }
+  }
+
+  private buildPaymentResponse(
+    booking: Booking,
+    payment: PaymentTransaction | null,
+  ): BookingPaymentResponse {
+    return {
+      booking,
+      payment: {
+        transactionId: payment?.id ?? booking.paymentTransactionId,
+        method: payment?.method ?? null,
+        reference: payment?.reference ?? booking.paymentReference,
+        orderNumber: payment?.orderNumber ?? null,
+        status: payment?.status ?? null,
+        statusCode: payment?.providerStatusCode ?? null,
+        message: payment
+          ? this.paymentsService.getClientPaymentMessage(payment)
+          : this.getBookingPaymentMessage(booking),
+        paymentUrl: payment?.paymentUrl ?? null,
+        amount: Number(payment?.amount ?? booking.paymentAmount ?? 0),
+        currency: payment?.currency ?? booking.paymentCurrency,
+      },
+    };
+  }
+
+  private buildCallbackResponse(
+    booking: Booking,
+    payment: PaymentTransaction,
+    verified: boolean,
+  ): BookingFlexPayCallbackResponse {
+    return {
+      received: true,
+      verified,
+      bookingId: booking.id,
+      bookingPaymentStatus: booking.paymentStatus,
+      paymentTransactionId: payment.id,
+      paymentStatus: payment.status,
+      paymentStatusCode: payment.providerStatusCode,
+      message: this.paymentsService.getClientPaymentMessage(payment),
+    };
+  }
+
+  private getBookingPaymentMessage(booking: Booking): string | null {
+    switch (booking.paymentStatus) {
+      case BookingPaymentStatus.NOT_REQUIRED:
+        return 'Aucun paiement requis pour ce trajet';
+      case BookingPaymentStatus.SUCCEEDED:
+        return 'Paiement confirme avec succes';
+      case BookingPaymentStatus.FAILED:
+        return 'Le paiement a echoue';
+      case BookingPaymentStatus.CANCELLED:
+        return 'Le paiement a ete annule';
+      case BookingPaymentStatus.INITIATED:
+        return 'Paiement initialise. Verification en cours';
+      case BookingPaymentStatus.PENDING:
+      default:
+        return 'Paiement en attente de confirmation';
+    }
+  }
+
+  private buildTripPaymentDescription(booking: Booking): string {
+    return `Paiement trajet ${booking.trip.departureLocation} vers ${booking.trip.arrivalLocation} (${booking.numberOfSeats} place(s))`;
+  }
+
+  private getBookingFlexPayCallbackUrl(): string {
+    const explicitUrl =
+      this.configService.get<string>('FLEXPAY_BOOKING_CALLBACK_URL')?.trim() ||
+      this.configService.get<string>('FLEXPAY_TRIP_CALLBACK_URL')?.trim();
+    if (explicitUrl) {
+      return explicitUrl;
+    }
+
+    const configuredBaseUrl =
+      this.configService.get<string>('FLEXPAY_CALLBACK_BASE_URL')?.trim() ||
+      this.configService.get<string>('PUBLIC_API_BASE_URL')?.trim();
+
+    if (configuredBaseUrl) {
+      return this.joinUrl(configuredBaseUrl, 'bookings/flexpay/callback');
+    }
+
+    const port = this.configService.get<string | number>('PORT') || 5200;
+    const configuredHost =
+      this.configService.get<string>('HOST')?.trim() || 'localhost';
+    const host = configuredHost === '0.0.0.0' ? 'localhost' : configuredHost;
+    const apiPrefix =
+      this.configService.get<string>('API_PREFIX')?.trim() || 'api/v1';
+
+    return this.joinUrl(
+      `http://${host}:${port}`,
+      apiPrefix,
+      'bookings/flexpay/callback',
+    );
+  }
+
+  private joinUrl(...parts: string[]): string {
+    return parts
+      .map((part, index) =>
+        index === 0 ? part.replace(/\/+$/, '') : part.replace(/^\/+|\/+$/g, ''),
+      )
+      .filter(Boolean)
+      .join('/');
+  }
+
+  private async invalidateBookingCaches(booking: Booking): Promise<void> {
+    await this.cacheService.del(CacheService.getBookingKey(booking.id));
+    await this.cacheService.del(
+      CacheService.getBookingsByPassengerKey(booking.passengerId),
+    );
+    await this.cacheService.del(
+      CacheService.getBookingsByTripKey(booking.tripId),
+    );
+    await this.cacheService.del(CacheService.getTripKey(booking.tripId));
   }
 
   private async notifyPassengerOfStatusChange(
@@ -679,14 +1331,17 @@ export class BookingsService {
         booking.status === BookingStatus.ACCEPTED
           ? 'acceptée'
           : booking.status === BookingStatus.REJECTED
-          ? 'refusée'
-          : booking.status === BookingStatus.CANCELLED
-          ? 'annulée'
-          : booking.status;
+            ? 'refusée'
+            : booking.status === BookingStatus.CANCELLED
+              ? 'annulée'
+              : booking.status;
 
       let body = `Votre réservation pour ${trip?.departureLocation ?? '...'} → ${trip?.arrivalLocation ?? '...'} a été ${statusLabel}.`;
 
-      if (booking.status === BookingStatus.REJECTED && booking.rejectionReason) {
+      if (
+        booking.status === BookingStatus.REJECTED &&
+        booking.rejectionReason
+      ) {
         body += ` Motif: ${booking.rejectionReason}`;
       }
 
@@ -702,27 +1357,44 @@ export class BookingsService {
         booking.passengerId,
       );
     } catch (error) {
-      this.logger.error(`Failed to send passenger notification: ${error.message}`, error.stack);
+      this.logger.error(
+        `Failed to send passenger notification: ${error.message}`,
+        error.stack,
+      );
     }
   }
 
-  private async notifyDriverOfNewBooking(trip: Trip, passengerId: string, booking: Booking) {
+  private async notifyDriverOfNewBooking(
+    trip: Trip,
+    passengerId: string,
+    booking: Booking,
+  ) {
     try {
-      const driver = trip.driver ?? (await this.userRepository.findOne({ where: { id: trip.driverId } }));
+      const driver =
+        trip.driver ??
+        (await this.userRepository.findOne({ where: { id: trip.driverId } }));
 
       if (!driver?.fcmToken) {
-        this.logger.debug(`Driver ${trip.driverId} has no FCM token, skipping notification`);
+        this.logger.debug(
+          `Driver ${trip.driverId} has no FCM token, skipping notification`,
+        );
         return;
       }
 
-      const passenger = await this.userRepository.findOne({ where: { id: passengerId } });
-      const passengerName = passenger ? `${passenger.firstName} ${passenger.lastName}` : 'Un passager';
-      
+      const passenger = await this.userRepository.findOne({
+        where: { id: passengerId },
+      });
+      const passengerName = passenger
+        ? `${passenger.firstName} ${passenger.lastName}`
+        : 'Un passager';
+
       // Build destination message
       const destination = booking.passengerDestination || trip.arrivalLocation;
-      const destinationMessage = booking.passengerDestination && booking.passengerDestination !== trip.arrivalLocation
-        ? `${trip.departureLocation} → ${destination} (destination personnalisée)`
-        : `${trip.departureLocation} → ${trip.arrivalLocation}`;
+      const destinationMessage =
+        booking.passengerDestination &&
+        booking.passengerDestination !== trip.arrivalLocation
+          ? `${trip.departureLocation} → ${destination} (destination personnalisée)`
+          : `${trip.departureLocation} → ${trip.arrivalLocation}`;
 
       await this.notificationService.sendNotification(
         driver.fcmToken,
@@ -738,12 +1410,17 @@ export class BookingsService {
         trip.driverId,
       );
     } catch (error) {
-      this.logger.error(`Failed to send booking notification: ${error.message}`, error.stack);
+      this.logger.error(
+        `Failed to send booking notification: ${error.message}`,
+        error.stack,
+      );
     }
   }
 
   async confirmPickup(bookingId: string, driverId: string): Promise<Booking> {
-    this.logger.log(`Driver ${driverId} confirming pickup for booking ${bookingId}`);
+    this.logger.log(
+      `Driver ${driverId} confirming pickup for booking ${bookingId}`,
+    );
 
     const booking = await this.bookingRepository.findOne({
       where: { id: bookingId },
@@ -755,15 +1432,21 @@ export class BookingsService {
     }
 
     if (booking.trip.driverId !== driverId) {
-      throw new ForbiddenException('Vous n\'êtes pas le conducteur de ce trajet');
+      throw new ForbiddenException(
+        "Vous n'êtes pas le conducteur de ce trajet",
+      );
     }
 
     if (booking.status !== BookingStatus.ACCEPTED) {
-      throw new BadRequestException('La réservation doit être acceptée avant de confirmer la prise en charge');
+      throw new BadRequestException(
+        'La réservation doit être acceptée avant de confirmer la prise en charge',
+      );
     }
 
     if (booking.pickedUp) {
-      throw new BadRequestException('Le passager est déjà marqué comme pris en charge');
+      throw new BadRequestException(
+        'Le passager est déjà marqué comme pris en charge',
+      );
     }
 
     booking.pickedUp = true;
@@ -778,15 +1461,24 @@ export class BookingsService {
     await this.notifyPassengerAboutPickupConfirmation(booking);
 
     // Invalidate cache
-    await this.cacheService.del(CacheService.getBookingsByTripKey(booking.tripId));
-    await this.cacheService.del(CacheService.getBookingsByPassengerKey(booking.passengerId));
+    await this.cacheService.del(
+      CacheService.getBookingsByTripKey(booking.tripId),
+    );
+    await this.cacheService.del(
+      CacheService.getBookingsByPassengerKey(booking.passengerId),
+    );
 
     this.logger.log(`Pickup confirmed for booking ${bookingId}`);
     return booking;
   }
 
-  async confirmPickupByPassenger(bookingId: string, passengerId: string): Promise<Booking> {
-    this.logger.log(`Passenger ${passengerId} confirming pickup for booking ${bookingId}`);
+  async confirmPickupByPassenger(
+    bookingId: string,
+    passengerId: string,
+  ): Promise<Booking> {
+    this.logger.log(
+      `Passenger ${passengerId} confirming pickup for booking ${bookingId}`,
+    );
 
     const booking = await this.bookingRepository.findOne({
       where: { id: bookingId, passengerId },
@@ -798,11 +1490,15 @@ export class BookingsService {
     }
 
     if (!booking.pickedUp) {
-      throw new BadRequestException('Le conducteur doit d\'abord confirmer la prise en charge');
+      throw new BadRequestException(
+        "Le conducteur doit d'abord confirmer la prise en charge",
+      );
     }
 
     if (booking.pickedUpConfirmedByPassenger) {
-      throw new BadRequestException('La prise en charge est déjà confirmée par le passager');
+      throw new BadRequestException(
+        'La prise en charge est déjà confirmée par le passager',
+      );
     }
 
     booking.pickedUpConfirmedByPassenger = true;
@@ -814,15 +1510,21 @@ export class BookingsService {
     await this.notifyDriverAboutPickupConfirmation(booking);
 
     // Invalidate cache
-    await this.cacheService.del(CacheService.getBookingsByTripKey(booking.tripId));
-    await this.cacheService.del(CacheService.getBookingsByPassengerKey(booking.passengerId));
+    await this.cacheService.del(
+      CacheService.getBookingsByTripKey(booking.tripId),
+    );
+    await this.cacheService.del(
+      CacheService.getBookingsByPassengerKey(booking.passengerId),
+    );
 
     this.logger.log(`Pickup confirmed by passenger for booking ${bookingId}`);
     return booking;
   }
 
   async confirmDropoff(bookingId: string, driverId: string): Promise<Booking> {
-    this.logger.log(`Driver ${driverId} confirming dropoff for booking ${bookingId}`);
+    this.logger.log(
+      `Driver ${driverId} confirming dropoff for booking ${bookingId}`,
+    );
 
     const booking = await this.bookingRepository.findOne({
       where: { id: bookingId },
@@ -834,11 +1536,15 @@ export class BookingsService {
     }
 
     if (booking.trip.driverId !== driverId) {
-      throw new ForbiddenException('Vous n\'êtes pas le conducteur de ce trajet');
+      throw new ForbiddenException(
+        "Vous n'êtes pas le conducteur de ce trajet",
+      );
     }
 
     if (!booking.pickedUp || !booking.pickedUpConfirmedByPassenger) {
-      throw new BadRequestException('Le passager doit être pris en charge et confirmé avant la dépose');
+      throw new BadRequestException(
+        'Le passager doit être pris en charge et confirmé avant la dépose',
+      );
     }
 
     if (booking.droppedOff) {
@@ -856,15 +1562,24 @@ export class BookingsService {
     await this.notifyPassengerAboutDropoffConfirmation(booking);
 
     // Invalidate cache
-    await this.cacheService.del(CacheService.getBookingsByTripKey(booking.tripId));
-    await this.cacheService.del(CacheService.getBookingsByPassengerKey(booking.passengerId));
+    await this.cacheService.del(
+      CacheService.getBookingsByTripKey(booking.tripId),
+    );
+    await this.cacheService.del(
+      CacheService.getBookingsByPassengerKey(booking.passengerId),
+    );
 
     this.logger.log(`Dropoff confirmed for booking ${bookingId}`);
     return booking;
   }
 
-  async confirmDropoffByPassenger(bookingId: string, passengerId: string): Promise<Booking> {
-    this.logger.log(`Passenger ${passengerId} confirming dropoff for booking ${bookingId}`);
+  async confirmDropoffByPassenger(
+    bookingId: string,
+    passengerId: string,
+  ): Promise<Booking> {
+    this.logger.log(
+      `Passenger ${passengerId} confirming dropoff for booking ${bookingId}`,
+    );
 
     const booking = await this.bookingRepository.findOne({
       where: { id: bookingId, passengerId },
@@ -876,19 +1591,23 @@ export class BookingsService {
     }
 
     if (!booking.droppedOff) {
-      throw new BadRequestException('Le conducteur doit d\'abord confirmer la dépose');
+      throw new BadRequestException(
+        "Le conducteur doit d'abord confirmer la dépose",
+      );
     }
 
     if (booking.droppedOffConfirmedByPassenger) {
-      throw new BadRequestException('La dépose est déjà confirmée par le passager');
+      throw new BadRequestException(
+        'La dépose est déjà confirmée par le passager',
+      );
     }
 
     booking.droppedOffConfirmedByPassenger = true;
     booking.droppedOffConfirmedAt = new Date();
-    
+
     // Mark booking as completed
     booking.status = BookingStatus.COMPLETED;
-    
+
     await this.bookingRepository.save(booking);
     await this.touchTripInteraction(booking.tripId);
 
@@ -896,8 +1615,12 @@ export class BookingsService {
     await this.notifyDriverAboutDropoffConfirmation(booking);
 
     // Invalidate cache
-    await this.cacheService.del(CacheService.getBookingsByTripKey(booking.tripId));
-    await this.cacheService.del(CacheService.getBookingsByPassengerKey(booking.passengerId));
+    await this.cacheService.del(
+      CacheService.getBookingsByTripKey(booking.tripId),
+    );
+    await this.cacheService.del(
+      CacheService.getBookingsByPassengerKey(booking.passengerId),
+    );
 
     this.logger.log(`Dropoff confirmed by passenger for booking ${bookingId}`);
     return booking;
@@ -921,7 +1644,9 @@ export class BookingsService {
         relations: ['driver', 'vehicle', 'bookings', 'bookings.passenger'],
       });
       if (!trip) {
-        this.logger.warn(`Trip not found while notifying emergency contacts for booking ${booking.id}`);
+        this.logger.warn(
+          `Trip not found while notifying emergency contacts for booking ${booking.id}`,
+        );
         return;
       }
 
@@ -932,7 +1657,8 @@ export class BookingsService {
           select: ['id', 'firstName', 'lastName'],
         }));
 
-      const emergencyContacts = await this.safetyService.findAllEmergencyContacts(booking.passengerId);
+      const emergencyContacts =
+        await this.safetyService.findAllEmergencyContacts(booking.passengerId);
       const selectedContacts = emergencyContacts.filter(
         (contact) =>
           contact.isActive &&
@@ -980,14 +1706,18 @@ export class BookingsService {
         this.logger.debug(
           `[WA][EmergencyContact][${eventType}] booking=${booking.id} contactId=${contact.id} phone=${contact.phone} sending...`,
         );
-        const sent = await this.messagingService.sendMessage(contact.phone, message, {
-          flow: 'booking_passenger_safety',
-          eventType,
-          bookingId: booking.id,
-          tripId: booking.tripId,
-          contactId: contact.id,
-          passengerId: booking.passengerId,
-        });
+        const sent = await this.messagingService.sendMessage(
+          contact.phone,
+          message,
+          {
+            flow: 'booking_passenger_safety',
+            eventType,
+            bookingId: booking.id,
+            tripId: booking.tripId,
+            contactId: contact.id,
+            passengerId: booking.passengerId,
+          },
+        );
         if (sent) {
           success += 1;
           this.logger.log(
@@ -1023,7 +1753,9 @@ export class BookingsService {
   ): string {
     const departure = trip.departureLocation;
     const arrival = booking.passengerDestination || trip.arrivalLocation;
-    const driverLabel = driverPhone ? `${driverName} (${driverPhone})` : driverName;
+    const driverLabel = driverPhone
+      ? `${driverName} (${driverPhone})`
+      : driverName;
     const otherPassengersLabel =
       otherPassengerNames.length > 0
         ? otherPassengerNames.join(', ')
@@ -1064,13 +1796,14 @@ export class BookingsService {
     ].join('\n');
   }
 
-  private async notifyDriverEmergencyContactsOnPickup(booking: Booking): Promise<void> {
+  private async notifyDriverEmergencyContactsOnPickup(
+    booking: Booking,
+  ): Promise<void> {
     try {
-      const trip =
-        (await this.tripRepository.findOne({
-          where: { id: booking.tripId },
-          relations: ['driver', 'vehicle', 'bookings', 'bookings.passenger'],
-        }));
+      const trip = await this.tripRepository.findOne({
+        where: { id: booking.tripId },
+        relations: ['driver', 'vehicle', 'bookings', 'bookings.passenger'],
+      });
       if (!trip) {
         return;
       }
@@ -1080,7 +1813,8 @@ export class BookingsService {
         return;
       }
 
-      const emergencyContacts = await this.safetyService.findAllEmergencyContacts(trip.driverId);
+      const emergencyContacts =
+        await this.safetyService.findAllEmergencyContacts(trip.driverId);
       const selectedContacts = emergencyContacts.filter(
         (contact) =>
           contact.isActive &&
@@ -1103,9 +1837,13 @@ export class BookingsService {
         ? `${trip.driver.firstName} ${trip.driver.lastName}`.trim()
         : 'Le conducteur';
       const vehicleDetails = this.buildVehicleSafetyLabel(trip);
-      const passengerNames = this.getConfirmedPassengerNames(trip.bookings ?? []);
+      const passengerNames = this.getConfirmedPassengerNames(
+        trip.bookings ?? [],
+      );
       const passengersLabel =
-        passengerNames.length > 0 ? passengerNames.join(', ') : 'aucun passager confirme';
+        passengerNames.length > 0
+          ? passengerNames.join(', ')
+          : 'aucun passager confirme';
 
       const message = [
         'ZWANGA - Mise a jour securite conducteur',
@@ -1123,14 +1861,18 @@ export class BookingsService {
         this.logger.debug(
           `[WA][DriverEmergencyContact][pickup] booking=${booking.id} contactId=${contact.id} phone=${contact.phone} sending...`,
         );
-        const sent = await this.messagingService.sendMessage(contact.phone, message, {
-          flow: 'booking_driver_safety',
-          eventType: 'driver_pickup',
-          bookingId: booking.id,
-          tripId: booking.tripId,
-          contactId: contact.id,
-          driverId: trip.driverId,
-        });
+        const sent = await this.messagingService.sendMessage(
+          contact.phone,
+          message,
+          {
+            flow: 'booking_driver_safety',
+            eventType: 'driver_pickup',
+            bookingId: booking.id,
+            tripId: booking.tripId,
+            contactId: contact.id,
+            driverId: trip.driverId,
+          },
+        );
         if (sent) {
           success += 1;
           this.logger.log(
@@ -1158,9 +1900,13 @@ export class BookingsService {
     if (!trip.vehicle) {
       return 'vehicule non renseigne';
     }
-    const brandModel = [trip.vehicle.brand, trip.vehicle.model].filter(Boolean).join(' ');
+    const brandModel = [trip.vehicle.brand, trip.vehicle.model]
+      .filter(Boolean)
+      .join(' ');
     const color = trip.vehicle.color ? `, couleur ${trip.vehicle.color}` : '';
-    const plate = trip.vehicle.licensePlate ? `, plaque ${trip.vehicle.licensePlate}` : '';
+    const plate = trip.vehicle.licensePlate
+      ? `, plaque ${trip.vehicle.licensePlate}`
+      : '';
     return `${brandModel || 'vehicule'}${color}${plate}`;
   }
 
@@ -1181,7 +1927,8 @@ export class BookingsService {
         continue;
       }
 
-      const name = `${booking.passenger.firstName ?? ''} ${booking.passenger.lastName ?? ''}`.trim();
+      const name =
+        `${booking.passenger.firstName ?? ''} ${booking.passenger.lastName ?? ''}`.trim();
       if (!name) {
         continue;
       }
@@ -1195,7 +1942,10 @@ export class BookingsService {
     return names;
   }
 
-  private getOtherConfirmedPassengerNames(bookings: Booking[], currentPassengerId: string): string[] {
+  private getOtherConfirmedPassengerNames(
+    bookings: Booking[],
+    currentPassengerId: string,
+  ): string[] {
     return this.getConfirmedPassengerNames(
       bookings.filter((booking) => booking.passengerId !== currentPassengerId),
     );
@@ -1206,7 +1956,9 @@ export class BookingsService {
     userId: string,
     reportDto: ReportBookingProblemDto,
   ): Promise<any> {
-    this.logger.log(`User ${userId} reporting problem for booking ${bookingId}`);
+    this.logger.log(
+      `User ${userId} reporting problem for booking ${bookingId}`,
+    );
 
     const booking = await this.bookingRepository.findOne({
       where: { id: bookingId },
@@ -1222,11 +1974,15 @@ export class BookingsService {
     const isPassenger = booking.passengerId === userId;
 
     if (!isDriver && !isPassenger) {
-      throw new ForbiddenException('Vous n\'êtes pas autorisé à signaler des problèmes pour cette réservation');
+      throw new ForbiddenException(
+        "Vous n'êtes pas autorisé à signaler des problèmes pour cette réservation",
+      );
     }
 
     // Determine reported user (opposite party)
-    const reportedUserId = isDriver ? booking.passengerId : booking.trip.driverId;
+    const reportedUserId = isDriver
+      ? booking.passengerId
+      : booking.trip.driverId;
 
     // Create report using SafetyService
     const report = await this.safetyService.createUserReport(userId, {
@@ -1237,11 +1993,15 @@ export class BookingsService {
       bookingId: booking.id,
     });
 
-    this.logger.log(`Problem reported for booking ${bookingId} by user ${userId}`);
+    this.logger.log(
+      `Problem reported for booking ${bookingId} by user ${userId}`,
+    );
     return report;
   }
 
-  private async notifyPassengerAboutPickupConfirmation(booking: Booking): Promise<void> {
+  private async notifyPassengerAboutPickupConfirmation(
+    booking: Booking,
+  ): Promise<void> {
     try {
       const passenger = await this.userRepository.findOne({
         where: { id: booking.passengerId },
@@ -1249,7 +2009,9 @@ export class BookingsService {
       });
 
       if (!passenger?.fcmToken) {
-        this.logger.debug(`Passenger ${booking.passengerId} has no FCM token, skipping notification`);
+        this.logger.debug(
+          `Passenger ${booking.passengerId} has no FCM token, skipping notification`,
+        );
         return;
       }
 
@@ -1265,11 +2027,16 @@ export class BookingsService {
         booking.passengerId,
       );
     } catch (error) {
-      this.logger.error(`Failed to notify passenger about pickup: ${error.message}`, error.stack);
+      this.logger.error(
+        `Failed to notify passenger about pickup: ${error.message}`,
+        error.stack,
+      );
     }
   }
 
-  private async notifyDriverAboutPickupConfirmation(booking: Booking): Promise<void> {
+  private async notifyDriverAboutPickupConfirmation(
+    booking: Booking,
+  ): Promise<void> {
     try {
       const driver = await this.userRepository.findOne({
         where: { id: booking.trip.driverId },
@@ -1277,7 +2044,9 @@ export class BookingsService {
       });
 
       if (!driver?.fcmToken) {
-        this.logger.debug(`Driver ${booking.trip.driverId} has no FCM token, skipping notification`);
+        this.logger.debug(
+          `Driver ${booking.trip.driverId} has no FCM token, skipping notification`,
+        );
         return;
       }
 
@@ -1285,7 +2054,9 @@ export class BookingsService {
         where: { id: booking.passengerId },
         select: ['firstName', 'lastName'],
       });
-      const passengerName = passenger ? `${passenger.firstName} ${passenger.lastName}` : 'Le passager';
+      const passengerName = passenger
+        ? `${passenger.firstName} ${passenger.lastName}`
+        : 'Le passager';
 
       await this.notificationService.sendNotification(
         driver.fcmToken,
@@ -1300,11 +2071,16 @@ export class BookingsService {
         booking.trip.driverId,
       );
     } catch (error) {
-      this.logger.error(`Failed to notify driver about pickup confirmation: ${error.message}`, error.stack);
+      this.logger.error(
+        `Failed to notify driver about pickup confirmation: ${error.message}`,
+        error.stack,
+      );
     }
   }
 
-  private async notifyPassengerAboutDropoffConfirmation(booking: Booking): Promise<void> {
+  private async notifyPassengerAboutDropoffConfirmation(
+    booking: Booking,
+  ): Promise<void> {
     try {
       const passenger = await this.userRepository.findOne({
         where: { id: booking.passengerId },
@@ -1312,7 +2088,9 @@ export class BookingsService {
       });
 
       if (!passenger?.fcmToken) {
-        this.logger.debug(`Passenger ${booking.passengerId} has no FCM token, skipping notification`);
+        this.logger.debug(
+          `Passenger ${booking.passengerId} has no FCM token, skipping notification`,
+        );
         return;
       }
 
@@ -1328,11 +2106,16 @@ export class BookingsService {
         booking.passengerId,
       );
     } catch (error) {
-      this.logger.error(`Failed to notify passenger about dropoff: ${error.message}`, error.stack);
+      this.logger.error(
+        `Failed to notify passenger about dropoff: ${error.message}`,
+        error.stack,
+      );
     }
   }
 
-  private async notifyDriverAboutDropoffConfirmation(booking: Booking): Promise<void> {
+  private async notifyDriverAboutDropoffConfirmation(
+    booking: Booking,
+  ): Promise<void> {
     try {
       const driver = await this.userRepository.findOne({
         where: { id: booking.trip.driverId },
@@ -1340,7 +2123,9 @@ export class BookingsService {
       });
 
       if (!driver?.fcmToken) {
-        this.logger.debug(`Driver ${booking.trip.driverId} has no FCM token, skipping notification`);
+        this.logger.debug(
+          `Driver ${booking.trip.driverId} has no FCM token, skipping notification`,
+        );
         return;
       }
 
@@ -1348,7 +2133,9 @@ export class BookingsService {
         where: { id: booking.passengerId },
         select: ['firstName', 'lastName'],
       });
-      const passengerName = passenger ? `${passenger.firstName} ${passenger.lastName}` : 'Le passager';
+      const passengerName = passenger
+        ? `${passenger.firstName} ${passenger.lastName}`
+        : 'Le passager';
 
       await this.notificationService.sendNotification(
         driver.fcmToken,
@@ -1363,7 +2150,10 @@ export class BookingsService {
         booking.trip.driverId,
       );
     } catch (error) {
-      this.logger.error(`Failed to notify driver about dropoff confirmation: ${error.message}`, error.stack);
+      this.logger.error(
+        `Failed to notify driver about dropoff confirmation: ${error.message}`,
+        error.stack,
+      );
     }
   }
 
@@ -1406,17 +2196,22 @@ export class BookingsService {
     }
 
     // Récupérer les contacts d'urgence
-    const emergencyContacts = await this.safetyService.findAllEmergencyContacts(passengerId);
+    const emergencyContacts =
+      await this.safetyService.findAllEmergencyContacts(passengerId);
     const selectedContacts = emergencyContacts.filter((contact) =>
       sendDto.emergencyContactIds.includes(contact.id),
     );
 
     if (selectedContacts.length !== sendDto.emergencyContactIds.length) {
-      throw new BadRequestException('Certains contacts d\'urgence sélectionnés n\'existent pas');
+      throw new BadRequestException(
+        "Certains contacts d'urgence sélectionnés n'existent pas",
+      );
     }
 
     // Vérifier que tous les contacts sont actifs
-    const inactiveContacts = selectedContacts.filter((contact) => !contact.isActive);
+    const inactiveContacts = selectedContacts.filter(
+      (contact) => !contact.isActive,
+    );
     if (inactiveContacts.length > 0) {
       throw new BadRequestException(
         `Certains contacts d'urgence ne sont pas actifs: ${inactiveContacts.map((c) => c.name).join(', ')}`,
@@ -1424,7 +2219,9 @@ export class BookingsService {
     }
 
     // Récupérer les informations du véhicule
-    booking.safetyEmergencyContactIds = selectedContacts.map((contact) => contact.id);
+    booking.safetyEmergencyContactIds = selectedContacts.map(
+      (contact) => contact.id,
+    );
     await this.bookingRepository.save(booking);
     this.logger.log(
       `Saved ${booking.safetyEmergencyContactIds.length} emergency contact(s) for booking ${booking.id}`,
@@ -1436,8 +2233,12 @@ export class BookingsService {
     }
 
     const vehicle = trip.vehicle;
-    const driver = trip.driver || (await this.userRepository.findOne({ where: { id: trip.driverId } }));
-    const passenger = booking.passenger || (await this.userRepository.findOne({ where: { id: passengerId } }));
+    const driver =
+      trip.driver ||
+      (await this.userRepository.findOne({ where: { id: trip.driverId } }));
+    const passenger =
+      booking.passenger ||
+      (await this.userRepository.findOne({ where: { id: passengerId } }));
 
     if (!driver) {
       throw new NotFoundException('Conducteur non trouvé');
@@ -1483,8 +2284,14 @@ export class BookingsService {
     passengerId: string,
     bookingId: string,
     updateLocationDto: UpdatePassengerLocationDto,
-  ): Promise<{ bookingId: string; coordinates: [number, number]; updatedAt: Date }> {
-    this.logger.log(`Updating passenger location for booking ${bookingId} by passenger ${passengerId}`);
+  ): Promise<{
+    bookingId: string;
+    coordinates: [number, number];
+    updatedAt: Date;
+  }> {
+    this.logger.log(
+      `Updating passenger location for booking ${bookingId} by passenger ${passengerId}`,
+    );
 
     const booking = await this.bookingRepository.findOne({
       where: { id: bookingId, passengerId },
@@ -1492,17 +2299,23 @@ export class BookingsService {
     });
 
     if (!booking) {
-      throw new NotFoundException('Réservation non trouvée ou vous n\'êtes pas le passager');
+      throw new NotFoundException(
+        "Réservation non trouvée ou vous n'êtes pas le passager",
+      );
     }
 
     // Vérifier que la réservation est acceptée
     if (booking.status !== BookingStatus.ACCEPTED) {
-      throw new BadRequestException('Seules les réservations acceptées peuvent partager leur position');
+      throw new BadRequestException(
+        'Seules les réservations acceptées peuvent partager leur position',
+      );
     }
 
     // Vérifier que le trajet est actif
     if (booking.trip.status !== TripStatus.ACTIVE) {
-      throw new BadRequestException('Le trajet doit être actif pour partager la position');
+      throw new BadRequestException(
+        'Le trajet doit être actif pour partager la position',
+      );
     }
 
     // Construire le point de position
@@ -1550,8 +2363,13 @@ export class BookingsService {
     }
   }
 
-  private async calculateDistanceToDestination(booking: Booking): Promise<number | null> {
-    if (!booking.passengerCurrentLocation || !booking.passengerDestinationPoint) {
+  private async calculateDistanceToDestination(
+    booking: Booking,
+  ): Promise<number | null> {
+    if (
+      !booking.passengerCurrentLocation ||
+      !booking.passengerDestinationPoint
+    ) {
       return null;
     }
 
@@ -1571,7 +2389,10 @@ export class BookingsService {
 
       return result?.distance ? Math.round(result.distance) : null;
     } catch (error) {
-      this.logger.error(`Error calculating distance to destination: ${error.message}`, error.stack);
+      this.logger.error(
+        `Error calculating distance to destination: ${error.message}`,
+        error.stack,
+      );
       return null;
     }
   }
@@ -1579,7 +2400,9 @@ export class BookingsService {
   /**
    * Vérifie si le passager est proche de sa destination et envoie les notifications si nécessaire
    */
-  private async checkAndNotifyDestinationProximity(booking: Booking): Promise<void> {
+  private async checkAndNotifyDestinationProximity(
+    booking: Booking,
+  ): Promise<void> {
     // Ne pas vérifier si la notification a déjà été envoyée
     if (booking.destinationProximityNotified) {
       return;
@@ -1592,8 +2415,11 @@ export class BookingsService {
 
     // Calculer la distance
     const distance = await this.calculateDistanceToDestination(booking);
-    
-    if (distance === null || distance > this.DESTINATION_PROXIMITY_THRESHOLD_METERS) {
+
+    if (
+      distance === null ||
+      distance > this.DESTINATION_PROXIMITY_THRESHOLD_METERS
+    ) {
       return;
     }
 
@@ -1612,7 +2438,10 @@ export class BookingsService {
   /**
    * Envoie les notifications de proximité au conducteur et au passager
    */
-  private async notifyDestinationProximity(booking: Booking, distanceMeters: number): Promise<void> {
+  private async notifyDestinationProximity(
+    booking: Booking,
+    distanceMeters: number,
+  ): Promise<void> {
     try {
       // Charger les relations nécessaires
       const bookingWithRelations = await this.bookingRepository.findOne({
@@ -1620,8 +2449,14 @@ export class BookingsService {
         relations: ['passenger', 'trip', 'trip.driver'],
       });
 
-      if (!bookingWithRelations || !bookingWithRelations.trip || !bookingWithRelations.passenger) {
-        this.logger.warn(`Cannot notify destination proximity: missing relations for booking ${booking.id}`);
+      if (
+        !bookingWithRelations ||
+        !bookingWithRelations.trip ||
+        !bookingWithRelations.passenger
+      ) {
+        this.logger.warn(
+          `Cannot notify destination proximity: missing relations for booking ${booking.id}`,
+        );
         return;
       }
 
@@ -1630,7 +2465,8 @@ export class BookingsService {
       const driver = trip.driver;
 
       const distanceKm = (distanceMeters / 1000).toFixed(1);
-      const destinationName = bookingWithRelations.passengerDestination || 'votre destination';
+      const destinationName =
+        bookingWithRelations.passengerDestination || 'votre destination';
 
       // Notification au passager
       if (passenger.fcmToken) {
@@ -1653,7 +2489,9 @@ export class BookingsService {
           passengerData,
           passenger.id,
         );
-        this.logger.log(`Notified passenger ${passenger.id} about destination proximity`);
+        this.logger.log(
+          `Notified passenger ${passenger.id} about destination proximity`,
+        );
       }
 
       // Notification au conducteur
@@ -1679,7 +2517,9 @@ export class BookingsService {
           driverData,
           driver.id,
         );
-        this.logger.log(`Notified driver ${driver.id} about passenger destination proximity`);
+        this.logger.log(
+          `Notified driver ${driver.id} about passenger destination proximity`,
+        );
       }
     } catch (error) {
       this.logger.error(
@@ -1689,14 +2529,21 @@ export class BookingsService {
     }
   }
 
-  async getPassengersLocations(tripId: string, driverId: string): Promise<Array<{
-    bookingId: string;
-    passengerId: string;
-    passengerName: string;
-    coordinates: [number, number] | null;
-    lastLocationUpdateAt: Date | null;
-  }>> {
-    this.logger.log(`Getting passengers locations for trip ${tripId} by driver ${driverId}`);
+  async getPassengersLocations(
+    tripId: string,
+    driverId: string,
+  ): Promise<
+    Array<{
+      bookingId: string;
+      passengerId: string;
+      passengerName: string;
+      coordinates: [number, number] | null;
+      lastLocationUpdateAt: Date | null;
+    }>
+  > {
+    this.logger.log(
+      `Getting passengers locations for trip ${tripId} by driver ${driverId}`,
+    );
 
     // Vérifier que l'utilisateur est le conducteur du trajet
     const trip = await this.tripRepository.findOne({
@@ -1704,7 +2551,9 @@ export class BookingsService {
     });
 
     if (!trip) {
-      throw new NotFoundException('Trajet non trouvé ou vous n\'êtes pas le conducteur');
+      throw new NotFoundException(
+        "Trajet non trouvé ou vous n'êtes pas le conducteur",
+      );
     }
 
     // Récupérer toutes les réservations acceptées pour ce trajet
@@ -1714,13 +2563,18 @@ export class BookingsService {
         status: BookingStatus.ACCEPTED,
       },
       relations: ['passenger'],
-      select: ['id', 'passengerId', 'passengerCurrentLocation', 'passengerLastLocationUpdateAt'],
+      select: [
+        'id',
+        'passengerId',
+        'passengerCurrentLocation',
+        'passengerLastLocationUpdateAt',
+      ],
     });
 
     // Convertir les positions en coordonnées
     return acceptedBookings.map((booking) => {
       let coordinates: [number, number] | null = null;
-      
+
       if (booking.passengerCurrentLocation) {
         const point = booking.passengerCurrentLocation as any;
         if (point.coordinates && point.coordinates.length === 2) {
@@ -1731,7 +2585,7 @@ export class BookingsService {
       return {
         bookingId: booking.id,
         passengerId: booking.passengerId,
-        passengerName: booking.passenger 
+        passengerName: booking.passenger
           ? `${booking.passenger.firstName} ${booking.passenger.lastName}`
           : 'Passager inconnu',
         coordinates,
