@@ -26,6 +26,7 @@ import { WalletAccount } from '../wallet/entities/wallet-account.entity';
 import { WalletLedgerEntry } from '../wallet/entities/wallet-ledger-entry.entity';
 import { DriverEarning } from '../driver-settlements/entities/driver-earning.entity';
 import { DriverPayout } from '../driver-settlements/entities/driver-payout.entity';
+import { TripShareLink } from '../tracking/entities/trip-share-link.entity';
 
 export const typeOrmEntities = [
   User,
@@ -56,4 +57,5 @@ export const typeOrmEntities = [
   WalletLedgerEntry,
   DriverEarning,
   DriverPayout,
+  TripShareLink,
 ];

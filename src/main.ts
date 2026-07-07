@@ -112,6 +112,7 @@ async function bootstrap() {
     .addTag('Vehicles', 'Vehicle management endpoints')
     .addTag('Trips', 'Trip management endpoints')
     .addTag('Bookings', 'Booking management endpoints')
+    .addTag('Tracking', 'Trip tracking and public sharing endpoints')
     .addTag('Chat', 'Chat endpoints')
     .addTag('Ratings', 'Rating endpoints')
     .addTag('Payments', 'Payment endpoints')
