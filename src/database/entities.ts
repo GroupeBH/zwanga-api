@@ -22,6 +22,11 @@ import { FavoriteLocation } from '../users/entities/favorite-location.entity';
 import { FavoritePlace } from '../favorite-places/entities/favorite-place.entity';
 import { SupportTicket } from '../support/entities/support-ticket.entity';
 import { SupportTicketMessage } from '../support/entities/support-ticket-message.entity';
+import { WalletAccount } from '../wallet/entities/wallet-account.entity';
+import { WalletLedgerEntry } from '../wallet/entities/wallet-ledger-entry.entity';
+import { DriverEarning } from '../driver-settlements/entities/driver-earning.entity';
+import { DriverPayout } from '../driver-settlements/entities/driver-payout.entity';
+import { TripShareLink } from '../tracking/entities/trip-share-link.entity';
 
 export const typeOrmEntities = [
   User,
@@ -48,4 +53,9 @@ export const typeOrmEntities = [
   FavoriteLocation,
   SupportTicket,
   SupportTicketMessage,
+  WalletAccount,
+  WalletLedgerEntry,
+  DriverEarning,
+  DriverPayout,
+  TripShareLink,
 ];

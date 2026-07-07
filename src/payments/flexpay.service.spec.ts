@@ -152,4 +152,47 @@ describe('FlexPayService', () => {
     );
     expect(result.transaction?.status).toBe('0');
   });
+
+  it('sends merchant payouts to the FlexPay merchantPayOutService endpoint', async () => {
+    httpService.post.mockReturnValue(
+      of({
+        data: {
+          code: '0',
+          message: 'Payout envoye avec succes',
+          orderNumber: '9bsTX7qXdpQe243891234568',
+        },
+      }),
+    );
+
+    const result = await service.initiatePayout({
+      reference: 'DRV0014521',
+      phone: '+243 891 234 568',
+      amount: 9500,
+      currency: 'CDF',
+      callbackUrl:
+        'https://api.zwanga.cd/api/v1/driver-settlements/payouts/flexpay/callback',
+    });
+
+    expect(httpService.post).toHaveBeenCalledWith(
+      'https://beta-backend.flexpay.cd/api/rest/v1/merchantPayOutService',
+      {
+        merchant: 'ZANDO',
+        type: '1',
+        phone: '243891234568',
+        reference: 'DRV0014521',
+        amount: '9500',
+        currency: 'CDF',
+        callbackUrl:
+          'https://api.zwanga.cd/api/v1/driver-settlements/payouts/flexpay/callback',
+      },
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: 'Bearer test-token',
+          'Content-Type': 'application/json',
+        }),
+        timeout: 30000,
+      }),
+    );
+    expect(result.orderNumber).toBe('9bsTX7qXdpQe243891234568');
+  });
 });

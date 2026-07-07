@@ -49,6 +49,13 @@ describe('PaymentsService', () => {
         paymentUrl: 'https://beta-cardpayment.flexpay.cd/redirect/ORD123',
         raw: {},
       }),
+      initiatePayout: jest.fn().mockResolvedValue({
+        code: '0',
+        message: 'Payout envoye avec succes',
+        orderNumber: 'PAYOUT123',
+        paymentUrl: null,
+        raw: {},
+      }),
       checkTransaction: jest.fn(),
       isSuccessfulCode: jest.fn().mockReturnValue(true),
       isSuccessfulTransaction: jest.fn().mockReturnValue(false),
@@ -231,5 +238,31 @@ describe('PaymentsService', () => {
     await expect(
       service.checkPaymentStatus('r2npySEnChn6243831919710', 'user-1'),
     ).rejects.toThrow('La reference FlexPay ne correspond pas a cette transaction');
+  });
+
+  it('tracks a FlexPay merchant payout as a driver payout transaction', async () => {
+    const payout = await service.initiatePayout({
+      userId: 'driver-1',
+      purpose: 'driver_payout',
+      relatedEntityType: 'driver_payout',
+      relatedEntityId: 'payout-1',
+      phone: '+243891234567',
+      amount: 9500,
+      currency: 'CDF',
+      description: 'Paiement chauffeur Zwanga payout-1',
+      callbackUrl:
+        'https://api.zwanga.cd/api/v1/driver-settlements/payouts/flexpay/callback',
+      referencePrefix: 'DRV',
+    });
+
+    expect(flexPayService.initiatePayout).toHaveBeenCalledWith(
+      expect.objectContaining({
+        phone: '+243891234567',
+        amount: 9500,
+        currency: 'CDF',
+      }),
+    );
+    expect(payout.status).toBe(PaymentStatus.INITIATED);
+    expect(payout.orderNumber).toBe('PAYOUT123');
   });
 });

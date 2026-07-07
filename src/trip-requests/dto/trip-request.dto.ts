@@ -116,7 +116,7 @@ export class CreateTripRequestDto {
     enum: TripPaymentMode,
     enumName: 'TripPaymentMode',
     description:
-      'Mode de reglement: paiement electronique via FlexPay ou paiement physique a l arrivee',
+      'Mode de reglement: paiement electronique via FlexPay, points Zwanga ou paiement physique a l arrivee',
     example: TripPaymentMode.ELECTRONIC,
   })
   @IsEnum(TripPaymentMode, {
@@ -496,7 +496,7 @@ export class UpdateTripRequestDto {
     enum: TripPaymentMode,
     enumName: 'TripPaymentMode',
     description:
-      'Mode de reglement: paiement electronique via FlexPay ou paiement physique a l arrivee',
+      'Mode de reglement: paiement electronique via FlexPay, points Zwanga ou paiement physique a l arrivee',
     example: TripPaymentMode.ELECTRONIC,
   })
   @IsEnum(TripPaymentMode, {

@@ -10,6 +10,8 @@ import { MessagingModule } from '../messaging/messaging.module';
 import { SafetyModule } from '../safety/safety.module';
 import { GoogleMapsModule } from '../google-maps/google-maps.module';
 import { PaymentsModule } from '../payments/payments.module';
+import { WalletModule } from '../wallet/wallet.module';
+import { DriverSettlementsModule } from '../driver-settlements/driver-settlements.module';
 
 @Module({
   imports: [
@@ -19,6 +21,8 @@ import { PaymentsModule } from '../payments/payments.module';
     SafetyModule,
     GoogleMapsModule,
     PaymentsModule,
+    WalletModule,
+    DriverSettlementsModule,
   ],
   controllers: [BookingsController],
   providers: [BookingsService],
