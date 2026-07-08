@@ -115,7 +115,7 @@ export class CreateBookingDto {
 
   @ApiProperty({
     description:
-      'Reference ou repere connu pour faciliter la depose du passager',
+      "Reference ou repere connu pour faciliter l'arrivee du passager",
     required: false,
     example: 'Entree principale, pres du rond-point',
   })
@@ -179,7 +179,7 @@ export class ConfirmPickupDto {
 
 export class ConfirmDropoffDto {
   @ApiProperty({
-    description: 'Confirmer la dépose du passager',
+    description: "Confirmer ou signaler l'arrivée du passager",
     example: true,
   })
   @IsOptional()
@@ -189,7 +189,7 @@ export class ConfirmDropoffDto {
     enum: TripPaymentMode,
     enumName: 'TripPaymentMode',
     description:
-      'Mode de reglement choisi au moment de la depose: paiement electronique, points Zwanga ou paiement physique',
+      "Mode de reglement choisi par le passager au moment de signaler son arrivee: paiement electronique, points Zwanga ou paiement physique",
     example: TripPaymentMode.CASH,
   })
   @IsEnum(TripPaymentMode, {

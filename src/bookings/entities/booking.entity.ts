@@ -163,16 +163,16 @@ export class Booking {
   pickedUpConfirmedAt: Date | null; // Date de confirmation par le passager
 
   @Column({ type: 'boolean', default: false })
-  droppedOff: boolean; // Driver a confirmé la dépose
+  droppedOff: boolean; // Conducteur a confirmé l'arrivée
 
   @Column({ type: 'timestamp', nullable: true })
-  droppedOffAt: Date | null; // Date de dépose confirmée par le driver
+  droppedOffAt: Date | null; // Date d'arrivée confirmée par le conducteur
 
   @Column({ type: 'boolean', default: false })
-  droppedOffConfirmedByPassenger: boolean; // Passager a confirmé la dépose
+  droppedOffConfirmedByPassenger: boolean; // Passager a signalé son arrivée
 
   @Column({ type: 'timestamp', nullable: true })
-  droppedOffConfirmedAt: Date | null; // Date de confirmation par le passager
+  droppedOffConfirmedAt: Date | null; // Date du signalement d'arrivée par le passager
 
   @Column({ type: 'jsonb', default: () => "'[]'" })
   safetyEmergencyContactIds: string[]; // Contacts d'urgence choisis pour les notifications WhatsApp

@@ -1766,17 +1766,31 @@ export class BookingsService {
 
     if (!booking.pickedUp || !booking.pickedUpConfirmedByPassenger) {
       throw new BadRequestException(
-        'Le passager doit être pris en charge et confirmé avant la dépose',
+        "La prise en charge du passager doit être confirmée avant son arrivée",
+      );
+    }
+
+    if (!booking.droppedOffConfirmedByPassenger) {
+      throw new BadRequestException(
+        "Le passager doit d'abord signaler son arrivée",
       );
     }
 
     if (booking.droppedOff) {
-      throw new BadRequestException('Le passager est déjà marqué comme déposé');
+      throw new BadRequestException("L'arrivée est déjà confirmée");
     }
+
+    this.ensureBookingIsPrepaidForRide(
+      booking,
+      'Cette reservation doit etre reglee avant de confirmer l arrivee',
+    );
 
     booking.droppedOff = true;
     booking.droppedOffAt = new Date();
+    booking.status = BookingStatus.COMPLETED;
+
     await this.bookingRepository.save(booking);
+    await this.finalizeCompletedBooking(booking);
     await this.touchTripInteraction(booking.tripId);
 
     await this.notifySelectedEmergencyContacts(booking, 'dropoff');
@@ -1792,7 +1806,7 @@ export class BookingsService {
       CacheService.getBookingsByPassengerKey(booking.passengerId),
     );
 
-    this.logger.log(`Dropoff confirmed for booking ${bookingId}`);
+    this.logger.log(`Dropoff confirmed by driver for booking ${bookingId}`);
     return booking;
   }
 
@@ -1802,7 +1816,7 @@ export class BookingsService {
     dto?: ConfirmDropoffDto,
   ): Promise<Booking> {
     this.logger.log(
-      `Passenger ${passengerId} confirming dropoff for booking ${bookingId}`,
+      `Passenger ${passengerId} requesting dropoff for booking ${bookingId}`,
     );
 
     let booking = await this.bookingRepository.findOne({
@@ -1814,15 +1828,15 @@ export class BookingsService {
       throw new NotFoundException('Réservation non trouvée');
     }
 
-    if (!booking.droppedOff) {
+    if (!booking.pickedUp || !booking.pickedUpConfirmedByPassenger) {
       throw new BadRequestException(
-        "Le conducteur doit d'abord confirmer la dépose",
+        "La prise en charge du passager doit être confirmée avant de signaler son arrivée",
       );
     }
 
     if (booking.droppedOffConfirmedByPassenger) {
       throw new BadRequestException(
-        'La dépose est déjà confirmée par le passager',
+        "L'arrivée a déjà été signalée au conducteur",
       );
     }
 
@@ -1834,19 +1848,10 @@ export class BookingsService {
       );
     }
 
-    this.ensureBookingIsPrepaidForRide(
-      booking,
-      'Cette reservation doit etre reglee avant de confirmer la depose',
-    );
-
     booking.droppedOffConfirmedByPassenger = true;
     booking.droppedOffConfirmedAt = new Date();
 
-    // Mark booking as completed
-    booking.status = BookingStatus.COMPLETED;
-
     await this.bookingRepository.save(booking);
-    await this.finalizeCompletedBooking(booking);
     await this.touchTripInteraction(booking.tripId);
 
     // Notify driver
@@ -1860,7 +1865,7 @@ export class BookingsService {
       CacheService.getBookingsByPassengerKey(booking.passengerId),
     );
 
-    this.logger.log(`Dropoff confirmed by passenger for booking ${bookingId}`);
+    this.logger.log(`Dropoff requested by passenger for booking ${bookingId}`);
     return booking;
   }
 
@@ -2002,7 +2007,7 @@ export class BookingsService {
     if (eventType === 'dropoff') {
       return [
         'ZWANGA - Mise a jour securite',
-        `${passengerName} a ete depose(e) avec succes.`,
+        `${passengerName} est bien arrive(e).`,
         `Depart: ${departure}.`,
         `Arrivee: ${arrival}.`,
         `Conducteur: ${driverLabel}.`,
@@ -2014,7 +2019,7 @@ export class BookingsService {
     if (eventType === 'trip_end_without_dropoff') {
       return [
         'ZWANGA - Alerte securite',
-        `Le trajet est termine mais la depose de ${passengerName} n'a pas ete confirmee.`,
+        `Le trajet est termine mais l'arrivee de ${passengerName} n'a pas ete confirmee.`,
         `Depart: ${departure}.`,
         `Arrivee: ${arrival}.`,
         `Conducteur: ${driverLabel}.`,
@@ -2334,8 +2339,8 @@ export class BookingsService {
 
       await this.notificationService.sendNotification(
         passenger.fcmToken,
-        '✅ Dépose confirmée',
-        `Le conducteur a confirmé votre dépose pour le trajet ${booking.trip.departureLocation} → ${booking.passengerDestination || booking.trip.arrivalLocation}. Veuillez confirmer également.`,
+        'Arrivée confirmée',
+        `Le conducteur a confirmé votre arrivée pour le trajet ${booking.trip.departureLocation} → ${booking.passengerDestination || booking.trip.arrivalLocation}. La réservation est maintenant complétée.`,
         {
           type: 'dropoff_confirmed_by_driver',
           bookingId: booking.id,
@@ -2377,10 +2382,10 @@ export class BookingsService {
 
       await this.notificationService.sendNotification(
         driver.fcmToken,
-        '✅ Dépose confirmée',
-        `${passengerName} a confirmé la dépose pour le trajet ${booking.trip.departureLocation} → ${booking.passengerDestination || booking.trip.arrivalLocation}. La réservation est maintenant complétée.`,
+        'Arrivée signalée',
+        `${passengerName} a signalé son arrivée pour le trajet ${booking.trip.departureLocation} → ${booking.passengerDestination || booking.trip.arrivalLocation}. Confirmez son arrivée côté conducteur.`,
         {
-          type: 'dropoff_confirmed_by_passenger',
+          type: 'dropoff_requested_by_passenger',
           bookingId: booking.id,
           tripId: booking.tripId,
           role: 'driver',

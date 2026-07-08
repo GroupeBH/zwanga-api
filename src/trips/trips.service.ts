@@ -106,7 +106,6 @@ export class TripsService {
   private readonly CACHE_TTL = 300; // 5 minutes
   private readonly RECURRING_GENERATION_WINDOW_DAYS = 14;
   private readonly DAILY_FREE_TRIP_PUBLICATION_LIMIT = 5;
-  private readonly ACTIVE_TRIP_EXPIRATION_GRACE_MS = 6 * 60 * 60 * 1000;
   private readonly DEFAULT_ESTIMATED_TRIP_DURATION_MS = 6 * 60 * 60 * 1000;
 
   constructor(
@@ -209,9 +208,6 @@ export class TripsService {
     }
 
     const now = new Date();
-    const activeTripExpirationThreshold = this.getActiveTripExpirationThreshold(now);
-    const activeTripFallbackExpirationThreshold =
-      this.getActiveTripFallbackExpirationThreshold(now);
     // Include PENDING trips with future departure dates OR ACTIVE trips with available seats
     // Exclude private trips (created from trip requests)
     const trips = await this.tripRepository.find({
@@ -224,14 +220,6 @@ export class TripsService {
         {
           status: TripStatus.ACTIVE,
           availableSeats: MoreThan(0),
-          estimatedArrivalDate: MoreThan(activeTripExpirationThreshold),
-          isPrivate: false, // Exclude private trips
-        },
-        {
-          status: TripStatus.ACTIVE,
-          availableSeats: MoreThan(0),
-          estimatedArrivalDate: IsNull(),
-          departureDate: MoreThan(activeTripFallbackExpirationThreshold),
           isPrivate: false, // Exclude private trips
         },
       ],
@@ -287,9 +275,6 @@ export class TripsService {
     this.logger.log(`Searching trips with filters: ${JSON.stringify(searchTripsDto)}`);
 
     const now = new Date();
-    const activeTripExpirationThreshold = this.getActiveTripExpirationThreshold(now);
-    const activeTripFallbackExpirationThreshold =
-      this.getActiveTripFallbackExpirationThreshold(now);
     const queryBuilder = this.tripRepository
       .createQueryBuilder('trip')
       .leftJoinAndSelect('trip.driver', 'driver')
@@ -309,20 +294,7 @@ export class TripsService {
             new Brackets((activeQb) => {
               activeQb
                 .where('trip.status = :activeStatus', { activeStatus: TripStatus.ACTIVE })
-                .andWhere('trip.availableSeats > 0')
-                .andWhere(
-                  new Brackets((expirationQb) => {
-                    expirationQb
-                      .where(
-                        'trip.estimatedArrivalDate IS NOT NULL AND trip.estimatedArrivalDate > :activeTripExpirationThreshold',
-                        { activeTripExpirationThreshold },
-                      )
-                      .orWhere(
-                        'trip.estimatedArrivalDate IS NULL AND trip.departureDate > :activeTripFallbackExpirationThreshold',
-                        { activeTripFallbackExpirationThreshold },
-                      );
-                  }),
-                );
+                .andWhere('trip.availableSeats > 0');
             }),
           );
         }),
@@ -962,7 +934,7 @@ export class TripsService {
         `Trip deletion failed: Trip ${id} still has at least one passenger on board`,
       );
       throw new BadRequestException(
-        'Vous ne pouvez pas supprimer ce trajet car un passager a embarque et n a pas encore ete depose',
+        'Vous ne pouvez pas supprimer ce trajet car un passager a embarque et son arrivee n a pas encore ete confirmee',
       );
     }
 
@@ -1761,18 +1733,6 @@ export class TripsService {
     return next;
   }
 
-  private getActiveTripExpirationThreshold(now: Date): Date {
-    return new Date(now.getTime() - this.ACTIVE_TRIP_EXPIRATION_GRACE_MS);
-  }
-
-  private getActiveTripFallbackExpirationThreshold(now: Date): Date {
-    return new Date(
-      now.getTime() -
-        this.DEFAULT_ESTIMATED_TRIP_DURATION_MS -
-        this.ACTIVE_TRIP_EXPIRATION_GRACE_MS,
-    );
-  }
-
   private getDepartureSearchPointExpression(): string {
     return `CASE
       WHEN "trip"."status" = :activeStatus THEN COALESCE("trip"."currentLocation", "trip"."departurePoint")
@@ -1896,31 +1856,6 @@ export class TripsService {
 
     const address = [location?.trim(), reference?.trim()].filter(Boolean).join(', ');
     return address ? { address } : null;
-  }
-
-  private async ensureEstimatedArrivalDate(trip: Trip): Promise<Date | null> {
-    if (trip.estimatedArrivalDate) {
-      return trip.estimatedArrivalDate;
-    }
-
-    const baseTime = trip.startedAt ?? trip.departureDate;
-    if (!baseTime) {
-      return null;
-    }
-
-    const estimatedArrivalDate = await this.calculateEstimatedArrivalDate(trip, baseTime);
-    trip.estimatedArrivalDate = estimatedArrivalDate;
-    await this.tripRepository.update(trip.id, { estimatedArrivalDate });
-    return estimatedArrivalDate;
-  }
-
-  private async getActiveTripExpirationDate(trip: Trip): Promise<Date | null> {
-    const estimatedArrivalDate = await this.ensureEstimatedArrivalDate(trip);
-    if (!estimatedArrivalDate) {
-      return null;
-    }
-
-    return new Date(estimatedArrivalDate.getTime() + this.ACTIVE_TRIP_EXPIRATION_GRACE_MS);
   }
 
   private toIsoWeekday(date: Date): number {
@@ -2373,7 +2308,7 @@ export class TripsService {
   /**
    * Cron job to mark expired trips and their bookings as expired
    * - PENDING trips expire 2 hours after scheduled departure
-   * - ACTIVE trips expire 6 hours after their estimated arrival time
+   * - ONGOING trips never expire automatically while they are in progress
    * Runs every hour.
    */
   @Cron(CronExpression.EVERY_HOUR)
@@ -2392,10 +2327,6 @@ export class TripsService {
 
     // Calculate thresholds
     const twoHoursAgo = new Date(now.getTime() - 2 * 60 * 60 * 1000);
-    const activeTripExpirationThreshold = new Date(
-      now.getTime() - this.ACTIVE_TRIP_EXPIRATION_GRACE_MS,
-    );
-
     // 1) PENDING trips that should expire 2 hours after departure
     //    Only trips that have NEVER been started (startedAt IS NULL)
     const pendingTripsToExpire = await this.tripRepository.find({
@@ -2407,32 +2338,7 @@ export class TripsService {
       relations: ['driver', 'bookings', 'bookings.passenger', 'vehicle'],
     });
 
-    // 2) ACTIVE trips expire 6 hours after the estimated arrival time.
-    const activeTripsCandidates = await this.tripRepository.find({
-      where: [
-        {
-          status: TripStatus.ACTIVE,
-          startedAt: Not(IsNull()),
-          estimatedArrivalDate: LessThan(activeTripExpirationThreshold),
-        },
-        {
-          status: TripStatus.ACTIVE,
-          startedAt: Not(IsNull()),
-          estimatedArrivalDate: IsNull(),
-        },
-      ],
-      relations: ['driver', 'bookings', 'bookings.passenger', 'vehicle'],
-    });
-
-    const activeTripsToExpire: Trip[] = [];
-    for (const trip of activeTripsCandidates) {
-      const expiresAt = await this.getActiveTripExpirationDate(trip);
-      if (expiresAt && expiresAt <= now) {
-        activeTripsToExpire.push(trip);
-      }
-    }
-
-    const tripsToExpire = [...pendingTripsToExpire, ...activeTripsToExpire];
+    const tripsToExpire = pendingTripsToExpire;
 
     if (tripsToExpire.length === 0) {
       this.logger.debug('No expired trips found');
@@ -2441,7 +2347,7 @@ export class TripsService {
 
     this.logger.log(
       `Found ${tripsToExpire.length} trips to auto-complete as expired ` +
-        `(pending: ${pendingTripsToExpire.length}, active_eta_grace: ${activeTripsToExpire.length})`,
+        `(pending: ${pendingTripsToExpire.length}, ongoing: 0)`,
     );
 
     for (const trip of tripsToExpire) {
@@ -2944,7 +2850,7 @@ export class TripsService {
 
         const message = [
           'ZWANGA - Alerte securite',
-          `Le trajet est termine mais la depose de ${passengerName} n'a pas ete confirmee.`,
+          `Le trajet est termine mais l'arrivee de ${passengerName} n'a pas ete confirmee.`,
           `Depart: ${trip.departureLocation}.`,
           `Arrivee: ${booking.passengerDestination || trip.arrivalLocation}.`,
           `Conducteur: ${driverPhone ? `${driverName} (${driverPhone})` : driverName}.`,

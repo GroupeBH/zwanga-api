@@ -215,7 +215,7 @@ export class BookingsController {
   @Auth()
   // @Roles(UserRole.DRIVER)
   @SensitiveThrottle(20, 60000)
-  @ApiOperation({ summary: 'Confirm passenger dropoff (driver only)' })
+  @ApiOperation({ summary: 'Confirm passenger-requested dropoff (driver only)' })
   async confirmDropoff(@Request() req, @Param('id') id: string, @Body() dto: ConfirmDropoffDto) {
     return this.bookingsService.confirmDropoff(id, req.user.userId);
   }
@@ -223,7 +223,7 @@ export class BookingsController {
   @Put(':id/confirm-dropoff-passenger')
   @Auth()
   @SensitiveThrottle(20, 60000)
-  @ApiOperation({ summary: 'Confirm dropoff by passenger' })
+  @ApiOperation({ summary: 'Request dropoff by passenger' })
   async confirmDropoffByPassenger(@Request() req, @Param('id') id: string, @Body() dto: ConfirmDropoffDto) {
     return this.bookingsService.confirmDropoffByPassenger(id, req.user.userId, dto);
   }
