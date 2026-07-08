@@ -49,7 +49,7 @@ export class CreateTripRequestDto {
 
   @ApiProperty({
     required: false,
-    description: 'Reference ou repere connu pour faciliter la depose',
+    description: "Reference ou repere connu pour faciliter l'arrivee",
     example: 'Portail noir, a cote du supermarche',
   })
   @IsString()
@@ -174,7 +174,7 @@ export class RecommendTripRequestPriceDto {
 
   @ApiProperty({
     required: false,
-    description: 'Reference ou repere connu pour faciliter la depose',
+    description: "Reference ou repere connu pour faciliter l'arrivee",
   })
   @IsString()
   @IsOptional()
@@ -277,8 +277,8 @@ export class CreateDriverOfferDto {
 
   @ApiProperty({
     required: false,
-    description: 'Reference ou repere propose par le conducteur pour la depose',
-    example: 'Depose possible au parking principal',
+    description: "Reference ou repere propose par le conducteur pour l'arrivee",
+    example: 'Arrivee possible au parking principal',
   })
   @IsString()
   @IsOptional()
@@ -287,7 +287,7 @@ export class CreateDriverOfferDto {
   @ApiProperty({
     required: false,
     description:
-      'Coordonnees de depose proposees par le conducteur [longitude, latitude]',
+      "Coordonnees d'arrivee proposees par le conducteur [longitude, latitude]",
     example: [15.3222, -4.4419],
     minItems: 2,
     maxItems: 2,
@@ -368,8 +368,8 @@ export class AcceptTripRequestDto {
 
   @ApiProperty({
     required: false,
-    description: 'Reference ou repere ajoute par le conducteur pour la depose',
-    example: 'Depose au parking principal',
+    description: "Reference ou repere ajoute par le conducteur pour l'arrivee",
+    example: 'Arrivee au parking principal',
   })
   @IsString()
   @IsOptional()
@@ -378,7 +378,7 @@ export class AcceptTripRequestDto {
   @ApiProperty({
     required: false,
     description:
-      'Coordonnees de depose ajoutees par le conducteur [longitude, latitude]',
+      "Coordonnees d'arrivee ajoutees par le conducteur [longitude, latitude]",
     example: [15.3222, -4.4419],
     minItems: 2,
     maxItems: 2,
@@ -426,7 +426,7 @@ export class UpdateTripRequestDto {
 
   @ApiProperty({
     required: false,
-    description: 'Reference ou repere connu pour faciliter la depose',
+    description: "Reference ou repere connu pour faciliter l'arrivee",
   })
   @IsString()
   @IsOptional()

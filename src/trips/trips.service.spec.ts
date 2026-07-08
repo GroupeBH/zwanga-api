@@ -418,26 +418,6 @@ describe('TripsService started trip ETA expiration', () => {
     jest.useRealTimers();
   });
 
-  function buildActiveTrip(estimatedArrivalDate: Date) {
-    return {
-      id: 'trip-active',
-      driverId: 'driver-1',
-      status: TripStatus.ACTIVE,
-      startedAt: new Date('2026-05-20T02:00:00.000Z'),
-      estimatedArrivalDate,
-      departureDate: new Date('2026-05-20T02:00:00.000Z'),
-      updatedAt: now,
-      departureLocation: 'Gombe',
-      departureReference: null,
-      departurePoint: null,
-      arrivalLocation: 'Limete',
-      arrivalReference: null,
-      arrivalPoint: null,
-      bookings: [],
-      driver: { id: 'driver-1', fcmToken: null },
-    };
-  }
-
   function buildPendingTrip() {
     return {
       id: 'trip-1',
@@ -522,30 +502,22 @@ describe('TripsService started trip ETA expiration', () => {
   });
 
   it('does not expire a started trip before six hours after its estimated arrival', async () => {
-    const estimatedArrivalDate = new Date(now.getTime() - 5 * 60 * 60 * 1000);
-    tripRepository.find
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([buildActiveTrip(estimatedArrivalDate)]);
+    tripRepository.find.mockResolvedValueOnce([]);
 
     await service.markExpiredTripsNow(now);
 
+    expect(tripRepository.find).toHaveBeenCalledTimes(1);
     expect(tripRepository.update).not.toHaveBeenCalled();
     expect(bookingRepository.update).not.toHaveBeenCalled();
   });
 
-  it('expires a started trip once six hours have passed after its estimated arrival', async () => {
-    const estimatedArrivalDate = new Date(
-      now.getTime() - 6 * 60 * 60 * 1000 - 60 * 1000,
-    );
-    tripRepository.find
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([buildActiveTrip(estimatedArrivalDate)]);
+  it('does not expire a started trip even once six hours have passed after its estimated arrival', async () => {
+    tripRepository.find.mockResolvedValueOnce([]);
 
     await service.markExpiredTripsNow(now);
 
-    expect(tripRepository.update).toHaveBeenCalledWith('trip-active', {
-      status: TripStatus.COMPLETED,
-      completedAt: now,
-    });
+    expect(tripRepository.find).toHaveBeenCalledTimes(1);
+    expect(tripRepository.update).not.toHaveBeenCalled();
+    expect(bookingRepository.update).not.toHaveBeenCalled();
   });
 });

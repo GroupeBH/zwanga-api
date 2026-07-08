@@ -235,4 +235,106 @@ describe('BookingsService trip payments', () => {
       driverSettlementsService.recordCompletedBookingEarning,
     ).toHaveBeenCalledWith(expect.objectContaining({ id: 'booking-1' }));
   });
+
+  it('blocks driver dropoff confirmation until the passenger requests dropoff', async () => {
+    bookingRepository.findOne.mockResolvedValue({
+      ...booking,
+      paymentMode: TripPaymentMode.CASH,
+      paymentStatus: BookingPaymentStatus.NOT_REQUIRED,
+      pickedUp: true,
+      pickedUpConfirmedByPassenger: true,
+      droppedOff: false,
+      droppedOffConfirmedByPassenger: false,
+      trip: {
+        ...booking.trip,
+        driverId: 'driver-1',
+      },
+    });
+
+    await expect(
+      service.confirmDropoff('booking-1', 'driver-1'),
+    ).rejects.toThrow("Le passager doit d'abord signaler son arrivée");
+
+    expect(bookingRepository.save).not.toHaveBeenCalled();
+  });
+
+  it('lets the passenger request dropoff without completing the booking', async () => {
+    const finalizeCompletedBookingSpy = jest
+      .spyOn(service as any, 'finalizeCompletedBooking')
+      .mockResolvedValue(undefined);
+    jest
+      .spyOn(service as any, 'notifyDriverAboutDropoffConfirmation')
+      .mockResolvedValue(undefined);
+    jest
+      .spyOn(service as any, 'touchTripInteraction')
+      .mockResolvedValue(undefined);
+
+    bookingRepository.findOne.mockResolvedValue({
+      ...booking,
+      paymentMode: TripPaymentMode.CASH,
+      paymentStatus: BookingPaymentStatus.NOT_REQUIRED,
+      pickedUp: true,
+      pickedUpConfirmedByPassenger: true,
+      droppedOff: false,
+      droppedOffConfirmedByPassenger: false,
+      trip: {
+        ...booking.trip,
+        driverId: 'driver-1',
+      },
+    });
+
+    const result = await service.confirmDropoffByPassenger(
+      'booking-1',
+      'passenger-1',
+      { paymentMode: TripPaymentMode.CASH },
+    );
+
+    expect(result.droppedOffConfirmedByPassenger).toBe(true);
+    expect(result.droppedOff).toBe(false);
+    expect(result.status).toBe(BookingStatus.ACCEPTED);
+    expect(finalizeCompletedBookingSpy).not.toHaveBeenCalled();
+  });
+
+  it('finalizes the booking when the driver confirms a passenger-requested dropoff', async () => {
+    const finalizeCompletedBookingSpy = jest
+      .spyOn(service as any, 'finalizeCompletedBooking')
+      .mockResolvedValue(undefined);
+    jest
+      .spyOn(service as any, 'notifySelectedEmergencyContacts')
+      .mockResolvedValue(undefined);
+    jest
+      .spyOn(service as any, 'notifyPassengerAboutDropoffConfirmation')
+      .mockResolvedValue(undefined);
+    jest
+      .spyOn(service as any, 'touchTripInteraction')
+      .mockResolvedValue(undefined);
+
+    bookingRepository.findOne.mockResolvedValue({
+      ...booking,
+      paymentMode: TripPaymentMode.CASH,
+      paymentStatus: BookingPaymentStatus.NOT_REQUIRED,
+      pickedUp: true,
+      pickedUpConfirmedByPassenger: true,
+      droppedOff: false,
+      droppedOffConfirmedByPassenger: true,
+      trip: {
+        ...booking.trip,
+        driverId: 'driver-1',
+      },
+    });
+
+    const result = await service.confirmDropoff('booking-1', 'driver-1');
+
+    expect(result.droppedOff).toBe(true);
+    expect(result.status).toBe(BookingStatus.COMPLETED);
+    expect(bookingRepository.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        droppedOff: true,
+        status: BookingStatus.COMPLETED,
+      }),
+    );
+    expect(finalizeCompletedBookingSpy).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'booking-1' }),
+    );
+  });
 });
