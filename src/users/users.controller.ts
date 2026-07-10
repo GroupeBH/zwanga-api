@@ -103,10 +103,9 @@ export class UsersController {
       properties: {
         // documentNumber: { type: 'string', required: false },
         cniFront: { type: 'string', format: 'binary' },
-        cniBack: { type: 'string', format: 'binary' },
         selfie: { type: 'string', format: 'binary' },
       },
-      required: ['cniBack', 'selfie'],
+      required: ['cniFront', 'selfie'],
     },
   })
   @ApiOperation({ summary: 'Upload KYC documents' })

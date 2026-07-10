@@ -1,4 +1,4 @@
-import { of } from 'rxjs';
+import { of, throwError } from 'rxjs';
 import { PaymentMethod } from './entities/payment-transaction.entity';
 import { FlexPayService } from './flexpay.service';
 
@@ -68,6 +68,32 @@ describe('FlexPayService', () => {
       }),
     );
     expect(result.orderNumber).toBe('9bsTX7qXdpQe243891234567');
+  });
+
+  it('surfaces Mobile Money timeout details without exposing credentials', async () => {
+    const timeoutError = Object.assign(
+      new Error('timeout of 30000ms exceeded'),
+      {
+        isAxiosError: true,
+        code: 'ECONNABORTED',
+        config: {
+          method: 'post',
+          timeout: 30000,
+          url: 'https://beta-backend.flexpay.cd/api/rest/v1/paymentService',
+        },
+      },
+    );
+    httpService.post.mockReturnValue(throwError(() => timeoutError));
+
+    await expect(
+      service.initiatePayment({
+        ...baseInput,
+        method: PaymentMethod.MOBILE_MONEY,
+        phone: '+243 891 234 567',
+      }),
+    ).rejects.toThrow(
+      'Initialisation paiement Mobile Money FlexPay indisponible (delai depasse apres 30000ms)',
+    );
   });
 
   it('sends card payments to the FlexPay card endpoint and returns the redirect url', async () => {
