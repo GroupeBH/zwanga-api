@@ -1,5 +1,6 @@
 import {
   Controller,
+  Delete,
   Get,
   Put,
   Param,
@@ -13,6 +14,9 @@ import { Auth } from '../auth/decorators/auth.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { UserRole } from '../users/entities/user.entity';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
+import { UpdateTripDto } from '../trips/dto/trip.dto';
+import { UpdateTripRequestDto } from '../trip-requests/dto/trip-request.dto';
+import { BookingStatus } from '../bookings/entities/booking.entity';
 
 @ApiTags('Admin')
 @Controller('admin')
@@ -54,6 +58,18 @@ export class AdminController {
     return this.adminService.getAllUsers(page, limit);
   }
 
+  @Get('users/:userId/details')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({
+    summary:
+      'Get a full admin view of a user, including trips, bookings, trip requests and payments',
+  })
+  async getUserDetails(@Param('userId') userId: string) {
+    return this.adminService.getUserDetails(userId);
+  }
+
   @Put('users/:userId/suspend')
   @Auth()
   @Roles(UserRole.ADMIN)
@@ -72,6 +88,15 @@ export class AdminController {
     return this.adminService.activateUser(userId, req.user.userId);
   }
 
+  @Put('users/:userId/deactivate')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({ summary: 'Deactivate a user account' })
+  async deactivateUser(@Request() req, @Param('userId') userId: string) {
+    return this.adminService.suspendUser(userId, req.user.userId);
+  }
+
   @Get('trips')
   @Auth()
   @Roles(UserRole.ADMIN)
@@ -82,6 +107,149 @@ export class AdminController {
     @Query('limit') limit: number = 10,
   ) {
     return this.adminService.getAllTrips(page, limit);
+  }
+
+  @Put('trips/:tripId')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({ summary: 'Update a trip as admin' })
+  async updateTrip(
+    @Request() req,
+    @Param('tripId') tripId: string,
+    @Body() updateTripDto: UpdateTripDto,
+  ) {
+    return this.adminService.updateTrip(tripId, req.user.userId, updateTripDto);
+  }
+
+  @Put('trips/:tripId/deactivate')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({ summary: 'Deactivate/cancel a trip as admin' })
+  async deactivateTrip(@Request() req, @Param('tripId') tripId: string) {
+    return this.adminService.deactivateTrip(tripId, req.user.userId);
+  }
+
+  @Delete('trips/:tripId')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({ summary: 'Delete a trip as admin' })
+  async deleteTrip(@Request() req, @Param('tripId') tripId: string) {
+    await this.adminService.deleteTrip(tripId, req.user.userId);
+    return { message: 'Trip deleted successfully' };
+  }
+
+  @Get('bookings')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'Get all bookings as admin' })
+  async getAllBookings(
+    @Query('page') page: number = 1,
+    @Query('limit') limit: number = 10,
+    @Query('status') status?: BookingStatus,
+  ) {
+    return this.adminService.getAllBookings(page, limit, status);
+  }
+
+  @Put('bookings/:bookingId/accept')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({ summary: 'Accept a booking as admin' })
+  async acceptBooking(@Request() req, @Param('bookingId') bookingId: string) {
+    return this.adminService.acceptBooking(bookingId, req.user.userId);
+  }
+
+  @Put('bookings/:bookingId/reject')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({ summary: 'Reject a booking as admin' })
+  async rejectBooking(
+    @Request() req,
+    @Param('bookingId') bookingId: string,
+    @Body('reason') reason?: string,
+  ) {
+    return this.adminService.rejectBooking(bookingId, req.user.userId, reason);
+  }
+
+  @Put('bookings/:bookingId/cancel')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({ summary: 'Cancel a booking as admin' })
+  async cancelBooking(@Request() req, @Param('bookingId') bookingId: string) {
+    return this.adminService.cancelBooking(bookingId, req.user.userId);
+  }
+
+  @Get('trip-requests')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'Get all trip requests as admin' })
+  async getAllTripRequests(
+    @Query('page') page: number = 1,
+    @Query('limit') limit: number = 50,
+    @Query('status') status?: string,
+  ) {
+    return this.adminService.getAllTripRequests(page, limit, status);
+  }
+
+  @Get('trip-requests/:tripRequestId')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'Get one trip request as admin' })
+  async getTripRequest(@Param('tripRequestId') tripRequestId: string) {
+    return this.adminService.getTripRequest(tripRequestId);
+  }
+
+  @Put('trip-requests/:tripRequestId')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({ summary: 'Update a trip request as admin' })
+  async updateTripRequest(
+    @Request() req,
+    @Param('tripRequestId') tripRequestId: string,
+    @Body() updateTripRequestDto: UpdateTripRequestDto,
+  ) {
+    return this.adminService.updateTripRequest(
+      tripRequestId,
+      req.user.userId,
+      updateTripRequestDto,
+    );
+  }
+
+  @Put('trip-requests/:tripRequestId/deactivate')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({ summary: 'Deactivate/cancel a trip request as admin' })
+  async deactivateTripRequest(
+    @Request() req,
+    @Param('tripRequestId') tripRequestId: string,
+  ) {
+    return this.adminService.deactivateTripRequest(
+      tripRequestId,
+      req.user.userId,
+    );
+  }
+
+  @Delete('trip-requests/:tripRequestId')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({ summary: 'Delete a trip request as admin' })
+  async deleteTripRequest(
+    @Request() req,
+    @Param('tripRequestId') tripRequestId: string,
+  ) {
+    await this.adminService.deleteTripRequest(tripRequestId, req.user.userId);
+    return { message: 'Trip request deleted successfully' };
   }
 }
 
