@@ -8,7 +8,7 @@ import {
 import { HttpService } from '@nestjs/axios';
 import { ConfigService } from '@nestjs/config';
 import { firstValueFrom } from 'rxjs';
-import { AxiosError } from 'axios';
+import { isAxiosError, type AxiosError } from 'axios';
 import { PaymentMethod } from './entities/payment-transaction.entity';
 
 export interface FlexPayInitiatePaymentInput {
@@ -502,14 +502,56 @@ export class FlexPayService {
       throw error;
     }
 
-    const axiosError = error as AxiosError;
+    const axiosError = isAxiosError(error)
+      ? error
+      : (error as AxiosError);
     const responseData =
       axiosError.response?.data && typeof axiosError.response.data === 'object'
         ? JSON.stringify(axiosError.response.data)
         : String(axiosError.response?.data ?? axiosError.message);
     const status = axiosError.response?.status ?? 'unknown';
+    const method = axiosError.config?.method?.toUpperCase() ?? 'unknown';
+    const url = axiosError.config?.url ?? 'unknown';
+    const code = axiosError.code ?? 'none';
+    const publicReason = this.getPublicHttpErrorReason(axiosError);
 
-    this.logger.error(`${context} failed: status=${status}, ${responseData}`);
-    throw new BadGatewayException(`${context} indisponible`);
+    this.logger.error(
+      `${context} failed: status=${status}, code=${code}, method=${method}, url=${url}, reason=${publicReason ?? 'none'}, ${responseData}`,
+    );
+    throw new BadGatewayException(
+      publicReason
+        ? `${context} indisponible (${publicReason})`
+        : `${context} indisponible`,
+    );
+  }
+
+  private getPublicHttpErrorReason(error: AxiosError): string | null {
+    const message = error.message?.toLowerCase() ?? '';
+    const timeout =
+      typeof error.config?.timeout === 'number' && error.config.timeout > 0
+        ? `${error.config.timeout}ms`
+        : null;
+
+    if (error.code === 'ECONNABORTED' || message.includes('timeout')) {
+      return timeout ? `delai depasse apres ${timeout}` : 'delai depasse';
+    }
+
+    if (error.code === 'ENOTFOUND') {
+      return 'hote flexpay introuvable';
+    }
+
+    if (
+      error.code === 'ECONNREFUSED' ||
+      error.code === 'ECONNRESET' ||
+      error.code === 'ETIMEDOUT'
+    ) {
+      return 'connexion flexpay impossible';
+    }
+
+    if (error.response?.status) {
+      return `reponse flexpay ${error.response.status}`;
+    }
+
+    return null;
   }
 }

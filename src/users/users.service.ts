@@ -479,13 +479,15 @@ export class UsersService {
       );
     }
 
-    if (!cniBackFile || !selfieFile) {
+    if (cniFrontFiles.length === 0 || !selfieFile) {
       const missingFiles: string[] = [];
-      if (!cniBackFile) missingFiles.push('cniBack (verso de la CNI)');
+      if (cniFrontFiles.length === 0) {
+        missingFiles.push('cniFront (recto de la CNI)');
+      }
       if (!selfieFile) missingFiles.push('selfie (photo selfie)');
 
       throw new BadRequestException(
-        `ÉCHEC : Fichiers manquants. Veuillez fournir tous les documents requis.\n\nFichiers manquants : ${missingFiles.join(', ')}\n\nTous les fichiers suivants sont requis :\n- cniBack : Photo du verso de votre carte d'identité\n- selfie : Photo selfie de vous-même`,
+        `ÉCHEC : Fichiers manquants. Veuillez fournir tous les documents requis.\n\nFichiers manquants : ${missingFiles.join(', ')}\n\nTous les fichiers suivants sont requis :\n- cniFront : Photo du recto de votre carte d'identité\n- selfie : Photo selfie de vous-même`,
       );
     }
 
@@ -497,7 +499,9 @@ export class UsersService {
       Boolean(url),
     );
     const [cniBackUrl, selfieUrl] = await Promise.all([
-      this.fileUploadService.saveFile(cniBackFile, 'kyc'),
+      cniBackFile
+        ? this.fileUploadService.saveFile(cniBackFile, 'kyc')
+        : Promise.resolve(null),
       this.fileUploadService.saveFile(selfieFile, 'kyc'),
     ]);
 
@@ -762,7 +766,7 @@ export class UsersService {
         // Parallel deletion of all uploaded files
         await Promise.all([
           ...cniFrontUrls.map((url) => this.fileUploadService.deleteFile(url)),
-          this.fileUploadService.deleteFile(cniBackUrl),
+          ...(cniBackUrl ? [this.fileUploadService.deleteFile(cniBackUrl)] : []),
           this.fileUploadService.deleteFile(selfieUrl),
         ]);
 

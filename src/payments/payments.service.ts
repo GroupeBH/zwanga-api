@@ -60,6 +60,29 @@ export interface NormalizedFlexPayCallback {
   raw: Record<string, unknown>;
 }
 
+export interface PaymentHistoryItem {
+  id: string;
+  purpose: string;
+  relatedEntityType: string | null;
+  relatedEntityId: string | null;
+  provider: PaymentProvider;
+  method: PaymentMethod;
+  status: PaymentStatus;
+  reference: string;
+  orderNumber: string | null;
+  providerReference: string | null;
+  statusCode: string | null;
+  message: string | null;
+  amount: number;
+  currency: string;
+  description: string | null;
+  phone: string | null;
+  paymentUrl: string | null;
+  paidAt: Date | null;
+  createdAt: Date;
+  updatedAt: Date;
+}
+
 @Injectable()
 export class PaymentsService {
   private readonly logger = new Logger(PaymentsService.name);
@@ -453,6 +476,33 @@ export class PaymentsService {
     };
   }
 
+  formatPaymentHistoryForClient(
+    transaction: PaymentTransaction,
+  ): PaymentHistoryItem {
+    return {
+      id: transaction.id,
+      purpose: transaction.purpose,
+      relatedEntityType: transaction.relatedEntityType,
+      relatedEntityId: transaction.relatedEntityId,
+      provider: transaction.provider,
+      method: transaction.method,
+      status: transaction.status,
+      reference: transaction.reference,
+      orderNumber: transaction.orderNumber,
+      providerReference: transaction.providerReference,
+      statusCode: transaction.providerStatusCode,
+      message: this.getClientPaymentMessage(transaction),
+      amount: Number(transaction.amount),
+      currency: transaction.currency,
+      description: transaction.description,
+      phone: this.maskPaymentPhone(transaction.phone),
+      paymentUrl: transaction.paymentUrl,
+      paidAt: transaction.paidAt,
+      createdAt: transaction.createdAt,
+      updatedAt: transaction.updatedAt,
+    };
+  }
+
   normalizeFlexPayCallback(dto: FlexPayCallbackDto): NormalizedFlexPayCallback {
     const raw = dto as Record<string, unknown>;
     const code = this.getStringValue(raw, 'code', 'Code');
@@ -816,6 +866,19 @@ export class PaymentsService {
       this.translatePaymentMessage(rawMessage) ??
       'Paiement en attente de confirmation'
     );
+  }
+
+  private maskPaymentPhone(phone: string | null | undefined): string | null {
+    if (!phone) {
+      return null;
+    }
+
+    const digits = phone.replace(/\D/g, '');
+    if (digits.length <= 6) {
+      return '***';
+    }
+
+    return `${digits.slice(0, 3)}***${digits.slice(-4)}`;
   }
 
   private translatePaymentMessage(
