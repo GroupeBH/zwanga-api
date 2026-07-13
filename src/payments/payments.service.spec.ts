@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-return, @typescript-eslint/require-await */
 import {
   PaymentMethod,
   PaymentStatus,
@@ -163,6 +164,49 @@ describe('PaymentsService', () => {
     );
   });
 
+  it('marks an operator-declined FlexPay check as failed even when provider status is 4', async () => {
+    paymentTransactionRepository.findOne.mockResolvedValue({
+      id: 'payment-1',
+      userId: 'user-1',
+      status: PaymentStatus.INITIATED,
+      reference: 'SUBMRJ532487C079775B0',
+      orderNumber: 'cbj5FN6idRLx243831919710',
+      providerMessage: null,
+      providerStatusCode: null,
+      rawCheckResponse: null,
+      paidAt: null,
+    });
+
+    flexPayService.checkTransaction.mockResolvedValue({
+      code: '0',
+      message:
+        'Transaction with code cbj5FN6idRLx243831919710 was declined by the operator',
+      transaction: {
+        orderNumber: 'cbj5FN6idRLx243831919710',
+        reference: 'SUBMRJ532487C079775B0',
+        status: '4',
+        amount: '5000',
+        amountCustomer: '5000',
+        currency: 'CDF',
+        createdAt: '2026-07-13 12:31:08',
+      },
+      raw: {
+        Code: '0',
+      },
+    });
+
+    const payment = await service.checkPaymentStatus(
+      'cbj5FN6idRLx243831919710',
+      'user-1',
+    );
+
+    expect(payment.status).toBe(PaymentStatus.FAILED);
+    expect(payment.providerStatusCode).toBe('4');
+    expect(payment.providerMessage).toBe(
+      'Paiement refuse par l operateur. Aucun montant confirme.',
+    );
+  });
+
   it('returns a french success message after a confirmed payment check', async () => {
     paymentTransactionRepository.findOne.mockResolvedValue({
       id: 'payment-1',
@@ -205,6 +249,85 @@ describe('PaymentsService', () => {
     expect(payment.paidAt).toBeInstanceOf(Date);
   });
 
+  it('confirms a successful FlexPay callback locally without a status check by default', async () => {
+    paymentTransactionRepository.findOne.mockResolvedValue({
+      id: 'payment-1',
+      userId: 'user-1',
+      status: PaymentStatus.INITIATED,
+      reference: 'SUBMO8LT0SM0255ED90F8',
+      orderNumber: 'r2npySEnChn6243831919710',
+      providerReference: null,
+      providerStatusCode: null,
+      providerMessage: null,
+      rawCallbackPayload: null,
+      paidAt: null,
+    });
+
+    const payment = await service.handleFlexPayCallback({
+      code: '0',
+      reference: 'SUBMO8LT0SM0255ED90F8',
+      provider_reference: '7KI81020PHS',
+      orderNumber: 'r2npySEnChn6243831919710',
+    });
+
+    expect(payment.status).toBe(PaymentStatus.SUCCEEDED);
+    expect(payment.providerMessage).toBe('Paiement confirme avec succes');
+    expect(payment.providerReference).toBe('7KI81020PHS');
+    expect(payment.paidAt).toBeInstanceOf(Date);
+    expect(flexPayService.checkTransaction).not.toHaveBeenCalled();
+  });
+
+  it('marks a cancelled FlexPay callback without keeping the payment pending', async () => {
+    flexPayService.isSuccessfulCode.mockImplementation((code) => code === '0');
+    paymentTransactionRepository.findOne.mockResolvedValue({
+      id: 'payment-1',
+      userId: 'user-1',
+      status: PaymentStatus.INITIATED,
+      reference: 'SUBMO8LT0SM0255ED90F8',
+      orderNumber: 'r2npySEnChn6243831919710',
+      providerReference: null,
+      providerStatusCode: null,
+      providerMessage: null,
+      rawCallbackPayload: null,
+      paidAt: null,
+    });
+
+    const payment = await service.handleFlexPayCallback({
+      code: '1',
+      message: 'Operation annulee par le client',
+      reference: 'SUBMO8LT0SM0255ED90F8',
+      orderNumber: 'r2npySEnChn6243831919710',
+    });
+
+    expect(payment.status).toBe(PaymentStatus.CANCELLED);
+    expect(payment.providerMessage).toBe(
+      'Paiement annule. Aucun montant confirme.',
+    );
+  });
+
+  it('returns terminal payment status locally without calling FlexPay again', async () => {
+    paymentTransactionRepository.findOne.mockResolvedValue({
+      id: 'payment-1',
+      userId: 'user-1',
+      status: PaymentStatus.FAILED,
+      reference: 'SUBMO8LT0SM0255ED90F8',
+      orderNumber: 'r2npySEnChn6243831919710',
+      providerMessage: 'Paiement echoue: solde insuffisant.',
+      providerStatusCode: '1',
+      rawCheckResponse: null,
+      paidAt: null,
+    });
+
+    const payment = await service.checkPaymentStatus(
+      'r2npySEnChn6243831919710',
+      'user-1',
+    );
+
+    expect(payment.status).toBe(PaymentStatus.FAILED);
+    expect(payment.providerMessage).toBe('Paiement echoue: solde insuffisant.');
+    expect(flexPayService.checkTransaction).not.toHaveBeenCalled();
+  });
+
   it('still rejects a FlexPay check response for a different reference', async () => {
     paymentTransactionRepository.findOne.mockResolvedValue({
       id: 'payment-1',
@@ -237,7 +360,9 @@ describe('PaymentsService', () => {
 
     await expect(
       service.checkPaymentStatus('r2npySEnChn6243831919710', 'user-1'),
-    ).rejects.toThrow('La reference FlexPay ne correspond pas a cette transaction');
+    ).rejects.toThrow(
+      'La reference FlexPay ne correspond pas a cette transaction',
+    );
   });
 
   it('tracks a FlexPay merchant payout as a driver payout transaction', async () => {

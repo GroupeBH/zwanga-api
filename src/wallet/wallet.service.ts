@@ -108,7 +108,9 @@ export class WalletService {
     });
 
     const account = await this.getOrCreateAccount(userId);
-    return this.buildPaymentResponse(account, payment);
+    const response = this.buildPaymentResponse(account, payment);
+    this.logWalletPaymentResponse('Wallet topup initialized', response);
+    return response;
   }
 
   async handleTopUpCallback(
@@ -116,7 +118,9 @@ export class WalletService {
   ): Promise<WalletPaymentResponse> {
     const payment = await this.paymentsService.handleFlexPayCallback(dto);
     const account = await this.applyTopUpPayment(payment);
-    return this.buildPaymentResponse(account, payment);
+    const response = this.buildPaymentResponse(account, payment);
+    this.logWalletPaymentResponse('Wallet topup callback applied', response);
+    return response;
   }
 
   async checkTopUpPaymentStatus(
@@ -128,7 +132,9 @@ export class WalletService {
       userId,
     );
     const account = await this.applyTopUpPayment(payment);
-    return this.buildPaymentResponse(account, payment);
+    const response = this.buildPaymentResponse(account, payment);
+    this.logWalletPaymentResponse('Wallet topup status check', response);
+    return response;
   }
 
   async payForBooking(booking: Booking, amount: number): Promise<void> {
@@ -439,6 +445,21 @@ export class WalletService {
         currency: payment?.currency ?? account.currency,
       },
     };
+  }
+
+  private logWalletPaymentResponse(
+    step: string,
+    response: WalletPaymentResponse,
+  ): void {
+    this.logger.log(
+      `${step}: response=${this.paymentsService.formatLogPayload({
+        accountId: response.account.id,
+        userId: response.account.userId,
+        balance: Number(response.account.balance ?? 0),
+        currency: response.account.currency,
+        payment: response.payment,
+      })}`,
+    );
   }
 
   private normalizePositiveAmount(value: number): number {

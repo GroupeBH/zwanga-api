@@ -164,12 +164,45 @@ export class SubscriptionsService {
       );
     }
 
-    await this.ensurePaymentMethodIsUsable(dto);
+    this.ensurePaymentMethodIsUsable(dto);
 
-    await this.subscriptionRepository.update(
-      { userId: user.id, status: SubscriptionStatus.PENDING },
-      { status: SubscriptionStatus.CANCELLED },
+    const activeSubscription = await this.getActiveSubscription(user.id);
+    if (activeSubscription) {
+      const activePayment =
+        await this.findPaymentForSubscription(activeSubscription);
+      this.logger.log(
+        `Subscription payment skipped because user already has an active subscription: userId=${user.id}, subscriptionId=${activeSubscription.id}`,
+      );
+      const response = this.buildPaymentResponse(
+        activeSubscription,
+        activePayment,
+      );
+      this.logSubscriptionPaymentResponse(
+        'Subscription payment skipped active subscription',
+        response,
+      );
+      return response;
+    }
+
+    const reusablePayment = await this.findReusablePendingSubscriptionPayment(
+      user.id,
     );
+    if (reusablePayment) {
+      this.logger.log(
+        `Reusing pending subscription payment: userId=${user.id}, subscriptionId=${reusablePayment.subscription.id}, paymentId=${reusablePayment.payment.id}, orderNumber=${reusablePayment.payment.orderNumber ?? 'none'}`,
+      );
+      const response = this.buildPaymentResponse(
+        reusablePayment.subscription,
+        reusablePayment.payment,
+      );
+      this.logSubscriptionPaymentResponse(
+        'Subscription payment reused pending transaction',
+        response,
+      );
+      return response;
+    }
+
+    await this.cancelPendingSubscriptions(user.id);
 
     const subscriptionPrice = this.getSubscriptionPrice();
     const startDate = new Date();
@@ -234,7 +267,12 @@ export class SubscriptionsService {
       `Subscription payment initialized: ${savedSubscription.id} for user ${userId}, amount ${subscriptionPrice} ${savedSubscription.currency}, payment ${payment.id}`,
     );
 
-    return this.buildPaymentResponse(savedSubscription, payment);
+    const response = this.buildPaymentResponse(savedSubscription, payment);
+    this.logSubscriptionPaymentResponse(
+      'Subscription payment initialized',
+      response,
+    );
+    return response;
   }
 
   async handleFlexPayCallback(
@@ -251,11 +289,15 @@ export class SubscriptionsService {
       `Subscription callback applied: subscriptionId=${savedSubscription.id}, paymentId=${payment.id}, paymentStatus=${payment.status}, subscriptionStatus=${savedSubscription.status}`,
     );
 
-    return this.buildCallbackResponse(
+    const response = this.buildCallbackResponse(
       savedSubscription,
       payment,
       payment.status === PaymentStatus.SUCCEEDED,
     );
+    this.logger.log(
+      `Subscription callback response: response=${this.paymentsService.formatLogPayload(response)}`,
+    );
+    return response;
   }
 
   async checkPaymentStatus(
@@ -278,7 +320,12 @@ export class SubscriptionsService {
       `Subscription payment status check applied: subscriptionId=${savedSubscription.id}, paymentId=${payment.id}, paymentStatus=${payment.status}, subscriptionStatus=${savedSubscription.status}`,
     );
 
-    return this.buildPaymentResponse(savedSubscription, payment);
+    const response = this.buildPaymentResponse(savedSubscription, payment);
+    this.logSubscriptionPaymentResponse(
+      'Subscription payment status check',
+      response,
+    );
+    return response;
   }
 
   async getActiveSubscription(userId: string): Promise<Subscription | null> {
@@ -457,7 +504,7 @@ export class SubscriptionsService {
     return this.documentFundingRequestRepository.save(request);
   }
 
-  private async ensurePaymentMethodIsUsable(dto: SubscribeDto): Promise<void> {
+  private ensurePaymentMethodIsUsable(dto: SubscribeDto): void {
     if (
       dto.paymentMethod === PaymentMethod.MOBILE_MONEY &&
       !dto.phone?.trim()
@@ -484,10 +531,112 @@ export class SubscriptionsService {
     }
   }
 
+  private async findReusablePendingSubscriptionPayment(
+    userId: string,
+  ): Promise<{
+    subscription: Subscription;
+    payment: PaymentTransaction;
+  } | null> {
+    const pendingSubscriptions = await this.subscriptionRepository.find({
+      where: { userId, status: SubscriptionStatus.PENDING },
+      relations: ['paymentTransaction'],
+      order: { createdAt: 'DESC' },
+    });
+
+    for (const subscription of pendingSubscriptions) {
+      const payment = await this.findPaymentForSubscription(subscription);
+      if (!payment) {
+        subscription.status = SubscriptionStatus.CANCELLED;
+        await this.subscriptionRepository.save(subscription);
+        continue;
+      }
+
+      if (payment.status === PaymentStatus.SUCCEEDED) {
+        const activatedSubscription = await this.activatePaidSubscription(
+          subscription,
+          payment,
+        );
+        return { subscription: activatedSubscription, payment };
+      }
+
+      if (payment.status === PaymentStatus.FAILED) {
+        subscription.status = SubscriptionStatus.PAYMENT_FAILED;
+        await this.subscriptionRepository.save(subscription);
+        continue;
+      }
+
+      if (payment.status === PaymentStatus.CANCELLED) {
+        subscription.status = SubscriptionStatus.CANCELLED;
+        await this.subscriptionRepository.save(subscription);
+        continue;
+      }
+
+      if (this.isRecentPayment(payment)) {
+        return { subscription, payment };
+      }
+
+      subscription.status = SubscriptionStatus.CANCELLED;
+      await this.subscriptionRepository.save(subscription);
+      this.logger.log(
+        `Stale pending subscription cancelled before new payment: subscriptionId=${subscription.id}, paymentId=${payment.id}, userId=${userId}`,
+      );
+    }
+
+    return null;
+  }
+
+  private async findPaymentForSubscription(
+    subscription: Subscription,
+  ): Promise<PaymentTransaction | null> {
+    if (subscription.paymentTransaction) {
+      return subscription.paymentTransaction;
+    }
+
+    if (!subscription.paymentTransactionId) {
+      return null;
+    }
+
+    try {
+      return await this.paymentsService.findTransactionById(
+        subscription.paymentTransactionId,
+        subscription.userId,
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Subscription payment transaction missing: subscriptionId=${subscription.id}, paymentTransactionId=${subscription.paymentTransactionId}, message=${this.getErrorMessage(error)}`,
+      );
+      return null;
+    }
+  }
+
+  private async cancelPendingSubscriptions(userId: string): Promise<void> {
+    await this.subscriptionRepository.update(
+      { userId, status: SubscriptionStatus.PENDING },
+      { status: SubscriptionStatus.CANCELLED },
+    );
+  }
+
+  private isRecentPayment(payment: PaymentTransaction): boolean {
+    const openStatuses = new Set<string>([
+      PaymentStatus.PENDING,
+      PaymentStatus.INITIATED,
+    ]);
+
+    if (!openStatuses.has(payment.status)) {
+      return false;
+    }
+
+    const createdAtMs = new Date(payment.createdAt).getTime();
+    return (
+      Number.isFinite(createdAtMs) &&
+      Date.now() - createdAtMs <= this.getPendingPaymentReuseWindowMs()
+    );
+  }
+
   private async findSubscriptionForPayment(
     payment: PaymentTransaction,
   ): Promise<Subscription> {
-    if (payment.purpose !== PaymentPurpose.SUBSCRIPTION_PRO) {
+    if (String(payment.purpose) !== 'subscription_pro') {
       throw new BadRequestException(
         'Cette transaction ne correspond pas a un abonnement Pro',
       );
@@ -524,6 +673,13 @@ export class SubscriptionsService {
       subscription.status = SubscriptionStatus.PAYMENT_FAILED;
       this.logger.warn(
         `Subscription marked payment_failed: subscriptionId=${subscription.id}, paymentId=${payment.id}, reference=${payment.reference}`,
+      );
+    }
+
+    if (payment.status === PaymentStatus.CANCELLED) {
+      subscription.status = SubscriptionStatus.CANCELLED;
+      this.logger.warn(
+        `Subscription marked cancelled from payment: subscriptionId=${subscription.id}, paymentId=${payment.id}, reference=${payment.reference}`,
       );
     }
 
@@ -607,6 +763,19 @@ export class SubscriptionsService {
       paymentStatusCode: payment?.providerStatusCode ?? null,
       message: this.paymentsService.getClientPaymentMessage(payment),
     };
+  }
+
+  private logSubscriptionPaymentResponse(
+    step: string,
+    response: SubscriptionPaymentResponse,
+  ): void {
+    this.logger.log(
+      `${step}: response=${this.paymentsService.formatLogPayload({
+        subscriptionId: response.subscription.id,
+        subscriptionStatus: response.subscription.status,
+        payment: response.payment,
+      })}`,
+    );
   }
 
   private getSubscriptionFlexPayCallbackUrl(): string {
@@ -701,6 +870,13 @@ export class SubscriptionsService {
 
   private getDocumentFundingLimit(): number {
     return this.getNumberConfig('SUBSCRIPTION_DOCUMENT_FUNDING_LIMIT', 50000);
+  }
+
+  private getPendingPaymentReuseWindowMs(): number {
+    return this.getNumberConfig(
+      'SUBSCRIPTION_PENDING_PAYMENT_REUSE_MS',
+      30 * 60 * 1000,
+    );
   }
 
   private getSubscriptionCurrency(): string {

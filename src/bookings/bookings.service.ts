@@ -577,7 +577,12 @@ export class BookingsService {
       booking.paidAt = booking.paidAt ?? new Date();
       const savedBooking = await this.bookingRepository.save(booking);
       await this.invalidateBookingCaches(savedBooking);
-      return this.buildPaymentResponse(savedBooking, null);
+      const response = this.buildPaymentResponse(savedBooking, null);
+      this.logBookingPaymentResponse(
+        'Trip payment not required',
+        response,
+      );
+      return response;
     }
 
     if (booking.paymentStatus === BookingPaymentStatus.SUCCEEDED) {
@@ -585,7 +590,12 @@ export class BookingsService {
         booking,
         passengerId,
       );
-      return this.buildPaymentResponse(booking, paidPayment);
+      const response = this.buildPaymentResponse(booking, paidPayment);
+      this.logBookingPaymentResponse(
+        'Trip payment already succeeded',
+        response,
+      );
+      return response;
     }
 
     const reusablePayment = await this.findReusablePaymentForBooking(
@@ -598,7 +608,12 @@ export class BookingsService {
         booking,
         reusablePayment,
       );
-      return this.buildPaymentResponse(savedBooking, reusablePayment);
+      const response = this.buildPaymentResponse(savedBooking, reusablePayment);
+      this.logBookingPaymentResponse(
+        'Trip payment reused pending transaction',
+        response,
+      );
+      return response;
     }
 
     const payment = await this.paymentsService.initiatePayment({
@@ -623,7 +638,9 @@ export class BookingsService {
       `Trip payment initialized: bookingId=${savedBooking.id}, paymentId=${payment.id}, amount=${amount} ${currency}`,
     );
 
-    return this.buildPaymentResponse(savedBooking, payment);
+    const response = this.buildPaymentResponse(savedBooking, payment);
+    this.logBookingPaymentResponse('Trip payment initialized', response);
+    return response;
   }
 
   async handleFlexPayCallback(
@@ -639,11 +656,15 @@ export class BookingsService {
       `Booking payment callback applied: bookingId=${savedBooking.id}, paymentId=${payment.id}, paymentStatus=${payment.status}, bookingPaymentStatus=${savedBooking.paymentStatus}`,
     );
 
-    return this.buildCallbackResponse(
+    const response = this.buildCallbackResponse(
       savedBooking,
       payment,
       payment.status === PaymentStatus.SUCCEEDED,
     );
+    this.logger.log(
+      `Booking payment callback response: response=${this.paymentsService.formatLogPayload(response)}`,
+    );
+    return response;
   }
 
   async checkBookingPaymentStatus(
@@ -661,7 +682,9 @@ export class BookingsService {
     const booking = await this.findBookingForPayment(payment, passengerId);
     const savedBooking = await this.applyPaymentToBooking(booking, payment);
 
-    return this.buildPaymentResponse(savedBooking, payment);
+    const response = this.buildPaymentResponse(savedBooking, payment);
+    this.logBookingPaymentResponse('Booking payment status check', response);
+    return response;
   }
 
   async updateStatus(
@@ -1454,6 +1477,20 @@ export class BookingsService {
       paymentStatusCode: payment.providerStatusCode,
       message: this.paymentsService.getClientPaymentMessage(payment),
     };
+  }
+
+  private logBookingPaymentResponse(
+    step: string,
+    response: BookingPaymentResponse,
+  ): void {
+    this.logger.log(
+      `${step}: response=${this.paymentsService.formatLogPayload({
+        bookingId: response.booking.id,
+        bookingStatus: response.booking.status,
+        bookingPaymentStatus: response.booking.paymentStatus,
+        payment: response.payment,
+      })}`,
+    );
   }
 
   private getBookingPaymentMessage(booking: Booking): string | null {

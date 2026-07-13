@@ -200,7 +200,13 @@ export class DriverSettlementsService {
           : null;
       payout.processedAt =
         payment.status === PaymentStatus.SUCCEEDED ? payment.paidAt : null;
-      return this.payoutRepository.save(payout);
+      const savedPayout = await this.payoutRepository.save(payout);
+      this.logDriverPayoutResponse(
+        'Driver payout initialized',
+        savedPayout,
+        payment,
+      );
+      return savedPayout;
     } catch (error) {
       payout.status = DriverPayoutStatus.FAILED;
       payout.failureReason =
@@ -212,7 +218,13 @@ export class DriverSettlementsService {
 
   async handlePayoutCallback(dto: FlexPayCallbackDto): Promise<DriverPayout> {
     const payment = await this.paymentsService.handleFlexPayCallback(dto);
-    return this.applyPaymentToPayout(payment);
+    const payout = await this.applyPaymentToPayout(payment);
+    this.logDriverPayoutResponse(
+      'Driver payout callback applied',
+      payout,
+      payment,
+    );
+    return payout;
   }
 
   async checkPayoutStatus(
@@ -223,7 +235,13 @@ export class DriverSettlementsService {
       orderNumber,
       driverId,
     );
-    return this.applyPaymentToPayout(payment, driverId);
+    const payout = await this.applyPaymentToPayout(payment, driverId);
+    this.logDriverPayoutResponse(
+      'Driver payout status check',
+      payout,
+      payment,
+    );
+    return payout;
   }
 
   private async applyPaymentToPayout(
@@ -271,6 +289,25 @@ export class DriverSettlementsService {
         : payout.processedAt;
 
     return this.payoutRepository.save(payout);
+  }
+
+  private logDriverPayoutResponse(
+    step: string,
+    payout: DriverPayout,
+    payment: PaymentTransaction | null,
+  ): void {
+    this.logger.log(
+      `${step}: response=${this.paymentsService.formatLogPayload({
+        payoutId: payout.id,
+        driverId: payout.driverId,
+        amount: Number(payout.amount ?? 0),
+        currency: payout.currency,
+        phone: payout.phone,
+        payoutStatus: payout.status,
+        failureReason: payout.failureReason,
+        payment: this.paymentsService.formatPaymentLogResponse(payment),
+      })}`,
+    );
   }
 
   private async getAvailableBalance(driverId: string): Promise<number> {

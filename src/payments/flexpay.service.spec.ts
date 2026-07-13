@@ -179,6 +179,34 @@ describe('FlexPayService', () => {
     expect(result.transaction?.status).toBe('0');
   });
 
+  it('accepts transaction Code as a fallback transaction status in check responses', async () => {
+    httpService.get.mockReturnValue(
+      of({
+        data: {
+          Code: '0',
+          Message: 'Une transaction trouvee',
+          Transaction: {
+            orderNumber: '9bsTX7qXdpQe243891234567',
+            reference: 'TEST0014521',
+            amount: '100.0',
+            amountCustomer: '101.0',
+            currency: 'CDF',
+            createdAt: '06-02-2021 17:32:46',
+            Code: '1',
+          },
+        },
+      }),
+    );
+
+    const result = await service.checkTransaction(
+      '9bsTX7qXdpQe243891234567',
+    );
+
+    expect(result.transaction?.status).toBeNull();
+    expect(result.transaction?.code).toBe('1');
+    expect(service.isSuccessfulTransaction(result.transaction)).toBe(false);
+  });
+
   it('sends merchant payouts to the FlexPay merchantPayOutService endpoint', async () => {
     httpService.post.mockReturnValue(
       of({
