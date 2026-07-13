@@ -71,6 +71,16 @@ export class FlexPayCallbackDto {
   @IsOptional()
   Code?: string;
 
+  @ApiProperty({ required: false, example: 'Transaction traitee' })
+  @IsString()
+  @IsOptional()
+  message?: string;
+
+  @ApiProperty({ required: false, example: 'Transaction traitee' })
+  @IsString()
+  @IsOptional()
+  Message?: string;
+
   @ApiProperty({ required: false, example: 'SUB-1700000000000-ABCD1234' })
   @IsString()
   @IsOptional()

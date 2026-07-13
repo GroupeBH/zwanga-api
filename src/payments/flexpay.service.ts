@@ -10,6 +10,7 @@ import { ConfigService } from '@nestjs/config';
 import { firstValueFrom } from 'rxjs';
 import { isAxiosError, type AxiosError } from 'axios';
 import { PaymentMethod } from './entities/payment-transaction.entity';
+import { formatPaymentLogPayload } from './payment-log.util';
 
 export interface FlexPayInitiatePaymentInput {
   method: PaymentMethod;
@@ -43,6 +44,7 @@ export interface FlexPayInitiatePayoutInput {
 export interface FlexPayTransactionStatus {
   orderNumber: string | null;
   reference: string | null;
+  code?: string | null;
   status: string | null;
   amount: string | null;
   amountCustomer: string | null;
@@ -119,7 +121,7 @@ export class FlexPayService {
 
       const normalizedResponse = this.normalizeInitiateResponse(response.data);
       this.logger.log(
-        `FlexPay merchant payout response: reference=${input.reference}, code=${normalizedResponse.code}, orderNumber=${normalizedResponse.orderNumber ?? 'none'}, message=${normalizedResponse.message ?? 'none'}`,
+        `FlexPay merchant payout response: reference=${input.reference}, code=${normalizedResponse.code}, orderNumber=${normalizedResponse.orderNumber ?? 'none'}, message=${normalizedResponse.message ?? 'none'}, response=${formatPaymentLogPayload(normalizedResponse.raw)}`,
       );
 
       return normalizedResponse;
@@ -155,7 +157,7 @@ export class FlexPayService {
 
       const normalizedResponse = this.normalizeCheckResponse(response.data);
       this.logger.log(
-        `FlexPay check response: orderNumber=${normalizedOrderNumber}, code=${normalizedResponse.code}, transactionStatus=${normalizedResponse.transaction?.status ?? 'none'}, transactionReference=${normalizedResponse.transaction?.reference ?? 'none'}`,
+        `FlexPay check response: orderNumber=${normalizedOrderNumber}, code=${normalizedResponse.code}, transactionStatus=${normalizedResponse.transaction?.status ?? 'none'}, transactionReference=${normalizedResponse.transaction?.reference ?? 'none'}, response=${formatPaymentLogPayload(normalizedResponse.raw)}`,
       );
 
       return normalizedResponse;
@@ -171,7 +173,7 @@ export class FlexPayService {
   isSuccessfulTransaction(
     transaction: FlexPayTransactionStatus | null | undefined,
   ): boolean {
-    return this.isSuccessfulCode(transaction?.status);
+    return this.isSuccessfulCode(transaction?.status ?? transaction?.code);
   }
 
   private async initiateMobileMoneyPayment(
@@ -212,7 +214,7 @@ export class FlexPayService {
 
       const normalizedResponse = this.normalizeInitiateResponse(response.data);
       this.logger.log(
-        `FlexPay Mobile Money response: reference=${input.reference}, code=${normalizedResponse.code}, orderNumber=${normalizedResponse.orderNumber ?? 'none'}, message=${normalizedResponse.message ?? 'none'}`,
+        `FlexPay Mobile Money response: reference=${input.reference}, code=${normalizedResponse.code}, orderNumber=${normalizedResponse.orderNumber ?? 'none'}, message=${normalizedResponse.message ?? 'none'}, response=${formatPaymentLogPayload(normalizedResponse.raw)}`,
       );
 
       return normalizedResponse;
@@ -267,7 +269,7 @@ export class FlexPayService {
 
       const normalizedResponse = this.normalizeInitiateResponse(response.data);
       this.logger.log(
-        `FlexPay card response: reference=${input.reference}, code=${normalizedResponse.code}, orderNumber=${normalizedResponse.orderNumber ?? 'none'}, hasPaymentUrl=${Boolean(normalizedResponse.paymentUrl)}, message=${normalizedResponse.message ?? 'none'}`,
+        `FlexPay card response: reference=${input.reference}, code=${normalizedResponse.code}, orderNumber=${normalizedResponse.orderNumber ?? 'none'}, hasPaymentUrl=${Boolean(normalizedResponse.paymentUrl)}, message=${normalizedResponse.message ?? 'none'}, response=${formatPaymentLogPayload(normalizedResponse.raw)}`,
       );
 
       return normalizedResponse;
@@ -301,7 +303,8 @@ export class FlexPayService {
         ? {
             orderNumber: this.getStringValue(rawTransaction, 'orderNumber'),
             reference: this.getStringValue(rawTransaction, 'reference'),
-            status: this.getStringValue(rawTransaction, 'status'),
+            code: this.getStringValue(rawTransaction, 'code', 'Code'),
+            status: this.getStringValue(rawTransaction, 'status', 'Status'),
             amount: this.getStringValue(rawTransaction, 'amount'),
             amountCustomer: this.getStringValue(
               rawTransaction,
@@ -505,10 +508,9 @@ export class FlexPayService {
     const axiosError = isAxiosError(error)
       ? error
       : (error as AxiosError);
-    const responseData =
-      axiosError.response?.data && typeof axiosError.response.data === 'object'
-        ? JSON.stringify(axiosError.response.data)
-        : String(axiosError.response?.data ?? axiosError.message);
+    const responseData = formatPaymentLogPayload(
+      axiosError.response?.data ?? axiosError.message,
+    );
     const status = axiosError.response?.status ?? 'unknown';
     const method = axiosError.config?.method?.toUpperCase() ?? 'unknown';
     const url = axiosError.config?.url ?? 'unknown';
@@ -516,7 +518,7 @@ export class FlexPayService {
     const publicReason = this.getPublicHttpErrorReason(axiosError);
 
     this.logger.error(
-      `${context} failed: status=${status}, code=${code}, method=${method}, url=${url}, reason=${publicReason ?? 'none'}, ${responseData}`,
+      `${context} failed: status=${status}, code=${code}, method=${method}, url=${url}, reason=${publicReason ?? 'none'}, response=${responseData}`,
     );
     throw new BadGatewayException(
       publicReason
