@@ -1,4 +1,5 @@
-import * as admin from 'firebase-admin';
+import { cert, initializeApp, type App } from 'firebase-admin/app';
+import { getMessaging, type MulticastMessage } from 'firebase-admin/messaging';
 import { Injectable, OnModuleInit, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -11,7 +12,7 @@ const AUTOMATIC_NOTIFICATION_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000;
 @Injectable()
 export class NotificationService implements OnModuleInit {
   private readonly logger = new Logger(NotificationService.name);
-  private firebaseApp: admin.app.App;
+  private firebaseApp: App;
 
   constructor(
     private configService: ConfigService,
@@ -32,8 +33,8 @@ export class NotificationService implements OnModuleInit {
       try {
         const credentialsJson = Buffer.from(credentialsBase64, 'base64').toString('utf-8');
         const credentials = JSON.parse(credentialsJson);
-        this.firebaseApp = admin.initializeApp({
-          credential: admin.credential.cert(credentials),
+        this.firebaseApp = initializeApp({
+          credential: cert(credentials),
         });
         this.logger.log('FCM initialized successfully with base64 credentials');
         return;
@@ -48,8 +49,8 @@ export class NotificationService implements OnModuleInit {
         // Décoder la clé privée depuis base64
         const privateKey = Buffer.from(privateKeyBase64, 'base64').toString('utf-8');
         
-        this.firebaseApp = admin.initializeApp({
-          credential: admin.credential.cert({
+        this.firebaseApp = initializeApp({
+          credential: cert({
             projectId,
             privateKey: privateKey.replace(/\\n/g, '\n'),
             clientEmail,
@@ -141,7 +142,7 @@ export class NotificationService implements OnModuleInit {
     try {
       this.logger.debug(`Sending notification to token: ${fcmToken.substring(0, 10)}... - Title: ${title}`);
       
-      const messageId = await admin.messaging().send({
+      const messageId = await getMessaging(this.firebaseApp).send({
         token: fcmToken,
         notification: {
           title,
@@ -199,7 +200,7 @@ export class NotificationService implements OnModuleInit {
     try {
       this.logger.log(`Sending multicast notification to ${fcmTokens.length} tokens - Title: ${title}`);
       
-      const message = {
+      const message: MulticastMessage = {
         notification: {
           title,
           body,
@@ -208,7 +209,7 @@ export class NotificationService implements OnModuleInit {
         tokens: fcmTokens,
       };
 
-      const response = await admin.messaging().sendEachForMulticast(message);
+      const response = await getMessaging(this.firebaseApp).sendEachForMulticast(message);
       
       // Mettre à jour les notifications selon les résultats
       if (response.responses) {

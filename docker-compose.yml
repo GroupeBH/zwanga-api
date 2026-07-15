@@ -52,7 +52,7 @@ services:
       dockerfile: Dockerfile
       target: production
       args:
-        NODE_BASE_IMAGE: ${NODE_BASE_IMAGE:-node:20-bookworm-slim}
+        NODE_BASE_IMAGE: ${NODE_BASE_IMAGE:-node:22-bookworm-slim}
     container_name: zwanga-api
     env_file:
       - .env
