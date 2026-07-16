@@ -72,11 +72,28 @@ export interface BookingFlexPayCallbackResponse {
   message: string | null;
 }
 
+export interface AutomaticRideProgressEvent {
+  type: 'pickup_confirmed' | 'dropoff_confirmed';
+  bookingId: string;
+  tripId: string;
+  passengerId: string;
+}
+
+export interface AutomaticRideProgressResult {
+  tripId: string;
+  events: AutomaticRideProgressEvent[];
+}
+
 @Injectable()
 export class BookingsService {
   private readonly logger = new Logger(BookingsService.name);
   private readonly CACHE_TTL = 180; // 3 minutes
   private readonly DESTINATION_PROXIMITY_THRESHOLD_METERS = 1000; // 1 km
+  private readonly AUTO_PROGRESS_LOCATION_FRESHNESS_MS = 90_000;
+  private readonly AUTO_PICKUP_MATCH_THRESHOLD_METERS = 75;
+  private readonly AUTO_PICKUP_MOVEMENT_THRESHOLD_METERS = 120;
+  private readonly AUTO_DROPOFF_DESTINATION_THRESHOLD_METERS = 120;
+  private readonly AUTO_DROPOFF_SEPARATION_THRESHOLD_METERS = 120;
   private readonly MAX_SEATS_PER_PASSENGER = 2;
   private readonly BOOKING_RELATED_ENTITY_TYPE = 'booking';
   private readonly DEFAULT_TRIP_PAYMENT_CURRENCY = 'CDF';
@@ -105,6 +122,69 @@ export class BookingsService {
       type: 'Point',
       coordinates: [Number(longitude), Number(latitude)],
     };
+  }
+
+  private pointToLatLng(
+    point?: Point | null,
+  ): { latitude: number; longitude: number } | null {
+    if (!point?.coordinates || point.coordinates.length < 2) {
+      return null;
+    }
+
+    const longitude = Number(point.coordinates[0]);
+    const latitude = Number(point.coordinates[1]);
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
+      return null;
+    }
+
+    return { latitude, longitude };
+  }
+
+  private calculatePointDistanceMeters(
+    first?: Point | null,
+    second?: Point | null,
+  ): number | null {
+    const a = this.pointToLatLng(first);
+    const b = this.pointToLatLng(second);
+    if (!a || !b) {
+      return null;
+    }
+
+    const earthRadiusMeters = 6371000;
+    const toRadians = (value: number) => (value * Math.PI) / 180;
+    const deltaLatitude = toRadians(b.latitude - a.latitude);
+    const deltaLongitude = toRadians(b.longitude - a.longitude);
+    const latitudeA = toRadians(a.latitude);
+    const latitudeB = toRadians(b.latitude);
+
+    const haversine =
+      Math.sin(deltaLatitude / 2) * Math.sin(deltaLatitude / 2) +
+      Math.cos(latitudeA) *
+        Math.cos(latitudeB) *
+        Math.sin(deltaLongitude / 2) *
+        Math.sin(deltaLongitude / 2);
+
+    return (
+      earthRadiusMeters *
+      2 *
+      Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine))
+    );
+  }
+
+  private isFreshLocationUpdate(
+    updatedAt?: Date | string | null,
+    now = new Date(),
+  ): boolean {
+    if (!updatedAt) {
+      return false;
+    }
+
+    const timestamp = new Date(updatedAt).getTime();
+    if (!Number.isFinite(timestamp)) {
+      return false;
+    }
+
+    return now.getTime() - timestamp <= this.AUTO_PROGRESS_LOCATION_FRESHNESS_MS;
   }
 
   private async geocodeAddressToPoint(
@@ -1906,6 +1986,222 @@ export class BookingsService {
     return booking;
   }
 
+  async evaluateAutomaticRideProgressForTrip(
+    tripId: string,
+  ): Promise<AutomaticRideProgressResult> {
+    const result: AutomaticRideProgressResult = { tripId, events: [] };
+    const bookings = await this.bookingRepository.find({
+      where: { tripId, status: BookingStatus.ACCEPTED },
+      relations: ['trip', 'trip.driver', 'passenger'],
+    });
+
+    for (const booking of bookings) {
+      const pickupEvent = await this.tryConfirmAutomaticPickup(booking);
+      if (pickupEvent) {
+        result.events.push(pickupEvent);
+        continue;
+      }
+
+      const dropoffEvent = await this.tryConfirmAutomaticDropoff(booking);
+      if (dropoffEvent) {
+        result.events.push(dropoffEvent);
+      }
+    }
+
+    if (result.events.length > 0) {
+      this.logger.log(
+        `Automatic ride progress updated for trip ${tripId}: ${result.events
+          .map((event) => `${event.type}:${event.bookingId}`)
+          .join(', ')}`,
+      );
+    }
+
+    return result;
+  }
+
+  private hasFreshGpsPair(booking: Booking, now = new Date()): boolean {
+    return (
+      Boolean(booking.trip?.currentLocation) &&
+      Boolean(booking.passengerCurrentLocation) &&
+      this.isFreshLocationUpdate(booking.trip?.lastLocationUpdateAt, now) &&
+      this.isFreshLocationUpdate(booking.passengerLastLocationUpdateAt, now)
+    );
+  }
+
+  private getPickupPoint(booking: Booking): Point | null {
+    return booking.passengerOriginPoint ?? booking.trip?.departurePoint ?? null;
+  }
+
+  private getDropoffPoint(booking: Booking): Point | null {
+    return (
+      booking.passengerDestinationPoint ?? booking.trip?.arrivalPoint ?? null
+    );
+  }
+
+  private canEvaluateAutomaticProgress(booking: Booking): boolean {
+    return (
+      booking.status === BookingStatus.ACCEPTED &&
+      booking.trip?.status === TripStatus.ACTIVE
+    );
+  }
+
+  private async tryConfirmAutomaticPickup(
+    booking: Booking,
+  ): Promise<AutomaticRideProgressEvent | null> {
+    if (
+      !this.canEvaluateAutomaticProgress(booking) ||
+      (booking.pickedUp && booking.pickedUpConfirmedByPassenger)
+    ) {
+      return null;
+    }
+
+    try {
+      this.ensureBookingIsPrepaidForRide(booking);
+    } catch (error) {
+      this.logger.debug(
+        `Automatic pickup skipped for booking ${booking.id}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return null;
+    }
+
+    const now = new Date();
+    if (!this.hasFreshGpsPair(booking, now)) {
+      return null;
+    }
+
+    const phoneDistance = this.calculatePointDistanceMeters(
+      booking.trip.currentLocation,
+      booking.passengerCurrentLocation,
+    );
+    if (
+      phoneDistance === null ||
+      phoneDistance > this.AUTO_PICKUP_MATCH_THRESHOLD_METERS
+    ) {
+      return null;
+    }
+
+    const pickupPoint = this.getPickupPoint(booking);
+    const movedFromPickup = this.calculatePointDistanceMeters(
+      booking.passengerCurrentLocation,
+      pickupPoint,
+    );
+    if (
+      movedFromPickup === null ||
+      movedFromPickup < this.AUTO_PICKUP_MOVEMENT_THRESHOLD_METERS
+    ) {
+      return null;
+    }
+
+    const wasPickedUp = booking.pickedUp;
+    const wasConfirmedByPassenger = booking.pickedUpConfirmedByPassenger;
+
+    booking.pickedUp = true;
+    booking.pickedUpAt = booking.pickedUpAt ?? now;
+    booking.pickedUpConfirmedByPassenger = true;
+    booking.pickedUpConfirmedAt = booking.pickedUpConfirmedAt ?? now;
+
+    const savedBooking = await this.bookingRepository.save(booking);
+    await this.touchTripInteraction(savedBooking.tripId);
+
+    if (!wasPickedUp) {
+      await this.notifySelectedEmergencyContacts(savedBooking, 'pickup');
+      await this.notifyDriverEmergencyContactsOnPickup(savedBooking);
+    }
+
+    await this.notifyPassengerAboutAutomaticPickupConfirmation(savedBooking);
+    if (!wasConfirmedByPassenger) {
+      await this.notifyDriverAboutAutomaticPickupConfirmation(savedBooking);
+    }
+
+    await this.invalidateBookingCaches(savedBooking);
+
+    return {
+      type: 'pickup_confirmed',
+      bookingId: savedBooking.id,
+      tripId: savedBooking.tripId,
+      passengerId: savedBooking.passengerId,
+    };
+  }
+
+  private async tryConfirmAutomaticDropoff(
+    booking: Booking,
+  ): Promise<AutomaticRideProgressEvent | null> {
+    if (
+      !this.canEvaluateAutomaticProgress(booking) ||
+      !booking.pickedUp ||
+      !booking.pickedUpConfirmedByPassenger ||
+      booking.droppedOff
+    ) {
+      return null;
+    }
+
+    try {
+      this.ensureBookingIsPrepaidForRide(
+        booking,
+        'Cette reservation doit etre reglee avant la confirmation automatique de l arrivee',
+      );
+    } catch (error) {
+      this.logger.debug(
+        `Automatic dropoff skipped for booking ${booking.id}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return null;
+    }
+
+    const now = new Date();
+    if (!this.hasFreshGpsPair(booking, now)) {
+      return null;
+    }
+
+    const dropoffPoint = this.getDropoffPoint(booking);
+    const passengerDistanceToDestination = this.calculatePointDistanceMeters(
+      booking.passengerCurrentLocation,
+      dropoffPoint,
+    );
+    if (
+      passengerDistanceToDestination === null ||
+      passengerDistanceToDestination >
+        this.AUTO_DROPOFF_DESTINATION_THRESHOLD_METERS
+    ) {
+      return null;
+    }
+
+    const phoneDistance = this.calculatePointDistanceMeters(
+      booking.trip.currentLocation,
+      booking.passengerCurrentLocation,
+    );
+    if (
+      phoneDistance === null ||
+      phoneDistance < this.AUTO_DROPOFF_SEPARATION_THRESHOLD_METERS
+    ) {
+      return null;
+    }
+
+    booking.droppedOffConfirmedByPassenger = true;
+    booking.droppedOffConfirmedAt = booking.droppedOffConfirmedAt ?? now;
+    booking.droppedOff = true;
+    booking.droppedOffAt = booking.droppedOffAt ?? now;
+    booking.status = BookingStatus.COMPLETED;
+
+    const savedBooking = await this.bookingRepository.save(booking);
+    await this.finalizeCompletedBooking(savedBooking);
+    await this.touchTripInteraction(savedBooking.tripId);
+    await this.notifySelectedEmergencyContacts(savedBooking, 'dropoff');
+    await this.notifyPassengerAboutAutomaticDropoffConfirmation(savedBooking);
+    await this.notifyDriverAboutAutomaticDropoffConfirmation(savedBooking);
+    await this.invalidateBookingCaches(savedBooking);
+
+    return {
+      type: 'dropoff_confirmed',
+      bookingId: savedBooking.id,
+      tripId: savedBooking.tripId,
+      passengerId: savedBooking.passengerId,
+    };
+  }
+
   private async notifySelectedEmergencyContacts(
     booking: Booking,
     eventType: 'pickup' | 'dropoff' | 'trip_end_without_dropoff',
@@ -2437,6 +2733,146 @@ export class BookingsService {
     }
   }
 
+  private async notifyPassengerAboutAutomaticPickupConfirmation(
+    booking: Booking,
+  ): Promise<void> {
+    try {
+      const passenger = await this.userRepository.findOne({
+        where: { id: booking.passengerId },
+        select: ['id', 'fcmToken', 'firstName'],
+      });
+
+      if (!passenger?.fcmToken) {
+        return;
+      }
+
+      await this.notificationService.sendNotification(
+        passenger.fcmToken,
+        'Recuperation confirmee',
+        `Votre recuperation a ete confirmee automatiquement par GPS pour le trajet ${booking.trip.departureLocation} -> ${booking.passengerDestination || booking.trip.arrivalLocation}.`,
+        {
+          type: 'pickup_confirmed_automatically',
+          bookingId: booking.id,
+          tripId: booking.tripId,
+        },
+        booking.passengerId,
+      );
+    } catch (error) {
+      this.logger.error(
+        `Failed to notify passenger about automatic pickup: ${error.message}`,
+        error.stack,
+      );
+    }
+  }
+
+  private async notifyDriverAboutAutomaticPickupConfirmation(
+    booking: Booking,
+  ): Promise<void> {
+    try {
+      const driver = await this.userRepository.findOne({
+        where: { id: booking.trip.driverId },
+        select: ['id', 'fcmToken', 'firstName'],
+      });
+
+      if (!driver?.fcmToken) {
+        return;
+      }
+
+      const passengerName = booking.passenger
+        ? `${booking.passenger.firstName} ${booking.passenger.lastName}`.trim()
+        : 'Le passager';
+
+      await this.notificationService.sendNotification(
+        driver.fcmToken,
+        'Passager recupere',
+        `${passengerName} est marque comme recupere automatiquement par GPS.`,
+        {
+          type: 'pickup_confirmed_automatically',
+          bookingId: booking.id,
+          tripId: booking.tripId,
+          passengerId: booking.passengerId,
+          role: 'driver',
+        },
+        booking.trip.driverId,
+      );
+    } catch (error) {
+      this.logger.error(
+        `Failed to notify driver about automatic pickup: ${error.message}`,
+        error.stack,
+      );
+    }
+  }
+
+  private async notifyPassengerAboutAutomaticDropoffConfirmation(
+    booking: Booking,
+  ): Promise<void> {
+    try {
+      const passenger = await this.userRepository.findOne({
+        where: { id: booking.passengerId },
+        select: ['id', 'fcmToken', 'firstName'],
+      });
+
+      if (!passenger?.fcmToken) {
+        return;
+      }
+
+      await this.notificationService.sendNotification(
+        passenger.fcmToken,
+        'Arrivee confirmee',
+        `Votre arrivee a ete confirmee automatiquement par GPS pour le trajet ${booking.trip.departureLocation} -> ${booking.passengerDestination || booking.trip.arrivalLocation}.`,
+        {
+          type: 'dropoff_confirmed_automatically',
+          bookingId: booking.id,
+          tripId: booking.tripId,
+        },
+        booking.passengerId,
+      );
+    } catch (error) {
+      this.logger.error(
+        `Failed to notify passenger about automatic dropoff: ${error.message}`,
+        error.stack,
+      );
+    }
+  }
+
+  private async notifyDriverAboutAutomaticDropoffConfirmation(
+    booking: Booking,
+  ): Promise<void> {
+    try {
+      const driver = await this.userRepository.findOne({
+        where: { id: booking.trip.driverId },
+        select: ['id', 'fcmToken', 'firstName'],
+      });
+
+      if (!driver?.fcmToken) {
+        return;
+      }
+
+      const passengerName = booking.passenger
+        ? `${booking.passenger.firstName} ${booking.passenger.lastName}`.trim()
+        : 'Le passager';
+
+      await this.notificationService.sendNotification(
+        driver.fcmToken,
+        'Arrivee confirmee',
+        `${passengerName} est marque comme depose automatiquement par GPS.`,
+        {
+          type: 'dropoff_confirmed_automatically',
+          bookingId: booking.id,
+          tripId: booking.tripId,
+          passengerId: booking.passengerId,
+          role: 'driver',
+        },
+        booking.trip.driverId,
+      );
+    } catch (error) {
+      this.logger.error(
+        `Failed to notify driver about automatic dropoff: ${error.message}`,
+        error.stack,
+      );
+    }
+  }
+
   async getWhatsAppNotificationData(
     bookingId: string,
     passengerId: string,
@@ -2568,6 +3004,7 @@ export class BookingsService {
     bookingId: string;
     coordinates: [number, number];
     updatedAt: Date;
+    autoProgress: AutomaticRideProgressResult;
   }> {
     this.logger.log(
       `Updating passenger location for booking ${bookingId} by passenger ${passengerId}`,
@@ -2617,11 +3054,15 @@ export class BookingsService {
 
     // Vérifier la proximité de la destination et notifier si nécessaire
     await this.checkAndNotifyDestinationProximity(booking);
+    const autoProgress = await this.evaluateAutomaticRideProgressForTrip(
+      booking.tripId,
+    );
 
     return {
       bookingId: booking.id,
       coordinates: [updateLocationDto.longitude, updateLocationDto.latitude],
       updatedAt: booking.passengerLastLocationUpdateAt!,
+      autoProgress,
     };
   }
 
