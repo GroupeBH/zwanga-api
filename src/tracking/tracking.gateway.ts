@@ -11,6 +11,7 @@ import { Server, Socket } from 'socket.io';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { TripsService } from '../trips/trips.service';
+import { BookingsService } from '../bookings/bookings.service';
 
 @WebSocketGateway({
   cors: { origin: '*' },
@@ -24,6 +25,7 @@ export class TrackingGateway
 
   constructor(
     private readonly tripsService: TripsService,
+    private readonly bookingsService: BookingsService,
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
   ) {}
@@ -89,8 +91,17 @@ export class TrackingGateway
         data.tripId,
         data.coordinates,
       );
+      const autoProgress =
+        await this.bookingsService.evaluateAutomaticRideProgressForTrip(
+          data.tripId,
+        );
 
       this.server.to(`trip:${data.tripId}`).emit('driver_location', location);
+      if (autoProgress.events.length > 0) {
+        this.server
+          .to(`trip:${data.tripId}`)
+          .emit('booking_auto_progress', autoProgress);
+      }
     } catch (error) {
       client.emit('error', { message: error.message });
     }
