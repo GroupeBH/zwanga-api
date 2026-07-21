@@ -125,6 +125,7 @@ describe('TripsService trip deletion rules', () => {
   let service: any;
   let tripRepository: {
     findOne: jest.Mock;
+    save: jest.Mock;
     remove: jest.Mock;
   };
   let bookingRepository: { update: jest.Mock; delete: jest.Mock };
@@ -133,6 +134,7 @@ describe('TripsService trip deletion rules', () => {
   beforeEach(() => {
     tripRepository = {
       findOne: jest.fn(),
+      save: jest.fn().mockImplementation(async (trip) => trip),
       remove: jest.fn().mockResolvedValue(undefined),
     };
     bookingRepository = {
@@ -337,6 +339,31 @@ describe('TripsService trip deletion rules', () => {
     expect(bookingRepository.update).not.toHaveBeenCalled();
     expect(bookingRepository.delete).toHaveBeenCalledWith({ tripId: 'trip-5' });
     expect(tripRepository.remove).toHaveBeenCalledWith(trip);
+  });
+
+  it('blocks completion while an accepted passenger has not been dropped off', async () => {
+    const trip = {
+      id: 'trip-active',
+      driverId: 'driver-1',
+      status: TripStatus.ACTIVE,
+      bookings: [
+        {
+          id: 'booking-active',
+          status: BookingStatus.ACCEPTED,
+          pickedUp: true,
+          pickedUpConfirmedByPassenger: true,
+          droppedOff: false,
+          droppedOffConfirmedByPassenger: false,
+        },
+      ],
+    };
+
+    tripRepository.findOne.mockResolvedValue(trip);
+
+    await expect(
+      service.completeTrip('trip-active', 'driver-1'),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(tripRepository.save).not.toHaveBeenCalled();
   });
 });
 

@@ -1,4 +1,8 @@
-import { BookingPaymentStatus, BookingStatus } from './entities/booking.entity';
+import {
+  Booking,
+  BookingPaymentStatus,
+  BookingStatus,
+} from './entities/booking.entity';
 import { BookingsService } from './bookings.service';
 import { TripStatus } from '../trips/entities/trip.entity';
 import {
@@ -13,6 +17,7 @@ describe('BookingsService trip payments', () => {
     find: jest.Mock;
     findOne: jest.Mock;
     save: jest.Mock;
+    manager?: unknown;
   };
   let cacheService: { del: jest.Mock };
   let configService: { get: jest.Mock };
@@ -217,6 +222,67 @@ describe('BookingsService trip payments', () => {
     ).rejects.toThrow('doit etre payee avant le demarrage');
 
     expect(bookingRepository.save).not.toHaveBeenCalled();
+  });
+
+  it('deducts seats when the driver accepts a pending booking', async () => {
+    const trip = {
+      id: 'trip-1',
+      driverId: 'driver-1',
+      status: TripStatus.PENDING,
+      totalSeats: 4,
+      availableSeats: 4,
+    };
+    const pendingBooking = {
+      id: 'booking-1',
+      tripId: 'trip-1',
+      passengerId: 'passenger-1',
+      numberOfSeats: 2,
+      status: BookingStatus.PENDING,
+      acceptedAt: null,
+      cancelledAt: null,
+      rejectionReason: null,
+      trip,
+    };
+    const queryBuilder = {
+      select: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      getRawOne: jest.fn().mockResolvedValue({ seats: 0 }),
+    };
+    const transactionBookingRepository = {
+      findOne: jest.fn().mockResolvedValue(pendingBooking),
+      save: jest.fn(async (payload) => payload),
+      createQueryBuilder: jest.fn().mockReturnValue(queryBuilder),
+    };
+    const transactionTripRepository = {
+      findOne: jest.fn().mockResolvedValue(trip),
+      save: jest.fn(async (payload) => payload),
+    };
+    const manager = {
+      getRepository: jest.fn((entity) =>
+        entity === Booking
+          ? transactionBookingRepository
+          : transactionTripRepository,
+      ),
+    };
+    bookingRepository.manager = {
+      transaction: jest.fn((callback) => callback(manager)),
+    };
+
+    const result = await service.updateStatus('booking-1', 'driver-1', {
+      status: BookingStatus.ACCEPTED,
+    });
+
+    expect(result.status).toBe(BookingStatus.ACCEPTED);
+    expect(transactionTripRepository.save).toHaveBeenCalledWith(
+      expect.objectContaining({ availableSeats: 2 }),
+    );
+    expect(transactionBookingRepository.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: BookingStatus.ACCEPTED,
+        acceptedAt: expect.any(Date),
+      }),
+    );
   });
 
   it('finalizes a completed prepaid booking with loyalty and driver earning', async () => {
