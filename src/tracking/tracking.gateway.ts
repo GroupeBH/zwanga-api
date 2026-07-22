@@ -185,6 +185,26 @@ export class TrackingGateway
     }
   }
 
+  @SubscribeMessage('passenger_pickup_signal')
+  async handlePassengerPickupSignal(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { bookingId: string },
+  ) {
+    try {
+      const event = await this.bookingsService.buildPassengerPickupSignal(
+        client.data.userId,
+        data.bookingId,
+      );
+
+      this.server.to(`trip:${event.tripId}`).emit('booking_auto_progress', {
+        tripId: event.tripId,
+        events: [event],
+      });
+    } catch (error) {
+      client.emit('error', { message: error.message });
+    }
+  }
+
   @SubscribeMessage('get_driver_location')
   async handleGetDriverLocation(
     @ConnectedSocket() client: Socket,

@@ -452,6 +452,14 @@ describe('BookingsService trip payments', () => {
     const result = await service.evaluateAutomaticRideProgressForTrip('trip-1');
 
     expect(result.events).toEqual([
+      expect.objectContaining({
+        type: 'parties_nearby',
+        bookingId: 'booking-1',
+        tripId: 'trip-1',
+        passengerId: 'passenger-1',
+        distanceMeters: expect.any(Number),
+        detectedAt: expect.any(String),
+      }),
       {
         type: 'pickup_confirmed',
         bookingId: 'booking-1',
@@ -467,7 +475,83 @@ describe('BookingsService trip payments', () => {
     );
   });
 
-  it('automatically completes dropoff when passenger is at destination and separated from driver', async () => {
+  it('emits a pickup arrival event when the driver reaches the passenger pickup point', async () => {
+    const now = new Date();
+    const autoBooking = {
+      ...booking,
+      paymentMode: TripPaymentMode.CASH,
+      paymentStatus: BookingPaymentStatus.NOT_REQUIRED,
+      pickedUp: false,
+      pickedUpConfirmedByPassenger: false,
+      passengerOriginPoint: { type: 'Point', coordinates: [15.3, -4.3] },
+      passengerCurrentLocation: null,
+      passengerLastLocationUpdateAt: null,
+      trip: {
+        ...booking.trip,
+        status: TripStatus.ACTIVE,
+        driverId: 'driver-1',
+        currentLocation: { type: 'Point', coordinates: [15.3001, -4.3] },
+        lastLocationUpdateAt: now,
+        departurePoint: { type: 'Point', coordinates: [15.3, -4.3] },
+      },
+    };
+    bookingRepository.find.mockResolvedValue([autoBooking]);
+
+    const result = await service.evaluateAutomaticRideProgressForTrip('trip-1');
+
+    expect(result.events).toEqual([
+      expect.objectContaining({
+        type: 'driver_arrived_pickup',
+        bookingId: 'booking-1',
+        tripId: 'trip-1',
+        passengerId: 'passenger-1',
+        distanceMeters: expect.any(Number),
+        detectedAt: expect.any(String),
+        expiresAt: expect.any(String),
+        pickupWaitSeconds: 600,
+      }),
+    ]);
+    expect(bookingRepository.save).not.toHaveBeenCalled();
+  });
+
+  it('emits a driver-near-pickup event when the driver is within 200 meters of pickup', async () => {
+    const now = new Date();
+    const autoBooking = {
+      ...booking,
+      paymentMode: TripPaymentMode.CASH,
+      paymentStatus: BookingPaymentStatus.NOT_REQUIRED,
+      pickedUp: false,
+      pickedUpConfirmedByPassenger: false,
+      passengerOriginPoint: { type: 'Point', coordinates: [15.3, -4.3] },
+      passengerCurrentLocation: null,
+      passengerLastLocationUpdateAt: null,
+      trip: {
+        ...booking.trip,
+        status: TripStatus.ACTIVE,
+        driverId: 'driver-1',
+        currentLocation: { type: 'Point', coordinates: [15.30135, -4.3] },
+        lastLocationUpdateAt: now,
+        departurePoint: { type: 'Point', coordinates: [15.3, -4.3] },
+      },
+    };
+    bookingRepository.find.mockResolvedValue([autoBooking]);
+
+    const result = await service.evaluateAutomaticRideProgressForTrip('trip-1');
+
+    expect(result.events).toEqual([
+      expect.objectContaining({
+        type: 'driver_near_pickup',
+        bookingId: 'booking-1',
+        tripId: 'trip-1',
+        passengerId: 'passenger-1',
+        distanceMeters: expect.any(Number),
+        detectedAt: expect.any(String),
+      }),
+    ]);
+    expect(bookingRepository.save).not.toHaveBeenCalled();
+  });
+
+  it('automatically completes dropoff when passenger and driver arrive together at destination', async () => {
     const finalizeCompletedBookingSpy = jest
       .spyOn(service as any, 'finalizeCompletedBooking')
       .mockResolvedValue(undefined);
@@ -503,7 +587,7 @@ describe('BookingsService trip payments', () => {
         ...booking.trip,
         status: TripStatus.ACTIVE,
         driverId: 'driver-1',
-        currentLocation: { type: 'Point', coordinates: [15.312, -4.31] },
+        currentLocation: { type: 'Point', coordinates: [15.31012, -4.31] },
         lastLocationUpdateAt: now,
         arrivalPoint: { type: 'Point', coordinates: [15.31, -4.31] },
       },

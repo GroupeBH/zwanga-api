@@ -592,7 +592,7 @@ export class UsersService {
             }
 
             if (details.similarityScore !== undefined) {
-              detailedReason += `\n- Score de similarité : ${details.similarityScore.toFixed(1)}% (minimum requis : ${details.minRequiredSimilarity || this.configService.get<string>('AWS_REKOGNITION_KYC_MIN_SIMILARITY') || '80'}%)`;
+              detailedReason += `\n- Score de similarité : ${details.similarityScore.toFixed(1)}% (minimum requis : ${details.minRequiredSimilarity || this.configService.get<string>('AWS_REKOGNITION_KYC_MIN_SIMILARITY') || '40'}%)`;
             }
 
             if (
