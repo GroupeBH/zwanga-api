@@ -53,7 +53,7 @@ export class KycValidationService {
     this.logger.log(`[KYC Init] AWS_REKOGNITION_KYC_ENABLED = "${kycEnabledConfig}" (enabled: ${this.enabled})`);
     
     this.minSimilarity = parseFloat(
-      this.configService.get<string>('AWS_REKOGNITION_KYC_MIN_SIMILARITY') || '80',
+      this.configService.get<string>('AWS_REKOGNITION_KYC_MIN_SIMILARITY') || '40',
     );
     this.minFaceQuality = parseFloat(
       this.configService.get<string>('AWS_REKOGNITION_KYC_MIN_FACE_QUALITY') || '50',
@@ -571,7 +571,7 @@ export class KycValidationService {
         faceCount,
         faceQuality: averageQuality,
       };
-    } catch (error) {
+    } catch (error: any) {
       this.logger.error(`[Face Detection] ❌ Error detecting faces in ${imageType}:`, error);
       this.logger.error(`[Face Detection] Error message: ${error.message}`);
       this.logger.error(`[Face Detection] Error code: ${error.name || 'Unknown'}`);

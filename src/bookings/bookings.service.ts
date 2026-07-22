@@ -73,10 +73,20 @@ export interface BookingFlexPayCallbackResponse {
 }
 
 export interface AutomaticRideProgressEvent {
-  type: 'pickup_confirmed' | 'dropoff_confirmed';
+  type:
+    | 'driver_near_pickup'
+    | 'driver_arrived_pickup'
+    | 'parties_nearby'
+    | 'passenger_ready_pickup'
+    | 'pickup_confirmed'
+    | 'dropoff_confirmed';
   bookingId: string;
   tripId: string;
   passengerId: string;
+  distanceMeters?: number;
+  detectedAt?: string;
+  expiresAt?: string;
+  pickupWaitSeconds?: number;
 }
 
 export interface AutomaticRideProgressResult {
@@ -91,9 +101,13 @@ export class BookingsService {
   private readonly DESTINATION_PROXIMITY_THRESHOLD_METERS = 1000; // 1 km
   private readonly AUTO_PROGRESS_LOCATION_FRESHNESS_MS = 90_000;
   private readonly AUTO_PICKUP_MATCH_THRESHOLD_METERS = 75;
+  private readonly AUTO_PICKUP_PASSENGER_READY_THRESHOLD_METERS = 5;
+  private readonly AUTO_PICKUP_DRIVER_NEAR_THRESHOLD_METERS = 200;
+  private readonly AUTO_PICKUP_DRIVER_ARRIVAL_THRESHOLD_METERS = 80;
   private readonly AUTO_PICKUP_MOVEMENT_THRESHOLD_METERS = 120;
+  private readonly PICKUP_WAIT_WINDOW_MS = 10 * 60 * 1000;
   private readonly AUTO_DROPOFF_DESTINATION_THRESHOLD_METERS = 120;
-  private readonly AUTO_DROPOFF_SEPARATION_THRESHOLD_METERS = 120;
+  private readonly AUTO_DROPOFF_TOGETHER_THRESHOLD_METERS = 75;
   private readonly MAX_SEATS_PER_PASSENGER = 2;
   private readonly BOOKING_RELATED_ENTITY_TYPE = 'booking';
   private readonly DEFAULT_TRIP_PAYMENT_CURRENCY = 'CDF';
@@ -2071,6 +2085,153 @@ export class BookingsService {
     return booking;
   }
 
+  private buildPickupAwarenessEvent(
+    type: 'driver_near_pickup' | 'driver_arrived_pickup' | 'parties_nearby',
+    booking: Booking,
+    distanceMeters: number,
+    now: Date,
+  ): AutomaticRideProgressEvent {
+    const event: AutomaticRideProgressEvent = {
+      type,
+      bookingId: booking.id,
+      tripId: booking.tripId,
+      passengerId: booking.passengerId,
+      distanceMeters: Math.round(distanceMeters),
+      detectedAt: now.toISOString(),
+    };
+
+    if (type === 'driver_arrived_pickup') {
+      event.expiresAt = new Date(
+        now.getTime() + this.PICKUP_WAIT_WINDOW_MS,
+      ).toISOString();
+      event.pickupWaitSeconds = Math.round(this.PICKUP_WAIT_WINDOW_MS / 1000);
+    }
+
+    return event;
+  }
+
+  private detectPickupAwarenessEvents(
+    booking: Booking,
+  ): AutomaticRideProgressEvent[] {
+    if (
+      !this.canEvaluateAutomaticProgress(booking) ||
+      booking.pickedUp ||
+      booking.pickedUpConfirmedByPassenger
+    ) {
+      return [];
+    }
+
+    const now = new Date();
+    const events: AutomaticRideProgressEvent[] = [];
+    const pickupPoint = this.getPickupPoint(booking);
+
+    if (
+      pickupPoint &&
+      booking.trip?.currentLocation &&
+      this.isFreshLocationUpdate(booking.trip.lastLocationUpdateAt, now)
+    ) {
+      const driverDistanceToPickup = this.calculatePointDistanceMeters(
+        booking.trip.currentLocation,
+        pickupPoint,
+      );
+
+      if (
+        driverDistanceToPickup !== null &&
+        driverDistanceToPickup <=
+          this.AUTO_PICKUP_DRIVER_ARRIVAL_THRESHOLD_METERS
+      ) {
+        events.push(
+          this.buildPickupAwarenessEvent(
+            'driver_arrived_pickup',
+            booking,
+            driverDistanceToPickup,
+            now,
+          ),
+        );
+      } else if (
+        driverDistanceToPickup !== null &&
+        driverDistanceToPickup <= this.AUTO_PICKUP_DRIVER_NEAR_THRESHOLD_METERS
+      ) {
+        events.push(
+          this.buildPickupAwarenessEvent(
+            'driver_near_pickup',
+            booking,
+            driverDistanceToPickup,
+            now,
+          ),
+        );
+      }
+    }
+
+    if (this.hasFreshGpsPair(booking, now)) {
+      const phoneDistance = this.calculatePointDistanceMeters(
+        booking.trip.currentLocation,
+        booking.passengerCurrentLocation,
+      );
+      const passengerDistanceToPickup = pickupPoint
+        ? this.calculatePointDistanceMeters(
+            booking.passengerCurrentLocation,
+            pickupPoint,
+          )
+        : null;
+      const nearestReadyDistance = Math.min(
+        phoneDistance ?? Number.POSITIVE_INFINITY,
+        passengerDistanceToPickup ?? Number.POSITIVE_INFINITY,
+      );
+
+      if (
+        Number.isFinite(nearestReadyDistance) &&
+        nearestReadyDistance <=
+          this.AUTO_PICKUP_PASSENGER_READY_THRESHOLD_METERS
+      ) {
+        events.push(
+          this.buildPickupAwarenessEvent(
+            'parties_nearby',
+            booking,
+            nearestReadyDistance,
+            now,
+          ),
+        );
+      }
+    }
+
+    return events;
+  }
+
+  async buildPassengerPickupSignal(
+    passengerId: string,
+    bookingId: string,
+  ): Promise<AutomaticRideProgressEvent> {
+    const booking = await this.bookingRepository.findOne({
+      where: { id: bookingId, passengerId },
+      relations: ['trip'],
+    });
+
+    if (!booking) {
+      throw new NotFoundException(
+        "Reservation non trouvee ou vous n'etes pas le passager",
+      );
+    }
+
+    if (!this.canEvaluateAutomaticProgress(booking)) {
+      throw new BadRequestException(
+        'Le trajet doit etre actif et la reservation acceptee pour vous signaler',
+      );
+    }
+
+    if (booking.pickedUp || booking.pickedUpConfirmedByPassenger) {
+      throw new BadRequestException('La prise en charge est deja confirmee');
+    }
+
+    return {
+      type: 'passenger_ready_pickup',
+      bookingId: booking.id,
+      tripId: booking.tripId,
+      passengerId: booking.passengerId,
+      detectedAt: new Date().toISOString(),
+    };
+  }
+
   async evaluateAutomaticRideProgressForTrip(
     tripId: string,
   ): Promise<AutomaticRideProgressResult> {
@@ -2081,6 +2242,8 @@ export class BookingsService {
     });
 
     for (const booking of bookings) {
+      result.events.push(...this.detectPickupAwarenessEvents(booking));
+
       const pickupEvent = await this.tryConfirmAutomaticPickup(booking);
       if (pickupEvent) {
         result.events.push(pickupEvent);
@@ -2260,7 +2423,7 @@ export class BookingsService {
     );
     if (
       phoneDistance === null ||
-      phoneDistance < this.AUTO_DROPOFF_SEPARATION_THRESHOLD_METERS
+      phoneDistance > this.AUTO_DROPOFF_TOGETHER_THRESHOLD_METERS
     ) {
       return null;
     }
