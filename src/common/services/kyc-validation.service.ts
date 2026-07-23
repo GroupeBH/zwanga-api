@@ -476,7 +476,7 @@ export class KycValidationService {
           similarityScore: avgSimilarity,
         },
       };
-    } catch (error) {
+    } catch (error: any) {
       this.logger.error('[KYC Validation] ❌ KYC validation ERROR:', error);
       this.logger.error(`[KYC Validation] Error message: ${error.message}`);
       this.logger.error(`[KYC Validation] Error stack: ${error.stack}`);

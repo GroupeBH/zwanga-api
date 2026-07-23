@@ -79,10 +79,11 @@ export interface AutomaticRideProgressEvent {
     | 'parties_nearby'
     | 'passenger_ready_pickup'
     | 'pickup_confirmed'
-    | 'dropoff_confirmed';
-  bookingId: string;
+    | 'dropoff_confirmed'
+    | 'driver_arrived_destination';
+  bookingId?: string;
   tripId: string;
-  passengerId: string;
+  passengerId?: string;
   distanceMeters?: number;
   detectedAt?: string;
   expiresAt?: string;
@@ -108,6 +109,7 @@ export class BookingsService {
   private readonly PICKUP_WAIT_WINDOW_MS = 10 * 60 * 1000;
   private readonly AUTO_DROPOFF_DESTINATION_THRESHOLD_METERS = 120;
   private readonly AUTO_DROPOFF_TOGETHER_THRESHOLD_METERS = 75;
+  private readonly AUTO_TRIP_DESTINATION_THRESHOLD_METERS = 120;
   private readonly MAX_SEATS_PER_PASSENGER = 2;
   private readonly BOOKING_RELATED_ENTITY_TYPE = 'booking';
   private readonly DEFAULT_TRIP_PAYMENT_CURRENCY = 'CDF';
@@ -406,12 +408,21 @@ export class BookingsService {
               'Seule une reservation acceptee peut etre terminee',
             );
           }
-          if (!booking.droppedOff || !booking.droppedOffConfirmedByPassenger) {
+          if (!this.hasBookingBeenPickedUpForRideProgress(booking)) {
             throw new BadRequestException(
-              "Impossible de terminer la reservation avant la confirmation d'arrivee",
+              'La prise en charge doit etre detectee avant de terminer la reservation',
             );
           }
 
+          const now = new Date();
+          booking.pickedUp = true;
+          booking.pickedUpAt = booking.pickedUpAt ?? now;
+          booking.pickedUpConfirmedByPassenger = true;
+          booking.pickedUpConfirmedAt = booking.pickedUpConfirmedAt ?? now;
+          booking.droppedOff = true;
+          booking.droppedOffAt = booking.droppedOffAt ?? now;
+          booking.droppedOffConfirmedByPassenger = true;
+          booking.droppedOffConfirmedAt = booking.droppedOffConfirmedAt ?? now;
           booking.status = BookingStatus.COMPLETED;
           const savedBooking = await bookingRepository.save(booking);
           await this.recalculateAvailableSeatsForTrip(trip.id, manager);
@@ -1882,19 +1893,25 @@ export class BookingsService {
 
     this.ensureBookingIsPrepaidForRide(booking);
 
-    if (booking.pickedUp) {
+    if (booking.pickedUp && booking.pickedUpConfirmedByPassenger) {
       throw new BadRequestException(
         'Le passager est déjà marqué comme pris en charge',
       );
     }
 
+    const now = new Date();
+    const wasPickedUp = booking.pickedUp;
     booking.pickedUp = true;
-    booking.pickedUpAt = new Date();
+    booking.pickedUpAt = booking.pickedUpAt ?? now;
+    booking.pickedUpConfirmedByPassenger = true;
+    booking.pickedUpConfirmedAt = booking.pickedUpConfirmedAt ?? now;
     await this.bookingRepository.save(booking);
     await this.touchTripInteraction(booking.tripId);
 
-    await this.notifySelectedEmergencyContacts(booking, 'pickup');
-    await this.notifyDriverEmergencyContactsOnPickup(booking);
+    if (!wasPickedUp) {
+      await this.notifySelectedEmergencyContacts(booking, 'pickup');
+      await this.notifyDriverEmergencyContactsOnPickup(booking);
+    }
 
     // Notify passenger
     await this.notifyPassengerAboutPickupConfirmation(booking);
@@ -1928,22 +1945,33 @@ export class BookingsService {
       throw new NotFoundException('Réservation non trouvée');
     }
 
-    if (!booking.pickedUp) {
+    if (booking.status !== BookingStatus.ACCEPTED) {
       throw new BadRequestException(
-        "Le conducteur doit d'abord confirmer la prise en charge",
+        'La reservation doit etre acceptee avant de confirmer la prise en charge',
       );
     }
 
-    if (booking.pickedUpConfirmedByPassenger) {
+    this.ensureBookingIsPrepaidForRide(booking);
+
+    if (booking.pickedUp && booking.pickedUpConfirmedByPassenger) {
       throw new BadRequestException(
         'La prise en charge est déjà confirmée par le passager',
       );
     }
 
+    const now = new Date();
+    const wasPickedUp = booking.pickedUp;
+    booking.pickedUp = true;
+    booking.pickedUpAt = booking.pickedUpAt ?? now;
     booking.pickedUpConfirmedByPassenger = true;
-    booking.pickedUpConfirmedAt = new Date();
+    booking.pickedUpConfirmedAt = booking.pickedUpConfirmedAt ?? now;
     await this.bookingRepository.save(booking);
     await this.touchTripInteraction(booking.tripId);
+
+    if (!wasPickedUp) {
+      await this.notifySelectedEmergencyContacts(booking, 'pickup');
+      await this.notifyDriverEmergencyContactsOnPickup(booking);
+    }
 
     // Notify driver
     await this.notifyDriverAboutPickupConfirmation(booking);
@@ -1980,19 +2008,13 @@ export class BookingsService {
       );
     }
 
-    if (!booking.pickedUp || !booking.pickedUpConfirmedByPassenger) {
+    if (!this.hasBookingBeenPickedUpForRideProgress(booking)) {
       throw new BadRequestException(
         'La prise en charge du passager doit être confirmée avant son arrivée',
       );
     }
 
-    if (!booking.droppedOffConfirmedByPassenger) {
-      throw new BadRequestException(
-        "Le passager doit d'abord signaler son arrivée",
-      );
-    }
-
-    if (booking.droppedOff) {
+    if (booking.droppedOff && booking.status === BookingStatus.COMPLETED) {
       throw new BadRequestException("L'arrivée est déjà confirmée");
     }
 
@@ -2001,8 +2023,15 @@ export class BookingsService {
       'Cette reservation doit etre reglee avant de confirmer l arrivee',
     );
 
+    const now = new Date();
+    booking.pickedUp = true;
+    booking.pickedUpAt = booking.pickedUpAt ?? now;
+    booking.pickedUpConfirmedByPassenger = true;
+    booking.pickedUpConfirmedAt = booking.pickedUpConfirmedAt ?? now;
+    booking.droppedOffConfirmedByPassenger = true;
+    booking.droppedOffConfirmedAt = booking.droppedOffConfirmedAt ?? now;
     booking.droppedOff = true;
-    booking.droppedOffAt = new Date();
+    booking.droppedOffAt = booking.droppedOffAt ?? now;
     booking.status = BookingStatus.COMPLETED;
 
     await this.bookingRepository.save(booking);
@@ -2044,13 +2073,13 @@ export class BookingsService {
       throw new NotFoundException('Réservation non trouvée');
     }
 
-    if (!booking.pickedUp || !booking.pickedUpConfirmedByPassenger) {
+    if (!this.hasBookingBeenPickedUpForRideProgress(booking)) {
       throw new BadRequestException(
         'La prise en charge du passager doit être confirmée avant de signaler son arrivée',
       );
     }
 
-    if (booking.droppedOffConfirmedByPassenger) {
+    if (booking.droppedOff && booking.status === BookingStatus.COMPLETED) {
       throw new BadRequestException(
         "L'arrivée a déjà été signalée au conducteur",
       );
@@ -2064,14 +2093,30 @@ export class BookingsService {
       );
     }
 
+    this.ensureBookingIsPrepaidForRide(
+      booking,
+      'Cette reservation doit etre reglee avant de confirmer l arrivee',
+    );
+
+    const now = new Date();
+    booking.pickedUp = true;
+    booking.pickedUpAt = booking.pickedUpAt ?? now;
+    booking.pickedUpConfirmedByPassenger = true;
+    booking.pickedUpConfirmedAt = booking.pickedUpConfirmedAt ?? now;
     booking.droppedOffConfirmedByPassenger = true;
-    booking.droppedOffConfirmedAt = new Date();
+    booking.droppedOffConfirmedAt = booking.droppedOffConfirmedAt ?? now;
+    booking.droppedOff = true;
+    booking.droppedOffAt = booking.droppedOffAt ?? now;
+    booking.status = BookingStatus.COMPLETED;
 
     await this.bookingRepository.save(booking);
+    await this.finalizeCompletedBooking(booking);
     await this.touchTripInteraction(booking.tripId);
+    await this.notifySelectedEmergencyContacts(booking, 'dropoff');
 
     // Notify driver
     await this.notifyDriverAboutDropoffConfirmation(booking);
+    await this.notifyPassengerAboutDropoffConfirmation(booking);
 
     // Invalidate cache
     await this.cacheService.del(
@@ -2237,7 +2282,7 @@ export class BookingsService {
   ): Promise<AutomaticRideProgressResult> {
     const result: AutomaticRideProgressResult = { tripId, events: [] };
     const bookings = await this.bookingRepository.find({
-      where: { tripId, status: BookingStatus.ACCEPTED },
+      where: { tripId },
       relations: ['trip', 'trip.driver', 'passenger'],
     });
 
@@ -2256,10 +2301,18 @@ export class BookingsService {
       }
     }
 
+    const tripDestinationEvent = await this.tryCompleteTripAtDestination(
+      tripId,
+      bookings,
+    );
+    if (tripDestinationEvent) {
+      result.events.push(tripDestinationEvent);
+    }
+
     if (result.events.length > 0) {
       this.logger.log(
         `Automatic ride progress updated for trip ${tripId}: ${result.events
-          .map((event) => `${event.type}:${event.bookingId}`)
+          .map((event) => `${event.type}:${event.bookingId ?? event.tripId}`)
           .join(', ')}`,
       );
     }
@@ -2284,6 +2337,81 @@ export class BookingsService {
     return (
       booking.passengerDestinationPoint ?? booking.trip?.arrivalPoint ?? null
     );
+  }
+
+  private hasBookingBeenPickedUpForRideProgress(booking: Booking): boolean {
+    return Boolean(
+      booking.pickedUp ||
+        booking.pickedUpConfirmedByPassenger ||
+        booking.pickedUpAt ||
+        booking.pickedUpConfirmedAt,
+    );
+  }
+
+  private hasBookingBeenDroppedOffForTripEnd(booking: Booking): boolean {
+    return Boolean(
+      booking.status === BookingStatus.COMPLETED ||
+        booking.droppedOff ||
+        booking.droppedOffConfirmedByPassenger ||
+        booking.droppedOffAt ||
+        booking.droppedOffConfirmedAt,
+    );
+  }
+
+  private async tryCompleteTripAtDestination(
+    tripId: string,
+    bookings: Booking[],
+  ): Promise<AutomaticRideProgressEvent | null> {
+    const trip =
+      bookings.find((booking) => booking.trip)?.trip ??
+      (await this.tripRepository.findOne({ where: { id: tripId } }));
+    if (
+      !trip ||
+      trip.status !== TripStatus.ACTIVE ||
+      !trip.currentLocation ||
+      !trip.arrivalPoint
+    ) {
+      return null;
+    }
+
+    const now = new Date();
+    if (!this.isFreshLocationUpdate(trip.lastLocationUpdateAt, now)) {
+      return null;
+    }
+
+    const hasUnfinishedAcceptedBooking = bookings.some(
+      (booking) =>
+        booking.status === BookingStatus.ACCEPTED &&
+        !this.hasBookingBeenDroppedOffForTripEnd(booking),
+    );
+    if (hasUnfinishedAcceptedBooking) {
+      return null;
+    }
+
+    const driverDistanceToDestination = this.calculatePointDistanceMeters(
+      trip.currentLocation,
+      trip.arrivalPoint,
+    );
+    if (
+      driverDistanceToDestination === null ||
+      driverDistanceToDestination > this.AUTO_TRIP_DESTINATION_THRESHOLD_METERS
+    ) {
+      return null;
+    }
+
+    trip.status = TripStatus.COMPLETED;
+    trip.completedAt = trip.completedAt ?? now;
+    await this.tripRepository.save(trip);
+    await this.cacheService.del(CacheService.getTripKey(trip.id));
+    await this.cacheService.del(CacheService.getTripsListKey());
+    await this.cacheService.del(CacheService.getTripsListKey('all'));
+
+    return {
+      type: 'driver_arrived_destination',
+      tripId: trip.id,
+      distanceMeters: Math.round(driverDistanceToDestination),
+      detectedAt: now.toISOString(),
+    };
   }
 
   private canEvaluateAutomaticProgress(booking: Booking): boolean {
@@ -2378,8 +2506,7 @@ export class BookingsService {
   ): Promise<AutomaticRideProgressEvent | null> {
     if (
       !this.canEvaluateAutomaticProgress(booking) ||
-      !booking.pickedUp ||
-      !booking.pickedUpConfirmedByPassenger ||
+      !this.hasBookingBeenPickedUpForRideProgress(booking) ||
       booking.droppedOff
     ) {
       return null;
@@ -2428,6 +2555,10 @@ export class BookingsService {
       return null;
     }
 
+    booking.pickedUp = true;
+    booking.pickedUpAt = booking.pickedUpAt ?? now;
+    booking.pickedUpConfirmedByPassenger = true;
+    booking.pickedUpConfirmedAt = booking.pickedUpConfirmedAt ?? now;
     booking.droppedOffConfirmedByPassenger = true;
     booking.droppedOffConfirmedAt = booking.droppedOffConfirmedAt ?? now;
     booking.droppedOff = true;
