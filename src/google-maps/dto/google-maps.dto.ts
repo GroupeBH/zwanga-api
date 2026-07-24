@@ -485,7 +485,10 @@ export class DirectionsDto {
   @IsBoolean()
   optimizeWaypoints?: boolean;
 
-  @ApiPropertyOptional({ description: 'Alternatives routes' })
+  @ApiPropertyOptional({
+    description:
+      'Deprecated and ignored: directions always return a single route',
+  })
   @IsOptional()
   @IsBoolean()
   alternatives?: boolean;

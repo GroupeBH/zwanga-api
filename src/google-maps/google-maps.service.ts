@@ -572,14 +572,18 @@ export class GoogleMapsService {
    */
   async getDirections(dto: DirectionsDto): Promise<DirectionsResponse> {
     // console.log('getDirections', dto);
-    const cacheKey = this.getDirectionsCacheKey(dto);
+    const singleRouteDto: DirectionsDto = { ...dto, alternatives: false };
+    const cacheKey = this.getDirectionsCacheKey(singleRouteDto);
 
     try {
       // Try to get from cache first
       const cached = await this.cacheService.get<DirectionsResponse>(cacheKey);
       if (cached) {
         // this.logger.debug('Returning directions from cache');
-        return cached;
+        return {
+          ...cached,
+          routes: (cached.routes ?? []).slice(0, 1),
+        };
       }
 
       // Build origin
@@ -598,6 +602,7 @@ export class GoogleMapsService {
         origin,
         destination,
         key: this.apiKey,
+        alternatives: 'false',
       };
 
       // Add waypoints if provided
@@ -620,11 +625,6 @@ export class GoogleMapsService {
       // Add avoid options
       if (dto.avoid && dto.avoid.length > 0) {
         params.avoid = dto.avoid.join('|');
-      }
-
-      // Add alternatives
-      if (dto.alternatives) {
-        params.alternatives = 'true';
       }
 
       // Add language and region
@@ -661,7 +661,17 @@ export class GoogleMapsService {
         );
       }
 
-      const routes = response.data.routes.map((route: any) => {
+      const providerRoutes = Array.isArray(response.data.routes)
+        ? response.data.routes.slice(0, 1)
+        : [];
+
+      if (providerRoutes.length === 0) {
+        throw new BadRequestException(
+          'Aucun itineraire trouve entre le depart et la destination',
+        );
+      }
+
+      const routes = providerRoutes.map((route: any) => {
         const legs = route.legs.map((leg: any) => ({
           distance: leg.distance.value,
           duration: leg.duration.value,
@@ -762,7 +772,7 @@ export class GoogleMapsService {
       optimizeWaypoints: dto.optimizeWaypoints,
       mode: dto.mode,
       avoid: dto.avoid,
-      alternatives: dto.alternatives,
+      alternatives: false,
       language: dto.language,
       region: dto.region,
       departureTime: dto.departureTime,
