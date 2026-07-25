@@ -102,6 +102,9 @@ export class Booking {
   @Column({ type: 'boolean', default: false })
   destinationProximityNotified: boolean; // Indique si la notification de proximité a été envoyée
 
+  @Column({ type: 'timestamp', nullable: true })
+  passengerDestinationApproachNotifiedAt: Date | null; // Modal temps reel envoye quand le vehicule approche de la destination passager
+
   @Column({
     type: 'enum',
     enum: BookingStatus,
