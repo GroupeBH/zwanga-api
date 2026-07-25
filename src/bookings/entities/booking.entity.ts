@@ -105,6 +105,9 @@ export class Booking {
   @Column({ type: 'timestamp', nullable: true })
   passengerDestinationApproachNotifiedAt: Date | null; // Modal temps reel envoye quand le vehicule approche de la destination passager
 
+  @Column({ type: 'timestamp', nullable: true })
+  driverPickupArrivedAt: Date | null; // Conducteur detecte au point de prise en charge
+
   @Column({
     type: 'enum',
     enum: BookingStatus,

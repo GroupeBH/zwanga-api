@@ -2563,31 +2563,60 @@ export class BookingsService {
     }
 
     const now = new Date();
-    if (!this.hasFreshGpsPair(booking, now)) {
-      return null;
-    }
-
-    const phoneDistance = this.calculatePointDistanceMeters(
-      booking.trip.currentLocation,
-      booking.passengerCurrentLocation,
-    );
-    if (
-      phoneDistance === null ||
-      phoneDistance > this.AUTO_PICKUP_MATCH_THRESHOLD_METERS
-    ) {
-      return null;
-    }
-
     const pickupPoint = this.getPickupPoint(booking);
-    const movedFromPickup = this.calculatePointDistanceMeters(
-      booking.passengerCurrentLocation,
-      pickupPoint,
+    const hasFreshDriverLocation = Boolean(
+      booking.trip?.currentLocation &&
+        this.isFreshLocationUpdate(booking.trip.lastLocationUpdateAt, now),
     );
+    const driverDistanceToPickup = hasFreshDriverLocation
+      ? this.calculatePointDistanceMeters(
+          booking.trip.currentLocation,
+          pickupPoint,
+        )
+      : null;
+
     if (
-      movedFromPickup === null ||
-      movedFromPickup < this.AUTO_PICKUP_MOVEMENT_THRESHOLD_METERS
+      driverDistanceToPickup !== null &&
+      driverDistanceToPickup <=
+        this.AUTO_PICKUP_DRIVER_ARRIVAL_THRESHOLD_METERS &&
+      !booking.driverPickupArrivedAt
     ) {
-      return null;
+      booking.driverPickupArrivedAt = now;
+      await this.bookingRepository.save(booking);
+    }
+
+    const driverLeftPickupAfterArrival = Boolean(
+      booking.driverPickupArrivedAt &&
+        driverDistanceToPickup !== null &&
+        driverDistanceToPickup >= this.AUTO_PICKUP_MOVEMENT_THRESHOLD_METERS,
+    );
+
+    if (!driverLeftPickupAfterArrival) {
+      if (!this.hasFreshGpsPair(booking, now)) {
+        return null;
+      }
+
+      const phoneDistance = this.calculatePointDistanceMeters(
+        booking.trip.currentLocation,
+        booking.passengerCurrentLocation,
+      );
+      if (
+        phoneDistance === null ||
+        phoneDistance > this.AUTO_PICKUP_MATCH_THRESHOLD_METERS
+      ) {
+        return null;
+      }
+
+      const movedFromPickup = this.calculatePointDistanceMeters(
+        booking.passengerCurrentLocation,
+        pickupPoint,
+      );
+      if (
+        movedFromPickup === null ||
+        movedFromPickup < this.AUTO_PICKUP_MOVEMENT_THRESHOLD_METERS
+      ) {
+        return null;
+      }
     }
 
     const wasPickedUp = booking.pickedUp;

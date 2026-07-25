@@ -8,7 +8,8 @@ export class AddRideArrivalTrackingState1780000008000
   public async up(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query(`
       ALTER TABLE bookings
-      ADD COLUMN IF NOT EXISTS "passengerDestinationApproachNotifiedAt" timestamp;
+      ADD COLUMN IF NOT EXISTS "passengerDestinationApproachNotifiedAt" timestamp,
+      ADD COLUMN IF NOT EXISTS "driverPickupArrivedAt" timestamp;
     `);
 
     await queryRunner.query(`
@@ -29,6 +30,11 @@ export class AddRideArrivalTrackingState1780000008000
     await queryRunner.query(`
       ALTER TABLE trips
       DROP COLUMN IF EXISTS "destinationApproachNotifiedAt";
+    `);
+
+    await queryRunner.query(`
+      ALTER TABLE bookings
+      DROP COLUMN IF EXISTS "driverPickupArrivedAt";
     `);
 
     await queryRunner.query(`

@@ -515,6 +515,63 @@ describe('BookingsService trip payments', () => {
     );
   });
 
+  it('automatically confirms pickup when the driver leaves pickup after being detected there', async () => {
+    jest
+      .spyOn(service as any, 'notifySelectedEmergencyContacts')
+      .mockResolvedValue(undefined);
+    jest
+      .spyOn(service as any, 'notifyDriverEmergencyContactsOnPickup')
+      .mockResolvedValue(undefined);
+    jest
+      .spyOn(service as any, 'notifyPassengerAboutAutomaticPickupConfirmation')
+      .mockResolvedValue(undefined);
+    jest
+      .spyOn(service as any, 'notifyDriverAboutAutomaticPickupConfirmation')
+      .mockResolvedValue(undefined);
+    jest
+      .spyOn(service as any, 'touchTripInteraction')
+      .mockResolvedValue(undefined);
+
+    const now = new Date();
+    const autoBooking = {
+      ...booking,
+      paymentMode: TripPaymentMode.CASH,
+      paymentStatus: BookingPaymentStatus.NOT_REQUIRED,
+      pickedUp: false,
+      pickedUpConfirmedByPassenger: false,
+      driverPickupArrivedAt: new Date(now.getTime() - 60 * 1000),
+      passengerOriginPoint: { type: 'Point', coordinates: [15.3, -4.3] },
+      passengerCurrentLocation: null,
+      passengerLastLocationUpdateAt: null,
+      trip: {
+        ...booking.trip,
+        status: TripStatus.ACTIVE,
+        driverId: 'driver-1',
+        currentLocation: { type: 'Point', coordinates: [15.302, -4.3] },
+        lastLocationUpdateAt: now,
+        departurePoint: { type: 'Point', coordinates: [15.3, -4.3] },
+      },
+    };
+    bookingRepository.find.mockResolvedValue([autoBooking]);
+
+    const result = await service.evaluateAutomaticRideProgressForTrip('trip-1');
+
+    expect(result.events).toEqual([
+      {
+        type: 'pickup_confirmed',
+        bookingId: 'booking-1',
+        tripId: 'trip-1',
+        passengerId: 'passenger-1',
+      },
+    ]);
+    expect(bookingRepository.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        pickedUp: true,
+        pickedUpConfirmedByPassenger: true,
+      }),
+    );
+  });
+
   it('emits a pickup arrival event when the driver reaches the passenger pickup point', async () => {
     const now = new Date();
     const autoBooking = {
@@ -551,7 +608,11 @@ describe('BookingsService trip payments', () => {
         pickupWaitSeconds: 600,
       }),
     ]);
-    expect(bookingRepository.save).not.toHaveBeenCalled();
+    expect(bookingRepository.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        driverPickupArrivedAt: expect.any(Date),
+      }),
+    );
   });
 
   it('emits a driver-near-pickup event when the driver is within 200 meters of pickup', async () => {
