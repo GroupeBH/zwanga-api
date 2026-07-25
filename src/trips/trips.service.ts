@@ -1196,6 +1196,10 @@ export class TripsService {
     const startedAt = new Date();
     trip.status = TripStatus.ACTIVE;
     trip.startedAt = startedAt;
+    trip.currentLocation = null;
+    trip.lastLocationUpdateAt = null;
+    trip.destinationApproachNotifiedAt = null;
+    trip.destinationReachedAt = null;
     trip.estimatedArrivalDate = await this.calculateEstimatedArrivalDate(
       trip,
       startedAt,

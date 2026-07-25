@@ -124,6 +124,12 @@ export class Trip {
   @Column({ type: 'timestamp', nullable: true })
   lastLocationUpdateAt: Date | null;
 
+  @Column({ type: 'timestamp', nullable: true })
+  destinationApproachNotifiedAt: Date | null;
+
+  @Column({ type: 'timestamp', nullable: true })
+  destinationReachedAt: Date | null;
+
   @Column({ type: 'boolean', default: false })
   departureReminderNotified: boolean;
 
@@ -139,7 +145,10 @@ export class Trip {
   @Column({ type: 'varchar', nullable: true })
   recurringTemplateId: string | null;
 
-  @ManyToOne(() => RecurringTripTemplate, { nullable: true, onDelete: 'SET NULL' })
+  @ManyToOne(() => RecurringTripTemplate, {
+    nullable: true,
+    onDelete: 'SET NULL',
+  })
   @JoinColumn({ name: 'recurringTemplateId' })
   recurringTemplate: RecurringTripTemplate | null;
 

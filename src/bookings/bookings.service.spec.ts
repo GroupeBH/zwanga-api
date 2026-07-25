@@ -591,7 +591,52 @@ describe('BookingsService trip payments', () => {
     expect(bookingRepository.save).not.toHaveBeenCalled();
   });
 
-  it('automatically completes dropoff when passenger and driver arrive together at destination', async () => {
+  it('emits a passenger destination warning when the vehicle is within 20 meters', async () => {
+    const now = new Date();
+    const autoBooking = {
+      ...booking,
+      paymentMode: TripPaymentMode.CASH,
+      paymentStatus: BookingPaymentStatus.NOT_REQUIRED,
+      pickedUp: true,
+      pickedUpConfirmedByPassenger: true,
+      droppedOff: false,
+      droppedOffConfirmedByPassenger: false,
+      passengerDestinationApproachNotifiedAt: null,
+      passengerDestinationPoint: { type: 'Point', coordinates: [15.31, -4.31] },
+      passengerCurrentLocation: null,
+      passengerLastLocationUpdateAt: null,
+      trip: {
+        ...booking.trip,
+        status: TripStatus.ACTIVE,
+        driverId: 'driver-1',
+        currentLocation: { type: 'Point', coordinates: [15.31015, -4.31] },
+        lastLocationUpdateAt: now,
+        arrivalPoint: { type: 'Point', coordinates: [15.31, -4.31] },
+      },
+    };
+    bookingRepository.find.mockResolvedValue([autoBooking]);
+
+    const result = await service.evaluateAutomaticRideProgressForTrip('trip-1');
+
+    expect(result.events).toEqual([
+      expect.objectContaining({
+        type: 'passenger_near_destination',
+        bookingId: 'booking-1',
+        tripId: 'trip-1',
+        passengerId: 'passenger-1',
+        distanceMeters: expect.any(Number),
+        detectedAt: expect.any(String),
+      }),
+    ]);
+    expect(bookingRepository.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        passengerDestinationApproachNotifiedAt: expect.any(Date),
+      }),
+    );
+    expect(tripRepository.save).not.toHaveBeenCalled();
+  });
+
+  it('automatically completes dropoff and the trip when the vehicle reaches the shared final destination', async () => {
     const finalizeCompletedBookingSpy = jest
       .spyOn(service as any, 'finalizeCompletedBooking')
       .mockResolvedValue(undefined);
@@ -617,17 +662,18 @@ describe('BookingsService trip payments', () => {
       pickedUpConfirmedByPassenger: false,
       droppedOff: false,
       droppedOffConfirmedByPassenger: false,
+      passengerDestinationApproachNotifiedAt: null,
       passengerDestinationPoint: { type: 'Point', coordinates: [15.31, -4.31] },
       passengerCurrentLocation: {
         type: 'Point',
-        coordinates: [15.3101, -4.31],
+        coordinates: [15.2, -4.2],
       },
       passengerLastLocationUpdateAt: now,
       trip: {
         ...booking.trip,
         status: TripStatus.ACTIVE,
         driverId: 'driver-1',
-        currentLocation: { type: 'Point', coordinates: [15.31012, -4.31] },
+        currentLocation: { type: 'Point', coordinates: [15.31005, -4.31] },
         lastLocationUpdateAt: now,
         arrivalPoint: { type: 'Point', coordinates: [15.31, -4.31] },
       },
@@ -654,6 +700,7 @@ describe('BookingsService trip payments', () => {
       expect.objectContaining({
         droppedOff: true,
         pickedUpConfirmedByPassenger: true,
+        passengerDestinationApproachNotifiedAt: expect.any(Date),
         droppedOffConfirmedByPassenger: true,
         status: BookingStatus.COMPLETED,
       }),
@@ -661,9 +708,17 @@ describe('BookingsService trip payments', () => {
     expect(finalizeCompletedBookingSpy).toHaveBeenCalledWith(
       expect.objectContaining({ id: 'booking-1' }),
     );
+    expect(tripRepository.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: TripStatus.COMPLETED,
+        completedAt: expect.any(Date),
+        destinationApproachNotifiedAt: expect.any(Date),
+        destinationReachedAt: expect.any(Date),
+      }),
+    );
   });
 
-  it('automatically completes the trip when the driver reaches the final destination after passenger dropoff', async () => {
+  it('emits a trip destination warning before completing the trip', async () => {
     const now = new Date();
     const completedBooking = {
       ...booking,
@@ -685,9 +740,95 @@ describe('BookingsService trip payments', () => {
         id: 'trip-1',
         status: TripStatus.ACTIVE,
         driverId: 'driver-1',
-        currentLocation: { type: 'Point', coordinates: [15.3101, -4.31] },
+        currentLocation: { type: 'Point', coordinates: [15.31015, -4.31] },
         lastLocationUpdateAt: now,
         arrivalPoint: { type: 'Point', coordinates: [15.31, -4.31] },
+        destinationApproachNotifiedAt: null,
+        destinationReachedAt: null,
+      },
+    };
+    bookingRepository.find.mockResolvedValue([completedBooking]);
+
+    const result = await service.evaluateAutomaticRideProgressForTrip('trip-1');
+
+    expect(result.events).toEqual([
+      expect.objectContaining({
+        type: 'driver_near_destination',
+        tripId: 'trip-1',
+        distanceMeters: expect.any(Number),
+        detectedAt: expect.any(String),
+      }),
+    ]);
+    expect(bookingRepository.save).not.toHaveBeenCalled();
+    expect(tripRepository.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: TripStatus.ACTIVE,
+        destinationApproachNotifiedAt: expect.any(Date),
+        destinationReachedAt: null,
+      }),
+    );
+  });
+
+  it('does not complete the trip after approach if the final destination was not reached', async () => {
+    const now = new Date();
+    const approachNotifiedAt = new Date(now.getTime() - 5 * 60 * 1000 - 1000);
+    const completedBooking = {
+      ...booking,
+      status: BookingStatus.COMPLETED,
+      paymentMode: TripPaymentMode.CASH,
+      paymentStatus: BookingPaymentStatus.NOT_REQUIRED,
+      pickedUp: true,
+      pickedUpConfirmedByPassenger: true,
+      droppedOff: true,
+      droppedOffConfirmedByPassenger: true,
+      passengerDestinationPoint: { type: 'Point', coordinates: [15.31, -4.31] },
+      passengerCurrentLocation: null,
+      passengerLastLocationUpdateAt: null,
+      trip: {
+        ...booking.trip,
+        id: 'trip-1',
+        status: TripStatus.ACTIVE,
+        driverId: 'driver-1',
+        currentLocation: { type: 'Point', coordinates: [15.31015, -4.31] },
+        lastLocationUpdateAt: now,
+        arrivalPoint: { type: 'Point', coordinates: [15.31, -4.31] },
+        destinationApproachNotifiedAt: approachNotifiedAt,
+        destinationReachedAt: null,
+      },
+    };
+    bookingRepository.find.mockResolvedValue([completedBooking]);
+
+    const result = await service.evaluateAutomaticRideProgressForTrip('trip-1');
+
+    expect(result.events).toEqual([]);
+    expect(bookingRepository.save).not.toHaveBeenCalled();
+    expect(tripRepository.save).not.toHaveBeenCalled();
+  });
+
+  it('automatically completes the trip when reaching the final destination', async () => {
+    const now = new Date();
+    const completedBooking = {
+      ...booking,
+      status: BookingStatus.COMPLETED,
+      paymentMode: TripPaymentMode.CASH,
+      paymentStatus: BookingPaymentStatus.NOT_REQUIRED,
+      pickedUp: true,
+      pickedUpConfirmedByPassenger: true,
+      droppedOff: true,
+      droppedOffConfirmedByPassenger: true,
+      passengerDestinationPoint: { type: 'Point', coordinates: [15.31, -4.31] },
+      passengerCurrentLocation: null,
+      passengerLastLocationUpdateAt: null,
+      trip: {
+        ...booking.trip,
+        id: 'trip-1',
+        status: TripStatus.ACTIVE,
+        driverId: 'driver-1',
+        currentLocation: { type: 'Point', coordinates: [15.31005, -4.31] },
+        lastLocationUpdateAt: now,
+        arrivalPoint: { type: 'Point', coordinates: [15.31, -4.31] },
+        destinationApproachNotifiedAt: null,
+        destinationReachedAt: null,
       },
     };
     bookingRepository.find.mockResolvedValue([completedBooking]);
@@ -702,7 +843,52 @@ describe('BookingsService trip payments', () => {
         detectedAt: expect.any(String),
       }),
     ]);
-    expect(bookingRepository.save).not.toHaveBeenCalled();
+    expect(tripRepository.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: TripStatus.COMPLETED,
+        completedAt: expect.any(Date),
+      }),
+    );
+  });
+
+  it('automatically completes the trip after the final destination zone is passed', async () => {
+    const now = new Date();
+    const completedBooking = {
+      ...booking,
+      status: BookingStatus.COMPLETED,
+      paymentMode: TripPaymentMode.CASH,
+      paymentStatus: BookingPaymentStatus.NOT_REQUIRED,
+      pickedUp: true,
+      pickedUpConfirmedByPassenger: true,
+      droppedOff: true,
+      droppedOffConfirmedByPassenger: true,
+      passengerDestinationPoint: { type: 'Point', coordinates: [15.31, -4.31] },
+      passengerCurrentLocation: null,
+      passengerLastLocationUpdateAt: null,
+      trip: {
+        ...booking.trip,
+        id: 'trip-1',
+        status: TripStatus.ACTIVE,
+        driverId: 'driver-1',
+        currentLocation: { type: 'Point', coordinates: [15.3104, -4.31] },
+        lastLocationUpdateAt: now,
+        arrivalPoint: { type: 'Point', coordinates: [15.31, -4.31] },
+        destinationApproachNotifiedAt: now,
+        destinationReachedAt: now,
+      },
+    };
+    bookingRepository.find.mockResolvedValue([completedBooking]);
+
+    const result = await service.evaluateAutomaticRideProgressForTrip('trip-1');
+
+    expect(result.events).toEqual([
+      expect.objectContaining({
+        type: 'driver_arrived_destination',
+        tripId: 'trip-1',
+        distanceMeters: expect.any(Number),
+        detectedAt: expect.any(String),
+      }),
+    ]);
     expect(tripRepository.save).toHaveBeenCalledWith(
       expect.objectContaining({
         status: TripStatus.COMPLETED,
@@ -722,7 +908,7 @@ describe('BookingsService trip payments', () => {
       pickedUpConfirmedByPassenger: true,
       droppedOff: false,
       droppedOffConfirmedByPassenger: false,
-      passengerDestinationPoint: { type: 'Point', coordinates: [15.31, -4.31] },
+      passengerDestinationPoint: { type: 'Point', coordinates: [15.2, -4.2] },
       passengerCurrentLocation: {
         type: 'Point',
         coordinates: [15.2, -4.2],

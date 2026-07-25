@@ -79,7 +79,9 @@ export interface AutomaticRideProgressEvent {
     | 'parties_nearby'
     | 'passenger_ready_pickup'
     | 'pickup_confirmed'
+    | 'passenger_near_destination'
     | 'dropoff_confirmed'
+    | 'driver_near_destination'
     | 'driver_arrived_destination';
   bookingId?: string;
   tripId: string;
@@ -107,9 +109,12 @@ export class BookingsService {
   private readonly AUTO_PICKUP_DRIVER_ARRIVAL_THRESHOLD_METERS = 80;
   private readonly AUTO_PICKUP_MOVEMENT_THRESHOLD_METERS = 120;
   private readonly PICKUP_WAIT_WINDOW_MS = 10 * 60 * 1000;
-  private readonly AUTO_DROPOFF_DESTINATION_THRESHOLD_METERS = 120;
-  private readonly AUTO_DROPOFF_TOGETHER_THRESHOLD_METERS = 75;
-  private readonly AUTO_TRIP_DESTINATION_THRESHOLD_METERS = 120;
+  private readonly PASSENGER_DESTINATION_NOTICE_THRESHOLD_METERS = 20;
+  private readonly AUTO_DROPOFF_DESTINATION_THRESHOLD_METERS = 10;
+  private readonly AUTO_TRIP_DESTINATION_NOTICE_THRESHOLD_METERS = 20;
+  private readonly AUTO_TRIP_DESTINATION_REACHED_THRESHOLD_METERS = 10;
+  private readonly AUTO_TRIP_DESTINATION_PASSED_GRACE_METERS = 10;
+  private readonly AUTO_TRIP_DESTINATION_COMPLETION_DELAY_MS = 5 * 60 * 1000;
   private readonly MAX_SEATS_PER_PASSENGER = 2;
   private readonly BOOKING_RELATED_ENTITY_TYPE = 'booking';
   private readonly DEFAULT_TRIP_PAYMENT_CURRENCY = 'CDF';
@@ -2243,6 +2248,54 @@ export class BookingsService {
     return events;
   }
 
+  private async detectPassengerDestinationAwarenessEvent(
+    booking: Booking,
+  ): Promise<AutomaticRideProgressEvent | null> {
+    if (
+      !this.canEvaluateAutomaticProgress(booking) ||
+      !this.hasBookingBeenPickedUpForRideProgress(booking) ||
+      this.hasBookingBeenDroppedOffForTripEnd(booking) ||
+      booking.passengerDestinationApproachNotifiedAt
+    ) {
+      return null;
+    }
+
+    const now = new Date();
+    if (
+      !booking.trip?.currentLocation ||
+      !this.isFreshLocationUpdate(booking.trip.lastLocationUpdateAt, now)
+    ) {
+      return null;
+    }
+
+    const dropoffPoint = this.getDropoffPoint(booking);
+    const driverDistanceToDestination = this.calculatePointDistanceMeters(
+      booking.trip.currentLocation,
+      dropoffPoint,
+    );
+    if (
+      driverDistanceToDestination === null ||
+      driverDistanceToDestination <=
+        this.AUTO_DROPOFF_DESTINATION_THRESHOLD_METERS ||
+      driverDistanceToDestination >
+        this.PASSENGER_DESTINATION_NOTICE_THRESHOLD_METERS
+    ) {
+      return null;
+    }
+
+    booking.passengerDestinationApproachNotifiedAt = now;
+    const savedBooking = await this.bookingRepository.save(booking);
+
+    return {
+      type: 'passenger_near_destination',
+      bookingId: savedBooking.id,
+      tripId: savedBooking.tripId,
+      passengerId: savedBooking.passengerId,
+      distanceMeters: Math.round(driverDistanceToDestination),
+      detectedAt: now.toISOString(),
+    };
+  }
+
   async buildPassengerPickupSignal(
     passengerId: string,
     bookingId: string,
@@ -2293,6 +2346,12 @@ export class BookingsService {
       if (pickupEvent) {
         result.events.push(pickupEvent);
         continue;
+      }
+
+      const destinationAwarenessEvent =
+        await this.detectPassengerDestinationAwarenessEvent(booking);
+      if (destinationAwarenessEvent) {
+        result.events.push(destinationAwarenessEvent);
       }
 
       const dropoffEvent = await this.tryConfirmAutomaticDropoff(booking);
@@ -2392,22 +2451,83 @@ export class BookingsService {
       trip.currentLocation,
       trip.arrivalPoint,
     );
-    if (
-      driverDistanceToDestination === null ||
-      driverDistanceToDestination > this.AUTO_TRIP_DESTINATION_THRESHOLD_METERS
-    ) {
+    if (driverDistanceToDestination === null) {
       return null;
     }
 
-    trip.status = TripStatus.COMPLETED;
-    trip.completedAt = trip.completedAt ?? now;
+    if (
+      driverDistanceToDestination >
+      this.AUTO_TRIP_DESTINATION_NOTICE_THRESHOLD_METERS
+    ) {
+      const reachedAt = trip.destinationReachedAt
+        ? new Date(trip.destinationReachedAt).getTime()
+        : null;
+      const passedDestinationAfterReaching =
+        reachedAt !== null &&
+        driverDistanceToDestination >
+          this.AUTO_TRIP_DESTINATION_REACHED_THRESHOLD_METERS +
+            this.AUTO_TRIP_DESTINATION_PASSED_GRACE_METERS;
+      const stayedReachedLongEnough =
+        reachedAt !== null &&
+        Number.isFinite(reachedAt) &&
+        now.getTime() - reachedAt >=
+          this.AUTO_TRIP_DESTINATION_COMPLETION_DELAY_MS;
+
+      if (!passedDestinationAfterReaching && !stayedReachedLongEnough) {
+        return null;
+      }
+
+      trip.status = TripStatus.COMPLETED;
+      trip.completedAt = trip.completedAt ?? now;
+      await this.tripRepository.save(trip);
+      await this.cacheService.del(CacheService.getTripKey(trip.id));
+      await this.cacheService.del(CacheService.getTripsListKey());
+      await this.cacheService.del(CacheService.getTripsListKey('all'));
+
+      return {
+        type: 'driver_arrived_destination',
+        tripId: trip.id,
+        distanceMeters: Math.round(driverDistanceToDestination),
+        detectedAt: now.toISOString(),
+      };
+    }
+
+    const shouldNotifyArrival =
+      !trip.destinationApproachNotifiedAt &&
+      driverDistanceToDestination <=
+        this.AUTO_TRIP_DESTINATION_NOTICE_THRESHOLD_METERS;
+    const hasReachedDestination =
+      driverDistanceToDestination <=
+      this.AUTO_TRIP_DESTINATION_REACHED_THRESHOLD_METERS;
+
+    if (hasReachedDestination) {
+      trip.destinationApproachNotifiedAt =
+        trip.destinationApproachNotifiedAt ?? now;
+      trip.destinationReachedAt = trip.destinationReachedAt ?? now;
+      trip.status = TripStatus.COMPLETED;
+      trip.completedAt = trip.completedAt ?? now;
+      await this.tripRepository.save(trip);
+      await this.cacheService.del(CacheService.getTripKey(trip.id));
+      await this.cacheService.del(CacheService.getTripsListKey());
+      await this.cacheService.del(CacheService.getTripsListKey('all'));
+
+      return {
+        type: 'driver_arrived_destination',
+        tripId: trip.id,
+        distanceMeters: Math.round(driverDistanceToDestination),
+        detectedAt: now.toISOString(),
+      };
+    }
+
+    if (!shouldNotifyArrival) {
+      return null;
+    }
+
+    trip.destinationApproachNotifiedAt = now;
     await this.tripRepository.save(trip);
-    await this.cacheService.del(CacheService.getTripKey(trip.id));
-    await this.cacheService.del(CacheService.getTripsListKey());
-    await this.cacheService.del(CacheService.getTripsListKey('all'));
 
     return {
-      type: 'driver_arrived_destination',
+      type: 'driver_near_destination',
       tripId: trip.id,
       distanceMeters: Math.round(driverDistanceToDestination),
       detectedAt: now.toISOString(),
@@ -2527,30 +2647,22 @@ export class BookingsService {
     }
 
     const now = new Date();
-    if (!this.hasFreshGpsPair(booking, now)) {
-      return null;
-    }
-
-    const dropoffPoint = this.getDropoffPoint(booking);
-    const passengerDistanceToDestination = this.calculatePointDistanceMeters(
-      booking.passengerCurrentLocation,
-      dropoffPoint,
-    );
     if (
-      passengerDistanceToDestination === null ||
-      passengerDistanceToDestination >
-        this.AUTO_DROPOFF_DESTINATION_THRESHOLD_METERS
+      !booking.trip?.currentLocation ||
+      !this.isFreshLocationUpdate(booking.trip.lastLocationUpdateAt, now)
     ) {
       return null;
     }
 
-    const phoneDistance = this.calculatePointDistanceMeters(
+    const dropoffPoint = this.getDropoffPoint(booking);
+    const driverDistanceToDestination = this.calculatePointDistanceMeters(
       booking.trip.currentLocation,
-      booking.passengerCurrentLocation,
+      dropoffPoint,
     );
     if (
-      phoneDistance === null ||
-      phoneDistance > this.AUTO_DROPOFF_TOGETHER_THRESHOLD_METERS
+      driverDistanceToDestination === null ||
+      driverDistanceToDestination >
+        this.AUTO_DROPOFF_DESTINATION_THRESHOLD_METERS
     ) {
       return null;
     }
@@ -2559,6 +2671,8 @@ export class BookingsService {
     booking.pickedUpAt = booking.pickedUpAt ?? now;
     booking.pickedUpConfirmedByPassenger = true;
     booking.pickedUpConfirmedAt = booking.pickedUpConfirmedAt ?? now;
+    booking.passengerDestinationApproachNotifiedAt =
+      booking.passengerDestinationApproachNotifiedAt ?? now;
     booking.droppedOffConfirmedByPassenger = true;
     booking.droppedOffConfirmedAt = booking.droppedOffConfirmedAt ?? now;
     booking.droppedOff = true;
