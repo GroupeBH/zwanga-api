@@ -36,6 +36,7 @@ import {
   DriverEmergencyContactsDto,
 } from './dto/trip.dto';
 import { CacheService } from '../common/services/cache.service';
+import { LocationHistoryService } from '../common/services/location-history.service';
 import { FileUploadService } from '../common/services/file-upload.service';
 import { NotificationService } from '../notifications/notifications.service';
 import { Rating } from '../ratings/entities/rating.entity';
@@ -150,6 +151,7 @@ export class TripsService {
     private googleMapsService: GoogleMapsService,
     private subscriptionsService: SubscriptionsService,
     private weatherAwarenessService: WeatherAwarenessService,
+    private locationHistoryService: LocationHistoryService,
   ) {}
 
   async create(
@@ -2597,6 +2599,12 @@ export class TripsService {
     trip.lastLocationUpdateAt = new Date();
 
     await this.tripRepository.save(trip);
+    await this.locationHistoryService.recordDriverLocation(
+      trip.id,
+      Number(coordinates[1]),
+      Number(coordinates[0]),
+      trip.lastLocationUpdateAt,
+    );
 
     return {
       tripId: trip.id,

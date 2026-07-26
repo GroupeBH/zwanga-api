@@ -38,6 +38,11 @@ import { TripPaymentMode } from '../payments/enums/trip-payment-mode.enum';
 import { WalletService } from '../wallet/wallet.service';
 import { DriverSettlementsService } from '../driver-settlements/driver-settlements.service';
 import { CacheService } from '../common/services/cache.service';
+import {
+  LocationHistoryService,
+  type LocationHistorySnapshot,
+  type TrackedLocationPoint,
+} from '../common/services/location-history.service';
 import { NotificationService } from '../notifications/notifications.service';
 import { FileUploadService } from '../common/services/file-upload.service';
 import { MessagingService } from '../messaging/messaging.service';
@@ -103,14 +108,17 @@ export class BookingsService {
   private readonly CACHE_TTL = 180; // 3 minutes
   private readonly DESTINATION_PROXIMITY_THRESHOLD_METERS = 1000; // 1 km
   private readonly AUTO_PROGRESS_LOCATION_FRESHNESS_MS = 90_000;
-  private readonly AUTO_PICKUP_MATCH_THRESHOLD_METERS = 75;
+  private readonly AUTO_PICKUP_MATCH_THRESHOLD_METERS = 25;
   private readonly AUTO_PICKUP_PASSENGER_READY_THRESHOLD_METERS = 5;
   private readonly AUTO_PICKUP_DRIVER_NEAR_THRESHOLD_METERS = 200;
   private readonly AUTO_PICKUP_DRIVER_ARRIVAL_THRESHOLD_METERS = 80;
-  private readonly AUTO_PICKUP_MOVEMENT_THRESHOLD_METERS = 120;
+  private readonly AUTO_PICKUP_MOVEMENT_THRESHOLD_METERS = 30;
+  private readonly AUTO_PICKUP_MAX_HEADING_DELTA_DEGREES = 60;
   private readonly PICKUP_WAIT_WINDOW_MS = 10 * 60 * 1000;
-  private readonly PASSENGER_DESTINATION_NOTICE_THRESHOLD_METERS = 20;
-  private readonly AUTO_DROPOFF_DESTINATION_THRESHOLD_METERS = 10;
+  private readonly PASSENGER_DESTINATION_NOTICE_THRESHOLD_METERS = 40;
+  private readonly AUTO_DROPOFF_DRIVER_EXIT_THRESHOLD_METERS = 40;
+  private readonly AUTO_DROPOFF_PASSENGER_STAY_THRESHOLD_METERS = 40;
+  private readonly AUTO_DROPOFF_DRIVER_PASSENGER_SEPARATION_THRESHOLD_METERS = 60;
   private readonly AUTO_TRIP_DESTINATION_NOTICE_THRESHOLD_METERS = 20;
   private readonly AUTO_TRIP_DESTINATION_REACHED_THRESHOLD_METERS = 10;
   private readonly AUTO_TRIP_DESTINATION_PASSED_GRACE_METERS = 10;
@@ -136,6 +144,7 @@ export class BookingsService {
     private paymentsService: PaymentsService,
     private walletService: WalletService,
     private driverSettlementsService: DriverSettlementsService,
+    private locationHistoryService: LocationHistoryService,
   ) {}
 
   private buildPointFromLatLng(latitude: number, longitude: number): Point {
@@ -189,6 +198,163 @@ export class BookingsService {
       earthRadiusMeters *
       2 *
       Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine))
+    );
+  }
+
+  private normalizeHeadingDelta(left: number, right: number): number {
+    const delta = Math.abs(((left - right + 540) % 360) - 180);
+    return Number.isFinite(delta) ? delta : 180;
+  }
+
+  private calculatePointBearingDegrees(
+    from?: Point | null,
+    to?: Point | null,
+  ): number | null {
+    const start = this.pointToLatLng(from);
+    const end = this.pointToLatLng(to);
+    if (!start || !end) {
+      return null;
+    }
+
+    const startLatitude = (start.latitude * Math.PI) / 180;
+    const endLatitude = (end.latitude * Math.PI) / 180;
+    const longitudeDelta = ((end.longitude - start.longitude) * Math.PI) / 180;
+    const y = Math.sin(longitudeDelta) * Math.cos(endLatitude);
+    const x =
+      Math.cos(startLatitude) * Math.sin(endLatitude) -
+      Math.sin(startLatitude) *
+        Math.cos(endLatitude) *
+        Math.cos(longitudeDelta);
+
+    return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+  }
+
+  private buildPointFromTrackedLocation(
+    location?: TrackedLocationPoint | null,
+  ): Point | null {
+    if (!location) {
+      return null;
+    }
+
+    return this.buildPointFromLatLng(location.latitude, location.longitude);
+  }
+
+  private isFreshTrackedLocation(
+    location: TrackedLocationPoint | null | undefined,
+    now = new Date(),
+  ): boolean {
+    if (!location?.recordedAt) {
+      return false;
+    }
+
+    return this.isFreshLocationUpdate(location.recordedAt, now);
+  }
+
+  private hasFreshLocationHistoryPair(
+    driverHistory: LocationHistorySnapshot | null,
+    passengerHistory: LocationHistorySnapshot | null,
+    now = new Date(),
+  ): boolean {
+    return (
+      this.isFreshTrackedLocation(driverHistory?.previous, now) &&
+      this.isFreshTrackedLocation(driverHistory?.current, now) &&
+      this.isFreshTrackedLocation(passengerHistory?.previous, now) &&
+      this.isFreshTrackedLocation(passengerHistory?.current, now)
+    );
+  }
+
+  private areDriverAndPassengerMovingTogetherFromHistory(
+    driverHistory: LocationHistorySnapshot | null,
+    passengerHistory: LocationHistorySnapshot | null,
+    now = new Date(),
+  ): boolean {
+    if (
+      !this.hasFreshLocationHistoryPair(driverHistory, passengerHistory, now)
+    ) {
+      return false;
+    }
+
+    const driverPrevious = this.buildPointFromTrackedLocation(
+      driverHistory?.previous,
+    );
+    const driverCurrent = this.buildPointFromTrackedLocation(
+      driverHistory?.current,
+    );
+    const passengerPrevious = this.buildPointFromTrackedLocation(
+      passengerHistory?.previous,
+    );
+    const passengerCurrent = this.buildPointFromTrackedLocation(
+      passengerHistory?.current,
+    );
+    const driverMovement = this.calculatePointDistanceMeters(
+      driverPrevious,
+      driverCurrent,
+    );
+    const passengerMovement = this.calculatePointDistanceMeters(
+      passengerPrevious,
+      passengerCurrent,
+    );
+    const currentPhoneDistance = this.calculatePointDistanceMeters(
+      driverCurrent,
+      passengerCurrent,
+    );
+    if (
+      driverMovement === null ||
+      passengerMovement === null ||
+      currentPhoneDistance === null ||
+      driverMovement < this.AUTO_PICKUP_MOVEMENT_THRESHOLD_METERS ||
+      passengerMovement < this.AUTO_PICKUP_MOVEMENT_THRESHOLD_METERS ||
+      currentPhoneDistance > this.AUTO_PICKUP_MATCH_THRESHOLD_METERS
+    ) {
+      return false;
+    }
+
+    const driverBearing = this.calculatePointBearingDegrees(
+      driverPrevious,
+      driverCurrent,
+    );
+    const passengerBearing = this.calculatePointBearingDegrees(
+      passengerPrevious,
+      passengerCurrent,
+    );
+    if (driverBearing === null || passengerBearing === null) {
+      return false;
+    }
+
+    return (
+      this.normalizeHeadingDelta(driverBearing, passengerBearing) <=
+      this.AUTO_PICKUP_MAX_HEADING_DELTA_DEGREES
+    );
+  }
+
+  private hasDriverContinuedAfterDropoffFromHistory(
+    driverHistory: LocationHistorySnapshot | null,
+    dropoffPoint: Point | null,
+    now = new Date(),
+  ): boolean {
+    if (
+      !this.isFreshTrackedLocation(driverHistory?.previous, now) ||
+      !this.isFreshTrackedLocation(driverHistory?.current, now)
+    ) {
+      return false;
+    }
+
+    const previousDistance = this.calculatePointDistanceMeters(
+      this.buildPointFromTrackedLocation(driverHistory?.previous),
+      dropoffPoint,
+    );
+    const currentDistance = this.calculatePointDistanceMeters(
+      this.buildPointFromTrackedLocation(driverHistory?.current),
+      dropoffPoint,
+    );
+    if (previousDistance === null || currentDistance === null) {
+      return false;
+    }
+
+    return (
+      previousDistance <= this.PASSENGER_DESTINATION_NOTICE_THRESHOLD_METERS &&
+      currentDistance >= this.AUTO_DROPOFF_DRIVER_EXIT_THRESHOLD_METERS &&
+      currentDistance > previousDistance
     );
   }
 
@@ -2275,8 +2441,6 @@ export class BookingsService {
     );
     if (
       driverDistanceToDestination === null ||
-      driverDistanceToDestination <=
-        this.AUTO_DROPOFF_DESTINATION_THRESHOLD_METERS ||
       driverDistanceToDestination >
         this.PASSENGER_DESTINATION_NOTICE_THRESHOLD_METERS
     ) {
@@ -2438,20 +2602,40 @@ export class BookingsService {
       return null;
     }
 
+    const driverDistanceToDestination = this.calculatePointDistanceMeters(
+      trip.currentLocation,
+      trip.arrivalPoint,
+    );
+    if (driverDistanceToDestination === null) {
+      return null;
+    }
+
     const hasUnfinishedAcceptedBooking = bookings.some(
       (booking) =>
         booking.status === BookingStatus.ACCEPTED &&
         !this.hasBookingBeenDroppedOffForTripEnd(booking),
     );
     if (hasUnfinishedAcceptedBooking) {
-      return null;
-    }
-
-    const driverDistanceToDestination = this.calculatePointDistanceMeters(
-      trip.currentLocation,
-      trip.arrivalPoint,
-    );
-    if (driverDistanceToDestination === null) {
+      let shouldSaveTripProgress = false;
+      if (
+        !trip.destinationApproachNotifiedAt &&
+        driverDistanceToDestination <=
+          this.AUTO_TRIP_DESTINATION_NOTICE_THRESHOLD_METERS
+      ) {
+        trip.destinationApproachNotifiedAt = now;
+        shouldSaveTripProgress = true;
+      }
+      if (
+        !trip.destinationReachedAt &&
+        driverDistanceToDestination <=
+          this.AUTO_TRIP_DESTINATION_REACHED_THRESHOLD_METERS
+      ) {
+        trip.destinationReachedAt = now;
+        shouldSaveTripProgress = true;
+      }
+      if (shouldSaveTripProgress) {
+        await this.tripRepository.save(trip);
+      }
       return null;
     }
 
@@ -2564,15 +2748,14 @@ export class BookingsService {
 
     const now = new Date();
     const pickupPoint = this.getPickupPoint(booking);
+    const driverLocation = booking.trip?.currentLocation ?? null;
+    const passengerLocation = booking.passengerCurrentLocation ?? null;
     const hasFreshDriverLocation = Boolean(
-      booking.trip?.currentLocation &&
-        this.isFreshLocationUpdate(booking.trip.lastLocationUpdateAt, now),
+      driverLocation &&
+        this.isFreshLocationUpdate(booking.trip?.lastLocationUpdateAt, now),
     );
     const driverDistanceToPickup = hasFreshDriverLocation
-      ? this.calculatePointDistanceMeters(
-          booking.trip.currentLocation,
-          pickupPoint,
-        )
+      ? this.calculatePointDistanceMeters(driverLocation, pickupPoint)
       : null;
 
     if (
@@ -2585,38 +2768,51 @@ export class BookingsService {
       await this.bookingRepository.save(booking);
     }
 
-    const driverLeftPickupAfterArrival = Boolean(
-      booking.driverPickupArrivedAt &&
-        driverDistanceToPickup !== null &&
-        driverDistanceToPickup >= this.AUTO_PICKUP_MOVEMENT_THRESHOLD_METERS,
+    if (!this.hasFreshGpsPair(booking, now) || !driverLocation || !passengerLocation) {
+      return null;
+    }
+
+    const phoneDistance = this.calculatePointDistanceMeters(
+      driverLocation,
+      passengerLocation,
     );
+    if (
+      phoneDistance === null ||
+      phoneDistance > this.AUTO_PICKUP_MATCH_THRESHOLD_METERS
+    ) {
+      return null;
+    }
 
-    if (!driverLeftPickupAfterArrival) {
-      if (!this.hasFreshGpsPair(booking, now)) {
-        return null;
-      }
+    const [driverHistory, passengerHistory] = await Promise.all([
+      this.locationHistoryService.getDriverLocationHistory(booking.tripId),
+      this.locationHistoryService.getPassengerLocationHistory(booking.id),
+    ]);
 
-      const phoneDistance = this.calculatePointDistanceMeters(
-        booking.trip.currentLocation,
-        booking.passengerCurrentLocation,
-      );
-      if (
-        phoneDistance === null ||
-        phoneDistance > this.AUTO_PICKUP_MATCH_THRESHOLD_METERS
-      ) {
-        return null;
-      }
+    if (
+      !this.areDriverAndPassengerMovingTogetherFromHistory(
+        driverHistory,
+        passengerHistory,
+        now,
+      )
+    ) {
+      return null;
+    }
 
-      const movedFromPickup = this.calculatePointDistanceMeters(
-        booking.passengerCurrentLocation,
-        pickupPoint,
-      );
-      if (
-        movedFromPickup === null ||
-        movedFromPickup < this.AUTO_PICKUP_MOVEMENT_THRESHOLD_METERS
-      ) {
-        return null;
-      }
+    const driverMovedFromPickup = this.calculatePointDistanceMeters(
+      driverLocation,
+      pickupPoint,
+    );
+    const passengerMovedFromPickup = this.calculatePointDistanceMeters(
+      passengerLocation,
+      pickupPoint,
+    );
+    if (
+      driverMovedFromPickup === null ||
+      passengerMovedFromPickup === null ||
+      driverMovedFromPickup < this.AUTO_PICKUP_MOVEMENT_THRESHOLD_METERS ||
+      passengerMovedFromPickup < this.AUTO_PICKUP_MOVEMENT_THRESHOLD_METERS
+    ) {
+      return null;
     }
 
     const wasPickedUp = booking.pickedUp;
@@ -2677,21 +2873,53 @@ export class BookingsService {
 
     const now = new Date();
     if (
-      !booking.trip?.currentLocation ||
-      !this.isFreshLocationUpdate(booking.trip.lastLocationUpdateAt, now)
+      !booking.passengerDestinationApproachNotifiedAt ||
+      !this.hasFreshGpsPair(booking, now)
     ) {
+      return null;
+    }
+
+    const driverLocation = booking.trip?.currentLocation ?? null;
+    const passengerLocation = booking.passengerCurrentLocation ?? null;
+    if (!driverLocation || !passengerLocation) {
       return null;
     }
 
     const dropoffPoint = this.getDropoffPoint(booking);
     const driverDistanceToDestination = this.calculatePointDistanceMeters(
-      booking.trip.currentLocation,
+      driverLocation,
       dropoffPoint,
     );
+    const passengerDistanceToDestination = this.calculatePointDistanceMeters(
+      passengerLocation,
+      dropoffPoint,
+    );
+    const driverPassengerDistance = this.calculatePointDistanceMeters(
+      driverLocation,
+      passengerLocation,
+    );
+    const [driverHistory, passengerHistory] = await Promise.all([
+      this.locationHistoryService.getDriverLocationHistory(booking.tripId),
+      this.locationHistoryService.getPassengerLocationHistory(booking.id),
+    ]);
     if (
       driverDistanceToDestination === null ||
-      driverDistanceToDestination >
-        this.AUTO_DROPOFF_DESTINATION_THRESHOLD_METERS
+      passengerDistanceToDestination === null ||
+      driverPassengerDistance === null ||
+      passengerDistanceToDestination >
+        this.AUTO_DROPOFF_PASSENGER_STAY_THRESHOLD_METERS ||
+      !this.hasDriverContinuedAfterDropoffFromHistory(
+        driverHistory,
+        dropoffPoint,
+        now,
+      ) ||
+      driverPassengerDistance <
+        this.AUTO_DROPOFF_DRIVER_PASSENGER_SEPARATION_THRESHOLD_METERS ||
+      this.areDriverAndPassengerMovingTogetherFromHistory(
+        driverHistory,
+        passengerHistory,
+        now,
+      )
     ) {
       return null;
     }
@@ -3571,6 +3799,12 @@ export class BookingsService {
     booking.passengerCurrentLocation = currentLocation;
     booking.passengerLastLocationUpdateAt = new Date();
     await this.bookingRepository.save(booking);
+    await this.locationHistoryService.recordPassengerLocation(
+      booking.id,
+      Number(updateLocationDto.latitude),
+      Number(updateLocationDto.longitude),
+      booking.passengerLastLocationUpdateAt,
+    );
     await this.touchTripInteraction(booking.tripId);
 
     this.logger.log(`Passenger location updated for booking ${bookingId}`);

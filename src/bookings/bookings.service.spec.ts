@@ -24,6 +24,11 @@ describe('BookingsService trip payments', () => {
     save: jest.Mock;
   };
   let cacheService: { del: jest.Mock };
+  let locationHistoryService: {
+    recordPassengerLocation: jest.Mock;
+    getDriverLocationHistory: jest.Mock;
+    getPassengerLocationHistory: jest.Mock;
+  };
   let configService: { get: jest.Mock };
   let paymentsService: {
     initiatePayment: jest.Mock;
@@ -78,6 +83,11 @@ describe('BookingsService trip payments', () => {
       save: jest.fn((payload: unknown) => Promise.resolve(payload)),
     };
     cacheService = { del: jest.fn() };
+    locationHistoryService = {
+      recordPassengerLocation: jest.fn().mockResolvedValue(undefined),
+      getDriverLocationHistory: jest.fn().mockResolvedValue(null),
+      getPassengerLocationHistory: jest.fn().mockResolvedValue(null),
+    };
     configService = {
       get: jest.fn((key: string) => {
         if (key === 'FLEXPAY_CALLBACK_BASE_URL') {
@@ -117,7 +127,25 @@ describe('BookingsService trip payments', () => {
       paymentsService as any,
       walletService as any,
       driverSettlementsService as any,
+      locationHistoryService as any,
     );
+  });
+
+  const buildLocationHistory = (
+    previousCoordinates: [number, number],
+    currentCoordinates: [number, number],
+    recordedAt: Date,
+  ) => ({
+    previous: {
+      longitude: previousCoordinates[0],
+      latitude: previousCoordinates[1],
+      recordedAt: recordedAt.toISOString(),
+    },
+    current: {
+      longitude: currentCoordinates[0],
+      latitude: currentCoordinates[1],
+      recordedAt: recordedAt.toISOString(),
+    },
   });
 
   it('calculates the booking amount on the backend when initiating payment', async () => {
@@ -487,6 +515,12 @@ describe('BookingsService trip payments', () => {
         departurePoint: { type: 'Point', coordinates: [15.3, -4.3] },
       },
     };
+    locationHistoryService.getDriverLocationHistory.mockResolvedValue(
+      buildLocationHistory([15.3005, -4.3], [15.30201, -4.3], now),
+    );
+    locationHistoryService.getPassengerLocationHistory.mockResolvedValue(
+      buildLocationHistory([15.3005, -4.3], [15.302, -4.3], now),
+    );
     bookingRepository.find.mockResolvedValue([autoBooking]);
 
     const result = await service.evaluateAutomaticRideProgressForTrip('trip-1');
@@ -515,7 +549,7 @@ describe('BookingsService trip payments', () => {
     );
   });
 
-  it('automatically confirms pickup when the driver leaves pickup after being detected there', async () => {
+  it('does not automatically confirm pickup when the driver leaves pickup without a fresh passenger location', async () => {
     jest
       .spyOn(service as any, 'notifySelectedEmergencyContacts')
       .mockResolvedValue(undefined);
@@ -556,20 +590,8 @@ describe('BookingsService trip payments', () => {
 
     const result = await service.evaluateAutomaticRideProgressForTrip('trip-1');
 
-    expect(result.events).toEqual([
-      {
-        type: 'pickup_confirmed',
-        bookingId: 'booking-1',
-        tripId: 'trip-1',
-        passengerId: 'passenger-1',
-      },
-    ]);
-    expect(bookingRepository.save).toHaveBeenCalledWith(
-      expect.objectContaining({
-        pickedUp: true,
-        pickedUpConfirmedByPassenger: true,
-      }),
-    );
+    expect(result.events).toEqual([]);
+    expect(bookingRepository.save).not.toHaveBeenCalled();
   });
 
   it('emits a pickup arrival event when the driver reaches the passenger pickup point', async () => {
@@ -694,10 +716,56 @@ describe('BookingsService trip payments', () => {
         passengerDestinationApproachNotifiedAt: expect.any(Date),
       }),
     );
-    expect(tripRepository.save).not.toHaveBeenCalled();
+    expect(tripRepository.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: TripStatus.ACTIVE,
+        destinationApproachNotifiedAt: expect.any(Date),
+      }),
+    );
   });
 
-  it('automatically completes dropoff and the trip when the vehicle reaches the shared final destination', async () => {
+  it('does not automatically complete dropoff while driver and passenger remain together at the destination', async () => {
+    const now = new Date();
+    const autoBooking = {
+      ...booking,
+      paymentMode: TripPaymentMode.CASH,
+      paymentStatus: BookingPaymentStatus.NOT_REQUIRED,
+      pickedUp: true,
+      pickedUpConfirmedByPassenger: true,
+      droppedOff: false,
+      droppedOffConfirmedByPassenger: false,
+      passengerDestinationApproachNotifiedAt: now,
+      passengerDestinationPoint: { type: 'Point', coordinates: [15.31, -4.31] },
+      passengerCurrentLocation: {
+        type: 'Point',
+        coordinates: [15.31005, -4.31],
+      },
+      passengerLastLocationUpdateAt: now,
+      trip: {
+        ...booking.trip,
+        status: TripStatus.ACTIVE,
+        driverId: 'driver-1',
+        currentLocation: { type: 'Point', coordinates: [15.31005, -4.31] },
+        lastLocationUpdateAt: now,
+        arrivalPoint: { type: 'Point', coordinates: [15.31, -4.31] },
+        destinationApproachNotifiedAt: now,
+        destinationReachedAt: null,
+      },
+    };
+    bookingRepository.find.mockResolvedValue([autoBooking]);
+
+    const result = await service.evaluateAutomaticRideProgressForTrip('trip-1');
+
+    expect(result.events).toEqual([]);
+    expect(bookingRepository.save).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        droppedOff: true,
+        status: BookingStatus.COMPLETED,
+      }),
+    );
+  });
+
+  it('automatically completes dropoff and the trip after the driver continues past the passenger destination', async () => {
     const finalizeCompletedBookingSpy = jest
       .spyOn(service as any, 'finalizeCompletedBooking')
       .mockResolvedValue(undefined);
@@ -723,22 +791,30 @@ describe('BookingsService trip payments', () => {
       pickedUpConfirmedByPassenger: false,
       droppedOff: false,
       droppedOffConfirmedByPassenger: false,
-      passengerDestinationApproachNotifiedAt: null,
+      passengerDestinationApproachNotifiedAt: now,
       passengerDestinationPoint: { type: 'Point', coordinates: [15.31, -4.31] },
       passengerCurrentLocation: {
         type: 'Point',
-        coordinates: [15.2, -4.2],
+        coordinates: [15.31, -4.31],
       },
       passengerLastLocationUpdateAt: now,
       trip: {
         ...booking.trip,
         status: TripStatus.ACTIVE,
         driverId: 'driver-1',
-        currentLocation: { type: 'Point', coordinates: [15.31005, -4.31] },
+        currentLocation: { type: 'Point', coordinates: [15.31065, -4.31] },
         lastLocationUpdateAt: now,
         arrivalPoint: { type: 'Point', coordinates: [15.31, -4.31] },
+        destinationApproachNotifiedAt: now,
+        destinationReachedAt: now,
       },
     };
+    locationHistoryService.getDriverLocationHistory.mockResolvedValue(
+      buildLocationHistory([15.31005, -4.31], [15.31065, -4.31], now),
+    );
+    locationHistoryService.getPassengerLocationHistory.mockResolvedValue(
+      buildLocationHistory([15.31, -4.31], [15.31, -4.31], now),
+    );
     bookingRepository.find.mockResolvedValue([autoBooking]);
 
     const result = await service.evaluateAutomaticRideProgressForTrip('trip-1');
@@ -991,6 +1067,11 @@ describe('BookingsService trip payments', () => {
 
     expect(result.events).toEqual([]);
     expect(bookingRepository.save).not.toHaveBeenCalled();
-    expect(tripRepository.save).not.toHaveBeenCalled();
+    expect(tripRepository.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: TripStatus.ACTIVE,
+        destinationApproachNotifiedAt: expect.any(Date),
+      }),
+    );
   });
 });

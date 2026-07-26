@@ -63,6 +63,7 @@ describe('TripsService daily trip publication quota', () => {
       {} as any,
       subscriptionsService as any,
       {} as any,
+      { recordDriverLocation: jest.fn().mockResolvedValue(undefined) } as any,
     );
 
     jest.spyOn(service, 'findOne').mockResolvedValue({ id: 'trip-1' });
@@ -162,6 +163,7 @@ describe('TripsService trip deletion rules', () => {
       {} as any,
       {} as any,
       {} as any,
+      { recordDriverLocation: jest.fn().mockResolvedValue(undefined) } as any,
     );
   });
 
@@ -438,6 +440,7 @@ describe('TripsService started trip ETA expiration', () => {
       googleMapsService as any,
       {} as any,
       weatherAwarenessService as any,
+      { recordDriverLocation: jest.fn().mockResolvedValue(undefined) } as any,
     );
   });
 

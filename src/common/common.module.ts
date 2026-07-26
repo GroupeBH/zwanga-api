@@ -1,6 +1,7 @@
 import { Module, Global } from '@nestjs/common';
 import { CacheService } from './services/cache.service';
 import { RedisService } from './services/redis.service';
+import { LocationHistoryService } from './services/location-history.service';
 import { FileUploadService } from './services/file-upload.service';
 import { S3Service } from './services/s3.service';
 import { ContentModerationService } from './services/content-moderation.service';
@@ -14,6 +15,7 @@ import { LoggingInterceptor } from './interceptors/logging.interceptor';
   providers: [
     CacheService,
     RedisService,
+    LocationHistoryService,
     S3Service,
     ContentModerationService,
     KycValidationService,
@@ -25,6 +27,7 @@ import { LoggingInterceptor } from './interceptors/logging.interceptor';
   exports: [
     CacheService,
     RedisService,
+    LocationHistoryService,
     S3Service,
     ContentModerationService,
     KycValidationService,
