@@ -16,6 +16,8 @@ export interface LocationHistorySnapshot {
 export class LocationHistoryService {
   private readonly logger = new Logger(LocationHistoryService.name);
   private readonly LOCATION_HISTORY_TTL_SECONDS = 6 * 60 * 60;
+  private readonly DUPLICATE_LOCATION_DISTANCE_METERS = 3;
+  private readonly DUPLICATE_LOCATION_WINDOW_MS = 20_000;
 
   constructor(private readonly redisService: RedisService) {}
 
@@ -59,6 +61,18 @@ export class LocationHistoryService {
     try {
       const existing =
         await this.redisService.get<LocationHistorySnapshot>(key);
+      if (this.isDuplicateCurrentLocation(existing?.current, current)) {
+        await this.redisService.set(
+          key,
+          {
+            previous: existing?.previous ?? null,
+            current,
+          },
+          this.LOCATION_HISTORY_TTL_SECONDS,
+        );
+        return;
+      }
+
       await this.redisService.set(
         key,
         {
@@ -74,6 +88,55 @@ export class LocationHistoryService {
         }`,
       );
     }
+  }
+
+  private isDuplicateCurrentLocation(
+    previous: TrackedLocationPoint | null | undefined,
+    current: TrackedLocationPoint,
+  ): boolean {
+    if (!previous) {
+      return false;
+    }
+
+    const previousTimestamp = new Date(previous.recordedAt).getTime();
+    const currentTimestamp = new Date(current.recordedAt).getTime();
+    if (
+      !Number.isFinite(previousTimestamp) ||
+      !Number.isFinite(currentTimestamp) ||
+      Math.abs(currentTimestamp - previousTimestamp) >
+        this.DUPLICATE_LOCATION_WINDOW_MS
+    ) {
+      return false;
+    }
+
+    return (
+      this.calculateDistanceMeters(previous, current) <=
+      this.DUPLICATE_LOCATION_DISTANCE_METERS
+    );
+  }
+
+  private calculateDistanceMeters(
+    first: TrackedLocationPoint,
+    second: TrackedLocationPoint,
+  ): number {
+    const earthRadiusMeters = 6371000;
+    const toRadians = (value: number) => (value * Math.PI) / 180;
+    const deltaLatitude = toRadians(second.latitude - first.latitude);
+    const deltaLongitude = toRadians(second.longitude - first.longitude);
+    const firstLatitude = toRadians(first.latitude);
+    const secondLatitude = toRadians(second.latitude);
+    const haversine =
+      Math.sin(deltaLatitude / 2) * Math.sin(deltaLatitude / 2) +
+      Math.cos(firstLatitude) *
+        Math.cos(secondLatitude) *
+        Math.sin(deltaLongitude / 2) *
+        Math.sin(deltaLongitude / 2);
+
+    return (
+      earthRadiusMeters *
+      2 *
+      Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine))
+    );
   }
 
   private async getLocationHistory(
