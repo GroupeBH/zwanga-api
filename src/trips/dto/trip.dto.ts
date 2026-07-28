@@ -46,6 +46,8 @@ export class CreateTripDto {
   @ArrayMinSize(2)
   @ArrayMaxSize(2)
   @IsNumber({}, { each: true })
+  @Min(-180, { each: true })
+  @Max(180, { each: true })
   departureCoordinates?: [number, number];
 
   @ApiProperty()
@@ -74,6 +76,8 @@ export class CreateTripDto {
   @ArrayMinSize(2)
   @ArrayMaxSize(2)
   @IsNumber({}, { each: true })
+  @Min(-180, { each: true })
+  @Max(180, { each: true })
   arrivalCoordinates?: [number, number];
 
   @ApiProperty()
@@ -156,6 +160,8 @@ export class SearchTripsDto {
   @ArrayMinSize(2)
   @ArrayMaxSize(2)
   @IsNumber({}, { each: true })
+  @Min(-180, { each: true })
+  @Max(180, { each: true })
   departureCoordinates?: [number, number];
 
   @ApiProperty({
@@ -177,6 +183,8 @@ export class SearchTripsDto {
   @ArrayMinSize(2)
   @ArrayMaxSize(2)
   @IsNumber({}, { each: true })
+  @Min(-180, { each: true })
+  @Max(180, { each: true })
   arrivalCoordinates?: [number, number];
 
   @ApiProperty({
@@ -254,6 +262,8 @@ export class UpdateTripDto {
   @ArrayMinSize(2)
   @ArrayMaxSize(2)
   @IsNumber({}, { each: true })
+  @Min(-180, { each: true })
+  @Max(180, { each: true })
   departureCoordinates?: [number, number];
 
   @ApiProperty({ required: false })
@@ -279,6 +289,8 @@ export class UpdateTripDto {
   @ArrayMinSize(2)
   @ArrayMaxSize(2)
   @IsNumber({}, { each: true })
+  @Min(-180, { each: true })
+  @Max(180, { each: true })
   arrivalCoordinates?: [number, number];
 
   @ApiProperty({ required: false })

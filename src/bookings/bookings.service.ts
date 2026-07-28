@@ -49,6 +49,15 @@ import { MessagingService } from '../messaging/messaging.service';
 import { SafetyService } from '../safety/safety.service';
 import { SendWhatsAppNotificationDto } from './dto/send-whatsapp-notification.dto';
 import { GoogleMapsService } from '../google-maps/google-maps.service';
+import {
+  buildPointFromCoordinate,
+  isCoordinateAllowedForTrip,
+  isFreshLocationTimestamp,
+  LIVE_LOCATION_FRESHNESS_MS,
+  normalizeCoordinateForTrip,
+  normalizeLatLngCoordinate,
+  pointToCoordinate,
+} from '../common/utils/tracking-coordinates';
 
 export interface BookingPaymentResponse {
   booking: Booking;
@@ -107,7 +116,8 @@ export class BookingsService {
   private readonly logger = new Logger(BookingsService.name);
   private readonly CACHE_TTL = 180; // 3 minutes
   private readonly DESTINATION_PROXIMITY_THRESHOLD_METERS = 1000; // 1 km
-  private readonly AUTO_PROGRESS_LOCATION_FRESHNESS_MS = 90_000;
+  private readonly AUTO_PROGRESS_LOCATION_FRESHNESS_MS =
+    LIVE_LOCATION_FRESHNESS_MS;
   private readonly AUTO_PICKUP_MATCH_THRESHOLD_METERS = 25;
   private readonly AUTO_PICKUP_PASSENGER_READY_THRESHOLD_METERS = 5;
   private readonly AUTO_PICKUP_DRIVER_NEAR_THRESHOLD_METERS = 200;
@@ -147,27 +157,46 @@ export class BookingsService {
     private locationHistoryService: LocationHistoryService,
   ) {}
 
-  private buildPointFromLatLng(latitude: number, longitude: number): Point {
-    return {
-      type: 'Point',
-      coordinates: [Number(longitude), Number(latitude)],
-    };
+  private buildPointFromLatLng(
+    latitude: number,
+    longitude: number,
+  ): Point | null {
+    const coordinate = normalizeLatLngCoordinate(latitude, longitude);
+    return buildPointFromCoordinate(coordinate);
+  }
+
+  private buildTripScopedPointFromLatLng(
+    latitude: number,
+    longitude: number,
+    trip: Trip,
+    context: string,
+  ): Point {
+    const coordinate = normalizeCoordinateForTrip(latitude, longitude, trip);
+    if (!coordinate) {
+      throw new BadRequestException(
+        `Coordonnees ${context} invalides ou incoherentes avec le trajet`,
+      );
+    }
+
+    return buildPointFromCoordinate(coordinate)!;
   }
 
   private pointToLatLng(
     point?: Point | null,
   ): { latitude: number; longitude: number } | null {
-    if (!point?.coordinates || point.coordinates.length < 2) {
+    return pointToCoordinate(point);
+  }
+
+  private sanitizePointForTrip(
+    point: Point | null | undefined,
+    trip: Trip,
+  ): Point | null {
+    const coordinate = this.pointToLatLng(point);
+    if (!coordinate || !isCoordinateAllowedForTrip(coordinate, trip)) {
       return null;
     }
 
-    const longitude = Number(point.coordinates[0]);
-    const latitude = Number(point.coordinates[1]);
-    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
-      return null;
-    }
-
-    return { latitude, longitude };
+    return buildPointFromCoordinate(coordinate);
   }
 
   private calculatePointDistanceMeters(
@@ -630,17 +659,10 @@ export class BookingsService {
     updatedAt?: Date | string | null,
     now = new Date(),
   ): boolean {
-    if (!updatedAt) {
-      return false;
-    }
-
-    const timestamp = new Date(updatedAt).getTime();
-    if (!Number.isFinite(timestamp)) {
-      return false;
-    }
-
-    return (
-      now.getTime() - timestamp <= this.AUTO_PROGRESS_LOCATION_FRESHNESS_MS
+    return isFreshLocationTimestamp(
+      updatedAt,
+      now,
+      this.AUTO_PROGRESS_LOCATION_FRESHNESS_MS,
     );
   }
 
@@ -672,6 +694,7 @@ export class BookingsService {
         const result = await this.googleMapsService.geocode({
           address: query,
           region: 'CD',
+          components: 'country:CD',
         });
         const rank = this.getGeocodePrecisionRank(result);
         if (rank < bestRank) {
@@ -841,15 +864,20 @@ export class BookingsService {
     const passengerOrigin =
       createBookingDto.passengerOrigin || trip.departureLocation;
     const passengerOriginPoint = createBookingDto.passengerOriginCoordinates
-      ? this.buildPointFromLatLng(
+      ? this.buildTripScopedPointFromLatLng(
           createBookingDto.passengerOriginCoordinates.latitude,
           createBookingDto.passengerOriginCoordinates.longitude,
+          trip,
+          'du point de depart passager',
         )
       : createBookingDto.passengerOrigin
-        ? await this.geocodeAddressToPoint(
-            createBookingDto.passengerOrigin,
-            createBookingDto.passengerOriginReference,
-            'passenger origin',
+        ? this.sanitizePointForTrip(
+            await this.geocodeAddressToPoint(
+              createBookingDto.passengerOrigin,
+              createBookingDto.passengerOriginReference,
+              'passenger origin',
+            ),
+            trip,
           )
         : trip.departurePoint;
 
@@ -858,15 +886,20 @@ export class BookingsService {
       createBookingDto.passengerDestination || trip.arrivalLocation;
     const passengerDestinationPoint =
       createBookingDto.passengerDestinationCoordinates
-        ? this.buildPointFromLatLng(
+        ? this.buildTripScopedPointFromLatLng(
             createBookingDto.passengerDestinationCoordinates.latitude,
             createBookingDto.passengerDestinationCoordinates.longitude,
+            trip,
+            "de l'arrivee passager",
           )
         : createBookingDto.passengerDestination
-          ? await this.geocodeAddressToPoint(
-              createBookingDto.passengerDestination,
-              createBookingDto.passengerDestinationReference,
-              'passenger destination',
+          ? this.sanitizePointForTrip(
+              await this.geocodeAddressToPoint(
+                createBookingDto.passengerDestination,
+                createBookingDto.passengerDestinationReference,
+                'passenger destination',
+              ),
+              trip,
             )
           : trip.arrivalPoint;
 
@@ -3787,22 +3820,26 @@ export class BookingsService {
     }
 
     // Construire le point de position
-    const currentLocation: Point = {
-      type: 'Point',
-      coordinates: [
-        Number(updateLocationDto.longitude),
-        Number(updateLocationDto.latitude),
-      ],
-    };
+    const currentCoordinate = normalizeCoordinateForTrip(
+      updateLocationDto.latitude,
+      updateLocationDto.longitude,
+      booking.trip,
+    );
+    if (!currentCoordinate) {
+      throw new BadRequestException(
+        'Position passager invalide ou incoherente avec le trajet',
+      );
+    }
 
     // Mettre à jour la position
-    booking.passengerCurrentLocation = currentLocation;
+    booking.passengerCurrentLocation =
+      buildPointFromCoordinate(currentCoordinate);
     booking.passengerLastLocationUpdateAt = new Date();
     await this.bookingRepository.save(booking);
     await this.locationHistoryService.recordPassengerLocation(
       booking.id,
-      Number(updateLocationDto.latitude),
-      Number(updateLocationDto.longitude),
+      currentCoordinate.latitude,
+      currentCoordinate.longitude,
       booking.passengerLastLocationUpdateAt,
     );
     await this.touchTripInteraction(booking.tripId);
@@ -3815,10 +3852,15 @@ export class BookingsService {
       booking.tripId,
     );
 
+    const responseCoordinates: [number, number] = [
+      currentCoordinate.longitude,
+      currentCoordinate.latitude,
+    ];
+
     return {
       tripId: booking.tripId,
       bookingId: booking.id,
-      coordinates: [updateLocationDto.longitude, updateLocationDto.latitude],
+      coordinates: responseCoordinates,
       updatedAt: booking.passengerLastLocationUpdateAt!,
       autoProgress,
     };
@@ -4051,14 +4093,20 @@ export class BookingsService {
     });
 
     // Convertir les positions en coordonnées
+    const now = new Date();
+
     return acceptedBookings.map((booking) => {
       let coordinates: [number, number] | null = null;
+      let lastLocationUpdateAt: Date | null = null;
 
-      if (booking.passengerCurrentLocation) {
-        const point = booking.passengerCurrentLocation as any;
-        if (point.coordinates && point.coordinates.length === 2) {
-          coordinates = [point.coordinates[0], point.coordinates[1]]; // [longitude, latitude]
-        }
+      const coordinate = this.pointToLatLng(booking.passengerCurrentLocation);
+      if (
+        coordinate &&
+        this.isFreshLocationUpdate(booking.passengerLastLocationUpdateAt, now) &&
+        isCoordinateAllowedForTrip(coordinate, trip)
+      ) {
+        coordinates = [coordinate.longitude, coordinate.latitude];
+        lastLocationUpdateAt = booking.passengerLastLocationUpdateAt;
       }
 
       return {
@@ -4068,7 +4116,7 @@ export class BookingsService {
           ? `${booking.passenger.firstName} ${booking.passenger.lastName}`
           : 'Passager inconnu',
         coordinates,
-        lastLocationUpdateAt: booking.passengerLastLocationUpdateAt,
+        lastLocationUpdateAt,
       };
     });
   }
