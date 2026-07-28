@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { RedisService } from './redis.service';
+import { normalizeLatLngCoordinate } from '../utils/tracking-coordinates';
 
 export interface TrackedLocationPoint {
   latitude: number;
@@ -34,15 +35,14 @@ export class LocationHistoryService {
     longitude: number,
     recordedAt: Date,
   ): TrackedLocationPoint | null {
-    const safeLatitude = Number(latitude);
-    const safeLongitude = Number(longitude);
-    if (!Number.isFinite(safeLatitude) || !Number.isFinite(safeLongitude)) {
+    const coordinate = normalizeLatLngCoordinate(latitude, longitude);
+    if (!coordinate) {
       return null;
     }
 
     return {
-      latitude: safeLatitude,
-      longitude: safeLongitude,
+      latitude: coordinate.latitude,
+      longitude: coordinate.longitude,
       recordedAt: recordedAt.toISOString(),
     };
   }

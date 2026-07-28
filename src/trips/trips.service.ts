@@ -49,6 +49,14 @@ import {
   SubscriptionsService,
 } from '../subscriptions/subscriptions.service';
 import { WeatherAwarenessService } from '../weather/weather-awareness.service';
+import {
+  buildPointFromCoordinate,
+  isCoordinateAllowedForTrip,
+  isFreshLocationTimestamp,
+  normalizeLngLatCoordinates,
+  pointToCoordinate,
+  pointToCoordinates as toSafeCoordinates,
+} from '../common/utils/tracking-coordinates';
 
 export type Coordinates = [number, number] | null;
 
@@ -400,18 +408,16 @@ export class TripsService {
     }
 
     // If coordinates are provided, calculate distance (simplified - in production use PostGIS)
-    const hasDepartureCoords =
-      Array.isArray(searchTripsDto.departureCoordinates) &&
-      searchTripsDto.departureCoordinates.length === 2;
+    const departureSearchCoordinates = normalizeLngLatCoordinates(
+      searchTripsDto.departureCoordinates,
+    );
+    const hasDepartureCoords = Boolean(departureSearchCoordinates);
 
     let depLng: number | undefined;
     let depLat: number | undefined;
 
-    if (hasDepartureCoords) {
-      [depLng, depLat] = searchTripsDto.departureCoordinates as [
-        number,
-        number,
-      ];
+    if (departureSearchCoordinates) {
+      [depLng, depLat] = departureSearchCoordinates;
       const departureRadiusMeters =
         (searchTripsDto.departureRadiusKm ?? 50) * 1000;
       const departureSearchPoint = this.getDepartureSearchPointExpression();
@@ -430,15 +436,16 @@ export class TripsService {
       );
     }
 
-    const hasArrivalCoords =
-      Array.isArray(searchTripsDto.arrivalCoordinates) &&
-      searchTripsDto.arrivalCoordinates.length === 2;
+    const arrivalSearchCoordinates = normalizeLngLatCoordinates(
+      searchTripsDto.arrivalCoordinates,
+    );
+    const hasArrivalCoords = Boolean(arrivalSearchCoordinates);
 
     let arrLng: number | undefined;
     let arrLat: number | undefined;
 
-    if (hasArrivalCoords) {
-      [arrLng, arrLat] = searchTripsDto.arrivalCoordinates as [number, number];
+    if (arrivalSearchCoordinates) {
+      [arrLng, arrLat] = arrivalSearchCoordinates;
       const arrivalRadiusMeters = (searchTripsDto.arrivalRadiusKm ?? 50) * 1000;
 
       queryBuilder.andWhere(
@@ -2006,7 +2013,9 @@ export class TripsService {
 
   private getDepartureSearchPointExpression(): string {
     return `CASE
-      WHEN "trip"."status" = :activeStatus THEN COALESCE("trip"."currentLocation", "trip"."departurePoint")
+      WHEN "trip"."status" = :activeStatus
+        AND "trip"."lastLocationUpdateAt" >= NOW() - INTERVAL '90 seconds'
+        THEN COALESCE("trip"."currentLocation", "trip"."departurePoint")
       ELSE "trip"."departurePoint"
     END`;
   }
@@ -2186,14 +2195,13 @@ export class TripsService {
   private buildPointFromCoordinates(
     coordinates?: [number, number] | null,
   ): Point | null {
-    if (!coordinates) {
+    const normalizedCoordinates = normalizeLngLatCoordinates(coordinates);
+    if (!normalizedCoordinates) {
       return null;
     }
-    const [longitude, latitude] = coordinates;
-    return {
-      type: 'Point',
-      coordinates: [Number(longitude), Number(latitude)],
-    };
+
+    const [longitude, latitude] = normalizedCoordinates;
+    return buildPointFromCoordinate({ latitude, longitude });
   }
 
   private async resolvePointFromCoordinatesOrAddress(
@@ -2238,6 +2246,7 @@ export class TripsService {
         const result = await this.googleMapsService.geocode({
           address: query,
           region: 'CD',
+          components: 'country:CD',
         });
         const rank = this.getGeocodePrecisionRank(result);
         if (rank < bestRank) {
@@ -2290,6 +2299,7 @@ export class TripsService {
   ): Promise<SanitizedTrip> {
     const { driver, bookings, departurePoint, arrivalPoint, vehicle, ...rest } =
       trip;
+    const freshCurrentLocation = this.getFreshCurrentLocationPoint(trip);
     const driverPremium = driver
       ? this.getUserPremiumFeatures(driver.id, userPremiumMap)
       : this.getInactivePremiumFeatures();
@@ -2324,7 +2334,7 @@ export class TripsService {
     const sanitizedBookings = bookings
       ? await Promise.all(
           bookings.map((booking) =>
-            this.sanitizeBooking(booking, userRatingsMap, userPremiumMap),
+            this.sanitizeBooking(booking, userRatingsMap, userPremiumMap, trip),
           ),
         )
       : [];
@@ -2334,6 +2344,10 @@ export class TripsService {
         Trip,
         'driver' | 'bookings' | 'departurePoint' | 'arrivalPoint' | 'vehicle'
       >),
+      currentLocation: freshCurrentLocation,
+      lastLocationUpdateAt: freshCurrentLocation
+        ? trip.lastLocationUpdateAt
+        : null,
       departureCoordinates: this.pointToCoordinates(departurePoint),
       arrivalCoordinates: this.pointToCoordinates(arrivalPoint),
       driver: sanitizedDriver,
@@ -2347,16 +2361,40 @@ export class TripsService {
     booking: Booking,
     userRatingsMap?: Map<string, UserRatingSummary>,
     userPremiumMap?: Map<string, PremiumSubscriptionFeatures>,
+    parentTrip?: Trip,
   ): Promise<SanitizedBooking> {
     const { passenger, trip, messages, ...rest } = booking;
+    const freshPassengerCurrentLocation =
+      this.getFreshPassengerCurrentLocationPoint(booking, parentTrip ?? trip);
+
     return {
       ...(rest as Omit<Booking, 'trip' | 'passenger' | 'messages'>),
+      passengerCurrentLocation: freshPassengerCurrentLocation,
+      passengerLastLocationUpdateAt: freshPassengerCurrentLocation
+        ? booking.passengerLastLocationUpdateAt
+        : null,
       passenger: await this.sanitizeUser(
         passenger,
         userRatingsMap,
         userPremiumMap,
       ),
     } as SanitizedBooking;
+  }
+
+  private getFreshPassengerCurrentLocationPoint(
+    booking: Booking,
+    trip?: Trip,
+  ): Point | null {
+    if (!isFreshLocationTimestamp(booking.passengerLastLocationUpdateAt)) {
+      return null;
+    }
+
+    const coordinate = pointToCoordinate(booking.passengerCurrentLocation);
+    if (!coordinate || (trip && !isCoordinateAllowedForTrip(coordinate, trip))) {
+      return null;
+    }
+
+    return buildPointFromCoordinate(coordinate);
   }
 
   private async sanitizeUser(
@@ -2522,12 +2560,20 @@ export class TripsService {
   }
 
   private pointToCoordinates(point?: Point | null): Coordinates {
-    if (!point?.coordinates) {
+    return toSafeCoordinates(point);
+  }
+
+  private getFreshCurrentLocationPoint(trip: Trip): Point | null {
+    if (!isFreshLocationTimestamp(trip.lastLocationUpdateAt)) {
       return null;
     }
 
-    const [longitude, latitude] = point.coordinates;
-    return [Number(longitude), Number(latitude)];
+    const coordinate = pointToCoordinate(trip.currentLocation);
+    if (!coordinate || !isCoordinateAllowedForTrip(coordinate, trip)) {
+      return null;
+    }
+
+    return buildPointFromCoordinate(coordinate);
   }
 
   private async verifyTripParticipant(tripId: string, userId: string) {
@@ -2595,20 +2641,38 @@ export class TripsService {
       );
     }
 
-    trip.currentLocation = this.buildPointFromCoordinates(coordinates);
+    const normalizedCoordinates = normalizeLngLatCoordinates(coordinates);
+    if (!normalizedCoordinates) {
+      throw new BadRequestException('Coordonnees conducteur invalides');
+    }
+
+    const [longitude, latitude] = normalizedCoordinates;
+    const currentCoordinate = { latitude, longitude };
+    if (!isCoordinateAllowedForTrip(currentCoordinate, trip)) {
+      throw new BadRequestException(
+        'Position conducteur incoherente avec le trajet',
+      );
+    }
+
+    trip.currentLocation = buildPointFromCoordinate(currentCoordinate);
     trip.lastLocationUpdateAt = new Date();
 
     await this.tripRepository.save(trip);
     await this.locationHistoryService.recordDriverLocation(
       trip.id,
-      Number(coordinates[1]),
-      Number(coordinates[0]),
+      currentCoordinate.latitude,
+      currentCoordinate.longitude,
       trip.lastLocationUpdateAt,
     );
 
+    const responseCoordinates: [number, number] = [
+      currentCoordinate.longitude,
+      currentCoordinate.latitude,
+    ];
+
     return {
       tripId: trip.id,
-      coordinates,
+      coordinates: responseCoordinates,
       updatedAt: trip.lastLocationUpdateAt,
     };
   }
@@ -2625,10 +2689,13 @@ export class TripsService {
         'Le trajet n’est plus en cours, le suivi en temps réel est arrêté',
       );
     }
+    const freshCurrentLocation = this.getFreshCurrentLocationPoint(trip);
+    const coordinates = this.pointToCoordinates(freshCurrentLocation);
+
     return {
       tripId: trip.id,
-      coordinates: this.pointToCoordinates(trip.currentLocation),
-      updatedAt: trip.lastLocationUpdateAt,
+      coordinates,
+      updatedAt: coordinates ? trip.lastLocationUpdateAt : null,
     };
   }
 

@@ -21,6 +21,8 @@ class PassengerDestinationCoordinatesDto {
     example: -4.3276,
   })
   @IsNumber()
+  @Min(-90)
+  @Max(90)
   @IsNotEmpty()
   latitude: number;
 
@@ -29,6 +31,8 @@ class PassengerDestinationCoordinatesDto {
     example: 15.3136,
   })
   @IsNumber()
+  @Min(-180)
+  @Max(180)
   @IsNotEmpty()
   longitude: number;
 }
@@ -39,6 +43,8 @@ class PassengerOriginCoordinatesDto {
     example: -4.3276,
   })
   @IsNumber()
+  @Min(-90)
+  @Max(90)
   @IsNotEmpty()
   latitude: number;
 
@@ -47,6 +53,8 @@ class PassengerOriginCoordinatesDto {
     example: 15.3136,
   })
   @IsNumber()
+  @Min(-180)
+  @Max(180)
   @IsNotEmpty()
   longitude: number;
 }
@@ -232,6 +240,8 @@ export class UpdatePassengerLocationDto {
     example: -4.3276,
   })
   @IsNumber()
+  @Min(-90)
+  @Max(90)
   @IsNotEmpty()
   latitude: number;
 
@@ -240,6 +250,8 @@ export class UpdatePassengerLocationDto {
     example: 15.3136,
   })
   @IsNumber()
+  @Min(-180)
+  @Max(180)
   @IsNotEmpty()
   longitude: number;
 }

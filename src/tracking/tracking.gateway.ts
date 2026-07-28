@@ -12,6 +12,7 @@ import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { TripsService } from '../trips/trips.service';
 import { BookingsService } from '../bookings/bookings.service';
+import { normalizeLngLatCoordinates } from '../common/utils/tracking-coordinates';
 
 @WebSocketGateway({
   cors: { origin: '*' },
@@ -31,18 +32,12 @@ export class TrackingGateway
   ) {}
 
   private parseCoordinates(coordinates?: [number, number]): [number, number] {
-    if (!Array.isArray(coordinates) || coordinates.length !== 2) {
+    const normalizedCoordinates = normalizeLngLatCoordinates(coordinates);
+    if (!normalizedCoordinates) {
       throw new Error('Coordonnees invalides');
     }
 
-    const longitude = Number(coordinates[0]);
-    const latitude = Number(coordinates[1]);
-
-    if (!Number.isFinite(longitude) || !Number.isFinite(latitude)) {
-      throw new Error('Coordonnees invalides');
-    }
-
-    return [longitude, latitude];
+    return normalizedCoordinates;
   }
 
   async handleConnection(client: Socket) {
