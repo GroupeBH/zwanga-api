@@ -15,6 +15,11 @@ import { Trip } from '../../trips/entities/trip.entity';
 import { Message } from '../../chat/entities/message.entity';
 import { PaymentTransaction } from '../../payments/entities/payment-transaction.entity';
 import { TripPaymentMode } from '../../payments/enums/trip-payment-mode.enum';
+import {
+  DriverTripInterruptionConfirmation,
+  DriverTripInterruptionRequest,
+  PassengerTripInterruptionRequest,
+} from '../../trips/entities/trip-interruption.entity';
 
 export enum BookingStatus {
   PENDING = 'pending',
@@ -191,4 +196,19 @@ export class Booking {
 
   @OneToMany(() => Message, (message) => message.booking)
   messages: Message[];
+
+  @OneToMany(
+    () => PassengerTripInterruptionRequest,
+    (request) => request.booking,
+  )
+  interruptionRequests: PassengerTripInterruptionRequest[];
+
+  @OneToMany(
+    () => DriverTripInterruptionConfirmation,
+    (confirmation) => confirmation.booking,
+  )
+  tripInterruptionConfirmations: DriverTripInterruptionConfirmation[];
+
+  interruptionRequest?: PassengerTripInterruptionRequest | null;
+  tripInterruptionRequest?: DriverTripInterruptionRequest | null;
 }

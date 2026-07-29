@@ -3,6 +3,11 @@ import { KycDocument } from '../users/entities/kyc-document.entity';
 import { Vehicle } from '../vehicles/entities/vehicle.entity';
 import { Trip } from '../trips/entities/trip.entity';
 import { RecurringTripTemplate } from '../trips/entities/recurring-trip-template.entity';
+import {
+  DriverTripInterruptionConfirmation,
+  DriverTripInterruptionRequest,
+  PassengerTripInterruptionRequest,
+} from '../trips/entities/trip-interruption.entity';
 import { Booking } from '../bookings/entities/booking.entity';
 import { Message } from '../chat/entities/message.entity';
 import { Rating } from '../ratings/entities/rating.entity';
@@ -34,6 +39,9 @@ export const typeOrmEntities = [
   Vehicle,
   Trip,
   RecurringTripTemplate,
+  PassengerTripInterruptionRequest,
+  DriverTripInterruptionRequest,
+  DriverTripInterruptionConfirmation,
   Booking,
   Message,
   Rating,

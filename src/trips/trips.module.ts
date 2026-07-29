@@ -16,6 +16,12 @@ import { RecurringTripTemplate } from './entities/recurring-trip-template.entity
 import { GoogleMapsModule } from '../google-maps/google-maps.module';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
 import { WeatherModule } from '../weather/weather.module';
+import { BookingsModule } from '../bookings/bookings.module';
+import {
+  DriverTripInterruptionConfirmation,
+  DriverTripInterruptionRequest,
+  PassengerTripInterruptionRequest,
+} from './entities/trip-interruption.entity';
 
 @Module({
   imports: [
@@ -29,7 +35,11 @@ import { WeatherModule } from '../weather/weather.module';
       Rating,
       EmergencyContact,
       RecurringTripTemplate,
+      PassengerTripInterruptionRequest,
+      DriverTripInterruptionRequest,
+      DriverTripInterruptionConfirmation,
     ]),
+    BookingsModule,
     NotificationsModule,
     MessagingModule,
     GoogleMapsModule,

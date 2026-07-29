@@ -7,6 +7,7 @@ import { AddWalletPointsAndDriverSettlements1780000006000 } from './178000000600
 import { AddTripShareLinks1780000007000 } from './1780000007000-AddTripShareLinks';
 import { AddRideArrivalTrackingState1780000008000 } from './1780000008000-AddRideArrivalTrackingState';
 import { RepairDriverPickupArrivedAt1780000009000 } from './1780000009000-RepairDriverPickupArrivedAt';
+import { AddTripInterruptionRequests1780000010000 } from './1780000010000-AddTripInterruptionRequests';
 
 export const databaseMigrations = [
   FillTotalSeats1780000000000,
@@ -18,4 +19,5 @@ export const databaseMigrations = [
   AddTripShareLinks1780000007000,
   AddRideArrivalTrackingState1780000008000,
   RepairDriverPickupArrivedAt1780000009000,
+  AddTripInterruptionRequests1780000010000,
 ];

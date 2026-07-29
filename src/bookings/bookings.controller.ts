@@ -15,6 +15,10 @@ import { Auth } from '../auth/decorators/auth.decorator';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
 import { Public } from '../common/decorators/public.decorator';
 import { FlexPayCallbackDto, InitiatePaymentDto } from '../payments/dto/payment.dto';
+import {
+  RejectTripInterruptionDto,
+  RequestTripInterruptionDto,
+} from '../trips/dto/trip-interruption.dto';
 
 @ApiTags('Bookings')
 @Controller('bookings')
@@ -164,6 +168,67 @@ export class BookingsController {
   async cancel(@Request() req, @Param('id') id: string) {
     await this.bookingsService.cancel(id, req.user.userId);
     return { message: 'Booking cancelled successfully' };
+  }
+
+  @Post(':id/interruption-request')
+  @Auth()
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({
+    summary:
+      'Request an early trip interruption for this passenger booking',
+  })
+  async requestTripInterruption(
+    @Request() req,
+    @Param('id') id: string,
+    @Body() dto: RequestTripInterruptionDto,
+  ) {
+    return this.bookingsService.requestPassengerTripInterruption(
+      id,
+      req.user.userId,
+      dto,
+    );
+  }
+
+  @Put(':id/interruption-request/cancel')
+  @Auth()
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({ summary: 'Cancel a pending passenger interruption request' })
+  async cancelTripInterruption(@Request() req, @Param('id') id: string) {
+    return this.bookingsService.cancelPassengerTripInterruption(
+      id,
+      req.user.userId,
+    );
+  }
+
+  @Put(':id/interruption-request/confirm')
+  @Auth()
+  @SensitiveThrottle(20, 60000)
+  @ApiOperation({
+    summary: 'Confirm a passenger early interruption request (driver only)',
+  })
+  async confirmTripInterruption(@Request() req, @Param('id') id: string) {
+    return this.bookingsService.confirmPassengerTripInterruption(
+      id,
+      req.user.userId,
+    );
+  }
+
+  @Put(':id/interruption-request/reject')
+  @Auth()
+  @SensitiveThrottle(20, 60000)
+  @ApiOperation({
+    summary: 'Reject a passenger early interruption request (driver only)',
+  })
+  async rejectTripInterruption(
+    @Request() req,
+    @Param('id') id: string,
+    @Body() dto: RejectTripInterruptionDto,
+  ) {
+    return this.bookingsService.rejectPassengerTripInterruption(
+      id,
+      req.user.userId,
+      dto.reason,
+    );
   }
 
   @Get(':id/driver-contact')
