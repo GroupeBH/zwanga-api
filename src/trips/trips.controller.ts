@@ -21,6 +21,11 @@ import {
   DriverEmergencyContactsDto,
   UpdateDriverLocationDto,
 } from './dto/trip.dto';
+import {
+  ConfirmDriverTripInterruptionDto,
+  RejectTripInterruptionDto,
+  RequestTripInterruptionDto,
+} from './dto/trip-interruption.dto';
 import { Auth } from '../auth/decorators/auth.decorator';
 import { Public } from '../common/decorators/public.decorator';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
@@ -235,6 +240,72 @@ export class TripsController {
   @ApiOperation({ summary: 'Pause/interrupt an active trip' })
   async pauseTrip(@Request() req, @Param('id') id: string) {
     return this.tripsService.pauseTrip(id, req.user.userId);
+  }
+
+  @Post(':id/interruption-request')
+  @Auth()
+  @SensitiveThrottle(10, 6000)
+  @ApiOperation({
+    summary:
+      'Request interruption of an active trip; onboard passengers must confirm',
+  })
+  async requestTripInterruption(
+    @Request() req,
+    @Param('id') id: string,
+    @Body() dto: RequestTripInterruptionDto,
+  ) {
+    return this.tripsService.requestDriverTripInterruption(
+      id,
+      req.user.userId,
+      dto,
+    );
+  }
+
+  @Put(':id/interruption-request/cancel')
+  @Auth()
+  @SensitiveThrottle(10, 6000)
+  @ApiOperation({ summary: 'Cancel a pending driver interruption request' })
+  async cancelTripInterruption(@Request() req, @Param('id') id: string) {
+    return this.tripsService.cancelDriverTripInterruption(
+      id,
+      req.user.userId,
+    );
+  }
+
+  @Put(':id/interruption-request/confirm')
+  @Auth()
+  @SensitiveThrottle(20, 6000)
+  @ApiOperation({
+    summary: 'Confirm a driver interruption request as an onboard passenger',
+  })
+  async confirmTripInterruption(
+    @Request() req,
+    @Param('id') id: string,
+    @Body() dto: ConfirmDriverTripInterruptionDto,
+  ) {
+    return this.tripsService.confirmDriverTripInterruption(
+      id,
+      req.user.userId,
+      dto,
+    );
+  }
+
+  @Put(':id/interruption-request/reject')
+  @Auth()
+  @SensitiveThrottle(20, 6000)
+  @ApiOperation({
+    summary: 'Reject a driver interruption request as an onboard passenger',
+  })
+  async rejectTripInterruption(
+    @Request() req,
+    @Param('id') id: string,
+    @Body() dto: RejectTripInterruptionDto,
+  ) {
+    return this.tripsService.rejectDriverTripInterruption(
+      id,
+      req.user.userId,
+      dto,
+    );
   }
 
   @Put(':id/complete')

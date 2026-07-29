@@ -20,6 +20,13 @@ import {
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { Trip, TripStatus } from './entities/trip.entity';
 import {
+  DriverTripInterruptionConfirmation,
+  DriverTripInterruptionRequest,
+  TripInterruptionConfirmationStatus,
+  TripInterruptionReason,
+  TripInterruptionStatus,
+} from './entities/trip-interruption.entity';
+import {
   RecurringTripTemplate,
   RecurringTripTemplateStatus,
 } from './entities/recurring-trip-template.entity';
@@ -35,6 +42,12 @@ import {
   UpdateTripDto,
   DriverEmergencyContactsDto,
 } from './dto/trip.dto';
+import {
+  ConfirmDriverTripInterruptionDto,
+  RejectTripInterruptionDto,
+  RequestTripInterruptionDto,
+} from './dto/trip-interruption.dto';
+import { BookingsService } from '../bookings/bookings.service';
 import { CacheService } from '../common/services/cache.service';
 import { LocationHistoryService } from '../common/services/location-history.service';
 import { FileUploadService } from '../common/services/file-upload.service';
@@ -53,6 +66,7 @@ import {
   buildPointFromCoordinate,
   isCoordinateAllowedForTrip,
   isFreshLocationTimestamp,
+  normalizeCoordinateForTrip,
   normalizeLngLatCoordinates,
   pointToCoordinate,
   pointToCoordinates as toSafeCoordinates,
@@ -152,6 +166,10 @@ export class TripsService {
     private ratingRepository: Repository<Rating>,
     @InjectRepository(EmergencyContact)
     private emergencyContactRepository: Repository<EmergencyContact>,
+    @InjectRepository(DriverTripInterruptionRequest)
+    private driverTripInterruptionRepository: Repository<DriverTripInterruptionRequest>,
+    @InjectRepository(DriverTripInterruptionConfirmation)
+    private driverTripInterruptionConfirmationRepository: Repository<DriverTripInterruptionConfirmation>,
     private cacheService: CacheService,
     private fileUploadService: FileUploadService,
     private notificationService: NotificationService,
@@ -160,6 +178,7 @@ export class TripsService {
     private subscriptionsService: SubscriptionsService,
     private weatherAwarenessService: WeatherAwarenessService,
     private locationHistoryService: LocationHistoryService,
+    private bookingsService: BookingsService,
   ) {}
 
   async create(
@@ -530,6 +549,8 @@ export class TripsService {
       throw new NotFoundException('Trajet non trouve');
     }
 
+    trip.interruptionRequest =
+      await this.findActiveDriverInterruptionRequest(id);
     const userIds = this.collectTripUserIds([trip]);
     const userRatingsMap = await this.buildUserRatingsMap(userIds);
     const userPremiumMap =
@@ -1300,6 +1321,607 @@ export class TripsService {
     await this.notifyPassengersAboutTripPause(trip, acceptedBookings);
 
     return this.findOne(tripId);
+  }
+
+  async requestDriverTripInterruption(
+    tripId: string,
+    driverId: string,
+    dto: RequestTripInterruptionDto,
+  ): Promise<SanitizedTrip> {
+    const trip = await this.tripRepository.findOne({
+      where: { id: tripId, driverId },
+      relations: ['bookings', 'bookings.passenger', 'driver', 'vehicle'],
+    });
+
+    if (!trip) {
+      throw new NotFoundException(
+        "Trajet non trouve ou vous n'etes pas le conducteur",
+      );
+    }
+
+    if (trip.status !== TripStatus.ACTIVE) {
+      throw new BadRequestException(
+        `Impossible d'interrompre le trajet. Statut actuel : ${trip.status}`,
+      );
+    }
+
+    const existingRequest =
+      await this.findActiveDriverInterruptionRequest(tripId);
+    if (existingRequest) {
+      return this.findOne(tripId);
+    }
+
+    const passengersOnBoard = this.getOnboardBookings(trip.bookings ?? []);
+
+    if (passengersOnBoard.length === 0) {
+      return this.pauseTrip(tripId, driverId);
+    }
+
+    const request = await this.driverTripInterruptionRepository.save(
+      this.driverTripInterruptionRepository.create({
+        tripId: trip.id,
+        requestedByDriverId: driverId,
+        reason: dto.reason ?? TripInterruptionReason.OTHER,
+        note: dto.note ?? null,
+        status: TripInterruptionStatus.PENDING,
+        requestedLocation: this.buildDriverInterruptionPoint(
+          dto.coordinates,
+          trip,
+        ),
+        requiredPassengerCount: passengersOnBoard.length,
+        confirmedPassengerCount: 0,
+        rejectedPassengerCount: 0,
+        requestedAt: new Date(),
+        confirmedAt: null,
+        rejectedAt: null,
+        cancelledAt: null,
+        completedAt: null,
+      }),
+    );
+
+    const confirmations = passengersOnBoard.map((booking) =>
+      this.driverTripInterruptionConfirmationRepository.create({
+        requestId: request.id,
+        tripId: trip.id,
+        bookingId: booking.id,
+        passengerId: booking.passengerId,
+        status: TripInterruptionConfirmationStatus.PENDING,
+        confirmedAt: null,
+        rejectedAt: null,
+        rejectionReason: null,
+      }),
+    );
+
+    await this.driverTripInterruptionConfirmationRepository.save(confirmations);
+    await this.invalidateDriverInterruptionCaches(trip.id);
+    await this.notifyPassengersAboutDriverInterruptionRequest(
+      trip,
+      request,
+      confirmations,
+    );
+
+    return this.findOne(tripId);
+  }
+
+  async cancelDriverTripInterruption(
+    tripId: string,
+    driverId: string,
+  ): Promise<SanitizedTrip> {
+    const request = await this.driverTripInterruptionRepository.findOne({
+      where: {
+        tripId,
+        requestedByDriverId: driverId,
+        status: TripInterruptionStatus.PENDING,
+      },
+      relations: ['confirmations', 'confirmations.passenger', 'trip'],
+    });
+
+    if (!request) {
+      throw new NotFoundException("Aucune demande d'interruption en attente");
+    }
+
+    request.status = TripInterruptionStatus.CANCELLED;
+    request.cancelledAt = new Date();
+    await this.driverTripInterruptionRepository.save(request);
+    await this.invalidateDriverInterruptionCaches(tripId);
+    await this.notifyPassengersAboutDriverInterruptionCancelled(request);
+
+    return this.findOne(tripId);
+  }
+
+  async confirmDriverTripInterruption(
+    tripId: string,
+    passengerId: string,
+    dto: ConfirmDriverTripInterruptionDto = {},
+  ): Promise<SanitizedTrip> {
+    const request = await this.getPendingDriverInterruptionRequest(tripId);
+    const confirmation =
+      await this.getDriverInterruptionConfirmationForPassenger(
+        request.id,
+        passengerId,
+        dto.bookingId,
+      );
+
+    if (confirmation.status === TripInterruptionConfirmationStatus.REJECTED) {
+      throw new BadRequestException(
+        "Vous avez deja refuse cette demande d'interruption",
+      );
+    }
+
+    if (confirmation.status !== TripInterruptionConfirmationStatus.CONFIRMED) {
+      confirmation.status = TripInterruptionConfirmationStatus.CONFIRMED;
+      confirmation.confirmedAt = new Date();
+      confirmation.rejectedAt = null;
+      confirmation.rejectionReason = null;
+      await this.driverTripInterruptionConfirmationRepository.save(
+        confirmation,
+      );
+    }
+
+    const refreshedRequest =
+      await this.refreshDriverInterruptionRequestCounts(request.id);
+
+    if (
+      refreshedRequest.confirmedPassengerCount >=
+        refreshedRequest.requiredPassengerCount &&
+      refreshedRequest.rejectedPassengerCount === 0
+    ) {
+      await this.finalizeDriverTripInterruption(refreshedRequest);
+    } else {
+      await this.driverTripInterruptionRepository.save(refreshedRequest);
+      await this.invalidateDriverInterruptionCaches(tripId);
+      await this.notifyDriverAboutDriverInterruptionResponse(
+        refreshedRequest,
+        confirmation,
+        true,
+      );
+    }
+
+    return this.findOne(tripId);
+  }
+
+  async rejectDriverTripInterruption(
+    tripId: string,
+    passengerId: string,
+    dto: RejectTripInterruptionDto = {},
+  ): Promise<SanitizedTrip> {
+    const request = await this.getPendingDriverInterruptionRequest(tripId);
+    const confirmation =
+      await this.getDriverInterruptionConfirmationForPassenger(
+        request.id,
+        passengerId,
+        dto.bookingId,
+      );
+
+    if (confirmation.status === TripInterruptionConfirmationStatus.CONFIRMED) {
+      throw new BadRequestException(
+        "Vous avez deja confirme cette demande d'interruption",
+      );
+    }
+
+    if (confirmation.status !== TripInterruptionConfirmationStatus.REJECTED) {
+      confirmation.status = TripInterruptionConfirmationStatus.REJECTED;
+      confirmation.rejectedAt = new Date();
+      confirmation.rejectionReason = dto.reason ?? null;
+      await this.driverTripInterruptionConfirmationRepository.save(
+        confirmation,
+      );
+    }
+
+    const refreshedRequest =
+      await this.refreshDriverInterruptionRequestCounts(request.id);
+    refreshedRequest.status = TripInterruptionStatus.REJECTED;
+    refreshedRequest.rejectedAt = refreshedRequest.rejectedAt ?? new Date();
+    await this.driverTripInterruptionRepository.save(refreshedRequest);
+    await this.invalidateDriverInterruptionCaches(tripId);
+    await this.notifyDriverAboutDriverInterruptionResponse(
+      refreshedRequest,
+      confirmation,
+      false,
+    );
+
+    return this.findOne(tripId);
+  }
+
+  private async findActiveDriverInterruptionRequest(
+    tripId: string,
+  ): Promise<DriverTripInterruptionRequest | null> {
+    return this.driverTripInterruptionRepository.findOne({
+      where: {
+        tripId,
+        status: TripInterruptionStatus.PENDING,
+      },
+      relations: ['confirmations', 'confirmations.passenger'],
+      order: { createdAt: 'DESC' },
+    });
+  }
+
+  private async getPendingDriverInterruptionRequest(
+    tripId: string,
+  ): Promise<DriverTripInterruptionRequest> {
+    const request = await this.findActiveDriverInterruptionRequest(tripId);
+    if (!request) {
+      throw new NotFoundException("Aucune demande d'interruption en attente");
+    }
+    return request;
+  }
+
+  private async getDriverInterruptionConfirmationForPassenger(
+    requestId: string,
+    passengerId: string,
+    bookingId?: string,
+  ): Promise<DriverTripInterruptionConfirmation> {
+    const confirmation =
+      await this.driverTripInterruptionConfirmationRepository.findOne({
+        where: bookingId
+          ? { requestId, passengerId, bookingId }
+          : { requestId, passengerId },
+        relations: ['booking', 'passenger'],
+      });
+
+    if (!confirmation) {
+      throw new ForbiddenException(
+        "Vous ne faites pas partie des passagers devant confirmer cette interruption",
+      );
+    }
+
+    return confirmation;
+  }
+
+  private async refreshDriverInterruptionRequestCounts(
+    requestId: string,
+  ): Promise<DriverTripInterruptionRequest> {
+    const request = await this.driverTripInterruptionRepository.findOne({
+      where: { id: requestId },
+      relations: ['confirmations', 'confirmations.passenger'],
+    });
+
+    if (!request) {
+      throw new NotFoundException("Demande d'interruption introuvable");
+    }
+
+    const confirmations = request.confirmations ?? [];
+    request.requiredPassengerCount =
+      request.requiredPassengerCount || confirmations.length;
+    request.confirmedPassengerCount = confirmations.filter(
+      (confirmation) =>
+        confirmation.status === TripInterruptionConfirmationStatus.CONFIRMED,
+    ).length;
+    request.rejectedPassengerCount = confirmations.filter(
+      (confirmation) =>
+        confirmation.status === TripInterruptionConfirmationStatus.REJECTED,
+    ).length;
+
+    return request;
+  }
+
+  private async finalizeDriverTripInterruption(
+    request: DriverTripInterruptionRequest,
+  ): Promise<void> {
+    const requestWithRelations =
+      await this.driverTripInterruptionRepository.findOne({
+        where: { id: request.id },
+        relations: [
+          'confirmations',
+          'confirmations.passenger',
+          'trip',
+          'trip.driver',
+        ],
+      });
+
+    if (!requestWithRelations) {
+      throw new NotFoundException("Demande d'interruption introuvable");
+    }
+
+    const confirmations = requestWithRelations.confirmations ?? [];
+    const hasMissingConfirmation = confirmations.some(
+      (confirmation) =>
+        confirmation.status !== TripInterruptionConfirmationStatus.CONFIRMED,
+    );
+
+    if (hasMissingConfirmation) {
+      throw new BadRequestException(
+        'Tous les passagers doivent confirmer avant interruption du trajet',
+      );
+    }
+
+    for (const confirmation of confirmations) {
+      await this.bookingsService.completeBookingByTripInterruption(
+        confirmation.bookingId,
+      );
+    }
+
+    const trip = await this.tripRepository.findOne({
+      where: { id: requestWithRelations.tripId },
+      relations: ['bookings', 'bookings.passenger', 'driver'],
+    });
+
+    if (!trip) {
+      throw new NotFoundException('Trajet non trouve');
+    }
+
+    trip.status = TripStatus.PENDING;
+    trip.availableSeats = this.calculateAvailableSeatsAfterInterruption(trip);
+    await this.tripRepository.save(trip);
+
+    const now = new Date();
+    requestWithRelations.status = TripInterruptionStatus.COMPLETED;
+    requestWithRelations.confirmedAt = now;
+    requestWithRelations.completedAt = now;
+    requestWithRelations.requiredPassengerCount = confirmations.length;
+    requestWithRelations.confirmedPassengerCount = confirmations.length;
+    requestWithRelations.rejectedPassengerCount = 0;
+    await this.driverTripInterruptionRepository.save(requestWithRelations);
+
+    await this.invalidateDriverInterruptionCaches(trip.id);
+    await this.notifyDriverAboutDriverInterruptionCompleted(
+      trip,
+      requestWithRelations,
+    );
+    await this.notifyPassengersAboutDriverInterruptionCompleted(
+      trip,
+      requestWithRelations,
+    );
+  }
+
+  private getOnboardBookings(bookings: Booking[]): Booking[] {
+    return bookings.filter(
+      (booking) =>
+        booking.status === BookingStatus.ACCEPTED &&
+        this.hasBookingEmbarked(booking) &&
+        !this.hasBookingBeenDroppedOff(booking),
+    );
+  }
+
+  private calculateAvailableSeatsAfterInterruption(trip: Trip): number {
+    if (!trip.totalSeats) {
+      return Math.max(0, trip.availableSeats ?? 0);
+    }
+
+    const activeAcceptedSeats = (trip.bookings ?? [])
+      .filter(
+        (booking) =>
+          booking.status === BookingStatus.ACCEPTED &&
+          !this.hasBookingBeenDroppedOff(booking),
+      )
+      .reduce((sum, booking) => sum + booking.numberOfSeats, 0);
+
+    return Math.max(0, trip.totalSeats - activeAcceptedSeats);
+  }
+
+  private buildDriverInterruptionPoint(
+    coordinates: RequestTripInterruptionDto['coordinates'],
+    trip: Trip,
+  ): Point | null {
+    if (!coordinates) {
+      return null;
+    }
+
+    const coordinate = normalizeCoordinateForTrip(
+      coordinates.latitude,
+      coordinates.longitude,
+      trip,
+    );
+
+    if (!coordinate) {
+      throw new BadRequestException(
+        "Position d'interruption invalide ou incoherente avec le trajet",
+      );
+    }
+
+    return buildPointFromCoordinate(coordinate);
+  }
+
+  private async invalidateDriverInterruptionCaches(tripId: string): Promise<void> {
+    await this.cacheService.del(CacheService.getTripKey(tripId));
+    await this.cacheService.del(CacheService.getBookingsByTripKey(tripId));
+    await this.cacheService.del(CacheService.getTripsListKey());
+    await this.cacheService.del(CacheService.getTripsListKey('all'));
+    await this.cacheService.del(CacheService.getTripsListKey('allTrips'));
+  }
+
+  private async notifyPassengersAboutDriverInterruptionRequest(
+    trip: Trip,
+    request: DriverTripInterruptionRequest,
+    confirmations: DriverTripInterruptionConfirmation[],
+  ): Promise<void> {
+    try {
+      const passengerIds = confirmations.map(
+        (confirmation) => confirmation.passengerId,
+      );
+      const passengers = await this.userRepository.find({
+        where: { id: In(passengerIds) },
+        select: ['id', 'fcmToken', 'firstName'],
+      });
+      const bookingIdByPassengerId = new Map(
+        confirmations.map((confirmation) => [
+          confirmation.passengerId,
+          confirmation.bookingId,
+        ]),
+      );
+
+      await Promise.all(
+        passengers
+          .filter((passenger) => passenger.fcmToken)
+          .map((passenger) =>
+            this.notificationService.sendNotification(
+              passenger.fcmToken!,
+              "Demande d'interruption",
+              'Le conducteur demande a interrompre le trajet. Votre confirmation est requise.',
+              {
+                type: 'driver_trip_interruption_requested',
+                tripId: trip.id,
+                requestId: request.id,
+                bookingId: bookingIdByPassengerId.get(passenger.id),
+                role: 'passenger',
+              },
+              passenger.id,
+            ),
+          ),
+      );
+    } catch (error) {
+      this.logger.error(
+        `Failed to notify passengers about driver interruption request: ${error.message}`,
+        error.stack,
+      );
+    }
+  }
+
+  private async notifyPassengersAboutDriverInterruptionCancelled(
+    request: DriverTripInterruptionRequest,
+  ): Promise<void> {
+    try {
+      const confirmations = request.confirmations ?? [];
+      const passengerIds = confirmations.map(
+        (confirmation) => confirmation.passengerId,
+      );
+      const passengers = await this.userRepository.find({
+        where: { id: In(passengerIds) },
+        select: ['id', 'fcmToken'],
+      });
+
+      await Promise.all(
+        passengers
+          .filter((passenger) => passenger.fcmToken)
+          .map((passenger) =>
+            this.notificationService.sendNotification(
+              passenger.fcmToken!,
+              'Demande annulee',
+              "Le conducteur a annule sa demande d'interruption du trajet.",
+              {
+                type: 'driver_trip_interruption_cancelled',
+                tripId: request.tripId,
+                requestId: request.id,
+                role: 'passenger',
+              },
+              passenger.id,
+            ),
+          ),
+      );
+    } catch (error) {
+      this.logger.error(
+        `Failed to notify passengers about driver interruption cancellation: ${error.message}`,
+        error.stack,
+      );
+    }
+  }
+
+  private async notifyDriverAboutDriverInterruptionResponse(
+    request: DriverTripInterruptionRequest,
+    confirmation: DriverTripInterruptionConfirmation,
+    confirmed: boolean,
+  ): Promise<void> {
+    try {
+      const driver = await this.userRepository.findOne({
+        where: { id: request.requestedByDriverId },
+        select: ['id', 'fcmToken'],
+      });
+
+      if (!driver?.fcmToken) {
+        return;
+      }
+
+      const passengerName = confirmation.passenger
+        ? `${confirmation.passenger.firstName} ${confirmation.passenger.lastName}`.trim()
+        : 'Un passager';
+
+      await this.notificationService.sendNotification(
+        driver.fcmToken,
+        confirmed ? 'Interruption confirmee' : 'Interruption refusee',
+        confirmed
+          ? `${passengerName} a confirme votre demande d'interruption.`
+          : `${passengerName} a refuse votre demande d'interruption.`,
+        {
+          type: confirmed
+            ? 'driver_trip_interruption_passenger_confirmed'
+            : 'driver_trip_interruption_passenger_rejected',
+          tripId: request.tripId,
+          requestId: request.id,
+          bookingId: confirmation.bookingId,
+          passengerId: confirmation.passengerId,
+          role: 'driver',
+        },
+        driver.id,
+      );
+    } catch (error) {
+      this.logger.error(
+        `Failed to notify driver about interruption response: ${error.message}`,
+        error.stack,
+      );
+    }
+  }
+
+  private async notifyDriverAboutDriverInterruptionCompleted(
+    trip: Trip,
+    request: DriverTripInterruptionRequest,
+  ): Promise<void> {
+    try {
+      const driver = await this.userRepository.findOne({
+        where: { id: request.requestedByDriverId },
+        select: ['id', 'fcmToken'],
+      });
+
+      if (!driver?.fcmToken) {
+        return;
+      }
+
+      await this.notificationService.sendNotification(
+        driver.fcmToken,
+        'Trajet interrompu',
+        'Tous les passagers ont confirme. Le trajet est maintenant interrompu.',
+        {
+          type: 'driver_trip_interruption_completed',
+          tripId: trip.id,
+          requestId: request.id,
+          role: 'driver',
+        },
+        driver.id,
+      );
+    } catch (error) {
+      this.logger.error(
+        `Failed to notify driver about completed interruption: ${error.message}`,
+        error.stack,
+      );
+    }
+  }
+
+  private async notifyPassengersAboutDriverInterruptionCompleted(
+    trip: Trip,
+    request: DriverTripInterruptionRequest,
+  ): Promise<void> {
+    try {
+      const confirmations = request.confirmations ?? [];
+      const passengers = await this.userRepository.find({
+        where: {
+          id: In(confirmations.map((confirmation) => confirmation.passengerId)),
+        },
+        select: ['id', 'fcmToken'],
+      });
+
+      await Promise.all(
+        passengers
+          .filter((passenger) => passenger.fcmToken)
+          .map((passenger) =>
+            this.notificationService.sendNotification(
+              passenger.fcmToken!,
+              'Trajet interrompu',
+              'Le trajet a ete interrompu apres confirmation des passagers.',
+              {
+                type: 'driver_trip_interruption_completed',
+                tripId: trip.id,
+                requestId: request.id,
+                role: 'passenger',
+              },
+              passenger.id,
+            ),
+          ),
+      );
+    } catch (error) {
+      this.logger.error(
+        `Failed to notify passengers about completed interruption: ${error.message}`,
+        error.stack,
+      );
+    }
   }
 
   private async notifyNearbyUsersAboutTripStart(trip: Trip): Promise<void> {

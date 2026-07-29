@@ -14,6 +14,10 @@ import { User } from '../../users/entities/user.entity';
 import { Booking } from '../../bookings/entities/booking.entity';
 import { Vehicle } from '../../vehicles/entities/vehicle.entity';
 import { RecurringTripTemplate } from './recurring-trip-template.entity';
+import {
+  DriverTripInterruptionRequest,
+  PassengerTripInterruptionRequest,
+} from './trip-interruption.entity';
 
 export enum TripStatus {
   PENDING = 'upcoming',
@@ -163,4 +167,15 @@ export class Trip {
 
   @OneToMany(() => Booking, (booking) => booking.trip)
   bookings: Booking[];
+
+  @OneToMany(
+    () => PassengerTripInterruptionRequest,
+    (request) => request.trip,
+  )
+  passengerInterruptionRequests: PassengerTripInterruptionRequest[];
+
+  @OneToMany(() => DriverTripInterruptionRequest, (request) => request.trip)
+  driverInterruptionRequests: DriverTripInterruptionRequest[];
+
+  interruptionRequest?: DriverTripInterruptionRequest | null;
 }
