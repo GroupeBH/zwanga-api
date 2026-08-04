@@ -1,5 +1,0 @@
-bucket         = "replace-with-your-terraform-state-bucket"
-key            = "zwanga/lightsail/eu-central-1/terraform.tfstate"
-region         = "eu-central-1"
-encrypt        = true
-use_lockfile   = true

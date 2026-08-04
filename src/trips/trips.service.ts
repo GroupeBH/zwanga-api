@@ -1628,6 +1628,8 @@ export class TripsService {
     for (const confirmation of confirmations) {
       await this.bookingsService.completeBookingByTripInterruption(
         confirmation.bookingId,
+        requestWithRelations.requestedLocation ??
+          requestWithRelations.trip.currentLocation,
       );
     }
 

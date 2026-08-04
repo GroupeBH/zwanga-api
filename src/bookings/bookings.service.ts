@@ -56,6 +56,7 @@ import { MessagingService } from '../messaging/messaging.service';
 import { SafetyService } from '../safety/safety.service';
 import { SendWhatsAppNotificationDto } from './dto/send-whatsapp-notification.dto';
 import { GoogleMapsService } from '../google-maps/google-maps.service';
+import { TravelMode } from '../google-maps/dto/google-maps.dto';
 import {
   buildPointFromCoordinate,
   isCoordinateAllowedForTrip,
@@ -1272,7 +1273,10 @@ export class BookingsService {
       throw new NotFoundException("Aucune demande d'interruption en attente");
     }
 
-    await this.completeBookingByTripInterruption(booking.id);
+    await this.completeBookingByTripInterruption(
+      booking.id,
+      request.requestedLocation ?? booking.trip.currentLocation,
+    );
 
     const now = new Date();
     request.status = TripInterruptionStatus.COMPLETED;
@@ -1335,7 +1339,10 @@ export class BookingsService {
     return this.findOne(booking.id);
   }
 
-  async completeBookingByTripInterruption(bookingId: string): Promise<Booking> {
+  async completeBookingByTripInterruption(
+    bookingId: string,
+    interruptionLocation?: Point | null,
+  ): Promise<Booking> {
     const booking = await this.bookingRepository.findOne({
       where: { id: bookingId },
       relations: ['trip', 'trip.driver', 'passenger'],
@@ -1366,6 +1373,40 @@ export class BookingsService {
       'Cette reservation doit etre reglee avant interruption',
     );
 
+    const fareAdjustment = await this.calculateDistanceBasedFareAdjustment(
+      booking,
+      interruptionLocation ??
+        booking.passengerCurrentLocation ??
+        booking.trip.currentLocation,
+    );
+
+    if (fareAdjustment) {
+      booking.originalPaymentAmount = fareAdjustment.originalAmount;
+      booking.plannedDistanceMeters = fareAdjustment.plannedDistanceMeters;
+      booking.travelledDistanceMeters = fareAdjustment.travelledDistanceMeters;
+      booking.pricePerKilometer = fareAdjustment.pricePerKilometer;
+      booking.fareAdjustmentAmount = fareAdjustment.adjustmentAmount;
+      booking.fareAdjustedAt = booking.fareAdjustedAt ?? new Date();
+      booking.paymentAmount = fareAdjustment.finalAmount;
+      booking.paymentCurrency =
+        booking.paymentCurrency || this.getTripPaymentCurrency();
+
+      await this.bookingRepository.save(booking);
+
+      if (
+        fareAdjustment.adjustmentAmount > 0 &&
+        [TripPaymentMode.ELECTRONIC, TripPaymentMode.POINTS].includes(
+          booking.paymentMode,
+        ) &&
+        booking.paymentStatus === BookingPaymentStatus.SUCCEEDED
+      ) {
+        await this.walletService.creditBookingFareAdjustment(
+          booking,
+          fareAdjustment.adjustmentAmount,
+        );
+      }
+    }
+
     const now = new Date();
     booking.pickedUp = true;
     booking.pickedUpAt = booking.pickedUpAt ?? now;
@@ -1383,6 +1424,157 @@ export class BookingsService {
     await this.invalidateBookingCaches(savedBooking);
 
     return savedBooking;
+  }
+
+  private async calculateDistanceBasedFareAdjustment(
+    booking: Booking,
+    interruptionLocation?: Point | null,
+  ): Promise<{
+    originalAmount: number;
+    finalAmount: number;
+    adjustmentAmount: number;
+    plannedDistanceMeters: number;
+    travelledDistanceMeters: number;
+    pricePerKilometer: number;
+  } | null> {
+    const storedOriginalAmount = Number(
+      booking.originalPaymentAmount ?? booking.paymentAmount,
+    );
+    const originalAmount =
+      Number.isFinite(storedOriginalAmount) && storedOriginalAmount > 0
+        ? storedOriginalAmount
+        : this.calculateBookingPaymentAmount(
+            booking.trip,
+            booking.numberOfSeats,
+          );
+
+    if (
+      booking.fareAdjustedAt &&
+      booking.plannedDistanceMeters !== null &&
+      booking.plannedDistanceMeters !== undefined &&
+      booking.travelledDistanceMeters !== null &&
+      booking.travelledDistanceMeters !== undefined &&
+      booking.pricePerKilometer !== null &&
+      booking.pricePerKilometer !== undefined &&
+      booking.fareAdjustmentAmount !== null &&
+      booking.fareAdjustmentAmount !== undefined
+    ) {
+      return {
+        originalAmount,
+        finalAmount: Number(booking.paymentAmount ?? originalAmount),
+        adjustmentAmount: Number(booking.fareAdjustmentAmount),
+        plannedDistanceMeters: booking.plannedDistanceMeters,
+        travelledDistanceMeters: booking.travelledDistanceMeters,
+        pricePerKilometer: Number(booking.pricePerKilometer),
+      };
+    }
+
+    const origin =
+      booking.passengerOriginPoint ?? booking.trip.departurePoint ?? null;
+    const destination =
+      booking.passengerDestinationPoint ?? booking.trip.arrivalPoint ?? null;
+
+    if (
+      originalAmount <= 0 ||
+      !origin ||
+      !destination ||
+      !interruptionLocation
+    ) {
+      return null;
+    }
+
+    const plannedDistanceMeters = await this.calculateRouteDistanceMeters(
+      origin,
+      destination,
+      `booking ${booking.id} planned route`,
+    );
+    const rawTravelledDistanceMeters = await this.calculateRouteDistanceMeters(
+      origin,
+      interruptionLocation,
+      `booking ${booking.id} travelled route`,
+    );
+
+    if (
+      plannedDistanceMeters === null ||
+      plannedDistanceMeters <= 0 ||
+      rawTravelledDistanceMeters === null ||
+      rawTravelledDistanceMeters < 0
+    ) {
+      return null;
+    }
+
+    const travelledDistanceMeters = Math.min(
+      plannedDistanceMeters,
+      Math.max(0, rawTravelledDistanceMeters),
+    );
+    const pricePerKilometer = this.roundMoney(
+      originalAmount / (plannedDistanceMeters / 1000),
+    );
+    const finalAmount = Math.min(
+      originalAmount,
+      this.roundMoney(
+        originalAmount * (travelledDistanceMeters / plannedDistanceMeters),
+      ),
+    );
+
+    return {
+      originalAmount,
+      finalAmount,
+      adjustmentAmount: this.roundMoney(originalAmount - finalAmount),
+      plannedDistanceMeters,
+      travelledDistanceMeters,
+      pricePerKilometer,
+    };
+  }
+
+  private async calculateRouteDistanceMeters(
+    originPoint: Point,
+    destinationPoint: Point,
+    context: string,
+  ): Promise<number | null> {
+    const origin = this.pointToLatLng(originPoint);
+    const destination = this.pointToLatLng(destinationPoint);
+    if (!origin || !destination) {
+      return null;
+    }
+
+    try {
+      const directions = await this.googleMapsService.getDirections({
+        origin: { lat: origin.latitude, lng: origin.longitude },
+        destination: {
+          lat: destination.latitude,
+          lng: destination.longitude,
+        },
+        mode: TravelMode.DRIVING,
+        region: 'CD',
+      });
+      const legs = directions.routes?.[0]?.legs ?? [];
+      const distanceMeters = legs.reduce(
+        (sum, leg) => sum + (Number(leg.distance) || 0),
+        0,
+      );
+
+      if (legs.length > 0 && distanceMeters >= 0) {
+        return Math.round(distanceMeters);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(
+        `Unable to calculate route distance for ${context}: ${message}`,
+      );
+    }
+
+    const straightLineDistance = this.calculatePointDistanceMeters(
+      originPoint,
+      destinationPoint,
+    );
+    return straightLineDistance === null
+      ? null
+      : Math.round(straightLineDistance);
+  }
+
+  private roundMoney(value: number): number {
+    return Math.round(Number(value) * 100) / 100;
   }
 
   private buildInterruptionPoint(
@@ -2010,10 +2202,18 @@ export class BookingsService {
       return;
     }
 
-    const grossAmount = this.calculateBookingPaymentAmount(
+    const calculatedGrossAmount = this.calculateBookingPaymentAmount(
       completedBooking.trip,
       completedBooking.numberOfSeats,
     );
+    const persistedAmount = Number(completedBooking.paymentAmount);
+    const grossAmount =
+      completedBooking.paymentAmount !== null &&
+      completedBooking.paymentAmount !== undefined &&
+      Number.isFinite(persistedAmount) &&
+      persistedAmount >= 0
+        ? persistedAmount
+        : calculatedGrossAmount;
 
     if (grossAmount > 0 && !completedBooking.paymentAmount) {
       completedBooking.paymentAmount = grossAmount;

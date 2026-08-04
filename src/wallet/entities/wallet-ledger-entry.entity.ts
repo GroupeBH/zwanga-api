@@ -18,6 +18,7 @@ export enum WalletLedgerEntryType {
   LOYALTY_REWARD = 'loyalty_reward',
   BOOKING_PAYMENT = 'booking_payment',
   BOOKING_REFUND = 'booking_refund',
+  BOOKING_FARE_ADJUSTMENT = 'booking_fare_adjustment',
 }
 
 @Entity('wallet_ledger_entries')

@@ -41,8 +41,10 @@ describe('BookingsService trip payments', () => {
   let walletService: {
     payForBooking: jest.Mock;
     refundBookingPayment: jest.Mock;
+    creditBookingFareAdjustment: jest.Mock;
     awardLoyaltyForBooking: jest.Mock;
   };
+  let googleMapsService: { getDirections: jest.Mock };
   let driverSettlementsService: {
     recordCompletedBookingEarning: jest.Mock;
   };
@@ -107,7 +109,11 @@ describe('BookingsService trip payments', () => {
     walletService = {
       payForBooking: jest.fn(),
       refundBookingPayment: jest.fn(),
+      creditBookingFareAdjustment: jest.fn(),
       awardLoyaltyForBooking: jest.fn(),
+    };
+    googleMapsService = {
+      getDirections: jest.fn(),
     };
     driverSettlementsService = {
       recordCompletedBookingEarning: jest.fn(),
@@ -117,12 +123,14 @@ describe('BookingsService trip payments', () => {
       bookingRepository as any,
       tripRepository as any,
       {} as any,
+      {} as any,
+      {} as any,
       cacheService as any,
       {} as any,
       {} as any,
       {} as any,
       {} as any,
-      {} as any,
+      googleMapsService as any,
       configService as any,
       paymentsService as any,
       walletService as any,
@@ -147,6 +155,96 @@ describe('BookingsService trip payments', () => {
       recordedAt: recordedAt.toISOString(),
     },
   });
+
+  it.each([
+    TripPaymentMode.ELECTRONIC,
+    TripPaymentMode.POINTS,
+    TripPaymentMode.CASH,
+  ])(
+    'charges only the travelled kilometers after an interruption paid by %s',
+    async (paymentMode) => {
+      const originPoint = {
+        type: 'Point' as const,
+        coordinates: [15.2663, -4.325],
+      };
+      const destinationPoint = {
+        type: 'Point' as const,
+        coordinates: [15.3663, -4.425],
+      };
+      const interruptionPoint = {
+        type: 'Point' as const,
+        coordinates: [15.3063, -4.365],
+      };
+      const interruptedBooking = {
+        ...booking,
+        numberOfSeats: 1,
+        pickedUp: true,
+        paymentMode,
+        paymentStatus:
+          paymentMode === TripPaymentMode.CASH
+            ? BookingPaymentStatus.NOT_REQUIRED
+            : BookingPaymentStatus.SUCCEEDED,
+        paymentAmount: 10000,
+        passengerOriginPoint: originPoint,
+        passengerDestinationPoint: destinationPoint,
+        trip: {
+          ...booking.trip,
+          driverId: 'driver-1',
+          status: TripStatus.ACTIVE,
+          pricePerSeat: 10000,
+          departurePoint: originPoint,
+          arrivalPoint: destinationPoint,
+          currentLocation: interruptionPoint,
+        },
+      };
+      bookingRepository.findOne.mockResolvedValue(interruptedBooking);
+      googleMapsService.getDirections
+        .mockResolvedValueOnce({
+          routes: [{ legs: [{ distance: 10000 }] }],
+        })
+        .mockResolvedValueOnce({
+          routes: [{ legs: [{ distance: 4000 }] }],
+        });
+      jest
+        .spyOn(service as any, 'touchTripInteraction')
+        .mockResolvedValue(undefined);
+
+      const result = await service.completeBookingByTripInterruption(
+        'booking-1',
+        interruptionPoint as any,
+      );
+
+      expect(result).toEqual(
+        expect.objectContaining({
+          status: BookingStatus.COMPLETED,
+          originalPaymentAmount: 10000,
+          paymentAmount: 4000,
+          plannedDistanceMeters: 10000,
+          travelledDistanceMeters: 4000,
+          pricePerKilometer: 1000,
+          fareAdjustmentAmount: 6000,
+          fareAdjustedAt: expect.any(Date),
+        }),
+      );
+      if (paymentMode === TripPaymentMode.CASH) {
+        expect(
+          walletService.creditBookingFareAdjustment,
+        ).not.toHaveBeenCalled();
+      } else {
+        expect(walletService.creditBookingFareAdjustment).toHaveBeenCalledWith(
+          expect.objectContaining({ id: 'booking-1', paymentAmount: 4000 }),
+          6000,
+        );
+      }
+      expect(walletService.awardLoyaltyForBooking).toHaveBeenCalledWith(
+        expect.objectContaining({ paymentAmount: 4000 }),
+        4000,
+      );
+      expect(
+        driverSettlementsService.recordCompletedBookingEarning,
+      ).toHaveBeenCalledWith(expect.objectContaining({ paymentAmount: 4000 }));
+    },
+  );
 
   it('calculates the booking amount on the backend when initiating payment', async () => {
     bookingRepository.findOne.mockResolvedValue({ ...booking });
@@ -203,6 +301,60 @@ describe('BookingsService trip payments', () => {
     ).rejects.toThrow('Cette reservation doit etre reglee en especes');
 
     expect(paymentsService.initiatePayment).not.toHaveBeenCalled();
+  });
+
+  it('lets the passenger pay an existing booking with points', async () => {
+    bookingRepository.findOne.mockResolvedValue({
+      ...booking,
+      paymentMode: TripPaymentMode.CASH,
+      paymentStatus: BookingPaymentStatus.NOT_REQUIRED,
+    });
+
+    const result = await service.updatePaymentMode(
+      'booking-1',
+      'passenger-1',
+      TripPaymentMode.POINTS,
+    );
+
+    expect(walletService.payForBooking).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'booking-1',
+        passengerId: 'passenger-1',
+        paymentMode: TripPaymentMode.POINTS,
+      }),
+      5000,
+    );
+    expect(result).toEqual(
+      expect.objectContaining({
+        paymentMode: TripPaymentMode.POINTS,
+        paymentAmount: 5000,
+        paymentCurrency: 'CDF',
+        paymentStatus: BookingPaymentStatus.SUCCEEDED,
+      }),
+    );
+    expect(result.paidAt).toBeInstanceOf(Date);
+    expect(paymentsService.initiatePayment).not.toHaveBeenCalled();
+  });
+
+  it('keeps the booking unpaid when the points balance is insufficient', async () => {
+    bookingRepository.findOne.mockResolvedValue({
+      ...booking,
+      paymentMode: TripPaymentMode.CASH,
+      paymentStatus: BookingPaymentStatus.NOT_REQUIRED,
+    });
+    walletService.payForBooking.mockRejectedValue(
+      new Error('Solde de points insuffisant pour payer ce trajet'),
+    );
+
+    await expect(
+      service.updatePaymentMode(
+        'booking-1',
+        'passenger-1',
+        TripPaymentMode.POINTS,
+      ),
+    ).rejects.toThrow('Solde de points insuffisant');
+
+    expect(bookingRepository.save).not.toHaveBeenCalled();
   });
 
   it('marks the booking paid after a successful FlexPay status check', async () => {
@@ -855,7 +1007,7 @@ describe('BookingsService trip payments', () => {
     );
   });
 
-  it('emits a trip destination warning before completing the trip', async () => {
+  it('completes the trip when the driver is within 25 meters of the destination', async () => {
     const now = new Date();
     const completedBooking = {
       ...booking,
@@ -890,7 +1042,7 @@ describe('BookingsService trip payments', () => {
 
     expect(result.events).toEqual([
       expect.objectContaining({
-        type: 'driver_near_destination',
+        type: 'driver_arrived_destination',
         tripId: 'trip-1',
         distanceMeters: expect.any(Number),
         detectedAt: expect.any(String),
@@ -899,9 +1051,10 @@ describe('BookingsService trip payments', () => {
     expect(bookingRepository.save).not.toHaveBeenCalled();
     expect(tripRepository.save).toHaveBeenCalledWith(
       expect.objectContaining({
-        status: TripStatus.ACTIVE,
+        status: TripStatus.COMPLETED,
         destinationApproachNotifiedAt: expect.any(Date),
-        destinationReachedAt: null,
+        destinationReachedAt: expect.any(Date),
+        completedAt: expect.any(Date),
       }),
     );
   });
@@ -926,7 +1079,7 @@ describe('BookingsService trip payments', () => {
         id: 'trip-1',
         status: TripStatus.ACTIVE,
         driverId: 'driver-1',
-        currentLocation: { type: 'Point', coordinates: [15.31015, -4.31] },
+        currentLocation: { type: 'Point', coordinates: [15.3103, -4.31] },
         lastLocationUpdateAt: now,
         arrivalPoint: { type: 'Point', coordinates: [15.31, -4.31] },
         destinationApproachNotifiedAt: approachNotifiedAt,

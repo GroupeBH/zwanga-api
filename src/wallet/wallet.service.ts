@@ -192,6 +192,35 @@ export class WalletService {
     return true;
   }
 
+  async creditBookingFareAdjustment(
+    booking: Booking,
+    amount: number,
+  ): Promise<WalletLedgerEntry | null> {
+    const normalizedAmount = this.normalizePositiveAmount(amount);
+    if (normalizedAmount <= 0) {
+      return null;
+    }
+
+    const existingEntry = await this.findBookingEntry(
+      booking.passengerId,
+      booking.id,
+      WalletLedgerEntryType.BOOKING_FARE_ADJUSTMENT,
+    );
+    if (existingEntry) {
+      return existingEntry;
+    }
+
+    return this.changeBalance({
+      userId: booking.passengerId,
+      amount: normalizedAmount,
+      type: WalletLedgerEntryType.BOOKING_FARE_ADJUSTMENT,
+      relatedEntityType: this.BOOKING_RELATED_ENTITY_TYPE,
+      relatedEntityId: booking.id,
+      paymentTransactionId: booking.paymentTransactionId,
+      description: `Ajustement du prix kilometrique pour la reservation ${booking.id}`,
+    });
+  }
+
   async awardLoyaltyForBooking(
     booking: Booking,
     grossAmount: number,

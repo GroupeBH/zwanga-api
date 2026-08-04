@@ -1,0 +1,138 @@
+name: Deploy NestJS to AWS App Runner
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: aws-apprunner-production
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+  APP_RUNNER_SERVICE_ARN: ${{ vars.APP_RUNNER_SERVICE_ARN }}
+
+jobs:
+  test-build-deploy:
+    name: Test, publish and deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Run tests
+        run: npm run test -- --runInBand
+
+      - name: Compile NestJS
+        run: npm run build
+
+      - name: Validate deployment variables
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${AWS_REGION:?Configure the AWS_REGION repository variable}"
+          : "${AWS_ROLE_ARN:?Configure the AWS_ROLE_ARN repository variable}"
+          : "${ECR_REPOSITORY:?Configure the ECR_REPOSITORY repository variable}"
+          : "${APP_RUNNER_SERVICE_ARN:?Configure the APP_RUNNER_SERVICE_ARN repository variable}"
+
+      - name: Configure temporary AWS credentials through OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          role-session-name: GitHubActions-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push immutable and deployment tags
+        id: docker-build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          target: production
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
+            ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Keep a single-image manifest: App Runner does not need BuildKit
+          # attestation manifests to deploy this linux/amd64 image.
+          provenance: false
+          sbom: false
+
+      - name: Start App Runner deployment
+        id: deploy
+        shell: bash
+        run: |
+          set -euo pipefail
+          operation_id="$(aws apprunner start-deployment \
+            --service-arn "${APP_RUNNER_SERVICE_ARN}" \
+            --query 'OperationId' \
+            --output text)"
+          echo "operation_id=${operation_id}" >> "${GITHUB_OUTPUT}"
+
+      - name: Wait for App Runner
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for attempt in $(seq 1 60); do
+            status="$(aws apprunner describe-service \
+              --service-arn "${APP_RUNNER_SERVICE_ARN}" \
+              --query 'Service.Status' \
+              --output text)"
+
+            echo "App Runner status: ${status} (attempt ${attempt}/60)"
+            case "${status}" in
+              RUNNING)
+                exit 0
+                ;;
+              OPERATION_IN_PROGRESS)
+                sleep 10
+                ;;
+              *)
+                echo "Unexpected App Runner status: ${status}"
+                exit 1
+                ;;
+            esac
+          done
+
+          echo "App Runner deployment did not finish within 10 minutes"
+          exit 1
+
+      - name: Publish deployment summary
+        shell: bash
+        run: |
+          {
+            echo "### AWS App Runner deployment"
+            echo "- Image digest: \`${{ steps.docker-build.outputs.digest }}\`"
+            echo "- Commit tag: \`${GITHUB_SHA}\`"
+            echo "- Operation: \`${{ steps.deploy.outputs.operation_id }}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
