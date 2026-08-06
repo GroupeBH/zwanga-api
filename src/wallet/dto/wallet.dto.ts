@@ -1,6 +1,15 @@
 import { ApiProperty } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { IsEnum, IsNumber, IsOptional, IsString, MaxLength, Min } from 'class-validator';
+import {
+  IsEmail,
+  IsEnum,
+  IsNumber,
+  IsOptional,
+  IsString,
+  IsUUID,
+  MaxLength,
+  Min,
+} from 'class-validator';
 import { PaymentMethod } from '../../payments/entities/payment-transaction.entity';
 
 export class InitiateWalletTopUpDto {
@@ -50,4 +59,56 @@ export class InitiateWalletTopUpDto {
   @IsOptional()
   @MaxLength(1000)
   declineUrl?: string;
+}
+
+export class TransferWalletPointsDto {
+  @ApiProperty({
+    minimum: 1,
+    example: 2500,
+    description:
+      'Nombre de points Zwanga a partager avec un autre utilisateur.',
+  })
+  @Type(() => Number)
+  @IsNumber()
+  @Min(1)
+  amount: number;
+
+  @ApiProperty({
+    required: false,
+    description: "ID de l'utilisateur destinataire.",
+    example: '123e4567-e89b-12d3-a456-426614174000',
+  })
+  @IsUUID()
+  @IsOptional()
+  recipientUserId?: string;
+
+  @ApiProperty({
+    required: false,
+    description: 'Telephone du destinataire deja inscrit sur Zwanga.',
+    example: '+243891234567',
+  })
+  @IsString()
+  @IsOptional()
+  @MaxLength(20)
+  recipientPhone?: string;
+
+  @ApiProperty({
+    required: false,
+    description: 'Email du destinataire deja inscrit sur Zwanga.',
+    example: 'client@zwanga.cd',
+  })
+  @IsEmail()
+  @IsOptional()
+  @MaxLength(160)
+  recipientEmail?: string;
+
+  @ApiProperty({
+    required: false,
+    description: 'Petit message associe au partage de points.',
+    example: 'Pour ton prochain trajet',
+  })
+  @IsString()
+  @IsOptional()
+  @MaxLength(200)
+  note?: string;
 }

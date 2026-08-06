@@ -13,6 +13,7 @@ interface CoordinateBounds {
 }
 
 export const LIVE_LOCATION_FRESHNESS_MS = 90_000;
+export const MAX_LOCATION_CLOCK_SKEW_MS = 5_000;
 
 const RDC_BOUNDS: CoordinateBounds = {
   minLatitude: -13.5,
@@ -138,6 +139,25 @@ export function isFreshLocationTimestamp(
   }
 
   return now.getTime() - timestamp <= freshnessMs;
+}
+
+export function normalizeLocationRecordedAt(
+  recordedAt?: Date | string | number | null,
+  receivedAt = new Date(),
+): Date {
+  if (recordedAt === null || recordedAt === undefined) {
+    return receivedAt;
+  }
+
+  const timestamp = new Date(recordedAt).getTime();
+  if (
+    !Number.isFinite(timestamp) ||
+    timestamp > receivedAt.getTime() + MAX_LOCATION_CLOCK_SKEW_MS
+  ) {
+    return receivedAt;
+  }
+
+  return new Date(timestamp);
 }
 
 export function isKinshasaRoute(route?: {

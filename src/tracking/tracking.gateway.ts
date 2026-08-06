@@ -40,6 +40,17 @@ export class TrackingGateway
     return normalizedCoordinates;
   }
 
+  private async evaluateAndEmitAutomaticProgress(
+    client: Socket,
+    tripId: string,
+  ): Promise<void> {
+    const autoProgress =
+      await this.bookingsService.evaluateAutomaticRideProgressForTrip(tripId);
+    if (autoProgress.events.length > 0) {
+      client.emit('booking_auto_progress', autoProgress);
+    }
+  }
+
   async handleConnection(client: Socket) {
     try {
       const token =
@@ -76,6 +87,7 @@ export class TrackingGateway
         client.data.userId,
       );
       client.join(`trip:${data.tripId}`);
+      await this.evaluateAndEmitAutomaticProgress(client, data.tripId);
     } catch (error) {
       client.emit('error', { message: error.message });
     }
@@ -93,7 +105,14 @@ export class TrackingGateway
   async handleDriverLocationUpdate(
     @ConnectedSocket() client: Socket,
     @MessageBody()
-    data: { tripId: string; coordinates: [number, number] },
+    data: {
+      tripId: string;
+      coordinates: [number, number];
+      accuracy?: number;
+      speed?: number;
+      heading?: number;
+      recordedAt?: string;
+    },
   ) {
     try {
       const coordinates = this.parseCoordinates(data.coordinates);
@@ -101,6 +120,12 @@ export class TrackingGateway
         client.data.userId,
         data.tripId,
         coordinates,
+        {
+          accuracyMeters: data.accuracy,
+          speedMetersPerSecond: data.speed,
+          headingDegrees: data.heading,
+          recordedAt: data.recordedAt,
+        },
       );
       const autoProgress =
         await this.bookingsService.evaluateAutomaticRideProgressForTrip(
@@ -122,7 +147,15 @@ export class TrackingGateway
   async handlePassengerLocationUpdate(
     @ConnectedSocket() client: Socket,
     @MessageBody()
-    data: { tripId: string; bookingId: string; coordinates: [number, number] },
+    data: {
+      tripId: string;
+      bookingId: string;
+      coordinates: [number, number];
+      accuracy?: number;
+      speed?: number;
+      heading?: number;
+      recordedAt?: string;
+    },
   ) {
     try {
       const [longitude, latitude] = this.parseCoordinates(data.coordinates);
@@ -132,6 +165,10 @@ export class TrackingGateway
         {
           latitude: Number(latitude),
           longitude: Number(longitude),
+          accuracy: data.accuracy,
+          speed: data.speed,
+          heading: data.heading,
+          recordedAt: data.recordedAt,
         },
       );
 
@@ -151,6 +188,22 @@ export class TrackingGateway
           .to(`trip:${location.tripId}`)
           .emit('booking_auto_progress', location.autoProgress);
       }
+    } catch (error) {
+      client.emit('error', { message: error.message });
+    }
+  }
+
+  @SubscribeMessage('resume_boarding_detection')
+  async handleResumeBoardingDetection(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { tripId: string },
+  ) {
+    try {
+      await this.tripsService.ensureUserCanTrackTrip(
+        data.tripId,
+        client.data.userId,
+      );
+      await this.evaluateAndEmitAutomaticProgress(client, data.tripId);
     } catch (error) {
       client.emit('error', { message: error.message });
     }

@@ -21,6 +21,7 @@ import {
   CreateDocumentFundingRequestDto,
   ListDocumentFundingRequestsQueryDto,
   SubscribeDto,
+  SubscribeWithPointsDto,
   UpdateDocumentFundingRequestStatusDto,
 } from './dto/subscription.dto';
 import {
@@ -33,6 +34,8 @@ import { FlexPayCallbackDto } from '../payments/dto/payment.dto';
 import { PaymentsService } from '../payments/payments.service';
 import { User, UserRole } from '../users/entities/user.entity';
 import { CacheService } from '../common/services/cache.service';
+import { WalletLedgerEntry } from '../wallet/entities/wallet-ledger-entry.entity';
+import { WalletService } from '../wallet/wallet.service';
 
 export interface PremiumSubscriptionFeatures {
   isActive: boolean;
@@ -49,6 +52,7 @@ export interface PremiumSubscriptionFeatures {
 
 export interface SubscriptionPaymentResponse {
   subscription: Subscription;
+  walletEntry?: WalletLedgerEntry | null;
   payment: {
     transactionId: string | null;
     method: PaymentMethod | null;
@@ -90,6 +94,7 @@ export class SubscriptionsService {
     private configService: ConfigService,
     private cacheService: CacheService,
     private paymentsService: PaymentsService,
+    private walletService: WalletService,
   ) {}
 
   async createTrial(userId: string): Promise<Subscription> {
@@ -143,7 +148,9 @@ export class SubscriptionsService {
         documentFundingEnabled: true,
         documentFundingLimit: this.getDocumentFundingLimit(),
         documentFundingCurrency: this.getDocumentFundingCurrency(),
-        paymentMethods: Object.values(PaymentMethod),
+        paymentMethods: [...Object.values(PaymentMethod), 'points'],
+        pointsAmount: this.getSubscriptionPointsPriceForPlans(),
+        pointsCurrency: this.walletService.getPointsCurrency(),
         eligibleDocumentTypes: Object.values(AdministrativeDocumentType),
       },
     ];
@@ -270,6 +277,85 @@ export class SubscriptionsService {
     const response = this.buildPaymentResponse(savedSubscription, payment);
     this.logSubscriptionPaymentResponse(
       'Subscription payment initialized',
+      response,
+    );
+    return response;
+  }
+
+  async subscribeWithPoints(
+    userId: string,
+    dto: SubscribeWithPointsDto,
+  ): Promise<SubscriptionPaymentResponse> {
+    this.logger.log(
+      `Creating subscription with points for user: ${userId} - Plan: ${dto.plan}`,
+    );
+
+    const user = await this.getDriverUser(userId);
+    if (dto.plan !== SubscriptionPlan.PRO) {
+      throw new BadRequestException(
+        'Le seul abonnement disponible est le pack pro',
+      );
+    }
+
+    const activeSubscription = await this.getActiveSubscription(user.id);
+    if (activeSubscription) {
+      const response = this.buildPaymentResponse(activeSubscription, null);
+      this.logSubscriptionPaymentResponse(
+        'Subscription points payment skipped active subscription',
+        response,
+      );
+      return response;
+    }
+
+    await this.cancelPendingSubscriptions(user.id);
+
+    const pointsAmount = this.getSubscriptionPointsPrice();
+    const startDate = new Date();
+    const endDate = this.calculateEndDate(startDate);
+    const subscription = this.subscriptionRepository.create({
+      userId: user.id,
+      plan: dto.plan,
+      status: SubscriptionStatus.PENDING,
+      startDate,
+      endDate,
+      amount: pointsAmount,
+      currency: this.walletService.getPointsCurrency(),
+      premiumBadgeEnabled: true,
+      featuredTripsEnabled: true,
+      documentFundingEnabled: true,
+      documentFundingLimit: this.getDocumentFundingLimit(),
+      documentFundingCurrency: this.getDocumentFundingCurrency(),
+      paymentReference: null,
+      paymentTransactionId: null,
+      isTrial: false,
+    });
+
+    let savedSubscription =
+      await this.subscriptionRepository.save(subscription);
+    let walletEntry: WalletLedgerEntry;
+
+    try {
+      walletEntry = await this.walletService.payForSubscription(
+        savedSubscription,
+        pointsAmount,
+      );
+    } catch (error) {
+      savedSubscription.status = SubscriptionStatus.PAYMENT_FAILED;
+      await this.subscriptionRepository.save(savedSubscription);
+      throw error;
+    }
+
+    savedSubscription = await this.activatePointsSubscription(
+      savedSubscription,
+      walletEntry,
+    );
+
+    const response = this.buildPointsPaymentResponse(
+      savedSubscription,
+      walletEntry,
+    );
+    this.logSubscriptionPaymentResponse(
+      'Subscription points payment completed',
       response,
     );
     return response;
@@ -727,6 +813,42 @@ export class SubscriptionsService {
     return savedSubscription;
   }
 
+  private async activatePointsSubscription(
+    subscription: Subscription,
+    walletEntry: WalletLedgerEntry,
+  ): Promise<Subscription> {
+    await this.subscriptionRepository.update(
+      {
+        userId: subscription.userId,
+        status: SubscriptionStatus.ACTIVE,
+        id: Not(subscription.id),
+      },
+      { status: SubscriptionStatus.CANCELLED },
+    );
+
+    const startDate = new Date();
+    subscription.status = SubscriptionStatus.ACTIVE;
+    subscription.startDate = startDate;
+    subscription.endDate = this.calculateEndDate(startDate);
+    subscription.paymentReference = `POINTS-${walletEntry.id}`;
+    subscription.paymentTransactionId = null;
+    subscription.premiumBadgeEnabled = true;
+    subscription.featuredTripsEnabled = true;
+    subscription.documentFundingEnabled = true;
+    subscription.documentFundingLimit = this.getDocumentFundingLimit();
+    subscription.documentFundingCurrency = this.getDocumentFundingCurrency();
+
+    const savedSubscription =
+      await this.subscriptionRepository.save(subscription);
+    await this.invalidatePremiumCaches();
+
+    this.logger.log(
+      `Points subscription activated: subscriptionId=${savedSubscription.id}, userId=${savedSubscription.userId}, walletEntryId=${walletEntry.id}, endDate=${savedSubscription.endDate.toISOString()}`,
+    );
+
+    return savedSubscription;
+  }
+
   private buildPaymentResponse(
     subscription: Subscription,
     payment: PaymentTransaction | null,
@@ -744,6 +866,28 @@ export class SubscriptionsService {
         paymentUrl: payment?.paymentUrl ?? null,
         amount: Number(payment?.amount ?? subscription.amount),
         currency: payment?.currency ?? subscription.currency,
+      },
+    };
+  }
+
+  private buildPointsPaymentResponse(
+    subscription: Subscription,
+    walletEntry: WalletLedgerEntry,
+  ): SubscriptionPaymentResponse {
+    return {
+      subscription,
+      walletEntry,
+      payment: {
+        transactionId: null,
+        method: null,
+        reference: subscription.paymentReference,
+        orderNumber: null,
+        status: PaymentStatus.SUCCEEDED,
+        statusCode: null,
+        message: 'Abonnement paye avec points Zwanga',
+        paymentUrl: null,
+        amount: Math.abs(Number(walletEntry.amount ?? subscription.amount)),
+        currency: walletEntry.currency ?? subscription.currency,
       },
     };
   }
@@ -859,6 +1003,43 @@ export class SubscriptionsService {
     );
   }
 
+  private getSubscriptionPointsPriceForPlans(): number | null {
+    try {
+      return this.getSubscriptionPointsPrice();
+    } catch {
+      return null;
+    }
+  }
+
+  private getSubscriptionPointsPrice(): number {
+    const explicitPointsPrice = this.getOptionalFirstNumberConfig([
+      'SUBSCRIPTION_PRO_PRICE_POINTS',
+      'SUBSCRIPTION_PRICE_POINTS',
+    ]);
+    if (explicitPointsPrice !== null && explicitPointsPrice > 0) {
+      return this.roundMoney(explicitPointsPrice);
+    }
+
+    const subscriptionPrice = this.getSubscriptionPrice();
+    const subscriptionCurrency = this.getSubscriptionCurrency();
+    const pointsCurrency = this.walletService.getPointsCurrency();
+    if (subscriptionCurrency === pointsCurrency) {
+      return this.roundMoney(subscriptionPrice);
+    }
+
+    const pointsPerCurrencyUnit = this.getOptionalFirstNumberConfig([
+      `SUBSCRIPTION_POINTS_PER_${subscriptionCurrency}`,
+      `ZWANGA_POINTS_PER_${subscriptionCurrency}`,
+    ]);
+    if (pointsPerCurrencyUnit !== null && pointsPerCurrencyUnit > 0) {
+      return this.roundMoney(subscriptionPrice * pointsPerCurrencyUnit);
+    }
+
+    throw new BadRequestException(
+      `Prix en points non configure pour l abonnement ${subscriptionCurrency}/${pointsCurrency}`,
+    );
+  }
+
   private calculateEndDate(startDate: Date): Date {
     const endDate = new Date(startDate);
     endDate.setDate(
@@ -927,6 +1108,22 @@ export class SubscriptionsService {
     }
 
     return fallback;
+  }
+
+  private getOptionalFirstNumberConfig(keys: string[]): number | null {
+    for (const key of keys) {
+      const rawValue = this.configService.get<string | number>(key);
+      const parsed = Number(rawValue);
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+
+    return null;
+  }
+
+  private roundMoney(value: number): number {
+    return Math.round(Number(value) * 100) / 100;
   }
 
   private buildPremiumFeatures(

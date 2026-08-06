@@ -4,7 +4,10 @@ import { Auth } from '../auth/decorators/auth.decorator';
 import { Public } from '../common/decorators/public.decorator';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
 import { FlexPayCallbackDto } from '../payments/dto/payment.dto';
-import { InitiateWalletTopUpDto } from './dto/wallet.dto';
+import {
+  InitiateWalletTopUpDto,
+  TransferWalletPointsDto,
+} from './dto/wallet.dto';
 import { WalletService } from './wallet.service';
 
 @ApiTags('Wallet')
@@ -32,11 +35,16 @@ export class WalletController {
   @Auth()
   @SensitiveThrottle(5, 60000)
   @ApiOperation({ summary: 'Buy Zwanga points through FlexPay' })
-  async initiateTopUp(
-    @Request() req,
-    @Body() dto: InitiateWalletTopUpDto,
-  ) {
+  async initiateTopUp(@Request() req, @Body() dto: InitiateWalletTopUpDto) {
     return this.walletService.initiateTopUp(req.user.userId, dto);
+  }
+
+  @Post('transfers')
+  @Auth()
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({ summary: 'Share Zwanga points with another platform user' })
+  async transferPoints(@Request() req, @Body() dto: TransferWalletPointsDto) {
+    return this.walletService.transferPoints(req.user.userId, dto);
   }
 
   @Post('topups/flexpay/callback')

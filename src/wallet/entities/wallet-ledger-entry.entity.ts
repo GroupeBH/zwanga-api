@@ -7,10 +7,7 @@ import {
   ManyToOne,
   PrimaryGeneratedColumn,
 } from 'typeorm';
-import {
-  WalletAccount,
-  WalletAccountType,
-} from './wallet-account.entity';
+import { WalletAccount, WalletAccountType } from './wallet-account.entity';
 import { PaymentTransaction } from '../../payments/entities/payment-transaction.entity';
 
 export enum WalletLedgerEntryType {
@@ -19,6 +16,9 @@ export enum WalletLedgerEntryType {
   BOOKING_PAYMENT = 'booking_payment',
   BOOKING_REFUND = 'booking_refund',
   BOOKING_FARE_ADJUSTMENT = 'booking_fare_adjustment',
+  SUBSCRIPTION_PAYMENT = 'subscription_payment',
+  TRANSFER_OUT = 'transfer_out',
+  TRANSFER_IN = 'transfer_in',
 }
 
 @Entity('wallet_ledger_entries')

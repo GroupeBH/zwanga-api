@@ -18,6 +18,9 @@ describe('WalletService', () => {
     find: jest.Mock;
     findOne: jest.Mock;
   };
+  let userRepository: {
+    findOne: jest.Mock;
+  };
   let manager: {
     findOne: jest.Mock;
     create: jest.Mock;
@@ -69,6 +72,16 @@ describe('WalletService', () => {
       find: jest.fn().mockResolvedValue([]),
       findOne: jest.fn().mockResolvedValue(null),
     };
+    userRepository = {
+      findOne: jest.fn().mockResolvedValue({
+        id: 'recipient-1',
+        firstName: 'Jane',
+        lastName: 'Kanda',
+        phone: '+243899999999',
+        email: 'jane@zwanga.cd',
+        isActive: true,
+      }),
+    };
     manager = {
       findOne: jest.fn().mockResolvedValue({ ...account }),
       create: jest.fn((_entity: unknown, payload: unknown) => payload),
@@ -102,6 +115,7 @@ describe('WalletService', () => {
     service = new WalletService(
       accountRepository as any,
       ledgerRepository as any,
+      userRepository as any,
       dataSource as any,
       configService as any,
       paymentsService as any,
@@ -272,5 +286,109 @@ describe('WalletService', () => {
 
     expect(result).toBe(existingAdjustment);
     expect(dataSource.transaction).not.toHaveBeenCalled();
+  });
+
+  it('pays a subscription with points once', async () => {
+    manager.findOne.mockResolvedValue({ ...account, balance: 6000 });
+
+    const entry = await service.payForSubscription(
+      {
+        id: '123e4567-e89b-12d3-a456-426614174000',
+        userId: 'passenger-1',
+      },
+      5000,
+    );
+
+    expect(manager.save).toHaveBeenCalledWith(
+      expect.objectContaining({ balance: 1000 }),
+    );
+    expect(manager.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: WalletLedgerEntryType.SUBSCRIPTION_PAYMENT,
+        amount: -5000,
+        balanceAfter: 1000,
+        relatedEntityType: 'subscription',
+        relatedEntityId: '123e4567-e89b-12d3-a456-426614174000',
+      }),
+    );
+    expect(entry).toEqual(
+      expect.objectContaining({
+        type: WalletLedgerEntryType.SUBSCRIPTION_PAYMENT,
+      }),
+    );
+  });
+
+  it('transfers points to another platform user atomically', async () => {
+    manager.findOne
+      .mockResolvedValueOnce({
+        ...account,
+        userId: 'passenger-1',
+        balance: 6000,
+      })
+      .mockResolvedValueOnce({
+        ...account,
+        id: 'wallet-2',
+        userId: 'recipient-1',
+        balance: 1000,
+      });
+
+    const result = await service.transferPoints('passenger-1', {
+      amount: 2500,
+      recipientPhone: '+243899999999',
+      note: 'Pour ton trajet',
+    });
+
+    expect(userRepository.findOne).toHaveBeenCalledWith({
+      where: [{ phone: '+243899999999' }],
+    });
+    expect(result.amount).toBe(2500);
+    expect(result.recipient.id).toBe('recipient-1');
+    expect(manager.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: 'passenger-1',
+        balance: 3500,
+      }),
+    );
+    expect(manager.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: 'recipient-1',
+        balance: 3500,
+      }),
+    );
+    expect(manager.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: WalletLedgerEntryType.TRANSFER_OUT,
+        amount: -2500,
+        relatedEntityType: 'wallet_transfer',
+      }),
+    );
+    expect(manager.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: WalletLedgerEntryType.TRANSFER_IN,
+        amount: 2500,
+        relatedEntityType: 'wallet_transfer',
+      }),
+    );
+  });
+
+  it('awards loyalty points from travelled kilometers first', async () => {
+    manager.findOne.mockResolvedValue({ ...account, balance: 1000 });
+
+    await service.awardLoyaltyForBooking(
+      {
+        id: 'booking-1',
+        passengerId: 'passenger-1',
+        travelledDistanceMeters: 4500,
+      } as any,
+      10000,
+    );
+
+    expect(manager.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: WalletLedgerEntryType.LOYALTY_REWARD,
+        amount: 4.5,
+        balanceAfter: 1004.5,
+      }),
+    );
   });
 });

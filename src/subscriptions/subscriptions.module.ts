@@ -6,10 +6,12 @@ import { Subscription } from './entities/subscription.entity';
 import { DocumentFundingRequest } from './entities/document-funding-request.entity';
 import { User } from '../users/entities/user.entity';
 import { PaymentsModule } from '../payments/payments.module';
+import { WalletModule } from '../wallet/wallet.module';
 
 @Module({
   imports: [
     PaymentsModule,
+    WalletModule,
     TypeOrmModule.forFeature([Subscription, DocumentFundingRequest, User]),
   ],
   controllers: [SubscriptionsController],

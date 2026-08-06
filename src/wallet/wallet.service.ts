@@ -4,9 +4,15 @@ import {
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import { randomUUID } from 'crypto';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, Repository } from 'typeorm';
+import {
+  DataSource,
+  EntityManager,
+  FindOptionsWhere,
+  Repository,
+} from 'typeorm';
 import {
   PaymentMethod,
   PaymentPurpose,
@@ -24,7 +30,11 @@ import {
   WalletLedgerEntry,
   WalletLedgerEntryType,
 } from './entities/wallet-ledger-entry.entity';
-import { InitiateWalletTopUpDto } from './dto/wallet.dto';
+import {
+  InitiateWalletTopUpDto,
+  TransferWalletPointsDto,
+} from './dto/wallet.dto';
+import { User } from '../users/entities/user.entity';
 
 export interface WalletSummary {
   account: WalletAccount;
@@ -47,19 +57,42 @@ export interface WalletPaymentResponse {
   };
 }
 
+export interface WalletTransferResponse {
+  transferId: string;
+  amount: number;
+  currency: string;
+  senderAccount: WalletAccount;
+  recipientAccount: WalletAccount;
+  senderEntry: WalletLedgerEntry;
+  recipientEntry: WalletLedgerEntry;
+  recipient: {
+    id: string;
+    firstName: string;
+    lastName: string;
+    phone: string | null;
+    email: string | null;
+  };
+}
+
 @Injectable()
 export class WalletService {
   private readonly logger = new Logger(WalletService.name);
   private readonly TOP_UP_RELATED_ENTITY_TYPE = 'wallet_top_up';
   private readonly BOOKING_RELATED_ENTITY_TYPE = 'booking';
+  private readonly SUBSCRIPTION_RELATED_ENTITY_TYPE = 'subscription';
+  private readonly TRANSFER_RELATED_ENTITY_TYPE = 'wallet_transfer';
   private readonly DEFAULT_POINTS_CURRENCY = 'CDF';
   private readonly DEFAULT_LOYALTY_RATE = 0.01;
+  private readonly DEFAULT_LOYALTY_POINTS_PER_KM = 1;
+  private readonly DEFAULT_LOYALTY_MIN_REWARD = 1;
 
   constructor(
     @InjectRepository(WalletAccount)
     private readonly accountRepository: Repository<WalletAccount>,
     @InjectRepository(WalletLedgerEntry)
     private readonly ledgerRepository: Repository<WalletLedgerEntry>,
+    @InjectRepository(User)
+    private readonly userRepository: Repository<User>,
     private readonly dataSource: DataSource,
     private readonly configService: ConfigService,
     private readonly paymentsService: PaymentsService,
@@ -221,11 +254,148 @@ export class WalletService {
     });
   }
 
+  async payForSubscription(
+    subscription: { id: string; userId: string },
+    amount: number,
+  ): Promise<WalletLedgerEntry> {
+    const normalizedAmount = this.normalizePositiveAmount(amount);
+
+    const existingEntry = await this.ledgerRepository.findOne({
+      where: {
+        userId: subscription.userId,
+        type: WalletLedgerEntryType.SUBSCRIPTION_PAYMENT,
+        relatedEntityType: this.SUBSCRIPTION_RELATED_ENTITY_TYPE,
+        relatedEntityId: subscription.id,
+      },
+      order: { createdAt: 'DESC' },
+    });
+    if (existingEntry) {
+      return existingEntry;
+    }
+
+    try {
+      return await this.changeBalance({
+        userId: subscription.userId,
+        amount: -normalizedAmount,
+        type: WalletLedgerEntryType.SUBSCRIPTION_PAYMENT,
+        relatedEntityType: this.SUBSCRIPTION_RELATED_ENTITY_TYPE,
+        relatedEntityId: subscription.id,
+        description: `Paiement par points pour l abonnement ${subscription.id}`,
+      });
+    } catch (error) {
+      if (error instanceof BadRequestException) {
+        throw new BadRequestException(
+          'Solde de points insuffisant pour payer cet abonnement',
+        );
+      }
+      throw error;
+    }
+  }
+
+  async transferPoints(
+    senderUserId: string,
+    dto: TransferWalletPointsDto,
+  ): Promise<WalletTransferResponse> {
+    const amount = this.normalizePositiveAmount(dto.amount);
+    const recipient = await this.resolveTransferRecipient(dto);
+
+    if (recipient.id === senderUserId) {
+      throw new BadRequestException(
+        'Impossible de partager des points avec votre propre compte',
+      );
+    }
+
+    const transferId = randomUUID();
+    const note = dto.note?.trim();
+
+    return this.dataSource.transaction(async (manager) => {
+      const userIds = [senderUserId, recipient.id].sort();
+      const accounts = new Map<string, WalletAccount>();
+
+      for (const userId of userIds) {
+        accounts.set(
+          userId,
+          await this.getOrCreateAccountWithManager(manager, userId),
+        );
+      }
+
+      const senderAccount = accounts.get(senderUserId);
+      const recipientAccount = accounts.get(recipient.id);
+
+      if (!senderAccount || !recipientAccount) {
+        throw new NotFoundException('Compte de points introuvable');
+      }
+
+      const senderNextBalance = this.roundMoney(
+        Number(senderAccount.balance) - amount,
+      );
+      if (senderNextBalance < 0) {
+        throw new BadRequestException(
+          'Solde de points insuffisant pour partager des points',
+        );
+      }
+
+      senderAccount.balance = senderNextBalance;
+      await manager.save(senderAccount);
+      const senderEntry = await this.createLedgerEntryWithManager(manager, {
+        account: senderAccount,
+        userId: senderUserId,
+        amount: -amount,
+        balanceAfter: senderNextBalance,
+        type: WalletLedgerEntryType.TRANSFER_OUT,
+        relatedEntityType: this.TRANSFER_RELATED_ENTITY_TYPE,
+        relatedEntityId: transferId,
+        description: note
+          ? `Partage de points vers ${recipient.id}: ${note}`
+          : `Partage de points vers ${recipient.id}`,
+      });
+
+      const recipientNextBalance = this.roundMoney(
+        Number(recipientAccount.balance) + amount,
+      );
+      recipientAccount.balance = recipientNextBalance;
+      await manager.save(recipientAccount);
+      const recipientEntry = await this.createLedgerEntryWithManager(manager, {
+        account: recipientAccount,
+        userId: recipient.id,
+        amount,
+        balanceAfter: recipientNextBalance,
+        type: WalletLedgerEntryType.TRANSFER_IN,
+        relatedEntityType: this.TRANSFER_RELATED_ENTITY_TYPE,
+        relatedEntityId: transferId,
+        description: note
+          ? `Points recus de ${senderUserId}: ${note}`
+          : `Points recus de ${senderUserId}`,
+      });
+
+      this.logger.log(
+        `Wallet points transferred: transferId=${transferId}, sender=${senderUserId}, recipient=${recipient.id}, amount=${amount}`,
+      );
+
+      return {
+        transferId,
+        amount,
+        currency: senderAccount.currency,
+        senderAccount,
+        recipientAccount,
+        senderEntry,
+        recipientEntry,
+        recipient: {
+          id: recipient.id,
+          firstName: recipient.firstName,
+          lastName: recipient.lastName,
+          phone: recipient.phone ?? null,
+          email: recipient.email ?? null,
+        },
+      };
+    });
+  }
+
   async awardLoyaltyForBooking(
     booking: Booking,
     grossAmount: number,
   ): Promise<WalletLedgerEntry | null> {
-    const reward = this.calculateLoyaltyReward(grossAmount);
+    const reward = this.calculateLoyaltyReward(booking, grossAmount);
     if (reward <= 0) {
       return null;
     }
@@ -252,10 +422,48 @@ export class WalletService {
   async ensureSufficientPoints(userId: string, amount: number): Promise<void> {
     const account = await this.getOrCreateAccount(userId);
     if (Number(account.balance) < amount) {
+      throw new BadRequestException('Solde de points insuffisant');
+    }
+  }
+
+  public getPointsCurrency(): string {
+    return (
+      this.configService.get<string>('ZWANGA_POINTS_CURRENCY')?.trim() ||
+      this.configService.get<string>('TRIP_PAYMENT_CURRENCY')?.trim() ||
+      this.DEFAULT_POINTS_CURRENCY
+    ).toUpperCase();
+  }
+
+  private async resolveTransferRecipient(
+    dto: TransferWalletPointsDto,
+  ): Promise<User> {
+    const where: FindOptionsWhere<User>[] = [];
+    const recipientUserId = dto.recipientUserId?.trim();
+    const recipientPhone = dto.recipientPhone?.trim();
+    const recipientEmail = dto.recipientEmail?.trim().toLowerCase();
+
+    if (recipientUserId) {
+      where.push({ id: recipientUserId });
+    }
+    if (recipientPhone) {
+      where.push({ phone: recipientPhone });
+    }
+    if (recipientEmail) {
+      where.push({ email: recipientEmail });
+    }
+
+    if (!where.length) {
       throw new BadRequestException(
-        'Solde de points insuffisant pour payer ce trajet',
+        'Veuillez renseigner le destinataire des points',
       );
     }
+
+    const recipient = await this.userRepository.findOne({ where });
+    if (!recipient || !recipient.isActive) {
+      throw new NotFoundException('Utilisateur destinataire introuvable');
+    }
+
+    return recipient;
   }
 
   private async applyTopUpPayment(
@@ -316,6 +524,59 @@ export class WalletService {
     return account;
   }
 
+  private async getOrCreateAccountWithManager(
+    manager: EntityManager,
+    userId: string,
+  ): Promise<WalletAccount> {
+    let account = await manager.findOne(WalletAccount, {
+      where: { userId, type: WalletAccountType.POINTS },
+      lock: { mode: 'pessimistic_write' },
+    });
+
+    if (!account) {
+      account = manager.create(WalletAccount, {
+        userId,
+        type: WalletAccountType.POINTS,
+        balance: 0,
+        currency: this.getPointsCurrency(),
+      });
+      account = await manager.save(account);
+    }
+
+    return account;
+  }
+
+  private async createLedgerEntryWithManager(
+    manager: EntityManager,
+    input: {
+      account: WalletAccount;
+      userId: string;
+      amount: number;
+      balanceAfter: number;
+      type: WalletLedgerEntryType;
+      relatedEntityType?: string | null;
+      relatedEntityId?: string | null;
+      paymentTransactionId?: string | null;
+      description?: string | null;
+    },
+  ): Promise<WalletLedgerEntry> {
+    const entry = manager.create(WalletLedgerEntry, {
+      accountId: input.account.id,
+      userId: input.userId,
+      accountType: WalletAccountType.POINTS,
+      type: input.type,
+      amount: this.roundMoney(input.amount),
+      balanceAfter: this.roundMoney(input.balanceAfter),
+      currency: input.account.currency,
+      relatedEntityType: input.relatedEntityType ?? null,
+      relatedEntityId: input.relatedEntityId ?? null,
+      paymentTransactionId: input.paymentTransactionId ?? null,
+      description: input.description ?? null,
+    });
+
+    return manager.save(entry);
+  }
+
   private async changeBalance(input: {
     userId: string;
     amount: number;
@@ -348,9 +609,7 @@ export class WalletService {
 
       const nextBalance = this.roundMoney(Number(account.balance) + amount);
       if (nextBalance < 0) {
-        throw new BadRequestException(
-          'Solde de points insuffisant pour payer ce trajet',
-        );
+        throw new BadRequestException('Solde de points insuffisant');
       }
 
       account.balance = nextBalance;
@@ -394,13 +653,38 @@ export class WalletService {
     });
   }
 
-  private calculateLoyaltyReward(grossAmount: number): number {
+  private calculateLoyaltyReward(
+    booking: Booking,
+    grossAmount: number,
+  ): number {
+    const distanceReward = this.calculateDistanceLoyaltyReward(booking);
+    if (distanceReward > 0) {
+      return distanceReward;
+    }
+
     const amount = Number(grossAmount);
     if (!Number.isFinite(amount) || amount <= 0) {
       return 0;
     }
 
     return this.roundMoney(amount * this.getLoyaltyRate());
+  }
+
+  private calculateDistanceLoyaltyReward(booking: Booking): number {
+    const distanceMeters = Number(
+      booking.travelledDistanceMeters ?? booking.plannedDistanceMeters ?? 0,
+    );
+    if (!Number.isFinite(distanceMeters) || distanceMeters <= 0) {
+      return 0;
+    }
+
+    const pointsPerKm = this.getLoyaltyPointsPerKm();
+    if (pointsPerKm <= 0) {
+      return 0;
+    }
+
+    const reward = this.roundMoney((distanceMeters / 1000) * pointsPerKm);
+    return Math.max(this.getLoyaltyMinReward(), reward);
   }
 
   private getLoyaltyRate(): number {
@@ -415,12 +699,28 @@ export class WalletService {
     return rate;
   }
 
-  private getPointsCurrency(): string {
-    return (
-      this.configService.get<string>('ZWANGA_POINTS_CURRENCY')?.trim() ||
-      this.configService.get<string>('TRIP_PAYMENT_CURRENCY')?.trim() ||
-      this.DEFAULT_POINTS_CURRENCY
-    ).toUpperCase();
+  private getLoyaltyPointsPerKm(): number {
+    const raw =
+      this.configService.get<string | number>('ZWANGA_LOYALTY_POINTS_PER_KM') ??
+      this.DEFAULT_LOYALTY_POINTS_PER_KM;
+    const pointsPerKm = Number(raw);
+    if (!Number.isFinite(pointsPerKm) || pointsPerKm < 0) {
+      return this.DEFAULT_LOYALTY_POINTS_PER_KM;
+    }
+
+    return pointsPerKm;
+  }
+
+  private getLoyaltyMinReward(): number {
+    const raw =
+      this.configService.get<string | number>('ZWANGA_LOYALTY_MIN_REWARD') ??
+      this.DEFAULT_LOYALTY_MIN_REWARD;
+    const minReward = Number(raw);
+    if (!Number.isFinite(minReward) || minReward < 0) {
+      return this.DEFAULT_LOYALTY_MIN_REWARD;
+    }
+
+    return minReward;
   }
 
   private getTopUpFlexPayCallbackUrl(): string {
