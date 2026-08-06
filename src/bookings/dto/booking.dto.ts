@@ -8,6 +8,7 @@ import {
   Max,
   ValidateNested,
   IsBoolean,
+  IsDateString,
 } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
@@ -254,4 +255,33 @@ export class UpdatePassengerLocationDto {
   @Max(180)
   @IsNotEmpty()
   longitude: number;
+
+  @ApiProperty({ required: false, description: 'Precision GPS en metres' })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(1000)
+  accuracy?: number;
+
+  @ApiProperty({ required: false, description: 'Vitesse GPS en m/s' })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(100)
+  speed?: number;
+
+  @ApiProperty({ required: false, description: 'Cap GPS en degres' })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(360)
+  heading?: number;
+
+  @ApiProperty({
+    required: false,
+    description: 'Horodatage ISO de la mesure GPS sur le terminal',
+  })
+  @IsOptional()
+  @IsDateString()
+  recordedAt?: string;
 }

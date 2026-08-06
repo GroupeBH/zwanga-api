@@ -173,6 +173,12 @@ export class TripsController {
       req.user.userId,
       id,
       dto.coordinates,
+      {
+        accuracyMeters: dto.accuracy,
+        speedMetersPerSecond: dto.speed,
+        headingDegrees: dto.heading,
+        recordedAt: dto.recordedAt,
+      },
     );
   }
 

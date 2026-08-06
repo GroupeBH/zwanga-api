@@ -44,13 +44,3 @@ lerna-debug.log*
 /uploads/*
 !/uploads/.gitkeep
 zwanga-c791b-firebase-adminsdk-fbsvc-43707dcb4e
-
-# Infrastructure local state and secrets
-infra/terraform/.terraform/
-infra/terraform/terraform.tfstate*
-infra/terraform/*.tfvars
-infra/terraform/*.tfvars.json
-infra/terraform/backend.hcl
-infra/ansible/inventory.ini
-infra/ansible/env/*.env
-!infra/ansible/env/*.env.example

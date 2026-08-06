@@ -131,6 +131,24 @@ export class Booking {
   @Column({ type: 'decimal', precision: 10, scale: 2, nullable: true })
   paymentAmount: number | null;
 
+  @Column({ type: 'decimal', precision: 10, scale: 2, nullable: true })
+  originalPaymentAmount: number | null;
+
+  @Column({ type: 'int', nullable: true })
+  plannedDistanceMeters: number | null;
+
+  @Column({ type: 'int', nullable: true })
+  travelledDistanceMeters: number | null;
+
+  @Column({ type: 'decimal', precision: 12, scale: 2, nullable: true })
+  pricePerKilometer: number | null;
+
+  @Column({ type: 'decimal', precision: 10, scale: 2, nullable: true })
+  fareAdjustmentAmount: number | null;
+
+  @Column({ type: 'timestamp', nullable: true })
+  fareAdjustedAt: Date | null;
+
   @Column({ type: 'varchar', length: 8, default: 'CDF' })
   paymentCurrency: string;
 

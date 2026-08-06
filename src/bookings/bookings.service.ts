@@ -50,17 +50,30 @@ import {
   type LocationHistorySnapshot,
   type TrackedLocationPoint,
 } from '../common/services/location-history.service';
+import {
+  BoardingDetectionState,
+  BoardingRejectionReason,
+  evaluateBoardingDetection,
+  type BoardingDetectionMetrics,
+  type BoardingLocationSample,
+} from './boarding-detection';
+import {
+  loadBoardingDetectionConfig,
+  type BoardingDetectionConfig,
+} from './boarding-detection.config';
 import { NotificationService } from '../notifications/notifications.service';
 import { FileUploadService } from '../common/services/file-upload.service';
 import { MessagingService } from '../messaging/messaging.service';
 import { SafetyService } from '../safety/safety.service';
 import { SendWhatsAppNotificationDto } from './dto/send-whatsapp-notification.dto';
 import { GoogleMapsService } from '../google-maps/google-maps.service';
+import { TravelMode } from '../google-maps/dto/google-maps.dto';
 import {
   buildPointFromCoordinate,
   isCoordinateAllowedForTrip,
   isFreshLocationTimestamp,
   LIVE_LOCATION_FRESHNESS_MS,
+  normalizeLocationRecordedAt,
   normalizeCoordinateForTrip,
   normalizeLatLngCoordinate,
   pointToCoordinate,
@@ -111,6 +124,10 @@ export interface AutomaticRideProgressEvent {
   detectedAt?: string;
   expiresAt?: string;
   pickupWaitSeconds?: number;
+  boardingState?: BoardingDetectionState;
+  confidenceScore?: number;
+  decision?: 'CONFIRM' | 'OBSERVE' | 'REJECT';
+  rejectionReason?: BoardingRejectionReason | null;
 }
 
 export interface AutomaticRideProgressResult {
@@ -143,6 +160,7 @@ export class BookingsService {
   private readonly MAX_SEATS_PER_PASSENGER = 2;
   private readonly BOOKING_RELATED_ENTITY_TYPE = 'booking';
   private readonly DEFAULT_TRIP_PAYMENT_CURRENCY = 'CDF';
+  private readonly boardingDetectionConfig: BoardingDetectionConfig;
 
   constructor(
     @InjectRepository(Booking)
@@ -166,7 +184,10 @@ export class BookingsService {
     private walletService: WalletService,
     private driverSettlementsService: DriverSettlementsService,
     private locationHistoryService: LocationHistoryService,
-  ) {}
+  ) {
+    this.boardingDetectionConfig =
+      loadBoardingDetectionConfig(this.configService);
+  }
 
   private buildPointFromLatLng(
     latitude: number,
@@ -277,6 +298,49 @@ export class BookingsService {
     }
 
     return this.buildPointFromLatLng(location.latitude, location.longitude);
+  }
+
+  private getBoardingLocationSamples(
+    history: LocationHistorySnapshot | null,
+  ): BoardingLocationSample[] {
+    const samples = history?.samples?.length
+      ? history.samples
+      : [history?.previous, history?.current].filter(
+          (sample): sample is TrackedLocationPoint => Boolean(sample),
+        );
+
+    return samples.map((sample) => ({
+      latitude: sample.latitude,
+      longitude: sample.longitude,
+      recordedAt: sample.recordedAt,
+      accuracyMeters:
+        typeof sample.accuracyMeters === 'number'
+          ? sample.accuracyMeters
+          : null,
+      speedMetersPerSecond:
+        typeof sample.speedMetersPerSecond === 'number'
+          ? sample.speedMetersPerSecond
+          : null,
+      headingDegrees:
+        typeof sample.headingDegrees === 'number'
+          ? sample.headingDegrees
+          : null,
+    }));
+  }
+
+  private logBoardingDetectionEvaluation(
+    booking: Booking,
+    metrics: BoardingDetectionMetrics,
+  ): void {
+    this.logger.log(
+      JSON.stringify({
+        event: 'boarding_detection_evaluation',
+        tripId: booking.tripId,
+        driverId: booking.trip?.driverId ?? null,
+        passengerId: booking.passengerId,
+        ...metrics,
+      }),
+    );
   }
 
   private isFreshTrackedLocation(
@@ -1115,7 +1179,10 @@ export class BookingsService {
             order: { createdAt: 'DESC' },
           })
         : [];
-    const driverRequestByTripId = new Map<string, DriverTripInterruptionRequest>();
+    const driverRequestByTripId = new Map<
+      string,
+      DriverTripInterruptionRequest
+    >();
     for (const request of driverRequests) {
       if (!driverRequestByTripId.has(request.tripId)) {
         driverRequestByTripId.set(request.tripId, request);
@@ -1149,7 +1216,7 @@ export class BookingsService {
 
     if (booking.trip.status !== TripStatus.ACTIVE) {
       throw new BadRequestException(
-        "Vous ne pouvez demander une interruption que pendant un trajet en cours",
+        'Vous ne pouvez demander une interruption que pendant un trajet en cours',
       );
     }
 
@@ -1161,7 +1228,7 @@ export class BookingsService {
 
     if (!this.hasBookingBeenPickedUpForRideProgress(booking)) {
       throw new BadRequestException(
-        "Vous devez etre a bord avant de demander une interruption",
+        'Vous devez etre a bord avant de demander une interruption',
       );
     }
 
@@ -1190,7 +1257,10 @@ export class BookingsService {
       reason: dto.reason ?? TripInterruptionReason.OTHER,
       note: dto.note ?? null,
       status: TripInterruptionStatus.PENDING,
-      requestedLocation: this.buildInterruptionPoint(dto.coordinates, booking.trip),
+      requestedLocation: this.buildInterruptionPoint(
+        dto.coordinates,
+        booking.trip,
+      ),
       requestedAt: new Date(),
       confirmedAt: null,
       rejectedAt: null,
@@ -1221,13 +1291,12 @@ export class BookingsService {
       throw new NotFoundException('Reservation non trouvee');
     }
 
-    const request =
-      await this.passengerTripInterruptionRepository.findOne({
-        where: {
-          bookingId,
-          status: TripInterruptionStatus.PENDING,
-        },
-      });
+    const request = await this.passengerTripInterruptionRepository.findOne({
+      where: {
+        bookingId,
+        status: TripInterruptionStatus.PENDING,
+      },
+    });
 
     if (!request) {
       throw new NotFoundException("Aucune demande d'interruption en attente");
@@ -1260,19 +1329,21 @@ export class BookingsService {
       );
     }
 
-    const request =
-      await this.passengerTripInterruptionRepository.findOne({
-        where: {
-          bookingId,
-          status: TripInterruptionStatus.PENDING,
-        },
-      });
+    const request = await this.passengerTripInterruptionRepository.findOne({
+      where: {
+        bookingId,
+        status: TripInterruptionStatus.PENDING,
+      },
+    });
 
     if (!request) {
       throw new NotFoundException("Aucune demande d'interruption en attente");
     }
 
-    await this.completeBookingByTripInterruption(booking.id);
+    await this.completeBookingByTripInterruption(
+      booking.id,
+      request.requestedLocation ?? booking.trip.currentLocation,
+    );
 
     const now = new Date();
     request.status = TripInterruptionStatus.COMPLETED;
@@ -1281,10 +1352,7 @@ export class BookingsService {
     request.confirmedByDriverId = driverId;
     await this.passengerTripInterruptionRepository.save(request);
     await this.invalidateBookingCaches(booking);
-    await this.notifyPassengerAboutPassengerInterruptionDecision(
-      booking,
-      true,
-    );
+    await this.notifyPassengerAboutPassengerInterruptionDecision(booking, true);
 
     return this.findOne(booking.id);
   }
@@ -1309,13 +1377,12 @@ export class BookingsService {
       );
     }
 
-    const request =
-      await this.passengerTripInterruptionRepository.findOne({
-        where: {
-          bookingId,
-          status: TripInterruptionStatus.PENDING,
-        },
-      });
+    const request = await this.passengerTripInterruptionRepository.findOne({
+      where: {
+        bookingId,
+        status: TripInterruptionStatus.PENDING,
+      },
+    });
 
     if (!request) {
       throw new NotFoundException("Aucune demande d'interruption en attente");
@@ -1335,7 +1402,10 @@ export class BookingsService {
     return this.findOne(booking.id);
   }
 
-  async completeBookingByTripInterruption(bookingId: string): Promise<Booking> {
+  async completeBookingByTripInterruption(
+    bookingId: string,
+    interruptionLocation?: Point | null,
+  ): Promise<Booking> {
     const booking = await this.bookingRepository.findOne({
       where: { id: bookingId },
       relations: ['trip', 'trip.driver', 'passenger'],
@@ -1366,6 +1436,40 @@ export class BookingsService {
       'Cette reservation doit etre reglee avant interruption',
     );
 
+    const fareAdjustment = await this.calculateDistanceBasedFareAdjustment(
+      booking,
+      interruptionLocation ??
+        booking.passengerCurrentLocation ??
+        booking.trip.currentLocation,
+    );
+
+    if (fareAdjustment) {
+      booking.originalPaymentAmount = fareAdjustment.originalAmount;
+      booking.plannedDistanceMeters = fareAdjustment.plannedDistanceMeters;
+      booking.travelledDistanceMeters = fareAdjustment.travelledDistanceMeters;
+      booking.pricePerKilometer = fareAdjustment.pricePerKilometer;
+      booking.fareAdjustmentAmount = fareAdjustment.adjustmentAmount;
+      booking.fareAdjustedAt = booking.fareAdjustedAt ?? new Date();
+      booking.paymentAmount = fareAdjustment.finalAmount;
+      booking.paymentCurrency =
+        booking.paymentCurrency || this.getTripPaymentCurrency();
+
+      await this.bookingRepository.save(booking);
+
+      if (
+        fareAdjustment.adjustmentAmount > 0 &&
+        [TripPaymentMode.ELECTRONIC, TripPaymentMode.POINTS].includes(
+          booking.paymentMode,
+        ) &&
+        booking.paymentStatus === BookingPaymentStatus.SUCCEEDED
+      ) {
+        await this.walletService.creditBookingFareAdjustment(
+          booking,
+          fareAdjustment.adjustmentAmount,
+        );
+      }
+    }
+
     const now = new Date();
     booking.pickedUp = true;
     booking.pickedUpAt = booking.pickedUpAt ?? now;
@@ -1383,6 +1487,157 @@ export class BookingsService {
     await this.invalidateBookingCaches(savedBooking);
 
     return savedBooking;
+  }
+
+  private async calculateDistanceBasedFareAdjustment(
+    booking: Booking,
+    interruptionLocation?: Point | null,
+  ): Promise<{
+    originalAmount: number;
+    finalAmount: number;
+    adjustmentAmount: number;
+    plannedDistanceMeters: number;
+    travelledDistanceMeters: number;
+    pricePerKilometer: number;
+  } | null> {
+    const storedOriginalAmount = Number(
+      booking.originalPaymentAmount ?? booking.paymentAmount,
+    );
+    const originalAmount =
+      Number.isFinite(storedOriginalAmount) && storedOriginalAmount > 0
+        ? storedOriginalAmount
+        : this.calculateBookingPaymentAmount(
+            booking.trip,
+            booking.numberOfSeats,
+          );
+
+    if (
+      booking.fareAdjustedAt &&
+      booking.plannedDistanceMeters !== null &&
+      booking.plannedDistanceMeters !== undefined &&
+      booking.travelledDistanceMeters !== null &&
+      booking.travelledDistanceMeters !== undefined &&
+      booking.pricePerKilometer !== null &&
+      booking.pricePerKilometer !== undefined &&
+      booking.fareAdjustmentAmount !== null &&
+      booking.fareAdjustmentAmount !== undefined
+    ) {
+      return {
+        originalAmount,
+        finalAmount: Number(booking.paymentAmount ?? originalAmount),
+        adjustmentAmount: Number(booking.fareAdjustmentAmount),
+        plannedDistanceMeters: booking.plannedDistanceMeters,
+        travelledDistanceMeters: booking.travelledDistanceMeters,
+        pricePerKilometer: Number(booking.pricePerKilometer),
+      };
+    }
+
+    const origin =
+      booking.passengerOriginPoint ?? booking.trip.departurePoint ?? null;
+    const destination =
+      booking.passengerDestinationPoint ?? booking.trip.arrivalPoint ?? null;
+
+    if (
+      originalAmount <= 0 ||
+      !origin ||
+      !destination ||
+      !interruptionLocation
+    ) {
+      return null;
+    }
+
+    const plannedDistanceMeters = await this.calculateRouteDistanceMeters(
+      origin,
+      destination,
+      `booking ${booking.id} planned route`,
+    );
+    const rawTravelledDistanceMeters = await this.calculateRouteDistanceMeters(
+      origin,
+      interruptionLocation,
+      `booking ${booking.id} travelled route`,
+    );
+
+    if (
+      plannedDistanceMeters === null ||
+      plannedDistanceMeters <= 0 ||
+      rawTravelledDistanceMeters === null ||
+      rawTravelledDistanceMeters < 0
+    ) {
+      return null;
+    }
+
+    const travelledDistanceMeters = Math.min(
+      plannedDistanceMeters,
+      Math.max(0, rawTravelledDistanceMeters),
+    );
+    const pricePerKilometer = this.roundMoney(
+      originalAmount / (plannedDistanceMeters / 1000),
+    );
+    const finalAmount = Math.min(
+      originalAmount,
+      this.roundMoney(
+        originalAmount * (travelledDistanceMeters / plannedDistanceMeters),
+      ),
+    );
+
+    return {
+      originalAmount,
+      finalAmount,
+      adjustmentAmount: this.roundMoney(originalAmount - finalAmount),
+      plannedDistanceMeters,
+      travelledDistanceMeters,
+      pricePerKilometer,
+    };
+  }
+
+  private async calculateRouteDistanceMeters(
+    originPoint: Point,
+    destinationPoint: Point,
+    context: string,
+  ): Promise<number | null> {
+    const origin = this.pointToLatLng(originPoint);
+    const destination = this.pointToLatLng(destinationPoint);
+    if (!origin || !destination) {
+      return null;
+    }
+
+    try {
+      const directions = await this.googleMapsService.getDirections({
+        origin: { lat: origin.latitude, lng: origin.longitude },
+        destination: {
+          lat: destination.latitude,
+          lng: destination.longitude,
+        },
+        mode: TravelMode.DRIVING,
+        region: 'CD',
+      });
+      const legs = directions.routes?.[0]?.legs ?? [];
+      const distanceMeters = legs.reduce(
+        (sum, leg) => sum + (Number(leg.distance) || 0),
+        0,
+      );
+
+      if (legs.length > 0 && distanceMeters >= 0) {
+        return Math.round(distanceMeters);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(
+        `Unable to calculate route distance for ${context}: ${message}`,
+      );
+    }
+
+    const straightLineDistance = this.calculatePointDistanceMeters(
+      originPoint,
+      destinationPoint,
+    );
+    return straightLineDistance === null
+      ? null
+      : Math.round(straightLineDistance);
+  }
+
+  private roundMoney(value: number): number {
+    return Math.round(Number(value) * 100) / 100;
   }
 
   private buildInterruptionPoint(
@@ -1427,7 +1682,7 @@ export class BookingsService {
     }
 
     this.ensurePassengerOwnsBooking(booking, passengerId);
-    this.ensureBookingCanBePaid(booking);
+    this.prepareBookingForElectronicPayment(booking);
 
     const amount = this.calculateBookingPaymentAmount(
       booking.trip,
@@ -1889,14 +2144,9 @@ export class BookingsService {
   }
 
   private ensureBookingCanBePaid(booking: Booking): void {
-    if (booking.paymentMode !== TripPaymentMode.ELECTRONIC) {
-      if (booking.paymentMode === TripPaymentMode.POINTS) {
-        throw new BadRequestException(
-          'Cette reservation est reglee avec les points Zwanga',
-        );
-      }
+    if (booking.paymentMode === TripPaymentMode.POINTS) {
       throw new BadRequestException(
-        'Cette reservation doit etre reglee en especes a l arrivee',
+        'Cette reservation est reglee avec les points Zwanga',
       );
     }
 
@@ -1925,6 +2175,20 @@ export class BookingsService {
     ) {
       throw new BadRequestException('Ce trajet ne peut plus etre paye');
     }
+  }
+
+  private prepareBookingForElectronicPayment(booking: Booking): void {
+    this.ensureBookingCanBePaid(booking);
+
+    if (booking.paymentMode === TripPaymentMode.ELECTRONIC) {
+      return;
+    }
+
+    booking.paymentMode = TripPaymentMode.ELECTRONIC;
+    booking.paymentStatus = BookingPaymentStatus.PENDING;
+    booking.paymentReference = null;
+    booking.paymentTransactionId = null;
+    booking.paidAt = null;
   }
 
   private ensureBookingIsPrepaidForRide(
@@ -2010,10 +2274,18 @@ export class BookingsService {
       return;
     }
 
-    const grossAmount = this.calculateBookingPaymentAmount(
+    const calculatedGrossAmount = this.calculateBookingPaymentAmount(
       completedBooking.trip,
       completedBooking.numberOfSeats,
     );
+    const persistedAmount = Number(completedBooking.paymentAmount);
+    const grossAmount =
+      completedBooking.paymentAmount !== null &&
+      completedBooking.paymentAmount !== undefined &&
+      Number.isFinite(persistedAmount) &&
+      persistedAmount >= 0
+        ? persistedAmount
+        : calculatedGrossAmount;
 
     if (grossAmount > 0 && !completedBooking.paymentAmount) {
       completedBooking.paymentAmount = grossAmount;
@@ -2021,6 +2293,7 @@ export class BookingsService {
       await this.bookingRepository.save(completedBooking);
     }
 
+    await this.ensureLoyaltyDistanceForCompletedBooking(completedBooking);
     await this.walletService.awardLoyaltyForBooking(
       completedBooking,
       grossAmount,
@@ -2028,6 +2301,40 @@ export class BookingsService {
     await this.driverSettlementsService.recordCompletedBookingEarning(
       completedBooking,
     );
+  }
+
+  private async ensureLoyaltyDistanceForCompletedBooking(
+    booking: Booking,
+  ): Promise<void> {
+    const existingDistance = Number(
+      booking.travelledDistanceMeters ?? booking.plannedDistanceMeters ?? 0,
+    );
+    if (Number.isFinite(existingDistance) && existingDistance > 0) {
+      return;
+    }
+
+    const origin =
+      booking.passengerOriginPoint ?? booking.trip.departurePoint ?? null;
+    const destination =
+      booking.passengerDestinationPoint ?? booking.trip.arrivalPoint ?? null;
+    if (!origin || !destination) {
+      return;
+    }
+
+    const distanceMeters = await this.calculateRouteDistanceMeters(
+      origin,
+      destination,
+      `booking ${booking.id} loyalty distance`,
+    );
+    if (!distanceMeters || distanceMeters <= 0) {
+      return;
+    }
+
+    booking.plannedDistanceMeters =
+      booking.plannedDistanceMeters ?? distanceMeters;
+    booking.travelledDistanceMeters =
+      booking.travelledDistanceMeters ?? distanceMeters;
+    await this.bookingRepository.save(booking);
   }
 
   private calculateBookingPaymentAmount(
@@ -2147,6 +2454,10 @@ export class BookingsService {
     booking: Booking,
     payment: PaymentTransaction,
   ): Promise<Booking> {
+    const wasAlreadyPaid =
+      booking.paymentStatus === BookingPaymentStatus.SUCCEEDED;
+
+    booking.paymentMode = TripPaymentMode.ELECTRONIC;
     booking.paymentReference = payment.reference;
     booking.paymentTransactionId = payment.id;
     booking.paymentAmount = Number(
@@ -2164,6 +2475,15 @@ export class BookingsService {
 
     const savedBooking = await this.bookingRepository.save(booking);
     await this.invalidateBookingCaches(savedBooking);
+
+    if (
+      !wasAlreadyPaid &&
+      savedBooking.status === BookingStatus.COMPLETED &&
+      savedBooking.paymentStatus === BookingPaymentStatus.SUCCEEDED
+    ) {
+      await this.finalizeCompletedBooking(savedBooking);
+    }
+
     return savedBooking;
   }
 
@@ -3132,7 +3452,6 @@ export class BookingsService {
     const now = new Date();
     const pickupPoint = this.getPickupPoint(booking);
     const driverLocation = booking.trip?.currentLocation ?? null;
-    const passengerLocation = booking.passengerCurrentLocation ?? null;
     const hasFreshDriverLocation = Boolean(
       driverLocation &&
         this.isFreshLocationUpdate(booking.trip?.lastLocationUpdateAt, now),
@@ -3151,81 +3470,113 @@ export class BookingsService {
       await this.bookingRepository.save(booking);
     }
 
-    if (!this.hasFreshGpsPair(booking, now) || !driverLocation || !passengerLocation) {
+    const driverId = booking.trip?.driverId;
+    if (!driverId) {
       return null;
     }
 
-    const phoneDistance = this.calculatePointDistanceMeters(
-      driverLocation,
-      passengerLocation,
-    );
-    if (
-      phoneDistance === null ||
-      phoneDistance > this.AUTO_PICKUP_MATCH_THRESHOLD_METERS
-    ) {
-      return null;
-    }
+    const [driverHistory, passengerHistory, existingCandidate] =
+      await Promise.all([
+        this.locationHistoryService.getDriverLocationHistory(booking.tripId),
+        this.locationHistoryService.getPassengerLocationHistory(booking.id),
+        this.locationHistoryService.getBoardingCandidate(
+          booking.tripId,
+          driverId,
+          booking.passengerId,
+        ),
+      ]);
+    const detection = evaluateBoardingDetection({
+      now,
+      stateCompatible: this.canEvaluateAutomaticProgress(booking),
+      pickupLocation: this.pointToLatLng(pickupPoint),
+      driverLocations: this.getBoardingLocationSamples(driverHistory),
+      passengerLocations: this.getBoardingLocationSamples(passengerHistory),
+      candidate: existingCandidate,
+      config: this.boardingDetectionConfig,
+    });
+    this.logBoardingDetectionEvaluation(booking, detection.metrics);
 
-    const [driverHistory, passengerHistory] = await Promise.all([
-      this.locationHistoryService.getDriverLocationHistory(booking.tripId),
-      this.locationHistoryService.getPassengerLocationHistory(booking.id),
-    ]);
-
-    if (
-      !this.areDriverAndPassengerMovingTogetherFromHistory(
-        driverHistory,
-        passengerHistory,
-        now,
-      )
-    ) {
-      return null;
-    }
-
-    const driverMovedFromPickup = this.calculatePointDistanceMeters(
-      driverLocation,
-      pickupPoint,
-    );
-    const passengerMovedFromPickup = this.calculatePointDistanceMeters(
-      passengerLocation,
-      pickupPoint,
-    );
-    if (
-      driverMovedFromPickup === null ||
-      passengerMovedFromPickup === null ||
-      driverMovedFromPickup < this.AUTO_PICKUP_MOVEMENT_THRESHOLD_METERS ||
-      passengerMovedFromPickup < this.AUTO_PICKUP_MOVEMENT_THRESHOLD_METERS
-    ) {
+    if (detection.decision !== 'CONFIRM') {
+      if (detection.candidate) {
+        await this.locationHistoryService.saveBoardingCandidate(
+          booking.tripId,
+          driverId,
+          booking.passengerId,
+          detection.candidate,
+        );
+      }
       return null;
     }
 
     const wasPickedUp = booking.pickedUp;
     const wasConfirmedByPassenger = booking.pickedUpConfirmedByPassenger;
+    const pickedUpAt = booking.pickedUpAt ?? now;
+    const pickedUpConfirmedAt = booking.pickedUpConfirmedAt ?? now;
+    const updateResult = await this.bookingRepository.update(
+      {
+        id: booking.id,
+        status: BookingStatus.ACCEPTED,
+        pickedUpConfirmedByPassenger: false,
+      },
+      {
+        pickedUp: true,
+        pickedUpAt,
+        pickedUpConfirmedByPassenger: true,
+        pickedUpConfirmedAt,
+      },
+    );
+
+    if (updateResult.affected !== 1) {
+      if (detection.candidate) {
+        await this.locationHistoryService.saveBoardingCandidate(
+          booking.tripId,
+          driverId,
+          booking.passengerId,
+          detection.candidate,
+        );
+      }
+      this.logger.debug(
+        `Automatic pickup already confirmed for booking ${booking.id}`,
+      );
+      return null;
+    }
 
     booking.pickedUp = true;
-    booking.pickedUpAt = booking.pickedUpAt ?? now;
+    booking.pickedUpAt = pickedUpAt;
     booking.pickedUpConfirmedByPassenger = true;
-    booking.pickedUpConfirmedAt = booking.pickedUpConfirmedAt ?? now;
-
-    const savedBooking = await this.bookingRepository.save(booking);
-    await this.touchTripInteraction(savedBooking.tripId);
+    booking.pickedUpConfirmedAt = pickedUpConfirmedAt;
+    if (detection.candidate) {
+      await this.locationHistoryService.saveBoardingCandidate(
+        booking.tripId,
+        driverId,
+        booking.passengerId,
+        detection.candidate,
+      );
+    }
+    await this.touchTripInteraction(booking.tripId);
 
     if (!wasPickedUp) {
-      await this.notifySelectedEmergencyContacts(savedBooking, 'pickup');
-      await this.notifyDriverEmergencyContactsOnPickup(savedBooking);
+      await this.notifySelectedEmergencyContacts(booking, 'pickup');
+      await this.notifyDriverEmergencyContactsOnPickup(booking);
     }
 
-    await this.notifyPassengerAboutAutomaticPickupConfirmation(savedBooking);
+    await this.notifyPassengerAboutAutomaticPickupConfirmation(booking);
     if (!wasConfirmedByPassenger) {
-      await this.notifyDriverAboutAutomaticPickupConfirmation(savedBooking);
+      await this.notifyDriverAboutAutomaticPickupConfirmation(booking);
     }
 
-    await this.invalidateBookingCaches(savedBooking);
+    await this.invalidateBookingCaches(booking);
 
     return {
       type: 'pickup_confirmed',
-      bookingId: savedBooking.id,
-      tripId: savedBooking.tripId,
-      passengerId: savedBooking.passengerId,
+      bookingId: booking.id,
+      tripId: booking.tripId,
+      passengerId: booking.passengerId,
+      detectedAt: now.toISOString(),
+      boardingState: BoardingDetectionState.BOARDING_CONFIRMED,
+      confidenceScore: detection.metrics.confidenceScore,
+      decision: detection.decision,
+      rejectionReason: null,
     };
   }
 
@@ -4259,15 +4610,43 @@ export class BookingsService {
     }
 
     // Mettre à jour la position
+    const observedAt = normalizeLocationRecordedAt(
+      updateLocationDto.recordedAt,
+    );
+    const previousTimestamp = booking.passengerLastLocationUpdateAt
+      ? new Date(booking.passengerLastLocationUpdateAt).getTime()
+      : 0;
+    if (previousTimestamp >= observedAt.getTime()) {
+      const autoProgress = await this.evaluateAutomaticRideProgressForTrip(
+        booking.tripId,
+      );
+      const existingCoordinates = booking.passengerCurrentLocation?.coordinates;
+      return {
+        tripId: booking.tripId,
+        bookingId: booking.id,
+        coordinates: [
+          Number(existingCoordinates?.[0] ?? currentCoordinate.longitude),
+          Number(existingCoordinates?.[1] ?? currentCoordinate.latitude),
+        ],
+        updatedAt: booking.passengerLastLocationUpdateAt!,
+        autoProgress,
+      };
+    }
+
     booking.passengerCurrentLocation =
       buildPointFromCoordinate(currentCoordinate);
-    booking.passengerLastLocationUpdateAt = new Date();
+    booking.passengerLastLocationUpdateAt = observedAt;
     await this.bookingRepository.save(booking);
     await this.locationHistoryService.recordPassengerLocation(
       booking.id,
       currentCoordinate.latitude,
       currentCoordinate.longitude,
       booking.passengerLastLocationUpdateAt,
+      {
+        accuracyMeters: updateLocationDto.accuracy,
+        speedMetersPerSecond: updateLocationDto.speed,
+        headingDegrees: updateLocationDto.heading,
+      },
     );
     await this.touchTripInteraction(booking.tripId);
 
@@ -4529,7 +4908,10 @@ export class BookingsService {
       const coordinate = this.pointToLatLng(booking.passengerCurrentLocation);
       if (
         coordinate &&
-        this.isFreshLocationUpdate(booking.passengerLastLocationUpdateAt, now) &&
+        this.isFreshLocationUpdate(
+          booking.passengerLastLocationUpdateAt,
+          now,
+        ) &&
         isCoordinateAllowedForTrip(coordinate, trip)
       ) {
         coordinates = [coordinate.longitude, coordinate.latitude];

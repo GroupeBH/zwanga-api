@@ -49,7 +49,10 @@ import {
 } from './dto/trip-interruption.dto';
 import { BookingsService } from '../bookings/bookings.service';
 import { CacheService } from '../common/services/cache.service';
-import { LocationHistoryService } from '../common/services/location-history.service';
+import {
+  LocationHistoryService,
+  type LocationObservationMetadata,
+} from '../common/services/location-history.service';
 import { FileUploadService } from '../common/services/file-upload.service';
 import { NotificationService } from '../notifications/notifications.service';
 import { Rating } from '../ratings/entities/rating.entity';
@@ -67,6 +70,7 @@ import {
   isCoordinateAllowedForTrip,
   isFreshLocationTimestamp,
   normalizeCoordinateForTrip,
+  normalizeLocationRecordedAt,
   normalizeLngLatCoordinates,
   pointToCoordinate,
   pointToCoordinates as toSafeCoordinates,
@@ -1628,6 +1632,8 @@ export class TripsService {
     for (const confirmation of confirmations) {
       await this.bookingsService.completeBookingByTripInterruption(
         confirmation.bookingId,
+        requestWithRelations.requestedLocation ??
+          requestWithRelations.trip.currentLocation,
       );
     }
 
@@ -3241,6 +3247,7 @@ export class TripsService {
     driverId: string,
     tripId: string,
     coordinates: [number, number],
+    metadata: LocationObservationMetadata & { recordedAt?: string } = {},
   ) {
     const { trip, isDriver } = await this.verifyTripParticipant(
       tripId,
@@ -3276,8 +3283,19 @@ export class TripsService {
       );
     }
 
+    const observedAt = normalizeLocationRecordedAt(metadata.recordedAt);
+    const previousTimestamp = trip.lastLocationUpdateAt?.getTime() ?? 0;
+    if (previousTimestamp >= observedAt.getTime()) {
+      return {
+        tripId: trip.id,
+        coordinates: this.pointToCoordinates(trip.currentLocation),
+        updatedAt: trip.lastLocationUpdateAt,
+        ignoredAsOutOfOrder: true,
+      };
+    }
+
     trip.currentLocation = buildPointFromCoordinate(currentCoordinate);
-    trip.lastLocationUpdateAt = new Date();
+    trip.lastLocationUpdateAt = observedAt;
 
     await this.tripRepository.save(trip);
     await this.locationHistoryService.recordDriverLocation(
@@ -3285,6 +3303,7 @@ export class TripsService {
       currentCoordinate.latitude,
       currentCoordinate.longitude,
       trip.lastLocationUpdateAt,
+      metadata,
     );
 
     const responseCoordinates: [number, number] = [

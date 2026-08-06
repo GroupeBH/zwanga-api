@@ -56,6 +56,8 @@ describe('TripsService daily trip publication quota', () => {
       {} as any,
       {} as any,
       {} as any,
+      {} as any,
+      {} as any,
       cacheService as any,
       {} as any,
       {} as any,
@@ -64,6 +66,7 @@ describe('TripsService daily trip publication quota', () => {
       subscriptionsService as any,
       {} as any,
       { recordDriverLocation: jest.fn().mockResolvedValue(undefined) } as any,
+      {} as any,
     );
 
     jest.spyOn(service, 'findOne').mockResolvedValue({ id: 'trip-1' });
@@ -156,6 +159,8 @@ describe('TripsService trip deletion rules', () => {
       {} as any,
       {} as any,
       {} as any,
+      {} as any,
+      {} as any,
       cacheService as any,
       {} as any,
       {} as any,
@@ -164,6 +169,7 @@ describe('TripsService trip deletion rules', () => {
       {} as any,
       {} as any,
       { recordDriverLocation: jest.fn().mockResolvedValue(undefined) } as any,
+      {} as any,
     );
   });
 
@@ -433,6 +439,8 @@ describe('TripsService started trip ETA expiration', () => {
       {} as any,
       {} as any,
       {} as any,
+      {} as any,
+      {} as any,
       cacheService as any,
       {} as any,
       {} as any,
@@ -441,6 +449,7 @@ describe('TripsService started trip ETA expiration', () => {
       {} as any,
       weatherAwarenessService as any,
       { recordDriverLocation: jest.fn().mockResolvedValue(undefined) } as any,
+      {} as any,
     );
   });
 
@@ -549,5 +558,101 @@ describe('TripsService started trip ETA expiration', () => {
     expect(tripRepository.find).toHaveBeenCalledTimes(1);
     expect(tripRepository.update).not.toHaveBeenCalled();
     expect(bookingRepository.update).not.toHaveBeenCalled();
+  });
+});
+
+describe('TripsService interrupted trip fare location', () => {
+  it('uses the driver interruption point for every onboard booking', async () => {
+    const interruptionPoint = {
+      type: 'Point' as const,
+      coordinates: [15.3063, -4.365],
+    };
+    const trip = {
+      id: 'trip-1',
+      status: TripStatus.ACTIVE,
+      totalSeats: 3,
+      availableSeats: 0,
+      currentLocation: {
+        type: 'Point' as const,
+        coordinates: [15.3, -4.36],
+      },
+      bookings: [],
+    };
+    const interruptionRequest = {
+      id: 'request-1',
+      tripId: 'trip-1',
+      requestedLocation: interruptionPoint,
+      trip,
+      confirmations: [
+        {
+          bookingId: 'booking-1',
+          status: 'confirmed',
+        },
+        {
+          bookingId: 'booking-2',
+          status: 'confirmed',
+        },
+      ],
+    };
+    const tripRepository = {
+      findOne: jest.fn().mockResolvedValue(trip),
+      save: jest.fn().mockImplementation(async (payload) => payload),
+    };
+    const driverInterruptionRepository = {
+      findOne: jest.fn().mockResolvedValue(interruptionRequest),
+      save: jest.fn().mockImplementation(async (payload) => payload),
+    };
+    const bookingsService = {
+      completeBookingByTripInterruption: jest.fn().mockResolvedValue(undefined),
+    };
+    const service: any = new TripsService(
+      tripRepository as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      driverInterruptionRepository as any,
+      {} as any,
+      { del: jest.fn() } as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      bookingsService as any,
+    );
+    jest
+      .spyOn(service, 'calculateAvailableSeatsAfterInterruption')
+      .mockReturnValue(3);
+    jest
+      .spyOn(service, 'invalidateDriverInterruptionCaches')
+      .mockResolvedValue(undefined);
+    jest
+      .spyOn(service, 'notifyDriverAboutDriverInterruptionCompleted')
+      .mockResolvedValue(undefined);
+    jest
+      .spyOn(service, 'notifyPassengersAboutDriverInterruptionCompleted')
+      .mockResolvedValue(undefined);
+
+    await service.finalizeDriverTripInterruption({ id: 'request-1' });
+
+    expect(
+      bookingsService.completeBookingByTripInterruption,
+    ).toHaveBeenNthCalledWith(1, 'booking-1', interruptionPoint);
+    expect(
+      bookingsService.completeBookingByTripInterruption,
+    ).toHaveBeenNthCalledWith(2, 'booking-2', interruptionPoint);
+    expect(tripRepository.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: TripStatus.PENDING,
+        availableSeats: 3,
+      }),
+    );
   });
 });

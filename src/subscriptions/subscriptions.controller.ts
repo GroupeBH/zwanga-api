@@ -16,6 +16,7 @@ import {
   CreateDocumentFundingRequestDto,
   ListDocumentFundingRequestsQueryDto,
   SubscribeDto,
+  SubscribeWithPointsDto,
   UpdateDocumentFundingRequestStatusDto,
 } from './dto/subscription.dto';
 import { FlexPayCallbackDto } from '../payments/dto/payment.dto';
@@ -50,6 +51,17 @@ export class SubscriptionsController {
   @ApiOperation({ summary: 'Initiate payment for a premium subscription' })
   async subscribe(@Request() req, @Body() dto: SubscribeDto) {
     return this.subscriptionsService.subscribe(req.user.userId, dto);
+  }
+
+  @Post('subscribe/points')
+  @Auth()
+  @SensitiveThrottle(5, 60000)
+  @ApiOperation({ summary: 'Pay a premium subscription with Zwanga points' })
+  async subscribeWithPoints(
+    @Request() req,
+    @Body() dto: SubscribeWithPointsDto,
+  ) {
+    return this.subscriptionsService.subscribeWithPoints(req.user.userId, dto);
   }
 
   @Post('flexpay/callback')
