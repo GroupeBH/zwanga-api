@@ -27,10 +27,6 @@ RUN --mount=type=cache,target=/root/.npm \
     && npm cache clean --force
 
 FROM base AS production
-ENV NODE_ENV=production \
-    HOST=0.0.0.0 \
-    PORT=5200
-
 COPY --chown=node:node package.json package-lock.json ./
 COPY --chown=node:node --from=production-dependencies /app/node_modules ./node_modules
 COPY --chown=node:node --from=builder /app/dist ./dist

@@ -1022,11 +1022,6 @@ export class SubscriptionsService {
 
     const subscriptionPrice = this.getSubscriptionPrice();
     const subscriptionCurrency = this.getSubscriptionCurrency();
-    const pointsCurrency = this.walletService.getPointsCurrency();
-    if (subscriptionCurrency === pointsCurrency) {
-      return this.roundMoney(subscriptionPrice);
-    }
-
     const pointsPerCurrencyUnit = this.getOptionalFirstNumberConfig([
       `SUBSCRIPTION_POINTS_PER_${subscriptionCurrency}`,
       `ZWANGA_POINTS_PER_${subscriptionCurrency}`,
@@ -1035,8 +1030,9 @@ export class SubscriptionsService {
       return this.roundMoney(subscriptionPrice * pointsPerCurrencyUnit);
     }
 
-    throw new BadRequestException(
-      `Prix en points non configure pour l abonnement ${subscriptionCurrency}/${pointsCurrency}`,
+    return this.walletService.convertMoneyToPoints(
+      subscriptionPrice,
+      subscriptionCurrency,
     );
   }
 

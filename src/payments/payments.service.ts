@@ -916,7 +916,7 @@ export class PaymentsService {
     }
 
     if (method === PaymentMethod.MOBILE_MONEY) {
-      return 'Demande de paiement envoyee. Veuillez valider sur votre telephone';
+      return 'Demande de paiement envoyée. Veuillez valider sur votre telephone';
     }
 
     return (

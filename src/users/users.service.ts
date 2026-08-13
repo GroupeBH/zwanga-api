@@ -666,33 +666,16 @@ export class UsersService {
       const kycEnabledConfig = this.configService.get<string>(
         'AWS_REKOGNITION_KYC_ENABLED',
       );
-      const accessKeyId = this.configService.get<string>('AWS_ACCESS_KEY_ID');
-      const secretAccessKey = this.configService.get<string>(
-        'AWS_SECRET_ACCESS_KEY',
-      );
 
       this.logger.warn(`[KYC Upload] ⚠️ KYC validation is DISABLED`);
       this.logger.warn(
         `[KYC Upload] Reason: AWS_REKOGNITION_KYC_ENABLED="${kycEnabledConfig || 'NOT SET'}" (must be "true" to enable)`,
       );
-
-      if (!accessKeyId || !secretAccessKey) {
-        this.logger.warn(
-          `[KYC Upload] Additional issue: AWS credentials not configured`,
-        );
-        this.logger.warn(
-          `[KYC Upload]   - AWS_ACCESS_KEY_ID: ${accessKeyId ? 'configured' : 'NOT SET'}`,
-        );
-        this.logger.warn(
-          `[KYC Upload]   - AWS_SECRET_ACCESS_KEY: ${secretAccessKey ? 'configured' : 'NOT SET'}`,
-        );
-      }
-
-      this.logger.warn(
+this.logger.warn(
         `[KYC Upload] Action: Keeping status as PENDING for manual review`,
       );
       this.logger.warn(
-        `[KYC Upload] To enable AI validation, set AWS_REKOGNITION_KYC_ENABLED=true and configure AWS credentials`,
+        `[KYC Upload] To enable AI validation, set AWS_REKOGNITION_KYC_ENABLED=true and grant Rekognition permissions to the ECS task role`,
       );
 
       // When KYC validation is disabled, keep status as PENDING for manual review

@@ -15,8 +15,8 @@ import { PaymentMethod } from '../../payments/entities/payment-transaction.entit
 export class InitiateWalletTopUpDto {
   @ApiProperty({
     minimum: 1,
-    example: 5000,
-    description: 'Montant a convertir en points Zwanga. 1 point = 1 CDF.',
+    example: 50,
+    description: 'Nombre de points Zwanga a acheter. 1 point = 100 FC/CDF.',
   })
   @Type(() => Number)
   @IsNumber()

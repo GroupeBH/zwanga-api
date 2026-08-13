@@ -42,7 +42,7 @@ describe('WalletService', () => {
     userId: 'passenger-1',
     type: WalletAccountType.POINTS,
     balance: 1000,
-    currency: 'CDF',
+    currency: 'PTS',
   };
 
   const topUpPayment = {
@@ -96,7 +96,10 @@ describe('WalletService', () => {
     configService = {
       get: jest.fn((key: string) => {
         if (key === 'ZWANGA_POINTS_CURRENCY') {
-          return 'CDF';
+          return 'PTS';
+        }
+        if (key === 'ZWANGA_POINT_VALUE_CDF') {
+          return 100;
         }
         if (key === 'FLEXPAY_CALLBACK_BASE_URL') {
           return 'https://api.zwanga.cd/api/v1';
@@ -122,11 +125,11 @@ describe('WalletService', () => {
     );
   });
 
-  it('initiates a FlexPay purchase where one CDF buys one point', async () => {
+  it('initiates a FlexPay purchase where one point costs 100 CDF', async () => {
     paymentsService.initiatePayment.mockResolvedValue(topUpPayment);
 
     const result = await service.initiateTopUp('passenger-1', {
-      amount: 5000,
+      amount: 50,
       method: PaymentMethod.MOBILE_MONEY,
       phone: '243891234567',
     });
@@ -139,6 +142,7 @@ describe('WalletService', () => {
         relatedEntityId: 'passenger-1',
         amount: 5000,
         currency: 'CDF',
+        description: 'Achat de 50 points Zwanga',
         callbackUrl:
           'https://api.zwanga.cd/api/v1/wallet/topups/flexpay/callback',
       }),
@@ -156,7 +160,7 @@ describe('WalletService', () => {
     paymentsService.handleFlexPayCallback.mockResolvedValue(succeededPayment);
     accountRepository.findOne.mockResolvedValue({
       ...account,
-      balance: 6000,
+      balance: 1050,
     });
 
     const result = await service.handleTopUpCallback({
@@ -167,17 +171,17 @@ describe('WalletService', () => {
 
     expect(dataSource.transaction).toHaveBeenCalledTimes(1);
     expect(manager.save).toHaveBeenCalledWith(
-      expect.objectContaining({ balance: 6000 }),
+      expect.objectContaining({ balance: 1050 }),
     );
     expect(manager.save).toHaveBeenCalledWith(
       expect.objectContaining({
         type: WalletLedgerEntryType.TOP_UP,
-        amount: 5000,
-        balanceAfter: 6000,
+        amount: 50,
+        balanceAfter: 1050,
         paymentTransactionId: 'payment-1',
       }),
     );
-    expect(result.account.balance).toBe(6000);
+    expect(result.account.balance).toBe(1050);
   });
 
   it('does not credit the same successful top-up twice', async () => {
@@ -197,7 +201,7 @@ describe('WalletService', () => {
   });
 
   it('rejects a trip payment when the points balance is insufficient', async () => {
-    manager.findOne.mockResolvedValue({ ...account, balance: 1000 });
+    manager.findOne.mockResolvedValue({ ...account, balance: 10 });
 
     await expect(
       service.payForBooking(
@@ -216,7 +220,7 @@ describe('WalletService', () => {
     ledgerRepository.findOne
       .mockResolvedValueOnce({
         id: 'entry-payment',
-        amount: -2500,
+        amount: -25,
         type: WalletLedgerEntryType.BOOKING_PAYMENT,
       })
       .mockResolvedValueOnce(null);
@@ -229,13 +233,13 @@ describe('WalletService', () => {
 
     expect(refunded).toBe(true);
     expect(manager.save).toHaveBeenCalledWith(
-      expect.objectContaining({ balance: 3500 }),
+      expect.objectContaining({ balance: 1025 }),
     );
     expect(manager.save).toHaveBeenCalledWith(
       expect.objectContaining({
         type: WalletLedgerEntryType.BOOKING_REFUND,
-        amount: 2500,
-        balanceAfter: 3500,
+        amount: 25,
+        balanceAfter: 1025,
       }),
     );
   });
@@ -253,13 +257,13 @@ describe('WalletService', () => {
     );
 
     expect(manager.save).toHaveBeenCalledWith(
-      expect.objectContaining({ balance: 2500 }),
+      expect.objectContaining({ balance: 1015 }),
     );
     expect(manager.save).toHaveBeenCalledWith(
       expect.objectContaining({
         type: WalletLedgerEntryType.BOOKING_FARE_ADJUSTMENT,
-        amount: 1500,
-        balanceAfter: 2500,
+        amount: 15,
+        balanceAfter: 1015,
         relatedEntityType: 'booking',
         relatedEntityId: 'booking-1',
         paymentTransactionId: 'payment-1',
@@ -271,7 +275,7 @@ describe('WalletService', () => {
     const existingAdjustment = {
       id: 'entry-adjustment',
       type: WalletLedgerEntryType.BOOKING_FARE_ADJUSTMENT,
-      amount: 1500,
+      amount: 15,
     };
     ledgerRepository.findOne.mockResolvedValue(existingAdjustment);
 
@@ -289,24 +293,24 @@ describe('WalletService', () => {
   });
 
   it('pays a subscription with points once', async () => {
-    manager.findOne.mockResolvedValue({ ...account, balance: 6000 });
+    manager.findOne.mockResolvedValue({ ...account, balance: 60 });
 
     const entry = await service.payForSubscription(
       {
         id: '123e4567-e89b-12d3-a456-426614174000',
         userId: 'passenger-1',
       },
-      5000,
+      50,
     );
 
     expect(manager.save).toHaveBeenCalledWith(
-      expect.objectContaining({ balance: 1000 }),
+      expect.objectContaining({ balance: 10 }),
     );
     expect(manager.save).toHaveBeenCalledWith(
       expect.objectContaining({
         type: WalletLedgerEntryType.SUBSCRIPTION_PAYMENT,
-        amount: -5000,
-        balanceAfter: 1000,
+        amount: -50,
+        balanceAfter: 10,
         relatedEntityType: 'subscription',
         relatedEntityId: '123e4567-e89b-12d3-a456-426614174000',
       }),
@@ -371,7 +375,28 @@ describe('WalletService', () => {
     );
   });
 
-  it('awards loyalty points from travelled kilometers first', async () => {
+  it('awards the base loyalty point even when the completed trip is free', async () => {
+    manager.findOne.mockResolvedValue({ ...account, balance: 1000 });
+
+    await service.awardLoyaltyForBooking(
+      {
+        id: 'booking-1',
+        passengerId: 'passenger-1',
+        paymentCurrency: 'CDF',
+      } as any,
+      0,
+    );
+
+    expect(manager.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: WalletLedgerEntryType.LOYALTY_REWARD,
+        amount: 1,
+        balanceAfter: 1001,
+      }),
+    );
+  });
+
+  it('adds 0.5 point per travelled kilometer on top of the base point', async () => {
     manager.findOne.mockResolvedValue({ ...account, balance: 1000 });
 
     await service.awardLoyaltyForBooking(
@@ -379,6 +404,7 @@ describe('WalletService', () => {
         id: 'booking-1',
         passengerId: 'passenger-1',
         travelledDistanceMeters: 4500,
+        paymentCurrency: 'CDF',
       } as any,
       10000,
     );
@@ -386,8 +412,29 @@ describe('WalletService', () => {
     expect(manager.save).toHaveBeenCalledWith(
       expect.objectContaining({
         type: WalletLedgerEntryType.LOYALTY_REWARD,
-        amount: 4.5,
-        balanceAfter: 1004.5,
+        amount: 3.25,
+        balanceAfter: 1003.25,
+      }),
+    );
+  });
+
+  it('converts the price-based loyalty bonus from CDF to points', async () => {
+    manager.findOne.mockResolvedValue({ ...account, balance: 1000 });
+
+    await service.awardLoyaltyForBooking(
+      {
+        id: 'booking-1',
+        passengerId: 'passenger-1',
+        paymentCurrency: 'CDF',
+      } as any,
+      5000,
+    );
+
+    expect(manager.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: WalletLedgerEntryType.LOYALTY_REWARD,
+        amount: 1.5,
+        balanceAfter: 1001.5,
       }),
     );
   });

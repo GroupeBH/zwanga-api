@@ -23,6 +23,7 @@ coverage
 
 # Local infrastructure and deployment tooling
 infra
+infra-aws
 tmp
 .terraform
 *.tfstate

@@ -63,29 +63,14 @@ export class KycValidationService {
     this.logger.log(`[KYC Init] Min face quality threshold: ${this.minFaceQuality}%`);
 
     if (this.enabled) {
-      const accessKeyId = this.configService.get<string>('AWS_ACCESS_KEY_ID');
-      const secretAccessKey = this.configService.get<string>('AWS_SECRET_ACCESS_KEY');
       const region = this.configService.get<string>('AWS_REGION') || 'us-east-1';
 
       this.logger.log(`[KYC Init] AWS Region: ${region}`);
-      this.logger.log(`[KYC Init] AWS_ACCESS_KEY_ID: ${accessKeyId ? '***configured***' : 'NOT SET'}`);
-      this.logger.log(`[KYC Init] AWS_SECRET_ACCESS_KEY: ${secretAccessKey ? '***configured***' : 'NOT SET'}`);
-
-      if (!accessKeyId || !secretAccessKey) {
-        this.logger.warn(
-          '[KYC Init] AWS credentials not configured. KYC validation will be disabled.',
-        );
-        this.enabled = false;
-        return;
-      }
+      this.logger.log('[KYC Init] AWS credentials provider: default SDK chain / ECS task role');
 
       try {
         this.rekognitionClient = new RekognitionClient({
           region,
-          credentials: {
-            accessKeyId,
-            secretAccessKey,
-          },
         });
 
         this.logger.log(

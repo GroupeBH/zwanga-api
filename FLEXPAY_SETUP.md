@@ -40,10 +40,12 @@ or through the payment-mode endpoint:
 
 ## Zwanga points (tokens)
 
-Points and tokens refer to the same wallet balance. By default, one point buys
-one unit of `ZWANGA_POINTS_CURRENCY` (normally `1 point = 1 CDF`). The backend
-never credits a top-up from the initiation response: it waits for a successful,
-verified FlexPay callback or status check.
+Points and tokens refer to the same wallet balance. By default, the wallet
+currency is `PTS` and `1 point = 100 CDF`. The `amount` sent by the client to
+`POST /wallet/topups` is the number of points to buy; the backend converts it to
+CDF before sending the payment to FlexPay. It never credits a top-up from the
+initiation response: it waits for a successful, verified FlexPay callback or
+status check.
 
 Authenticated wallet endpoints:
 
@@ -62,17 +64,19 @@ Mobile Money points purchase:
 
 ```json
 {
-  "amount": 5000,
+  "amount": 50,
   "method": "mobile_money",
   "phone": "243891234567"
 }
 ```
 
+This charges `5000 CDF` through FlexPay and credits `50 PTS` after confirmation.
+
 Card points purchase:
 
 ```json
 {
-  "amount": 5000,
+  "amount": 50,
   "method": "card",
   "approveUrl": "zwanga://wallet/topup?status=success",
   "cancelUrl": "zwanga://wallet/topup?status=cancel",
@@ -91,7 +95,11 @@ To pay a booking with points:
 Send that body to `PUT /api/v1/bookings/:id/payment-mode`. If the balance is
 insufficient, the request fails without marking the booking as paid. A points
 payment is refunded once when the booking is cancelled or rejected. Completing
-a paid trip also grants loyalty points according to `ZWANGA_LOYALTY_RATE`.
+a trip grants `ZWANGA_LOYALTY_BASE_REWARD` first, then adds
+`ZWANGA_LOYALTY_POINTS_PER_KM` for each travelled kilometer. When distance is
+unavailable, the backend falls back to a price-based loyalty amount converted
+with the same point value. With the defaults, every completed booking grants at
+least `1 point`, worth `100 CDF` on the platform, plus `0.5 point/km`.
 
 ## Prix kilometrique en cas d'interruption
 
@@ -205,8 +213,12 @@ SUBSCRIPTION_PRO_CURRENCY=CDF
 # Trip booking payments.
 TRIP_PAYMENT_CURRENCY=CDF
 
-# Points wallet. 0.01 grants 1% of the completed trip price as loyalty points.
-ZWANGA_POINTS_CURRENCY=CDF
+# Points wallet. 1 point = 100 CDF by default.
+ZWANGA_POINTS_CURRENCY=PTS
+ZWANGA_POINT_VALUE_CDF=100
+ZWANGA_LOYALTY_BASE_REWARD=1
+ZWANGA_LOYALTY_POINTS_PER_KM=0.5
+# 0.01 grants 1% of the completed trip price, converted back to points.
 ZWANGA_LOYALTY_RATE=0.01
 
 # Fallback card redirect URLs when the client does not send them.

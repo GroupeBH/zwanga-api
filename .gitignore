@@ -44,3 +44,16 @@ lerna-debug.log*
 /uploads/*
 !/uploads/.gitkeep
 zwanga-c791b-firebase-adminsdk-fbsvc-43707dcb4e
+
+# Terraform local state and generated configuration
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+infra-aws/backend.hcl
+infra-aws/terraform.tfvars
+infra-aws/*.auto.tfvars
+infra-aws/bootstrap/terraform.tfvars
+
+# Local renderings and temporary validation artifacts
+/tmp/

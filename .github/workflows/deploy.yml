@@ -1,4 +1,4 @@
-name: Deploy NestJS to AWS App Runner
+name: Deploy NestJS to AWS ECS Fargate
 
 on:
   push:
@@ -11,14 +11,15 @@ permissions:
   contents: read
 
 concurrency:
-  group: aws-apprunner-production
+  group: aws-ecs-fargate-production
   cancel-in-progress: false
 
 env:
   AWS_REGION: ${{ vars.AWS_REGION }}
   AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
   ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
-  APP_RUNNER_SERVICE_ARN: ${{ vars.APP_RUNNER_SERVICE_ARN }}
+  ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
+  ECS_SERVICE: ${{ vars.ECS_SERVICE }}
 
 jobs:
   test-build-deploy:
@@ -52,7 +53,8 @@ jobs:
           : "${AWS_REGION:?Configure the AWS_REGION repository variable}"
           : "${AWS_ROLE_ARN:?Configure the AWS_ROLE_ARN repository variable}"
           : "${ECR_REPOSITORY:?Configure the ECR_REPOSITORY repository variable}"
-          : "${APP_RUNNER_SERVICE_ARN:?Configure the APP_RUNNER_SERVICE_ARN repository variable}"
+          : "${ECS_CLUSTER:?Configure the ECS_CLUSTER repository variable}"
+          : "${ECS_SERVICE:?Configure the ECS_SERVICE repository variable}"
 
       - name: Configure temporary AWS credentials through OIDC
         uses: aws-actions/configure-aws-credentials@v4
@@ -82,57 +84,46 @@ jobs:
             ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          # Keep a single-image manifest: App Runner does not need BuildKit
-          # attestation manifests to deploy this linux/amd64 image.
           provenance: false
           sbom: false
 
-      - name: Start App Runner deployment
+      - name: Force ECS deployment
         id: deploy
         shell: bash
         run: |
           set -euo pipefail
-          operation_id="$(aws apprunner start-deployment \
-            --service-arn "${APP_RUNNER_SERVICE_ARN}" \
-            --query 'OperationId' \
-            --output text)"
-          echo "operation_id=${operation_id}" >> "${GITHUB_OUTPUT}"
 
-      - name: Wait for App Runner
+          deployment_id="$(aws ecs update-service \
+            --cluster "${ECS_CLUSTER}" \
+            --service "${ECS_SERVICE}" \
+            --force-new-deployment \
+            --query 'service.deployments[?status==`PRIMARY`].id | [0]' \
+            --output text)"
+
+          echo "deployment_id=${deployment_id}" >> "${GITHUB_OUTPUT}"
+
+      - name: Wait for ECS stability
         shell: bash
         run: |
           set -euo pipefail
 
-          for attempt in $(seq 1 60); do
-            status="$(aws apprunner describe-service \
-              --service-arn "${APP_RUNNER_SERVICE_ARN}" \
-              --query 'Service.Status' \
-              --output text)"
+          aws ecs wait services-stable \
+            --cluster "${ECS_CLUSTER}" \
+            --services "${ECS_SERVICE}"
 
-            echo "App Runner status: ${status} (attempt ${attempt}/60)"
-            case "${status}" in
-              RUNNING)
-                exit 0
-                ;;
-              OPERATION_IN_PROGRESS)
-                sleep 10
-                ;;
-              *)
-                echo "Unexpected App Runner status: ${status}"
-                exit 1
-                ;;
-            esac
-          done
-
-          echo "App Runner deployment did not finish within 10 minutes"
-          exit 1
+          aws ecs describe-services \
+            --cluster "${ECS_CLUSTER}" \
+            --services "${ECS_SERVICE}" \
+            --query 'services[0].{status:status,running:runningCount,desired:desiredCount,deployments:deployments[*].{id:id,status:status,rolloutState:rolloutState}}'
 
       - name: Publish deployment summary
         shell: bash
         run: |
           {
-            echo "### AWS App Runner deployment"
+            echo "### AWS ECS Fargate deployment"
             echo "- Image digest: \`${{ steps.docker-build.outputs.digest }}\`"
             echo "- Commit tag: \`${GITHUB_SHA}\`"
-            echo "- Operation: \`${{ steps.deploy.outputs.operation_id }}\`"
+            echo "- ECS cluster: \`${ECS_CLUSTER}\`"
+            echo "- ECS service: \`${ECS_SERVICE}\`"
+            echo "- Deployment: \`${{ steps.deploy.outputs.deployment_id }}\`"
           } >> "${GITHUB_STEP_SUMMARY}"

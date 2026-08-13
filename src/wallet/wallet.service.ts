@@ -81,10 +81,12 @@ export class WalletService {
   private readonly BOOKING_RELATED_ENTITY_TYPE = 'booking';
   private readonly SUBSCRIPTION_RELATED_ENTITY_TYPE = 'subscription';
   private readonly TRANSFER_RELATED_ENTITY_TYPE = 'wallet_transfer';
-  private readonly DEFAULT_POINTS_CURRENCY = 'CDF';
+  private readonly DEFAULT_POINTS_CURRENCY = 'PTS';
+  private readonly DEFAULT_POINT_VALUE_CDF = 100;
   private readonly DEFAULT_LOYALTY_RATE = 0.01;
-  private readonly DEFAULT_LOYALTY_POINTS_PER_KM = 1;
+  private readonly DEFAULT_LOYALTY_POINTS_PER_KM = 0.5;
   private readonly DEFAULT_LOYALTY_MIN_REWARD = 1;
+  private readonly DEFAULT_LOYALTY_BASE_REWARD = 1;
 
   constructor(
     @InjectRepository(WalletAccount)
@@ -120,8 +122,9 @@ export class WalletService {
     userId: string,
     dto: InitiateWalletTopUpDto,
   ): Promise<WalletPaymentResponse> {
-    const amount = this.normalizePositiveAmount(dto.amount);
-    const currency = this.getPointsCurrency();
+    const pointsAmount = this.normalizePositiveAmount(dto.amount);
+    const currency = this.getPointValueCurrency();
+    const paymentAmount = this.convertPointsToMoney(pointsAmount, currency);
 
     const payment = await this.paymentsService.initiatePayment({
       userId,
@@ -130,9 +133,9 @@ export class WalletService {
       relatedEntityId: userId,
       method: dto.method,
       phone: dto.phone,
-      amount,
+      amount: paymentAmount,
       currency,
-      description: `Achat de ${amount} points Zwanga`,
+      description: `Achat de ${pointsAmount} points Zwanga`,
       callbackUrl: this.getTopUpFlexPayCallbackUrl(),
       approveUrl: dto.approveUrl,
       cancelUrl: dto.cancelUrl,
@@ -171,8 +174,11 @@ export class WalletService {
   }
 
   async payForBooking(booking: Booking, amount: number): Promise<void> {
-    const normalizedAmount = this.normalizePositiveAmount(amount);
-    if (normalizedAmount <= 0) {
+    const pointsAmount = this.convertMoneyToPoints(
+      amount,
+      booking.paymentCurrency,
+    );
+    if (pointsAmount <= 0) {
       return;
     }
 
@@ -187,11 +193,11 @@ export class WalletService {
 
     await this.changeBalance({
       userId: booking.passengerId,
-      amount: -normalizedAmount,
+      amount: -pointsAmount,
       type: WalletLedgerEntryType.BOOKING_PAYMENT,
       relatedEntityType: this.BOOKING_RELATED_ENTITY_TYPE,
       relatedEntityId: booking.id,
-      description: `Paiement par points pour la reservation ${booking.id}`,
+      description: `Paiement par points pour la reservation ${booking.id} (${amount} ${booking.paymentCurrency ?? this.getPointValueCurrency()})`,
     });
   }
 
@@ -229,8 +235,11 @@ export class WalletService {
     booking: Booking,
     amount: number,
   ): Promise<WalletLedgerEntry | null> {
-    const normalizedAmount = this.normalizePositiveAmount(amount);
-    if (normalizedAmount <= 0) {
+    const pointsAmount = this.convertMoneyToPoints(
+      amount,
+      booking.paymentCurrency,
+    );
+    if (pointsAmount <= 0) {
       return null;
     }
 
@@ -245,12 +254,12 @@ export class WalletService {
 
     return this.changeBalance({
       userId: booking.passengerId,
-      amount: normalizedAmount,
+      amount: pointsAmount,
       type: WalletLedgerEntryType.BOOKING_FARE_ADJUSTMENT,
       relatedEntityType: this.BOOKING_RELATED_ENTITY_TYPE,
       relatedEntityId: booking.id,
       paymentTransactionId: booking.paymentTransactionId,
-      description: `Ajustement du prix kilometrique pour la reservation ${booking.id}`,
+      description: `Ajustement du prix kilometrique pour la reservation ${booking.id} (${amount} ${booking.paymentCurrency ?? this.getPointValueCurrency()})`,
     });
   }
 
@@ -429,9 +438,34 @@ export class WalletService {
   public getPointsCurrency(): string {
     return (
       this.configService.get<string>('ZWANGA_POINTS_CURRENCY')?.trim() ||
-      this.configService.get<string>('TRIP_PAYMENT_CURRENCY')?.trim() ||
       this.DEFAULT_POINTS_CURRENCY
     ).toUpperCase();
+  }
+
+  public convertMoneyToPoints(
+    amount: number,
+    currency?: string | null,
+  ): number {
+    const normalizedAmount = this.normalizeNonNegativeAmount(amount);
+    if (normalizedAmount <= 0) {
+      return 0;
+    }
+    return this.roundMoney(
+      normalizedAmount / this.getPointValueForCurrency(currency),
+    );
+  }
+
+  public convertPointsToMoney(
+    points: number,
+    currency?: string | null,
+  ): number {
+    const normalizedPoints = this.normalizeNonNegativeAmount(points);
+    if (normalizedPoints <= 0) {
+      return 0;
+    }
+    return this.roundMoney(
+      normalizedPoints * this.getPointValueForCurrency(currency),
+    );
   }
 
   private async resolveTransferRecipient(
@@ -495,7 +529,10 @@ export class WalletService {
 
     await this.changeBalance({
       userId: payment.userId,
-      amount: this.normalizePositiveAmount(Number(payment.amount)),
+      amount: this.convertMoneyToPoints(
+        Number(payment.amount),
+        payment.currency,
+      ),
       type: WalletLedgerEntryType.TOP_UP,
       relatedEntityType: this.TOP_UP_RELATED_ENTITY_TYPE,
       relatedEntityId: payment.userId,
@@ -657,17 +694,26 @@ export class WalletService {
     booking: Booking,
     grossAmount: number,
   ): number {
+    const baseReward = this.getLoyaltyBaseReward();
     const distanceReward = this.calculateDistanceLoyaltyReward(booking);
     if (distanceReward > 0) {
-      return distanceReward;
+      return this.roundMoney(baseReward + distanceReward);
     }
 
     const amount = Number(grossAmount);
     if (!Number.isFinite(amount) || amount <= 0) {
-      return 0;
+      return baseReward;
     }
 
-    return this.roundMoney(amount * this.getLoyaltyRate());
+    const loyaltyMoneyValue = this.roundMoney(amount * this.getLoyaltyRate());
+    if (loyaltyMoneyValue <= 0) {
+      return baseReward;
+    }
+
+    return this.roundMoney(
+      baseReward +
+        this.convertMoneyToPoints(loyaltyMoneyValue, booking.paymentCurrency),
+    );
   }
 
   private calculateDistanceLoyaltyReward(booking: Booking): number {
@@ -721,6 +767,49 @@ export class WalletService {
     }
 
     return minReward;
+  }
+
+  private getLoyaltyBaseReward(): number {
+    const raw =
+      this.configService.get<string | number>('ZWANGA_LOYALTY_BASE_REWARD') ??
+      this.DEFAULT_LOYALTY_BASE_REWARD;
+    const baseReward = Number(raw);
+    if (!Number.isFinite(baseReward) || baseReward < 0) {
+      return this.DEFAULT_LOYALTY_BASE_REWARD;
+    }
+
+    return this.roundMoney(baseReward);
+  }
+
+  private getPointValueCurrency(): string {
+    return (
+      this.configService.get<string>('ZWANGA_POINT_VALUE_CURRENCY')?.trim() ||
+      this.configService.get<string>('TRIP_PAYMENT_CURRENCY')?.trim() ||
+      'CDF'
+    ).toUpperCase();
+  }
+
+  private getPointValueForCurrency(currency?: string | null): number {
+    const normalizedCurrency = (
+      currency?.trim() ||
+      this.getPointValueCurrency()
+    ).toUpperCase();
+    const raw =
+      this.configService.get<string | number>(
+        `ZWANGA_POINT_VALUE_${normalizedCurrency}`,
+      ) ??
+      this.configService.get<string | number>('ZWANGA_POINT_VALUE') ??
+      (normalizedCurrency === 'CDF'
+        ? this.DEFAULT_POINT_VALUE_CDF
+        : undefined);
+    const pointValue = Number(raw);
+    if (!Number.isFinite(pointValue) || pointValue <= 0) {
+      throw new BadRequestException(
+        `Valeur du point non configuree pour ${normalizedCurrency}`,
+      );
+    }
+
+    return pointValue;
   }
 
   private getTopUpFlexPayCallbackUrl(): string {
@@ -794,6 +883,14 @@ export class WalletService {
   private normalizePositiveAmount(value: number): number {
     const amount = this.roundMoney(Number(value));
     if (!Number.isFinite(amount) || amount <= 0) {
+      throw new BadRequestException('Le montant de points est invalide');
+    }
+    return amount;
+  }
+
+  private normalizeNonNegativeAmount(value: number): number {
+    const amount = this.roundMoney(Number(value));
+    if (!Number.isFinite(amount) || amount < 0) {
       throw new BadRequestException('Le montant de points est invalide');
     }
     return amount;

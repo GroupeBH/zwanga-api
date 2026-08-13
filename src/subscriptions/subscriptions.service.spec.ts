@@ -32,6 +32,7 @@ describe('SubscriptionsService points payments', () => {
   };
   let walletService: {
     getPointsCurrency: jest.Mock;
+    convertMoneyToPoints: jest.Mock;
     payForSubscription: jest.Mock;
   };
   let service: SubscriptionsService;
@@ -81,11 +82,12 @@ describe('SubscriptionsService points payments', () => {
       formatLogPayload: jest.fn((payload: unknown) => JSON.stringify(payload)),
     };
     walletService = {
-      getPointsCurrency: jest.fn().mockReturnValue('CDF'),
+      getPointsCurrency: jest.fn().mockReturnValue('PTS'),
+      convertMoneyToPoints: jest.fn((amount: number) => amount / 100),
       payForSubscription: jest.fn().mockResolvedValue({
         id: 'wallet-entry-1',
-        amount: -5000,
-        currency: 'CDF',
+        amount: -50,
+        currency: 'PTS',
       }),
     };
 
@@ -108,10 +110,14 @@ describe('SubscriptionsService points payments', () => {
           PaymentMethod.CARD,
           'points',
         ],
-        pointsAmount: 5000,
-        pointsCurrency: 'CDF',
+        pointsAmount: 50,
+        pointsCurrency: 'PTS',
       }),
     ]);
+    expect(walletService.convertMoneyToPoints).toHaveBeenCalledWith(
+      5000,
+      'CDF',
+    );
   });
 
   it('activates a Pro subscription paid with wallet points', async () => {
@@ -123,10 +129,10 @@ describe('SubscriptionsService points payments', () => {
       expect.objectContaining({
         id: 'subscription-1',
         userId: 'driver-1',
-        amount: 5000,
-        currency: 'CDF',
+        amount: 50,
+        currency: 'PTS',
       }),
-      5000,
+      50,
     );
     expect(subscriptionRepository.save).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -141,8 +147,8 @@ describe('SubscriptionsService points payments', () => {
       expect.objectContaining({
         status: PaymentStatus.SUCCEEDED,
         reference: 'POINTS-wallet-entry-1',
-        amount: 5000,
-        currency: 'CDF',
+        amount: 50,
+        currency: 'PTS',
       }),
     );
   });
