@@ -15,6 +15,11 @@ import { Trip } from '../../trips/entities/trip.entity';
 import { Message } from '../../chat/entities/message.entity';
 import { PaymentTransaction } from '../../payments/entities/payment-transaction.entity';
 import { TripPaymentMode } from '../../payments/enums/trip-payment-mode.enum';
+import {
+  DriverTripInterruptionConfirmation,
+  DriverTripInterruptionRequest,
+  PassengerTripInterruptionRequest,
+} from '../../trips/entities/trip-interruption.entity';
 
 export enum BookingStatus {
   PENDING = 'pending',
@@ -102,6 +107,12 @@ export class Booking {
   @Column({ type: 'boolean', default: false })
   destinationProximityNotified: boolean; // Indique si la notification de proximité a été envoyée
 
+  @Column({ type: 'timestamp', nullable: true })
+  passengerDestinationApproachNotifiedAt: Date | null; // Modal temps reel envoye quand le vehicule approche de la destination passager
+
+  @Column({ type: 'timestamp', nullable: true })
+  driverPickupArrivedAt: Date | null; // Conducteur detecte au point de prise en charge
+
   @Column({
     type: 'enum',
     enum: BookingStatus,
@@ -119,6 +130,24 @@ export class Booking {
 
   @Column({ type: 'decimal', precision: 10, scale: 2, nullable: true })
   paymentAmount: number | null;
+
+  @Column({ type: 'decimal', precision: 10, scale: 2, nullable: true })
+  originalPaymentAmount: number | null;
+
+  @Column({ type: 'int', nullable: true })
+  plannedDistanceMeters: number | null;
+
+  @Column({ type: 'int', nullable: true })
+  travelledDistanceMeters: number | null;
+
+  @Column({ type: 'decimal', precision: 12, scale: 2, nullable: true })
+  pricePerKilometer: number | null;
+
+  @Column({ type: 'decimal', precision: 10, scale: 2, nullable: true })
+  fareAdjustmentAmount: number | null;
+
+  @Column({ type: 'timestamp', nullable: true })
+  fareAdjustedAt: Date | null;
 
   @Column({ type: 'varchar', length: 8, default: 'CDF' })
   paymentCurrency: string;
@@ -163,16 +192,16 @@ export class Booking {
   pickedUpConfirmedAt: Date | null; // Date de confirmation par le passager
 
   @Column({ type: 'boolean', default: false })
-  droppedOff: boolean; // Driver a confirmé la dépose
+  droppedOff: boolean; // Conducteur a confirmé l'arrivée
 
   @Column({ type: 'timestamp', nullable: true })
-  droppedOffAt: Date | null; // Date de dépose confirmée par le driver
+  droppedOffAt: Date | null; // Date d'arrivée confirmée par le conducteur
 
   @Column({ type: 'boolean', default: false })
-  droppedOffConfirmedByPassenger: boolean; // Passager a confirmé la dépose
+  droppedOffConfirmedByPassenger: boolean; // Passager a signalé son arrivée
 
   @Column({ type: 'timestamp', nullable: true })
-  droppedOffConfirmedAt: Date | null; // Date de confirmation par le passager
+  droppedOffConfirmedAt: Date | null; // Date du signalement d'arrivée par le passager
 
   @Column({ type: 'jsonb', default: () => "'[]'" })
   safetyEmergencyContactIds: string[]; // Contacts d'urgence choisis pour les notifications WhatsApp
@@ -185,4 +214,19 @@ export class Booking {
 
   @OneToMany(() => Message, (message) => message.booking)
   messages: Message[];
+
+  @OneToMany(
+    () => PassengerTripInterruptionRequest,
+    (request) => request.booking,
+  )
+  interruptionRequests: PassengerTripInterruptionRequest[];
+
+  @OneToMany(
+    () => DriverTripInterruptionConfirmation,
+    (confirmation) => confirmation.booking,
+  )
+  tripInterruptionConfirmations: DriverTripInterruptionConfirmation[];
+
+  interruptionRequest?: PassengerTripInterruptionRequest | null;
+  tripInterruptionRequest?: DriverTripInterruptionRequest | null;
 }

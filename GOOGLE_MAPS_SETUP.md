@@ -190,7 +190,6 @@ Tous les endpoints sont préfixés par `/api/v1/google-maps`
   "mode": "driving",
   "avoid": ["tolls", "highways"],
   "optimizeWaypoints": true,
-  "alternatives": false,
   "language": "fr",
   "region": "CD"
 }
@@ -203,7 +202,7 @@ Tous les endpoints sont préfixés par `/api/v1/google-maps`
 - `mode` (optionnel) : Mode de transport (`driving`, `walking`, `bicycling`, `transit`)
 - `avoid` (optionnel) : Éviter (`tolls`, `highways`, `ferries`, `indoor`)
 - `optimizeWaypoints` (optionnel) : Optimiser l'ordre des waypoints
-- `alternatives` (optionnel) : Retourner des itinéraires alternatifs
+- `alternatives` (optionnel, ignoré) : conservé pour compatibilité, l'API retourne toujours une seule trajectoire
 - `language` (optionnel) : Code de langue
 - `region` (optionnel) : Code de région
 - `departureTime` (optionnel) : Timestamp Unix pour le départ

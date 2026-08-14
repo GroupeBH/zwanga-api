@@ -27,7 +27,8 @@ export class CreateTripDto {
 
   @ApiProperty({
     required: false,
-    description: 'Reference ou repere connu donne par le conducteur pour le depart',
+    description:
+      'Reference ou repere connu donne par le conducteur pour le depart',
     example: 'Devant la station, cote parking',
   })
   @IsString()
@@ -45,6 +46,8 @@ export class CreateTripDto {
   @ArrayMinSize(2)
   @ArrayMaxSize(2)
   @IsNumber({}, { each: true })
+  @Min(-180, { each: true })
+  @Max(180, { each: true })
   departureCoordinates?: [number, number];
 
   @ApiProperty()
@@ -54,7 +57,8 @@ export class CreateTripDto {
 
   @ApiProperty({
     required: false,
-    description: 'Reference ou repere connu donne par le conducteur pour l\'arrivee',
+    description:
+      "Reference ou repere connu donne par le conducteur pour l'arrivee",
     example: 'Entree principale, pres du rond-point',
   })
   @IsString()
@@ -72,6 +76,8 @@ export class CreateTripDto {
   @ArrayMinSize(2)
   @ArrayMaxSize(2)
   @IsNumber({}, { each: true })
+  @Min(-180, { each: true })
+  @Max(180, { each: true })
   arrivalCoordinates?: [number, number];
 
   @ApiProperty()
@@ -79,25 +85,30 @@ export class CreateTripDto {
   @IsNotEmpty()
   departureDate: string;
 
-  @ApiProperty({ minimum: 1, description: 'Nombre total de places disponibles dans le véhicule' })
+  @ApiProperty({
+    minimum: 1,
+    description: 'Nombre total de places disponibles dans le véhicule',
+  })
   @IsNumber()
   @Min(1)
   @IsNotEmpty()
   totalSeats: number;
 
-  @ApiProperty({ 
+  @ApiProperty({
     minimum: 0,
-    description: 'Prix par place en francs congolais. Mettre 0 pour un trajet gratuit.',
+    description:
+      'Prix par place en francs congolais. Mettre 0 pour un trajet gratuit.',
     example: 0,
   })
   @IsNumber()
   @Min(0)
   pricePerSeat: number;
 
-  @ApiProperty({ 
+  @ApiProperty({
     required: false,
     default: false,
-    description: 'Indique si le trajet est gratuit. Si true, pricePerSeat sera automatiquement mis à 0.',
+    description:
+      'Indique si le trajet est gratuit. Si true, pricePerSeat sera automatiquement mis à 0.',
     example: false,
   })
   @IsBoolean()
@@ -111,7 +122,8 @@ export class CreateTripDto {
 
   @ApiProperty({
     required: false,
-    description: 'ID du véhicule à associer au trajet (doit appartenir au driver)',
+    description:
+      'ID du véhicule à associer au trajet (doit appartenir au driver)',
   })
   @IsString()
   @IsOptional()
@@ -121,7 +133,8 @@ export class CreateTripDto {
 export class SearchTripsDto {
   @ApiProperty({
     required: false,
-    description: "Mots-cles de recherche. Chaque mot est teste sur l'adresse de depart ou d'arrivee.",
+    description:
+      "Mots-cles de recherche. Chaque mot est teste sur l'adresse de depart ou d'arrivee.",
     example: 'gombe aeroport',
   })
   @IsString()
@@ -138,7 +151,8 @@ export class SearchTripsDto {
 
   @ApiProperty({
     required: false,
-    description: 'Coordonnées du point de départ [longitude, latitude]. Peut être utilisé seul ou avec arrivalCoordinates.',
+    description:
+      'Coordonnées du point de départ [longitude, latitude]. Peut être utilisé seul ou avec arrivalCoordinates.',
     example: [15.2663, -4.325],
   })
   @IsOptional()
@@ -146,11 +160,13 @@ export class SearchTripsDto {
   @ArrayMinSize(2)
   @ArrayMaxSize(2)
   @IsNumber({}, { each: true })
+  @Min(-180, { each: true })
+  @Max(180, { each: true })
   departureCoordinates?: [number, number];
 
   @ApiProperty({
     required: false,
-    description: 'Nom du lieu d\'arrivée (recherche textuelle)',
+    description: "Nom du lieu d'arrivée (recherche textuelle)",
   })
   @IsString()
   @IsOptional()
@@ -158,7 +174,8 @@ export class SearchTripsDto {
 
   @ApiProperty({
     required: false,
-    description: 'Coordonnées du point d\'arrivée [longitude, latitude]. Peut être utilisé seul ou avec departureCoordinates.',
+    description:
+      "Coordonnées du point d'arrivée [longitude, latitude]. Peut être utilisé seul ou avec departureCoordinates.",
     example: [15.3222, -4.4419],
   })
   @IsOptional()
@@ -166,12 +183,15 @@ export class SearchTripsDto {
   @ArrayMinSize(2)
   @ArrayMaxSize(2)
   @IsNumber({}, { each: true })
+  @Min(-180, { each: true })
+  @Max(180, { each: true })
   arrivalCoordinates?: [number, number];
 
   @ApiProperty({
     required: false,
     minimum: 1,
-    description: 'Rayon de recherche autour du point de départ en kilomètres (défaut: 50 km). Optionnel si departureCoordinates est fourni.',
+    description:
+      'Rayon de recherche autour du point de départ en kilomètres (défaut: 50 km). Optionnel si departureCoordinates est fourni.',
     default: 50,
   })
   @IsNumber()
@@ -182,7 +202,8 @@ export class SearchTripsDto {
   @ApiProperty({
     required: false,
     minimum: 1,
-    description: 'Rayon de recherche autour du point d\'arrivée en kilomètres (défaut: 50 km). Optionnel si arrivalCoordinates est fourni.',
+    description:
+      "Rayon de recherche autour du point d'arrivée en kilomètres (défaut: 50 km). Optionnel si arrivalCoordinates est fourni.",
     default: 50,
   })
   @IsNumber()
@@ -207,7 +228,7 @@ export class SearchTripsDto {
   @IsOptional()
   maxPrice?: number;
 
-  @ApiProperty({ 
+  @ApiProperty({
     required: false,
     description: 'Filtrer uniquement les trajets gratuits',
     example: false,
@@ -225,7 +246,8 @@ export class UpdateTripDto {
 
   @ApiProperty({
     required: false,
-    description: 'Reference ou repere connu donne par le conducteur pour le depart',
+    description:
+      'Reference ou repere connu donne par le conducteur pour le depart',
   })
   @IsString()
   @IsOptional()
@@ -240,6 +262,8 @@ export class UpdateTripDto {
   @ArrayMinSize(2)
   @ArrayMaxSize(2)
   @IsNumber({}, { each: true })
+  @Min(-180, { each: true })
+  @Max(180, { each: true })
   departureCoordinates?: [number, number];
 
   @ApiProperty({ required: false })
@@ -249,7 +273,8 @@ export class UpdateTripDto {
 
   @ApiProperty({
     required: false,
-    description: 'Reference ou repere connu donne par le conducteur pour l\'arrivee',
+    description:
+      "Reference ou repere connu donne par le conducteur pour l'arrivee",
   })
   @IsString()
   @IsOptional()
@@ -264,6 +289,8 @@ export class UpdateTripDto {
   @ArrayMinSize(2)
   @ArrayMaxSize(2)
   @IsNumber({}, { each: true })
+  @Min(-180, { each: true })
+  @Max(180, { each: true })
   arrivalCoordinates?: [number, number];
 
   @ApiProperty({ required: false })
@@ -271,7 +298,12 @@ export class UpdateTripDto {
   @IsOptional()
   departureDate?: string;
 
-  @ApiProperty({ required: false, minimum: 1, description: 'Nombre total de places (si modifié, availableSeats sera recalculé)' })
+  @ApiProperty({
+    required: false,
+    minimum: 1,
+    description:
+      'Nombre total de places (si modifié, availableSeats sera recalculé)',
+  })
   @IsNumber()
   @Min(1)
   @IsOptional()
@@ -283,9 +315,10 @@ export class UpdateTripDto {
   @IsOptional()
   pricePerSeat?: number;
 
-  @ApiProperty({ 
+  @ApiProperty({
     required: false,
-    description: 'Indique si le trajet est gratuit. Si true, pricePerSeat sera automatiquement mis à 0.',
+    description:
+      'Indique si le trajet est gratuit. Si true, pricePerSeat sera automatiquement mis à 0.',
     example: false,
   })
   @IsBoolean()
@@ -304,7 +337,8 @@ export class UpdateTripDto {
 
   @ApiProperty({
     required: false,
-    description: 'ID du véhicule à associer au trajet (doit appartenir au driver). Passer null pour retirer l\'association.',
+    description:
+      "ID du véhicule à associer au trajet (doit appartenir au driver). Passer null pour retirer l'association.",
   })
   @IsString()
   @IsOptional()
@@ -313,16 +347,67 @@ export class UpdateTripDto {
 
 export class DriverEmergencyContactsDto {
   @ApiProperty({
-    description: "IDs des contacts d'urgence du conducteur a notifier (1 a 5 contacts)",
+    description:
+      "IDs des contacts d'urgence du conducteur a notifier (1 a 5 contacts)",
     type: [String],
     minItems: 1,
     maxItems: 5,
   })
   @IsArray()
-  @ArrayMinSize(1, { message: "Vous devez selectionner au moins 1 contact d'urgence" })
-  @ArrayMaxSize(5, { message: "Vous ne pouvez pas selectionner plus de 5 contacts d'urgence" })
-  @IsUUID(undefined, { each: true, message: 'Chaque ID de contact doit etre un UUID valide' })
+  @ArrayMinSize(1, {
+    message: "Vous devez selectionner au moins 1 contact d'urgence",
+  })
+  @ArrayMaxSize(5, {
+    message: "Vous ne pouvez pas selectionner plus de 5 contacts d'urgence",
+  })
+  @IsUUID(undefined, {
+    each: true,
+    message: 'Chaque ID de contact doit etre un UUID valide',
+  })
   emergencyContactIds: string[];
+}
+
+export class UpdateDriverLocationDto {
+  @ApiProperty({
+    description: 'Coordonnees actuelles du conducteur [longitude, latitude]',
+    example: [15.3136, -4.3276],
+    minItems: 2,
+    maxItems: 2,
+  })
+  @IsArray()
+  @ArrayMinSize(2)
+  @ArrayMaxSize(2)
+  @IsNumber({}, { each: true })
+  coordinates: [number, number];
+
+  @ApiProperty({ required: false, description: 'Precision GPS en metres' })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(1000)
+  accuracy?: number;
+
+  @ApiProperty({ required: false, description: 'Vitesse GPS en m/s' })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(100)
+  speed?: number;
+
+  @ApiProperty({ required: false, description: 'Cap GPS en degres' })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(360)
+  heading?: number;
+
+  @ApiProperty({
+    required: false,
+    description: 'Horodatage ISO de la mesure GPS sur le terminal',
+  })
+  @IsOptional()
+  @IsDateString()
+  recordedAt?: string;
 }
 
 export class CreateRecurringTripDto {
@@ -333,7 +418,8 @@ export class CreateRecurringTripDto {
 
   @ApiProperty({
     required: false,
-    description: 'Reference ou repere connu donne par le conducteur pour le depart',
+    description:
+      'Reference ou repere connu donne par le conducteur pour le depart',
     example: 'Devant la station, cote parking',
   })
   @IsString()
@@ -360,7 +446,8 @@ export class CreateRecurringTripDto {
 
   @ApiProperty({
     required: false,
-    description: 'Reference ou repere connu donne par le conducteur pour l\'arrivee',
+    description:
+      "Reference ou repere connu donne par le conducteur pour l'arrivee",
     example: 'Entree principale, pres du rond-point',
   })
   @IsString()
@@ -390,7 +477,8 @@ export class CreateRecurringTripDto {
 
   @ApiProperty({
     required: false,
-    description: 'Date de fin optionnelle du schema recurrent (format YYYY-MM-DD)',
+    description:
+      'Date de fin optionnelle du schema recurrent (format YYYY-MM-DD)',
     example: '2026-06-30',
   })
   @IsDateString()
@@ -420,7 +508,10 @@ export class CreateRecurringTripDto {
   @Max(7, { each: true })
   weekdays: number[];
 
-  @ApiProperty({ minimum: 1, description: 'Nombre total de places disponibles dans le vehicule' })
+  @ApiProperty({
+    minimum: 1,
+    description: 'Nombre total de places disponibles dans le vehicule',
+  })
   @IsNumber()
   @Min(1)
   @IsNotEmpty()
@@ -428,7 +519,8 @@ export class CreateRecurringTripDto {
 
   @ApiProperty({
     minimum: 0,
-    description: 'Prix par place en francs congolais. Mettre 0 pour un trajet gratuit.',
+    description:
+      'Prix par place en francs congolais. Mettre 0 pour un trajet gratuit.',
     example: 0,
   })
   @IsNumber()
@@ -467,7 +559,8 @@ export class UpdateRecurringTripStatusDto {
 export class SearchByPointsDto {
   @ApiProperty({
     required: false,
-    description: "Mots-cles de recherche. Chaque mot est teste sur l'adresse de depart ou d'arrivee.",
+    description:
+      "Mots-cles de recherche. Chaque mot est teste sur l'adresse de depart ou d'arrivee.",
     example: 'gombe aeroport',
   })
   @IsString()
@@ -476,7 +569,8 @@ export class SearchByPointsDto {
 
   @ApiProperty({
     required: false,
-    description: 'Coordonnées du point de départ [longitude, latitude]. Peut être utilisé seul ou avec arrivalCoordinates.',
+    description:
+      'Coordonnées du point de départ [longitude, latitude]. Peut être utilisé seul ou avec arrivalCoordinates.',
     example: [15.2663, -4.325],
     minItems: 2,
     maxItems: 2,
@@ -490,7 +584,8 @@ export class SearchByPointsDto {
 
   @ApiProperty({
     required: false,
-    description: "Coordonnées du point d'arrivée [longitude, latitude]. Peut être utilisé seul ou avec departureCoordinates.",
+    description:
+      "Coordonnées du point d'arrivée [longitude, latitude]. Peut être utilisé seul ou avec departureCoordinates.",
     example: [15.3222, -4.4419],
     minItems: 2,
     maxItems: 2,
@@ -505,7 +600,8 @@ export class SearchByPointsDto {
   @ApiProperty({
     required: false,
     minimum: 1,
-    description: 'Rayon de recherche autour du point de départ en kilomètres (défaut: 50 km). Optionnel si departureCoordinates est fourni.',
+    description:
+      'Rayon de recherche autour du point de départ en kilomètres (défaut: 50 km). Optionnel si departureCoordinates est fourni.',
     default: 50,
   })
   @IsNumber()
@@ -516,7 +612,8 @@ export class SearchByPointsDto {
   @ApiProperty({
     required: false,
     minimum: 1,
-    description: 'Rayon de recherche autour du point d\'arrivée en kilomètres (défaut: 50 km). Optionnel si arrivalCoordinates est fourni.',
+    description:
+      "Rayon de recherche autour du point d'arrivée en kilomètres (défaut: 50 km). Optionnel si arrivalCoordinates est fourni.",
     default: 50,
   })
   @IsNumber()
@@ -541,4 +638,3 @@ export class SearchByPointsDto {
   @IsOptional()
   maxPrice?: number;
 }
-

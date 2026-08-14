@@ -8,6 +8,7 @@ import {
   Max,
   ValidateNested,
   IsBoolean,
+  IsDateString,
 } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
@@ -21,6 +22,8 @@ class PassengerDestinationCoordinatesDto {
     example: -4.3276,
   })
   @IsNumber()
+  @Min(-90)
+  @Max(90)
   @IsNotEmpty()
   latitude: number;
 
@@ -29,6 +32,8 @@ class PassengerDestinationCoordinatesDto {
     example: 15.3136,
   })
   @IsNumber()
+  @Min(-180)
+  @Max(180)
   @IsNotEmpty()
   longitude: number;
 }
@@ -39,6 +44,8 @@ class PassengerOriginCoordinatesDto {
     example: -4.3276,
   })
   @IsNumber()
+  @Min(-90)
+  @Max(90)
   @IsNotEmpty()
   latitude: number;
 
@@ -47,6 +54,8 @@ class PassengerOriginCoordinatesDto {
     example: 15.3136,
   })
   @IsNumber()
+  @Min(-180)
+  @Max(180)
   @IsNotEmpty()
   longitude: number;
 }
@@ -115,7 +124,7 @@ export class CreateBookingDto {
 
   @ApiProperty({
     description:
-      'Reference ou repere connu pour faciliter la depose du passager',
+      "Reference ou repere connu pour faciliter l'arrivee du passager",
     required: false,
     example: 'Entree principale, pres du rond-point',
   })
@@ -139,7 +148,7 @@ export class CreateBookingDto {
     enum: TripPaymentMode,
     enumName: 'TripPaymentMode',
     description:
-      'Mode de reglement du trajet: paiement electronique via FlexPay ou paiement physique a l arrivee',
+      'Mode de reglement du trajet: paiement electronique via FlexPay, points Zwanga ou paiement physique a l arrivee',
     example: TripPaymentMode.ELECTRONIC,
   })
   @IsEnum(TripPaymentMode, {
@@ -179,11 +188,39 @@ export class ConfirmPickupDto {
 
 export class ConfirmDropoffDto {
   @ApiProperty({
-    description: 'Confirmer la dépose du passager',
+    description: "Confirmer ou signaler l'arrivée du passager",
     example: true,
   })
   @IsOptional()
   confirmed?: boolean; // Pour compatibilité, mais toujours true quand appelé
+  @ApiProperty({
+    required: false,
+    enum: TripPaymentMode,
+    enumName: 'TripPaymentMode',
+    description:
+      "Mode de reglement choisi par le passager au moment de signaler son arrivee: paiement electronique, points Zwanga ou paiement physique",
+    example: TripPaymentMode.CASH,
+  })
+  @IsEnum(TripPaymentMode, {
+    message: 'Le mode de paiement selectionne est invalide',
+  })
+  @IsOptional()
+  paymentMode?: TripPaymentMode;
+}
+
+export class UpdateBookingPaymentModeDto {
+  @ApiProperty({
+    enum: TripPaymentMode,
+    enumName: 'TripPaymentMode',
+    description:
+      'Nouveau mode de reglement du trajet: paiement electronique via FlexPay, points Zwanga ou paiement physique',
+    example: TripPaymentMode.CASH,
+  })
+  @IsEnum(TripPaymentMode, {
+    message: 'Le mode de paiement selectionne est invalide',
+  })
+  @IsNotEmpty()
+  paymentMode: TripPaymentMode;
 }
 
 export class ReportBookingProblemDto {
@@ -204,6 +241,8 @@ export class UpdatePassengerLocationDto {
     example: -4.3276,
   })
   @IsNumber()
+  @Min(-90)
+  @Max(90)
   @IsNotEmpty()
   latitude: number;
 
@@ -212,6 +251,37 @@ export class UpdatePassengerLocationDto {
     example: 15.3136,
   })
   @IsNumber()
+  @Min(-180)
+  @Max(180)
   @IsNotEmpty()
   longitude: number;
+
+  @ApiProperty({ required: false, description: 'Precision GPS en metres' })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(1000)
+  accuracy?: number;
+
+  @ApiProperty({ required: false, description: 'Vitesse GPS en m/s' })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(100)
+  speed?: number;
+
+  @ApiProperty({ required: false, description: 'Cap GPS en degres' })
+  @IsOptional()
+  @IsNumber()
+  @Min(0)
+  @Max(360)
+  heading?: number;
+
+  @ApiProperty({
+    required: false,
+    description: 'Horodatage ISO de la mesure GPS sur le terminal',
+  })
+  @IsOptional()
+  @IsDateString()
+  recordedAt?: string;
 }

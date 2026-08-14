@@ -1,0 +1,211 @@
+param(
+  [string]$EnvFile = "",
+  [string]$ProjectName = "zwanga-api",
+  [string]$Environment = "production",
+  [string]$AwsRegion = "eu-central-1",
+  [string]$KmsKeyId = "",
+  [string]$TerraformNamesFile = "",
+  [bool]$Overwrite = $true,
+  [switch]$AllowLocalEnvForProduction,
+  [switch]$DryRun
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+if ([string]::IsNullOrWhiteSpace($EnvFile)) {
+  $candidateEnvFile = Join-Path $PSScriptRoot "..\..\.env.$Environment"
+  if (Test-Path -LiteralPath $candidateEnvFile) {
+    $EnvFile = $candidateEnvFile
+  } else {
+    throw "No environment file provided. Create .env.$Environment or pass -EnvFile .\.env.$Environment. Refusing to import .env implicitly because local and production values are usually different."
+  }
+}
+
+if (-not (Test-Path -LiteralPath $EnvFile)) {
+  throw "Environment file not found: $EnvFile"
+}
+
+if (
+  $Environment.Equals("production", [StringComparison]::OrdinalIgnoreCase) -and
+  (Split-Path -Leaf $EnvFile).Equals(".env", [StringComparison]::OrdinalIgnoreCase) -and
+  -not $AllowLocalEnvForProduction
+) {
+  throw "Refusing to import .env into production SSM. Use .env.production, or pass -AllowLocalEnvForProduction if you intentionally want to override production with .env."
+}
+
+if (-not (Get-Command aws -ErrorAction SilentlyContinue)) {
+  throw "AWS CLI is required and was not found in PATH."
+}
+
+if ([string]::IsNullOrWhiteSpace($KmsKeyId)) {
+  $KmsKeyId = "alias/$ProjectName-$Environment-application"
+}
+
+$excludedNames = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+@(
+  "DATABASE_URL",
+  "DATABASE_HOST",
+  "DATABASE_PORT",
+  "DATABASE_USER",
+  "DATABASE_PASSWORD",
+  "DATABASE_NAME",
+  "DATABASE_SSL",
+  "DATABASE_SSL_MODE",
+  "DATABASE_SSLMODE",
+  "REDIS_URL",
+  "REDIS_HOST",
+  "REDIS_PORT",
+  "REDIS_PASSWORD",
+  "REDIS_TLS",
+  "JWT_SECRET",
+  "JWT_REFRESH_SECRET",
+  "AWS_ACCESS_KEY_ID",
+  "AWS_SECRET_ACCESS_KEY",
+  "AWS_SESSION_TOKEN",
+  "AWS_PROFILE",
+  "AWS_DEFAULT_REGION",
+  "AWS_S3_BUCKET_NAME",
+  "NODE_ENV",
+  "LOG_LEVEL",
+  "GPS_LOG_SAMPLE_RATE",
+  "HOST",
+  "PORT",
+  "API_PREFIX",
+  "TYPEORM_SYNCHRONIZE",
+  "AWS_REGION",
+  "ENV_FILE",
+  "NODE_OPTIONS",
+  "AOT_CONFIG_CONTENT"
+) | ForEach-Object { [void]$excludedNames.Add($_) }
+
+$excludedPrefixes = @(
+  "DATABASE_",
+  "POSTGRES_",
+  "PG",
+  "REDIS_",
+  "RENDER_",
+  "DOCKER_",
+  "ECS_",
+  "AWS_CONTAINER_",
+  "AWS_EXECUTION_",
+  "npm_",
+  "NPM_"
+)
+
+function Test-ExcludedName {
+  param([string]$Name)
+
+  if ($excludedNames.Contains($Name)) {
+    return $true
+  }
+
+  foreach ($prefix in $excludedPrefixes) {
+    if ($Name.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+      return $true
+    }
+  }
+
+  return $false
+}
+
+function Convert-DotEnvValue {
+  param([string]$RawValue)
+
+  $value = $RawValue.Trim()
+  if ($value.Length -ge 2 -and $value.StartsWith('"') -and $value.EndsWith('"')) {
+    $value = $value.Substring(1, $value.Length - 2)
+    $value = $value.Replace('\"', '"').Replace('\n', "`n").Replace('\r', "`r")
+  } elseif ($value.Length -ge 2 -and $value.StartsWith("'") -and $value.EndsWith("'")) {
+    $value = $value.Substring(1, $value.Length - 2)
+  }
+
+  return $value
+}
+
+$importedNames = [System.Collections.Generic.SortedSet[string]]::new([StringComparer]::Ordinal)
+$skippedNames = [System.Collections.Generic.List[string]]::new()
+
+Get-Content -LiteralPath $EnvFile | ForEach-Object {
+  $line = $_.Trim()
+
+  if ($line.Length -eq 0 -or $line.StartsWith("#")) {
+    return
+  }
+
+  if ($line -notmatch '^([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$') {
+    Write-Warning "Skipping invalid dotenv line: $line"
+    return
+  }
+
+  $name = $Matches[1]
+  $value = Convert-DotEnvValue -RawValue $Matches[2]
+
+  if (Test-ExcludedName -Name $name) {
+    [void]$skippedNames.Add($name)
+    return
+  }
+
+  if ($value.Length -eq 0) {
+    Write-Warning "Skipping $name because SSM SecureString values cannot be empty."
+    [void]$skippedNames.Add($name)
+    return
+  }
+
+  $parameterName = "/$ProjectName/$Environment/env/$name"
+  $args = @(
+    "ssm",
+    "put-parameter",
+    "--region", $AwsRegion,
+    "--name", $parameterName,
+    "--type", "SecureString",
+    "--key-id", $KmsKeyId,
+    "--value", $value
+  )
+
+  if ($Overwrite) {
+    $args += "--overwrite"
+  }
+
+  if ($DryRun) {
+    Write-Host "Would import $parameterName"
+  } else {
+    & aws @args | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+      throw "aws ssm put-parameter failed for $name"
+    }
+
+    Write-Host "Imported $parameterName"
+  }
+
+  [void]$importedNames.Add($name)
+}
+
+if (-not [string]::IsNullOrWhiteSpace($TerraformNamesFile)) {
+  $terraformNamesDirectory = Split-Path -Parent $TerraformNamesFile
+  if (-not (Test-Path -LiteralPath $terraformNamesDirectory)) {
+    New-Item -ItemType Directory -Path $terraformNamesDirectory | Out-Null
+  }
+
+  $tfvarsLines = [System.Collections.Generic.List[string]]::new()
+  $tfvarsLines.Add("# Generated by scripts/import-env-to-ssm.ps1. Contains names only, not secret values.")
+  $tfvarsLines.Add("external_runtime_environment_variable_names = [")
+  foreach ($name in $importedNames) {
+    $tfvarsLines.Add("  `"$name`",")
+  }
+  $tfvarsLines.Add("]")
+
+  Set-Content -LiteralPath $TerraformNamesFile -Value $tfvarsLines -Encoding ascii
+  Write-Host "Wrote Terraform variable names to $TerraformNamesFile."
+}
+
+if ($DryRun) {
+  Write-Host "Dry run complete. $($importedNames.Count) variables would be imported into SSM."
+} else {
+  Write-Host "Imported $($importedNames.Count) variables into SSM."
+  Write-Host "Terraform auto-discovers imported variables under /$ProjectName/$Environment/env/* on the next apply."
+}
+if ($skippedNames.Count -gt 0) {
+  $uniqueSkipped = $skippedNames | Sort-Object -Unique
+  Write-Host "Skipped: $($uniqueSkipped -join ', ')"
+}

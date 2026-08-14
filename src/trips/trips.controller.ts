@@ -19,7 +19,13 @@ import {
   UpdateTripDto,
   SearchByPointsDto,
   DriverEmergencyContactsDto,
+  UpdateDriverLocationDto,
 } from './dto/trip.dto';
+import {
+  ConfirmDriverTripInterruptionDto,
+  RejectTripInterruptionDto,
+  RequestTripInterruptionDto,
+} from './dto/trip-interruption.dto';
 import { Auth } from '../auth/decorators/auth.decorator';
 import { Public } from '../common/decorators/public.decorator';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
@@ -27,14 +33,15 @@ import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decor
 @ApiTags('Trips')
 @Controller('trips')
 export class TripsController {
-  constructor(private readonly tripsService: TripsService) { }
+  constructor(private readonly tripsService: TripsService) {}
 
   @Post()
   @Auth()
   @SensitiveThrottle(10, 6000) // 10 requests per minute per IP
   @ApiOperation({
     summary: 'Create a new trip',
-    description: 'Permet à un utilisateur de créer un trajet. Si l\'utilisateur est un passager et fournit un véhicule, il sera automatiquement promu en conducteur.'
+    description:
+      "Permet à un utilisateur de créer un trajet. Si l'utilisateur est un passager et fournit un véhicule, il sera automatiquement promu en conducteur.",
   })
   async create(@Request() req, @Body() createTripDto: CreateTripDto) {
     return this.tripsService.create(req.user.userId, createTripDto);
@@ -45,7 +52,8 @@ export class TripsController {
   @SensitiveThrottle(30, 6000) // 30 requests per minute per IP
   @ApiOperation({
     summary: 'Rechercher des trajets ou obtenir tous les trajets disponibles',
-    description: 'Recherche flexible par coordonnées : vous pouvez fournir uniquement departureCoordinates, uniquement arrivalCoordinates, ou les deux. Le rayon de recherche (departureRadiusKm, arrivalRadiusKm) est optionnel pour chaque point (défaut: 50 km). Si aucun critère n\'est fourni, retourne tous les trajets disponibles.'
+    description:
+      "Recherche flexible par coordonnées : vous pouvez fournir uniquement departureCoordinates, uniquement arrivalCoordinates, ou les deux. Le rayon de recherche (departureRadiusKm, arrivalRadiusKm) est optionnel pour chaque point (défaut: 50 km). Si aucun critère n'est fourni, retourne tous les trajets disponibles.",
   })
   async findAll(@Query() searchTripsDto: SearchTripsDto) {
     if (Object.keys(searchTripsDto).length > 0) {
@@ -59,12 +67,15 @@ export class TripsController {
   @SensitiveThrottle(30, 6000)
   @ApiOperation({
     summary: 'Rechercher des trajets par coordonnées',
-    description: 'Recherche flexible : vous pouvez fournir uniquement departureCoordinates, uniquement arrivalCoordinates, ou les deux. Le rayon de recherche est optionnel pour chaque point (défaut: 50 km).'
+    description:
+      'Recherche flexible : vous pouvez fournir uniquement departureCoordinates, uniquement arrivalCoordinates, ou les deux. Le rayon de recherche est optionnel pour chaque point (défaut: 50 km).',
   })
   async searchByCoordinates(@Body() payload: SearchByPointsDto) {
     // Validate that at least one coordinate is provided
     if (!payload.departureCoordinates && !payload.arrivalCoordinates) {
-      throw new BadRequestException('Au moins un point (départ ou arrivée) doit être fourni pour la recherche');
+      throw new BadRequestException(
+        'Au moins un point (départ ou arrivée) doit être fourni pour la recherche',
+      );
     }
 
     const {
@@ -106,14 +117,22 @@ export class TripsController {
     description:
       'Permet a un conducteur de creer un schema recurrent et de generer automatiquement les prochaines occurrences.',
   })
-  async createRecurring(@Request() req, @Body() createRecurringTripDto: CreateRecurringTripDto) {
-    return this.tripsService.createRecurring(req.user.userId, createRecurringTripDto);
+  async createRecurring(
+    @Request() req,
+    @Body() createRecurringTripDto: CreateRecurringTripDto,
+  ) {
+    return this.tripsService.createRecurring(
+      req.user.userId,
+      createRecurringTripDto,
+    );
   }
 
   @Get('recurring/my')
   @Auth()
   @SensitiveThrottle(20, 6000)
-  @ApiOperation({ summary: 'Get recurring trip templates created by current user' })
+  @ApiOperation({
+    summary: 'Get recurring trip templates created by current user',
+  })
   async findMyRecurringTrips(@Request() req) {
     return this.tripsService.findRecurringByDriver(req.user.userId);
   }
@@ -141,6 +160,35 @@ export class TripsController {
     return this.tripsService.findAllTrips();
   }
 
+  @Put(':id/driver-location')
+  @Auth()
+  @SensitiveThrottle(60, 6000)
+  @ApiOperation({ summary: 'Update driver location for an active trip' })
+  async updateDriverLocation(
+    @Request() req,
+    @Param('id') id: string,
+    @Body() dto: UpdateDriverLocationDto,
+  ) {
+    return this.tripsService.updateDriverLocation(
+      req.user.userId,
+      id,
+      dto.coordinates,
+      {
+        accuracyMeters: dto.accuracy,
+        speedMetersPerSecond: dto.speed,
+        headingDegrees: dto.heading,
+        recordedAt: dto.recordedAt,
+      },
+    );
+  }
+
+  @Get(':id/driver-location')
+  @Auth()
+  @SensitiveThrottle(120, 6000)
+  @ApiOperation({ summary: 'Get driver location for an active trip' })
+  async getDriverLocation(@Request() req, @Param('id') id: string) {
+    return this.tripsService.getDriverLocationForUser(id, req.user.userId);
+  }
 
   @Get(':id')
   @SensitiveThrottle(30, 6000)
@@ -176,13 +224,20 @@ export class TripsController {
   @Put(':id/driver-emergency-contacts')
   @Auth()
   @SensitiveThrottle(10, 6000)
-  @ApiOperation({ summary: "Select driver's emergency contacts for trip WhatsApp safety notifications" })
+  @ApiOperation({
+    summary:
+      "Select driver's emergency contacts for trip WhatsApp safety notifications",
+  })
   async setDriverEmergencyContacts(
     @Request() req,
     @Param('id') id: string,
     @Body() dto: DriverEmergencyContactsDto,
   ) {
-    return this.tripsService.setDriverEmergencyContacts(id, req.user.userId, dto);
+    return this.tripsService.setDriverEmergencyContacts(
+      id,
+      req.user.userId,
+      dto,
+    );
   }
 
   @Put(':id/pause')
@@ -191,6 +246,72 @@ export class TripsController {
   @ApiOperation({ summary: 'Pause/interrupt an active trip' })
   async pauseTrip(@Request() req, @Param('id') id: string) {
     return this.tripsService.pauseTrip(id, req.user.userId);
+  }
+
+  @Post(':id/interruption-request')
+  @Auth()
+  @SensitiveThrottle(10, 6000)
+  @ApiOperation({
+    summary:
+      'Request interruption of an active trip; onboard passengers must confirm',
+  })
+  async requestTripInterruption(
+    @Request() req,
+    @Param('id') id: string,
+    @Body() dto: RequestTripInterruptionDto,
+  ) {
+    return this.tripsService.requestDriverTripInterruption(
+      id,
+      req.user.userId,
+      dto,
+    );
+  }
+
+  @Put(':id/interruption-request/cancel')
+  @Auth()
+  @SensitiveThrottle(10, 6000)
+  @ApiOperation({ summary: 'Cancel a pending driver interruption request' })
+  async cancelTripInterruption(@Request() req, @Param('id') id: string) {
+    return this.tripsService.cancelDriverTripInterruption(
+      id,
+      req.user.userId,
+    );
+  }
+
+  @Put(':id/interruption-request/confirm')
+  @Auth()
+  @SensitiveThrottle(20, 6000)
+  @ApiOperation({
+    summary: 'Confirm a driver interruption request as an onboard passenger',
+  })
+  async confirmTripInterruption(
+    @Request() req,
+    @Param('id') id: string,
+    @Body() dto: ConfirmDriverTripInterruptionDto,
+  ) {
+    return this.tripsService.confirmDriverTripInterruption(
+      id,
+      req.user.userId,
+      dto,
+    );
+  }
+
+  @Put(':id/interruption-request/reject')
+  @Auth()
+  @SensitiveThrottle(20, 6000)
+  @ApiOperation({
+    summary: 'Reject a driver interruption request as an onboard passenger',
+  })
+  async rejectTripInterruption(
+    @Request() req,
+    @Param('id') id: string,
+    @Body() dto: RejectTripInterruptionDto,
+  ) {
+    return this.tripsService.rejectDriverTripInterruption(
+      id,
+      req.user.userId,
+      dto,
+    );
   }
 
   @Put(':id/complete')
@@ -206,7 +327,8 @@ export class TripsController {
   @SensitiveThrottle(10, 6000)
   @ApiOperation({
     summary: 'Make a private trip public',
-    description: 'Permet au passager qui a créé la demande de trajet d\'autoriser que le trajet devienne public. Le conducteur du trajet doit avoir passé le KYC et avoir au moins un véhicule actif pour que le trajet soit effectivement publié.'
+    description:
+      "Permet au passager qui a créé la demande de trajet d'autoriser que le trajet devienne public. Le conducteur du trajet doit avoir passé le KYC et avoir au moins un véhicule actif pour que le trajet soit effectivement publié.",
   })
   async makeTripPublic(@Request() req, @Param('id') id: string) {
     return this.tripsService.makeTripPublic(id, req.user.userId);
@@ -224,4 +346,3 @@ export class TripsController {
     return { message: 'Trajet supprimé avec succès' };
   }
 }
-

@@ -9,12 +9,16 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { BookingsService } from './bookings.service';
-import { CreateBookingDto, UpdateBookingStatusDto, RejectBookingDto, ConfirmPickupDto, ConfirmDropoffDto, ReportBookingProblemDto, UpdatePassengerLocationDto } from './dto/booking.dto';
+import { CreateBookingDto, UpdateBookingStatusDto, RejectBookingDto, ConfirmPickupDto, ConfirmDropoffDto, ReportBookingProblemDto, UpdatePassengerLocationDto, UpdateBookingPaymentModeDto } from './dto/booking.dto';
 import { SendWhatsAppNotificationDto } from './dto/send-whatsapp-notification.dto';
 import { Auth } from '../auth/decorators/auth.decorator';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
 import { Public } from '../common/decorators/public.decorator';
 import { FlexPayCallbackDto, InitiatePaymentDto } from '../payments/dto/payment.dto';
+import {
+  RejectTripInterruptionDto,
+  RequestTripInterruptionDto,
+} from '../trips/dto/trip-interruption.dto';
 
 @ApiTags('Bookings')
 @Controller('bookings')
@@ -59,6 +63,26 @@ export class BookingsController {
       id,
       req.user.userId,
       dto,
+    );
+  }
+
+  @Put(':id/payment-mode')
+  @Auth()
+  @SensitiveThrottle(20, 60000)
+  @ApiOperation({
+    summary: 'Update payment mode for a booking',
+    description:
+      'Permet au passager de changer entre paiement electronique, points Zwanga et paiement physique avant la cloture de la reservation.',
+  })
+  async updatePaymentMode(
+    @Request() req,
+    @Param('id') id: string,
+    @Body() dto: UpdateBookingPaymentModeDto,
+  ) {
+    return this.bookingsService.updatePaymentMode(
+      id,
+      req.user.userId,
+      dto.paymentMode,
     );
   }
 
@@ -146,6 +170,67 @@ export class BookingsController {
     return { message: 'Booking cancelled successfully' };
   }
 
+  @Post(':id/interruption-request')
+  @Auth()
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({
+    summary:
+      'Request an early trip interruption for this passenger booking',
+  })
+  async requestTripInterruption(
+    @Request() req,
+    @Param('id') id: string,
+    @Body() dto: RequestTripInterruptionDto,
+  ) {
+    return this.bookingsService.requestPassengerTripInterruption(
+      id,
+      req.user.userId,
+      dto,
+    );
+  }
+
+  @Put(':id/interruption-request/cancel')
+  @Auth()
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({ summary: 'Cancel a pending passenger interruption request' })
+  async cancelTripInterruption(@Request() req, @Param('id') id: string) {
+    return this.bookingsService.cancelPassengerTripInterruption(
+      id,
+      req.user.userId,
+    );
+  }
+
+  @Put(':id/interruption-request/confirm')
+  @Auth()
+  @SensitiveThrottle(20, 60000)
+  @ApiOperation({
+    summary: 'Confirm a passenger early interruption request (driver only)',
+  })
+  async confirmTripInterruption(@Request() req, @Param('id') id: string) {
+    return this.bookingsService.confirmPassengerTripInterruption(
+      id,
+      req.user.userId,
+    );
+  }
+
+  @Put(':id/interruption-request/reject')
+  @Auth()
+  @SensitiveThrottle(20, 60000)
+  @ApiOperation({
+    summary: 'Reject a passenger early interruption request (driver only)',
+  })
+  async rejectTripInterruption(
+    @Request() req,
+    @Param('id') id: string,
+    @Body() dto: RejectTripInterruptionDto,
+  ) {
+    return this.bookingsService.rejectPassengerTripInterruption(
+      id,
+      req.user.userId,
+      dto.reason,
+    );
+  }
+
   @Get(':id/driver-contact')
   @Auth()
   @SensitiveThrottle(30, 60000)
@@ -195,7 +280,7 @@ export class BookingsController {
   @Auth()
   // @Roles(UserRole.DRIVER)
   @SensitiveThrottle(20, 60000)
-  @ApiOperation({ summary: 'Confirm passenger dropoff (driver only)' })
+  @ApiOperation({ summary: 'Confirm passenger-requested dropoff (driver only)' })
   async confirmDropoff(@Request() req, @Param('id') id: string, @Body() dto: ConfirmDropoffDto) {
     return this.bookingsService.confirmDropoff(id, req.user.userId);
   }
@@ -203,9 +288,9 @@ export class BookingsController {
   @Put(':id/confirm-dropoff-passenger')
   @Auth()
   @SensitiveThrottle(20, 60000)
-  @ApiOperation({ summary: 'Confirm dropoff by passenger' })
+  @ApiOperation({ summary: 'Request dropoff by passenger' })
   async confirmDropoffByPassenger(@Request() req, @Param('id') id: string, @Body() dto: ConfirmDropoffDto) {
-    return this.bookingsService.confirmDropoffByPassenger(id, req.user.userId);
+    return this.bookingsService.confirmDropoffByPassenger(id, req.user.userId, dto);
   }
 
   @Post(':id/report-problem')

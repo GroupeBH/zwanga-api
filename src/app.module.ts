@@ -36,6 +36,10 @@ import { YandexMapsModule } from './yandex-maps/yandex-maps.module';
 import { FavoritePlacesModule } from './favorite-places/favorite-places.module';
 import { ChatbotModule } from './chatbot/chatbot.module';
 import { buildTypeOrmModuleOptions } from './database/typeorm-options';
+import { WalletModule } from './wallet/wallet.module';
+import { DriverSettlementsModule } from './driver-settlements/driver-settlements.module';
+import { HealthModule } from './health/health.module';
+import { createRedisCacheStore } from './common/utils/redis-cache-store';
 
 @Module({
   imports: [
@@ -47,9 +51,14 @@ import { buildTypeOrmModuleOptions } from './database/typeorm-options';
         buildTypeOrmModuleOptions(configService),
       inject: [ConfigService],
     }),
-    CacheModule.register({
+    CacheModule.registerAsync({
       isGlobal: true,
-      ttl: 300, // 5 minutes default TTL
+      imports: [ConfigModule],
+      useFactory: async (configService: ConfigService) => ({
+        store: await createRedisCacheStore(configService),
+        ttl: 300,
+      }),
+      inject: [ConfigService],
     }),
     ScheduleModule.forRoot(),
     CommonModule,
@@ -86,6 +95,9 @@ import { buildTypeOrmModuleOptions } from './database/typeorm-options';
     YandexMapsModule,
     FavoritePlacesModule,
     ChatbotModule,
+    WalletModule,
+    DriverSettlementsModule,
+    HealthModule,
   ],
   controllers: [AppController],
   providers: [

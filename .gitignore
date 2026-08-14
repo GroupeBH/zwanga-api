@@ -38,6 +38,10 @@ lerna-debug.log*
 # Environment
 .env
 .env.local
+.env.development
+.env.staging
+.env.production
+.env.test
 .env.*.local
 
 # Uploads
@@ -45,12 +49,15 @@ lerna-debug.log*
 !/uploads/.gitkeep
 zwanga-c791b-firebase-adminsdk-fbsvc-43707dcb4e
 
-# Infrastructure local state and secrets
-infra/terraform/.terraform/
-infra/terraform/terraform.tfstate*
-infra/terraform/*.tfvars
-infra/terraform/*.tfvars.json
-infra/terraform/backend.hcl
-infra/ansible/inventory.ini
-infra/ansible/env/*.env
-!infra/ansible/env/*.env.example
+# Terraform local state and generated configuration
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+infra-aws/backend.hcl
+infra-aws/terraform.tfvars
+infra-aws/*.auto.tfvars
+infra-aws/bootstrap/terraform.tfvars
+
+# Local renderings and temporary validation artifacts
+/tmp/

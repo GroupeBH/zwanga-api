@@ -35,6 +35,40 @@ export class PaymentsController {
     );
   }
 
+  @Get('history')
+  @Auth()
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({
+    summary: 'Get sanitized payment history for the current user',
+  })
+  async getPaymentHistory(@Request() req) {
+    const transactions = await this.paymentsService.findUserTransactions(
+      req.user.userId,
+    );
+
+    return transactions.map((transaction) =>
+      this.paymentsService.formatPaymentHistoryForClient(transaction),
+    );
+  }
+
+  @Get(':paymentId/details')
+  @Auth()
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({
+    summary: 'Get sanitized payment details for the current user',
+  })
+  async getPaymentDetails(
+    @Request() req,
+    @Param('paymentId') paymentId: string,
+  ) {
+    const transaction = await this.paymentsService.findTransactionById(
+      paymentId,
+      req.user.userId,
+    );
+
+    return this.paymentsService.formatPaymentHistoryForClient(transaction);
+  }
+
   @Get(':orderNumber/status')
   @Auth()
   @SensitiveThrottle(20, 60000)

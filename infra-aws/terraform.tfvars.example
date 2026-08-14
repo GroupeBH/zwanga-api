@@ -1,0 +1,156 @@
+aws_region   = "eu-central-1"
+project_name = "zwanga-api"
+environment  = "production"
+
+# Replace with the GitHub organization or username that owns zwanga-backend.
+github_owner      = "MON_PSEUDO"
+github_repository = "zwanga-backend"
+github_branch     = "main"
+
+# If your AWS account already has the GitHub Actions OIDC provider, set its ARN
+# instead of creating a duplicate account-level provider.
+# Example:
+# github_oidc_provider_arn = "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com"
+
+database_instance_class      = "db.t4g.micro"
+database_allocated_storage_gb = 20
+database_multi_az            = false
+database_deletion_protection = true
+database_skip_final_snapshot = false
+
+redis_node_type          = "cache.t4g.micro"
+redis_num_cache_clusters = 1
+
+# Economical always-on ECS profile for around 100 daily users.
+ecs_task_cpu    = "512"
+ecs_task_memory = "1024"
+ecs_desired_count = 1
+
+# Keep autoscaling disabled for the first economical deployment. Redis pub/sub is
+# configured; when you enable autoscaling, use min=2 and max=6.
+ecs_enable_autoscaling = false
+ecs_min_capacity       = 2
+ecs_max_capacity       = 6
+
+# Useful observability without the more expensive high-cardinality metrics.
+enable_ecs_container_insights             = false
+rds_enhanced_monitoring_interval_seconds = 60
+cloudwatch_log_retention_days             = 7
+cloudtrail_s3_retention_days              = 365
+enable_cloudtrail_insights                = false
+enable_xray_tracing                       = true
+xray_sampling_rate                        = 0.05
+
+# Optional. When set, ALB listens on HTTPS and redirects HTTP to HTTPS.
+alb_certificate_arn = null
+
+# Keep sticky routing enabled for Socket.IO long-polling during autoscaling.
+alb_enable_stickiness                  = true
+alb_stickiness_cookie_duration_seconds = 86400
+
+# Every address receives an AWS confirmation email before alerts become active.
+alert_email_addresses = [
+  "ops@zwanga-app.com",
+  "security@zwanga-app.com",
+]
+
+# Ces variables non sensibles sont des exemples. Elles sont creees par Terraform
+# dans SSM Parameter Store en SecureString sous /zwanga-api/production/env/*,
+# puis injectees dans ECS. Pour tes vraies variables locales, utilise plutot
+# scripts/import-env-to-ssm.ps1 avec ton fichier .env non versionne.
+runtime_environment_variables = {
+  CORS_ORIGINS                 = "https://zwanga-app.com,https://www.zwanga-app.com"
+  FRONTEND_URL                 = "https://zwanga-app.com"
+  GPS_LOG_SAMPLE_RATE          = "0.01"
+  LOG_LEVEL                    = "warn"
+  PUBLIC_API_BASE_URL          = "https://api.zwanga-app.com"
+  TRACKING_PUBLIC_BASE_URL     = "https://zwanga-app.com/trips"
+  ZWANGA_PUBLIC_WEB_URL        = "https://zwanga-app.com"
+  JWT_EXPIRES_IN               = "1d"
+  JWT_REFRESH_EXPIRES_IN       = "21d"
+  THROTTLE_TTL                 = "60"
+  THROTTLE_LIMIT               = "10"
+  UPLOAD_DEST                  = "./uploads"
+  AWS_REKOGNITION_ENABLED      = "false"
+  AWS_REKOGNITION_KYC_ENABLED  = "false"
+  AWS_REKOGNITION_MIN_CONFIDENCE = "50"
+  AWS_REKOGNITION_KYC_MIN_SIMILARITY = "40"
+  AWS_REKOGNITION_KYC_MIN_FACE_QUALITY = "50"
+  AWS_S3_PRESIGNED_URL_EXPIRES_IN = "3600"
+  AWS_S3_PUBLIC_BUCKET         = "false"
+  FLEXPAY_VERIFY_CALLBACKS     = "true"
+  DEFAULT_COUNTRY_CODE         = "+243"
+  WHATSAPP_ENABLED             = "true"
+  KECCEL_SMS_ENABLED           = "true"
+  SUBSCRIPTION_CURRENCY        = "USD"
+  SUBSCRIPTION_PRICE           = "10"
+  SUBSCRIPTION_PRO_CURRENCY    = "USD"
+  SUBSCRIPTION_PRO_PRICE       = "20"
+  TRIP_PAYMENT_CURRENCY        = "CDF"
+  ZWANGA_COMMISSION_RATE       = "0.10"
+  ZWANGA_POINTS_CURRENCY       = "POINTS"
+  ZWANGA_POINT_VALUE           = "1"
+  ZWANGA_POINT_VALUE_CURRENCY  = "CDF"
+  ZWANGA_LOYALTY_RATE          = "0.01"
+  ZWANGA_LOYALTY_POINTS_PER_KM = "1"
+  ZWANGA_LOYALTY_MIN_REWARD    = "1"
+  ZWANGA_LOYALTY_BASE_REWARD   = "5"
+  SUPPORT_DEFAULT_LOCALE       = "fr-CD"
+  SUPPORT_DEFAULT_AUDIENCE     = "mobile"
+  SUPPORT_EMAIL                = "support@zwanga.cd"
+  SUPPORT_TITLE                = "Support Zwanga"
+  SUPPORT_SUBTITLE             = "Nous sommes la pour vous aider"
+  SUPPORT_HOURS_WEEKDAYS       = "08:00-18:00"
+  SUPPORT_HOURS_SATURDAY       = "09:00-14:00"
+  SUPPORT_HOURS_SUNDAY         = "ferme"
+  OLLAMA_BASE_URL              = "http://localhost:11434"
+  OLLAMA_MODEL                 = "llama3.2"
+  OPENWEATHER_BASE_URL         = "https://api.openweathermap.org/data/2.5"
+}
+
+# Les secrets et valeurs propres a ton compte peuvent etre importes dans SSM
+# avec scripts/import-env-to-ssm.ps1. Terraform les decouvre automatiquement
+# sous /zwanga-api/production/env/* au prochain apply, sans stocker les valeurs.
+external_runtime_environment_variable_names = [
+  # "AWS_S3_BUCKET_NAME",
+  # "FCM_PROJECT_ID",
+  # "FCM_CLIENT_EMAIL",
+  # "FCM_PRIVATE_KEY",
+  # "FCM_CREDENTIALS_BASE64",
+  # "GOOGLE_CLIENT_ID",
+  # "GOOGLE_CLIENT_SECRET",
+  # "GOOGLE_CALLBACK_URL",
+  # "GOOGLE_MOBILE_CLIENT_IDS",
+  # "APPLE_CLIENT_ID",
+  # "APPLE_CLIENT_IDS",
+  # "GOOGLE_MAPS_API_KEY",
+  # "YANDEX_MAPS_API_KEY",
+  # "FLEXPAY_TOKEN",
+  # "FLEX_PAIE_TOKEN",
+  # "FLEXPAY_MERCHANT_CODE",
+  # "FLEXPAY_CALLBACK_BASE_URL",
+  # "FLEXPAY_BOOKING_CALLBACK_URL",
+  # "FLEXPAY_TRIP_CALLBACK_URL",
+  # "FLEXPAY_SUBSCRIPTION_CALLBACK_URL",
+  # "FLEXPAY_WALLET_CALLBACK_URL",
+  # "FLEXPAY_DRIVER_PAYOUT_CALLBACK_URL",
+  # "KECCEL_TOKEN",
+  # "KECCEL_FROM",
+  # "KECCEL_SMS_URL",
+  # "KECCEL_OTP_URL_GENERATE",
+  # "KECCEL_OTP_URL_VALIDATE",
+  # "INFOBIP_API_KEY",
+  # "INFOBIP_BASE_URL",
+  # "INFOBIP_WHATSAPP_API_URL",
+  # "INFOBIP_WHATSAPP_FROM",
+  # "WHATSAPP_API_KEY",
+  # "WHATSAPP_API_URL",
+  # "WHATSAPP_FROM",
+  # "OPENWEATHER_API_KEY",
+  # "WEATHER_ZONES_JSON",
+]
+
+extra_tags = {
+  Owner      = "Zwanga"
+  CostCenter = "backend"
+}

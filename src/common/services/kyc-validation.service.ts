@@ -53,7 +53,7 @@ export class KycValidationService {
     this.logger.log(`[KYC Init] AWS_REKOGNITION_KYC_ENABLED = "${kycEnabledConfig}" (enabled: ${this.enabled})`);
     
     this.minSimilarity = parseFloat(
-      this.configService.get<string>('AWS_REKOGNITION_KYC_MIN_SIMILARITY') || '80',
+      this.configService.get<string>('AWS_REKOGNITION_KYC_MIN_SIMILARITY') || '40',
     );
     this.minFaceQuality = parseFloat(
       this.configService.get<string>('AWS_REKOGNITION_KYC_MIN_FACE_QUALITY') || '50',
@@ -63,29 +63,14 @@ export class KycValidationService {
     this.logger.log(`[KYC Init] Min face quality threshold: ${this.minFaceQuality}%`);
 
     if (this.enabled) {
-      const accessKeyId = this.configService.get<string>('AWS_ACCESS_KEY_ID');
-      const secretAccessKey = this.configService.get<string>('AWS_SECRET_ACCESS_KEY');
       const region = this.configService.get<string>('AWS_REGION') || 'us-east-1';
 
       this.logger.log(`[KYC Init] AWS Region: ${region}`);
-      this.logger.log(`[KYC Init] AWS_ACCESS_KEY_ID: ${accessKeyId ? '***configured***' : 'NOT SET'}`);
-      this.logger.log(`[KYC Init] AWS_SECRET_ACCESS_KEY: ${secretAccessKey ? '***configured***' : 'NOT SET'}`);
-
-      if (!accessKeyId || !secretAccessKey) {
-        this.logger.warn(
-          '[KYC Init] AWS credentials not configured. KYC validation will be disabled.',
-        );
-        this.enabled = false;
-        return;
-      }
+      this.logger.log('[KYC Init] AWS credentials provider: default SDK chain / ECS task role');
 
       try {
         this.rekognitionClient = new RekognitionClient({
           region,
-          credentials: {
-            accessKeyId,
-            secretAccessKey,
-          },
         });
 
         this.logger.log(
@@ -476,7 +461,7 @@ export class KycValidationService {
           similarityScore: avgSimilarity,
         },
       };
-    } catch (error) {
+    } catch (error: any) {
       this.logger.error('[KYC Validation] ❌ KYC validation ERROR:', error);
       this.logger.error(`[KYC Validation] Error message: ${error.message}`);
       this.logger.error(`[KYC Validation] Error stack: ${error.stack}`);
@@ -571,7 +556,7 @@ export class KycValidationService {
         faceCount,
         faceQuality: averageQuality,
       };
-    } catch (error) {
+    } catch (error: any) {
       this.logger.error(`[Face Detection] ❌ Error detecting faces in ${imageType}:`, error);
       this.logger.error(`[Face Detection] Error message: ${error.message}`);
       this.logger.error(`[Face Detection] Error code: ${error.name || 'Unknown'}`);

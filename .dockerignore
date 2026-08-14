@@ -1,75 +1,62 @@
-# Dependencies
+# Dependency and build artifacts
 node_modules
-npm-debug.log
-yarn-error.log
-yarn.lock
-
-# Build output
 dist
 build
+coverage
+.nyc_output
 *.tsbuildinfo
 
-# Environment files
+# Secrets and local configuration
 .env
-.env.local
-.env.*.local
+.env.*
+!.env.example
+!.env.docker.example
+*.pem
+*.key
 
-# Git
+# Source-control and CI metadata
 .git
 .gitignore
 .gitattributes
+.github
+.gitlab-ci.yml
 
-# IDE
-.vscode
-.idea
-*.swp
-*.swo
-*~
+# Local infrastructure and deployment tooling
+infra
+infra-aws
+tmp
+.terraform
+*.tfstate
+*.tfstate.*
 
-# Documentation
-README.md
-*.md
-docs
-
-# Testing
-coverage
-.nyc_output
+# Tests are executed by CI before the image build
 test
-*.test.ts
-*.spec.ts
-*.e2e-spec.ts
+**/*.spec.ts
+**/*.test.ts
+**/*.e2e-spec.ts
 
-# Logs
+# Runtime-generated files
+uploads/*
 logs
 *.log
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# OS
+# Editors and operating systems
+.vscode
+.idea
 .DS_Store
 Thumbs.db
+*.swp
+*.swo
 
-# Docker
-docker-compose.yml
-docker-compose.*.yml
-Dockerfile*
-.dockerignore
+# Local orchestration and documentation
+docker-compose*.yml
+docs
+*.md
+!README.md
 
-# CI/CD
-.github
-.gitlab-ci.yml
-.travis.yml
-infra
-
-# Misc
+# Miscellaneous
 .eslintcache
-.prettierignore
 ecosystem.config.js
-PM2_GUIDE.md
-SETUP.md
-ENV_VARIABLES.md
-AWS_S3_SETUP.md
-FCM_SETUP.md
-SECURITY.md
-

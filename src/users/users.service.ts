@@ -479,13 +479,15 @@ export class UsersService {
       );
     }
 
-    if (!cniBackFile || !selfieFile) {
+    if (cniFrontFiles.length === 0 || !selfieFile) {
       const missingFiles: string[] = [];
-      if (!cniBackFile) missingFiles.push('cniBack (verso de la CNI)');
+      if (cniFrontFiles.length === 0) {
+        missingFiles.push('cniFront (recto de la CNI)');
+      }
       if (!selfieFile) missingFiles.push('selfie (photo selfie)');
 
       throw new BadRequestException(
-        `ÉCHEC : Fichiers manquants. Veuillez fournir tous les documents requis.\n\nFichiers manquants : ${missingFiles.join(', ')}\n\nTous les fichiers suivants sont requis :\n- cniBack : Photo du verso de votre carte d'identité\n- selfie : Photo selfie de vous-même`,
+        `ÉCHEC : Fichiers manquants. Veuillez fournir tous les documents requis.\n\nFichiers manquants : ${missingFiles.join(', ')}\n\nTous les fichiers suivants sont requis :\n- cniFront : Photo du recto de votre carte d'identité\n- selfie : Photo selfie de vous-même`,
       );
     }
 
@@ -497,7 +499,9 @@ export class UsersService {
       Boolean(url),
     );
     const [cniBackUrl, selfieUrl] = await Promise.all([
-      this.fileUploadService.saveFile(cniBackFile, 'kyc'),
+      cniBackFile
+        ? this.fileUploadService.saveFile(cniBackFile, 'kyc')
+        : Promise.resolve(null),
       this.fileUploadService.saveFile(selfieFile, 'kyc'),
     ]);
 
@@ -588,7 +592,7 @@ export class UsersService {
             }
 
             if (details.similarityScore !== undefined) {
-              detailedReason += `\n- Score de similarité : ${details.similarityScore.toFixed(1)}% (minimum requis : ${details.minRequiredSimilarity || this.configService.get<string>('AWS_REKOGNITION_KYC_MIN_SIMILARITY') || '80'}%)`;
+              detailedReason += `\n- Score de similarité : ${details.similarityScore.toFixed(1)}% (minimum requis : ${details.minRequiredSimilarity || this.configService.get<string>('AWS_REKOGNITION_KYC_MIN_SIMILARITY') || '40'}%)`;
             }
 
             if (
@@ -662,33 +666,16 @@ export class UsersService {
       const kycEnabledConfig = this.configService.get<string>(
         'AWS_REKOGNITION_KYC_ENABLED',
       );
-      const accessKeyId = this.configService.get<string>('AWS_ACCESS_KEY_ID');
-      const secretAccessKey = this.configService.get<string>(
-        'AWS_SECRET_ACCESS_KEY',
-      );
 
       this.logger.warn(`[KYC Upload] ⚠️ KYC validation is DISABLED`);
       this.logger.warn(
         `[KYC Upload] Reason: AWS_REKOGNITION_KYC_ENABLED="${kycEnabledConfig || 'NOT SET'}" (must be "true" to enable)`,
       );
-
-      if (!accessKeyId || !secretAccessKey) {
-        this.logger.warn(
-          `[KYC Upload] Additional issue: AWS credentials not configured`,
-        );
-        this.logger.warn(
-          `[KYC Upload]   - AWS_ACCESS_KEY_ID: ${accessKeyId ? 'configured' : 'NOT SET'}`,
-        );
-        this.logger.warn(
-          `[KYC Upload]   - AWS_SECRET_ACCESS_KEY: ${secretAccessKey ? 'configured' : 'NOT SET'}`,
-        );
-      }
-
-      this.logger.warn(
+this.logger.warn(
         `[KYC Upload] Action: Keeping status as PENDING for manual review`,
       );
       this.logger.warn(
-        `[KYC Upload] To enable AI validation, set AWS_REKOGNITION_KYC_ENABLED=true and configure AWS credentials`,
+        `[KYC Upload] To enable AI validation, set AWS_REKOGNITION_KYC_ENABLED=true and grant Rekognition permissions to the ECS task role`,
       );
 
       // When KYC validation is disabled, keep status as PENDING for manual review
@@ -762,7 +749,7 @@ export class UsersService {
         // Parallel deletion of all uploaded files
         await Promise.all([
           ...cniFrontUrls.map((url) => this.fileUploadService.deleteFile(url)),
-          this.fileUploadService.deleteFile(cniBackUrl),
+          ...(cniBackUrl ? [this.fileUploadService.deleteFile(cniBackUrl)] : []),
           this.fileUploadService.deleteFile(selfieUrl),
         ]);
 

@@ -3,6 +3,13 @@ import { PreventMultipleActiveDriverTrips1780000001000 } from './1780000001000-P
 import { AddAppleIdToUsers1780000002000 } from './1780000002000-AddAppleIdToUsers';
 import { AddBookingPayments1780000003000 } from './1780000003000-AddBookingPayments';
 import { AddTripPaymentModes1780000005000 } from './1780000005000-AddTripPaymentModes';
+import { AddWalletPointsAndDriverSettlements1780000006000 } from './1780000006000-AddWalletPointsAndDriverSettlements';
+import { AddTripShareLinks1780000007000 } from './1780000007000-AddTripShareLinks';
+import { AddRideArrivalTrackingState1780000008000 } from './1780000008000-AddRideArrivalTrackingState';
+import { RepairDriverPickupArrivedAt1780000009000 } from './1780000009000-RepairDriverPickupArrivedAt';
+import { AddTripInterruptionRequests1780000010000 } from './1780000010000-AddTripInterruptionRequests';
+import { AddDistanceBasedBookingFares1780000011000 } from './1780000011000-AddDistanceBasedBookingFares';
+import { AddWalletTransfersAndSubscriptionPayments1780000012000 } from './1780000012000-AddWalletTransfersAndSubscriptionPayments';
 
 export const databaseMigrations = [
   FillTotalSeats1780000000000,
@@ -10,4 +17,11 @@ export const databaseMigrations = [
   AddAppleIdToUsers1780000002000,
   AddBookingPayments1780000003000,
   AddTripPaymentModes1780000005000,
+  AddWalletPointsAndDriverSettlements1780000006000,
+  AddTripShareLinks1780000007000,
+  AddRideArrivalTrackingState1780000008000,
+  RepairDriverPickupArrivedAt1780000009000,
+  AddTripInterruptionRequests1780000010000,
+  AddDistanceBasedBookingFares1780000011000,
+  AddWalletTransfersAndSubscriptionPayments1780000012000,
 ];

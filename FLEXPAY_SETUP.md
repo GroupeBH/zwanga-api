@@ -26,9 +26,107 @@ Trip booking payments use:
 - `POST /api/v1/bookings/:id/pay`
 - `POST /api/v1/bookings/flexpay/callback`
 - `GET /api/v1/bookings/payments/:orderNumber/status`
+- `PUT /api/v1/bookings/:id/payment-mode`
 
 The booking amount is calculated by the backend from
 `trip.pricePerSeat * booking.numberOfSeats`; the app does not send the amount.
+
+The passenger selects one of these `paymentMode` values when creating a booking
+or through the payment-mode endpoint:
+
+- `electronic`: pay the accepted booking through FlexPay with the `/pay` route.
+- `points`: debit the passenger's Zwanga points wallet immediately.
+- `cash`: pay physically; no electronic transaction is created.
+
+## Zwanga points (tokens)
+
+Points and tokens refer to the same wallet balance. By default, the wallet
+currency is `PTS` and `1 point = 100 CDF`. The `amount` sent by the client to
+`POST /wallet/topups` is the number of points to buy; the backend converts it to
+CDF before sending the payment to FlexPay. It never credits a top-up from the
+initiation response: it waits for a successful, verified FlexPay callback or
+status check.
+
+Authenticated wallet endpoints:
+
+- `GET /api/v1/wallet/me`: current balance and 30 latest ledger entries.
+- `GET /api/v1/wallet/ledger`: complete points ledger.
+- `POST /api/v1/wallet/topups`: buy points with Mobile Money or card.
+- `GET /api/v1/wallet/topups/:orderNumber/status`: verify a purchase and credit
+  it once.
+
+FlexPay calls the public callback
+`POST /api/v1/wallet/topups/flexpay/callback`. A successful purchase is
+idempotent: the unique payment transaction can create only one `top_up` ledger
+entry.
+
+Mobile Money points purchase:
+
+```json
+{
+  "amount": 50,
+  "method": "mobile_money",
+  "phone": "243891234567"
+}
+```
+
+This charges `5000 CDF` through FlexPay and credits `50 PTS` after confirmation.
+
+Card points purchase:
+
+```json
+{
+  "amount": 50,
+  "method": "card",
+  "approveUrl": "zwanga://wallet/topup?status=success",
+  "cancelUrl": "zwanga://wallet/topup?status=cancel",
+  "declineUrl": "zwanga://wallet/topup?status=decline"
+}
+```
+
+To pay a booking with points:
+
+```json
+{
+  "paymentMode": "points"
+}
+```
+
+Send that body to `PUT /api/v1/bookings/:id/payment-mode`. If the balance is
+insufficient, the request fails without marking the booking as paid. A points
+payment is refunded once when the booking is cancelled or rejected. Completing
+a trip grants `ZWANGA_LOYALTY_BASE_REWARD` first, then adds
+`ZWANGA_LOYALTY_POINTS_PER_KM` for each travelled kilometer. When distance is
+unavailable, the backend falls back to a price-based loyalty amount converted
+with the same point value. With the defaults, every completed booking grants at
+least `1 point`, worth `100 CDF` on the platform, plus `0.5 point/km`.
+
+## Prix kilometrique en cas d'interruption
+
+Le prix publie par le conducteur reste le plafond d'une course complete. Quand
+le conducteur arrete le trajet avant l'arrivee ou qu'un passager descend plus
+tot, le backend recalcule automatiquement la reservation avec la formule :
+
+```text
+prix final = prix publie x distance parcourue / distance prevue
+```
+
+La distance prevue est calculee entre l'origine et la destination de la
+reservation. La distance parcourue va de cette origine au point
+d'interruption. Google Directions fournit la distance routiere; si le service
+n'est pas disponible, le backend utilise la distance geodesique. Le prix final
+ne peut jamais depasser le prix publie.
+
+La reservation expose les champs d'audit `originalPaymentAmount`,
+`paymentAmount`, `plannedDistanceMeters`, `travelledDistanceMeters`,
+`pricePerKilometer`, `fareAdjustmentAmount` et `fareAdjustedAt`.
+
+- En especes, `paymentAmount` devient directement le montant restant a payer.
+- Pour un paiement electronique ou par points deja confirme, la difference est
+  creditee une seule fois dans le portefeuille de points Zwanga avec le type de
+  mouvement `booking_fare_adjustment`.
+- Les points de fidelite et le revenu du conducteur sont calcules sur le prix
+  final ajuste.
 
 ## Mobile Money request
 
@@ -105,6 +203,7 @@ FLEXPAY_CALLBACK_URL=
 FLEXPAY_CALLBACK_BASE_URL=https://api.zwanga.cd/api/v1
 FLEXPAY_SUBSCRIPTION_CALLBACK_URL=
 FLEXPAY_BOOKING_CALLBACK_URL=
+FLEXPAY_WALLET_CALLBACK_URL=
 FLEXPAY_VERIFY_CALLBACKS=true
 
 # Subscription amount charged in-app.
@@ -113,6 +212,14 @@ SUBSCRIPTION_PRO_CURRENCY=CDF
 
 # Trip booking payments.
 TRIP_PAYMENT_CURRENCY=CDF
+
+# Points wallet. 1 point = 100 CDF by default.
+ZWANGA_POINTS_CURRENCY=PTS
+ZWANGA_POINT_VALUE_CDF=100
+ZWANGA_LOYALTY_BASE_REWARD=1
+ZWANGA_LOYALTY_POINTS_PER_KM=0.5
+# 0.01 grants 1% of the completed trip price, converted back to points.
+ZWANGA_LOYALTY_RATE=0.01
 
 # Fallback card redirect URLs when the client does not send them.
 FLEXPAY_CARD_APPROVE_URL=https://zwanga-app.com/subscriptions/payment/success

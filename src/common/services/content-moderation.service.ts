@@ -90,21 +90,8 @@ export class ContentModerationService {
     this.minConfidence = parseFloat(this.configService.get<string>('AWS_REKOGNITION_MIN_CONFIDENCE') || '50');
 
     if (this.enabled) {
-      const accessKeyId = this.configService.get<string>('AWS_ACCESS_KEY_ID');
-      const secretAccessKey = this.configService.get<string>('AWS_SECRET_ACCESS_KEY');
-
-      if (!accessKeyId || !secretAccessKey) {
-        this.logger.warn('AWS credentials not configured. Content moderation will be disabled.');
-        this.enabled = false;
-        return;
-      }
-
       this.rekognitionClient = new RekognitionClient({
         region: this.configService.get<string>('AWS_REGION') || 'us-east-1',
-        credentials: {
-          accessKeyId,
-          secretAccessKey,
-        },
       });
       
       this.logger.log(`Content moderation service initialized - Min confidence: ${this.minConfidence}%`);

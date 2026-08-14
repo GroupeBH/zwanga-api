@@ -10,15 +10,31 @@ import { MessagingModule } from '../messaging/messaging.module';
 import { SafetyModule } from '../safety/safety.module';
 import { GoogleMapsModule } from '../google-maps/google-maps.module';
 import { PaymentsModule } from '../payments/payments.module';
+import { WalletModule } from '../wallet/wallet.module';
+import { DriverSettlementsModule } from '../driver-settlements/driver-settlements.module';
+import {
+  DriverTripInterruptionConfirmation,
+  DriverTripInterruptionRequest,
+  PassengerTripInterruptionRequest,
+} from '../trips/entities/trip-interruption.entity';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([Booking, Trip, User]),
+    TypeOrmModule.forFeature([
+      Booking,
+      Trip,
+      User,
+      PassengerTripInterruptionRequest,
+      DriverTripInterruptionRequest,
+      DriverTripInterruptionConfirmation,
+    ]),
     NotificationsModule,
     MessagingModule,
     SafetyModule,
     GoogleMapsModule,
     PaymentsModule,
+    WalletModule,
+    DriverSettlementsModule,
   ],
   controllers: [BookingsController],
   providers: [BookingsService],

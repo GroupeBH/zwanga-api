@@ -14,6 +14,10 @@ import { User } from '../../users/entities/user.entity';
 import { Booking } from '../../bookings/entities/booking.entity';
 import { Vehicle } from '../../vehicles/entities/vehicle.entity';
 import { RecurringTripTemplate } from './recurring-trip-template.entity';
+import {
+  DriverTripInterruptionRequest,
+  PassengerTripInterruptionRequest,
+} from './trip-interruption.entity';
 
 export enum TripStatus {
   PENDING = 'upcoming',
@@ -124,6 +128,12 @@ export class Trip {
   @Column({ type: 'timestamp', nullable: true })
   lastLocationUpdateAt: Date | null;
 
+  @Column({ type: 'timestamp', nullable: true })
+  destinationApproachNotifiedAt: Date | null;
+
+  @Column({ type: 'timestamp', nullable: true })
+  destinationReachedAt: Date | null;
+
   @Column({ type: 'boolean', default: false })
   departureReminderNotified: boolean;
 
@@ -139,7 +149,10 @@ export class Trip {
   @Column({ type: 'varchar', nullable: true })
   recurringTemplateId: string | null;
 
-  @ManyToOne(() => RecurringTripTemplate, { nullable: true, onDelete: 'SET NULL' })
+  @ManyToOne(() => RecurringTripTemplate, {
+    nullable: true,
+    onDelete: 'SET NULL',
+  })
   @JoinColumn({ name: 'recurringTemplateId' })
   recurringTemplate: RecurringTripTemplate | null;
 
@@ -154,4 +167,15 @@ export class Trip {
 
   @OneToMany(() => Booking, (booking) => booking.trip)
   bookings: Booking[];
+
+  @OneToMany(
+    () => PassengerTripInterruptionRequest,
+    (request) => request.trip,
+  )
+  passengerInterruptionRequests: PassengerTripInterruptionRequest[];
+
+  @OneToMany(() => DriverTripInterruptionRequest, (request) => request.trip)
+  driverInterruptionRequests: DriverTripInterruptionRequest[];
+
+  interruptionRequest?: DriverTripInterruptionRequest | null;
 }

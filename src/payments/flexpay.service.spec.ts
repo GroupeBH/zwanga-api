@@ -1,4 +1,4 @@
-import { of } from 'rxjs';
+import { of, throwError } from 'rxjs';
 import { PaymentMethod } from './entities/payment-transaction.entity';
 import { FlexPayService } from './flexpay.service';
 
@@ -68,6 +68,32 @@ describe('FlexPayService', () => {
       }),
     );
     expect(result.orderNumber).toBe('9bsTX7qXdpQe243891234567');
+  });
+
+  it('surfaces Mobile Money timeout details without exposing credentials', async () => {
+    const timeoutError = Object.assign(
+      new Error('timeout of 30000ms exceeded'),
+      {
+        isAxiosError: true,
+        code: 'ECONNABORTED',
+        config: {
+          method: 'post',
+          timeout: 30000,
+          url: 'https://beta-backend.flexpay.cd/api/rest/v1/paymentService',
+        },
+      },
+    );
+    httpService.post.mockReturnValue(throwError(() => timeoutError));
+
+    await expect(
+      service.initiatePayment({
+        ...baseInput,
+        method: PaymentMethod.MOBILE_MONEY,
+        phone: '+243 891 234 567',
+      }),
+    ).rejects.toThrow(
+      'Initialisation paiement Mobile Money FlexPay indisponible (delai depasse apres 30000ms)',
+    );
   });
 
   it('sends card payments to the FlexPay card endpoint and returns the redirect url', async () => {
@@ -151,5 +177,76 @@ describe('FlexPayService', () => {
       }),
     );
     expect(result.transaction?.status).toBe('0');
+  });
+
+  it('accepts transaction Code as a fallback transaction status in check responses', async () => {
+    httpService.get.mockReturnValue(
+      of({
+        data: {
+          Code: '0',
+          Message: 'Une transaction trouvee',
+          Transaction: {
+            orderNumber: '9bsTX7qXdpQe243891234567',
+            reference: 'TEST0014521',
+            amount: '100.0',
+            amountCustomer: '101.0',
+            currency: 'CDF',
+            createdAt: '06-02-2021 17:32:46',
+            Code: '1',
+          },
+        },
+      }),
+    );
+
+    const result = await service.checkTransaction(
+      '9bsTX7qXdpQe243891234567',
+    );
+
+    expect(result.transaction?.status).toBeNull();
+    expect(result.transaction?.code).toBe('1');
+    expect(service.isSuccessfulTransaction(result.transaction)).toBe(false);
+  });
+
+  it('sends merchant payouts to the FlexPay merchantPayOutService endpoint', async () => {
+    httpService.post.mockReturnValue(
+      of({
+        data: {
+          code: '0',
+          message: 'Payout envoye avec succes',
+          orderNumber: '9bsTX7qXdpQe243891234568',
+        },
+      }),
+    );
+
+    const result = await service.initiatePayout({
+      reference: 'DRV0014521',
+      phone: '+243 891 234 568',
+      amount: 9500,
+      currency: 'CDF',
+      callbackUrl:
+        'https://api.zwanga.cd/api/v1/driver-settlements/payouts/flexpay/callback',
+    });
+
+    expect(httpService.post).toHaveBeenCalledWith(
+      'https://beta-backend.flexpay.cd/api/rest/v1/merchantPayOutService',
+      {
+        merchant: 'ZANDO',
+        type: '1',
+        phone: '243891234568',
+        reference: 'DRV0014521',
+        amount: '9500',
+        currency: 'CDF',
+        callbackUrl:
+          'https://api.zwanga.cd/api/v1/driver-settlements/payouts/flexpay/callback',
+      },
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: 'Bearer test-token',
+          'Content-Type': 'application/json',
+        }),
+        timeout: 30000,
+      }),
+    );
+    expect(result.orderNumber).toBe('9bsTX7qXdpQe243891234568');
   });
 });

@@ -6,9 +6,26 @@ import {
   ForbiddenException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, Point, LessThan, MoreThan, In, Between, Brackets, Not, IsNull } from 'typeorm';
+import {
+  Repository,
+  Point,
+  LessThan,
+  MoreThan,
+  In,
+  Between,
+  Brackets,
+  Not,
+  IsNull,
+} from 'typeorm';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { Trip, TripStatus } from './entities/trip.entity';
+import {
+  DriverTripInterruptionConfirmation,
+  DriverTripInterruptionRequest,
+  TripInterruptionConfirmationStatus,
+  TripInterruptionReason,
+  TripInterruptionStatus,
+} from './entities/trip-interruption.entity';
 import {
   RecurringTripTemplate,
   RecurringTripTemplateStatus,
@@ -25,7 +42,17 @@ import {
   UpdateTripDto,
   DriverEmergencyContactsDto,
 } from './dto/trip.dto';
+import {
+  ConfirmDriverTripInterruptionDto,
+  RejectTripInterruptionDto,
+  RequestTripInterruptionDto,
+} from './dto/trip-interruption.dto';
+import { BookingsService } from '../bookings/bookings.service';
 import { CacheService } from '../common/services/cache.service';
+import {
+  LocationHistoryService,
+  type LocationObservationMetadata,
+} from '../common/services/location-history.service';
 import { FileUploadService } from '../common/services/file-upload.service';
 import { NotificationService } from '../notifications/notifications.service';
 import { Rating } from '../ratings/entities/rating.entity';
@@ -38,6 +65,16 @@ import {
   SubscriptionsService,
 } from '../subscriptions/subscriptions.service';
 import { WeatherAwarenessService } from '../weather/weather-awareness.service';
+import {
+  buildPointFromCoordinate,
+  isCoordinateAllowedForTrip,
+  isFreshLocationTimestamp,
+  normalizeCoordinateForTrip,
+  normalizeLocationRecordedAt,
+  normalizeLngLatCoordinates,
+  pointToCoordinate,
+  pointToCoordinates as toSafeCoordinates,
+} from '../common/utils/tracking-coordinates';
 
 export type Coordinates = [number, number] | null;
 
@@ -61,7 +98,10 @@ interface UserRatingSummary {
   totalRatings: number;
 }
 
-export type SanitizedBooking = Omit<Booking, 'trip' | 'passenger' | 'messages'> & {
+export type SanitizedBooking = Omit<
+  Booking,
+  'trip' | 'passenger' | 'messages'
+> & {
   passenger: SanitizedUser | null;
 };
 
@@ -74,7 +114,10 @@ export interface SanitizedVehicle {
   photoUrl: string | null;
 }
 
-export type SanitizedTrip = Omit<Trip, 'driver' | 'bookings' | 'departurePoint' | 'arrivalPoint' | 'vehicle'> & {
+export type SanitizedTrip = Omit<
+  Trip,
+  'driver' | 'bookings' | 'departurePoint' | 'arrivalPoint' | 'vehicle'
+> & {
   driver: SanitizedUser | null;
   bookings: SanitizedBooking[];
   departureCoordinates: Coordinates;
@@ -106,8 +149,24 @@ export class TripsService {
   private readonly CACHE_TTL = 300; // 5 minutes
   private readonly RECURRING_GENERATION_WINDOW_DAYS = 14;
   private readonly DAILY_FREE_TRIP_PUBLICATION_LIMIT = 5;
-  private readonly ACTIVE_TRIP_EXPIRATION_GRACE_MS = 6 * 60 * 60 * 1000;
   private readonly DEFAULT_ESTIMATED_TRIP_DURATION_MS = 6 * 60 * 60 * 1000;
+
+  private logTripStateChange(payload: {
+    tripId: string;
+    driverId?: string;
+    from: TripStatus;
+    to: TripStatus;
+    reason: string;
+    acceptedBookings?: number;
+    availableSeats?: number;
+  }): void {
+    this.logger.warn(
+      JSON.stringify({
+        event: 'trip_state_change',
+        ...payload,
+      }),
+    );
+  }
 
   constructor(
     @InjectRepository(Trip)
@@ -128,6 +187,10 @@ export class TripsService {
     private ratingRepository: Repository<Rating>,
     @InjectRepository(EmergencyContact)
     private emergencyContactRepository: Repository<EmergencyContact>,
+    @InjectRepository(DriverTripInterruptionRequest)
+    private driverTripInterruptionRepository: Repository<DriverTripInterruptionRequest>,
+    @InjectRepository(DriverTripInterruptionConfirmation)
+    private driverTripInterruptionConfirmationRepository: Repository<DriverTripInterruptionConfirmation>,
     private cacheService: CacheService,
     private fileUploadService: FileUploadService,
     private notificationService: NotificationService,
@@ -135,7 +198,9 @@ export class TripsService {
     private googleMapsService: GoogleMapsService,
     private subscriptionsService: SubscriptionsService,
     private weatherAwarenessService: WeatherAwarenessService,
-  ) { }
+    private locationHistoryService: LocationHistoryService,
+    private bookingsService: BookingsService,
+  ) {}
 
   async create(
     driverId: string,
@@ -158,7 +223,10 @@ export class TripsService {
       ...baseTripData
     } = createTripDto;
 
-    const { vehicle } = await this.resolvePublishingContext(driverId, vehicleId || null);
+    const { vehicle } = await this.resolvePublishingContext(
+      driverId,
+      vehicleId || null,
+    );
     await this.ensureDailyTripPublicationQuota(driverId);
     const departurePoint = await this.resolvePointFromCoordinatesOrAddress(
       departureCoordinates,
@@ -193,7 +261,9 @@ export class TripsService {
     const savedTrip = await this.tripRepository.save(trip);
     await this.invalidateTripCaches();
 
-    this.logger.log(`Trip created successfully: ${savedTrip.id} by user ${driverId}`);
+    this.logger.log(
+      `Trip created successfully: ${savedTrip.id} by user ${driverId}`,
+    );
     return this.findOne(savedTrip.id);
   }
 
@@ -209,9 +279,6 @@ export class TripsService {
     }
 
     const now = new Date();
-    const activeTripExpirationThreshold = this.getActiveTripExpirationThreshold(now);
-    const activeTripFallbackExpirationThreshold =
-      this.getActiveTripFallbackExpirationThreshold(now);
     // Include PENDING trips with future departure dates OR ACTIVE trips with available seats
     // Exclude private trips (created from trip requests)
     const trips = await this.tripRepository.find({
@@ -224,14 +291,6 @@ export class TripsService {
         {
           status: TripStatus.ACTIVE,
           availableSeats: MoreThan(0),
-          estimatedArrivalDate: MoreThan(activeTripExpirationThreshold),
-          isPrivate: false, // Exclude private trips
-        },
-        {
-          status: TripStatus.ACTIVE,
-          availableSeats: MoreThan(0),
-          estimatedArrivalDate: IsNull(),
-          departureDate: MoreThan(activeTripFallbackExpirationThreshold),
           isPrivate: false, // Exclude private trips
         },
       ],
@@ -243,13 +302,20 @@ export class TripsService {
 
     const userIds = this.collectTripUserIds(trips);
     const userRatingsMap = await this.buildUserRatingsMap(userIds);
-    const userPremiumMap = await this.subscriptionsService.getPremiumFeaturesForUsers(userIds);
-    const sanitized = this.sortSanitizedTripsByPremium(await Promise.all(
-      trips.map((trip) => this.sanitizeTrip(trip, userRatingsMap, userPremiumMap)),
-    ));
+    const userPremiumMap =
+      await this.subscriptionsService.getPremiumFeaturesForUsers(userIds);
+    const sanitized = this.sortSanitizedTripsByPremium(
+      await Promise.all(
+        trips.map((trip) =>
+          this.sanitizeTrip(trip, userRatingsMap, userPremiumMap),
+        ),
+      ),
+    );
 
     await this.cacheService.set(cacheKey, sanitized, this.CACHE_TTL);
-    this.logger.log(`Fetched ${trips.length} trips from database (${trips.filter(t => t.status === TripStatus.PENDING).length} pending, ${trips.filter(t => t.status === TripStatus.ACTIVE).length} active)`);
+    this.logger.log(
+      `Fetched ${trips.length} trips from database (${trips.filter((t) => t.status === TripStatus.PENDING).length} pending, ${trips.filter((t) => t.status === TripStatus.ACTIVE).length} active)`,
+    );
     return sanitized;
   }
 
@@ -273,23 +339,29 @@ export class TripsService {
 
     const userIds = this.collectTripUserIds(trips);
     const userRatingsMap = await this.buildUserRatingsMap(userIds);
-    const userPremiumMap = await this.subscriptionsService.getPremiumFeaturesForUsers(userIds);
-    const sanitized = this.sortSanitizedTripsByPremium(await Promise.all(
-      trips.map((trip) => this.sanitizeTrip(trip, userRatingsMap, userPremiumMap)),
-    ));
+    const userPremiumMap =
+      await this.subscriptionsService.getPremiumFeaturesForUsers(userIds);
+    const sanitized = this.sortSanitizedTripsByPremium(
+      await Promise.all(
+        trips.map((trip) =>
+          this.sanitizeTrip(trip, userRatingsMap, userPremiumMap),
+        ),
+      ),
+    );
 
     await this.cacheService.set(cacheKey, sanitized, this.CACHE_TTL);
-    this.logger.log(`Fetched ${trips.length} trips of zwanga from database (${trips.filter(t => t.status === TripStatus.PENDING).length} pending, ${trips.filter(t => t.status === TripStatus.ACTIVE).length} active)`);
+    this.logger.log(
+      `Fetched ${trips.length} trips of zwanga from database (${trips.filter((t) => t.status === TripStatus.PENDING).length} pending, ${trips.filter((t) => t.status === TripStatus.ACTIVE).length} active)`,
+    );
     return sanitized;
   }
 
   async search(searchTripsDto: SearchTripsDto): Promise<SanitizedTrip[]> {
-    this.logger.log(`Searching trips with filters: ${JSON.stringify(searchTripsDto)}`);
+    this.logger.log(
+      `Searching trips with filters: ${JSON.stringify(searchTripsDto)}`,
+    );
 
     const now = new Date();
-    const activeTripExpirationThreshold = this.getActiveTripExpirationThreshold(now);
-    const activeTripFallbackExpirationThreshold =
-      this.getActiveTripFallbackExpirationThreshold(now);
     const queryBuilder = this.tripRepository
       .createQueryBuilder('trip')
       .leftJoinAndSelect('trip.driver', 'driver')
@@ -302,27 +374,18 @@ export class TripsService {
           qb.where(
             new Brackets((pendingQb) => {
               pendingQb
-                .where('trip.status = :pendingStatus', { pendingStatus: TripStatus.PENDING })
+                .where('trip.status = :pendingStatus', {
+                  pendingStatus: TripStatus.PENDING,
+                })
                 .andWhere('trip.departureDate > :now', { now });
             }),
           ).orWhere(
             new Brackets((activeQb) => {
               activeQb
-                .where('trip.status = :activeStatus', { activeStatus: TripStatus.ACTIVE })
-                .andWhere('trip.availableSeats > 0')
-                .andWhere(
-                  new Brackets((expirationQb) => {
-                    expirationQb
-                      .where(
-                        'trip.estimatedArrivalDate IS NOT NULL AND trip.estimatedArrivalDate > :activeTripExpirationThreshold',
-                        { activeTripExpirationThreshold },
-                      )
-                      .orWhere(
-                        'trip.estimatedArrivalDate IS NULL AND trip.departureDate > :activeTripFallbackExpirationThreshold',
-                        { activeTripFallbackExpirationThreshold },
-                      );
-                  }),
-                );
+                .where('trip.status = :activeStatus', {
+                  activeStatus: TripStatus.ACTIVE,
+                })
+                .andWhere('trip.availableSeats > 0');
             }),
           );
         }),
@@ -385,15 +448,16 @@ export class TripsService {
     }
 
     // If coordinates are provided, calculate distance (simplified - in production use PostGIS)
-    const hasDepartureCoords =
-      Array.isArray(searchTripsDto.departureCoordinates) &&
-      searchTripsDto.departureCoordinates.length === 2;
+    const departureSearchCoordinates = normalizeLngLatCoordinates(
+      searchTripsDto.departureCoordinates,
+    );
+    const hasDepartureCoords = Boolean(departureSearchCoordinates);
 
     let depLng: number | undefined;
     let depLat: number | undefined;
 
-    if (hasDepartureCoords) {
-      [depLng, depLat] = searchTripsDto.departureCoordinates as [number, number];
+    if (departureSearchCoordinates) {
+      [depLng, depLat] = departureSearchCoordinates;
       const departureRadiusMeters =
         (searchTripsDto.departureRadiusKm ?? 50) * 1000;
       const departureSearchPoint = this.getDepartureSearchPointExpression();
@@ -412,17 +476,17 @@ export class TripsService {
       );
     }
 
-    const hasArrivalCoords =
-      Array.isArray(searchTripsDto.arrivalCoordinates) &&
-      searchTripsDto.arrivalCoordinates.length === 2;
+    const arrivalSearchCoordinates = normalizeLngLatCoordinates(
+      searchTripsDto.arrivalCoordinates,
+    );
+    const hasArrivalCoords = Boolean(arrivalSearchCoordinates);
 
     let arrLng: number | undefined;
     let arrLat: number | undefined;
 
-    if (hasArrivalCoords) {
-      [arrLng, arrLat] = searchTripsDto.arrivalCoordinates as [number, number];
-      const arrivalRadiusMeters =
-        (searchTripsDto.arrivalRadiusKm ?? 50) * 1000;
+    if (arrivalSearchCoordinates) {
+      [arrLng, arrLat] = arrivalSearchCoordinates;
+      const arrivalRadiusMeters = (searchTripsDto.arrivalRadiusKm ?? 50) * 1000;
 
       queryBuilder.andWhere(
         `ST_DWithin(
@@ -447,7 +511,11 @@ export class TripsService {
         )`,
         'ASC',
       );
-    } else if (hasArrivalCoords && arrLng !== undefined && arrLat !== undefined) {
+    } else if (
+      hasArrivalCoords &&
+      arrLng !== undefined &&
+      arrLat !== undefined
+    ) {
       queryBuilder.orderBy(
         `ST_Distance(
           trip.arrivalPoint,
@@ -462,10 +530,15 @@ export class TripsService {
     const results = await queryBuilder.getMany();
     const userIds = this.collectTripUserIds(results);
     const userRatingsMap = await this.buildUserRatingsMap(userIds);
-    const userPremiumMap = await this.subscriptionsService.getPremiumFeaturesForUsers(userIds);
-    const sanitized = this.sortSanitizedTripsByPremium(await Promise.all(
-      results.map((trip) => this.sanitizeTrip(trip, userRatingsMap, userPremiumMap)),
-    ));
+    const userPremiumMap =
+      await this.subscriptionsService.getPremiumFeaturesForUsers(userIds);
+    const sanitized = this.sortSanitizedTripsByPremium(
+      await Promise.all(
+        results.map((trip) =>
+          this.sanitizeTrip(trip, userRatingsMap, userPremiumMap),
+        ),
+      ),
+    );
     this.logger.log(`Trip search returned ${sanitized.length} results`);
     return sanitized;
   }
@@ -483,7 +556,13 @@ export class TripsService {
 
     const trip = await this.tripRepository.findOne({
       where: { id },
-      relations: ['driver', 'driver.vehicles', 'vehicle', 'bookings', 'bookings.passenger'],
+      relations: [
+        'driver',
+        'driver.vehicles',
+        'vehicle',
+        'bookings',
+        'bookings.passenger',
+      ],
     });
 
     if (!trip) {
@@ -491,10 +570,17 @@ export class TripsService {
       throw new NotFoundException('Trajet non trouve');
     }
 
+    trip.interruptionRequest =
+      await this.findActiveDriverInterruptionRequest(id);
     const userIds = this.collectTripUserIds([trip]);
     const userRatingsMap = await this.buildUserRatingsMap(userIds);
-    const userPremiumMap = await this.subscriptionsService.getPremiumFeaturesForUsers(userIds);
-    const sanitized = await this.sanitizeTrip(trip, userRatingsMap, userPremiumMap);
+    const userPremiumMap =
+      await this.subscriptionsService.getPremiumFeaturesForUsers(userIds);
+    const sanitized = await this.sanitizeTrip(
+      trip,
+      userRatingsMap,
+      userPremiumMap,
+    );
     await this.cacheService.set(cacheKey, sanitized, this.CACHE_TTL);
     this.logger.debug(`Trip ${id} fetched from database`);
     return sanitized;
@@ -511,8 +597,11 @@ export class TripsService {
 
     const userIds = this.collectTripUserIds(trips);
     const userRatingsMap = await this.buildUserRatingsMap(userIds);
-    const userPremiumMap = await this.subscriptionsService.getPremiumFeaturesForUsers(userIds);
-    const sanitized = trips.map((trip) => this.sanitizeTrip(trip, userRatingsMap, userPremiumMap));
+    const userPremiumMap =
+      await this.subscriptionsService.getPremiumFeaturesForUsers(userIds);
+    const sanitized = trips.map((trip) =>
+      this.sanitizeTrip(trip, userRatingsMap, userPremiumMap),
+    );
 
     this.logger.debug(`Found ${trips.length} trips for driver ${driverId}`);
     const sanitizedResults = await Promise.all(sanitized);
@@ -533,7 +622,9 @@ export class TripsService {
     );
 
     if (!vehicle) {
-      throw new BadRequestException('Un vehicule actif est requis pour creer un trajet recurrent');
+      throw new BadRequestException(
+        'Un vehicule actif est requis pour creer un trajet recurrent',
+      );
     }
 
     const startDate = this.parseDateOnly(createRecurringTripDto.startDate);
@@ -542,13 +633,18 @@ export class TripsService {
       : null;
 
     if (endDate && endDate < startDate) {
-      throw new BadRequestException('La date de fin doit etre posterieure a la date de debut');
+      throw new BadRequestException(
+        'La date de fin doit etre posterieure a la date de debut',
+      );
     }
 
     const weekdays = this.normalizeWeekdays(createRecurringTripDto.weekdays);
-    const departureTimeMinutes = this.parseTimeToMinutes(createRecurringTripDto.departureTime);
+    const departureTimeMinutes = this.parseTimeToMinutes(
+      createRecurringTripDto.departureTime,
+    );
     const isFree =
-      createRecurringTripDto.isFree ?? createRecurringTripDto.pricePerSeat === 0;
+      createRecurringTripDto.isFree ??
+      createRecurringTripDto.pricePerSeat === 0;
     const pricePerSeat = isFree ? 0 : createRecurringTripDto.pricePerSeat;
     const departurePoint = await this.resolvePointFromCoordinatesOrAddress(
       createRecurringTripDto.departureCoordinates,
@@ -567,7 +663,8 @@ export class TripsService {
       driverId,
       vehicleId: vehicle.id,
       departureLocation: createRecurringTripDto.departureLocation,
-      departureReference: createRecurringTripDto.departureReference?.trim() || null,
+      departureReference:
+        createRecurringTripDto.departureReference?.trim() || null,
       departurePoint,
       arrivalLocation: createRecurringTripDto.arrivalLocation,
       arrivalReference: createRecurringTripDto.arrivalReference?.trim() || null,
@@ -584,15 +681,22 @@ export class TripsService {
       lastGeneratedDate: null,
     });
 
-    const savedTemplate = await this.recurringTripTemplateRepository.save(template);
+    const savedTemplate =
+      await this.recurringTripTemplateRepository.save(template);
     await this.generateTripsForTemplate(savedTemplate);
 
-    this.logger.log(`Recurring trip template ${savedTemplate.id} created successfully`);
+    this.logger.log(
+      `Recurring trip template ${savedTemplate.id} created successfully`,
+    );
     return this.findRecurringById(savedTemplate.id, driverId);
   }
 
-  async findRecurringByDriver(driverId: string): Promise<SanitizedRecurringTripTemplate[]> {
-    this.logger.debug(`Fetching recurring trip templates for driver: ${driverId}`);
+  async findRecurringByDriver(
+    driverId: string,
+  ): Promise<SanitizedRecurringTripTemplate[]> {
+    this.logger.debug(
+      `Fetching recurring trip templates for driver: ${driverId}`,
+    );
 
     const templates = await this.recurringTripTemplateRepository.find({
       where: { driverId },
@@ -603,7 +707,10 @@ export class TripsService {
     const futureMeta = await this.buildRecurringTripFutureMeta(templates);
     return Promise.all(
       templates.map((template) =>
-        this.sanitizeRecurringTripTemplate(template, futureMeta.get(template.id)),
+        this.sanitizeRecurringTripTemplate(
+          template,
+          futureMeta.get(template.id),
+        ),
       ),
     );
   }
@@ -612,7 +719,10 @@ export class TripsService {
     templateId: string,
     driverId: string,
   ): Promise<SanitizedRecurringTripTemplate> {
-    const template = await this.findRecurringTemplateEntity(templateId, driverId);
+    const template = await this.findRecurringTemplateEntity(
+      templateId,
+      driverId,
+    );
 
     if (template.status === RecurringTripTemplateStatus.PAUSED) {
       return this.sanitizeRecurringTripTemplate(
@@ -631,7 +741,10 @@ export class TripsService {
     templateId: string,
     driverId: string,
   ): Promise<SanitizedRecurringTripTemplate> {
-    const template = await this.findRecurringTemplateEntity(templateId, driverId);
+    const template = await this.findRecurringTemplateEntity(
+      templateId,
+      driverId,
+    );
 
     if (template.status !== RecurringTripTemplateStatus.ACTIVE) {
       template.status = RecurringTripTemplateStatus.ACTIVE;
@@ -662,7 +775,9 @@ export class TripsService {
     }
 
     if (!trip.tripRequestId) {
-      throw new BadRequestException('Ce trajet n\'a pas été créé à partir d\'une demande de trajet');
+      throw new BadRequestException(
+        "Ce trajet n'a pas été créé à partir d'une demande de trajet",
+      );
     }
 
     // Vérifier que l'utilisateur est le passager qui a créé la demande de trajet
@@ -677,7 +792,9 @@ export class TripsService {
 
     // Seul le passager qui a créé la demande peut autoriser la publication
     if (tripRequest.passengerId !== userId) {
-      throw new ForbiddenException('Seul le passager qui a créé la demande de trajet peut autoriser que le trajet devienne public. Vous n\'êtes pas autorisé à effectuer cette action.');
+      throw new ForbiddenException(
+        "Seul le passager qui a créé la demande de trajet peut autoriser que le trajet devienne public. Vous n'êtes pas autorisé à effectuer cette action.",
+      );
     }
 
     // Vérifier que le conducteur du trajet a les prérequis (KYC + véhicules)
@@ -693,7 +810,9 @@ export class TripsService {
 
     // Vérifier que le conducteur a passé le KYC (status ACTIVE)
     if (driver.status !== UserStatus.ACTIVE) {
-      throw new BadRequestException('Le conducteur du trajet doit avoir passé la vérification KYC (compte actif) pour que le trajet puisse être rendu public.');
+      throw new BadRequestException(
+        'Le conducteur du trajet doit avoir passé la vérification KYC (compte actif) pour que le trajet puisse être rendu public.',
+      );
     }
 
     // Vérifier que le KYC est approuvé
@@ -703,13 +822,17 @@ export class TripsService {
     });
 
     if (!kycDocument || kycDocument.status !== KycStatus.APPROVED) {
-      throw new BadRequestException('Le conducteur du trajet doit avoir un KYC approuvé pour que le trajet puisse être rendu public.');
+      throw new BadRequestException(
+        'Le conducteur du trajet doit avoir un KYC approuvé pour que le trajet puisse être rendu public.',
+      );
     }
 
     // Vérifier que le conducteur a au moins un véhicule actif
     const activeVehicles = driver.vehicles?.filter((v) => v.isActive) || [];
     if (activeVehicles.length === 0) {
-      throw new BadRequestException('Le conducteur du trajet doit avoir au moins un véhicule actif pour que le trajet puisse être rendu public.');
+      throw new BadRequestException(
+        'Le conducteur du trajet doit avoir au moins un véhicule actif pour que le trajet puisse être rendu public.',
+      );
     }
 
     // Rendre le trajet public
@@ -726,7 +849,11 @@ export class TripsService {
     return this.findOne(tripId);
   }
 
-  async update(id: string, driverId: string, updateTripDto: UpdateTripDto): Promise<SanitizedTrip> {
+  async update(
+    id: string,
+    driverId: string,
+    updateTripDto: UpdateTripDto,
+  ): Promise<SanitizedTrip> {
     this.logger.log(`Updating trip ${id} by driver ${driverId}`);
 
     const trip = await this.tripRepository.findOne({
@@ -734,13 +861,21 @@ export class TripsService {
     });
 
     if (!trip) {
-      this.logger.warn(`Trip update failed: Trip ${id} not found for driver ${driverId}`);
+      this.logger.warn(
+        `Trip update failed: Trip ${id} not found for driver ${driverId}`,
+      );
       throw new NotFoundException('Trajet non trouve');
     }
-    if (updateTripDto.status === TripStatus.COMPLETED && trip.status !== TripStatus.COMPLETED) {
+    if (
+      updateTripDto.status === TripStatus.COMPLETED &&
+      trip.status !== TripStatus.COMPLETED
+    ) {
       return this.completeTrip(id, driverId);
     }
-    if (updateTripDto.status === TripStatus.ACTIVE && trip.status !== TripStatus.ACTIVE) {
+    if (
+      updateTripDto.status === TripStatus.ACTIVE &&
+      trip.status !== TripStatus.ACTIVE
+    ) {
       return this.startTrip(id, driverId);
     }
 
@@ -789,12 +924,17 @@ export class TripsService {
 
     // Synchronize isFree with pricePerSeat
     if (isFree !== undefined || pricePerSeat !== undefined) {
-      const newIsFree = isFree !== undefined
-        ? isFree
-        : (pricePerSeat !== undefined ? pricePerSeat === 0 : trip.isFree);
+      const newIsFree =
+        isFree !== undefined
+          ? isFree
+          : pricePerSeat !== undefined
+            ? pricePerSeat === 0
+            : trip.isFree;
       const newPricePerSeat = newIsFree
         ? 0
-        : (pricePerSeat !== undefined ? pricePerSeat : trip.pricePerSeat);
+        : pricePerSeat !== undefined
+          ? pricePerSeat
+          : trip.pricePerSeat;
 
       trip.isFree = newIsFree;
       trip.pricePerSeat = newPricePerSeat;
@@ -823,7 +963,9 @@ export class TripsService {
           this.logger.warn(
             `Trip update failed: Vehicle ${vehicleId} is not active`,
           );
-          throw new BadRequestException('Le véhicule sélectionné n\'est pas actif');
+          throw new BadRequestException(
+            "Le véhicule sélectionné n'est pas actif",
+          );
         }
 
         trip.vehicleId = vehicleId;
@@ -831,7 +973,10 @@ export class TripsService {
     }
 
     // Gérer totalSeats et recalculer availableSeats si nécessaire
-    if (totalSeats !== undefined && totalSeats !== (trip.totalSeats ?? trip.availableSeats)) {
+    if (
+      totalSeats !== undefined &&
+      totalSeats !== (trip.totalSeats ?? trip.availableSeats)
+    ) {
       const oldTotalSeats = trip.totalSeats ?? trip.availableSeats; // Utiliser availableSeats comme fallback si totalSeats est null
       const oldAvailableSeats = trip.availableSeats;
       trip.totalSeats = totalSeats;
@@ -891,7 +1036,9 @@ export class TripsService {
       );
     }
 
-    trip.driverSafetyEmergencyContactIds = selectedContacts.map((contact) => contact.id);
+    trip.driverSafetyEmergencyContactIds = selectedContacts.map(
+      (contact) => contact.id,
+    );
     await this.tripRepository.save(trip);
 
     await this.cacheService.del(CacheService.getTripKey(tripId));
@@ -916,7 +1063,9 @@ export class TripsService {
     });
 
     if (!trip) {
-      throw new NotFoundException('Trajet non trouve ou vous n\'etes pas le conducteur');
+      throw new NotFoundException(
+        "Trajet non trouve ou vous n'etes pas le conducteur",
+      );
     }
 
     if (trip.status !== TripStatus.ACTIVE) {
@@ -925,9 +1074,34 @@ export class TripsService {
       );
     }
 
+    const unfinishedBookings = (trip.bookings ?? []).filter(
+      (booking) =>
+        booking.status === BookingStatus.ACCEPTED &&
+        !this.hasBookingBeenDroppedOff(booking),
+    );
+
+    if (unfinishedBookings.length > 0) {
+      this.logger.warn(
+        `Trip completion failed: Trip ${tripId} still has ${unfinishedBookings.length} accepted booking(s) not dropped off`,
+      );
+      throw new BadRequestException(
+        "Impossible de terminer le trajet tant que tous les passagers acceptes n'ont pas ete deposes",
+      );
+    }
+
+    const previousStatus = trip.status;
     trip.status = TripStatus.COMPLETED;
     trip.completedAt = new Date();
     await this.tripRepository.save(trip);
+    this.logTripStateChange({
+      tripId,
+      driverId,
+      from: previousStatus,
+      to: TripStatus.COMPLETED,
+      reason: 'driver_completed_trip',
+      acceptedBookings: trip.bookings?.length ?? 0,
+      availableSeats: trip.availableSeats,
+    });
 
     await this.cacheService.del(CacheService.getTripKey(tripId));
     await this.cacheService.del(CacheService.getTripsListKey());
@@ -947,7 +1121,9 @@ export class TripsService {
     });
 
     if (!trip) {
-      this.logger.warn(`Trip deletion failed: Trip ${id} not found for driver ${driverId}`);
+      this.logger.warn(
+        `Trip deletion failed: Trip ${id} not found for driver ${driverId}`,
+      );
       throw new NotFoundException('Trajet non trouve');
     }
     const bookings = trip.bookings ?? [];
@@ -962,7 +1138,7 @@ export class TripsService {
         `Trip deletion failed: Trip ${id} still has at least one passenger on board`,
       );
       throw new BadRequestException(
-        'Vous ne pouvez pas supprimer ce trajet car un passager a embarque et n a pas encore ete depose',
+        'Vous ne pouvez pas supprimer ce trajet car un passager a embarque et son arrivee n a pas encore ete confirmee',
       );
     }
 
@@ -1047,21 +1223,30 @@ export class TripsService {
     });
 
     if (!trip) {
-      this.logger.warn(`Trip start failed: Trip ${tripId} not found for driver ${driverId}`);
-      throw new NotFoundException('Trajet non trouve ou vous n\'êtes pas le conducteur');
+      this.logger.warn(
+        `Trip start failed: Trip ${tripId} not found for driver ${driverId}`,
+      );
+      throw new NotFoundException(
+        "Trajet non trouve ou vous n'êtes pas le conducteur",
+      );
     }
 
     if (trip.status !== TripStatus.PENDING) {
-      this.logger.warn(`Trip start failed: Trip ${tripId} is not in PENDING status (current: ${trip.status})`);
-      throw new BadRequestException(`Impossible de démarrer le trajet. Statut actuel : ${trip.status}`);
+      this.logger.warn(
+        `Trip start failed: Trip ${tripId} is not in PENDING status (current: ${trip.status})`,
+      );
+      throw new BadRequestException(
+        `Impossible de démarrer le trajet. Statut actuel : ${trip.status}`,
+      );
     }
 
     await this.ensureDriverCanStartTrip(driverId, tripId);
 
     // Calculate total accepted seats
-    const acceptedBookings = trip.bookings?.filter(
-      (booking) => booking.status === BookingStatus.ACCEPTED,
-    ) || [];
+    const acceptedBookings =
+      trip.bookings?.filter(
+        (booking) => booking.status === BookingStatus.ACCEPTED,
+      ) || [];
     const totalAcceptedSeats = acceptedBookings.reduce(
       (sum, booking) => sum + booking.numberOfSeats,
       0,
@@ -1069,18 +1254,37 @@ export class TripsService {
     const hasAvailableSeats = trip.availableSeats > 0;
 
     // Update trip status to ACTIVE and set startedAt
+    const previousStatus = trip.status;
     const startedAt = new Date();
     trip.status = TripStatus.ACTIVE;
     trip.startedAt = startedAt;
-    trip.estimatedArrivalDate = await this.calculateEstimatedArrivalDate(trip, startedAt);
+    trip.currentLocation = null;
+    trip.lastLocationUpdateAt = null;
+    trip.destinationApproachNotifiedAt = null;
+    trip.destinationReachedAt = null;
+    trip.estimatedArrivalDate = await this.calculateEstimatedArrivalDate(
+      trip,
+      startedAt,
+    );
     await this.tripRepository.save(trip);
+    this.logTripStateChange({
+      tripId,
+      driverId,
+      from: previousStatus,
+      to: TripStatus.ACTIVE,
+      reason: 'driver_started_trip',
+      acceptedBookings: acceptedBookings.length,
+      availableSeats: trip.availableSeats,
+    });
 
     // Invalidate cache
     await this.cacheService.del(CacheService.getTripKey(tripId));
     await this.cacheService.del(CacheService.getTripsListKey());
     await this.cacheService.del(CacheService.getTripsListKey('all'));
 
-    this.logger.log(`Trip ${tripId} started successfully. Available seats: ${trip.availableSeats}, Accepted bookings: ${acceptedBookings.length}`);
+    this.logger.log(
+      `Trip ${tripId} started successfully. Available seats: ${trip.availableSeats}, Accepted bookings: ${acceptedBookings.length}`,
+    );
     await this.notifyDriverEmergencyContacts(trip, 'trip_started');
 
     // Notify users based on seat availability
@@ -1104,23 +1308,33 @@ export class TripsService {
     });
 
     if (!trip) {
-      this.logger.warn(`Trip pause failed: Trip ${tripId} not found for driver ${driverId}`);
-      throw new NotFoundException('Trajet non trouve ou vous n\'êtes pas le conducteur');
+      this.logger.warn(
+        `Trip pause failed: Trip ${tripId} not found for driver ${driverId}`,
+      );
+      throw new NotFoundException(
+        "Trajet non trouve ou vous n'êtes pas le conducteur",
+      );
     }
 
     if (trip.status !== TripStatus.ACTIVE) {
-      this.logger.warn(`Trip pause failed: Trip ${tripId} is not in ACTIVE status (current: ${trip.status})`);
-      throw new BadRequestException(`Impossible d'interrompre le trajet. Le trajet doit être en cours (statut actuel : ${trip.status})`);
+      this.logger.warn(
+        `Trip pause failed: Trip ${tripId} is not in ACTIVE status (current: ${trip.status})`,
+      );
+      throw new BadRequestException(
+        `Impossible d'interrompre le trajet. Le trajet doit être en cours (statut actuel : ${trip.status})`,
+      );
     }
 
     // Get accepted bookings
-    const acceptedBookings = trip.bookings?.filter(
-      (booking) => booking.status === BookingStatus.ACCEPTED,
-    ) || [];
+    const acceptedBookings =
+      trip.bookings?.filter(
+        (booking) => booking.status === BookingStatus.ACCEPTED,
+      ) || [];
 
     // A driver can interrupt a trip only if passengers have NOT yet been picked up
-    const bookingsWithPickedUpPassengers =
-      acceptedBookings.filter((booking) => booking.pickedUp || booking.pickedUpConfirmedByPassenger);
+    const bookingsWithPickedUpPassengers = acceptedBookings.filter(
+      (booking) => booking.pickedUp || booking.pickedUpConfirmedByPassenger,
+    );
 
     if (bookingsWithPickedUpPassengers.length > 0) {
       this.logger.warn(
@@ -1132,8 +1346,18 @@ export class TripsService {
     }
 
     // Update trip status to PENDING (interrupted) when there are no picked-up passengers
+    const previousStatus = trip.status;
     trip.status = TripStatus.PENDING;
     await this.tripRepository.save(trip);
+    this.logTripStateChange({
+      tripId,
+      driverId,
+      from: previousStatus,
+      to: TripStatus.PENDING,
+      reason: 'driver_paused_before_pickup',
+      acceptedBookings: acceptedBookings.length,
+      availableSeats: trip.availableSeats,
+    });
 
     // Invalidate cache
     await this.cacheService.del(CacheService.getTripKey(tripId));
@@ -1150,9 +1374,624 @@ export class TripsService {
     return this.findOne(tripId);
   }
 
+  async requestDriverTripInterruption(
+    tripId: string,
+    driverId: string,
+    dto: RequestTripInterruptionDto,
+  ): Promise<SanitizedTrip> {
+    const trip = await this.tripRepository.findOne({
+      where: { id: tripId, driverId },
+      relations: ['bookings', 'bookings.passenger', 'driver', 'vehicle'],
+    });
+
+    if (!trip) {
+      throw new NotFoundException(
+        "Trajet non trouve ou vous n'etes pas le conducteur",
+      );
+    }
+
+    if (trip.status !== TripStatus.ACTIVE) {
+      throw new BadRequestException(
+        `Impossible d'interrompre le trajet. Statut actuel : ${trip.status}`,
+      );
+    }
+
+    const existingRequest =
+      await this.findActiveDriverInterruptionRequest(tripId);
+    if (existingRequest) {
+      return this.findOne(tripId);
+    }
+
+    const passengersOnBoard = this.getOnboardBookings(trip.bookings ?? []);
+
+    if (passengersOnBoard.length === 0) {
+      return this.pauseTrip(tripId, driverId);
+    }
+
+    const request = await this.driverTripInterruptionRepository.save(
+      this.driverTripInterruptionRepository.create({
+        tripId: trip.id,
+        requestedByDriverId: driverId,
+        reason: dto.reason ?? TripInterruptionReason.OTHER,
+        note: dto.note ?? null,
+        status: TripInterruptionStatus.PENDING,
+        requestedLocation: this.buildDriverInterruptionPoint(
+          dto.coordinates,
+          trip,
+        ),
+        requiredPassengerCount: passengersOnBoard.length,
+        confirmedPassengerCount: 0,
+        rejectedPassengerCount: 0,
+        requestedAt: new Date(),
+        confirmedAt: null,
+        rejectedAt: null,
+        cancelledAt: null,
+        completedAt: null,
+      }),
+    );
+
+    const confirmations = passengersOnBoard.map((booking) =>
+      this.driverTripInterruptionConfirmationRepository.create({
+        requestId: request.id,
+        tripId: trip.id,
+        bookingId: booking.id,
+        passengerId: booking.passengerId,
+        status: TripInterruptionConfirmationStatus.PENDING,
+        confirmedAt: null,
+        rejectedAt: null,
+        rejectionReason: null,
+      }),
+    );
+
+    await this.driverTripInterruptionConfirmationRepository.save(confirmations);
+    await this.invalidateDriverInterruptionCaches(trip.id);
+    await this.notifyPassengersAboutDriverInterruptionRequest(
+      trip,
+      request,
+      confirmations,
+    );
+
+    return this.findOne(tripId);
+  }
+
+  async cancelDriverTripInterruption(
+    tripId: string,
+    driverId: string,
+  ): Promise<SanitizedTrip> {
+    const request = await this.driverTripInterruptionRepository.findOne({
+      where: {
+        tripId,
+        requestedByDriverId: driverId,
+        status: TripInterruptionStatus.PENDING,
+      },
+      relations: ['confirmations', 'confirmations.passenger', 'trip'],
+    });
+
+    if (!request) {
+      throw new NotFoundException("Aucune demande d'interruption en attente");
+    }
+
+    request.status = TripInterruptionStatus.CANCELLED;
+    request.cancelledAt = new Date();
+    await this.driverTripInterruptionRepository.save(request);
+    await this.invalidateDriverInterruptionCaches(tripId);
+    await this.notifyPassengersAboutDriverInterruptionCancelled(request);
+
+    return this.findOne(tripId);
+  }
+
+  async confirmDriverTripInterruption(
+    tripId: string,
+    passengerId: string,
+    dto: ConfirmDriverTripInterruptionDto = {},
+  ): Promise<SanitizedTrip> {
+    const request = await this.getPendingDriverInterruptionRequest(tripId);
+    const confirmation =
+      await this.getDriverInterruptionConfirmationForPassenger(
+        request.id,
+        passengerId,
+        dto.bookingId,
+      );
+
+    if (confirmation.status === TripInterruptionConfirmationStatus.REJECTED) {
+      throw new BadRequestException(
+        "Vous avez deja refuse cette demande d'interruption",
+      );
+    }
+
+    if (confirmation.status !== TripInterruptionConfirmationStatus.CONFIRMED) {
+      confirmation.status = TripInterruptionConfirmationStatus.CONFIRMED;
+      confirmation.confirmedAt = new Date();
+      confirmation.rejectedAt = null;
+      confirmation.rejectionReason = null;
+      await this.driverTripInterruptionConfirmationRepository.save(
+        confirmation,
+      );
+    }
+
+    const refreshedRequest =
+      await this.refreshDriverInterruptionRequestCounts(request.id);
+
+    if (
+      refreshedRequest.confirmedPassengerCount >=
+        refreshedRequest.requiredPassengerCount &&
+      refreshedRequest.rejectedPassengerCount === 0
+    ) {
+      await this.finalizeDriverTripInterruption(refreshedRequest);
+    } else {
+      await this.driverTripInterruptionRepository.save(refreshedRequest);
+      await this.invalidateDriverInterruptionCaches(tripId);
+      await this.notifyDriverAboutDriverInterruptionResponse(
+        refreshedRequest,
+        confirmation,
+        true,
+      );
+    }
+
+    return this.findOne(tripId);
+  }
+
+  async rejectDriverTripInterruption(
+    tripId: string,
+    passengerId: string,
+    dto: RejectTripInterruptionDto = {},
+  ): Promise<SanitizedTrip> {
+    const request = await this.getPendingDriverInterruptionRequest(tripId);
+    const confirmation =
+      await this.getDriverInterruptionConfirmationForPassenger(
+        request.id,
+        passengerId,
+        dto.bookingId,
+      );
+
+    if (confirmation.status === TripInterruptionConfirmationStatus.CONFIRMED) {
+      throw new BadRequestException(
+        "Vous avez deja confirme cette demande d'interruption",
+      );
+    }
+
+    if (confirmation.status !== TripInterruptionConfirmationStatus.REJECTED) {
+      confirmation.status = TripInterruptionConfirmationStatus.REJECTED;
+      confirmation.rejectedAt = new Date();
+      confirmation.rejectionReason = dto.reason ?? null;
+      await this.driverTripInterruptionConfirmationRepository.save(
+        confirmation,
+      );
+    }
+
+    const refreshedRequest =
+      await this.refreshDriverInterruptionRequestCounts(request.id);
+    refreshedRequest.status = TripInterruptionStatus.REJECTED;
+    refreshedRequest.rejectedAt = refreshedRequest.rejectedAt ?? new Date();
+    await this.driverTripInterruptionRepository.save(refreshedRequest);
+    await this.invalidateDriverInterruptionCaches(tripId);
+    await this.notifyDriverAboutDriverInterruptionResponse(
+      refreshedRequest,
+      confirmation,
+      false,
+    );
+
+    return this.findOne(tripId);
+  }
+
+  private async findActiveDriverInterruptionRequest(
+    tripId: string,
+  ): Promise<DriverTripInterruptionRequest | null> {
+    return this.driverTripInterruptionRepository.findOne({
+      where: {
+        tripId,
+        status: TripInterruptionStatus.PENDING,
+      },
+      relations: ['confirmations', 'confirmations.passenger'],
+      order: { createdAt: 'DESC' },
+    });
+  }
+
+  private async getPendingDriverInterruptionRequest(
+    tripId: string,
+  ): Promise<DriverTripInterruptionRequest> {
+    const request = await this.findActiveDriverInterruptionRequest(tripId);
+    if (!request) {
+      throw new NotFoundException("Aucune demande d'interruption en attente");
+    }
+    return request;
+  }
+
+  private async getDriverInterruptionConfirmationForPassenger(
+    requestId: string,
+    passengerId: string,
+    bookingId?: string,
+  ): Promise<DriverTripInterruptionConfirmation> {
+    const confirmation =
+      await this.driverTripInterruptionConfirmationRepository.findOne({
+        where: bookingId
+          ? { requestId, passengerId, bookingId }
+          : { requestId, passengerId },
+        relations: ['booking', 'passenger'],
+      });
+
+    if (!confirmation) {
+      throw new ForbiddenException(
+        "Vous ne faites pas partie des passagers devant confirmer cette interruption",
+      );
+    }
+
+    return confirmation;
+  }
+
+  private async refreshDriverInterruptionRequestCounts(
+    requestId: string,
+  ): Promise<DriverTripInterruptionRequest> {
+    const request = await this.driverTripInterruptionRepository.findOne({
+      where: { id: requestId },
+      relations: ['confirmations', 'confirmations.passenger'],
+    });
+
+    if (!request) {
+      throw new NotFoundException("Demande d'interruption introuvable");
+    }
+
+    const confirmations = request.confirmations ?? [];
+    request.requiredPassengerCount =
+      request.requiredPassengerCount || confirmations.length;
+    request.confirmedPassengerCount = confirmations.filter(
+      (confirmation) =>
+        confirmation.status === TripInterruptionConfirmationStatus.CONFIRMED,
+    ).length;
+    request.rejectedPassengerCount = confirmations.filter(
+      (confirmation) =>
+        confirmation.status === TripInterruptionConfirmationStatus.REJECTED,
+    ).length;
+
+    return request;
+  }
+
+  private async finalizeDriverTripInterruption(
+    request: DriverTripInterruptionRequest,
+  ): Promise<void> {
+    const requestWithRelations =
+      await this.driverTripInterruptionRepository.findOne({
+        where: { id: request.id },
+        relations: [
+          'confirmations',
+          'confirmations.passenger',
+          'trip',
+          'trip.driver',
+        ],
+      });
+
+    if (!requestWithRelations) {
+      throw new NotFoundException("Demande d'interruption introuvable");
+    }
+
+    const confirmations = requestWithRelations.confirmations ?? [];
+    const hasMissingConfirmation = confirmations.some(
+      (confirmation) =>
+        confirmation.status !== TripInterruptionConfirmationStatus.CONFIRMED,
+    );
+
+    if (hasMissingConfirmation) {
+      throw new BadRequestException(
+        'Tous les passagers doivent confirmer avant interruption du trajet',
+      );
+    }
+
+    for (const confirmation of confirmations) {
+      await this.bookingsService.completeBookingByTripInterruption(
+        confirmation.bookingId,
+        requestWithRelations.requestedLocation ??
+          requestWithRelations.trip.currentLocation,
+      );
+    }
+
+    const trip = await this.tripRepository.findOne({
+      where: { id: requestWithRelations.tripId },
+      relations: ['bookings', 'bookings.passenger', 'driver'],
+    });
+
+    if (!trip) {
+      throw new NotFoundException('Trajet non trouve');
+    }
+
+    const previousStatus = trip.status;
+    trip.status = TripStatus.PENDING;
+    trip.availableSeats = this.calculateAvailableSeatsAfterInterruption(trip);
+    await this.tripRepository.save(trip);
+    this.logTripStateChange({
+      tripId: trip.id,
+      driverId: trip.driverId,
+      from: previousStatus,
+      to: TripStatus.PENDING,
+      reason: 'driver_interruption_confirmed_by_passengers',
+      acceptedBookings: trip.bookings?.length ?? 0,
+      availableSeats: trip.availableSeats,
+    });
+
+    const now = new Date();
+    requestWithRelations.status = TripInterruptionStatus.COMPLETED;
+    requestWithRelations.confirmedAt = now;
+    requestWithRelations.completedAt = now;
+    requestWithRelations.requiredPassengerCount = confirmations.length;
+    requestWithRelations.confirmedPassengerCount = confirmations.length;
+    requestWithRelations.rejectedPassengerCount = 0;
+    await this.driverTripInterruptionRepository.save(requestWithRelations);
+
+    await this.invalidateDriverInterruptionCaches(trip.id);
+    await this.notifyDriverAboutDriverInterruptionCompleted(
+      trip,
+      requestWithRelations,
+    );
+    await this.notifyPassengersAboutDriverInterruptionCompleted(
+      trip,
+      requestWithRelations,
+    );
+  }
+
+  private getOnboardBookings(bookings: Booking[]): Booking[] {
+    return bookings.filter(
+      (booking) =>
+        booking.status === BookingStatus.ACCEPTED &&
+        this.hasBookingEmbarked(booking) &&
+        !this.hasBookingBeenDroppedOff(booking),
+    );
+  }
+
+  private calculateAvailableSeatsAfterInterruption(trip: Trip): number {
+    if (!trip.totalSeats) {
+      return Math.max(0, trip.availableSeats ?? 0);
+    }
+
+    const activeAcceptedSeats = (trip.bookings ?? [])
+      .filter(
+        (booking) =>
+          booking.status === BookingStatus.ACCEPTED &&
+          !this.hasBookingBeenDroppedOff(booking),
+      )
+      .reduce((sum, booking) => sum + booking.numberOfSeats, 0);
+
+    return Math.max(0, trip.totalSeats - activeAcceptedSeats);
+  }
+
+  private buildDriverInterruptionPoint(
+    coordinates: RequestTripInterruptionDto['coordinates'],
+    trip: Trip,
+  ): Point | null {
+    if (!coordinates) {
+      return null;
+    }
+
+    const coordinate = normalizeCoordinateForTrip(
+      coordinates.latitude,
+      coordinates.longitude,
+      trip,
+    );
+
+    if (!coordinate) {
+      throw new BadRequestException(
+        "Position d'interruption invalide ou incoherente avec le trajet",
+      );
+    }
+
+    return buildPointFromCoordinate(coordinate);
+  }
+
+  private async invalidateDriverInterruptionCaches(tripId: string): Promise<void> {
+    await this.cacheService.del(CacheService.getTripKey(tripId));
+    await this.cacheService.del(CacheService.getBookingsByTripKey(tripId));
+    await this.cacheService.del(CacheService.getTripsListKey());
+    await this.cacheService.del(CacheService.getTripsListKey('all'));
+    await this.cacheService.del(CacheService.getTripsListKey('allTrips'));
+  }
+
+  private async notifyPassengersAboutDriverInterruptionRequest(
+    trip: Trip,
+    request: DriverTripInterruptionRequest,
+    confirmations: DriverTripInterruptionConfirmation[],
+  ): Promise<void> {
+    try {
+      const passengerIds = confirmations.map(
+        (confirmation) => confirmation.passengerId,
+      );
+      const passengers = await this.userRepository.find({
+        where: { id: In(passengerIds) },
+        select: ['id', 'fcmToken', 'firstName'],
+      });
+      const bookingIdByPassengerId = new Map(
+        confirmations.map((confirmation) => [
+          confirmation.passengerId,
+          confirmation.bookingId,
+        ]),
+      );
+
+      await Promise.all(
+        passengers
+          .filter((passenger) => passenger.fcmToken)
+          .map((passenger) =>
+            this.notificationService.sendNotification(
+              passenger.fcmToken!,
+              "Demande d'interruption",
+              'Le conducteur demande a interrompre le trajet. Votre confirmation est requise.',
+              {
+                type: 'driver_trip_interruption_requested',
+                tripId: trip.id,
+                requestId: request.id,
+                bookingId: bookingIdByPassengerId.get(passenger.id),
+                role: 'passenger',
+              },
+              passenger.id,
+            ),
+          ),
+      );
+    } catch (error) {
+      this.logger.error(
+        `Failed to notify passengers about driver interruption request: ${error.message}`,
+        error.stack,
+      );
+    }
+  }
+
+  private async notifyPassengersAboutDriverInterruptionCancelled(
+    request: DriverTripInterruptionRequest,
+  ): Promise<void> {
+    try {
+      const confirmations = request.confirmations ?? [];
+      const passengerIds = confirmations.map(
+        (confirmation) => confirmation.passengerId,
+      );
+      const passengers = await this.userRepository.find({
+        where: { id: In(passengerIds) },
+        select: ['id', 'fcmToken'],
+      });
+
+      await Promise.all(
+        passengers
+          .filter((passenger) => passenger.fcmToken)
+          .map((passenger) =>
+            this.notificationService.sendNotification(
+              passenger.fcmToken!,
+              'Demande annulee',
+              "Le conducteur a annule sa demande d'interruption du trajet.",
+              {
+                type: 'driver_trip_interruption_cancelled',
+                tripId: request.tripId,
+                requestId: request.id,
+                role: 'passenger',
+              },
+              passenger.id,
+            ),
+          ),
+      );
+    } catch (error) {
+      this.logger.error(
+        `Failed to notify passengers about driver interruption cancellation: ${error.message}`,
+        error.stack,
+      );
+    }
+  }
+
+  private async notifyDriverAboutDriverInterruptionResponse(
+    request: DriverTripInterruptionRequest,
+    confirmation: DriverTripInterruptionConfirmation,
+    confirmed: boolean,
+  ): Promise<void> {
+    try {
+      const driver = await this.userRepository.findOne({
+        where: { id: request.requestedByDriverId },
+        select: ['id', 'fcmToken'],
+      });
+
+      if (!driver?.fcmToken) {
+        return;
+      }
+
+      const passengerName = confirmation.passenger
+        ? `${confirmation.passenger.firstName} ${confirmation.passenger.lastName}`.trim()
+        : 'Un passager';
+
+      await this.notificationService.sendNotification(
+        driver.fcmToken,
+        confirmed ? 'Interruption confirmee' : 'Interruption refusee',
+        confirmed
+          ? `${passengerName} a confirme votre demande d'interruption.`
+          : `${passengerName} a refuse votre demande d'interruption.`,
+        {
+          type: confirmed
+            ? 'driver_trip_interruption_passenger_confirmed'
+            : 'driver_trip_interruption_passenger_rejected',
+          tripId: request.tripId,
+          requestId: request.id,
+          bookingId: confirmation.bookingId,
+          passengerId: confirmation.passengerId,
+          role: 'driver',
+        },
+        driver.id,
+      );
+    } catch (error) {
+      this.logger.error(
+        `Failed to notify driver about interruption response: ${error.message}`,
+        error.stack,
+      );
+    }
+  }
+
+  private async notifyDriverAboutDriverInterruptionCompleted(
+    trip: Trip,
+    request: DriverTripInterruptionRequest,
+  ): Promise<void> {
+    try {
+      const driver = await this.userRepository.findOne({
+        where: { id: request.requestedByDriverId },
+        select: ['id', 'fcmToken'],
+      });
+
+      if (!driver?.fcmToken) {
+        return;
+      }
+
+      await this.notificationService.sendNotification(
+        driver.fcmToken,
+        'Trajet interrompu',
+        'Tous les passagers ont confirme. Le trajet est maintenant interrompu.',
+        {
+          type: 'driver_trip_interruption_completed',
+          tripId: trip.id,
+          requestId: request.id,
+          role: 'driver',
+        },
+        driver.id,
+      );
+    } catch (error) {
+      this.logger.error(
+        `Failed to notify driver about completed interruption: ${error.message}`,
+        error.stack,
+      );
+    }
+  }
+
+  private async notifyPassengersAboutDriverInterruptionCompleted(
+    trip: Trip,
+    request: DriverTripInterruptionRequest,
+  ): Promise<void> {
+    try {
+      const confirmations = request.confirmations ?? [];
+      const passengers = await this.userRepository.find({
+        where: {
+          id: In(confirmations.map((confirmation) => confirmation.passengerId)),
+        },
+        select: ['id', 'fcmToken'],
+      });
+
+      await Promise.all(
+        passengers
+          .filter((passenger) => passenger.fcmToken)
+          .map((passenger) =>
+            this.notificationService.sendNotification(
+              passenger.fcmToken!,
+              'Trajet interrompu',
+              'Le trajet a ete interrompu apres confirmation des passagers.',
+              {
+                type: 'driver_trip_interruption_completed',
+                tripId: trip.id,
+                requestId: request.id,
+                role: 'passenger',
+              },
+              passenger.id,
+            ),
+          ),
+      );
+    } catch (error) {
+      this.logger.error(
+        `Failed to notify passengers about completed interruption: ${error.message}`,
+        error.stack,
+      );
+    }
+  }
+
   private async notifyNearbyUsersAboutTripStart(trip: Trip): Promise<void> {
     try {
-      this.logger.log(`Notifying nearby users about trip ${trip.id} start (${trip.availableSeats} seats available)`);
+      this.logger.log(
+        `Notifying nearby users about trip ${trip.id} start (${trip.availableSeats} seats available)`,
+      );
 
       // Get all active users with FCM tokens (except the driver)
       const users = await this.userRepository.find({
@@ -1188,10 +2027,21 @@ export class TripsService {
         departureDate: trip.departureDate.toISOString(),
       };
 
-      await this.notificationService.sendToMultiple(fcmTokens, title, body, data, userIds);
-      this.logger.log(`Notified ${fcmTokens.length} users about trip ${trip.id} start`);
+      await this.notificationService.sendToMultiple(
+        fcmTokens,
+        title,
+        body,
+        data,
+        userIds,
+      );
+      this.logger.log(
+        `Notified ${fcmTokens.length} users about trip ${trip.id} start`,
+      );
     } catch (error: any) {
-      this.logger.error(`Error notifying nearby users about trip start: ${error.message}`, error.stack);
+      this.logger.error(
+        `Error notifying nearby users about trip start: ${error.message}`,
+        error.stack,
+      );
     }
   }
 
@@ -1200,7 +2050,9 @@ export class TripsService {
     acceptedBookings: Booking[],
   ): Promise<void> {
     try {
-      this.logger.log(`Notifying ${acceptedBookings.length} booked passengers about trip ${trip.id} start`);
+      this.logger.log(
+        `Notifying ${acceptedBookings.length} booked passengers about trip ${trip.id} start`,
+      );
 
       if (acceptedBookings.length === 0) {
         this.logger.debug('No accepted bookings to notify');
@@ -1208,7 +2060,9 @@ export class TripsService {
       }
 
       // Get passengers with FCM tokens
-      const passengerIds = acceptedBookings.map((booking) => booking.passengerId);
+      const passengerIds = acceptedBookings.map(
+        (booking) => booking.passengerId,
+      );
       const passengers = await this.userRepository.find({
         where: {
           id: In(passengerIds),
@@ -1216,14 +2070,18 @@ export class TripsService {
         select: ['id', 'fcmToken', 'firstName'],
       });
 
-      const passengersWithTokens = passengers.filter((passenger) => passenger.fcmToken);
+      const passengersWithTokens = passengers.filter(
+        (passenger) => passenger.fcmToken,
+      );
 
       if (passengersWithTokens.length === 0) {
         this.logger.debug('No passengers with FCM tokens to notify');
         return;
       }
 
-      const fcmTokens = passengersWithTokens.map((passenger) => passenger.fcmToken!);
+      const fcmTokens = passengersWithTokens.map(
+        (passenger) => passenger.fcmToken!,
+      );
       const userIds = passengersWithTokens.map((passenger) => passenger.id);
 
       const title = '🚗 Votre trajet a démarré';
@@ -1237,10 +2095,21 @@ export class TripsService {
         departureDate: trip.departureDate.toISOString(),
       };
 
-      await this.notificationService.sendToMultiple(fcmTokens, title, body, data, userIds);
-      this.logger.log(`Notified ${fcmTokens.length} passengers about trip ${trip.id} start`);
+      await this.notificationService.sendToMultiple(
+        fcmTokens,
+        title,
+        body,
+        data,
+        userIds,
+      );
+      this.logger.log(
+        `Notified ${fcmTokens.length} passengers about trip ${trip.id} start`,
+      );
     } catch (error: any) {
-      this.logger.error(`Error notifying booked passengers about trip start: ${error.message}`, error.stack);
+      this.logger.error(
+        `Error notifying booked passengers about trip start: ${error.message}`,
+        error.stack,
+      );
     }
   }
 
@@ -1249,7 +2118,9 @@ export class TripsService {
     acceptedBookings: Booking[],
   ): Promise<void> {
     try {
-      this.logger.log(`Notifying ${acceptedBookings.length} passengers about trip ${trip.id} pause`);
+      this.logger.log(
+        `Notifying ${acceptedBookings.length} passengers about trip ${trip.id} pause`,
+      );
 
       if (acceptedBookings.length === 0) {
         this.logger.debug('No accepted bookings to notify about pause');
@@ -1257,7 +2128,9 @@ export class TripsService {
       }
 
       // Get passengers with FCM tokens
-      const passengerIds = acceptedBookings.map((booking) => booking.passengerId);
+      const passengerIds = acceptedBookings.map(
+        (booking) => booking.passengerId,
+      );
       const passengers = await this.userRepository.find({
         where: {
           id: In(passengerIds),
@@ -1265,14 +2138,20 @@ export class TripsService {
         select: ['id', 'fcmToken', 'firstName'],
       });
 
-      const passengersWithTokens = passengers.filter((passenger) => passenger.fcmToken);
+      const passengersWithTokens = passengers.filter(
+        (passenger) => passenger.fcmToken,
+      );
 
       if (passengersWithTokens.length === 0) {
-        this.logger.debug('No passengers with FCM tokens to notify about pause');
+        this.logger.debug(
+          'No passengers with FCM tokens to notify about pause',
+        );
         return;
       }
 
-      const fcmTokens = passengersWithTokens.map((passenger) => passenger.fcmToken!);
+      const fcmTokens = passengersWithTokens.map(
+        (passenger) => passenger.fcmToken!,
+      );
       const userIds = passengersWithTokens.map((passenger) => passenger.id);
 
       const title = '⏸️ Trajet interrompu';
@@ -1304,9 +2183,14 @@ export class TripsService {
         );
       }
 
-      this.logger.log(`Notified ${fcmTokens.length} passengers about trip ${trip.id} pause`);
+      this.logger.log(
+        `Notified ${fcmTokens.length} passengers about trip ${trip.id} pause`,
+      );
     } catch (error: any) {
-      this.logger.error(`Error notifying passengers about trip pause: ${error.message}`, error.stack);
+      this.logger.error(
+        `Error notifying passengers about trip pause: ${error.message}`,
+        error.stack,
+      );
     }
   }
 
@@ -1352,27 +2236,39 @@ export class TripsService {
         this.logger.warn(
           `Trip publication failed: Vehicle ${vehicleId} not found or does not belong to user ${driverId}`,
         );
-        throw new BadRequestException('Vehicule non trouve ou ne vous appartient pas');
+        throw new BadRequestException(
+          'Vehicule non trouve ou ne vous appartient pas',
+        );
       }
 
       if (!vehicle.isActive) {
-        this.logger.warn(`Trip publication failed: Vehicle ${vehicleId} is not active`);
-        throw new BadRequestException('Le vehicule selectionne n est pas actif');
+        this.logger.warn(
+          `Trip publication failed: Vehicle ${vehicleId} is not active`,
+        );
+        throw new BadRequestException(
+          'Le vehicule selectionne n est pas actif',
+        );
       }
 
       if (!this.isDriverRole(user.role)) {
-        this.logger.log(`Promoting user ${driverId} to driver for trip publication`);
+        this.logger.log(
+          `Promoting user ${driverId} to driver for trip publication`,
+        );
         user.role = UserRole.DRIVER;
         user.isDriver = true;
         await this.userRepository.save(user);
       }
     } else {
       if (requireVehicle) {
-        throw new BadRequestException('Veuillez selectionner un vehicule actif');
+        throw new BadRequestException(
+          'Veuillez selectionner un vehicule actif',
+        );
       }
 
       if (!this.isDriverRole(user.role)) {
-        this.logger.warn(`Trip publication failed: User ${driverId} is not a driver`);
+        this.logger.warn(
+          `Trip publication failed: User ${driverId} is not a driver`,
+        );
         throw new BadRequestException(
           'Vous devez etre conducteur ou fournir un vehicule pour creer un trajet',
         );
@@ -1406,12 +2302,20 @@ export class TripsService {
     templateId: string,
     driverId: string,
   ): Promise<SanitizedRecurringTripTemplate> {
-    const template = await this.findRecurringTemplateEntity(templateId, driverId);
+    const template = await this.findRecurringTemplateEntity(
+      templateId,
+      driverId,
+    );
     const futureMeta = await this.buildRecurringTripFutureMeta([template]);
-    return this.sanitizeRecurringTripTemplate(template, futureMeta.get(template.id));
+    return this.sanitizeRecurringTripTemplate(
+      template,
+      futureMeta.get(template.id),
+    );
   }
 
-  private async generateTripsForTemplate(template: RecurringTripTemplate): Promise<number> {
+  private async generateTripsForTemplate(
+    template: RecurringTripTemplate,
+  ): Promise<number> {
     if (template.status !== RecurringTripTemplateStatus.ACTIVE) {
       return 0;
     }
@@ -1425,11 +2329,19 @@ export class TripsService {
     const nextGenerationStart = lastGeneratedDate
       ? this.addDays(lastGeneratedDate, 1)
       : templateStartDate;
-    const generationStart = nextGenerationStart > today ? nextGenerationStart : today;
-    const windowEnd = this.addDays(today, this.RECURRING_GENERATION_WINDOW_DAYS);
-    const templateEndDate = template.endDate ? this.parseDateOnly(template.endDate) : null;
+    const generationStart =
+      nextGenerationStart > today ? nextGenerationStart : today;
+    const windowEnd = this.addDays(
+      today,
+      this.RECURRING_GENERATION_WINDOW_DAYS,
+    );
+    const templateEndDate = template.endDate
+      ? this.parseDateOnly(template.endDate)
+      : null;
     const generationEnd =
-      templateEndDate && templateEndDate < windowEnd ? templateEndDate : windowEnd;
+      templateEndDate && templateEndDate < windowEnd
+        ? templateEndDate
+        : windowEnd;
 
     if (generationStart > generationEnd) {
       return 0;
@@ -1468,7 +2380,10 @@ export class TripsService {
         continue;
       }
 
-      const departureDate = this.combineDateAndTime(cursor, template.departureTimeMinutes);
+      const departureDate = this.combineDateAndTime(
+        cursor,
+        template.departureTimeMinutes,
+      );
       if (departureDate <= now) {
         continue;
       }
@@ -1573,7 +2488,9 @@ export class TripsService {
       }
 
       const nextOccurrence = this.computeNextOccurrenceDate(template);
-      currentMeta.nextOccurrenceDate = nextOccurrence ? nextOccurrence.toISOString() : null;
+      currentMeta.nextOccurrenceDate = nextOccurrence
+        ? nextOccurrence.toISOString()
+        : null;
     }
 
     return meta;
@@ -1583,13 +2500,21 @@ export class TripsService {
     template: RecurringTripTemplate,
     futureMeta?: RecurringTripFutureMeta,
   ): Promise<SanitizedRecurringTripTemplate> {
-    const { departurePoint, arrivalPoint, departureTimeMinutes, vehicle, ...rest } = template;
+    const {
+      departurePoint,
+      arrivalPoint,
+      departureTimeMinutes,
+      vehicle,
+      ...rest
+    } = template;
     let sanitizedVehicle: SanitizedVehicle | null = null;
 
     if (vehicle) {
       let photoUrl = vehicle.photoUrl;
       if (photoUrl) {
-        photoUrl = await this.fileUploadService.getPresignedUrlIfS3Key(photoUrl) || photoUrl;
+        photoUrl =
+          (await this.fileUploadService.getPresignedUrlIfS3Key(photoUrl)) ||
+          photoUrl;
       }
 
       sanitizedVehicle = {
@@ -1656,12 +2581,16 @@ export class TripsService {
     return (
       databaseError?.code === '23505' &&
       (databaseError.constraint === 'IDX_trips_one_active_per_driver' ||
-        databaseError.detail?.includes('IDX_trips_one_active_per_driver') === true)
+        databaseError.detail?.includes('IDX_trips_one_active_per_driver') ===
+          true)
     );
   }
 
-  private async ensureDailyTripPublicationQuota(driverId: string): Promise<void> {
-    const remainingQuota = await this.getRemainingDailyTripPublicationQuota(driverId);
+  private async ensureDailyTripPublicationQuota(
+    driverId: string,
+  ): Promise<void> {
+    const remainingQuota =
+      await this.getRemainingDailyTripPublicationQuota(driverId);
 
     if (remainingQuota === null || remainingQuota > 0) {
       return;
@@ -1683,7 +2612,8 @@ export class TripsService {
       return tripsToCreate;
     }
 
-    const remainingQuota = await this.getRemainingDailyTripPublicationQuota(driverId);
+    const remainingQuota =
+      await this.getRemainingDailyTripPublicationQuota(driverId);
 
     if (remainingQuota === null || tripsToCreate.length <= remainingQuota) {
       return tripsToCreate;
@@ -1699,7 +2629,8 @@ export class TripsService {
   private async getRemainingDailyTripPublicationQuota(
     driverId: string,
   ): Promise<number | null> {
-    const premium = await this.subscriptionsService.getPremiumOverview(driverId);
+    const premium =
+      await this.subscriptionsService.getPremiumOverview(driverId);
 
     if (premium.isActive) {
       return null;
@@ -1714,10 +2645,7 @@ export class TripsService {
       .andWhere('trip.createdAt < :tomorrowStart', { tomorrowStart })
       .getCount();
 
-    return Math.max(
-      this.DAILY_FREE_TRIP_PUBLICATION_LIMIT - publishedToday,
-      0,
-    );
+    return Math.max(this.DAILY_FREE_TRIP_PUBLICATION_LIMIT - publishedToday, 0);
   }
 
   private parseDateOnly(value: string): Date {
@@ -1745,13 +2673,20 @@ export class TripsService {
 
   private normalizeWeekdays(weekdays: number[]): number[] {
     return Array.from(
-      new Set(weekdays.filter((day) => Number.isInteger(day) && day >= 1 && day <= 7)),
+      new Set(
+        weekdays.filter((day) => Number.isInteger(day) && day >= 1 && day <= 7),
+      ),
     ).sort((left, right) => left - right);
   }
 
   private combineDateAndTime(date: Date, departureTimeMinutes: number): Date {
     const next = new Date(date);
-    next.setHours(Math.floor(departureTimeMinutes / 60), departureTimeMinutes % 60, 0, 0);
+    next.setHours(
+      Math.floor(departureTimeMinutes / 60),
+      departureTimeMinutes % 60,
+      0,
+      0,
+    );
     return next;
   }
 
@@ -1761,21 +2696,11 @@ export class TripsService {
     return next;
   }
 
-  private getActiveTripExpirationThreshold(now: Date): Date {
-    return new Date(now.getTime() - this.ACTIVE_TRIP_EXPIRATION_GRACE_MS);
-  }
-
-  private getActiveTripFallbackExpirationThreshold(now: Date): Date {
-    return new Date(
-      now.getTime() -
-        this.DEFAULT_ESTIMATED_TRIP_DURATION_MS -
-        this.ACTIVE_TRIP_EXPIRATION_GRACE_MS,
-    );
-  }
-
   private getDepartureSearchPointExpression(): string {
     return `CASE
-      WHEN "trip"."status" = :activeStatus THEN COALESCE("trip"."currentLocation", "trip"."departurePoint")
+      WHEN "trip"."status" = :activeStatus
+        AND "trip"."lastLocationUpdateAt" >= NOW() - INTERVAL '90 seconds'
+        THEN COALESCE("trip"."currentLocation", "trip"."departurePoint")
       ELSE "trip"."departurePoint"
     END`;
   }
@@ -1786,7 +2711,10 @@ export class TripsService {
       searchTripsDto.departureLocation,
       searchTripsDto.arrivalLocation,
     ]
-      .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
+      .filter(
+        (value): value is string =>
+          typeof value === 'string' && value.trim().length > 0,
+      )
       .join(' ');
 
     if (!rawSearchText) {
@@ -1810,12 +2738,21 @@ export class TripsService {
     return next;
   }
 
-  private async calculateEstimatedArrivalDate(trip: Trip, baseTime: Date): Promise<Date> {
-    const estimatedDurationMs = await this.estimateTripDurationMs(trip, baseTime);
+  private async calculateEstimatedArrivalDate(
+    trip: Trip,
+    baseTime: Date,
+  ): Promise<Date> {
+    const estimatedDurationMs = await this.estimateTripDurationMs(
+      trip,
+      baseTime,
+    );
     return new Date(baseTime.getTime() + estimatedDurationMs);
   }
 
-  private async estimateTripDurationMs(trip: Trip, departureTime: Date): Promise<number> {
+  private async estimateTripDurationMs(
+    trip: Trip,
+    departureTime: Date,
+  ): Promise<number> {
     const origin = this.buildTripDirectionsWaypoint(
       trip.departurePoint,
       trip.departureLocation,
@@ -1851,10 +2788,7 @@ export class TripsService {
       );
 
       if (durationSeconds && durationSeconds > 0) {
-        return this.applyWeatherEtaMultiplier(
-          trip,
-          durationSeconds * 1000,
-        );
+        return this.applyWeatherEtaMultiplier(trip, durationSeconds * 1000);
       }
 
       this.logger.warn(
@@ -1862,7 +2796,9 @@ export class TripsService {
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      this.logger.warn(`Unable to estimate route duration for trip ${trip.id}: ${message}`);
+      this.logger.warn(
+        `Unable to estimate route duration for trip ${trip.id}: ${message}`,
+      );
     }
 
     return this.applyWeatherEtaMultiplier(
@@ -1894,33 +2830,10 @@ export class TripsService {
       return { lat: latitude, lng: longitude };
     }
 
-    const address = [location?.trim(), reference?.trim()].filter(Boolean).join(', ');
+    const address = [location?.trim(), reference?.trim()]
+      .filter(Boolean)
+      .join(', ');
     return address ? { address } : null;
-  }
-
-  private async ensureEstimatedArrivalDate(trip: Trip): Promise<Date | null> {
-    if (trip.estimatedArrivalDate) {
-      return trip.estimatedArrivalDate;
-    }
-
-    const baseTime = trip.startedAt ?? trip.departureDate;
-    if (!baseTime) {
-      return null;
-    }
-
-    const estimatedArrivalDate = await this.calculateEstimatedArrivalDate(trip, baseTime);
-    trip.estimatedArrivalDate = estimatedArrivalDate;
-    await this.tripRepository.update(trip.id, { estimatedArrivalDate });
-    return estimatedArrivalDate;
-  }
-
-  private async getActiveTripExpirationDate(trip: Trip): Promise<Date | null> {
-    const estimatedArrivalDate = await this.ensureEstimatedArrivalDate(trip);
-    if (!estimatedArrivalDate) {
-      return null;
-    }
-
-    return new Date(estimatedArrivalDate.getTime() + this.ACTIVE_TRIP_EXPIRATION_GRACE_MS);
   }
 
   private toIsoWeekday(date: Date): number {
@@ -1928,14 +2841,18 @@ export class TripsService {
     return weekday === 0 ? 7 : weekday;
   }
 
-  private computeNextOccurrenceDate(template: RecurringTripTemplate): Date | null {
+  private computeNextOccurrenceDate(
+    template: RecurringTripTemplate,
+  ): Date | null {
     if (template.status !== RecurringTripTemplateStatus.ACTIVE) {
       return null;
     }
 
     const now = new Date();
     const startDate = this.parseDateOnly(template.startDate);
-    const endDate = template.endDate ? this.parseDateOnly(template.endDate) : null;
+    const endDate = template.endDate
+      ? this.parseDateOnly(template.endDate)
+      : null;
     const cursor = this.startOfDay(startDate > now ? startDate : now);
 
     for (let offset = 0; offset <= 365; offset += 1) {
@@ -1949,7 +2866,10 @@ export class TripsService {
         continue;
       }
 
-      const departureDate = this.combineDateAndTime(currentDate, template.departureTimeMinutes);
+      const departureDate = this.combineDateAndTime(
+        currentDate,
+        template.departureTimeMinutes,
+      );
       if (departureDate > now) {
         return departureDate;
       }
@@ -1957,15 +2877,16 @@ export class TripsService {
 
     return null;
   }
-  private buildPointFromCoordinates(coordinates?: [number, number] | null): Point | null {
-    if (!coordinates) {
+  private buildPointFromCoordinates(
+    coordinates?: [number, number] | null,
+  ): Point | null {
+    const normalizedCoordinates = normalizeLngLatCoordinates(coordinates);
+    if (!normalizedCoordinates) {
       return null;
     }
-    const [longitude, latitude] = coordinates;
-    return {
-      type: 'Point',
-      coordinates: [Number(longitude), Number(latitude)],
-    };
+
+    const [longitude, latitude] = normalizedCoordinates;
+    return buildPointFromCoordinate({ latitude, longitude });
   }
 
   private async resolvePointFromCoordinatesOrAddress(
@@ -2010,6 +2931,7 @@ export class TripsService {
         const result = await this.googleMapsService.geocode({
           address: query,
           region: 'CD',
+          components: 'country:CD',
         });
         const rank = this.getGeocodePrecisionRank(result);
         if (rank < bestRank) {
@@ -2060,7 +2982,9 @@ export class TripsService {
     userRatingsMap?: Map<string, UserRatingSummary>,
     userPremiumMap?: Map<string, PremiumSubscriptionFeatures>,
   ): Promise<SanitizedTrip> {
-    const { driver, bookings, departurePoint, arrivalPoint, vehicle, ...rest } = trip;
+    const { driver, bookings, departurePoint, arrivalPoint, vehicle, ...rest } =
+      trip;
+    const freshCurrentLocation = this.getFreshCurrentLocationPoint(trip);
     const driverPremium = driver
       ? this.getUserPremiumFeatures(driver.id, userPremiumMap)
       : this.getInactivePremiumFeatures();
@@ -2070,7 +2994,9 @@ export class TripsService {
     if (vehicle) {
       let photoUrl = vehicle.photoUrl;
       if (photoUrl) {
-        photoUrl = await this.fileUploadService.getPresignedUrlIfS3Key(photoUrl) || photoUrl;
+        photoUrl =
+          (await this.fileUploadService.getPresignedUrlIfS3Key(photoUrl)) ||
+          photoUrl;
       }
       sanitizedVehicle = {
         id: vehicle.id,
@@ -2083,17 +3009,30 @@ export class TripsService {
     }
 
     // Sanitize driver with profile picture (presigned URL if S3 key)
-    const sanitizedDriver = await this.sanitizeUser(driver, userRatingsMap, userPremiumMap);
+    const sanitizedDriver = await this.sanitizeUser(
+      driver,
+      userRatingsMap,
+      userPremiumMap,
+    );
 
     // Sanitize bookings with passenger profile pictures (presigned URLs if S3 keys)
     const sanitizedBookings = bookings
       ? await Promise.all(
-          bookings.map((booking) => this.sanitizeBooking(booking, userRatingsMap, userPremiumMap)),
+          bookings.map((booking) =>
+            this.sanitizeBooking(booking, userRatingsMap, userPremiumMap, trip),
+          ),
         )
       : [];
 
     return {
-      ...(rest as Omit<Trip, 'driver' | 'bookings' | 'departurePoint' | 'arrivalPoint' | 'vehicle'>),
+      ...(rest as Omit<
+        Trip,
+        'driver' | 'bookings' | 'departurePoint' | 'arrivalPoint' | 'vehicle'
+      >),
+      currentLocation: freshCurrentLocation,
+      lastLocationUpdateAt: freshCurrentLocation
+        ? trip.lastLocationUpdateAt
+        : null,
       departureCoordinates: this.pointToCoordinates(departurePoint),
       arrivalCoordinates: this.pointToCoordinates(arrivalPoint),
       driver: sanitizedDriver,
@@ -2107,12 +3046,40 @@ export class TripsService {
     booking: Booking,
     userRatingsMap?: Map<string, UserRatingSummary>,
     userPremiumMap?: Map<string, PremiumSubscriptionFeatures>,
+    parentTrip?: Trip,
   ): Promise<SanitizedBooking> {
     const { passenger, trip, messages, ...rest } = booking;
+    const freshPassengerCurrentLocation =
+      this.getFreshPassengerCurrentLocationPoint(booking, parentTrip ?? trip);
+
     return {
       ...(rest as Omit<Booking, 'trip' | 'passenger' | 'messages'>),
-      passenger: await this.sanitizeUser(passenger, userRatingsMap, userPremiumMap),
+      passengerCurrentLocation: freshPassengerCurrentLocation,
+      passengerLastLocationUpdateAt: freshPassengerCurrentLocation
+        ? booking.passengerLastLocationUpdateAt
+        : null,
+      passenger: await this.sanitizeUser(
+        passenger,
+        userRatingsMap,
+        userPremiumMap,
+      ),
     } as SanitizedBooking;
+  }
+
+  private getFreshPassengerCurrentLocationPoint(
+    booking: Booking,
+    trip?: Trip,
+  ): Point | null {
+    if (!isFreshLocationTimestamp(booking.passengerLastLocationUpdateAt)) {
+      return null;
+    }
+
+    const coordinate = pointToCoordinate(booking.passengerCurrentLocation);
+    if (!coordinate || (trip && !isCoordinateAllowedForTrip(coordinate, trip))) {
+      return null;
+    }
+
+    return buildPointFromCoordinate(coordinate);
   }
 
   private async sanitizeUser(
@@ -2127,7 +3094,9 @@ export class TripsService {
     // Convert S3 key to presigned URL for profile picture
     let profilePicture: string | null = null;
     if (user.profilePicture) {
-      profilePicture = await this.fileUploadService.getPresignedUrlIfS3Key(user.profilePicture);
+      profilePicture = await this.fileUploadService.getPresignedUrlIfS3Key(
+        user.profilePicture,
+      );
       // If getPresignedUrlIfS3Key returns null, it means it's not an S3 key, so use the original value
       if (!profilePicture) {
         profilePicture = user.profilePicture;
@@ -2135,9 +3104,15 @@ export class TripsService {
     }
 
     const userRatingSummary = userRatingsMap
-      ? userRatingsMap.get(user.id) ?? { averageRating: null, totalRatings: 0 }
+      ? (userRatingsMap.get(user.id) ?? {
+          averageRating: null,
+          totalRatings: 0,
+        })
       : await this.getUserRatingSummary(user.id);
-    const premiumFeatures = this.getUserPremiumFeatures(user.id, userPremiumMap);
+    const premiumFeatures = this.getUserPremiumFeatures(
+      user.id,
+      userPremiumMap,
+    );
 
     return {
       id: user.id,
@@ -2251,7 +3226,9 @@ export class TripsService {
     return ratingsMap;
   }
 
-  private async getUserRatingSummary(userId: string): Promise<UserRatingSummary> {
+  private async getUserRatingSummary(
+    userId: string,
+  ): Promise<UserRatingSummary> {
     const stats = await this.ratingRepository
       .createQueryBuilder('rating')
       .select('AVG(rating.rating)', 'averageRating')
@@ -2268,12 +3245,20 @@ export class TripsService {
   }
 
   private pointToCoordinates(point?: Point | null): Coordinates {
-    if (!point?.coordinates) {
+    return toSafeCoordinates(point);
+  }
+
+  private getFreshCurrentLocationPoint(trip: Trip): Point | null {
+    if (!isFreshLocationTimestamp(trip.lastLocationUpdateAt)) {
       return null;
     }
 
-    const [longitude, latitude] = point.coordinates;
-    return [Number(longitude), Number(latitude)];
+    const coordinate = pointToCoordinate(trip.currentLocation);
+    if (!coordinate || !isCoordinateAllowedForTrip(coordinate, trip)) {
+      return null;
+    }
+
+    return buildPointFromCoordinate(coordinate);
   }
 
   private async verifyTripParticipant(tripId: string, userId: string) {
@@ -2319,6 +3304,7 @@ export class TripsService {
     driverId: string,
     tripId: string,
     coordinates: [number, number],
+    metadata: LocationObservationMetadata & { recordedAt?: string } = {},
   ) {
     const { trip, isDriver } = await this.verifyTripParticipant(
       tripId,
@@ -2326,7 +3312,9 @@ export class TripsService {
     );
 
     if (!isDriver) {
-      throw new ForbiddenException('Seul le conducteur peut mettre à jour la localisation');
+      throw new ForbiddenException(
+        'Seul le conducteur peut mettre à jour la localisation',
+      );
     }
 
     // Stop tracking updates if trip is not ACTIVE
@@ -2339,14 +3327,50 @@ export class TripsService {
       );
     }
 
-    trip.currentLocation = this.buildPointFromCoordinates(coordinates);
-    trip.lastLocationUpdateAt = new Date();
+    const normalizedCoordinates = normalizeLngLatCoordinates(coordinates);
+    if (!normalizedCoordinates) {
+      throw new BadRequestException('Coordonnees conducteur invalides');
+    }
+
+    const [longitude, latitude] = normalizedCoordinates;
+    const currentCoordinate = { latitude, longitude };
+    if (!isCoordinateAllowedForTrip(currentCoordinate, trip)) {
+      throw new BadRequestException(
+        'Position conducteur incoherente avec le trajet',
+      );
+    }
+
+    const observedAt = normalizeLocationRecordedAt(metadata.recordedAt);
+    const previousTimestamp = trip.lastLocationUpdateAt?.getTime() ?? 0;
+    if (previousTimestamp >= observedAt.getTime()) {
+      return {
+        tripId: trip.id,
+        coordinates: this.pointToCoordinates(trip.currentLocation),
+        updatedAt: trip.lastLocationUpdateAt,
+        ignoredAsOutOfOrder: true,
+      };
+    }
+
+    trip.currentLocation = buildPointFromCoordinate(currentCoordinate);
+    trip.lastLocationUpdateAt = observedAt;
 
     await this.tripRepository.save(trip);
+    await this.locationHistoryService.recordDriverLocation(
+      trip.id,
+      currentCoordinate.latitude,
+      currentCoordinate.longitude,
+      trip.lastLocationUpdateAt,
+      metadata,
+    );
+
+    const responseCoordinates: [number, number] = [
+      currentCoordinate.longitude,
+      currentCoordinate.latitude,
+    ];
 
     return {
       tripId: trip.id,
-      coordinates,
+      coordinates: responseCoordinates,
       updatedAt: trip.lastLocationUpdateAt,
     };
   }
@@ -2363,17 +3387,20 @@ export class TripsService {
         'Le trajet n’est plus en cours, le suivi en temps réel est arrêté',
       );
     }
+    const freshCurrentLocation = this.getFreshCurrentLocationPoint(trip);
+    const coordinates = this.pointToCoordinates(freshCurrentLocation);
+
     return {
       tripId: trip.id,
-      coordinates: this.pointToCoordinates(trip.currentLocation),
-      updatedAt: trip.lastLocationUpdateAt,
+      coordinates,
+      updatedAt: coordinates ? trip.lastLocationUpdateAt : null,
     };
   }
 
   /**
    * Cron job to mark expired trips and their bookings as expired
    * - PENDING trips expire 2 hours after scheduled departure
-   * - ACTIVE trips expire 6 hours after their estimated arrival time
+   * - ONGOING trips never expire automatically while they are in progress
    * Runs every hour.
    */
   @Cron(CronExpression.EVERY_HOUR)
@@ -2382,7 +3409,10 @@ export class TripsService {
     setImmediate(() => {
       this.markExpiredTripsNow().catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
-        this.logger.error(`Error marking expired trips: ${message}`, error.stack);
+        this.logger.error(
+          `Error marking expired trips: ${message}`,
+          error.stack,
+        );
       });
     });
   }
@@ -2392,10 +3422,6 @@ export class TripsService {
 
     // Calculate thresholds
     const twoHoursAgo = new Date(now.getTime() - 2 * 60 * 60 * 1000);
-    const activeTripExpirationThreshold = new Date(
-      now.getTime() - this.ACTIVE_TRIP_EXPIRATION_GRACE_MS,
-    );
-
     // 1) PENDING trips that should expire 2 hours after departure
     //    Only trips that have NEVER been started (startedAt IS NULL)
     const pendingTripsToExpire = await this.tripRepository.find({
@@ -2407,32 +3433,7 @@ export class TripsService {
       relations: ['driver', 'bookings', 'bookings.passenger', 'vehicle'],
     });
 
-    // 2) ACTIVE trips expire 6 hours after the estimated arrival time.
-    const activeTripsCandidates = await this.tripRepository.find({
-      where: [
-        {
-          status: TripStatus.ACTIVE,
-          startedAt: Not(IsNull()),
-          estimatedArrivalDate: LessThan(activeTripExpirationThreshold),
-        },
-        {
-          status: TripStatus.ACTIVE,
-          startedAt: Not(IsNull()),
-          estimatedArrivalDate: IsNull(),
-        },
-      ],
-      relations: ['driver', 'bookings', 'bookings.passenger', 'vehicle'],
-    });
-
-    const activeTripsToExpire: Trip[] = [];
-    for (const trip of activeTripsCandidates) {
-      const expiresAt = await this.getActiveTripExpirationDate(trip);
-      if (expiresAt && expiresAt <= now) {
-        activeTripsToExpire.push(trip);
-      }
-    }
-
-    const tripsToExpire = [...pendingTripsToExpire, ...activeTripsToExpire];
+    const tripsToExpire = pendingTripsToExpire;
 
     if (tripsToExpire.length === 0) {
       this.logger.debug('No expired trips found');
@@ -2441,22 +3442,33 @@ export class TripsService {
 
     this.logger.log(
       `Found ${tripsToExpire.length} trips to auto-complete as expired ` +
-        `(pending: ${pendingTripsToExpire.length}, active_eta_grace: ${activeTripsToExpire.length})`,
+        `(pending: ${pendingTripsToExpire.length}, ongoing: 0)`,
     );
 
     for (const trip of tripsToExpire) {
       // Mark trip as completed
+      const previousStatus = trip.status;
       await this.tripRepository.update(trip.id, {
         status: TripStatus.COMPLETED,
         completedAt: now,
       });
+      this.logTripStateChange({
+        tripId: trip.id,
+        driverId: trip.driverId,
+        from: previousStatus,
+        to: TripStatus.COMPLETED,
+        reason: 'auto_expired_trip',
+        acceptedBookings: trip.bookings?.length ?? 0,
+        availableSeats: trip.availableSeats,
+      });
 
       // Mark all pending and accepted bookings as expired
-      const bookingsToExpire = trip.bookings?.filter(
-        (booking) =>
-          booking.status === BookingStatus.PENDING ||
-          booking.status === BookingStatus.ACCEPTED,
-      ) || [];
+      const bookingsToExpire =
+        trip.bookings?.filter(
+          (booking) =>
+            booking.status === BookingStatus.PENDING ||
+            booking.status === BookingStatus.ACCEPTED,
+        ) || [];
 
       const bookingsMissingDropoff = bookingsToExpire.filter(
         (booking) =>
@@ -2500,7 +3512,10 @@ export class TripsService {
       await this.notifyPassengersAboutTripExpiration(trip, bookingsToExpire);
 
       // Notify selected emergency contacts when a picked-up passenger has no dropoff confirmation.
-      await this.notifyEmergencyContactsForMissingDropoff(trip, bookingsMissingDropoff);
+      await this.notifyEmergencyContactsForMissingDropoff(
+        trip,
+        bookingsMissingDropoff,
+      );
 
       // Invalidate cache for this trip
       await this.cacheService.del(CacheService.getTripKey(trip.id));
@@ -2523,40 +3538,42 @@ export class TripsService {
   async notifyAboutUpcomingTripDeparture() {
     // Use setImmediate to ensure HTTP requests have priority
     setImmediate(async () => {
-      this.logger.debug('Running cron job to notify about upcoming trip departure');
+      this.logger.debug(
+        'Running cron job to notify about upcoming trip departure',
+      );
 
-    const now = new Date();
-    const thirtyMinutesFromNow = new Date(now.getTime() + 30 * 60 * 1000); // 30 minutes from now
+      const now = new Date();
+      const thirtyMinutesFromNow = new Date(now.getTime() + 30 * 60 * 1000); // 30 minutes from now
 
-    // Find all pending trips starting in the next 30 minutes that haven't been notified yet
-    const tripsStartingSoon = await this.tripRepository.find({
-      where: {
-        status: TripStatus.PENDING,
-        departureReminderNotified: false,
-        departureDate: Between(now, thirtyMinutesFromNow),
-      },
-      relations: ['driver', 'bookings', 'bookings.passenger'],
-    });
+      // Find all pending trips starting in the next 30 minutes that haven't been notified yet
+      const tripsStartingSoon = await this.tripRepository.find({
+        where: {
+          status: TripStatus.PENDING,
+          departureReminderNotified: false,
+          departureDate: Between(now, thirtyMinutesFromNow),
+        },
+        relations: ['driver', 'bookings', 'bookings.passenger'],
+      });
 
-    if (tripsStartingSoon.length === 0) {
-      this.logger.debug('No trips starting soon found');
-      return;
-    }
+      if (tripsStartingSoon.length === 0) {
+        this.logger.debug('No trips starting soon found');
+        return;
+      }
 
-    this.logger.log(`Found ${tripsStartingSoon.length} trips starting soon`);
+      this.logger.log(`Found ${tripsStartingSoon.length} trips starting soon`);
 
-    for (const trip of tripsStartingSoon) {
-      // Notify driver and passengers
-      await this.notifyAboutTripDeparture(trip);
+      for (const trip of tripsStartingSoon) {
+        // Notify driver and passengers
+        await this.notifyAboutTripDeparture(trip);
 
-      // Mark as notified
-      trip.departureReminderNotified = true;
-      await this.tripRepository.save(trip);
-    }
+        // Mark as notified
+        trip.departureReminderNotified = true;
+        await this.tripRepository.save(trip);
+      }
 
-    this.logger.log(
-      `Successfully notified about ${tripsStartingSoon.length} trips starting soon`,
-    );
+      this.logger.log(
+        `Successfully notified about ${tripsStartingSoon.length} trips starting soon`,
+      );
     });
   }
 
@@ -2591,20 +3608,25 @@ export class TripsService {
           data,
           trip.driverId,
         );
-        this.logger.log(`Notified driver ${trip.driverId} about trip ${trip.id} departure`);
+        this.logger.log(
+          `Notified driver ${trip.driverId} about trip ${trip.id} departure`,
+        );
       }
 
       // Notify passengers with accepted bookings
-      const acceptedBookings = trip.bookings?.filter(
-        (booking) => booking.status === BookingStatus.ACCEPTED,
-      ) || [];
+      const acceptedBookings =
+        trip.bookings?.filter(
+          (booking) => booking.status === BookingStatus.ACCEPTED,
+        ) || [];
 
       if (acceptedBookings.length === 0) {
         this.logger.debug(`No accepted bookings to notify for trip ${trip.id}`);
         return;
       }
 
-      const passengerIds = acceptedBookings.map((booking) => booking.passengerId);
+      const passengerIds = acceptedBookings.map(
+        (booking) => booking.passengerId,
+      );
       const passengers = await this.userRepository.find({
         where: {
           id: In(passengerIds),
@@ -2612,10 +3634,14 @@ export class TripsService {
         select: ['id', 'fcmToken', 'firstName', 'lastName'],
       });
 
-      const passengersWithTokens = passengers.filter((passenger) => passenger.fcmToken);
+      const passengersWithTokens = passengers.filter(
+        (passenger) => passenger.fcmToken,
+      );
 
       if (passengersWithTokens.length === 0) {
-        this.logger.debug('No passengers with FCM tokens found, skipping notifications');
+        this.logger.debug(
+          'No passengers with FCM tokens found, skipping notifications',
+        );
         return;
       }
 
@@ -2638,8 +3664,16 @@ export class TripsService {
         minutesUntilDeparture,
       };
 
-      await this.notificationService.sendToMultiple(fcmTokens, title, body, data, userIds);
-      this.logger.log(`Notified ${fcmTokens.length} passengers about trip ${trip.id} departure`);
+      await this.notificationService.sendToMultiple(
+        fcmTokens,
+        title,
+        body,
+        data,
+        userIds,
+      );
+      this.logger.log(
+        `Notified ${fcmTokens.length} passengers about trip ${trip.id} departure`,
+      );
     } catch (error: any) {
       this.logger.error(
         `Error notifying about trip departure ${trip.id}: ${error.message}`,
@@ -2656,44 +3690,50 @@ export class TripsService {
   async notifyAboutUpcomingTripExpiration() {
     // Use setImmediate to ensure HTTP requests have priority
     setImmediate(async () => {
-      this.logger.debug('Running cron job to notify about upcoming trip expiration');
+      this.logger.debug(
+        'Running cron job to notify about upcoming trip expiration',
+      );
 
-    const now = new Date();
-    const oneHourFromNow = new Date(now.getTime() + 60 * 60 * 1000); // 1 hour from now
+      const now = new Date();
+      const oneHourFromNow = new Date(now.getTime() + 60 * 60 * 1000); // 1 hour from now
 
-    // Find all pending trips expiring in the next hour
-    const tripsExpiringSoon = await this.tripRepository.find({
-      where: {
-        status: TripStatus.PENDING,
-        departureDate: Between(now, oneHourFromNow),
-      },
-      relations: ['driver', 'bookings', 'bookings.passenger'],
-    });
+      // Find all pending trips expiring in the next hour
+      const tripsExpiringSoon = await this.tripRepository.find({
+        where: {
+          status: TripStatus.PENDING,
+          departureDate: Between(now, oneHourFromNow),
+        },
+        relations: ['driver', 'bookings', 'bookings.passenger'],
+      });
 
-    if (tripsExpiringSoon.length === 0) {
-      this.logger.debug('No trips expiring soon found');
-      return;
-    }
-
-    this.logger.log(`Found ${tripsExpiringSoon.length} trips expiring soon`);
-
-    for (const trip of tripsExpiringSoon) {
-      // Notify driver about upcoming expiration
-      await this.notifyDriverAboutUpcomingExpiration(trip);
-
-      // Notify passengers with accepted bookings
-      const acceptedBookings = trip.bookings?.filter(
-        (booking) => booking.status === BookingStatus.ACCEPTED,
-      ) || [];
-
-      if (acceptedBookings.length > 0) {
-        await this.notifyPassengersAboutUpcomingExpiration(trip, acceptedBookings);
+      if (tripsExpiringSoon.length === 0) {
+        this.logger.debug('No trips expiring soon found');
+        return;
       }
-    }
 
-    this.logger.log(
-      `Successfully notified about ${tripsExpiringSoon.length} trips expiring soon`,
-    );
+      this.logger.log(`Found ${tripsExpiringSoon.length} trips expiring soon`);
+
+      for (const trip of tripsExpiringSoon) {
+        // Notify driver about upcoming expiration
+        await this.notifyDriverAboutUpcomingExpiration(trip);
+
+        // Notify passengers with accepted bookings
+        const acceptedBookings =
+          trip.bookings?.filter(
+            (booking) => booking.status === BookingStatus.ACCEPTED,
+          ) || [];
+
+        if (acceptedBookings.length > 0) {
+          await this.notifyPassengersAboutUpcomingExpiration(
+            trip,
+            acceptedBookings,
+          );
+        }
+      }
+
+      this.logger.log(
+        `Successfully notified about ${tripsExpiringSoon.length} trips expiring soon`,
+      );
     });
   }
 
@@ -2703,7 +3743,9 @@ export class TripsService {
   private async notifyDriverAboutTripExpiration(trip: Trip): Promise<void> {
     try {
       if (!trip.driver?.fcmToken) {
-        this.logger.debug(`Driver ${trip.driverId} has no FCM token, skipping notification`);
+        this.logger.debug(
+          `Driver ${trip.driverId} has no FCM token, skipping notification`,
+        );
         return;
       }
 
@@ -2727,7 +3769,9 @@ export class TripsService {
         trip.driverId,
       );
 
-      this.logger.log(`Notified driver ${trip.driverId} about expired trip ${trip.id}`);
+      this.logger.log(
+        `Notified driver ${trip.driverId} about expired trip ${trip.id}`,
+      );
     } catch (error: any) {
       this.logger.error(
         `Error notifying driver about trip expiration: ${error.message}`,
@@ -2752,7 +3796,9 @@ export class TripsService {
         }));
 
       if (passengersWithTokens.length === 0) {
-        this.logger.debug('No passengers with FCM tokens found, skipping notifications');
+        this.logger.debug(
+          'No passengers with FCM tokens found, skipping notifications',
+        );
         return;
       }
 
@@ -2829,9 +3875,13 @@ export class TripsService {
         ? `${trip.driver.firstName} ${trip.driver.lastName}`.trim()
         : 'Le conducteur';
       const vehicleDetails = this.buildVehicleSafetyLabel(trip);
-      const passengerNames = this.getConfirmedPassengerNames(trip.bookings ?? []);
+      const passengerNames = this.getConfirmedPassengerNames(
+        trip.bookings ?? [],
+      );
       const passengersLabel =
-        passengerNames.length > 0 ? passengerNames.join(', ') : 'aucun passager confirme';
+        passengerNames.length > 0
+          ? passengerNames.join(', ')
+          : 'aucun passager confirme';
       const message =
         eventType === 'trip_started'
           ? [
@@ -2860,13 +3910,17 @@ export class TripsService {
         this.logger.debug(
           `[WA][DriverEmergencyContact][${eventType}] trip=${trip.id} contactId=${contact.id} phone=${contact.phone} sending...`,
         );
-        const whatsappSent = await this.messagingService.sendMessage(contact.phone, message, {
-          flow: 'trip_driver_safety',
-          eventType,
-          tripId: trip.id,
-          driverId: trip.driverId,
-          contactId: contact.id,
-        });
+        const whatsappSent = await this.messagingService.sendMessage(
+          contact.phone,
+          message,
+          {
+            flow: 'trip_driver_safety',
+            eventType,
+            tripId: trip.id,
+            driverId: trip.driverId,
+            contactId: contact.id,
+          },
+        );
         if (whatsappSent) {
           sent += 1;
           this.logger.log(
@@ -2944,7 +3998,7 @@ export class TripsService {
 
         const message = [
           'ZWANGA - Alerte securite',
-          `Le trajet est termine mais la depose de ${passengerName} n'a pas ete confirmee.`,
+          `Le trajet est termine mais l'arrivee de ${passengerName} n'a pas ete confirmee.`,
           `Depart: ${trip.departureLocation}.`,
           `Arrivee: ${booking.passengerDestination || trip.arrivalLocation}.`,
           `Conducteur: ${driverPhone ? `${driverName} (${driverPhone})` : driverName}.`,
@@ -2956,14 +4010,18 @@ export class TripsService {
           this.logger.debug(
             `[WA][EmergencyContact][trip_end_without_dropoff] trip=${trip.id} booking=${booking.id} contactId=${contact.id} phone=${contact.phone} sending...`,
           );
-          const whatsappSent = await this.messagingService.sendMessage(contact.phone, message, {
-            flow: 'trip_passenger_safety',
-            eventType: 'trip_end_without_dropoff',
-            tripId: trip.id,
-            bookingId: booking.id,
-            passengerId: booking.passengerId,
-            contactId: contact.id,
-          });
+          const whatsappSent = await this.messagingService.sendMessage(
+            contact.phone,
+            message,
+            {
+              flow: 'trip_passenger_safety',
+              eventType: 'trip_end_without_dropoff',
+              tripId: trip.id,
+              bookingId: booking.id,
+              passengerId: booking.passengerId,
+              contactId: contact.id,
+            },
+          );
           if (whatsappSent) {
             sent += 1;
             this.logger.log(
@@ -2995,9 +4053,13 @@ export class TripsService {
     if (!trip.vehicle) {
       return 'vehicule non renseigne';
     }
-    const brandModel = [trip.vehicle.brand, trip.vehicle.model].filter(Boolean).join(' ');
+    const brandModel = [trip.vehicle.brand, trip.vehicle.model]
+      .filter(Boolean)
+      .join(' ');
     const color = trip.vehicle.color ? `, couleur ${trip.vehicle.color}` : '';
-    const plate = trip.vehicle.licensePlate ? `, plaque ${trip.vehicle.licensePlate}` : '';
+    const plate = trip.vehicle.licensePlate
+      ? `, plaque ${trip.vehicle.licensePlate}`
+      : '';
     return `${brandModel || 'vehicule'}${color}${plate}`;
   }
 
@@ -3018,7 +4080,8 @@ export class TripsService {
         continue;
       }
 
-      const name = `${booking.passenger.firstName ?? ''} ${booking.passenger.lastName ?? ''}`.trim();
+      const name =
+        `${booking.passenger.firstName ?? ''} ${booking.passenger.lastName ?? ''}`.trim();
       if (!name || seen.has(name)) {
         continue;
       }
@@ -3029,7 +4092,10 @@ export class TripsService {
     return names;
   }
 
-  private getOtherConfirmedPassengerNames(bookings: Booking[], currentPassengerId: string): string[] {
+  private getOtherConfirmedPassengerNames(
+    bookings: Booking[],
+    currentPassengerId: string,
+  ): string[] {
     return this.getConfirmedPassengerNames(
       bookings.filter((booking) => booking.passengerId !== currentPassengerId),
     );
@@ -3041,7 +4107,9 @@ export class TripsService {
   private async notifyDriverAboutUpcomingExpiration(trip: Trip): Promise<void> {
     try {
       if (!trip.driver?.fcmToken) {
-        this.logger.debug(`Driver ${trip.driverId} has no FCM token, skipping notification`);
+        this.logger.debug(
+          `Driver ${trip.driverId} has no FCM token, skipping notification`,
+        );
         return;
       }
 
@@ -3097,7 +4165,9 @@ export class TripsService {
         }));
 
       if (passengersWithTokens.length === 0) {
-        this.logger.debug('No passengers with FCM tokens found, skipping notifications');
+        this.logger.debug(
+          'No passengers with FCM tokens found, skipping notifications',
+        );
         return;
       }
 

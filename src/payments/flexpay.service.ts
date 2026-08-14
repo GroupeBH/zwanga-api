@@ -8,8 +8,9 @@ import {
 import { HttpService } from '@nestjs/axios';
 import { ConfigService } from '@nestjs/config';
 import { firstValueFrom } from 'rxjs';
-import { AxiosError } from 'axios';
+import { isAxiosError, type AxiosError } from 'axios';
 import { PaymentMethod } from './entities/payment-transaction.entity';
+import { formatPaymentLogPayload } from './payment-log.util';
 
 export interface FlexPayInitiatePaymentInput {
   method: PaymentMethod;
@@ -32,9 +33,18 @@ export interface FlexPayInitiatePaymentResult {
   raw: Record<string, unknown>;
 }
 
+export interface FlexPayInitiatePayoutInput {
+  reference: string;
+  phone: string;
+  amount: number;
+  currency: string;
+  callbackUrl: string;
+}
+
 export interface FlexPayTransactionStatus {
   orderNumber: string | null;
   reference: string | null;
+  code?: string | null;
   status: string | null;
   amount: string | null;
   amountCustomer: string | null;
@@ -73,6 +83,53 @@ export class FlexPayService {
     return this.initiateMobileMoneyPayment(input);
   }
 
+  async initiatePayout(
+    input: FlexPayInitiatePayoutInput,
+  ): Promise<FlexPayInitiatePaymentResult> {
+    if (!input.phone?.trim()) {
+      throw new BadRequestException(
+        'Le numero de telephone est requis pour un paiement chauffeur',
+      );
+    }
+
+    const body = {
+      merchant: this.getMerchantCode(),
+      type: '1',
+      phone: this.normalizePhone(input.phone),
+      reference: input.reference,
+      amount: this.formatAmount(input.amount),
+      currency: input.currency,
+      callbackUrl: input.callbackUrl,
+    };
+    const url = this.getMerchantPayoutUrl();
+
+    this.logger.log(
+      `FlexPay merchant payout request: url=${url}, merchant=${body.merchant}, reference=${body.reference}, phone=${this.maskPhone(body.phone)}, amount=${body.amount} ${body.currency}`,
+    );
+
+    try {
+      const response = await firstValueFrom(
+        this.httpService.post<Record<string, unknown>>(url, body, {
+          headers: {
+            Authorization: this.getBearerToken(),
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+          timeout: this.getRequestTimeoutMs(),
+        }),
+      );
+
+      const normalizedResponse = this.normalizeInitiateResponse(response.data);
+      this.logger.log(
+        `FlexPay merchant payout response: reference=${input.reference}, code=${normalizedResponse.code}, orderNumber=${normalizedResponse.orderNumber ?? 'none'}, message=${normalizedResponse.message ?? 'none'}, response=${formatPaymentLogPayload(normalizedResponse.raw)}`,
+      );
+
+      return normalizedResponse;
+    } catch (error) {
+      this.handleHttpError(error, 'Paiement chauffeur FlexPay');
+    }
+  }
+
   async checkTransaction(
     orderNumber: string,
   ): Promise<FlexPayCheckTransactionResult> {
@@ -100,7 +157,7 @@ export class FlexPayService {
 
       const normalizedResponse = this.normalizeCheckResponse(response.data);
       this.logger.log(
-        `FlexPay check response: orderNumber=${normalizedOrderNumber}, code=${normalizedResponse.code}, transactionStatus=${normalizedResponse.transaction?.status ?? 'none'}, transactionReference=${normalizedResponse.transaction?.reference ?? 'none'}`,
+        `FlexPay check response: orderNumber=${normalizedOrderNumber}, code=${normalizedResponse.code}, transactionStatus=${normalizedResponse.transaction?.status ?? 'none'}, transactionReference=${normalizedResponse.transaction?.reference ?? 'none'}, response=${formatPaymentLogPayload(normalizedResponse.raw)}`,
       );
 
       return normalizedResponse;
@@ -116,7 +173,7 @@ export class FlexPayService {
   isSuccessfulTransaction(
     transaction: FlexPayTransactionStatus | null | undefined,
   ): boolean {
-    return this.isSuccessfulCode(transaction?.status);
+    return this.isSuccessfulCode(transaction?.status ?? transaction?.code);
   }
 
   private async initiateMobileMoneyPayment(
@@ -157,7 +214,7 @@ export class FlexPayService {
 
       const normalizedResponse = this.normalizeInitiateResponse(response.data);
       this.logger.log(
-        `FlexPay Mobile Money response: reference=${input.reference}, code=${normalizedResponse.code}, orderNumber=${normalizedResponse.orderNumber ?? 'none'}, message=${normalizedResponse.message ?? 'none'}`,
+        `FlexPay Mobile Money response: reference=${input.reference}, code=${normalizedResponse.code}, orderNumber=${normalizedResponse.orderNumber ?? 'none'}, message=${normalizedResponse.message ?? 'none'}, response=${formatPaymentLogPayload(normalizedResponse.raw)}`,
       );
 
       return normalizedResponse;
@@ -212,7 +269,7 @@ export class FlexPayService {
 
       const normalizedResponse = this.normalizeInitiateResponse(response.data);
       this.logger.log(
-        `FlexPay card response: reference=${input.reference}, code=${normalizedResponse.code}, orderNumber=${normalizedResponse.orderNumber ?? 'none'}, hasPaymentUrl=${Boolean(normalizedResponse.paymentUrl)}, message=${normalizedResponse.message ?? 'none'}`,
+        `FlexPay card response: reference=${input.reference}, code=${normalizedResponse.code}, orderNumber=${normalizedResponse.orderNumber ?? 'none'}, hasPaymentUrl=${Boolean(normalizedResponse.paymentUrl)}, message=${normalizedResponse.message ?? 'none'}, response=${formatPaymentLogPayload(normalizedResponse.raw)}`,
       );
 
       return normalizedResponse;
@@ -246,7 +303,8 @@ export class FlexPayService {
         ? {
             orderNumber: this.getStringValue(rawTransaction, 'orderNumber'),
             reference: this.getStringValue(rawTransaction, 'reference'),
-            status: this.getStringValue(rawTransaction, 'status'),
+            code: this.getStringValue(rawTransaction, 'code', 'Code'),
+            status: this.getStringValue(rawTransaction, 'status', 'Status'),
             amount: this.getStringValue(rawTransaction, 'amount'),
             amountCustomer: this.getStringValue(
               rawTransaction,
@@ -315,6 +373,19 @@ export class FlexPayService {
       this.getOptionalConfig('FLEXPAY_MOBILE_BASE_URL') ||
         this.defaultMobileBaseUrl,
       'api/rest/v1/paymentService',
+    );
+  }
+
+  private getMerchantPayoutUrl(): string {
+    const explicitUrl = this.getOptionalConfig('FLEXPAY_PAYOUT_SERVICE_URL');
+    if (explicitUrl) {
+      return explicitUrl;
+    }
+
+    return this.joinUrl(
+      this.getOptionalConfig('FLEXPAY_MOBILE_BASE_URL') ||
+        this.defaultMobileBaseUrl,
+      'api/rest/v1/merchantPayOutService',
     );
   }
 
@@ -434,14 +505,55 @@ export class FlexPayService {
       throw error;
     }
 
-    const axiosError = error as AxiosError;
-    const responseData =
-      axiosError.response?.data && typeof axiosError.response.data === 'object'
-        ? JSON.stringify(axiosError.response.data)
-        : String(axiosError.response?.data ?? axiosError.message);
+    const axiosError = isAxiosError(error)
+      ? error
+      : (error as AxiosError);
+    const responseData = formatPaymentLogPayload(
+      axiosError.response?.data ?? axiosError.message,
+    );
     const status = axiosError.response?.status ?? 'unknown';
+    const method = axiosError.config?.method?.toUpperCase() ?? 'unknown';
+    const url = axiosError.config?.url ?? 'unknown';
+    const code = axiosError.code ?? 'none';
+    const publicReason = this.getPublicHttpErrorReason(axiosError);
 
-    this.logger.error(`${context} failed: status=${status}, ${responseData}`);
-    throw new BadGatewayException(`${context} indisponible`);
+    this.logger.error(
+      `${context} failed: status=${status}, code=${code}, method=${method}, url=${url}, reason=${publicReason ?? 'none'}, response=${responseData}`,
+    );
+    throw new BadGatewayException(
+      publicReason
+        ? `${context} indisponible (${publicReason})`
+        : `${context} indisponible`,
+    );
+  }
+
+  private getPublicHttpErrorReason(error: AxiosError): string | null {
+    const message = error.message?.toLowerCase() ?? '';
+    const timeout =
+      typeof error.config?.timeout === 'number' && error.config.timeout > 0
+        ? `${error.config.timeout}ms`
+        : null;
+
+    if (error.code === 'ECONNABORTED' || message.includes('timeout')) {
+      return timeout ? `delai depasse apres ${timeout}` : 'delai depasse';
+    }
+
+    if (error.code === 'ENOTFOUND') {
+      return 'hote flexpay introuvable';
+    }
+
+    if (
+      error.code === 'ECONNREFUSED' ||
+      error.code === 'ECONNRESET' ||
+      error.code === 'ETIMEDOUT'
+    ) {
+      return 'connexion flexpay impossible';
+    }
+
+    if (error.response?.status) {
+      return `reponse flexpay ${error.response.status}`;
+    }
+
+    return null;
   }
 }

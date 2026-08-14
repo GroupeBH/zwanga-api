@@ -56,12 +56,16 @@ describe('TripsService daily trip publication quota', () => {
       {} as any,
       {} as any,
       {} as any,
+      {} as any,
+      {} as any,
       cacheService as any,
       {} as any,
       {} as any,
       {} as any,
       {} as any,
       subscriptionsService as any,
+      {} as any,
+      { recordDriverLocation: jest.fn().mockResolvedValue(undefined) } as any,
       {} as any,
     );
 
@@ -125,6 +129,7 @@ describe('TripsService trip deletion rules', () => {
   let service: any;
   let tripRepository: {
     findOne: jest.Mock;
+    save: jest.Mock;
     remove: jest.Mock;
   };
   let bookingRepository: { update: jest.Mock; delete: jest.Mock };
@@ -133,6 +138,7 @@ describe('TripsService trip deletion rules', () => {
   beforeEach(() => {
     tripRepository = {
       findOne: jest.fn(),
+      save: jest.fn().mockImplementation(async (trip) => trip),
       remove: jest.fn().mockResolvedValue(undefined),
     };
     bookingRepository = {
@@ -153,12 +159,16 @@ describe('TripsService trip deletion rules', () => {
       {} as any,
       {} as any,
       {} as any,
+      {} as any,
+      {} as any,
       cacheService as any,
       {} as any,
       {} as any,
       {} as any,
       {} as any,
       {} as any,
+      {} as any,
+      { recordDriverLocation: jest.fn().mockResolvedValue(undefined) } as any,
       {} as any,
     );
   });
@@ -338,6 +348,31 @@ describe('TripsService trip deletion rules', () => {
     expect(bookingRepository.delete).toHaveBeenCalledWith({ tripId: 'trip-5' });
     expect(tripRepository.remove).toHaveBeenCalledWith(trip);
   });
+
+  it('blocks completion while an accepted passenger has not been dropped off', async () => {
+    const trip = {
+      id: 'trip-active',
+      driverId: 'driver-1',
+      status: TripStatus.ACTIVE,
+      bookings: [
+        {
+          id: 'booking-active',
+          status: BookingStatus.ACCEPTED,
+          pickedUp: true,
+          pickedUpConfirmedByPassenger: true,
+          droppedOff: false,
+          droppedOffConfirmedByPassenger: false,
+        },
+      ],
+    };
+
+    tripRepository.findOne.mockResolvedValue(trip);
+
+    await expect(
+      service.completeTrip('trip-active', 'driver-1'),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(tripRepository.save).not.toHaveBeenCalled();
+  });
 });
 
 describe('TripsService started trip ETA expiration', () => {
@@ -404,6 +439,8 @@ describe('TripsService started trip ETA expiration', () => {
       {} as any,
       {} as any,
       {} as any,
+      {} as any,
+      {} as any,
       cacheService as any,
       {} as any,
       {} as any,
@@ -411,32 +448,14 @@ describe('TripsService started trip ETA expiration', () => {
       googleMapsService as any,
       {} as any,
       weatherAwarenessService as any,
+      { recordDriverLocation: jest.fn().mockResolvedValue(undefined) } as any,
+      {} as any,
     );
   });
 
   afterEach(() => {
     jest.useRealTimers();
   });
-
-  function buildActiveTrip(estimatedArrivalDate: Date) {
-    return {
-      id: 'trip-active',
-      driverId: 'driver-1',
-      status: TripStatus.ACTIVE,
-      startedAt: new Date('2026-05-20T02:00:00.000Z'),
-      estimatedArrivalDate,
-      departureDate: new Date('2026-05-20T02:00:00.000Z'),
-      updatedAt: now,
-      departureLocation: 'Gombe',
-      departureReference: null,
-      departurePoint: null,
-      arrivalLocation: 'Limete',
-      arrivalReference: null,
-      arrivalPoint: null,
-      bookings: [],
-      driver: { id: 'driver-1', fcmToken: null },
-    };
-  }
 
   function buildPendingTrip() {
     return {
@@ -522,30 +541,118 @@ describe('TripsService started trip ETA expiration', () => {
   });
 
   it('does not expire a started trip before six hours after its estimated arrival', async () => {
-    const estimatedArrivalDate = new Date(now.getTime() - 5 * 60 * 60 * 1000);
-    tripRepository.find
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([buildActiveTrip(estimatedArrivalDate)]);
+    tripRepository.find.mockResolvedValueOnce([]);
 
     await service.markExpiredTripsNow(now);
 
+    expect(tripRepository.find).toHaveBeenCalledTimes(1);
     expect(tripRepository.update).not.toHaveBeenCalled();
     expect(bookingRepository.update).not.toHaveBeenCalled();
   });
 
-  it('expires a started trip once six hours have passed after its estimated arrival', async () => {
-    const estimatedArrivalDate = new Date(
-      now.getTime() - 6 * 60 * 60 * 1000 - 60 * 1000,
-    );
-    tripRepository.find
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce([buildActiveTrip(estimatedArrivalDate)]);
+  it('does not expire a started trip even once six hours have passed after its estimated arrival', async () => {
+    tripRepository.find.mockResolvedValueOnce([]);
 
     await service.markExpiredTripsNow(now);
 
-    expect(tripRepository.update).toHaveBeenCalledWith('trip-active', {
-      status: TripStatus.COMPLETED,
-      completedAt: now,
-    });
+    expect(tripRepository.find).toHaveBeenCalledTimes(1);
+    expect(tripRepository.update).not.toHaveBeenCalled();
+    expect(bookingRepository.update).not.toHaveBeenCalled();
+  });
+});
+
+describe('TripsService interrupted trip fare location', () => {
+  it('uses the driver interruption point for every onboard booking', async () => {
+    const interruptionPoint = {
+      type: 'Point' as const,
+      coordinates: [15.3063, -4.365],
+    };
+    const trip = {
+      id: 'trip-1',
+      status: TripStatus.ACTIVE,
+      totalSeats: 3,
+      availableSeats: 0,
+      currentLocation: {
+        type: 'Point' as const,
+        coordinates: [15.3, -4.36],
+      },
+      bookings: [],
+    };
+    const interruptionRequest = {
+      id: 'request-1',
+      tripId: 'trip-1',
+      requestedLocation: interruptionPoint,
+      trip,
+      confirmations: [
+        {
+          bookingId: 'booking-1',
+          status: 'confirmed',
+        },
+        {
+          bookingId: 'booking-2',
+          status: 'confirmed',
+        },
+      ],
+    };
+    const tripRepository = {
+      findOne: jest.fn().mockResolvedValue(trip),
+      save: jest.fn().mockImplementation(async (payload) => payload),
+    };
+    const driverInterruptionRepository = {
+      findOne: jest.fn().mockResolvedValue(interruptionRequest),
+      save: jest.fn().mockImplementation(async (payload) => payload),
+    };
+    const bookingsService = {
+      completeBookingByTripInterruption: jest.fn().mockResolvedValue(undefined),
+    };
+    const service: any = new TripsService(
+      tripRepository as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      driverInterruptionRepository as any,
+      {} as any,
+      { del: jest.fn() } as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      bookingsService as any,
+    );
+    jest
+      .spyOn(service, 'calculateAvailableSeatsAfterInterruption')
+      .mockReturnValue(3);
+    jest
+      .spyOn(service, 'invalidateDriverInterruptionCaches')
+      .mockResolvedValue(undefined);
+    jest
+      .spyOn(service, 'notifyDriverAboutDriverInterruptionCompleted')
+      .mockResolvedValue(undefined);
+    jest
+      .spyOn(service, 'notifyPassengersAboutDriverInterruptionCompleted')
+      .mockResolvedValue(undefined);
+
+    await service.finalizeDriverTripInterruption({ id: 'request-1' });
+
+    expect(
+      bookingsService.completeBookingByTripInterruption,
+    ).toHaveBeenNthCalledWith(1, 'booking-1', interruptionPoint);
+    expect(
+      bookingsService.completeBookingByTripInterruption,
+    ).toHaveBeenNthCalledWith(2, 'booking-2', interruptionPoint);
+    expect(tripRepository.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: TripStatus.PENDING,
+        availableSeats: 3,
+      }),
+    );
   });
 });

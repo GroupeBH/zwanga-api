@@ -15,24 +15,13 @@ export class S3Service {
     this.region = this.configService.get<string>('AWS_REGION') || 'us-east-1';
     this.bucketName = this.configService.get<string>('AWS_S3_BUCKET_NAME') || null;
 
-    // Only initialize S3 client if bucket name is configured
+    // In ECS Fargate, credentials come from the task role. Locally, the AWS SDK
+    // can still use an AWS profile or exported temporary credentials.
     if (this.bucketName) {
-      const accessKeyId = this.configService.get<string>('AWS_ACCESS_KEY_ID');
-      const secretAccessKey = this.configService.get<string>('AWS_SECRET_ACCESS_KEY');
-
-      if (!accessKeyId || !secretAccessKey) {
-        this.logger.warn('AWS credentials not configured. S3 service will not be available.');
-        return;
-      }
-
       this.logger.log(`S3 service initialized - Bucket: ${this.bucketName}, Region: ${this.region}`);
 
       this.s3Client = new S3Client({
         region: this.region,
-        credentials: {
-          accessKeyId,
-          secretAccessKey,
-        },
       });
     }
   }

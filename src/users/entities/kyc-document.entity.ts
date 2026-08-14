@@ -33,8 +33,8 @@ export class KycDocument {
   @Column({ type: 'jsonb', nullable: true })
   cniFrontUrls: string[] | null; // Array of CNI front photo URLs (0, 1, or 2 photos)
 
-  @Column({ nullable: true })
-  cniBackUrl: string;
+  @Column({ type: 'varchar', nullable: true })
+  cniBackUrl: string | null;
 
   @Column({ nullable: true })
   selfieUrl: string;
