@@ -4568,10 +4568,6 @@ export class BookingsService {
     updatedAt: Date;
     autoProgress: AutomaticRideProgressResult;
   }> {
-    this.logger.log(
-      `Updating passenger location for booking ${bookingId} by passenger ${passengerId}`,
-    );
-
     const booking = await this.bookingRepository.findOne({
       where: { id: bookingId, passengerId },
       relations: ['trip'],
@@ -4649,8 +4645,6 @@ export class BookingsService {
       },
     );
     await this.touchTripInteraction(booking.tripId);
-
-    this.logger.log(`Passenger location updated for booking ${bookingId}`);
 
     // Vérifier la proximité de la destination et notifier si nécessaire
     await this.checkAndNotifyDestinationProximity(booking);

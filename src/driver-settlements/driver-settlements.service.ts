@@ -129,7 +129,7 @@ export class DriverSettlementsService {
     });
 
     const saved = await this.earningRepository.save(earning);
-    this.logger.log(
+    this.logger.warn(
       `Driver earning recorded: bookingId=${booking.id}, driverId=${booking.trip.driverId}, gross=${grossAmount}, commission=${commissionAmount}, net=${netAmount}`,
     );
     return saved;
@@ -296,7 +296,7 @@ export class DriverSettlementsService {
     payout: DriverPayout,
     payment: PaymentTransaction | null,
   ): void {
-    this.logger.log(
+    this.logger.warn(
       `${step}: response=${this.paymentsService.formatLogPayload({
         payoutId: payout.id,
         driverId: payout.driverId,

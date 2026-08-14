@@ -7,7 +7,8 @@ import {
   OnGatewayConnection,
   OnGatewayDisconnect,
 } from '@nestjs/websockets';
-import { Server, Socket } from 'socket.io';
+import { Logger } from '@nestjs/common';
+import { Namespace, Socket } from 'socket.io';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { TripsService } from '../trips/trips.service';
@@ -22,7 +23,8 @@ export class TrackingGateway
   implements OnGatewayConnection, OnGatewayDisconnect
 {
   @WebSocketServer()
-  server: Server;
+  server: Namespace;
+  private readonly logger = new Logger(TrackingGateway.name);
 
   constructor(
     private readonly tripsService: TripsService,
@@ -51,6 +53,69 @@ export class TrackingGateway
     }
   }
 
+  private shouldSampleGpsPosition(): boolean {
+    const configuredRate = Number(
+      this.configService.get<string>('GPS_LOG_SAMPLE_RATE') ?? '0.01',
+    );
+    const sampleRate = Number.isFinite(configuredRate)
+      ? Math.min(Math.max(configuredRate, 0), 1)
+      : 0.01;
+    return Math.random() < sampleRate;
+  }
+
+  private logGpsSample(
+    event: 'driver_location_update' | 'passenger_location_update',
+    payload: {
+      tripId: string;
+      bookingId?: string;
+      userId?: string;
+      accuracy?: number;
+      speed?: number;
+      recordedAt?: string;
+    },
+  ): void {
+    if (!this.shouldSampleGpsPosition()) {
+      return;
+    }
+
+    this.logger.warn(
+      JSON.stringify({
+        event,
+        sampled: true,
+        ...payload,
+      }),
+    );
+  }
+
+  private logAutomaticProgress(
+    source: 'driver_location_update' | 'passenger_location_update',
+    events: Array<{
+      type: string;
+      tripId: string;
+      bookingId?: string;
+      passengerId?: string;
+      detectedAt?: string;
+      decision?: string;
+      confidenceScore?: number;
+    }>,
+  ): void {
+    for (const event of events) {
+      this.logger.warn(
+        JSON.stringify({
+          event: 'ride_progress_detection',
+          source,
+          type: event.type,
+          tripId: event.tripId,
+          bookingId: event.bookingId,
+          passengerId: event.passengerId,
+          detectedAt: event.detectedAt,
+          decision: event.decision,
+          confidenceScore: event.confidenceScore,
+        }),
+      );
+    }
+  }
+
   async handleConnection(client: Socket) {
     try {
       const token =
@@ -67,6 +132,21 @@ export class TrackingGateway
       });
 
       client.data.userId = payload.sub;
+      const tripId =
+        typeof client.handshake.auth.tripId === 'string'
+          ? client.handshake.auth.tripId
+          : typeof client.handshake.query.tripId === 'string'
+            ? client.handshake.query.tripId
+            : undefined;
+      this.logger.warn(
+        JSON.stringify({
+          event: 'socket_reconnected',
+          namespace: '/tracking',
+          userId: client.data.userId,
+          tripId,
+          socketId: client.id,
+        }),
+      );
     } catch {
       client.disconnect();
     }
@@ -87,6 +167,7 @@ export class TrackingGateway
         client.data.userId,
       );
       client.join(`trip:${data.tripId}`);
+      client.data.tripId = data.tripId;
       await this.evaluateAndEmitAutomaticProgress(client, data.tripId);
     } catch (error) {
       client.emit('error', { message: error.message });
@@ -134,10 +215,21 @@ export class TrackingGateway
 
       this.server.to(`trip:${data.tripId}`).emit('driver_location', location);
       if (autoProgress.events.length > 0) {
+        this.logAutomaticProgress(
+          'driver_location_update',
+          autoProgress.events,
+        );
         this.server
           .to(`trip:${data.tripId}`)
           .emit('booking_auto_progress', autoProgress);
       }
+      this.logGpsSample('driver_location_update', {
+        tripId: data.tripId,
+        userId: client.data.userId,
+        accuracy: data.accuracy,
+        speed: data.speed,
+        recordedAt: data.recordedAt,
+      });
     } catch (error) {
       client.emit('error', { message: error.message });
     }
@@ -184,10 +276,22 @@ export class TrackingGateway
         .to(`trip:${location.tripId}`)
         .emit('passenger_location', payload);
       if (location.autoProgress.events.length > 0) {
+        this.logAutomaticProgress(
+          'passenger_location_update',
+          location.autoProgress.events,
+        );
         this.server
           .to(`trip:${location.tripId}`)
           .emit('booking_auto_progress', location.autoProgress);
       }
+      this.logGpsSample('passenger_location_update', {
+        tripId: location.tripId,
+        bookingId: location.bookingId,
+        userId: client.data.userId,
+        accuracy: data.accuracy,
+        speed: data.speed,
+        recordedAt: data.recordedAt,
+      });
     } catch (error) {
       client.emit('error', { message: error.message });
     }

@@ -377,7 +377,7 @@ export class WalletService {
           : `Points recus de ${senderUserId}`,
       });
 
-      this.logger.log(
+      this.logger.warn(
         `Wallet points transferred: transferId=${transferId}, sender=${senderUserId}, recipient=${recipient.id}, amount=${amount}`,
       );
 
@@ -667,7 +667,7 @@ export class WalletService {
       });
 
       const savedEntry = await manager.save(entry);
-      this.logger.log(
+      this.logger.warn(
         `Wallet balance changed: userId=${input.userId}, type=${input.type}, amount=${amount}, balanceAfter=${nextBalance}`,
       );
       return savedEntry;
@@ -869,7 +869,7 @@ export class WalletService {
     step: string,
     response: WalletPaymentResponse,
   ): void {
-    this.logger.log(
+    this.logger.warn(
       `${step}: response=${this.paymentsService.formatLogPayload({
         accountId: response.account.id,
         userId: response.account.userId,

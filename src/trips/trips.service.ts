@@ -151,6 +151,23 @@ export class TripsService {
   private readonly DAILY_FREE_TRIP_PUBLICATION_LIMIT = 5;
   private readonly DEFAULT_ESTIMATED_TRIP_DURATION_MS = 6 * 60 * 60 * 1000;
 
+  private logTripStateChange(payload: {
+    tripId: string;
+    driverId?: string;
+    from: TripStatus;
+    to: TripStatus;
+    reason: string;
+    acceptedBookings?: number;
+    availableSeats?: number;
+  }): void {
+    this.logger.warn(
+      JSON.stringify({
+        event: 'trip_state_change',
+        ...payload,
+      }),
+    );
+  }
+
   constructor(
     @InjectRepository(Trip)
     private tripRepository: Repository<Trip>,
@@ -1072,9 +1089,19 @@ export class TripsService {
       );
     }
 
+    const previousStatus = trip.status;
     trip.status = TripStatus.COMPLETED;
     trip.completedAt = new Date();
     await this.tripRepository.save(trip);
+    this.logTripStateChange({
+      tripId,
+      driverId,
+      from: previousStatus,
+      to: TripStatus.COMPLETED,
+      reason: 'driver_completed_trip',
+      acceptedBookings: trip.bookings?.length ?? 0,
+      availableSeats: trip.availableSeats,
+    });
 
     await this.cacheService.del(CacheService.getTripKey(tripId));
     await this.cacheService.del(CacheService.getTripsListKey());
@@ -1227,6 +1254,7 @@ export class TripsService {
     const hasAvailableSeats = trip.availableSeats > 0;
 
     // Update trip status to ACTIVE and set startedAt
+    const previousStatus = trip.status;
     const startedAt = new Date();
     trip.status = TripStatus.ACTIVE;
     trip.startedAt = startedAt;
@@ -1239,6 +1267,15 @@ export class TripsService {
       startedAt,
     );
     await this.tripRepository.save(trip);
+    this.logTripStateChange({
+      tripId,
+      driverId,
+      from: previousStatus,
+      to: TripStatus.ACTIVE,
+      reason: 'driver_started_trip',
+      acceptedBookings: acceptedBookings.length,
+      availableSeats: trip.availableSeats,
+    });
 
     // Invalidate cache
     await this.cacheService.del(CacheService.getTripKey(tripId));
@@ -1309,8 +1346,18 @@ export class TripsService {
     }
 
     // Update trip status to PENDING (interrupted) when there are no picked-up passengers
+    const previousStatus = trip.status;
     trip.status = TripStatus.PENDING;
     await this.tripRepository.save(trip);
+    this.logTripStateChange({
+      tripId,
+      driverId,
+      from: previousStatus,
+      to: TripStatus.PENDING,
+      reason: 'driver_paused_before_pickup',
+      acceptedBookings: acceptedBookings.length,
+      availableSeats: trip.availableSeats,
+    });
 
     // Invalidate cache
     await this.cacheService.del(CacheService.getTripKey(tripId));
@@ -1646,9 +1693,19 @@ export class TripsService {
       throw new NotFoundException('Trajet non trouve');
     }
 
+    const previousStatus = trip.status;
     trip.status = TripStatus.PENDING;
     trip.availableSeats = this.calculateAvailableSeatsAfterInterruption(trip);
     await this.tripRepository.save(trip);
+    this.logTripStateChange({
+      tripId: trip.id,
+      driverId: trip.driverId,
+      from: previousStatus,
+      to: TripStatus.PENDING,
+      reason: 'driver_interruption_confirmed_by_passengers',
+      acceptedBookings: trip.bookings?.length ?? 0,
+      availableSeats: trip.availableSeats,
+    });
 
     const now = new Date();
     requestWithRelations.status = TripInterruptionStatus.COMPLETED;
@@ -3390,9 +3447,19 @@ export class TripsService {
 
     for (const trip of tripsToExpire) {
       // Mark trip as completed
+      const previousStatus = trip.status;
       await this.tripRepository.update(trip.id, {
         status: TripStatus.COMPLETED,
         completedAt: now,
+      });
+      this.logTripStateChange({
+        tripId: trip.id,
+        driverId: trip.driverId,
+        from: previousStatus,
+        to: TripStatus.COMPLETED,
+        reason: 'auto_expired_trip',
+        acceptedBookings: trip.bookings?.length ?? 0,
+        availableSeats: trip.availableSeats,
       });
 
       // Mark all pending and accepted bookings as expired

@@ -136,10 +136,10 @@ export class PaymentsService {
       await this.paymentTransactionRepository.save(transaction);
     let flexPayResponse: FlexPayInitiatePaymentResult;
 
-    this.logger.log(
+    this.logger.warn(
       `Payment transaction created: id=${savedTransaction.id}, reference=${savedTransaction.reference}, userId=${savedTransaction.userId ?? 'anonymous'}, purpose=${savedTransaction.purpose}, method=${savedTransaction.method}, amount=${savedTransaction.amount} ${savedTransaction.currency}, related=${savedTransaction.relatedEntityType ?? 'none'}:${savedTransaction.relatedEntityId ?? 'none'}`,
     );
-    this.logger.log(
+    this.logger.warn(
       `Starting FlexPay initiation: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, method=${savedTransaction.method}`,
     );
 
@@ -169,7 +169,7 @@ export class PaymentsService {
       throw error;
     }
 
-    this.logger.log(
+    this.logger.warn(
       `FlexPay initiation received: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, code=${flexPayResponse.code}, orderNumber=${flexPayResponse.orderNumber ?? 'none'}, hasPaymentUrl=${Boolean(flexPayResponse.paymentUrl)}, message=${flexPayResponse.message ?? 'none'}, response=${formatPaymentLogPayload(flexPayResponse.raw)}`,
     );
 
@@ -204,7 +204,7 @@ export class PaymentsService {
     savedTransaction =
       await this.paymentTransactionRepository.save(savedTransaction);
 
-    this.logger.log(
+    this.logger.warn(
       `Payment initialized: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, orderNumber=${savedTransaction.orderNumber ?? 'none'}, status=${savedTransaction.status}, amount=${savedTransaction.amount} ${savedTransaction.currency}, response=${formatPaymentLogPayload(this.formatPaymentLogResponse(savedTransaction))}`,
     );
 
@@ -249,7 +249,7 @@ export class PaymentsService {
     let savedTransaction =
       await this.paymentTransactionRepository.save(transaction);
 
-    this.logger.log(
+    this.logger.warn(
       `Payout transaction created: id=${savedTransaction.id}, reference=${savedTransaction.reference}, userId=${savedTransaction.userId}, amount=${savedTransaction.amount} ${savedTransaction.currency}, related=${savedTransaction.relatedEntityType ?? 'none'}:${savedTransaction.relatedEntityId ?? 'none'}`,
     );
 
@@ -261,7 +261,7 @@ export class PaymentsService {
         currency: savedTransaction.currency,
         callbackUrl,
       });
-      this.logger.log(
+      this.logger.warn(
         `FlexPay payout initiation received: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, code=${flexPayResponse.code}, orderNumber=${flexPayResponse.orderNumber ?? 'none'}, message=${flexPayResponse.message ?? 'none'}, response=${formatPaymentLogPayload(flexPayResponse.raw)}`,
       );
 
@@ -283,7 +283,7 @@ export class PaymentsService {
       savedTransaction.status = PaymentStatus.INITIATED;
       savedTransaction =
         await this.paymentTransactionRepository.save(savedTransaction);
-      this.logger.log(
+      this.logger.warn(
         `Payout initialized: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, orderNumber=${savedTransaction.orderNumber ?? 'none'}, status=${savedTransaction.status}, response=${formatPaymentLogPayload(this.formatPaymentLogResponse(savedTransaction))}`,
       );
       return savedTransaction;
@@ -305,7 +305,7 @@ export class PaymentsService {
     dto: FlexPayCallbackDto,
   ): Promise<PaymentTransaction> {
     const callback = this.normalizeFlexPayCallback(dto);
-    this.logger.log(
+    this.logger.warn(
       `FlexPay callback received: reference=${callback.reference}, orderNumber=${callback.orderNumber ?? 'none'}, code=${callback.code}, providerReference=${callback.providerReference ?? 'none'}, payload=${formatPaymentLogPayload(callback.raw)}`,
     );
 
@@ -318,7 +318,7 @@ export class PaymentsService {
       callback.code,
     );
 
-    this.logger.log(
+    this.logger.warn(
       `FlexPay callback matched payment: paymentId=${transaction.id}, reference=${transaction.reference}, previousStatus=${previousStatus}, orderNumber=${transaction.orderNumber ?? 'none'}`,
     );
 
@@ -385,7 +385,7 @@ export class PaymentsService {
     transaction.paidAt = transaction.paidAt ?? new Date();
     const savedTransaction =
       await this.paymentTransactionRepository.save(transaction);
-    this.logger.log(
+    this.logger.warn(
       `Payment confirmed from FlexPay callback: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, previousStatus=${previousStatus}, status=${savedTransaction.status}, response=${formatPaymentLogPayload(this.formatPaymentLogResponse(savedTransaction))}`,
     );
     return savedTransaction;
@@ -395,19 +395,19 @@ export class PaymentsService {
     orderNumber: string,
     userId?: string,
   ): Promise<PaymentTransaction> {
-    this.logger.log(
+    this.logger.warn(
       `Payment status check requested: orderNumber=${orderNumber}, userId=${userId ?? 'none'}`,
     );
     const transaction = await this.findTransactionByOrderNumber(
       orderNumber,
       userId,
     );
-    this.logger.log(
+    this.logger.warn(
       `Payment status check matched payment: paymentId=${transaction.id}, reference=${transaction.reference}, currentStatus=${transaction.status}`,
     );
 
     if (this.isTerminalPaymentStatus(transaction.status)) {
-      this.logger.log(
+      this.logger.warn(
         `Payment status check served from local terminal state: paymentId=${transaction.id}, status=${transaction.status}, response=${formatPaymentLogPayload(this.formatPaymentLogResponse(transaction))}`,
       );
       return transaction;
@@ -608,14 +608,14 @@ export class PaymentsService {
       throw new BadRequestException('Le numero de commande FlexPay est requis');
     }
 
-    this.logger.log(
+    this.logger.warn(
       `Checking FlexPay transaction: paymentId=${transaction.id}, reference=${transaction.reference}, orderNumber=${transaction.orderNumber}, currentStatus=${transaction.status}`,
     );
 
     const checkResult = await this.flexPayService.checkTransaction(
       transaction.orderNumber,
     );
-    this.logger.log(
+    this.logger.warn(
       `FlexPay check result received: paymentId=${transaction.id}, reference=${transaction.reference}, orderNumber=${transaction.orderNumber}, response=${formatPaymentLogPayload(checkResult.raw)}`,
     );
 
@@ -694,7 +694,7 @@ export class PaymentsService {
       transaction.paidAt = transaction.paidAt ?? new Date();
       const savedTransaction =
         await this.paymentTransactionRepository.save(transaction);
-      this.logger.log(
+      this.logger.warn(
         `Payment confirmed from FlexPay check: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, previousStatus=${previousStatus}, status=${savedTransaction.status}, providerStatus=${providerTransactionStatus}, response=${formatPaymentLogPayload(this.formatPaymentLogResponse(savedTransaction))}`,
       );
       return savedTransaction;
@@ -718,7 +718,7 @@ export class PaymentsService {
 
     const savedTransaction =
       await this.paymentTransactionRepository.save(transaction);
-    this.logger.log(
+    this.logger.warn(
       `Payment updated from FlexPay check: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, previousStatus=${previousStatus}, status=${savedTransaction.status}, providerStatus=${providerTransactionStatus ?? 'none'}, response=${formatPaymentLogPayload(this.formatPaymentLogResponse(savedTransaction))}`,
     );
     return savedTransaction;

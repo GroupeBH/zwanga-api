@@ -3,7 +3,7 @@ name: Deploy NestJS to AWS ECS Fargate
 on:
   push:
     branches:
-      - main
+      - release
   workflow_dispatch:
 
 permissions:
@@ -20,6 +20,7 @@ env:
   ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
   ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
   ECS_SERVICE: ${{ vars.ECS_SERVICE }}
+  ECS_APP_CONTAINER: api
 
 jobs:
   test-build-deploy:
@@ -78,7 +79,7 @@ jobs:
           file: ./Dockerfile
           target: production
           push: true
-          platforms: linux/amd64
+          platforms: linux/arm64
           tags: |
             ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
             ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
@@ -86,6 +87,75 @@ jobs:
           cache-to: type=gha,mode=max
           provenance: false
           sbom: false
+
+      - name: Run TypeORM migrations on ECS
+        id: migrations
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          service_json="$(aws ecs describe-services \
+            --cluster "${ECS_CLUSTER}" \
+            --services "${ECS_SERVICE}" \
+            --query 'services[0]' \
+            --output json)"
+
+          task_definition="$(jq -r '.taskDefinition' <<< "${service_json}")"
+          assign_public_ip="$(jq -r '.networkConfiguration.awsvpcConfiguration.assignPublicIp' <<< "${service_json}")"
+          subnets="$(jq -r '.networkConfiguration.awsvpcConfiguration.subnets | join(",")' <<< "${service_json}")"
+          security_groups="$(jq -r '.networkConfiguration.awsvpcConfiguration.securityGroups | join(",")' <<< "${service_json}")"
+
+          if [[ -z "${task_definition}" || "${task_definition}" == "null" ]]; then
+            echo "Unable to resolve ECS task definition from service ${ECS_SERVICE}."
+            exit 1
+          fi
+
+          network_configuration="awsvpcConfiguration={subnets=[${subnets}],securityGroups=[${security_groups}],assignPublicIp=${assign_public_ip}}"
+          overrides="$(jq -nc \
+            --arg container "${ECS_APP_CONTAINER}" \
+            '{containerOverrides:[{name:$container,command:["npm","run","migration:run:prod"]}]}')"
+
+          run_task_output="$(aws ecs run-task \
+            --cluster "${ECS_CLUSTER}" \
+            --launch-type FARGATE \
+            --task-definition "${task_definition}" \
+            --network-configuration "${network_configuration}" \
+            --overrides "${overrides}" \
+            --output json)"
+
+          migration_task_arn="$(jq -r '.tasks[0].taskArn // empty' <<< "${run_task_output}")"
+          if [[ -z "${migration_task_arn}" ]]; then
+            echo "Failed to start migration task:"
+            echo "${run_task_output}"
+            exit 1
+          fi
+
+          echo "migration_task_arn=${migration_task_arn}" >> "${GITHUB_OUTPUT}"
+          echo "Started migration task: ${migration_task_arn}"
+
+          aws ecs wait tasks-stopped \
+            --cluster "${ECS_CLUSTER}" \
+            --tasks "${migration_task_arn}"
+
+          task_result="$(aws ecs describe-tasks \
+            --cluster "${ECS_CLUSTER}" \
+            --tasks "${migration_task_arn}" \
+            --output json)"
+
+          exit_code="$(jq -r \
+            --arg container "${ECS_APP_CONTAINER}" \
+            '.tasks[0].containers[] | select(.name == $container) | .exitCode // empty' \
+            <<< "${task_result}")"
+          stopped_reason="$(jq -r '.tasks[0].stoppedReason // ""' <<< "${task_result}")"
+
+          if [[ "${exit_code}" != "0" ]]; then
+            echo "Migration task failed with exit code: ${exit_code:-unknown}"
+            echo "Stopped reason: ${stopped_reason}"
+            echo "${task_result}"
+            exit 1
+          fi
+
+          echo "Migrations completed successfully."
 
       - name: Force ECS deployment
         id: deploy
@@ -123,6 +193,7 @@ jobs:
             echo "### AWS ECS Fargate deployment"
             echo "- Image digest: \`${{ steps.docker-build.outputs.digest }}\`"
             echo "- Commit tag: \`${GITHUB_SHA}\`"
+            echo "- Migration task: \`${{ steps.migrations.outputs.migration_task_arn }}\`"
             echo "- ECS cluster: \`${ECS_CLUSTER}\`"
             echo "- ECS service: \`${ECS_SERVICE}\`"
             echo "- Deployment: \`${{ steps.deploy.outputs.deployment_id }}\`"
