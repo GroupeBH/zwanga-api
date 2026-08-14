@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import type { TypeOrmModuleOptions } from '@nestjs/typeorm';
 import type { DataSourceOptions } from 'typeorm';
 import { typeOrmEntities } from './entities';
@@ -9,6 +9,9 @@ type ConfigReader = {
 };
 
 type EnvironmentReader = NodeJS.ProcessEnv;
+
+const DEFAULT_AWS_RDS_CA_FILE =
+  '/usr/local/share/ca-certificates/aws-rds-global-bundle.crt';
 
 function shouldSynchronize(nodeEnv?: string, synchronize?: string): boolean {
   return (nodeEnv || 'development') !== 'production' && synchronize === 'true';
@@ -57,18 +60,24 @@ function buildDatabaseSslOptions(params: {
     return undefined;
   }
 
-  if (!params.databaseSslCaFile) {
+  const caFile =
+    params.databaseSslCaFile ||
+    process.env.DATABASE_SSL_CA_FILE ||
+    process.env.NODE_EXTRA_CA_CERTS ||
+    (existsSync(DEFAULT_AWS_RDS_CA_FILE) ? DEFAULT_AWS_RDS_CA_FILE : undefined);
+
+  if (!caFile) {
     return { rejectUnauthorized };
   }
 
   try {
     return {
-      ca: readFileSync(params.databaseSslCaFile, 'utf8'),
+      ca: readFileSync(caFile, 'utf8'),
       rejectUnauthorized,
     };
   } catch (error) {
     throw new Error(
-      `Unable to read PostgreSQL CA certificate file at ${params.databaseSslCaFile}: ${
+      `Unable to read PostgreSQL CA certificate file at ${caFile}: ${
         error instanceof Error ? error.message : String(error)
       }`,
     );
@@ -106,6 +115,7 @@ function buildBaseOptions(params: {
       ...baseConfig,
       url: params.databaseUrl,
       ssl,
+      extra: ssl ? { ssl } : undefined,
     };
   }
 
@@ -117,6 +127,7 @@ function buildBaseOptions(params: {
     password: params.databasePassword,
     database: params.databaseName,
     ssl,
+    extra: ssl ? { ssl } : undefined,
   };
 }
 
