@@ -129,6 +129,20 @@ data "aws_iam_policy_document" "github_actions_deploy" {
     ]
     resources = [local.ecs_cluster_arn]
   }
+
+  statement {
+    sid    = "ReadECSApplicationLogsForFailedMigrations"
+    effect = "Allow"
+    actions = [
+      "logs:DescribeLogStreams",
+      "logs:FilterLogEvents",
+      "logs:GetLogEvents",
+    ]
+    resources = [
+      aws_cloudwatch_log_group.ecs_app.arn,
+      "${aws_cloudwatch_log_group.ecs_app.arn}:*",
+    ]
+  }
 }
 
 resource "aws_iam_role_policy" "github_actions_deploy" {

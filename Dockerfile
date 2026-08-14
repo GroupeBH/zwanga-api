@@ -7,7 +7,13 @@ FROM node:${NODE_VERSION}-alpine AS base
 WORKDIR /app
 
 # dumb-init forwards Unix signals correctly when Node runs as PID 1.
-RUN apk add --no-cache dumb-init
+# The AWS RDS global CA bundle is added to Node's trusted CAs so PostgreSQL
+# TLS can keep certificate verification enabled in ECS production tasks.
+RUN apk add --no-cache ca-certificates dumb-init wget \
+    && wget -q -O /usr/local/share/ca-certificates/aws-rds-global-bundle.crt https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem \
+    && update-ca-certificates
+
+ENV NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/aws-rds-global-bundle.crt
 
 FROM base AS dependencies
 COPY package.json package-lock.json ./

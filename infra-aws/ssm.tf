@@ -120,7 +120,7 @@ locals {
     for name, arn in zipmap(
       data.aws_ssm_parameters_by_path.external_runtime_environment.names,
       data.aws_ssm_parameters_by_path.external_runtime_environment.arns,
-      ) :
+    ) :
     trimprefix(name, "${local.ssm_prefix}/env/") => arn
     if startswith(name, "${local.ssm_prefix}/env/")
     && can(regex("^[A-Za-z_][A-Za-z0-9_]*$", trimprefix(name, "${local.ssm_prefix}/env/")))
@@ -148,5 +148,6 @@ locals {
     values(local.generated_runtime_environment_parameter_arns_by_env),
     values(local.external_runtime_environment_parameter_arns_by_env),
     values(local.otel_environment_parameter_arns_by_env),
+    [local.database_import_source_url_parameter_arn],
   )
 }

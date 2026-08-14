@@ -1,14 +1,16 @@
 locals {
   ecs_base_environment = merge(
     {
-      NODE_ENV            = "production"
-      HOST                = "0.0.0.0"
-      PORT                = tostring(var.ecs_container_port)
-      API_PREFIX          = "api/v1"
-      TYPEORM_SYNCHRONIZE = "false"
-      AWS_REGION          = var.aws_region
-      LOG_LEVEL           = "warn"
-      GPS_LOG_SAMPLE_RATE = "0.01"
+      NODE_ENV                         = "production"
+      HOST                             = "0.0.0.0"
+      PORT                             = tostring(var.ecs_container_port)
+      API_PREFIX                       = "api/v1"
+      TYPEORM_SYNCHRONIZE              = "false"
+      DATABASE_SSL_CA_FILE             = "/usr/local/share/ca-certificates/aws-rds-global-bundle.crt"
+      DATABASE_SSL_REJECT_UNAUTHORIZED = "true"
+      AWS_REGION                       = var.aws_region
+      LOG_LEVEL                        = "warn"
+      GPS_LOG_SAMPLE_RATE              = "0.01"
     },
     var.runtime_environment_variables,
     var.enable_xray_tracing ? {
