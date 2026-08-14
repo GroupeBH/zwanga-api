@@ -5,7 +5,7 @@ environment  = "production"
 # Replace with the GitHub organization or username that owns zwanga-backend.
 github_owner      = "MON_PSEUDO"
 github_repository = "zwanga-backend"
-github_branch     = "main"
+github_branch     = "release"
 
 # If your AWS account already has the GitHub Actions OIDC provider, set its ARN
 # instead of creating a duplicate account-level provider.
