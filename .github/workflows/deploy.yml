@@ -26,8 +26,10 @@ env:
 jobs:
   test-build-deploy:
     name: Test, publish and deploy
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Native ARM64 runner: avoids QEMU emulation crashes while building
+    # the linux/arm64 image used by the ECS Fargate Graviton task.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
 
     steps:
       - name: Checkout source code
