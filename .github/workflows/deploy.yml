@@ -21,6 +21,7 @@ env:
   ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
   ECS_SERVICE: ${{ vars.ECS_SERVICE }}
   ECS_APP_CONTAINER: api
+  DEPLOY_BRANCH: release
 
 jobs:
   test-build-deploy:
@@ -51,6 +52,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [[ "${GITHUB_REF}" != "refs/heads/${DEPLOY_BRANCH}" ]]; then
+            echo "This production workflow must run from refs/heads/${DEPLOY_BRANCH}, but got ${GITHUB_REF}."
+            echo "Run it from the ${DEPLOY_BRANCH} branch or update Terraform github_branch and DEPLOY_BRANCH together."
+            exit 1
+          fi
           : "${AWS_REGION:?Configure the AWS_REGION repository variable}"
           : "${AWS_ROLE_ARN:?Configure the AWS_ROLE_ARN repository variable}"
           : "${ECR_REPOSITORY:?Configure the ECR_REPOSITORY repository variable}"
@@ -58,11 +64,13 @@ jobs:
           : "${ECS_SERVICE:?Configure the ECS_SERVICE repository variable}"
 
       - name: Configure temporary AWS credentials through OIDC
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6.2.3
         with:
           role-to-assume: ${{ env.AWS_ROLE_ARN }}
           role-session-name: GitHubActions-${{ github.run_id }}
           aws-region: ${{ env.AWS_REGION }}
+          audience: sts.amazonaws.com
+          allowed-account-ids: "046374119247"
 
       - name: Log in to Amazon ECR
         id: ecr-login
