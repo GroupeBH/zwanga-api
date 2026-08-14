@@ -139,6 +139,40 @@ variable "database_skip_final_snapshot" {
   default     = false
 }
 
+variable "database_import_image" {
+  description = "PostgreSQL client image used by the one-off Neon to RDS import task. Keep the major version greater than or equal to the Neon PostgreSQL version."
+  type        = string
+  default     = "postgres:17-alpine"
+}
+
+variable "database_import_task_cpu" {
+  description = "Fargate CPU units used by the one-off database import task."
+  type        = string
+  default     = "512"
+
+  validation {
+    condition     = contains(["256", "512", "1024", "2048", "4096"], var.database_import_task_cpu)
+    error_message = "database_import_task_cpu must be a valid Fargate CPU value."
+  }
+}
+
+variable "database_import_task_memory" {
+  description = "Fargate memory in MiB used by the one-off database import task."
+  type        = string
+  default     = "1024"
+}
+
+variable "database_import_ephemeral_storage_gb" {
+  description = "Ephemeral storage in GiB for the compressed pg_dump file used by the one-off database import task."
+  type        = number
+  default     = 30
+
+  validation {
+    condition     = var.database_import_ephemeral_storage_gb >= 21 && var.database_import_ephemeral_storage_gb <= 200
+    error_message = "database_import_ephemeral_storage_gb must be between 21 and 200 GiB."
+  }
+}
+
 variable "redis_node_type" {
   description = "ElastiCache Valkey node type."
   type        = string

@@ -17,6 +17,7 @@ database_allocated_storage_gb = 20
 database_multi_az            = false
 database_deletion_protection = true
 database_skip_final_snapshot = false
+database_import_ephemeral_storage_gb = 30
 
 redis_node_type          = "cache.t4g.micro"
 redis_num_cache_clusters = 1

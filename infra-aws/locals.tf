@@ -13,15 +13,21 @@ locals {
     var.extra_tags,
   )
 
-  ecs_cluster_name    = "${local.name_prefix}-cluster"
-  ecs_service_name    = "${local.name_prefix}-api"
-  ecs_task_family     = "${local.name_prefix}-api"
-  ecs_cluster_arn     = "arn:${data.aws_partition.current.partition}:ecs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:cluster/${local.ecs_cluster_name}"
-  ecs_service_arn     = "arn:${data.aws_partition.current.partition}:ecs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:service/${local.ecs_cluster_name}/${local.ecs_service_name}"
-  ecs_task_arn_pattern = "arn:${data.aws_partition.current.partition}:ecs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:task/${local.ecs_cluster_name}/*"
+  ecs_cluster_name                = "${local.name_prefix}-cluster"
+  ecs_service_name                = "${local.name_prefix}-api"
+  ecs_task_family                 = "${local.name_prefix}-api"
+  ecs_cluster_arn                 = "arn:${data.aws_partition.current.partition}:ecs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:cluster/${local.ecs_cluster_name}"
+  ecs_service_arn                 = "arn:${data.aws_partition.current.partition}:ecs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:service/${local.ecs_cluster_name}/${local.ecs_service_name}"
+  ecs_task_arn_pattern            = "arn:${data.aws_partition.current.partition}:ecs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:task/${local.ecs_cluster_name}/*"
   ecs_task_definition_arn_pattern = "arn:${data.aws_partition.current.partition}:ecs:${var.aws_region}:${data.aws_caller_identity.current.account_id}:task-definition/${local.ecs_task_family}:*"
-  app_container_name  = "api"
-  otel_container_name = "aws-otel-collector"
+  app_container_name              = "api"
+  otel_container_name             = "aws-otel-collector"
+
+  database_import_container_name            = "neon-to-rds-import"
+  database_import_task_family               = "${local.name_prefix}-neon-to-rds-import"
+  database_import_source_url_parameter_name = "${local.ssm_prefix}/migration/NEON_DATABASE_URL"
+  database_import_source_url_parameter_arn  = "arn:${data.aws_partition.current.partition}:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${local.database_import_source_url_parameter_name}"
+  database_import_log_group_name            = "/ecs/${local.name_prefix}/database-import"
 
   cloudtrail_name        = "${local.name_prefix}-audit"
   cloudtrail_arn         = "arn:${data.aws_partition.current.partition}:cloudtrail:${var.aws_region}:${data.aws_caller_identity.current.account_id}:trail/${local.cloudtrail_name}"

@@ -143,6 +143,37 @@ jobs:
           echo "migration_task_arn=${migration_task_arn}" >> "${GITHUB_OUTPUT}"
           echo "Started migration task: ${migration_task_arn}"
 
+          print_migration_logs() {
+            local task_id="${migration_task_arn##*/}"
+            local name_prefix="${ECS_CLUSTER%-cluster}"
+            local log_group="/ecs/${name_prefix}/${ECS_APP_CONTAINER}"
+            local log_stream_prefix="${ECS_APP_CONTAINER}/${ECS_APP_CONTAINER}/${task_id}"
+
+            echo "::group::CloudWatch logs for migration task"
+            echo "Log group: ${log_group}"
+            echo "Log stream prefix: ${log_stream_prefix}"
+
+            if ! log_events="$(aws logs get-log-events \
+              --log-group-name "${log_group}" \
+              --log-stream-name "${log_stream_prefix}" \
+              --limit 100 \
+              --output json 2>&1)"; then
+              echo "Unable to fetch CloudWatch logs:"
+              echo "${log_events}"
+              echo "::endgroup::"
+              return 0
+            fi
+
+            if ! jq -e '.events | length > 0' <<< "${log_events}" >/dev/null; then
+              echo "No CloudWatch log event found for this migration task yet."
+              echo "::endgroup::"
+              return 0
+            fi
+
+            jq -r '.events[] | .message' <<< "${log_events}"
+            echo "::endgroup::"
+          }
+
           aws ecs wait tasks-stopped \
             --cluster "${ECS_CLUSTER}" \
             --tasks "${migration_task_arn}"
@@ -161,6 +192,7 @@ jobs:
           if [[ "${exit_code}" != "0" ]]; then
             echo "Migration task failed with exit code: ${exit_code:-unknown}"
             echo "Stopped reason: ${stopped_reason}"
+            print_migration_logs
             echo "${task_result}"
             exit 1
           fi

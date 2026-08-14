@@ -102,6 +102,21 @@ output "cloudtrail_log_bucket" {
   value       = aws_s3_bucket.cloudtrail.id
 }
 
+output "application_kms_key_alias" {
+  description = "KMS alias used for application SSM SecureString parameters."
+  value       = aws_kms_alias.application.name
+}
+
+output "database_import_source_url_parameter_name" {
+  description = "SSM SecureString parameter name where the Neon DATABASE_URL must be stored before running the one-off import task."
+  value       = local.database_import_source_url_parameter_name
+}
+
+output "database_import_task_definition_arn" {
+  description = "ECS task definition ARN used for the one-off Neon to RDS import."
+  value       = aws_ecs_task_definition.database_import.arn
+}
+
 output "xray_sampling_rule_names" {
   description = "X-Ray sampling rules created for ECS tracing."
   value = var.enable_xray_tracing ? {
@@ -113,12 +128,13 @@ output "xray_sampling_rule_names" {
 output "observability_log_groups" {
   description = "CloudWatch Logs groups and prefix managed by the observability layer."
   value = {
-    cloudtrail     = aws_cloudwatch_log_group.cloudtrail.name
-    rds_postgresql = aws_cloudwatch_log_group.rds_postgresql.name
-    rds_upgrade    = aws_cloudwatch_log_group.rds_upgrade.name
-    redis_slow     = aws_cloudwatch_log_group.redis_slow.name
-    redis_engine   = aws_cloudwatch_log_group.redis_engine.name
-    ecs_app        = aws_cloudwatch_log_group.ecs_app.name
-    ecs_otel       = try(aws_cloudwatch_log_group.ecs_otel[0].name, null)
+    cloudtrail      = aws_cloudwatch_log_group.cloudtrail.name
+    database_import = aws_cloudwatch_log_group.database_import.name
+    rds_postgresql  = aws_cloudwatch_log_group.rds_postgresql.name
+    rds_upgrade     = aws_cloudwatch_log_group.rds_upgrade.name
+    redis_slow      = aws_cloudwatch_log_group.redis_slow.name
+    redis_engine    = aws_cloudwatch_log_group.redis_engine.name
+    ecs_app         = aws_cloudwatch_log_group.ecs_app.name
+    ecs_otel        = try(aws_cloudwatch_log_group.ecs_otel[0].name, null)
   }
 }

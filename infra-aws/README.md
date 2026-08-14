@@ -248,6 +248,116 @@ wait services-stable
 
 La tache de migration reutilise la definition ECS du service. Elle recupere donc les memes variables SSM que l'application et accede a RDS avec les memes Security Groups. Si une migration echoue, le workflow s'arrete avant de redeployer le service.
 
+## Importer les donnees NeonDB vers AWS RDS
+
+RDS est prive et accepte PostgreSQL uniquement depuis les taches ECS. L'import propre se fait donc avec une tache ECS Fargate temporaire, pas directement depuis ton PC.
+
+Flux :
+
+```text
+NeonDB public
+  |
+  | pg_dump
+  v
+tache ECS temporaire dans le VPC
+  |
+  | pg_restore
+  v
+AWS RDS PostgreSQL prive
+```
+
+### 1. Appliquer Terraform
+
+```bash
+terraform apply \
+  -var="github_owner=GroupeBH" \
+  -var="github_repository=zwanga-api" \
+  -var="github_branch=release" \
+  -var="application_s3_bucket_name=medias-zwanga" \
+  -var="enable_rekognition_permissions=true"
+```
+
+Terraform cree une task definition ECS dediee a l'import :
+
+```bash
+terraform output -raw database_import_task_definition_arn
+```
+
+### 2. Preparer le secret Neon dans SSM
+
+Ne mets pas l'URL Neon dans GitHub ni dans Terraform. Stocke-la localement dans SSM :
+
+```bash
+cd /mnt/c/Users/hp/projects/zwanga-backend/infra-aws
+bash scripts/put-neon-database-url-to-ssm.sh
+```
+
+Le script demande `NEON_DATABASE_URL` en saisie cachee et l'ecrit dans :
+
+```text
+/zwanga-api/production/migration/NEON_DATABASE_URL
+```
+
+### 3. Geler les ecritures cote Render/Neon
+
+Avant l'import final :
+
+- arrete temporairement le service Render ou mets l'application en maintenance ;
+- si le service ECS AWS tourne deja, mets temporairement `desired-count` a `0` ;
+- evite toute nouvelle inscription, reservation, paiement ou mise a jour de trajet ;
+- garde Neon intact apres l'import, le temps de verifier AWS.
+
+Exemple pour arreter temporairement l'application AWS avant l'import :
+
+```bash
+aws ecs update-service \
+  --region "$(terraform output -raw aws_region)" \
+  --cluster "$(terraform output -raw ecs_cluster_name)" \
+  --service "$(terraform output -raw ecs_service_name)" \
+  --desired-count 0
+```
+
+### 4. Lancer l'import Neon vers RDS
+
+```bash
+bash scripts/run-neon-to-rds-import.sh
+```
+
+Le script lance une tache ECS Fargate qui execute :
+
+```text
+pg_dump Neon --format=custom --single-transaction --no-owner --no-acl
+pg_restore RDS --clean --if-exists --no-owner --no-acl
+ANALYZE
+```
+
+Les logs sont dans CloudWatch :
+
+```text
+/ecs/zwanga-api-production/database-import
+```
+
+### 5. Verifier puis deployer
+
+Apres l'import :
+
+- verifie les logs CloudWatch de la tache ;
+- lance ou relance le workflow GitHub Actions sur `release` ;
+- le workflow executera `npm run migration:run:prod` dans ECS avant de redeployer l'application ;
+- teste `/health`, login, recherche de trajets, wallet, paiements et tracking.
+
+Si tu ne redeploies pas immediatement via GitHub Actions, remets le service AWS a `1` :
+
+```bash
+aws ecs update-service \
+  --region "$(terraform output -raw aws_region)" \
+  --cluster "$(terraform output -raw ecs_cluster_name)" \
+  --service "$(terraform output -raw ecs_service_name)" \
+  --desired-count 1
+```
+
+Ne supprime pas Neon tant que l'application AWS n'a pas ete verifiee avec les donnees importees.
+
 ## Observabilite et alertes
 
 Apres l'apply, ouvrir le dashboard :
