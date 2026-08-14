@@ -10,7 +10,7 @@ resource "aws_security_group" "alb" {
 
 resource "aws_security_group" "ecs_tasks" {
   name        = "${local.name_prefix}-ecs-tasks-sg"
-  description = "Strict traffic rules for private ECS Fargate tasks"
+  description = "Strict traffic rules for ECS Fargate tasks with public egress only"
   vpc_id      = aws_vpc.main.id
 
   tags = {
@@ -114,7 +114,7 @@ resource "aws_vpc_security_group_egress_rule" "ecs_tasks_to_redis" {
 
 resource "aws_vpc_security_group_egress_rule" "ecs_tasks_https" {
   security_group_id = aws_security_group.ecs_tasks.id
-  description       = "HTTPS APIs, ECR, CloudWatch Logs, SSM and X-Ray through NAT"
+  description       = "HTTPS APIs, ECR, CloudWatch Logs, SSM and X-Ray through the task public IP"
   cidr_ipv4         = "0.0.0.0/0"
   ip_protocol       = "tcp"
   from_port         = 443

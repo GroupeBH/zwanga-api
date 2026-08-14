@@ -1,5 +1,5 @@
-aws_region   = "eu-west-1"
-project_name = "zwanga"
+aws_region   = "eu-central-1"
+project_name = "zwanga-api"
 environment  = "production"
 
 # Replace with the GitHub organization or username that owns zwanga-backend.
@@ -7,8 +7,10 @@ github_owner      = "MON_PSEUDO"
 github_repository = "zwanga-backend"
 github_branch     = "main"
 
-# Economical profile: one NAT Gateway. Use false for one NAT per AZ.
-single_nat_gateway = true
+# If your AWS account already has the GitHub Actions OIDC provider, set its ARN
+# instead of creating a duplicate account-level provider.
+# Example:
+# github_oidc_provider_arn = "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com"
 
 database_instance_class      = "db.t4g.micro"
 database_allocated_storage_gb = 20
@@ -24,16 +26,16 @@ ecs_task_cpu    = "512"
 ecs_task_memory = "1024"
 ecs_desired_count = 1
 
-# Keep autoscaling disabled until WebSockets are validated with Redis pub/sub
-# across several ECS tasks.
+# Keep autoscaling disabled for the first economical deployment. Redis pub/sub is
+# configured; when you enable autoscaling, use min=2 and max=6.
 ecs_enable_autoscaling = false
-ecs_min_capacity       = 1
-ecs_max_capacity       = 1
+ecs_min_capacity       = 2
+ecs_max_capacity       = 6
 
 # Useful observability without the more expensive high-cardinality metrics.
 enable_ecs_container_insights             = false
 rds_enhanced_monitoring_interval_seconds = 60
-cloudwatch_log_retention_days             = 30
+cloudwatch_log_retention_days             = 7
 cloudtrail_s3_retention_days              = 365
 enable_cloudtrail_insights                = false
 enable_xray_tracing                       = true
@@ -52,11 +54,15 @@ alert_email_addresses = [
   "security@zwanga-app.com",
 ]
 
-# Ces variables non sensibles sont creees par Terraform dans SSM Parameter Store
-# en SecureString sous /zwanga/production/env/*, puis injectees dans ECS.
+# Ces variables non sensibles sont des exemples. Elles sont creees par Terraform
+# dans SSM Parameter Store en SecureString sous /zwanga-api/production/env/*,
+# puis injectees dans ECS. Pour tes vraies variables locales, utilise plutot
+# scripts/import-env-to-ssm.ps1 avec ton fichier .env non versionne.
 runtime_environment_variables = {
   CORS_ORIGINS                 = "https://zwanga-app.com,https://www.zwanga-app.com"
   FRONTEND_URL                 = "https://zwanga-app.com"
+  GPS_LOG_SAMPLE_RATE          = "0.01"
+  LOG_LEVEL                    = "warn"
   PUBLIC_API_BASE_URL          = "https://api.zwanga-app.com"
   TRACKING_PUBLIC_BASE_URL     = "https://zwanga-app.com/trips"
   ZWANGA_PUBLIC_WEB_URL        = "https://zwanga-app.com"
@@ -103,7 +109,8 @@ runtime_environment_variables = {
 }
 
 # Les secrets et valeurs propres a ton compte peuvent etre importes dans SSM
-# avec scripts/import-env-to-ssm.ps1. Terraform ne stocke alors que leurs noms.
+# avec scripts/import-env-to-ssm.ps1. Terraform les decouvre automatiquement
+# sous /zwanga-api/production/env/* au prochain apply, sans stocker les valeurs.
 external_runtime_environment_variable_names = [
   # "AWS_S3_BUCKET_NAME",
   # "FCM_PROJECT_ID",

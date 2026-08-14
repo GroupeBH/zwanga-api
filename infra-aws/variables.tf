@@ -1,13 +1,13 @@
 variable "aws_region" {
   description = "AWS region used by every resource."
   type        = string
-  default     = "eu-west-1"
+  default     = "eu-central-1"
 }
 
 variable "project_name" {
   description = "Lowercase project identifier used in resource names."
   type        = string
-  default     = "zwanga"
+  default     = "zwanga-api"
 
   validation {
     condition     = can(regex("^[a-z0-9-]+$", var.project_name))
@@ -34,7 +34,7 @@ variable "github_owner" {
 variable "github_repository" {
   description = "GitHub backend repository allowed to deploy."
   type        = string
-  default     = "zwanga-backend"
+  default     = "zwanga-api"
 }
 
 variable "github_branch" {
@@ -47,6 +47,20 @@ variable "github_actions_role_name" {
   description = "Name of the IAM role assumed by GitHub Actions through OIDC."
   type        = string
   default     = "GitHubActionsWorkflowRole"
+}
+
+variable "github_oidc_provider_arn" {
+  description = "Optional ARN of an existing account-level GitHub Actions OIDC provider. Leave null to let this Terraform stack create it."
+  type        = string
+  default     = null
+
+  validation {
+    condition = (
+      var.github_oidc_provider_arn == null ||
+      can(regex("^arn:[^:]+:iam::[0-9]{12}:oidc-provider/token\\.actions\\.githubusercontent\\.com$", var.github_oidc_provider_arn))
+    )
+    error_message = "github_oidc_provider_arn must be null or the ARN of token.actions.githubusercontent.com in the current AWS account."
+  }
 }
 
 variable "vpc_cidr" {
@@ -75,12 +89,6 @@ variable "private_subnet_cidrs" {
     condition     = length(var.private_subnet_cidrs) == 2
     error_message = "private_subnet_cidrs must contain exactly two CIDRs."
   }
-}
-
-variable "single_nat_gateway" {
-  description = "Use one NAT Gateway to reduce cost. Set false for one NAT per AZ."
-  type        = bool
-  default     = true
 }
 
 variable "database_name" {
@@ -132,7 +140,7 @@ variable "database_skip_final_snapshot" {
 }
 
 variable "redis_node_type" {
-  description = "ElastiCache Redis node type."
+  description = "ElastiCache Valkey node type."
   type        = string
   default     = "cache.t4g.micro"
 }
@@ -184,9 +192,9 @@ variable "ecs_task_memory" {
 }
 
 variable "ecs_task_cpu_architecture" {
-  description = "Container CPU architecture. Keep X86_64 while the workflow builds linux/amd64 images."
+  description = "Container CPU architecture. ARM64 uses AWS Graviton and matches the GitHub Actions linux/arm64 Docker build."
   type        = string
-  default     = "X86_64"
+  default     = "ARM64"
 
   validation {
     condition     = contains(["X86_64", "ARM64"], var.ecs_task_cpu_architecture)
@@ -201,7 +209,7 @@ variable "ecs_desired_count" {
 }
 
 variable "ecs_enable_autoscaling" {
-  description = "Enable ECS Service Auto Scaling. Keep false until Socket.IO is configured for multi-task pub/sub."
+  description = "Enable ECS Service Auto Scaling. Keep false for the most economical launch profile; Redis pub/sub is ready for multi-task Socket.IO when enabled."
   type        = bool
   default     = false
 }
@@ -213,21 +221,33 @@ variable "ecs_min_capacity" {
 }
 
 variable "ecs_max_capacity" {
-  description = "Maximum ECS tasks when autoscaling is enabled. Keep 1 until WebSockets are ready for multi-task scaling."
+  description = "Maximum ECS tasks when autoscaling is enabled."
   type        = number
-  default     = 1
-}
-
-variable "ecs_cpu_target_utilization" {
-  description = "Target CPU utilization percentage for ECS Service Auto Scaling."
-  type        = number
-  default     = 60
+  default     = 6
 }
 
 variable "ecs_memory_target_utilization" {
   description = "Target memory utilization percentage for ECS Service Auto Scaling."
   type        = number
   default     = 70
+}
+
+variable "ecs_request_count_per_target" {
+  description = "Target ALB request count per target for ECS Service Auto Scaling."
+  type        = number
+  default     = 1000
+}
+
+variable "ecs_scale_in_cooldown_seconds" {
+  description = "Cooldown before ECS scales in after a scale event."
+  type        = number
+  default     = 300
+}
+
+variable "ecs_scale_out_cooldown_seconds" {
+  description = "Cooldown before ECS scales out after a scale event."
+  type        = number
+  default     = 60
 }
 
 variable "ecs_deployment_minimum_healthy_percent" {
@@ -293,7 +313,7 @@ variable "alb_stickiness_cookie_duration_seconds" {
 variable "alb_health_check_path" {
   description = "Application health check path used by the ALB target group."
   type        = string
-  default     = "/api/v1/health"
+  default     = "/health"
 }
 
 variable "runtime_environment_variables" {
@@ -320,7 +340,7 @@ variable "runtime_environment_variables" {
   validation {
     condition = length(setintersection(
       toset(keys(var.runtime_environment_variables)),
-      toset(["DATABASE_URL", "REDIS_URL", "JWT_SECRET", "JWT_REFRESH_SECRET", "AOT_CONFIG_CONTENT"]),
+      toset(["DATABASE_URL", "REDIS_URL", "REDIS_TLS", "JWT_SECRET", "JWT_REFRESH_SECRET", "AOT_CONFIG_CONTENT"]),
     )) == 0
     error_message = "DATABASE_URL, REDIS_URL, JWT_SECRET, JWT_REFRESH_SECRET and AOT_CONFIG_CONTENT are generated separately and must not be set in runtime_environment_variables."
   }
@@ -353,6 +373,7 @@ variable "external_runtime_environment_variable_names" {
       toset([
         "DATABASE_URL",
         "REDIS_URL",
+        "REDIS_TLS",
         "JWT_SECRET",
         "JWT_REFRESH_SECRET",
         "AOT_CONFIG_CONTENT",
@@ -409,7 +430,7 @@ variable "alert_email_addresses" {
 variable "cloudwatch_log_retention_days" {
   description = "Retention for application, database, cache and CloudTrail logs in CloudWatch Logs."
   type        = number
-  default     = 30
+  default     = 7
 
   validation {
     condition = contains([

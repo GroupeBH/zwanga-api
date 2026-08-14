@@ -1,4 +1,6 @@
 resource "aws_iam_openid_connect_provider" "github" {
+  count = var.github_oidc_provider_arn == null ? 1 : 0
+
   url = "https://token.actions.githubusercontent.com"
 
   client_id_list = ["sts.amazonaws.com"]
@@ -16,7 +18,7 @@ data "aws_iam_policy_document" "github_actions_assume_role" {
 
     principals {
       type        = "Federated"
-      identifiers = [aws_iam_openid_connect_provider.github.arn]
+      identifiers = [local.github_oidc_provider_arn]
     }
 
     condition {
@@ -71,6 +73,48 @@ data "aws_iam_policy_document" "github_actions_deploy" {
       "ecs:UpdateService",
     ]
     resources = [local.ecs_service_arn]
+  }
+
+  statement {
+    sid    = "RunDatabaseMigrationTask"
+    effect = "Allow"
+    actions = [
+      "ecs:RunTask",
+    ]
+    resources = [local.ecs_task_definition_arn_pattern]
+
+    condition {
+      test     = "ArnEquals"
+      variable = "ecs:cluster"
+      values   = [local.ecs_cluster_arn]
+    }
+  }
+
+  statement {
+    sid    = "DescribeDatabaseMigrationTask"
+    effect = "Allow"
+    actions = [
+      "ecs:DescribeTasks",
+    ]
+    resources = [local.ecs_task_arn_pattern]
+  }
+
+  statement {
+    sid    = "PassECSTaskRolesForMigration"
+    effect = "Allow"
+    actions = [
+      "iam:PassRole",
+    ]
+    resources = [
+      aws_iam_role.ecs_task.arn,
+      aws_iam_role.ecs_task_execution.arn,
+    ]
+
+    condition {
+      test     = "StringEquals"
+      variable = "iam:PassedToService"
+      values   = ["ecs-tasks.amazonaws.com"]
+    }
   }
 
   statement {

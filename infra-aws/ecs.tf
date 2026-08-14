@@ -7,6 +7,8 @@ locals {
       API_PREFIX          = "api/v1"
       TYPEORM_SYNCHRONIZE = "false"
       AWS_REGION          = var.aws_region
+      LOG_LEVEL           = "warn"
+      GPS_LOG_SAMPLE_RATE = "0.01"
     },
     var.runtime_environment_variables,
     var.enable_xray_tracing ? {
@@ -196,9 +198,9 @@ resource "aws_ecs_service" "backend" {
   wait_for_steady_state              = var.ecs_wait_for_steady_state
 
   network_configuration {
-    subnets          = aws_subnet.private[*].id
+    subnets          = aws_subnet.public[*].id
     security_groups  = [aws_security_group.ecs_tasks.id]
-    assign_public_ip = false
+    assign_public_ip = true
   }
 
   load_balancer {
@@ -228,24 +230,6 @@ resource "aws_appautoscaling_target" "ecs" {
   service_namespace  = "ecs"
 }
 
-resource "aws_appautoscaling_policy" "ecs_cpu" {
-  count = var.ecs_enable_autoscaling ? 1 : 0
-
-  name               = "${local.name_prefix}-ecs-cpu"
-  policy_type        = "TargetTrackingScaling"
-  resource_id        = aws_appautoscaling_target.ecs[0].resource_id
-  scalable_dimension = aws_appautoscaling_target.ecs[0].scalable_dimension
-  service_namespace  = aws_appautoscaling_target.ecs[0].service_namespace
-
-  target_tracking_scaling_policy_configuration {
-    target_value = var.ecs_cpu_target_utilization
-
-    predefined_metric_specification {
-      predefined_metric_type = "ECSServiceAverageCPUUtilization"
-    }
-  }
-}
-
 resource "aws_appautoscaling_policy" "ecs_memory" {
   count = var.ecs_enable_autoscaling ? 1 : 0
 
@@ -256,10 +240,33 @@ resource "aws_appautoscaling_policy" "ecs_memory" {
   service_namespace  = aws_appautoscaling_target.ecs[0].service_namespace
 
   target_tracking_scaling_policy_configuration {
-    target_value = var.ecs_memory_target_utilization
+    target_value       = var.ecs_memory_target_utilization
+    scale_in_cooldown  = var.ecs_scale_in_cooldown_seconds
+    scale_out_cooldown = var.ecs_scale_out_cooldown_seconds
 
     predefined_metric_specification {
       predefined_metric_type = "ECSServiceAverageMemoryUtilization"
+    }
+  }
+}
+
+resource "aws_appautoscaling_policy" "ecs_request_count" {
+  count = var.ecs_enable_autoscaling ? 1 : 0
+
+  name               = "${local.name_prefix}-ecs-request-count"
+  policy_type        = "TargetTrackingScaling"
+  resource_id        = aws_appautoscaling_target.ecs[0].resource_id
+  scalable_dimension = aws_appautoscaling_target.ecs[0].scalable_dimension
+  service_namespace  = aws_appautoscaling_target.ecs[0].service_namespace
+
+  target_tracking_scaling_policy_configuration {
+    target_value       = var.ecs_request_count_per_target
+    scale_in_cooldown  = var.ecs_scale_in_cooldown_seconds
+    scale_out_cooldown = var.ecs_scale_out_cooldown_seconds
+
+    predefined_metric_specification {
+      predefined_metric_type = "ALBRequestCountPerTarget"
+      resource_label         = "${aws_lb.backend.arn_suffix}/${aws_lb_target_group.backend.arn_suffix}"
     }
   }
 }

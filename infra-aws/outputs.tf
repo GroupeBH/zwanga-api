@@ -9,8 +9,13 @@ output "vpc_id" {
 }
 
 output "private_subnet_ids" {
-  description = "Private subnet IDs used by ECS Fargate, RDS and Redis."
+  description = "Private subnet IDs used by RDS and Redis."
   value       = aws_subnet.private[*].id
+}
+
+output "ecs_public_subnet_ids" {
+  description = "Public subnet IDs used by ECS Fargate tasks with assign_public_ip=true."
+  value       = aws_subnet.public[*].id
 }
 
 output "ecr_repository_name" {
@@ -54,6 +59,7 @@ output "runtime_parameter_names" {
     {
       DATABASE_URL       = aws_ssm_parameter.database_url.name
       REDIS_URL          = aws_ssm_parameter.redis_url.name
+      REDIS_TLS          = aws_ssm_parameter.redis_tls.name
       JWT_SECRET         = aws_ssm_parameter.jwt_secret.name
       JWT_REFRESH_SECRET = aws_ssm_parameter.jwt_refresh_secret.name
     },
@@ -64,10 +70,7 @@ output "runtime_parameter_names" {
     var.application_s3_bucket_name == null ? {} : {
       AWS_S3_BUCKET_NAME = "${local.ssm_prefix}/env/AWS_S3_BUCKET_NAME"
     },
-    {
-      for name in sort(tolist(var.external_runtime_environment_variable_names)) :
-      name => "${local.ssm_prefix}/env/${name}"
-    },
+    local.external_runtime_environment_parameter_names_by_env,
     var.enable_xray_tracing ? {
       AOT_CONFIG_CONTENT = aws_ssm_parameter.otel_collector_config[0].name
     } : {},

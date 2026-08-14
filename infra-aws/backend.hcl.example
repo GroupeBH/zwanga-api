@@ -1,5 +1,5 @@
-bucket       = "replace-with-your-globally-unique-terraform-state-bucket"
+bucket       = "tfstates-zwanga-api"
 key          = "zwanga/production/terraform.tfstate"
-region       = "eu-west-1"
+region       = "eu-central-1"
 encrypt      = true
 use_lockfile = true

@@ -35,7 +35,7 @@ resource "aws_iam_role_policy" "ecs_xray" {
 resource "aws_xray_sampling_rule" "health_checks" {
   count = var.enable_xray_tracing ? 1 : 0
 
-  rule_name      = "${local.name_prefix}-health"
+  rule_name      = local.xray_health_rule_name
   priority       = 100
   version        = 1
   reservoir_size = 0
@@ -52,7 +52,7 @@ resource "aws_xray_sampling_rule" "health_checks" {
 resource "aws_xray_sampling_rule" "application" {
   count = var.enable_xray_tracing ? 1 : 0
 
-  rule_name      = "${local.name_prefix}-application"
+  rule_name      = local.xray_application_rule_name
   priority       = 1000
   version        = 1
   reservoir_size = 1

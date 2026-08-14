@@ -24,6 +24,14 @@ resource "aws_ssm_parameter" "redis_url" {
   value       = "rediss://:${random_password.redis_auth.result}@${aws_elasticache_replication_group.redis.primary_endpoint_address}:6379"
 }
 
+resource "aws_ssm_parameter" "redis_tls" {
+  name        = "${local.ssm_prefix}/REDIS_TLS"
+  description = "Enables TLS for Redis and Socket.IO adapter clients"
+  type        = "SecureString"
+  key_id      = aws_kms_key.application.arn
+  value       = "true"
+}
+
 resource "aws_ssm_parameter" "jwt_secret" {
   name        = "${local.ssm_prefix}/JWT_SECRET"
   description = "JWT signing secret consumed by ECS Fargate"
@@ -70,10 +78,20 @@ resource "aws_ssm_parameter" "otel_collector_config" {
   value       = local.ecs_otel_collector_config
 }
 
+data "aws_ssm_parameters_by_path" "external_runtime_environment" {
+  # Application secrets imported from a local .env file live under this path.
+  # We only use their names/ARNs to inject them into ECS. Values are not
+  # decrypted into Terraform state.
+  path            = "${local.ssm_prefix}/env"
+  recursive       = false
+  with_decryption = false
+}
+
 locals {
   generated_secret_parameter_arns_by_env = {
     DATABASE_URL       = aws_ssm_parameter.database_url.arn
     REDIS_URL          = aws_ssm_parameter.redis_url.arn
+    REDIS_TLS          = aws_ssm_parameter.redis_tls.arn
     JWT_SECRET         = aws_ssm_parameter.jwt_secret.arn
     JWT_REFRESH_SECRET = aws_ssm_parameter.jwt_refresh_secret.arn
   }
@@ -87,14 +105,42 @@ locals {
     AWS_S3_BUCKET_NAME = aws_ssm_parameter.application_s3_bucket_name[0].arn
   }
 
-  external_runtime_environment_parameter_arns_by_env = {
+  otel_environment_parameter_arns_by_env = var.enable_xray_tracing ? {
+    AOT_CONFIG_CONTENT = aws_ssm_parameter.otel_collector_config[0].arn
+  } : {}
+
+  reserved_runtime_environment_variable_names = toset(concat(
+    keys(local.generated_secret_parameter_arns_by_env),
+    keys(local.ecs_environment_parameter_arns_by_env),
+    keys(local.generated_runtime_environment_parameter_arns_by_env),
+    keys(local.otel_environment_parameter_arns_by_env),
+  ))
+
+  discovered_external_runtime_environment_parameter_arns_by_env = {
+    for name, arn in zipmap(
+      data.aws_ssm_parameters_by_path.external_runtime_environment.names,
+      data.aws_ssm_parameters_by_path.external_runtime_environment.arns,
+      ) :
+    trimprefix(name, "${local.ssm_prefix}/env/") => arn
+    if startswith(name, "${local.ssm_prefix}/env/")
+    && can(regex("^[A-Za-z_][A-Za-z0-9_]*$", trimprefix(name, "${local.ssm_prefix}/env/")))
+    && !contains(local.reserved_runtime_environment_variable_names, trimprefix(name, "${local.ssm_prefix}/env/"))
+  }
+
+  manual_external_runtime_environment_parameter_arns_by_env = {
     for name in sort(tolist(var.external_runtime_environment_variable_names)) :
     name => "arn:${data.aws_partition.current.partition}:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${local.ssm_prefix}/env/${name}"
   }
 
-  otel_environment_parameter_arns_by_env = var.enable_xray_tracing ? {
-    AOT_CONFIG_CONTENT = aws_ssm_parameter.otel_collector_config[0].arn
-  } : {}
+  external_runtime_environment_parameter_arns_by_env = merge(
+    local.discovered_external_runtime_environment_parameter_arns_by_env,
+    local.manual_external_runtime_environment_parameter_arns_by_env,
+  )
+
+  external_runtime_environment_parameter_names_by_env = {
+    for name in sort(keys(local.external_runtime_environment_parameter_arns_by_env)) :
+    name => "${local.ssm_prefix}/env/${name}"
+  }
 
   runtime_parameter_arns = concat(
     values(local.generated_secret_parameter_arns_by_env),

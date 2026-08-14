@@ -10,15 +10,15 @@ resource "random_password" "redis_auth" {
 
 resource "aws_elasticache_replication_group" "redis" {
   replication_group_id = "${local.name_prefix}-redis"
-  description          = "Redis cache and Socket.IO pub/sub for ${local.name_prefix}"
+  description          = "Valkey cache and Socket.IO pub/sub for ${local.name_prefix}"
 
-  engine                     = "redis"
-  engine_version             = "7.1"
+  engine                     = "valkey"
+  engine_version             = "7.2"
   auto_minor_version_upgrade = true
   node_type                  = var.redis_node_type
   port                       = 6379
   num_cache_clusters         = var.redis_num_cache_clusters
-  parameter_group_name       = "default.redis7"
+  parameter_group_name       = "default.valkey7"
 
   automatic_failover_enabled = var.redis_num_cache_clusters > 1
   multi_az_enabled           = var.redis_num_cache_clusters > 1
