@@ -40,7 +40,7 @@ variable "github_repository" {
 variable "github_branch" {
   description = "Only this Git branch can assume the deployment role."
   type        = string
-  default     = "main"
+  default     = "release"
 }
 
 variable "github_actions_role_name" {
