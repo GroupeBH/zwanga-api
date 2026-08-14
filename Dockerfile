@@ -11,7 +11,7 @@ RUN apk add --no-cache dumb-init
 
 FROM base AS dependencies
 COPY package.json package-lock.json ./
-RUN --mount=type=cache,target=/root/.npm \
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
     npm ci --legacy-peer-deps
 
 FROM dependencies AS builder
@@ -22,9 +22,8 @@ RUN npm run build
 FROM base AS production-dependencies
 ENV NODE_ENV=production
 COPY package.json package-lock.json ./
-RUN --mount=type=cache,target=/root/.npm \
-    npm ci --omit=dev --legacy-peer-deps \
-    && npm cache clean --force
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
+    npm ci --omit=dev --legacy-peer-deps
 
 FROM base AS production
 COPY --chown=node:node package.json package-lock.json ./
