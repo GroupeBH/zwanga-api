@@ -28,6 +28,7 @@
     "migration:create": "npm run typeorm -- migration:create",
     "migration:generate": "npm run typeorm:ts -- -d src/database/data-source.ts migration:generate",
     "migration:run": "npm run build && npm run migration:run:prod",
+    "database:assert-bootstrap:prod": "node dist/database/assert-bootstrap.js",
     "migration:run:prod": "node ./node_modules/typeorm/cli.js -d dist/database/data-source.js migration:run",
     "migration:revert": "npm run build && node ./node_modules/typeorm/cli.js -d dist/database/data-source.js migration:revert",
     "migration:show": "npm run build && node ./node_modules/typeorm/cli.js -d dist/database/data-source.js migration:show",

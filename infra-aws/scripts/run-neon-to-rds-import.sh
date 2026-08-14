@@ -20,6 +20,7 @@ aws_region="${AWS_REGION:-$(terraform output -raw aws_region)}"
 cluster_name="${ECS_CLUSTER:-$(terraform output -raw ecs_cluster_name)}"
 service_name="${ECS_SERVICE:-$(terraform output -raw ecs_service_name)}"
 task_definition="${DATABASE_IMPORT_TASK_DEFINITION:-$(terraform output -raw database_import_task_definition_arn)}"
+database_import_security_group="${DATABASE_IMPORT_SECURITY_GROUP_ID:-$(terraform output -raw database_import_security_group_id)}"
 container_name="neon-to-rds-import"
 
 parameter_name="$(terraform output -raw database_import_source_url_parameter_name)"
@@ -36,21 +37,11 @@ subnets="$(aws ecs describe-services \
   --query 'services[0].networkConfiguration.awsvpcConfiguration.subnets' \
   --output text | tr '\t' ',')"
 
-security_groups="$(aws ecs describe-services \
-  --region "${aws_region}" \
-  --cluster "${cluster_name}" \
-  --services "${service_name}" \
-  --query 'services[0].networkConfiguration.awsvpcConfiguration.securityGroups' \
-  --output text | tr '\t' ',')"
+# This economic setup has no NAT Gateway. The one-off import task runs in
+# public subnets and therefore needs a public IP to reach Neon over TCP/5432.
+assign_public_ip="${DATABASE_IMPORT_ASSIGN_PUBLIC_IP:-ENABLED}"
 
-assign_public_ip="$(aws ecs describe-services \
-  --region "${aws_region}" \
-  --cluster "${cluster_name}" \
-  --services "${service_name}" \
-  --query 'services[0].networkConfiguration.awsvpcConfiguration.assignPublicIp' \
-  --output text)"
-
-if [[ -z "${subnets}" || "${subnets}" == "None" || -z "${security_groups}" || "${security_groups}" == "None" ]]; then
+if [[ -z "${subnets}" || "${subnets}" == "None" || -z "${database_import_security_group}" || "${database_import_security_group}" == "None" ]]; then
   echo "Unable to resolve ECS service network configuration." >&2
   exit 1
 fi
@@ -66,6 +57,7 @@ Important:
 Cluster:         ${cluster_name}
 Service network: ${service_name}
 Task definition: ${task_definition}
+Import SG:       ${database_import_security_group}
 EOF
 
 read -r -p "Type IMPORT to continue: " confirmation
@@ -79,7 +71,7 @@ task_arn="$(aws ecs run-task \
   --cluster "${cluster_name}" \
   --launch-type FARGATE \
   --task-definition "${task_definition}" \
-  --network-configuration "awsvpcConfiguration={subnets=[${subnets}],securityGroups=[${security_groups}],assignPublicIp=${assign_public_ip}}" \
+  --network-configuration "awsvpcConfiguration={subnets=[${subnets}],securityGroups=[${database_import_security_group}],assignPublicIp=${assign_public_ip}}" \
   --started-by "neon-to-rds-import" \
   --query 'tasks[0].taskArn' \
   --output text)"

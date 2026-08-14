@@ -241,12 +241,12 @@ Ordre du deploiement :
 tests
 build NestJS
 build/push Docker vers ECR
-tache ECS temporaire : npm run migration:run:prod
+tache ECS temporaire : npm run database:assert-bootstrap:prod && npm run migration:run:prod
 ecs update-service --force-new-deployment
 wait services-stable
 ```
 
-La tache de migration reutilise la definition ECS du service. Elle recupere donc les memes variables SSM que l'application et accede a RDS avec les memes Security Groups. Si une migration echoue, le workflow s'arrete avant de redeployer le service.
+La tache de migration reutilise la definition ECS du service. Elle recupere donc les memes variables SSM que l'application et accede a RDS avec les memes Security Groups. Avant TypeORM, elle verifie que RDS contient deja les tables de base importees depuis Neon (`users`, `trips`, `bookings`). Si RDS est vide, le workflow s'arrete avec un message clair : il faut importer Neon avant d'executer les migrations incrementales.
 
 ## Importer les donnees NeonDB vers AWS RDS
 
@@ -326,8 +326,8 @@ bash scripts/run-neon-to-rds-import.sh
 Le script lance une tache ECS Fargate qui execute :
 
 ```text
-pg_dump Neon --format=custom --single-transaction --no-owner --no-acl
-pg_restore RDS --clean --if-exists --no-owner --no-acl
+pg_dump Neon --format=custom --no-owner --no-acl --exclude-extension=postgis_sfcgal
+pg_restore RDS --clean --if-exists --no-owner --no-acl --single-transaction
 ANALYZE
 ```
 
@@ -337,13 +337,45 @@ Les logs sont dans CloudWatch :
 /ecs/zwanga-api-production/database-import
 ```
 
+`postgis_sfcgal` est exclu du dump car Neon peut l'avoir activee alors qu'Amazon RDS PostgreSQL ne la fournit pas toujours. L'application Zwanga utilise PostGIS pour les positions GPS (`geography(Point,4326)`), donc l'extension `postgis` suffit pour les besoins applicatifs actuels.
+
+Si les logs affichent un timeout vers Neon comme :
+
+```text
+connection to server at "...neon.tech", port 5432 failed: Operation timed out
+```
+
+cela signifie que la tache ECS ne peut pas sortir vers le PostgreSQL public de Neon. L'import utilise un Security Group dedie qui autorise uniquement :
+
+- DNS vers le resolver VPC ;
+- HTTPS vers AWS APIs/ECR/CloudWatch/SSM ;
+- PostgreSQL prive vers RDS ;
+- PostgreSQL public `5432` vers Neon pour la duree de l'import.
+
+Applique Terraform avant de relancer l'import pour creer ce Security Group :
+
+```bash
+terraform apply \
+  -var="application_s3_bucket_name=medias-zwanga" \
+  -var="enable_rekognition_permissions=true"
+```
+
+Important : l'ancien projet utilisait `TYPEORM_SYNCHRONIZE=true`. La base Neon contient donc le schema initial reel, alors que les migrations TypeORM actuelles sont des migrations incrementales. Elles ne savent pas creer une base vide de zero. Le premier bootstrap AWS doit donc etre :
+
+```text
+1. Terraform cree RDS vide
+2. Import Neon complet vers RDS
+3. GitHub Actions execute les migrations incrementales restantes
+4. ECS redeploie l'application
+```
+
 ### 5. Verifier puis deployer
 
 Apres l'import :
 
 - verifie les logs CloudWatch de la tache ;
 - lance ou relance le workflow GitHub Actions sur `release` ;
-- le workflow executera `npm run migration:run:prod` dans ECS avant de redeployer l'application ;
+- le workflow executera `npm run database:assert-bootstrap:prod && npm run migration:run:prod` dans ECS avant de redeployer l'application ;
 - teste `/health`, login, recherche de trajets, wallet, paiements et tracking.
 
 Si tu ne redeploies pas immediatement via GitHub Actions, remets le service AWS a `1` :

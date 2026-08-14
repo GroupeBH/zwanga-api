@@ -18,6 +18,16 @@ resource "aws_security_group" "ecs_tasks" {
   }
 }
 
+resource "aws_security_group" "database_import" {
+  name        = "${local.name_prefix}-database-import-sg"
+  description = "One-off Neon to RDS import task egress rules"
+  vpc_id      = aws_vpc.main.id
+
+  tags = {
+    Name = "${local.name_prefix}-database-import-sg"
+  }
+}
+
 resource "aws_security_group" "database" {
   name        = "${local.name_prefix}-postgres-sg"
   description = "PostgreSQL accepts traffic only from ECS Fargate tasks"
@@ -85,6 +95,15 @@ resource "aws_vpc_security_group_ingress_rule" "database_from_ecs_tasks" {
   to_port                      = 5432
 }
 
+resource "aws_vpc_security_group_ingress_rule" "database_from_database_import" {
+  security_group_id            = aws_security_group.database.id
+  referenced_security_group_id = aws_security_group.database_import.id
+  description                  = "PostgreSQL from the one-off Neon import task"
+  ip_protocol                  = "tcp"
+  from_port                    = 5432
+  to_port                      = 5432
+}
+
 resource "aws_vpc_security_group_ingress_rule" "redis_from_ecs_tasks" {
   security_group_id            = aws_security_group.redis.id
   referenced_security_group_id = aws_security_group.ecs_tasks.id
@@ -132,6 +151,51 @@ resource "aws_vpc_security_group_egress_rule" "ecs_tasks_dns_udp" {
 
 resource "aws_vpc_security_group_egress_rule" "ecs_tasks_dns_tcp" {
   security_group_id = aws_security_group.ecs_tasks.id
+  description       = "DNS over TCP to the VPC resolver"
+  cidr_ipv4         = "${cidrhost(var.vpc_cidr, 2)}/32"
+  ip_protocol       = "tcp"
+  from_port         = 53
+  to_port           = 53
+}
+
+resource "aws_vpc_security_group_egress_rule" "database_import_to_database" {
+  security_group_id            = aws_security_group.database_import.id
+  referenced_security_group_id = aws_security_group.database.id
+  description                  = "Import task to private AWS RDS PostgreSQL"
+  ip_protocol                  = "tcp"
+  from_port                    = 5432
+  to_port                      = 5432
+}
+
+resource "aws_vpc_security_group_egress_rule" "database_import_to_external_postgresql" {
+  security_group_id = aws_security_group.database_import.id
+  description       = "Import task to Neon PostgreSQL public endpoint"
+  cidr_ipv4         = "0.0.0.0/0"
+  ip_protocol       = "tcp"
+  from_port         = 5432
+  to_port           = 5432
+}
+
+resource "aws_vpc_security_group_egress_rule" "database_import_https" {
+  security_group_id = aws_security_group.database_import.id
+  description       = "HTTPS for image pulls, SSM, CloudWatch Logs and AWS APIs"
+  cidr_ipv4         = "0.0.0.0/0"
+  ip_protocol       = "tcp"
+  from_port         = 443
+  to_port           = 443
+}
+
+resource "aws_vpc_security_group_egress_rule" "database_import_dns_udp" {
+  security_group_id = aws_security_group.database_import.id
+  description       = "DNS over UDP to the VPC resolver"
+  cidr_ipv4         = "${cidrhost(var.vpc_cidr, 2)}/32"
+  ip_protocol       = "udp"
+  from_port         = 53
+  to_port           = 53
+}
+
+resource "aws_vpc_security_group_egress_rule" "database_import_dns_tcp" {
+  security_group_id = aws_security_group.database_import.id
   description       = "DNS over TCP to the VPC resolver"
   cidr_ipv4         = "${cidrhost(var.vpc_cidr, 2)}/32"
   ip_protocol       = "tcp"
