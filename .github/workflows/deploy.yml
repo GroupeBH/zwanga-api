@@ -123,7 +123,7 @@ jobs:
           network_configuration="awsvpcConfiguration={subnets=[${subnets}],securityGroups=[${security_groups}],assignPublicIp=${assign_public_ip}}"
           overrides="$(jq -nc \
             --arg container "${ECS_APP_CONTAINER}" \
-            '{containerOverrides:[{name:$container,command:["npm","run","migration:run:prod"]}]}')"
+            '{containerOverrides:[{name:$container,command:["sh","-c","npm run database:assert-bootstrap:prod && npm run migration:run:prod"]}]}')"
 
           run_task_output="$(aws ecs run-task \
             --cluster "${ECS_CLUSTER}" \

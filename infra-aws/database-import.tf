@@ -2,6 +2,8 @@ locals {
   database_import_command = <<-EOT
 set -eu
 
+export PGCONNECT_TIMEOUT="$${PGCONNECT_TIMEOUT:-20}"
+
 : "$${NEON_DATABASE_URL:?NEON_DATABASE_URL is required}"
 : "$${DATABASE_URL:?DATABASE_URL is required}"
 
@@ -19,7 +21,7 @@ pg_dump "$${NEON_DATABASE_URL}" \
   --file "$${dump_file}" \
   --no-owner \
   --no-acl \
-  --single-transaction \
+  --exclude-extension=postgis_sfcgal \
   --exclude-schema=neon_auth \
   --verbose
 
@@ -31,6 +33,7 @@ pg_restore \
   --no-owner \
   --no-acl \
   --exit-on-error \
+  --single-transaction \
   --verbose \
   "$${dump_file}"
 

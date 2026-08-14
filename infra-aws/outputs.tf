@@ -117,6 +117,11 @@ output "database_import_task_definition_arn" {
   value       = aws_ecs_task_definition.database_import.arn
 }
 
+output "database_import_security_group_id" {
+  description = "Dedicated Security Group used by the one-off Neon to RDS import task."
+  value       = aws_security_group.database_import.id
+}
+
 output "xray_sampling_rule_names" {
   description = "X-Ray sampling rules created for ECS tracing."
   value = var.enable_xray_tracing ? {
