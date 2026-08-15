@@ -326,6 +326,36 @@ variable "alb_certificate_arn" {
   }
 }
 
+variable "api_domain_name" {
+  description = "Optional public API domain name served by the ALB, for example compute-api.zwanga-app.com."
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition = (
+      var.api_domain_name == null ||
+      can(regex("^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+$", var.api_domain_name))
+    )
+    error_message = "api_domain_name must be null or a valid DNS name, for example compute-api.zwanga-app.com."
+  }
+}
+
+variable "route53_hosted_zone_id" {
+  description = "Optional Route53 hosted zone ID for api_domain_name. When set with api_domain_name and no alb_certificate_arn, Terraform creates and validates the ACM certificate and DNS alias automatically."
+  type        = string
+  default     = null
+  nullable    = true
+
+  validation {
+    condition = (
+      var.route53_hosted_zone_id == null ||
+      can(regex("^(/hostedzone/)?Z[A-Z0-9]+$", trimspace(var.route53_hosted_zone_id)))
+    )
+    error_message = "route53_hosted_zone_id must be null or a real Route53 hosted zone ID, for example Z0123456789ABCDEFG."
+  }
+}
+
 variable "alb_enable_deletion_protection" {
   description = "Protect the ALB from accidental deletion. Disabled for the economical profile."
   type        = bool

@@ -49,8 +49,23 @@ output "alb_dns_name" {
 }
 
 output "alb_url" {
-  description = "Public HTTP URL of the Application Load Balancer. Use HTTPS after setting alb_certificate_arn."
-  value       = var.alb_certificate_arn == null ? "http://${aws_lb.backend.dns_name}" : "https://${aws_lb.backend.dns_name}"
+  description = "Public URL of the backend. When api_domain_name is set, use that custom HTTPS domain instead of the technical ALB DNS name."
+  value       = local.api_url != null ? local.api_url : (local.alb_https_enabled ? "https://${aws_lb.backend.dns_name}" : "http://${aws_lb.backend.dns_name}")
+}
+
+output "api_domain_name" {
+  description = "Custom API domain name configured for the ALB, when provided."
+  value       = var.api_domain_name
+}
+
+output "api_url" {
+  description = "Canonical public HTTPS API URL, when api_domain_name is configured."
+  value       = local.api_url
+}
+
+output "acm_certificate_arn" {
+  description = "ACM certificate ARN used by the ALB HTTPS listener, either provided manually or created through Route53 DNS validation."
+  value       = local.effective_alb_certificate_arn
 }
 
 output "runtime_parameter_names" {

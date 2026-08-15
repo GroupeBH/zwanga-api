@@ -34,6 +34,11 @@ locals {
   cloudtrail_bucket_name = "${local.name_prefix}-cloudtrail-${data.aws_caller_identity.current.account_id}"
   dashboard_name         = "${local.name_prefix}-operations"
 
+  create_route53_validated_alb_certificate = var.alb_certificate_arn == null && var.api_domain_name != null && var.route53_hosted_zone_id != null
+  alb_https_enabled                        = var.alb_certificate_arn != null || local.create_route53_validated_alb_certificate
+  effective_alb_certificate_arn            = var.alb_certificate_arn != null ? var.alb_certificate_arn : (local.create_route53_validated_alb_certificate ? aws_acm_certificate_validation.api[0].certificate_arn : null)
+  api_url                                  = var.api_domain_name == null ? null : "https://${var.api_domain_name}"
+
   rds_postgresql_log_group_name = "/aws/rds/instance/${local.name_prefix}-postgres/postgresql"
   rds_upgrade_log_group_name    = "/aws/rds/instance/${local.name_prefix}-postgres/upgrade"
   redis_slow_log_group_name     = "/aws/elasticache/${local.name_prefix}-redis/slow-log"

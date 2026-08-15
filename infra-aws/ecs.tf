@@ -216,8 +216,7 @@ resource "aws_ecs_service" "backend" {
   }
 
   depends_on = [
-    aws_lb_listener.http_forward,
-    aws_lb_listener.http_redirect,
+    aws_lb_listener.http,
     aws_lb_listener.https,
   ]
 }

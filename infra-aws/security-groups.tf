@@ -58,7 +58,7 @@ resource "aws_vpc_security_group_ingress_rule" "alb_http" {
 }
 
 resource "aws_vpc_security_group_ingress_rule" "alb_https" {
-  count = var.alb_certificate_arn == null ? 0 : 1
+  count = local.alb_https_enabled ? 1 : 0
 
   security_group_id = aws_security_group.alb.id
   description       = "Public HTTPS"
