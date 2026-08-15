@@ -93,7 +93,9 @@ Modifier au minimum :
 - `terraform.tfvars` : `github_owner` si tu utilises un fichier local de variables ;
 - optionnellement, les variables non sensibles dans `runtime_environment_variables` ;
 - les destinataires `alert_email_addresses` ;
-- `alb_certificate_arn` si tu as deja un certificat ACM pour HTTPS.
+- `api_domain_name = "compute-api.zwanga-app.com"` pour exposer l'API en HTTPS ;
+- `route53_hosted_zone_id` si la zone DNS `zwanga-app.com` est dans Route53 ;
+- ou `alb_certificate_arn` si tu as deja un certificat ACM valide pour `compute-api.zwanga-app.com`.
 
 Si ton compte AWS possede deja le provider OIDC GitHub Actions, renseigne aussi :
 
@@ -114,6 +116,53 @@ terraform apply tfplan
 ```
 
 Le service ECS peut etre cree avant que l'image `latest` existe dans ECR, car `ecs_wait_for_steady_state = false` par defaut. La premiere execution GitHub Actions pousse l'image et force ensuite un nouveau deploiement ECS.
+
+### HTTPS pour `compute-api.zwanga-app.com`
+
+Le certificat ACM utilise par un Application Load Balancer doit etre cree dans la meme region que l'ALB, ici `eu-central-1`.
+
+Si la zone DNS `zwanga-app.com` est geree dans Route53, le chemin le plus propre est de donner le Hosted Zone ID a Terraform :
+
+```bash
+ZONE_ID=$(aws route53 list-hosted-zones-by-name \
+  --dns-name compute-api.zwanga-app.com \
+  --query "HostedZones[?Name=='compute-api.zwanga-app.com.'] | [0].Id" \
+  --output text | sed 's#/hostedzone/##')
+
+echo "$ZONE_ID"
+
+terraform apply \
+  -var='api_domain_name=compute-api.zwanga-app.com' \
+  -var="route53_hosted_zone_id=$ZONE_ID" \
+  -var='alert_email_addresses=["dev.gbh.sarl@gmail.com"]'
+```
+
+`ZONE_ID` doit afficher un vrai identifiant Route53 de type `Z0123456789ABCDEFG`, jamais un placeholder.
+
+Terraform cree alors :
+
+- le certificat ACM public ;
+- les enregistrements DNS de validation ACM ;
+- l'alias DNS `compute-api.zwanga-app.com` vers l'ALB ;
+- le listener HTTPS `443` ;
+- la redirection HTTP `80` vers HTTPS.
+
+Si la zone DNS n'est pas dans Route53, cree le certificat ACM manuellement dans `eu-central-1`, valide-le par DNS chez ton fournisseur, puis passe son ARN :
+
+```bash
+terraform apply \
+  -var='api_domain_name=compute-api.zwanga-app.com' \
+  -var='alb_certificate_arn=arn:aws:acm:eu-central-1:046374119247:certificate/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx' \
+  -var='alert_email_addresses=["dev.gbh.sarl@gmail.com"]'
+```
+
+Dans ce cas, cree aussi chez ton fournisseur DNS un CNAME :
+
+```text
+compute-api.zwanga-app.com -> <terraform output -raw alb_dns_name>
+```
+
+Ne teste pas HTTPS avec le DNS technique de l'ALB : le certificat correspond au domaine `compute-api.zwanga-app.com`.
 
 ### Variables d'environnement dans SSM
 
@@ -139,6 +188,7 @@ Exemple :
 runtime_environment_variables = {
   CORS_ORIGINS        = "https://zwanga-app.com,https://www.zwanga-app.com"
   FRONTEND_URL        = "https://zwanga-app.com"
+  PUBLIC_API_BASE_URL = "https://compute-api.zwanga-app.com"
   GOOGLE_MAPS_API_KEY = "replace-me"
   FLEXPAY_API_KEY     = "replace-me"
 }

@@ -42,7 +42,16 @@ enable_cloudtrail_insights                = false
 enable_xray_tracing                       = true
 xray_sampling_rate                        = 0.05
 
-# Optional. When set, ALB listens on HTTPS and redirects HTTP to HTTPS.
+# Public API domain. If route53_hosted_zone_id is set, Terraform creates the
+# ACM certificate, DNS validation records and the ALB alias automatically.
+api_domain_name = "compute-api.zwanga-app.com"
+
+# Optional. If your DNS zone zwanga-app.com is hosted in Route53, set its zone ID
+# to fully automate HTTPS and DNS.
+# route53_hosted_zone_id = "Z0123456789ABCDEFG"
+
+# Optional. If DNS is not hosted in Route53, create and validate the ACM
+# certificate manually, then paste its ARN here or pass it with -var.
 alb_certificate_arn = null
 
 # Keep sticky routing enabled for Socket.IO long-polling during autoscaling.
@@ -64,7 +73,7 @@ runtime_environment_variables = {
   FRONTEND_URL                 = "https://zwanga-app.com"
   GPS_LOG_SAMPLE_RATE          = "0.01"
   LOG_LEVEL                    = "warn"
-  PUBLIC_API_BASE_URL          = "https://api.zwanga-app.com"
+  PUBLIC_API_BASE_URL          = "https://compute-api.zwanga-app.com"
   TRACKING_PUBLIC_BASE_URL     = "https://zwanga-app.com/trips"
   ZWANGA_PUBLIC_WEB_URL        = "https://zwanga-app.com"
   JWT_EXPIRES_IN               = "1d"
