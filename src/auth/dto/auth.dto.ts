@@ -12,7 +12,7 @@ import {
 } from 'class-validator';
 import { Transform, TransformFnParams, Type } from 'class-transformer';
 import { ApiProperty } from '@nestjs/swagger';
-import { UserRole } from '../../users/entities/user.entity';
+import { UserGender, UserRole } from '../../users/entities/user.entity';
 import { CreateVehicleDto } from '../../vehicles/dto/vehicle.dto';
 
 const toTrimmedString = ({ value }: TransformFnParams): unknown => {
@@ -57,6 +57,18 @@ export class RegisterDto {
   @IsString()
   @IsNotEmpty()
   lastName: string;
+
+  @ApiProperty({
+    enum: UserGender,
+    enumName: 'UserGender',
+    example: UserGender.FEMALE,
+    required: false,
+    nullable: true,
+    description: "Sexe choisi par l'utilisateur",
+  })
+  @IsEnum(UserGender)
+  @IsOptional()
+  gender?: UserGender | null;
 
   @ApiProperty({ enum: UserRole, example: UserRole.DRIVER })
   @IsNotEmpty()
@@ -133,6 +145,18 @@ export class GoogleMobileAuthDto {
   @IsString()
   @IsOptional()
   phone?: string;
+
+  @ApiProperty({
+    enum: UserGender,
+    enumName: 'UserGender',
+    example: UserGender.FEMALE,
+    required: false,
+    nullable: true,
+    description: 'Sexe choisi lors de la premiere inscription Google',
+  })
+  @IsEnum(UserGender)
+  @IsOptional()
+  gender?: UserGender | null;
 }
 
 export class AppleMobileAuthDto {
@@ -181,6 +205,18 @@ export class AppleMobileAuthDto {
   @IsString()
   @IsOptional()
   lastName?: string;
+
+  @ApiProperty({
+    enum: UserGender,
+    enumName: 'UserGender',
+    example: UserGender.FEMALE,
+    required: false,
+    nullable: true,
+    description: 'Sexe choisi lors de la premiere inscription Apple',
+  })
+  @IsEnum(UserGender)
+  @IsOptional()
+  gender?: UserGender | null;
 
   @ApiProperty({
     enum: UserRole,

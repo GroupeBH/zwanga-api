@@ -23,6 +23,13 @@ export enum UserRole {
   ADMIN = 'admin',
 }
 
+export enum UserGender {
+  MALE = 'male',
+  FEMALE = 'female',
+  OTHER = 'other',
+  PREFER_NOT_TO_SAY = 'prefer_not_to_say',
+}
+
 export enum UserStatus {
   ACTIVE = 'active',
   INACTIVE = 'inactive',
@@ -57,6 +64,14 @@ export class User {
 
   @Column()
   lastName: string;
+
+  @Column({
+    type: 'enum',
+    enum: UserGender,
+    enumName: 'users_gender_enum',
+    nullable: true,
+  })
+  gender: UserGender | null;
 
   @Column({ nullable: true })
   profilePicture: string;

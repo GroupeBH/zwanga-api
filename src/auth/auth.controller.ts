@@ -32,7 +32,7 @@ import {
   AppleMobileAuthDto,
 } from './dto/auth.dto';
 import { Public } from '../common/decorators/public.decorator';
-import { UserRole } from '../users/entities/user.entity';
+import { UserGender, UserRole } from '../users/entities/user.entity';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
 
 interface MulterFile {
@@ -81,6 +81,13 @@ export class AuthController {
         },
         firstName: { type: 'string', example: 'John' },
         lastName: { type: 'string', example: 'Doe' },
+        gender: {
+          type: 'string',
+          enum: Object.values(UserGender),
+          example: UserGender.FEMALE,
+          nullable: true,
+          description: "Sexe choisi par l'utilisateur (optionnel)",
+        },
         role: {
           type: 'string',
           enum: Object.values(UserRole),
@@ -180,7 +187,11 @@ export class AuthController {
   @ApiResponse({ status: 200, type: AuthResponseDto })
   @ApiResponse({ status: 401, description: 'Invalid Google token' })
   async googleMobile(@Body() dto: GoogleMobileAuthDto) {
-    return this.authService.googleMobileLogin(dto.idToken, dto.phone);
+    return this.authService.googleMobileLogin(
+      dto.idToken,
+      dto.phone,
+      dto.gender,
+    );
   }
 
   @Post('apple/mobile')

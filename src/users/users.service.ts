@@ -337,6 +337,7 @@ export class UsersService {
         password: () => 'NULL',
         firstName: 'Compte',
         lastName: 'supprimé',
+        gender: () => 'NULL',
         profilePicture: () => 'NULL',
         role: UserRole.PASSENGER,
         status: UserStatus.INACTIVE,
@@ -392,6 +393,10 @@ export class UsersService {
 
     if (updateProfileDto.lastName !== undefined) {
       user.lastName = updateProfileDto.lastName;
+    }
+
+    if (updateProfileDto.gender !== undefined) {
+      user.gender = updateProfileDto.gender;
     }
 
     if (profilePictureFile) {
@@ -671,7 +676,7 @@ export class UsersService {
       this.logger.warn(
         `[KYC Upload] Reason: AWS_REKOGNITION_KYC_ENABLED="${kycEnabledConfig || 'NOT SET'}" (must be "true" to enable)`,
       );
-this.logger.warn(
+      this.logger.warn(
         `[KYC Upload] Action: Keeping status as PENDING for manual review`,
       );
       this.logger.warn(
@@ -749,7 +754,9 @@ this.logger.warn(
         // Parallel deletion of all uploaded files
         await Promise.all([
           ...cniFrontUrls.map((url) => this.fileUploadService.deleteFile(url)),
-          ...(cniBackUrl ? [this.fileUploadService.deleteFile(cniBackUrl)] : []),
+          ...(cniBackUrl
+            ? [this.fileUploadService.deleteFile(cniBackUrl)]
+            : []),
           this.fileUploadService.deleteFile(selfieUrl),
         ]);
 
