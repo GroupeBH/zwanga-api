@@ -1,5 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
 import { VehiclesService } from './vehicles.service';
+import { VehicleType } from './entities/vehicle.entity';
 
 describe('VehiclesService vehicle creation', () => {
   let service: VehiclesService;
@@ -11,18 +12,24 @@ describe('VehiclesService vehicle creation', () => {
     createQueryBuilder: jest.Mock;
   };
   let userRepository: { findOne: jest.Mock };
+  let tripRepository: { find: jest.Mock };
   let cacheService: { get: jest.Mock; set: jest.Mock; del: jest.Mock };
 
   beforeEach(() => {
     vehicleRepository = {
       create: jest.fn((payload) => payload),
-      save: jest.fn((vehicle) => Promise.resolve({ ...vehicle, id: vehicle.id ?? 'vehicle-new' })),
+      save: jest.fn((vehicle) =>
+        Promise.resolve({ ...vehicle, id: vehicle.id ?? 'vehicle-new' }),
+      ),
       findOne: jest.fn(),
       find: jest.fn(),
       createQueryBuilder: jest.fn(),
     };
     userRepository = {
       findOne: jest.fn().mockResolvedValue({ id: 'owner-1' }),
+    };
+    tripRepository = {
+      find: jest.fn().mockResolvedValue([]),
     };
     cacheService = {
       get: jest.fn(),
@@ -33,7 +40,7 @@ describe('VehiclesService vehicle creation', () => {
     service = new VehiclesService(
       vehicleRepository as any,
       userRepository as any,
-      { find: jest.fn() } as any,
+      tripRepository as any,
       cacheService as any,
       { getPresignedUrlIfS3Key: jest.fn() } as any,
     );
@@ -63,11 +70,73 @@ describe('VehiclesService vehicle creation', () => {
         brand: 'Toyota',
         model: 'Corolla',
         color: 'Noir',
+        type: VehicleType.CAR,
         licensePlate: '1576AN01',
         ownerId: 'owner-1',
         isActive: true,
       }),
     );
+  });
+
+  it('supports two- and three-wheel motorcycles', async () => {
+    mockPlateLookup(null);
+
+    await service.create('owner-1', {
+      type: VehicleType.MOTORCYCLE_TWO_WHEELS,
+      brand: 'Honda',
+      model: 'CB125',
+      color: 'Rouge',
+      licensePlate: 'MOTO-001',
+    } as any);
+
+    expect(vehicleRepository.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: VehicleType.MOTORCYCLE_TWO_WHEELS,
+      }),
+    );
+
+    vehicleRepository.create.mockClear();
+    await service.create('owner-1', {
+      type: VehicleType.MOTORCYCLE_THREE_WHEELS,
+      brand: 'TVS',
+      model: 'King',
+      color: 'Bleu',
+      licensePlate: 'TRIKE-001',
+    } as any);
+
+    expect(vehicleRepository.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: VehicleType.MOTORCYCLE_THREE_WHEELS,
+      }),
+    );
+  });
+
+  it('rejects a motorcycle type that cannot support an active trip', async () => {
+    vehicleRepository.findOne.mockResolvedValue({
+      id: 'vehicle-1',
+      ownerId: 'owner-1',
+      type: VehicleType.CAR,
+      brand: 'Toyota',
+      model: 'Corolla',
+      color: 'Noir',
+      licensePlate: '1234AA01',
+      isActive: true,
+    });
+    tripRepository.find.mockResolvedValue([
+      {
+        id: 'trip-1',
+        totalSeats: 3,
+        availableSeats: 3,
+      },
+    ]);
+
+    await expect(
+      service.update('vehicle-1', 'owner-1', {
+        type: VehicleType.MOTORCYCLE_TWO_WHEELS,
+      } as any),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    expect(vehicleRepository.save).not.toHaveBeenCalled();
   });
 
   it('reactivates and updates an inactive vehicle when the plate already belongs to the same owner', async () => {

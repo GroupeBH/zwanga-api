@@ -1216,6 +1216,7 @@ export class UsersService {
                 }
                 return {
                   id: vehicle.id,
+                  type: vehicle.type,
                   brand: vehicle.brand,
                   model: vehicle.model,
                   color: vehicle.color,

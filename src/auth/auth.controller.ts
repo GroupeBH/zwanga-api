@@ -33,6 +33,7 @@ import {
 } from './dto/auth.dto';
 import { Public } from '../common/decorators/public.decorator';
 import { UserGender, UserRole } from '../users/entities/user.entity';
+import { VehicleType } from '../vehicles/entities/vehicle.entity';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
 
 interface MulterFile {
@@ -104,6 +105,12 @@ export class AuthController {
           description:
             'Informations du véhicule (optionnel, conducteurs uniquement)',
           properties: {
+            type: {
+              type: 'string',
+              enum: Object.values(VehicleType),
+              default: VehicleType.CAR,
+              example: VehicleType.MOTORCYCLE_TWO_WHEELS,
+            },
             brand: { type: 'string', example: 'Toyota' },
             model: { type: 'string', example: 'Corolla' },
             color: { type: 'string', example: 'Noir' },

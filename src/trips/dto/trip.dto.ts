@@ -87,7 +87,8 @@ export class CreateTripDto {
 
   @ApiProperty({
     minimum: 1,
-    description: 'Nombre total de places disponibles dans le véhicule',
+    description:
+      'Nombre total de places disponibles. Maximum 2 pour une moto à 2 roues et 3 pour une moto à 3 roues.',
   })
   @IsNumber()
   @Min(1)
@@ -302,7 +303,7 @@ export class UpdateTripDto {
     required: false,
     minimum: 1,
     description:
-      'Nombre total de places (si modifié, availableSeats sera recalculé)',
+      'Nombre total de places (si modifié, availableSeats sera recalculé). Maximum 2 pour une moto à 2 roues et 3 pour une moto à 3 roues.',
   })
   @IsNumber()
   @Min(1)
@@ -510,7 +511,8 @@ export class CreateRecurringTripDto {
 
   @ApiProperty({
     minimum: 1,
-    description: 'Nombre total de places disponibles dans le vehicule',
+    description:
+      'Nombre total de places disponibles. Maximum 2 pour une moto a 2 roues et 3 pour une moto a 3 roues.',
   })
   @IsNumber()
   @Min(1)

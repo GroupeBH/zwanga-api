@@ -12,6 +12,7 @@ import {
 import { ApiProperty } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
 import { UserGender, UserRole } from '../entities/user.entity';
+import { VehicleType } from '../../vehicles/entities/vehicle.entity';
 
 export enum PhoneVerificationContext {
   REGISTRATION = 'registration',
@@ -171,6 +172,7 @@ export class PublicUserInfoDto {
   })
   vehicles?: Array<{
     id: string;
+    type: VehicleType;
     brand: string;
     model: string;
     color: string;
