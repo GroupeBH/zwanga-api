@@ -229,7 +229,8 @@ export class CreateDriverOfferDto {
 
   @ApiProperty({
     minimum: 1,
-    description: 'Nombre de places disponibles',
+    description:
+      'Nombre de places disponibles. Maximum 2 pour une moto à 2 roues et 3 pour une moto à 3 roues.',
     example: 4,
   })
   @IsNumber()
@@ -333,7 +334,7 @@ export class AcceptTripRequestDto {
     required: false,
     minimum: 1,
     description:
-      'Nombre total de places disponibles dans le véhicule. Si non fourni, sera déterminé automatiquement. Doit être au moins égal au nombre de places demandées par le passager.',
+      'Nombre total de places disponibles dans le véhicule. Si non fourni, sera déterminé automatiquement. Doit être au moins égal au nombre de places demandées par le passager. Maximum 2 pour une moto à 2 roues et 3 pour une moto à 3 roues.',
     example: 4,
   })
   @IsNumber()

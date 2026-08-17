@@ -3,6 +3,7 @@ import { TripsService } from './trips.service';
 import { UserRole } from '../users/entities/user.entity';
 import { TripStatus } from './entities/trip.entity';
 import { BookingStatus } from '../bookings/entities/booking.entity';
+import { VehicleType } from '../vehicles/entities/vehicle.entity';
 
 describe('TripsService daily trip publication quota', () => {
   let service: any;
@@ -12,6 +13,7 @@ describe('TripsService daily trip publication quota', () => {
     createQueryBuilder: jest.Mock;
   };
   let userRepository: { findOne: jest.Mock; save: jest.Mock };
+  let vehicleRepository: { findOne: jest.Mock };
   let subscriptionsService: { getPremiumOverview: jest.Mock };
   let cacheService: { del: jest.Mock };
 
@@ -39,6 +41,9 @@ describe('TripsService daily trip publication quota', () => {
       }),
       save: jest.fn(),
     };
+    vehicleRepository = {
+      findOne: jest.fn(),
+    };
     subscriptionsService = {
       getPremiumOverview: jest.fn(),
     };
@@ -51,7 +56,7 @@ describe('TripsService daily trip publication quota', () => {
       {} as any,
       {} as any,
       userRepository as any,
-      {} as any,
+      vehicleRepository as any,
       {} as any,
       {} as any,
       {} as any,
@@ -107,6 +112,48 @@ describe('TripsService daily trip publication quota', () => {
 
     expect(tripRepository.createQueryBuilder).not.toHaveBeenCalled();
     expect(tripRepository.save).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [VehicleType.MOTORCYCLE_TWO_WHEELS, 2],
+    [VehicleType.MOTORCYCLE_THREE_WHEELS, 3],
+  ])('limits %s trips to %i places', async (type, maxSeats) => {
+    vehicleRepository.findOne.mockResolvedValue({
+      id: 'vehicle-1',
+      ownerId: 'driver-1',
+      type,
+      isActive: true,
+    });
+
+    await expect(
+      service.create('driver-1', {
+        ...baseCreateTripDto,
+        vehicleId: 'vehicle-1',
+        totalSeats: maxSeats + 1,
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    expect(tripRepository.save).not.toHaveBeenCalled();
+  });
+
+  it('allows three places on a three-wheel motorcycle', async () => {
+    subscriptionsService.getPremiumOverview.mockResolvedValue({
+      isActive: true,
+    });
+    vehicleRepository.findOne.mockResolvedValue({
+      id: 'vehicle-1',
+      ownerId: 'driver-1',
+      type: VehicleType.MOTORCYCLE_THREE_WHEELS,
+      isActive: true,
+    });
+
+    await expect(
+      service.create('driver-1', {
+        ...baseCreateTripDto,
+        vehicleId: 'vehicle-1',
+        totalSeats: 3,
+      }),
+    ).resolves.toEqual({ id: 'trip-1' });
   });
 
   it('caps recurring trip batches to the remaining free daily quota', async () => {

@@ -15,7 +15,12 @@ import {
   type JsonWebKey,
 } from 'crypto';
 import * as bcrypt from 'bcrypt';
-import { User, UserRole, UserStatus } from '../users/entities/user.entity';
+import {
+  User,
+  UserGender,
+  UserRole,
+  UserStatus,
+} from '../users/entities/user.entity';
 import { KycDocument, KycStatus } from '../users/entities/kyc-document.entity';
 import {
   RegisterDto,
@@ -110,7 +115,7 @@ export class AuthService {
   ): Promise<AuthResponseDto> {
     console.log('registerDto', registerDto);
     console.log('files', files);
-    const { phone, pin, firstName, lastName, role, isDriver, vehicle } =
+    const { phone, pin, firstName, lastName, gender, role, isDriver, vehicle } =
       registerDto;
     const resolvedIsDriver = isDriver ?? role === UserRole.DRIVER;
 
@@ -164,6 +169,7 @@ export class AuthService {
       password: hashedPin, // Store hashed PIN
       firstName,
       lastName,
+      gender: gender ?? null,
       role,
       isDriver: resolvedIsDriver,
       status: UserStatus.PENDING_KYC,
@@ -435,6 +441,7 @@ export class AuthService {
   async googleMobileLogin(
     idToken: string,
     phone?: string,
+    gender?: UserGender | null,
   ): Promise<AuthResponseDto> {
     const googleProfile = await this.verifyGoogleIdToken(idToken);
     // Reuse existing linking/creation logic
@@ -447,12 +454,14 @@ export class AuthService {
         profilePicture: googleProfile.profilePicture,
       },
       phone,
+      gender,
     );
   }
 
   async validateGoogleUser(
     googleProfile: any,
     phone?: string,
+    gender?: UserGender | null,
   ): Promise<AuthResponseDto> {
     const { googleId, email, firstName, lastName, profilePicture } =
       googleProfile;
@@ -530,6 +539,7 @@ export class AuthService {
           phone,
           firstName,
           lastName,
+          gender: gender ?? null,
           profilePicture,
           role: UserRole.PASSENGER,
           isDriver: false,
@@ -742,7 +752,10 @@ export class AuthService {
   async validateAppleUser(
     appleProfile: AppleAuthProfile,
     phone?: string,
-    signupOptions?: Pick<AppleMobileAuthDto, 'role' | 'isDriver' | 'vehicle'>,
+    signupOptions?: Pick<
+      AppleMobileAuthDto,
+      'gender' | 'role' | 'isDriver' | 'vehicle'
+    >,
   ): Promise<AuthResponseDto> {
     const { appleId, email, firstName, lastName, emailVerified } = appleProfile;
 
@@ -828,6 +841,7 @@ export class AuthService {
         phone,
         firstName: firstName ?? '',
         lastName: lastName ?? '',
+        gender: signupOptions?.gender ?? null,
         role,
         isDriver,
         status: UserStatus.PENDING_KYC,

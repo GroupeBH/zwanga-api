@@ -7,7 +7,11 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In } from 'typeorm';
-import { Vehicle } from './entities/vehicle.entity';
+import {
+  getVehicleMaxSeats,
+  Vehicle,
+  VehicleType,
+} from './entities/vehicle.entity';
 import { User } from '../users/entities/user.entity';
 import { Trip, TripStatus } from '../trips/entities/trip.entity';
 import { CacheService } from '../common/services/cache.service';
@@ -29,7 +33,9 @@ export class VehiclesService {
     private fileUploadService: FileUploadService,
   ) {}
 
-  private normalizeVehiclePayload(vehicleData: Partial<Vehicle>): Partial<Vehicle> {
+  private normalizeVehiclePayload(
+    vehicleData: Partial<Vehicle>,
+  ): Partial<Vehicle> {
     return {
       ...vehicleData,
       brand: vehicleData.brand?.trim(),
@@ -43,11 +49,16 @@ export class VehiclesService {
     try {
       await this.cacheService.del(CacheService.getVehiclesByOwnerKey(ownerId));
     } catch (cacheError: any) {
-      this.logger.warn(`Failed to invalidate cache for owner ${ownerId}: ${cacheError.message}`);
+      this.logger.warn(
+        `Failed to invalidate cache for owner ${ownerId}: ${cacheError.message}`,
+      );
     }
   }
 
-  async create(ownerId: string, vehicleData: Partial<Vehicle>): Promise<Vehicle> {
+  async create(
+    ownerId: string,
+    vehicleData: Partial<Vehicle>,
+  ): Promise<Vehicle> {
     this.logger.log(
       `Creating vehicle for owner: ${ownerId} (${vehicleData.brand} ${vehicleData.model})`,
     );
@@ -76,7 +87,9 @@ export class VehiclesService {
         );
       }
 
-      const owner = await this.userRepository.findOne({ where: { id: ownerId } });
+      const owner = await this.userRepository.findOne({
+        where: { id: ownerId },
+      });
       if (!owner) {
         this.logger.warn(`Vehicle creation failed: Owner ${ownerId} not found`);
         throw new NotFoundException('Proprietaire non trouve');
@@ -107,6 +120,7 @@ export class VehiclesService {
       const vehicle = this.vehicleRepository.create({
         ...sanitizedVehicleData,
         ownerId,
+        type: sanitizedVehicleData.type ?? VehicleType.CAR,
         isActive:
           sanitizedVehicleData.isActive !== undefined
             ? sanitizedVehicleData.isActive
@@ -121,7 +135,10 @@ export class VehiclesService {
       );
       return savedVehicle;
     } catch (error) {
-      if (error instanceof BadRequestException || error instanceof NotFoundException) {
+      if (
+        error instanceof BadRequestException ||
+        error instanceof NotFoundException
+      ) {
         throw error;
       }
 
@@ -167,7 +184,9 @@ export class VehiclesService {
       this.logger.debug(
         `Returning ${cached.length} vehicles from cache for owner ${ownerId}`,
       );
-      return Promise.all(cached.map((vehicle) => this.enrichVehiclePhotoUrl(vehicle)));
+      return Promise.all(
+        cached.map((vehicle) => this.enrichVehiclePhotoUrl(vehicle)),
+      );
     }
 
     const vehicles = await this.vehicleRepository.find({
@@ -219,7 +238,9 @@ export class VehiclesService {
     if (updateData.licensePlate !== undefined) {
       const normalizedLicensePlate = sanitizedUpdateData.licensePlate;
       if (!normalizedLicensePlate) {
-        throw new BadRequestException("La plaque d'immatriculation est requise");
+        throw new BadRequestException(
+          "La plaque d'immatriculation est requise",
+        );
       }
 
       const existingVehicle = await this.findByNormalizedLicensePlate(
@@ -232,7 +253,13 @@ export class VehiclesService {
       }
     }
 
-    Object.assign(vehicle, sanitizedUpdateData);
+    const nextType =
+      sanitizedUpdateData.type ?? vehicle.type ?? VehicleType.CAR;
+    if (nextType !== (vehicle.type ?? VehicleType.CAR)) {
+      await this.ensureTypeSupportsActiveTrips(id, nextType);
+    }
+
+    Object.assign(vehicle, sanitizedUpdateData, { type: nextType });
 
     let updatedVehicle: Vehicle;
     try {
@@ -281,7 +308,10 @@ export class VehiclesService {
     this.logger.log(`Vehicle ${id} deactivated successfully`);
   }
 
-  private async findOwnedVehicleEntity(id: string, ownerId: string): Promise<Vehicle> {
+  private async findOwnedVehicleEntity(
+    id: string,
+    ownerId: string,
+  ): Promise<Vehicle> {
     const vehicle = await this.vehicleRepository.findOne({
       where: { id, ownerId },
     });
@@ -298,8 +328,9 @@ export class VehiclesService {
     const enriched = { ...vehicle };
     if (enriched.photoUrl) {
       enriched.photoUrl =
-        (await this.fileUploadService.getPresignedUrlIfS3Key(enriched.photoUrl)) ||
-        enriched.photoUrl;
+        (await this.fileUploadService.getPresignedUrlIfS3Key(
+          enriched.photoUrl,
+        )) || enriched.photoUrl;
     }
     return enriched as Vehicle;
   }
@@ -317,7 +348,9 @@ export class VehiclesService {
       sanitized.color = vehicleData.color.trim();
     }
     if (vehicleData.licensePlate !== undefined) {
-      sanitized.licensePlate = this.normalizeLicensePlate(vehicleData.licensePlate);
+      sanitized.licensePlate = this.normalizeLicensePlate(
+        vehicleData.licensePlate,
+      );
     }
     if (vehicleData.photoUrl !== undefined) {
       const photoUrl = vehicleData.photoUrl.trim();
@@ -328,7 +361,10 @@ export class VehiclesService {
   }
 
   private normalizeLicensePlate(licensePlate?: string | null): string {
-    return (licensePlate ?? '').trim().toUpperCase().replace(/[\s-]+/g, '');
+    return (licensePlate ?? '')
+      .trim()
+      .toUpperCase()
+      .replace(/[\s-]+/g, '');
   }
 
   private async findByNormalizedLicensePlate(
@@ -358,9 +394,15 @@ export class VehiclesService {
       `Vehicle with license plate ${normalizedLicensePlate} already belongs to owner ${ownerId}; reactivating/updating vehicle ${vehicle.id}`,
     );
 
+    const nextType = vehicleData.type ?? vehicle.type ?? VehicleType.CAR;
+    if (nextType !== (vehicle.type ?? VehicleType.CAR)) {
+      await this.ensureTypeSupportsActiveTrips(vehicle.id, nextType);
+    }
+
     vehicle.brand = vehicleData.brand ?? vehicle.brand;
     vehicle.model = vehicleData.model ?? vehicle.model;
     vehicle.color = vehicleData.color ?? vehicle.color;
+    vehicle.type = nextType;
     vehicle.licensePlate = normalizedLicensePlate;
     vehicle.photoUrl = vehicleData.photoUrl ?? vehicle.photoUrl;
     vehicle.isActive = true;
@@ -368,6 +410,32 @@ export class VehiclesService {
     const savedVehicle = await this.vehicleRepository.save(vehicle);
     await this.invalidateVehicleCaches(ownerId, vehicle.id);
     return savedVehicle;
+  }
+
+  private async ensureTypeSupportsActiveTrips(
+    vehicleId: string,
+    vehicleType: VehicleType,
+  ): Promise<void> {
+    const maxSeats = getVehicleMaxSeats(vehicleType);
+    if (maxSeats === null) {
+      return;
+    }
+
+    const activeTrips = await this.tripRepository.find({
+      where: {
+        vehicleId,
+        status: In([TripStatus.ACTIVE, TripStatus.PENDING]),
+      },
+    });
+    const incompatibleTrip = (activeTrips ?? []).find(
+      (trip) => (trip.totalSeats ?? trip.availableSeats) > maxSeats,
+    );
+
+    if (incompatibleTrip) {
+      throw new BadRequestException(
+        `Impossible de changer le type du vehicule : le trajet ${incompatibleTrip.id} depasse la limite de ${maxSeats} places`,
+      );
+    }
   }
 
   private async invalidateVehicleCaches(

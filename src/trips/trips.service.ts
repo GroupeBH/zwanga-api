@@ -32,7 +32,11 @@ import {
 } from './entities/recurring-trip-template.entity';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { Booking, BookingStatus } from '../bookings/entities/booking.entity';
-import { Vehicle } from '../vehicles/entities/vehicle.entity';
+import {
+  getVehicleMaxSeats,
+  Vehicle,
+  VehicleType,
+} from '../vehicles/entities/vehicle.entity';
 import { TripRequest } from '../trip-requests/entities/trip-request.entity';
 import { KycDocument, KycStatus } from '../users/entities/kyc-document.entity';
 import {
@@ -107,6 +111,7 @@ export type SanitizedBooking = Omit<
 
 export interface SanitizedVehicle {
   id: string;
+  type: VehicleType;
   brand: string;
   model: string;
   color: string;
@@ -227,6 +232,7 @@ export class TripsService {
       driverId,
       vehicleId || null,
     );
+    this.assertVehicleSeatCapacity(vehicle, baseTripData.totalSeats);
     await this.ensureDailyTripPublicationQuota(driverId);
     const departurePoint = await this.resolvePointFromCoordinatesOrAddress(
       departureCoordinates,
@@ -626,6 +632,7 @@ export class TripsService {
         'Un vehicule actif est requis pour creer un trajet recurrent',
       );
     }
+    this.assertVehicleSeatCapacity(vehicle, createRecurringTripDto.totalSeats);
 
     const startDate = this.parseDateOnly(createRecurringTripDto.startDate);
     const endDate = createRecurringTripDto.endDate
@@ -858,6 +865,7 @@ export class TripsService {
 
     const trip = await this.tripRepository.findOne({
       where: { id, driverId },
+      relations: ['vehicle'],
     });
 
     if (!trip) {
@@ -941,10 +949,12 @@ export class TripsService {
     }
 
     // Validate and update vehicle if provided
+    let resultingVehicle = trip.vehicle ?? null;
     if (vehicleId !== undefined) {
       if (vehicleId === null) {
         // Allow removing vehicle association
         trip.vehicleId = null;
+        resultingVehicle = null;
       } else {
         const vehicle = await this.vehicleRepository.findOne({
           where: { id: vehicleId, ownerId: driverId },
@@ -969,8 +979,14 @@ export class TripsService {
         }
 
         trip.vehicleId = vehicleId;
+        resultingVehicle = vehicle;
       }
     }
+
+    this.assertVehicleSeatCapacity(
+      resultingVehicle,
+      totalSeats ?? trip.totalSeats ?? trip.availableSeats,
+    );
 
     // Gérer totalSeats et recalculer availableSeats si nécessaire
     if (
@@ -1509,8 +1525,9 @@ export class TripsService {
       );
     }
 
-    const refreshedRequest =
-      await this.refreshDriverInterruptionRequestCounts(request.id);
+    const refreshedRequest = await this.refreshDriverInterruptionRequestCounts(
+      request.id,
+    );
 
     if (
       refreshedRequest.confirmedPassengerCount >=
@@ -1559,8 +1576,9 @@ export class TripsService {
       );
     }
 
-    const refreshedRequest =
-      await this.refreshDriverInterruptionRequestCounts(request.id);
+    const refreshedRequest = await this.refreshDriverInterruptionRequestCounts(
+      request.id,
+    );
     refreshedRequest.status = TripInterruptionStatus.REJECTED;
     refreshedRequest.rejectedAt = refreshedRequest.rejectedAt ?? new Date();
     await this.driverTripInterruptionRepository.save(refreshedRequest);
@@ -1612,7 +1630,7 @@ export class TripsService {
 
     if (!confirmation) {
       throw new ForbiddenException(
-        "Vous ne faites pas partie des passagers devant confirmer cette interruption",
+        'Vous ne faites pas partie des passagers devant confirmer cette interruption',
       );
     }
 
@@ -1775,7 +1793,9 @@ export class TripsService {
     return buildPointFromCoordinate(coordinate);
   }
 
-  private async invalidateDriverInterruptionCaches(tripId: string): Promise<void> {
+  private async invalidateDriverInterruptionCaches(
+    tripId: string,
+  ): Promise<void> {
     await this.cacheService.del(CacheService.getTripKey(tripId));
     await this.cacheService.del(CacheService.getBookingsByTripKey(tripId));
     await this.cacheService.del(CacheService.getTripsListKey());
@@ -2278,6 +2298,18 @@ export class TripsService {
     return { user, vehicle };
   }
 
+  private assertVehicleSeatCapacity(
+    vehicle: Vehicle | null | undefined,
+    totalSeats: number,
+  ): void {
+    const maxSeats = getVehicleMaxSeats(vehicle?.type);
+    if (maxSeats !== null && totalSeats > maxSeats) {
+      throw new BadRequestException(
+        `Ce type de moto accepte au maximum ${maxSeats} places`,
+      );
+    }
+  }
+
   private isDriverRole(role?: User['role'] | null): boolean {
     return role === UserRole.DRIVER;
   }
@@ -2319,6 +2351,18 @@ export class TripsService {
     if (template.status !== RecurringTripTemplateStatus.ACTIVE) {
       return 0;
     }
+
+    const vehicle =
+      template.vehicle ??
+      (await this.vehicleRepository.findOne({
+        where: { id: template.vehicleId, ownerId: template.driverId },
+      }));
+    if (!vehicle || !vehicle.isActive) {
+      throw new BadRequestException(
+        'Le vehicule du trajet recurrent est introuvable ou inactif',
+      );
+    }
+    this.assertVehicleSeatCapacity(vehicle, template.totalSeats);
 
     const now = new Date();
     const today = this.startOfDay(now);
@@ -2519,6 +2563,7 @@ export class TripsService {
 
       sanitizedVehicle = {
         id: vehicle.id,
+        type: vehicle.type,
         brand: vehicle.brand,
         model: vehicle.model,
         color: vehicle.color,
@@ -3000,6 +3045,7 @@ export class TripsService {
       }
       sanitizedVehicle = {
         id: vehicle.id,
+        type: vehicle.type,
         brand: vehicle.brand,
         model: vehicle.model,
         color: vehicle.color,
@@ -3075,7 +3121,10 @@ export class TripsService {
     }
 
     const coordinate = pointToCoordinate(booking.passengerCurrentLocation);
-    if (!coordinate || (trip && !isCoordinateAllowedForTrip(coordinate, trip))) {
+    if (
+      !coordinate ||
+      (trip && !isCoordinateAllowedForTrip(coordinate, trip))
+    ) {
       return null;
     }
 

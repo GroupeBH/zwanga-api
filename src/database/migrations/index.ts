@@ -10,6 +10,8 @@ import { RepairDriverPickupArrivedAt1780000009000 } from './1780000009000-Repair
 import { AddTripInterruptionRequests1780000010000 } from './1780000010000-AddTripInterruptionRequests';
 import { AddDistanceBasedBookingFares1780000011000 } from './1780000011000-AddDistanceBasedBookingFares';
 import { AddWalletTransfersAndSubscriptionPayments1780000012000 } from './1780000012000-AddWalletTransfersAndSubscriptionPayments';
+import { AddGenderToUsers1780000013000 } from './1780000013000-AddGenderToUsers';
+import { AddVehicleTypes1780000014000 } from './1780000014000-AddVehicleTypes';
 
 export const databaseMigrations = [
   FillTotalSeats1780000000000,
@@ -24,4 +26,6 @@ export const databaseMigrations = [
   AddTripInterruptionRequests1780000010000,
   AddDistanceBasedBookingFares1780000011000,
   AddWalletTransfersAndSubscriptionPayments1780000012000,
+  AddGenderToUsers1780000013000,
+  AddVehicleTypes1780000014000,
 ];

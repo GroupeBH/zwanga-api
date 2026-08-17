@@ -10,8 +10,12 @@ import { Repository, Point, LessThan, MoreThan, Between, In } from 'typeorm';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { TripRequest, TripRequestStatus } from './entities/trip-request.entity';
 import { DriverOffer, DriverOfferStatus } from './entities/driver-offer.entity';
-import { User, UserRole } from '../users/entities/user.entity';
-import { Vehicle } from '../vehicles/entities/vehicle.entity';
+import { User, UserGender, UserRole } from '../users/entities/user.entity';
+import {
+  getVehicleMaxSeats,
+  Vehicle,
+  VehicleType,
+} from '../vehicles/entities/vehicle.entity';
 import {
   CreateTripRequestDto,
   CreateDriverOfferDto,
@@ -37,6 +41,7 @@ export interface SanitizedUser {
   firstName: string;
   lastName: string;
   phone: string;
+  gender: UserGender | null;
   profilePicture: string | null;
   isPremium: boolean;
   premiumBadge: boolean;
@@ -44,6 +49,7 @@ export interface SanitizedUser {
 
 export interface SanitizedVehicle {
   id: string;
+  type: VehicleType;
   brand: string;
   model: string;
   color: string;
@@ -871,6 +877,11 @@ export class TripRequestsService {
           "Le véhicule sélectionné n'est pas actif",
         );
       }
+
+      this.assertVehicleSeatCapacity(
+        vehicle,
+        createDriverOfferDto.availableSeats,
+      );
     }
 
     const offer = this.driverOfferRepository.create({
@@ -1353,6 +1364,8 @@ export class TripRequestsService {
       }
     }
 
+    this.assertVehicleSeatCapacity(vehicle, totalSeats);
+
     // Determine departure date
     let departureDate: Date;
     if (acceptDto.departureDate) {
@@ -1778,6 +1791,7 @@ export class TripRequestsService {
       firstName: user.firstName,
       lastName: user.lastName,
       phone: user.phone,
+      gender: user.gender ?? null,
       profilePicture: profilePicture || user.profilePicture,
       isPremium: premium.isPremium,
       premiumBadge: premium.premiumBadgeEnabled,
@@ -1800,12 +1814,25 @@ export class TripRequestsService {
 
     return {
       id: vehicle.id,
+      type: vehicle.type,
       brand: vehicle.brand,
       model: vehicle.model,
       color: vehicle.color,
       licensePlate: vehicle.licensePlate,
       photoUrl,
     };
+  }
+
+  private assertVehicleSeatCapacity(
+    vehicle: Vehicle,
+    totalSeats: number,
+  ): void {
+    const maxSeats = getVehicleMaxSeats(vehicle.type);
+    if (maxSeats !== null && totalSeats > maxSeats) {
+      throw new BadRequestException(
+        `Ce type de moto accepte au maximum ${maxSeats} places`,
+      );
+    }
   }
 
   private async sanitizeDriverOffer(
