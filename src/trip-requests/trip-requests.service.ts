@@ -119,6 +119,8 @@ export interface SanitizedTripRequest {
 
 export interface TripRequestPriceRecommendation {
   currency: 'CDF';
+  vehicleType: VehicleType;
+  pricingModel: 'distance_per_vehicle_type';
   baseDistanceKm: number;
   additionalPricePerKmPerPassenger: number;
   distanceMeters: number | null;
@@ -133,9 +135,14 @@ export interface TripRequestPriceRecommendation {
 export class TripRequestsService {
   private readonly logger = new Logger(TripRequestsService.name);
   private readonly MAX_SEATS_PER_PASSENGER = 2;
-  private readonly RECOMMENDED_BASE_DISTANCE_KM = 3;
-  private readonly RECOMMENDED_BASE_PRICE_PER_KM_PER_PASSENGER = 4500;
-  private readonly RECOMMENDED_ADDITIONAL_PRICE_PER_KM_PER_PASSENGER = 750;
+  private readonly RECOMMENDED_PRICE_PER_KM_PER_PASSENGER_BY_VEHICLE_TYPE: Record<
+    VehicleType,
+    number
+  > = {
+    [VehicleType.CAR]: 500,
+    [VehicleType.MOTORCYCLE_TWO_WHEELS]: 1000,
+    [VehicleType.MOTORCYCLE_THREE_WHEELS]: 1000,
+  };
 
   constructor(
     @InjectRepository(TripRequest)
@@ -179,6 +186,7 @@ export class TripRequestsService {
       arrivalCoordinates,
       departureDateMin,
       departureDateMax,
+      vehicleType,
       ...rest
     } = createTripRequestDto;
 
@@ -215,6 +223,7 @@ export class TripRequestsService {
       (await this.calculateRecommendedPricePerSeat(
         departurePoint,
         arrivalPoint,
+        vehicleType,
         'trip request creation',
       ));
 
@@ -242,6 +251,7 @@ export class TripRequestsService {
     payload: RecommendTripRequestPriceDto,
   ): Promise<TripRequestPriceRecommendation> {
     const numberOfSeats = payload.numberOfSeats ?? 1;
+    const vehicleType = payload.vehicleType ?? VehicleType.CAR;
 
     if (numberOfSeats < 1 || numberOfSeats > this.MAX_SEATS_PER_PASSENGER) {
       throw new BadRequestException(
@@ -272,17 +282,21 @@ export class TripRequestsService {
     );
     const recommendedPricePerSeat = this.buildRecommendedPricePerSeat(
       distanceMeters,
+      vehicleType,
       weatherImpact.priceMultiplier,
     );
+    const pricePerKmPerPassenger =
+      this.getRecommendedPricePerKmPerPassenger(vehicleType);
 
     return {
       currency: 'CDF',
-      baseDistanceKm: this.RECOMMENDED_BASE_DISTANCE_KM,
-      additionalPricePerKmPerPassenger:
-        this.RECOMMENDED_ADDITIONAL_PRICE_PER_KM_PER_PASSENGER,
+      vehicleType,
+      pricingModel: 'distance_per_vehicle_type',
+      baseDistanceKm: 0,
+      additionalPricePerKmPerPassenger: pricePerKmPerPassenger,
       distanceMeters,
       numberOfSeats,
-      pricePerKmPerPassenger: this.RECOMMENDED_BASE_PRICE_PER_KM_PER_PASSENGER,
+      pricePerKmPerPassenger,
       recommendedPricePerSeat,
       recommendedTotalPrice:
         recommendedPricePerSeat === null
@@ -356,6 +370,7 @@ export class TripRequestsService {
       arrivalCoordinates,
       departureDateMin,
       departureDateMax,
+      vehicleType,
       ...rest
     } = updateTripRequestDto;
 
@@ -449,11 +464,13 @@ export class TripRequestsService {
       departureCoordinates ||
       arrivalCoordinates ||
       shouldRefreshDeparturePoint ||
-      shouldRefreshArrivalPoint
+      shouldRefreshArrivalPoint ||
+      vehicleType !== undefined
     ) {
       const recommendedPrice = await this.calculateRecommendedPricePerSeat(
         tripRequest.departurePoint,
         tripRequest.arrivalPoint,
+        vehicleType,
         `trip request ${tripRequest.id} update`,
       );
       if (recommendedPrice !== null) {
@@ -1551,6 +1568,7 @@ export class TripRequestsService {
   private async calculateRecommendedPricePerSeat(
     departurePoint: Point | null,
     arrivalPoint: Point | null,
+    vehicleType: VehicleType | undefined | null,
     context: string,
   ): Promise<number | null> {
     const distanceMeters = await this.calculateRouteDistanceMeters(
@@ -1565,12 +1583,14 @@ export class TripRequestsService {
 
     return this.buildRecommendedPricePerSeat(
       distanceMeters,
+      vehicleType,
       weatherImpact.priceMultiplier,
     );
   }
 
   private buildRecommendedPricePerSeat(
     distanceMeters: number | null,
+    vehicleType: VehicleType | undefined | null,
     priceMultiplier = 1,
   ): number | null {
     if (
@@ -1582,26 +1602,28 @@ export class TripRequestsService {
     }
 
     const distanceKm = distanceMeters / 1000;
-    const baseDistanceKm = Math.min(
-      distanceKm,
-      this.RECOMMENDED_BASE_DISTANCE_KM,
-    );
-    const additionalDistanceKm = Math.max(
-      distanceKm - this.RECOMMENDED_BASE_DISTANCE_KM,
-      0,
-    );
-    const basePrice =
-      baseDistanceKm * this.RECOMMENDED_BASE_PRICE_PER_KM_PER_PASSENGER;
-    const additionalPrice =
-      additionalDistanceKm *
-      this.RECOMMENDED_ADDITIONAL_PRICE_PER_KM_PER_PASSENGER;
+    const pricePerKmPerPassenger =
+      this.getRecommendedPricePerKmPerPassenger(vehicleType);
 
     const safeMultiplier =
       Number.isFinite(priceMultiplier) && priceMultiplier >= 1
         ? priceMultiplier
         : 1;
 
-    return Math.round((basePrice + additionalPrice) * safeMultiplier);
+    return Math.round(distanceKm * pricePerKmPerPassenger * safeMultiplier);
+  }
+
+  private getRecommendedPricePerKmPerPassenger(
+    vehicleType: VehicleType | undefined | null,
+  ): number {
+    return (
+      this.RECOMMENDED_PRICE_PER_KM_PER_PASSENGER_BY_VEHICLE_TYPE[
+        vehicleType ?? VehicleType.CAR
+      ] ??
+      this.RECOMMENDED_PRICE_PER_KM_PER_PASSENGER_BY_VEHICLE_TYPE[
+        VehicleType.CAR
+      ]
+    );
   }
 
   private async calculateRouteDistanceMeters(

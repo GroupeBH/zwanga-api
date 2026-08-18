@@ -3,8 +3,8 @@ import { VehicleType } from '../vehicles/entities/vehicle.entity';
 import { TripRequestStatus } from './entities/trip-request.entity';
 import { TripRequestsService } from './trip-requests.service';
 
-describe('TripRequestsService weather-aware recommended price', () => {
-  it('applies the heavy-rain coefficient after the distance pricing tiers', async () => {
+describe('TripRequestsService recommended price', () => {
+  it('recommends 500 FC per kilometer for cars and applies the heavy-rain coefficient', async () => {
     const weatherAwarenessService = {
       getRouteImpact: jest.fn().mockResolvedValue({
         heavyRain: true,
@@ -46,11 +46,65 @@ describe('TripRequestsService weather-aware recommended price', () => {
       departureLocation: 'Gombe',
       arrivalLocation: "N'djili",
       numberOfSeats: 2,
+      vehicleType: VehicleType.CAR,
     });
 
-    expect(recommendation.recommendedPricePerSeat).toBe(19500);
-    expect(recommendation.recommendedTotalPrice).toBe(39000);
+    expect(recommendation.vehicleType).toBe(VehicleType.CAR);
+    expect(recommendation.pricePerKmPerPassenger).toBe(500);
+    expect(recommendation.recommendedPricePerSeat).toBe(3250);
+    expect(recommendation.recommendedTotalPrice).toBe(6500);
     expect(recommendation.weatherImpact.priceMultiplier).toBe(1.3);
+  });
+
+  it('recommends 1000 FC per kilometer for motorcycles', async () => {
+    const weatherAwarenessService = {
+      getRouteImpact: jest.fn().mockResolvedValue({
+        heavyRain: false,
+        dataAvailable: true,
+        priceMultiplier: 1,
+        etaMultiplier: 1,
+        evaluatedZoneIds: [],
+        affectedZoneIds: [],
+      }),
+    };
+    const service = new TripRequestsService(
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      weatherAwarenessService as any,
+    );
+    jest
+      .spyOn(service as any, 'resolvePointFromCoordinatesOrAddress')
+      .mockResolvedValueOnce({
+        type: 'Point',
+        coordinates: [15.3136, -4.3073],
+      })
+      .mockResolvedValueOnce({
+        type: 'Point',
+        coordinates: [15.403, -4.4075],
+      });
+    jest
+      .spyOn(service as any, 'calculateRouteDistanceMeters')
+      .mockResolvedValue(5000);
+
+    const recommendation = await service.recommendPrice({
+      departureLocation: 'Gombe',
+      arrivalLocation: "N'djili",
+      numberOfSeats: 1,
+      vehicleType: VehicleType.MOTORCYCLE_TWO_WHEELS,
+    });
+
+    expect(recommendation.vehicleType).toBe(VehicleType.MOTORCYCLE_TWO_WHEELS);
+    expect(recommendation.pricePerKmPerPassenger).toBe(1000);
+    expect(recommendation.recommendedPricePerSeat).toBe(5000);
+    expect(recommendation.recommendedTotalPrice).toBe(5000);
   });
 });
 

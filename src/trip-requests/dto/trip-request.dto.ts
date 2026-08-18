@@ -13,6 +13,7 @@ import {
 } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { TripPaymentMode } from '../../payments/enums/trip-payment-mode.enum';
+import { VehicleType } from '../../vehicles/entities/vehicle.entity';
 
 export class CreateTripRequestDto {
   @ApiProperty()
@@ -113,6 +114,21 @@ export class CreateTripRequestDto {
 
   @ApiProperty({
     required: false,
+    enum: VehicleType,
+    enumName: 'VehicleType',
+    default: VehicleType.CAR,
+    description:
+      'Type de vehicule souhaite pour calculer le prix recommande: voiture = 500 FC/km, moto = 1000 FC/km',
+    example: VehicleType.CAR,
+  })
+  @IsEnum(VehicleType, {
+    message: 'Le type de vehicule selectionne est invalide',
+  })
+  @IsOptional()
+  vehicleType?: VehicleType;
+
+  @ApiProperty({
+    required: false,
     enum: TripPaymentMode,
     enumName: 'TripPaymentMode',
     description:
@@ -206,6 +222,21 @@ export class RecommendTripRequestPriceDto {
   @Max(2)
   @IsOptional()
   numberOfSeats?: number;
+
+  @ApiProperty({
+    required: false,
+    enum: VehicleType,
+    enumName: 'VehicleType',
+    default: VehicleType.CAR,
+    description:
+      'Type de vehicule utilise pour la grille tarifaire: voiture = 500 FC/km, moto = 1000 FC/km',
+    example: VehicleType.MOTORCYCLE_TWO_WHEELS,
+  })
+  @IsEnum(VehicleType, {
+    message: 'Le type de vehicule selectionne est invalide',
+  })
+  @IsOptional()
+  vehicleType?: VehicleType;
 }
 
 export class CreateDriverOfferDto {
@@ -491,6 +522,20 @@ export class UpdateTripRequestDto {
   @Min(0)
   @IsOptional()
   maxPricePerSeat?: number;
+
+  @ApiProperty({
+    required: false,
+    enum: VehicleType,
+    enumName: 'VehicleType',
+    description:
+      'Type de vehicule a utiliser si le backend doit recalculer le prix recommande: voiture = 500 FC/km, moto = 1000 FC/km',
+    example: VehicleType.CAR,
+  })
+  @IsEnum(VehicleType, {
+    message: 'Le type de vehicule selectionne est invalide',
+  })
+  @IsOptional()
+  vehicleType?: VehicleType;
 
   @ApiProperty({
     required: false,
