@@ -54,7 +54,7 @@ Toute évolution financière doit respecter les règles suivantes :
 
 - [Choix du véhicule et tarification d'une demande de trajet](./trip-request-vehicle-pricing.md)
 - [Type obligatoire à la création d'un véhicule](./vehicle-type-registration.md)
-- [Expiration après douze heures sans conducteur accepté](./trip-request-response-expiration.md)
+- [Expiration douze heures après la fin de la plage de départ](./trip-request-response-expiration.md)
 - [Nombre de places facultatif dans une demande](./trip-request-optional-seat-count.md)
 - [Jetons Zwanga et bonus de 25 jetons après paiement d'abonnement](./token-denomination-subscription-reward.md)
 - [Journal des modifications financières](./CHANGELOG.md)

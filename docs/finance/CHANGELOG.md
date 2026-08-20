@@ -4,11 +4,11 @@ Ce fichier répertorie les changements qui influencent un prix, un paiement, un 
 
 ## 20 août 2026
 
-### FIN-TRIP-004 — Expiration après douze heures sans conducteur accepté
+### FIN-TRIP-004 — Expiration douze heures après la fin de la plage de départ
 
 Statut : implémenté.
 
-Résumé : toute demande `pending` ou `offers_received` expire à `createdAt + 12 heures` tant qu'aucun conducteur n'a été accepté. Une simple offre ne maintient plus la demande ouverte indéfiniment. Le Home possède également un filtre défensif de douze heures.
+Résumé : toute demande `pending` ou `offers_received` expire à `departureDateMax + 12 heures` tant qu'aucun conducteur n'a été accepté. Une simple offre ne maintient plus la demande ouverte indéfiniment. Le Home possède le même filtre défensif fondé sur la fin de la plage de départ.
 
 Impacts financiers :
 

@@ -436,13 +436,14 @@ describe('TripRequestsService unaccepted request expiration', () => {
       {} as any,
     );
 
-  it('keeps an unaccepted request visible for twelve hours even when its departure window has passed', async () => {
+  it('keeps an old request visible until twelve hours after the end of its departure window', async () => {
     const now = Date.now();
     const request = {
       id: 'request-recent',
       status: TripRequestStatus.PENDING,
-      createdAt: new Date(now - (12 * 60 - 1) * 60 * 1000),
-      departureDateMax: new Date(now - 30 * 60 * 1000),
+      createdAt: new Date(now - 30 * 24 * 60 * 60 * 1000),
+      departureDateMin: new Date(now - 13 * 60 * 60 * 1000),
+      departureDateMax: new Date(now - (12 * 60 - 1) * 60 * 1000),
       driverOffers: [],
     };
     const tripRequestRepository = {
@@ -468,7 +469,7 @@ describe('TripRequestsService unaccepted request expiration', () => {
     expect(tripRequestRepository.update).not.toHaveBeenCalled();
     expect(
       tripRequestRepository.find.mock.calls[0][0].where,
-    ).not.toHaveProperty('departureDateMax');
+    ).not.toHaveProperty('createdAt');
   });
 
   it('expires pending and offers-received requests after twelve hours unless a driver was accepted', async () => {
@@ -476,13 +477,17 @@ describe('TripRequestsService unaccepted request expiration', () => {
     const unansweredRequest = {
       id: 'request-unanswered',
       status: TripRequestStatus.PENDING,
-      createdAt: new Date(now - 12 * 60 * 60 * 1000 - 1),
+      createdAt: new Date(now - 30 * 24 * 60 * 60 * 1000),
+      departureDateMin: new Date(now - 13 * 60 * 60 * 1000 - 1),
+      departureDateMax: new Date(now - 12 * 60 * 60 * 1000 - 1),
       driverOffers: [],
     };
     const unacceptedOfferRequest = {
       id: 'request-offer-not-accepted',
       status: TripRequestStatus.OFFERS_RECEIVED,
       createdAt: new Date(now - 30 * 24 * 60 * 60 * 1000),
+      departureDateMin: new Date(now - 30 * 24 * 60 * 60 * 1000),
+      departureDateMax: new Date(now - 29 * 24 * 60 * 60 * 1000),
       driverOffers: [
         { id: 'offer-1', status: DriverOfferStatus.PENDING },
       ],
@@ -491,6 +496,8 @@ describe('TripRequestsService unaccepted request expiration', () => {
       id: 'request-accepted',
       status: TripRequestStatus.OFFERS_RECEIVED,
       createdAt: new Date(now - 30 * 24 * 60 * 60 * 1000),
+      departureDateMin: new Date(now - 30 * 24 * 60 * 60 * 1000),
+      departureDateMax: new Date(now - 29 * 24 * 60 * 60 * 1000),
       driverOffers: [
         { id: 'offer-2', status: DriverOfferStatus.ACCEPTED },
       ],
@@ -498,7 +505,9 @@ describe('TripRequestsService unaccepted request expiration', () => {
     const freshOfferRequest = {
       id: 'request-fresh-offer',
       status: TripRequestStatus.OFFERS_RECEIVED,
-      createdAt: new Date(now - 60 * 60 * 1000),
+      createdAt: new Date(now - 30 * 24 * 60 * 60 * 1000),
+      departureDateMin: new Date(now - 2 * 60 * 60 * 1000),
+      departureDateMax: new Date(now - 60 * 60 * 1000),
       driverOffers: [
         { id: 'offer-3', status: DriverOfferStatus.PENDING },
       ],
@@ -553,9 +562,9 @@ describe('TripRequestsService unaccepted request expiration', () => {
       id: 'request-expired',
       passengerId: 'passenger-1',
       status: TripRequestStatus.PENDING,
-      createdAt: new Date(now - 12 * 60 * 60 * 1000 - 1),
-      departureDateMin: new Date(now + 30 * 60 * 1000),
-      departureDateMax: new Date(now + 90 * 60 * 1000),
+      createdAt: new Date(now - 30 * 24 * 60 * 60 * 1000),
+      departureDateMin: new Date(now - 13 * 60 * 60 * 1000 - 1),
+      departureDateMax: new Date(now - 12 * 60 * 60 * 1000 - 1),
       driverOffers: [],
     };
     const tripRequestRepository = {

@@ -2163,12 +2163,16 @@ export class TripRequestsService {
   private getUnacceptedRequestExpirationAt(
     tripRequest: TripRequest,
   ): Date | null {
-    const createdAt = new Date(tripRequest.createdAt).getTime();
-    if (!Number.isFinite(createdAt)) {
+    const latestAcceptedDepartureAt = new Date(
+      tripRequest.departureDateMax,
+    ).getTime();
+    if (!Number.isFinite(latestAcceptedDepartureAt)) {
       return null;
     }
 
-    return new Date(createdAt + this.UNACCEPTED_REQUEST_EXPIRATION_MS);
+    return new Date(
+      latestAcceptedDepartureAt + this.UNACCEPTED_REQUEST_EXPIRATION_MS,
+    );
   }
 
   private hasAcceptedDriver(tripRequest: TripRequest): boolean {
@@ -2248,8 +2252,8 @@ export class TripRequestsService {
 
   /**
    * Cron job to mark expired trip requests
-   * Runs every minute and expires requests created at least twelve hours ago
-   * when no driver has been accepted.
+   * Runs every minute and expires requests whose latest accepted departure
+   * was at least twelve hours ago when no driver has been accepted.
    */
   @Cron(CronExpression.EVERY_MINUTE)
   async markExpiredTripRequests() {
@@ -2258,7 +2262,7 @@ export class TripRequestsService {
       this.logger.debug('Running cron job to mark expired trip requests');
 
       const now = new Date();
-      const unacceptedCutoff = new Date(
+      const latestAcceptedDepartureCutoff = new Date(
         now.getTime() - this.UNACCEPTED_REQUEST_EXPIRATION_MS,
       );
 
@@ -2268,7 +2272,7 @@ export class TripRequestsService {
             TripRequestStatus.PENDING,
             TripRequestStatus.OFFERS_RECEIVED,
           ]),
-          createdAt: LessThanOrEqual(unacceptedCutoff),
+          departureDateMax: LessThanOrEqual(latestAcceptedDepartureCutoff),
         },
         relations: ['passenger', 'driverOffers'],
       });
@@ -2302,11 +2306,11 @@ export class TripRequestsService {
       );
 
       const now = new Date();
-      const oldestCreationTime = new Date(
+      const oldestLatestAcceptedDeparture = new Date(
         now.getTime() - this.UNACCEPTED_REQUEST_EXPIRATION_MS,
       );
-      const newestCreationTime = new Date(
-        oldestCreationTime.getTime() + this.EXPIRATION_WARNING_MS,
+      const newestLatestAcceptedDeparture = new Date(
+        oldestLatestAcceptedDeparture.getTime() + this.EXPIRATION_WARNING_MS,
       );
 
       const notificationCandidates = await this.tripRequestRepository.find({
@@ -2315,7 +2319,10 @@ export class TripRequestsService {
             TripRequestStatus.PENDING,
             TripRequestStatus.OFFERS_RECEIVED,
           ]),
-          createdAt: Between(oldestCreationTime, newestCreationTime),
+          departureDateMax: Between(
+            oldestLatestAcceptedDeparture,
+            newestLatestAcceptedDeparture,
+          ),
           expirationNotificationSent: false,
         },
         relations: ['passenger', 'driverOffers'],

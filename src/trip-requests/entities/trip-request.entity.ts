@@ -74,7 +74,7 @@ export class TripRequest {
   departureDateMin: Date; // Date/heure de départ minimum souhaitée
 
   @Column({ type: 'timestamp' })
-  departureDateMax: Date; // Date/heure de départ maximum acceptée (distincte de l'expiration)
+  departureDateMax: Date; // Fin de la plage de départ, utilisée comme référence pour l'expiration
 
   @Column({ type: 'int' })
   numberOfSeats: number; // Nombre de places nécessaires (1 si omis à la création)
