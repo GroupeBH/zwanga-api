@@ -74,7 +74,7 @@ export class TripRequest {
   departureDateMin: Date; // Date/heure de départ minimum souhaitée
 
   @Column({ type: 'timestamp' })
-  departureDateMax: Date; // Date/heure de départ maximum acceptée (distincte de l'expiration)
+  departureDateMax: Date; // Fin de la plage de départ, utilisée comme référence pour l'expiration
 
   @Column({ type: 'int' })
   numberOfSeats: number; // Nombre de places nécessaires (1 si omis à la création)
@@ -127,7 +127,7 @@ export class TripRequest {
   tripId: string | null; // ID du trip créé à partir de cette demande
 
   @Column({ type: 'boolean', default: false })
-  expirationNotificationSent: boolean; // Notification du délai de deux heures envoyée
+  expirationNotificationSent: boolean; // Notification du délai de douze heures envoyée
 
   @CreateDateColumn()
   createdAt: Date;

@@ -4,6 +4,23 @@ Ce fichier répertorie les changements qui influencent un prix, un paiement, un 
 
 ## 20 août 2026
 
+### FIN-TRIP-004 — Expiration douze heures après la fin de la plage de départ
+
+Statut : implémenté.
+
+Résumé : toute demande `pending` ou `offers_received` expire à `departureDateMax + 12 heures` tant qu'aucun conducteur n'a été accepté. Une simple offre ne maintient plus la demande ouverte indéfiniment. Le Home possède le même filtre défensif fondé sur la fin de la plage de départ.
+
+Impacts financiers :
+
+- aucun paiement, solde ou jeton n'est modifié ;
+- aucun prix de demande historique n'est recalculé ;
+- les demandes anciennes sans acceptation passent à `expired` au cron ou à la prochaine lecture ;
+- les demandes associées à un conducteur accepté ou à un trajet sont protégées.
+
+Cette règle remplace `FIN-TRIP-002`.
+
+Documentation complète : [trip-request-response-expiration.md](./trip-request-response-expiration.md).
+
 ### FIN-WALLET-001 — Jetons Zwanga et bonus d'abonnement
 
 Statut : implémenté dans le code, migration non encore appliquée à une base de production.
@@ -40,7 +57,7 @@ Documentation complète : [trip-request-optional-seat-count.md](./trip-request-o
 
 ### FIN-TRIP-002 — Expiration après deux heures sans réponse
 
-Statut : implémenté.
+Statut : remplacé le 20 août 2026 par `FIN-TRIP-004`.
 
 Résumé : une demande `pending` expire désormais à `createdAt + 2 heures` seulement lorsqu'aucune offre conducteur n'a été enregistrée. La plage de départ souhaitée ne sert plus de date d'expiration.
 

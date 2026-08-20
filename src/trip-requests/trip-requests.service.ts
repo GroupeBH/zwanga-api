@@ -6,7 +6,14 @@ import {
   ForbiddenException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, Point, LessThanOrEqual, Between, In } from 'typeorm';
+import {
+  Repository,
+  Point,
+  LessThanOrEqual,
+  Between,
+  In,
+  IsNull,
+} from 'typeorm';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { TripRequest, TripRequestStatus } from './entities/trip-request.entity';
 import { DriverOffer, DriverOfferStatus } from './entities/driver-offer.entity';
@@ -156,7 +163,7 @@ export interface TripRequestVehicleOptionsResponse {
 export class TripRequestsService {
   private readonly logger = new Logger(TripRequestsService.name);
   private readonly MAX_SEATS_PER_PASSENGER = 2;
-  private readonly NO_RESPONSE_EXPIRATION_MS = 2 * 60 * 60 * 1000;
+  private readonly UNACCEPTED_REQUEST_EXPIRATION_MS = 12 * 60 * 60 * 1000;
   private readonly EXPIRATION_WARNING_MS = 30 * 60 * 1000;
   private readonly RECOMMENDED_PRICE_PER_KM_PER_PASSENGER_BY_VEHICLE_TYPE: Record<
     VehicleType,
@@ -429,7 +436,7 @@ export class TripRequestsService {
       );
     }
 
-    await this.expireUnansweredRequests([tripRequest]);
+    await this.expireUnacceptedRequests([tripRequest]);
 
     // Check if trip request can be updated (only PENDING or OFFERS_RECEIVED, no driver selected)
     if (tripRequest.status === TripRequestStatus.DRIVER_SELECTED) {
@@ -684,7 +691,7 @@ export class TripRequestsService {
       order: { createdAt: 'DESC' },
     });
 
-    await this.expireUnansweredRequests(tripRequests);
+    await this.expireUnacceptedRequests(tripRequests);
 
     // Filter out trip requests that have an accepted offer (even if status is not DRIVER_SELECTED yet)
     const visibleTripRequests = tripRequests.filter((tr) => {
@@ -718,7 +725,7 @@ export class TripRequestsService {
       throw new NotFoundException('Demande de trajet non trouvée');
     }
 
-    await this.expireUnansweredRequests([tripRequest]);
+    await this.expireUnacceptedRequests([tripRequest]);
 
     const isPassenger = userId && tripRequest.passengerId === userId;
     const isSelectedDriver =
@@ -841,7 +848,7 @@ export class TripRequestsService {
       order: { createdAt: 'DESC' },
     });
 
-    await this.expireUnansweredRequests(tripRequests);
+    await this.expireUnacceptedRequests(tripRequests);
 
     return Promise.all(tripRequests.map((tr) => this.sanitizeTripRequest(tr)));
   }
@@ -892,7 +899,7 @@ export class TripRequestsService {
       throw new NotFoundException('Demande de trajet non trouvée');
     }
 
-    await this.expireUnansweredRequests([tripRequest]);
+    await this.expireUnacceptedRequests([tripRequest]);
 
     // Check if trip request status allows new offers
     if (tripRequest.status === TripRequestStatus.DRIVER_SELECTED) {
@@ -1205,7 +1212,7 @@ export class TripRequestsService {
       );
     }
 
-    await this.expireUnansweredRequests([tripRequest]);
+    await this.expireUnacceptedRequests([tripRequest]);
 
     if (tripRequest.status === TripRequestStatus.DRIVER_SELECTED) {
       throw new BadRequestException(
@@ -1430,7 +1437,7 @@ export class TripRequestsService {
       throw new NotFoundException('Demande de trajet non trouvée');
     }
 
-    await this.expireUnansweredRequests([tripRequest]);
+    await this.expireUnacceptedRequests([tripRequest]);
 
     // Check if trip request can be accepted
     if (tripRequest.status === TripRequestStatus.DRIVER_SELECTED) {
@@ -2153,43 +2160,59 @@ export class TripRequestsService {
     };
   }
 
-  private getNoResponseExpirationAt(tripRequest: TripRequest): Date | null {
-    const createdAt = new Date(tripRequest.createdAt).getTime();
-    if (!Number.isFinite(createdAt)) {
+  private getUnacceptedRequestExpirationAt(
+    tripRequest: TripRequest,
+  ): Date | null {
+    const latestAcceptedDepartureAt = new Date(
+      tripRequest.departureDateMax,
+    ).getTime();
+    if (!Number.isFinite(latestAcceptedDepartureAt)) {
       return null;
     }
 
-    return new Date(createdAt + this.NO_RESPONSE_EXPIRATION_MS);
-  }
-
-  private hasDriverResponse(tripRequest: TripRequest): boolean {
-    return (
-      tripRequest.status === TripRequestStatus.OFFERS_RECEIVED ||
-      Boolean(tripRequest.driverOffers?.length)
+    return new Date(
+      latestAcceptedDepartureAt + this.UNACCEPTED_REQUEST_EXPIRATION_MS,
     );
   }
 
-  private shouldExpireWithoutResponse(
+  private hasAcceptedDriver(tripRequest: TripRequest): boolean {
+    return (
+      tripRequest.status === TripRequestStatus.DRIVER_SELECTED ||
+      Boolean(tripRequest.selectedDriverId) ||
+      Boolean(tripRequest.tripId) ||
+      Boolean(
+        tripRequest.driverOffers?.some(
+          (offer) => offer.status === DriverOfferStatus.ACCEPTED,
+        ),
+      )
+    );
+  }
+
+  private shouldExpireWithoutAcceptance(
     tripRequest: TripRequest,
     now: Date,
   ): boolean {
+    const isAwaitingAcceptance =
+      tripRequest.status === TripRequestStatus.PENDING ||
+      tripRequest.status === TripRequestStatus.OFFERS_RECEIVED;
+
     if (
-      tripRequest.status !== TripRequestStatus.PENDING ||
-      this.hasDriverResponse(tripRequest)
+      !isAwaitingAcceptance ||
+      this.hasAcceptedDriver(tripRequest)
     ) {
       return false;
     }
 
-    const expirationAt = this.getNoResponseExpirationAt(tripRequest);
+    const expirationAt = this.getUnacceptedRequestExpirationAt(tripRequest);
     return expirationAt !== null && expirationAt.getTime() <= now.getTime();
   }
 
-  private async expireUnansweredRequests(
+  private async expireUnacceptedRequests(
     tripRequests: TripRequest[],
     now = new Date(),
   ): Promise<string[]> {
     const expiredRequests = tripRequests.filter((tripRequest) =>
-      this.shouldExpireWithoutResponse(tripRequest, now),
+      this.shouldExpireWithoutAcceptance(tripRequest, now),
     );
 
     if (expiredRequests.length === 0) {
@@ -2199,7 +2222,15 @@ export class TripRequestsService {
     const expirationAttempts = await Promise.all(
       expiredRequests.map(async (request) => {
         const result = await this.tripRequestRepository.update(
-          { id: request.id, status: TripRequestStatus.PENDING },
+          {
+            id: request.id,
+            status: In([
+              TripRequestStatus.PENDING,
+              TripRequestStatus.OFFERS_RECEIVED,
+            ]),
+            selectedDriverId: IsNull(),
+            tripId: IsNull(),
+          },
           { status: TripRequestStatus.EXPIRED },
         );
 
@@ -2221,8 +2252,8 @@ export class TripRequestsService {
 
   /**
    * Cron job to mark expired trip requests
-   * Runs every minute and expires requests created at least two hours ago
-   * only when no driver response has been received.
+   * Runs every minute and expires requests whose latest accepted departure
+   * was at least twelve hours ago when no driver has been accepted.
    */
   @Cron(CronExpression.EVERY_MINUTE)
   async markExpiredTripRequests() {
@@ -2231,19 +2262,22 @@ export class TripRequestsService {
       this.logger.debug('Running cron job to mark expired trip requests');
 
       const now = new Date();
-      const unansweredCutoff = new Date(
-        now.getTime() - this.NO_RESPONSE_EXPIRATION_MS,
+      const latestAcceptedDepartureCutoff = new Date(
+        now.getTime() - this.UNACCEPTED_REQUEST_EXPIRATION_MS,
       );
 
       const expirationCandidates = await this.tripRequestRepository.find({
         where: {
-          status: TripRequestStatus.PENDING,
-          createdAt: LessThanOrEqual(unansweredCutoff),
+          status: In([
+            TripRequestStatus.PENDING,
+            TripRequestStatus.OFFERS_RECEIVED,
+          ]),
+          departureDateMax: LessThanOrEqual(latestAcceptedDepartureCutoff),
         },
         relations: ['passenger', 'driverOffers'],
       });
 
-      const expiredRequestIds = await this.expireUnansweredRequests(
+      const expiredRequestIds = await this.expireUnacceptedRequests(
         expirationCandidates,
         now,
       );
@@ -2254,7 +2288,7 @@ export class TripRequestsService {
       }
 
       this.logger.log(
-        `Successfully marked ${expiredRequestIds.length} unanswered trip requests as expired`,
+        `Successfully marked ${expiredRequestIds.length} unaccepted trip requests as expired`,
       );
     });
   }
@@ -2272,17 +2306,23 @@ export class TripRequestsService {
       );
 
       const now = new Date();
-      const oldestCreationTime = new Date(
-        now.getTime() - this.NO_RESPONSE_EXPIRATION_MS,
+      const oldestLatestAcceptedDeparture = new Date(
+        now.getTime() - this.UNACCEPTED_REQUEST_EXPIRATION_MS,
       );
-      const newestCreationTime = new Date(
-        oldestCreationTime.getTime() + this.EXPIRATION_WARNING_MS,
+      const newestLatestAcceptedDeparture = new Date(
+        oldestLatestAcceptedDeparture.getTime() + this.EXPIRATION_WARNING_MS,
       );
 
       const notificationCandidates = await this.tripRequestRepository.find({
         where: {
-          status: TripRequestStatus.PENDING,
-          createdAt: Between(oldestCreationTime, newestCreationTime),
+          status: In([
+            TripRequestStatus.PENDING,
+            TripRequestStatus.OFFERS_RECEIVED,
+          ]),
+          departureDateMax: Between(
+            oldestLatestAcceptedDeparture,
+            newestLatestAcceptedDeparture,
+          ),
           expirationNotificationSent: false,
         },
         relations: ['passenger', 'driverOffers'],
@@ -2290,9 +2330,10 @@ export class TripRequestsService {
 
       const requestsExpiringSoon = notificationCandidates.filter(
         (tripRequest) => {
-          const expirationAt = this.getNoResponseExpirationAt(tripRequest);
+          const expirationAt =
+            this.getUnacceptedRequestExpirationAt(tripRequest);
           return (
-            !this.hasDriverResponse(tripRequest) &&
+            !this.hasAcceptedDriver(tripRequest) &&
             expirationAt !== null &&
             expirationAt.getTime() > now.getTime()
           );
@@ -2346,13 +2387,14 @@ export class TripRequestsService {
     }
 
     const minutesUntilExpiration = Math.round(
-      ((this.getNoResponseExpirationAt(tripRequest)?.getTime() ?? Date.now()) -
+      ((this.getUnacceptedRequestExpirationAt(tripRequest)?.getTime() ??
+        Date.now()) -
         Date.now()) /
         (60 * 1000),
     );
 
     const title = '⏰ Votre demande de trajet expire bientôt';
-    const body = `Votre demande de trajet ${tripRequest.departureLocation} → ${tripRequest.arrivalLocation} expire dans ${minutesUntilExpiration} minute(s) si aucun conducteur ne répond.`;
+    const body = `Votre demande de trajet ${tripRequest.departureLocation} → ${tripRequest.arrivalLocation} expire dans ${minutesUntilExpiration} minute(s) si aucun conducteur n'est confirmé.`;
 
     await this.notificationService.sendNotification(
       passenger.fcmToken,
