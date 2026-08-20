@@ -10,6 +10,7 @@ import {
   UseGuards,
   Req,
   Res,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { FileFieldsInterceptor } from '@nestjs/platform-express';
 import {
@@ -22,7 +23,7 @@ import {
 } from '@nestjs/swagger';
 import { AuthGuard } from '@nestjs/passport';
 import type { Request, Response } from 'express';
-import { AuthService } from './auth.service';
+import { AuthService, type GoogleAuthProfile } from './auth.service';
 import {
   RegisterDto,
   LoginDto,
@@ -102,13 +103,13 @@ export class AuthController {
         },
         vehicle: {
           type: 'object',
+          required: ['type', 'brand', 'model', 'color', 'licensePlate'],
           description:
             'Informations du véhicule (optionnel, conducteurs uniquement)',
           properties: {
             type: {
               type: 'string',
               enum: Object.values(VehicleType),
-              default: VehicleType.CAR,
               example: VehicleType.MOTORCYCLE_TWO_WHEELS,
             },
             brand: { type: 'string', example: 'Toyota' },
@@ -198,6 +199,7 @@ export class AuthController {
       dto.idToken,
       dto.phone,
       dto.gender,
+      dto,
     );
   }
 
@@ -230,7 +232,11 @@ export class AuthController {
   @ApiResponse({ status: 200, type: AuthResponseDto })
   @ApiResponse({ status: 401, description: 'Authentication failed' })
   async googleAuthCallback(@Req() req: Request, @Res() res: Response) {
-    const googleProfile = req.user;
+    if (!req.user) {
+      throw new UnauthorizedException('Authentication failed');
+    }
+
+    const googleProfile = req.user as unknown as GoogleAuthProfile;
     const authResponse =
       await this.authService.validateGoogleUser(googleProfile);
 

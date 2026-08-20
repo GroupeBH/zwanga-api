@@ -148,7 +148,7 @@ export class CreateBookingDto {
     enum: TripPaymentMode,
     enumName: 'TripPaymentMode',
     description:
-      'Mode de reglement du trajet: paiement electronique via FlexPay, points Zwanga ou paiement physique a l arrivee',
+      'Mode de reglement du trajet: paiement electronique via FlexPay, jetons Zwanga ou paiement physique a l arrivee',
     example: TripPaymentMode.ELECTRONIC,
   })
   @IsEnum(TripPaymentMode, {
@@ -198,7 +198,7 @@ export class ConfirmDropoffDto {
     enum: TripPaymentMode,
     enumName: 'TripPaymentMode',
     description:
-      "Mode de reglement choisi par le passager au moment de signaler son arrivee: paiement electronique, points Zwanga ou paiement physique",
+      "Mode de reglement choisi par le passager au moment de signaler son arrivee: paiement electronique, jetons Zwanga ou paiement physique",
     example: TripPaymentMode.CASH,
   })
   @IsEnum(TripPaymentMode, {
@@ -213,7 +213,7 @@ export class UpdateBookingPaymentModeDto {
     enum: TripPaymentMode,
     enumName: 'TripPaymentMode',
     description:
-      'Nouveau mode de reglement du trajet: paiement electronique via FlexPay, points Zwanga ou paiement physique',
+      'Nouveau mode de reglement du trajet: paiement electronique via FlexPay, jetons Zwanga ou paiement physique',
     example: TripPaymentMode.CASH,
   })
   @IsEnum(TripPaymentMode, {

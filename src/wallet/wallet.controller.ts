@@ -18,7 +18,7 @@ export class WalletController {
   @Get('me')
   @Auth()
   @SensitiveThrottle(30, 60000)
-  @ApiOperation({ summary: 'Get current user points wallet' })
+  @ApiOperation({ summary: 'Get current user Zwanga token wallet' })
   async getMyWallet(@Request() req) {
     return this.walletService.getSummary(req.user.userId);
   }
@@ -26,7 +26,7 @@ export class WalletController {
   @Get('ledger')
   @Auth()
   @SensitiveThrottle(30, 60000)
-  @ApiOperation({ summary: 'Get current user points ledger' })
+  @ApiOperation({ summary: 'Get current user Zwanga token ledger' })
   async getMyLedger(@Request() req) {
     return this.walletService.getLedger(req.user.userId);
   }
@@ -34,7 +34,7 @@ export class WalletController {
   @Post('topups')
   @Auth()
   @SensitiveThrottle(5, 60000)
-  @ApiOperation({ summary: 'Buy Zwanga points through FlexPay' })
+  @ApiOperation({ summary: 'Buy Zwanga tokens through FlexPay' })
   async initiateTopUp(@Request() req, @Body() dto: InitiateWalletTopUpDto) {
     return this.walletService.initiateTopUp(req.user.userId, dto);
   }
@@ -42,7 +42,7 @@ export class WalletController {
   @Post('transfers')
   @Auth()
   @SensitiveThrottle(10, 60000)
-  @ApiOperation({ summary: 'Share Zwanga points with another platform user' })
+  @ApiOperation({ summary: 'Share Zwanga tokens with another platform user' })
   async transferPoints(@Request() req, @Body() dto: TransferWalletPointsDto) {
     return this.walletService.transferPoints(req.user.userId, dto);
   }

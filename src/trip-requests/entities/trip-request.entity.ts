@@ -11,7 +11,7 @@ import {
   Index,
 } from 'typeorm';
 import { User } from '../../users/entities/user.entity';
-import { Vehicle } from '../../vehicles/entities/vehicle.entity';
+import { Vehicle, VehicleType } from '../../vehicles/entities/vehicle.entity';
 import { DriverOffer } from './driver-offer.entity';
 import { TripPaymentMode } from '../../payments/enums/trip-payment-mode.enum';
 
@@ -28,6 +28,7 @@ export enum TripRequestStatus {
 @Index(['arrivalLocation'])
 @Index(['departureDateMin'])
 @Index(['departureDateMax'])
+@Index('IDX_trip_requests_vehicle_type', ['vehicleType'])
 export class TripRequest {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -73,13 +74,21 @@ export class TripRequest {
   departureDateMin: Date; // Date/heure de départ minimum souhaitée
 
   @Column({ type: 'timestamp' })
-  departureDateMax: Date; // Date/heure de départ maximum acceptée (délai)
+  departureDateMax: Date; // Date/heure de départ maximum acceptée (distincte de l'expiration)
 
   @Column({ type: 'int' })
-  numberOfSeats: number; // Nombre de places nécessaires
+  numberOfSeats: number; // Nombre de places nécessaires (1 si omis à la création)
 
   @Column({ type: 'decimal', precision: 10, scale: 2, nullable: true })
   maxPricePerSeat: number | null; // Prix maximum par place accepté (optionnel)
+
+  @Column({
+    type: 'enum',
+    enum: VehicleType,
+    enumName: 'vehicles_type_enum',
+    default: VehicleType.CAR,
+  })
+  vehicleType: VehicleType; // Type de véhicule explicitement choisi par le passager
 
   @Column({ type: 'varchar', length: 30, default: TripPaymentMode.CASH })
   paymentMode: TripPaymentMode;
@@ -118,7 +127,7 @@ export class TripRequest {
   tripId: string | null; // ID du trip créé à partir de cette demande
 
   @Column({ type: 'boolean', default: false })
-  expirationNotificationSent: boolean; // Si une notification d'expiration a été envoyée
+  expirationNotificationSent: boolean; // Notification du délai de deux heures envoyée
 
   @CreateDateColumn()
   createdAt: Date;

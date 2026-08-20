@@ -198,6 +198,12 @@ L'application implémente plusieurs mesures de sécurité :
 
 Voir `SECURITY.md` pour plus de détails sur la sécurité et le logging.
 
+## Documentation financière
+
+Toute évolution liée aux paiements, aux prix, aux points, aux commissions,
+aux remboursements, aux retraits ou au parrainage est documentée dans
+[`docs/finance/README.md`](docs/finance/README.md).
+
 ## 📄 Licence
 
 UNLICENSED

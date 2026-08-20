@@ -138,6 +138,9 @@ export class SubscriptionsService {
   }
 
   getPlans() {
+    const tokensAmount = this.getSubscriptionPointsPriceForPlans();
+    const tokensCurrency = this.walletService.getPointsCurrency();
+
     return [
       {
         plan: SubscriptionPlan.PRO,
@@ -149,8 +152,12 @@ export class SubscriptionsService {
         documentFundingLimit: this.getDocumentFundingLimit(),
         documentFundingCurrency: this.getDocumentFundingCurrency(),
         paymentMethods: [...Object.values(PaymentMethod), 'points'],
-        pointsAmount: this.getSubscriptionPointsPriceForPlans(),
-        pointsCurrency: this.walletService.getPointsCurrency(),
+        pointsAmount: tokensAmount,
+        pointsCurrency: tokensCurrency,
+        tokensAmount,
+        tokensCurrency,
+        subscriptionRewardTokens:
+          this.walletService.getSubscriptionPaymentRewardTokens(),
         eligibleDocumentTypes: Object.values(AdministrativeDocumentType),
       },
     ];
@@ -287,7 +294,7 @@ export class SubscriptionsService {
     dto: SubscribeWithPointsDto,
   ): Promise<SubscriptionPaymentResponse> {
     this.logger.log(
-      `Creating subscription with points for user: ${userId} - Plan: ${dto.plan}`,
+      `Creating subscription with tokens for user: ${userId} - Plan: ${dto.plan}`,
     );
 
     const user = await this.getDriverUser(userId);
@@ -301,7 +308,7 @@ export class SubscriptionsService {
     if (activeSubscription) {
       const response = this.buildPaymentResponse(activeSubscription, null);
       this.logSubscriptionPaymentResponse(
-        'Subscription points payment skipped active subscription',
+        'Subscription token payment skipped active subscription',
         response,
       );
       return response;
@@ -355,7 +362,7 @@ export class SubscriptionsService {
       walletEntry,
     );
     this.logSubscriptionPaymentResponse(
-      'Subscription points payment completed',
+      'Subscription token payment completed',
       response,
     );
     return response;
@@ -748,10 +755,20 @@ export class SubscriptionsService {
     subscription: Subscription,
     payment: PaymentTransaction,
   ): Promise<Subscription> {
+    const alreadyActivatedForPayment =
+      subscription.status === SubscriptionStatus.ACTIVE &&
+      subscription.paymentTransactionId === payment.id;
     subscription.paymentReference = payment.reference;
     subscription.paymentTransactionId = payment.id;
 
     if (payment.status === PaymentStatus.SUCCEEDED) {
+      if (alreadyActivatedForPayment) {
+        await this.walletService.awardSubscriptionPaymentTokens(
+          subscription,
+          payment.id,
+        );
+        return subscription;
+      }
       return this.activatePaidSubscription(subscription, payment);
     }
 
@@ -804,6 +821,10 @@ export class SubscriptionsService {
 
     const savedSubscription =
       await this.subscriptionRepository.save(subscription);
+    await this.walletService.awardSubscriptionPaymentTokens(
+      savedSubscription,
+      payment.id,
+    );
     await this.invalidatePremiumCaches();
 
     this.logger.log(
@@ -840,10 +861,11 @@ export class SubscriptionsService {
 
     const savedSubscription =
       await this.subscriptionRepository.save(subscription);
+    await this.walletService.awardSubscriptionPaymentTokens(savedSubscription);
     await this.invalidatePremiumCaches();
 
     this.logger.log(
-      `Points subscription activated: subscriptionId=${savedSubscription.id}, userId=${savedSubscription.userId}, walletEntryId=${walletEntry.id}, endDate=${savedSubscription.endDate.toISOString()}`,
+      `Token subscription activated: subscriptionId=${savedSubscription.id}, userId=${savedSubscription.userId}, walletEntryId=${walletEntry.id}, endDate=${savedSubscription.endDate.toISOString()}`,
     );
 
     return savedSubscription;
@@ -884,7 +906,7 @@ export class SubscriptionsService {
         orderNumber: null,
         status: PaymentStatus.SUCCEEDED,
         statusCode: null,
-        message: 'Abonnement paye avec points Zwanga',
+        message: 'Abonnement paye avec jetons Zwanga',
         paymentUrl: null,
         amount: Math.abs(Number(walletEntry.amount ?? subscription.amount)),
         currency: walletEntry.currency ?? subscription.currency,

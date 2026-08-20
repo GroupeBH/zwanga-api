@@ -16,7 +16,7 @@ export class InitiateWalletTopUpDto {
   @ApiProperty({
     minimum: 1,
     example: 50,
-    description: 'Nombre de points Zwanga a acheter. 1 point = 100 FC/CDF.',
+    description: 'Nombre de jetons Zwanga a acheter. 1 jeton = 100 FC/CDF.',
   })
   @Type(() => Number)
   @IsNumber()
@@ -27,7 +27,7 @@ export class InitiateWalletTopUpDto {
     enum: PaymentMethod,
     enumName: 'PaymentMethod',
     example: PaymentMethod.MOBILE_MONEY,
-    description: 'Canal FlexPay utilise pour acheter les points.',
+    description: 'Canal FlexPay utilise pour acheter les jetons.',
   })
   @IsEnum(PaymentMethod)
   method: PaymentMethod;
@@ -66,7 +66,7 @@ export class TransferWalletPointsDto {
     minimum: 1,
     example: 2500,
     description:
-      'Nombre de points Zwanga a partager avec un autre utilisateur.',
+      'Nombre de jetons Zwanga a partager avec un autre utilisateur.',
   })
   @Type(() => Number)
   @IsNumber()
@@ -104,7 +104,7 @@ export class TransferWalletPointsDto {
 
   @ApiProperty({
     required: false,
-    description: 'Petit message associe au partage de points.',
+    description: 'Petit message associe au partage de jetons.',
     example: 'Pour ton prochain trajet',
   })
   @IsString()

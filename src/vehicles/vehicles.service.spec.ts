@@ -59,6 +59,7 @@ describe('VehiclesService vehicle creation', () => {
     mockPlateLookup(null);
 
     await service.create('owner-1', {
+      type: VehicleType.CAR,
       brand: ' Toyota ',
       model: ' Corolla ',
       color: ' Noir ',
@@ -76,6 +77,20 @@ describe('VehiclesService vehicle creation', () => {
         isActive: true,
       }),
     );
+  });
+
+  it('rejects creation when the vehicle type is missing', async () => {
+    await expect(
+      service.create('owner-1', {
+        brand: 'Toyota',
+        model: 'Corolla',
+        color: 'Noir',
+        licensePlate: '1576AN01',
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    expect(userRepository.findOne).not.toHaveBeenCalled();
+    expect(vehicleRepository.save).not.toHaveBeenCalled();
   });
 
   it('supports two- and three-wheel motorcycles', async () => {
@@ -152,6 +167,7 @@ describe('VehiclesService vehicle creation', () => {
     mockPlateLookup(existingVehicle);
 
     const result = await service.create('owner-1', {
+      type: VehicleType.CAR,
       brand: 'Hyundai',
       model: 'Tucson',
       color: 'Blanc',
@@ -182,6 +198,7 @@ describe('VehiclesService vehicle creation', () => {
 
     await expect(
       service.create('owner-1', {
+        type: VehicleType.CAR,
         brand: 'Hyundai',
         model: 'Tucson',
         color: 'Blanc',

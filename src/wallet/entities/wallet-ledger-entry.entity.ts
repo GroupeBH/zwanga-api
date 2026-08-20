@@ -17,6 +17,7 @@ export enum WalletLedgerEntryType {
   BOOKING_REFUND = 'booking_refund',
   BOOKING_FARE_ADJUSTMENT = 'booking_fare_adjustment',
   SUBSCRIPTION_PAYMENT = 'subscription_payment',
+  SUBSCRIPTION_REWARD = 'subscription_reward',
   TRANSFER_OUT = 'transfer_out',
   TRANSFER_IN = 'transfer_in',
 }

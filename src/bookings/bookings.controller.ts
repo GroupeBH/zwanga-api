@@ -72,7 +72,7 @@ export class BookingsController {
   @ApiOperation({
     summary: 'Update payment mode for a booking',
     description:
-      'Permet au passager de changer entre paiement electronique, points Zwanga et paiement physique avant la cloture de la reservation.',
+      'Permet au passager de changer entre paiement electronique, jetons Zwanga et paiement physique avant la cloture de la reservation.',
   })
   async updatePaymentMode(
     @Request() req,
