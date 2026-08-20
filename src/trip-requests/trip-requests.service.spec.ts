@@ -1,5 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
 import { VehicleType } from '../vehicles/entities/vehicle.entity';
+import { DriverOfferStatus } from './entities/driver-offer.entity';
 import { TripRequestStatus } from './entities/trip-request.entity';
 import { TripRequestsService } from './trip-requests.service';
 
@@ -419,7 +420,7 @@ describe('TripRequestsService motorcycle capacity', () => {
   });
 });
 
-describe('TripRequestsService unanswered request expiration', () => {
+describe('TripRequestsService unaccepted request expiration', () => {
   const buildService = (tripRequestRepository: Record<string, jest.Mock>) =>
     new TripRequestsService(
       tripRequestRepository as any,
@@ -435,12 +436,12 @@ describe('TripRequestsService unanswered request expiration', () => {
       {} as any,
     );
 
-  it('keeps a request visible for two hours even when its departure window has passed', async () => {
+  it('keeps an unaccepted request visible for twelve hours even when its departure window has passed', async () => {
     const now = Date.now();
     const request = {
       id: 'request-recent',
       status: TripRequestStatus.PENDING,
-      createdAt: new Date(now - 119 * 60 * 1000),
+      createdAt: new Date(now - (12 * 60 - 1) * 60 * 1000),
       departureDateMax: new Date(now - 30 * 60 * 1000),
       driverOffers: [],
     };
@@ -470,22 +471,45 @@ describe('TripRequestsService unanswered request expiration', () => {
     ).not.toHaveProperty('departureDateMax');
   });
 
-  it('expires only unanswered requests after two hours', async () => {
+  it('expires pending and offers-received requests after twelve hours unless a driver was accepted', async () => {
     const now = Date.now();
     const unansweredRequest = {
       id: 'request-unanswered',
       status: TripRequestStatus.PENDING,
-      createdAt: new Date(now - 121 * 60 * 1000),
+      createdAt: new Date(now - 12 * 60 * 60 * 1000 - 1),
       driverOffers: [],
     };
-    const answeredRequest = {
-      id: 'request-answered',
+    const unacceptedOfferRequest = {
+      id: 'request-offer-not-accepted',
       status: TripRequestStatus.OFFERS_RECEIVED,
-      createdAt: new Date(now - 3 * 60 * 60 * 1000),
-      driverOffers: [{ id: 'offer-1' }],
+      createdAt: new Date(now - 30 * 24 * 60 * 60 * 1000),
+      driverOffers: [
+        { id: 'offer-1', status: DriverOfferStatus.PENDING },
+      ],
+    };
+    const acceptedRequest = {
+      id: 'request-accepted',
+      status: TripRequestStatus.OFFERS_RECEIVED,
+      createdAt: new Date(now - 30 * 24 * 60 * 60 * 1000),
+      driverOffers: [
+        { id: 'offer-2', status: DriverOfferStatus.ACCEPTED },
+      ],
+    };
+    const freshOfferRequest = {
+      id: 'request-fresh-offer',
+      status: TripRequestStatus.OFFERS_RECEIVED,
+      createdAt: new Date(now - 60 * 60 * 1000),
+      driverOffers: [
+        { id: 'offer-3', status: DriverOfferStatus.PENDING },
+      ],
     };
     const tripRequestRepository = {
-      find: jest.fn().mockResolvedValue([unansweredRequest, answeredRequest]),
+      find: jest.fn().mockResolvedValue([
+        unansweredRequest,
+        unacceptedOfferRequest,
+        acceptedRequest,
+        freshOfferRequest,
+      ]),
       update: jest.fn().mockResolvedValue({ affected: 1 }),
     };
     const service = buildService(tripRequestRepository);
@@ -499,29 +523,37 @@ describe('TripRequestsService unanswered request expiration', () => {
     const result = await service.findAll();
 
     expect(unansweredRequest.status).toBe(TripRequestStatus.EXPIRED);
-    expect(answeredRequest.status).toBe(TripRequestStatus.OFFERS_RECEIVED);
+    expect(unacceptedOfferRequest.status).toBe(TripRequestStatus.EXPIRED);
+    expect(acceptedRequest.status).toBe(TripRequestStatus.OFFERS_RECEIVED);
+    expect(freshOfferRequest.status).toBe(TripRequestStatus.OFFERS_RECEIVED);
     expect(result).toEqual([
       expect.objectContaining({
-        id: 'request-answered',
+        id: 'request-fresh-offer',
         status: TripRequestStatus.OFFERS_RECEIVED,
       }),
     ]);
+    expect(tripRequestRepository.update).toHaveBeenCalledTimes(2);
     expect(tripRequestRepository.update).toHaveBeenCalledWith(
-      {
+      expect.objectContaining({
         id: 'request-unanswered',
-        status: TripRequestStatus.PENDING,
-      },
+      }),
+      { status: TripRequestStatus.EXPIRED },
+    );
+    expect(tripRequestRepository.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'request-offer-not-accepted',
+      }),
       { status: TripRequestStatus.EXPIRED },
     );
   });
 
-  it('rejects a first driver response once the two-hour deadline has passed', async () => {
+  it('rejects a driver response once the twelve-hour deadline has passed', async () => {
     const now = Date.now();
     const tripRequest = {
       id: 'request-expired',
       passengerId: 'passenger-1',
       status: TripRequestStatus.PENDING,
-      createdAt: new Date(now - 2 * 60 * 60 * 1000 - 1),
+      createdAt: new Date(now - 12 * 60 * 60 * 1000 - 1),
       departureDateMin: new Date(now + 30 * 60 * 1000),
       departureDateMax: new Date(now + 90 * 60 * 1000),
       driverOffers: [],

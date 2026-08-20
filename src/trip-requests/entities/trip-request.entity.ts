@@ -127,7 +127,7 @@ export class TripRequest {
   tripId: string | null; // ID du trip créé à partir de cette demande
 
   @Column({ type: 'boolean', default: false })
-  expirationNotificationSent: boolean; // Notification du délai de deux heures envoyée
+  expirationNotificationSent: boolean; // Notification du délai de douze heures envoyée
 
   @CreateDateColumn()
   createdAt: Date;
