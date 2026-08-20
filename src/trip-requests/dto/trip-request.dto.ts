@@ -11,8 +11,9 @@ import {
   ArrayMinSize,
   ArrayMaxSize,
 } from 'class-validator';
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, OmitType } from '@nestjs/swagger';
 import { TripPaymentMode } from '../../payments/enums/trip-payment-mode.enum';
+import { VehicleType } from '../../vehicles/entities/vehicle.entity';
 
 export class CreateTripRequestDto {
   @ApiProperty()
@@ -86,9 +87,12 @@ export class CreateTripRequestDto {
   departureDateMax: string;
 
   @ApiProperty({
+    required: false,
+    default: 1,
     minimum: 1,
     maximum: 2,
-    description: 'Nombre de places nécessaires',
+    description:
+      'Nombre de places nécessaires (optionnel, 1 place par défaut)',
     example: 2,
   })
   @IsNumber()
@@ -97,8 +101,8 @@ export class CreateTripRequestDto {
     message:
       'Pour des raisons de sécurité du conducteur, vous ne pouvez pas réserver plus de 2 places par trajet',
   })
-  @IsNotEmpty()
-  numberOfSeats: number;
+  @IsOptional()
+  numberOfSeats?: number;
 
   @ApiProperty({
     required: false,
@@ -112,11 +116,24 @@ export class CreateTripRequestDto {
   maxPricePerSeat?: number;
 
   @ApiProperty({
+    required: true,
+    enum: VehicleType,
+    enumName: 'VehicleType',
+    description:
+      'Type de véhicule choisi par le passager. Le prix est toujours recalculé côté serveur.',
+    example: VehicleType.CAR,
+  })
+  @IsEnum(VehicleType, {
+    message: 'Le type de vehicule selectionne est invalide',
+  })
+  vehicleType: VehicleType;
+
+  @ApiProperty({
     required: false,
     enum: TripPaymentMode,
     enumName: 'TripPaymentMode',
     description:
-      'Mode de reglement: paiement electronique via FlexPay, points Zwanga ou paiement physique a l arrivee',
+      'Mode de reglement: paiement electronique via FlexPay, jetons Zwanga ou paiement physique a l arrivee',
     example: TripPaymentMode.ELECTRONIC,
   })
   @IsEnum(TripPaymentMode, {
@@ -206,7 +223,27 @@ export class RecommendTripRequestPriceDto {
   @Max(2)
   @IsOptional()
   numberOfSeats?: number;
+
+  @ApiProperty({
+    required: false,
+    enum: VehicleType,
+    enumName: 'VehicleType',
+    default: VehicleType.CAR,
+    description:
+      'Type de vehicule utilise pour la grille tarifaire: voiture = 500 FC/km, moto = 1000 FC/km',
+    example: VehicleType.MOTORCYCLE_TWO_WHEELS,
+  })
+  @IsEnum(VehicleType, {
+    message: 'Le type de vehicule selectionne est invalide',
+  })
+  @IsOptional()
+  vehicleType?: VehicleType;
 }
+
+export class TripRequestVehicleOptionsDto extends OmitType(
+  RecommendTripRequestPriceDto,
+  ['vehicleType'] as const,
+) {}
 
 export class CreateDriverOfferDto {
   @ApiProperty({
@@ -494,10 +531,24 @@ export class UpdateTripRequestDto {
 
   @ApiProperty({
     required: false,
+    enum: VehicleType,
+    enumName: 'VehicleType',
+    description:
+      'Type de vehicule a utiliser si le backend doit recalculer le prix recommande: voiture = 500 FC/km, moto = 1000 FC/km',
+    example: VehicleType.CAR,
+  })
+  @IsEnum(VehicleType, {
+    message: 'Le type de vehicule selectionne est invalide',
+  })
+  @IsOptional()
+  vehicleType?: VehicleType;
+
+  @ApiProperty({
+    required: false,
     enum: TripPaymentMode,
     enumName: 'TripPaymentMode',
     description:
-      'Mode de reglement: paiement electronique via FlexPay, points Zwanga ou paiement physique a l arrivee',
+      'Mode de reglement: paiement electronique via FlexPay, jetons Zwanga ou paiement physique a l arrivee',
     example: TripPaymentMode.ELECTRONIC,
   })
   @IsEnum(TripPaymentMode, {

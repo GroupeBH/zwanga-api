@@ -68,12 +68,14 @@ export class VehiclesService {
 
     try {
       if (
+        !sanitizedVehicleData.type ||
         !sanitizedVehicleData.brand ||
         !sanitizedVehicleData.model ||
         !sanitizedVehicleData.color ||
         !normalizedLicensePlate
       ) {
         const missingFields: string[] = [];
+        if (!sanitizedVehicleData.type) missingFields.push('type');
         if (!sanitizedVehicleData.brand) missingFields.push('brand');
         if (!sanitizedVehicleData.model) missingFields.push('model');
         if (!sanitizedVehicleData.color) missingFields.push('color');
@@ -120,7 +122,7 @@ export class VehiclesService {
       const vehicle = this.vehicleRepository.create({
         ...sanitizedVehicleData,
         ownerId,
-        type: sanitizedVehicleData.type ?? VehicleType.CAR,
+        type: sanitizedVehicleData.type,
         isActive:
           sanitizedVehicleData.isActive !== undefined
             ? sanitizedVehicleData.isActive

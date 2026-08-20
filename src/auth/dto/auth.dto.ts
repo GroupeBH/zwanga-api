@@ -157,6 +157,36 @@ export class GoogleMobileAuthDto {
   @IsEnum(UserGender)
   @IsOptional()
   gender?: UserGender | null;
+
+  @ApiProperty({
+    enum: UserRole,
+    example: UserRole.PASSENGER,
+    required: false,
+    description: 'Role choisi pendant la premiere inscription Google',
+  })
+  @IsEnum(UserRole)
+  @IsOptional()
+  role?: UserRole;
+
+  @ApiProperty({
+    required: false,
+    example: false,
+    description: 'Indique si utilisateur est conducteur',
+  })
+  @IsBoolean()
+  @IsOptional()
+  isDriver?: boolean;
+
+  @ApiProperty({
+    required: false,
+    type: () => CreateVehicleDto,
+    description:
+      'Infos vehicule pour la premiere inscription Google conducteur',
+  })
+  @ValidateNested()
+  @IsOptional()
+  @Type(() => CreateVehicleDto)
+  vehicle?: CreateVehicleDto;
 }
 
 export class AppleMobileAuthDto {

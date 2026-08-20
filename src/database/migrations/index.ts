@@ -12,6 +12,8 @@ import { AddDistanceBasedBookingFares1780000011000 } from './1780000011000-AddDi
 import { AddWalletTransfersAndSubscriptionPayments1780000012000 } from './1780000012000-AddWalletTransfersAndSubscriptionPayments';
 import { AddGenderToUsers1780000013000 } from './1780000013000-AddGenderToUsers';
 import { AddVehicleTypes1780000014000 } from './1780000014000-AddVehicleTypes';
+import { AddVehicleTypeToTripRequests1780000015000 } from './1780000015000-AddVehicleTypeToTripRequests';
+import { AddSubscriptionTokenRewards1780000016000 } from './1780000016000-AddSubscriptionTokenRewards';
 
 export const databaseMigrations = [
   FillTotalSeats1780000000000,
@@ -28,4 +30,6 @@ export const databaseMigrations = [
   AddWalletTransfersAndSubscriptionPayments1780000012000,
   AddGenderToUsers1780000013000,
   AddVehicleTypes1780000014000,
+  AddVehicleTypeToTripRequests1780000015000,
+  AddSubscriptionTokenRewards1780000016000,
 ];

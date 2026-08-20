@@ -2146,7 +2146,7 @@ export class BookingsService {
   private ensureBookingCanBePaid(booking: Booking): void {
     if (booking.paymentMode === TripPaymentMode.POINTS) {
       throw new BadRequestException(
-        'Cette reservation est reglee avec les points Zwanga',
+        'Cette reservation est reglee avec les jetons Zwanga',
       );
     }
 

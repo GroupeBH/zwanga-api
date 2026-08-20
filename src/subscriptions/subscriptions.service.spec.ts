@@ -34,6 +34,8 @@ describe('SubscriptionsService points payments', () => {
     getPointsCurrency: jest.Mock;
     convertMoneyToPoints: jest.Mock;
     payForSubscription: jest.Mock;
+    awardSubscriptionPaymentTokens: jest.Mock;
+    getSubscriptionPaymentRewardTokens: jest.Mock;
   };
   let service: SubscriptionsService;
 
@@ -89,6 +91,12 @@ describe('SubscriptionsService points payments', () => {
         amount: -50,
         currency: 'PTS',
       }),
+      awardSubscriptionPaymentTokens: jest.fn().mockResolvedValue({
+        id: 'subscription-reward-1',
+        amount: 25,
+        currency: 'PTS',
+      }),
+      getSubscriptionPaymentRewardTokens: jest.fn().mockReturnValue(25),
     };
 
     service = new SubscriptionsService(
@@ -112,6 +120,9 @@ describe('SubscriptionsService points payments', () => {
         ],
         pointsAmount: 50,
         pointsCurrency: 'PTS',
+        tokensAmount: 50,
+        tokensCurrency: 'PTS',
+        subscriptionRewardTokens: 25,
       }),
     ]);
     expect(walletService.convertMoneyToPoints).toHaveBeenCalledWith(
@@ -142,6 +153,13 @@ describe('SubscriptionsService points payments', () => {
       }),
     );
     expect(result.subscription.status).toBe(SubscriptionStatus.ACTIVE);
+    expect(walletService.awardSubscriptionPaymentTokens).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'subscription-1',
+        userId: 'driver-1',
+        status: SubscriptionStatus.ACTIVE,
+      }),
+    );
     expect(result.walletEntry?.id).toBe('wallet-entry-1');
     expect(result.payment).toEqual(
       expect.objectContaining({
@@ -153,10 +171,49 @@ describe('SubscriptionsService points payments', () => {
     );
   });
 
+  it('credits the reward only after FlexPay confirms the subscription payment', async () => {
+    const subscription = {
+      id: 'subscription-1',
+      userId: 'driver-1',
+      status: SubscriptionStatus.PENDING,
+      startDate: new Date(),
+      endDate: new Date(),
+      amount: 5000,
+      currency: 'CDF',
+    };
+    const initiatedPayment = {
+      id: 'payment-1',
+      reference: 'SUB-1',
+      status: PaymentStatus.INITIATED,
+    };
+
+    await (service as any).applyPaymentToSubscription(
+      { ...subscription },
+      initiatedPayment,
+    );
+
+    expect(walletService.awardSubscriptionPaymentTokens).not.toHaveBeenCalled();
+
+    await (service as any).applyPaymentToSubscription(
+      { ...subscription },
+      { ...initiatedPayment, status: PaymentStatus.SUCCEEDED },
+    );
+
+    expect(walletService.awardSubscriptionPaymentTokens).toHaveBeenCalledTimes(1);
+    expect(walletService.awardSubscriptionPaymentTokens).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'subscription-1',
+        userId: 'driver-1',
+        status: SubscriptionStatus.ACTIVE,
+      }),
+      'payment-1',
+    );
+  });
+
   it('marks the subscription payment failed when points are insufficient', async () => {
     walletService.payForSubscription.mockRejectedValue(
       new BadRequestException(
-        'Solde de points insuffisant pour payer cet abonnement',
+        'Solde de jetons insuffisant pour payer cet abonnement',
       ),
     );
 
@@ -164,7 +221,7 @@ describe('SubscriptionsService points payments', () => {
       service.subscribeWithPoints('driver-1', {
         plan: SubscriptionPlan.PRO,
       }),
-    ).rejects.toThrow('Solde de points insuffisant');
+    ).rejects.toThrow('Solde de jetons insuffisant');
 
     expect(subscriptionRepository.save).toHaveBeenCalledWith(
       expect.objectContaining({

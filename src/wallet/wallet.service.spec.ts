@@ -142,7 +142,7 @@ describe('WalletService', () => {
         relatedEntityId: 'passenger-1',
         amount: 5000,
         currency: 'CDF',
-        description: 'Achat de 50 points Zwanga',
+        description: 'Achat de 50 jetons Zwanga',
         callbackUrl:
           'https://api.zwanga.cd/api/v1/wallet/topups/flexpay/callback',
       }),
@@ -394,6 +394,57 @@ describe('WalletService', () => {
         balanceAfter: 1001,
       }),
     );
+  });
+
+  it('credits exactly 25 tokens for a paid subscription', async () => {
+    manager.findOne.mockResolvedValue({ ...account, balance: 1000 });
+
+    const entry = await service.awardSubscriptionPaymentTokens(
+      {
+        id: '123e4567-e89b-12d3-a456-426614174000',
+        userId: 'passenger-1',
+      },
+      'payment-1',
+    );
+
+    expect(manager.save).toHaveBeenCalledWith(
+      expect.objectContaining({ balance: 1025 }),
+    );
+    expect(manager.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: WalletLedgerEntryType.SUBSCRIPTION_REWARD,
+        amount: 25,
+        balanceAfter: 1025,
+        relatedEntityType: 'subscription',
+        relatedEntityId: '123e4567-e89b-12d3-a456-426614174000',
+        paymentTransactionId: 'payment-1',
+        description:
+          'Bonus de 25 jetons pour l abonnement 123e4567-e89b-12d3-a456-426614174000',
+      }),
+    );
+    expect(entry).toEqual(
+      expect.objectContaining({
+        type: WalletLedgerEntryType.SUBSCRIPTION_REWARD,
+        amount: 25,
+      }),
+    );
+  });
+
+  it('does not credit the subscription reward twice', async () => {
+    const existingReward = {
+      id: 'reward-entry-1',
+      type: WalletLedgerEntryType.SUBSCRIPTION_REWARD,
+      amount: 25,
+    };
+    ledgerRepository.findOne.mockResolvedValue(existingReward);
+
+    const result = await service.awardSubscriptionPaymentTokens({
+      id: '123e4567-e89b-12d3-a456-426614174000',
+      userId: 'passenger-1',
+    });
+
+    expect(result).toBe(existingReward);
+    expect(dataSource.transaction).not.toHaveBeenCalled();
   });
 
   it('adds 0.5 point per travelled kilometer on top of the base point', async () => {

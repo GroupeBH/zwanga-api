@@ -87,6 +87,7 @@ export class WalletService {
   private readonly DEFAULT_LOYALTY_POINTS_PER_KM = 0.5;
   private readonly DEFAULT_LOYALTY_MIN_REWARD = 1;
   private readonly DEFAULT_LOYALTY_BASE_REWARD = 1;
+  private readonly SUBSCRIPTION_PAYMENT_REWARD_TOKENS = 25;
 
   constructor(
     @InjectRepository(WalletAccount)
@@ -135,7 +136,7 @@ export class WalletService {
       phone: dto.phone,
       amount: paymentAmount,
       currency,
-      description: `Achat de ${pointsAmount} points Zwanga`,
+      description: `Achat de ${pointsAmount} jetons Zwanga`,
       callbackUrl: this.getTopUpFlexPayCallbackUrl(),
       approveUrl: dto.approveUrl,
       cancelUrl: dto.cancelUrl,
@@ -197,7 +198,7 @@ export class WalletService {
       type: WalletLedgerEntryType.BOOKING_PAYMENT,
       relatedEntityType: this.BOOKING_RELATED_ENTITY_TYPE,
       relatedEntityId: booking.id,
-      description: `Paiement par points pour la reservation ${booking.id} (${amount} ${booking.paymentCurrency ?? this.getPointValueCurrency()})`,
+      description: `Paiement par jetons pour la reservation ${booking.id} (${amount} ${booking.paymentCurrency ?? this.getPointValueCurrency()})`,
     });
   }
 
@@ -226,7 +227,7 @@ export class WalletService {
       type: WalletLedgerEntryType.BOOKING_REFUND,
       relatedEntityType: this.BOOKING_RELATED_ENTITY_TYPE,
       relatedEntityId: booking.id,
-      description: `Remboursement points pour la reservation ${booking.id}`,
+      description: `Remboursement en jetons pour la reservation ${booking.id}`,
     });
     return true;
   }
@@ -289,12 +290,12 @@ export class WalletService {
         type: WalletLedgerEntryType.SUBSCRIPTION_PAYMENT,
         relatedEntityType: this.SUBSCRIPTION_RELATED_ENTITY_TYPE,
         relatedEntityId: subscription.id,
-        description: `Paiement par points pour l abonnement ${subscription.id}`,
+        description: `Paiement par jetons pour l abonnement ${subscription.id}`,
       });
     } catch (error) {
       if (error instanceof BadRequestException) {
         throw new BadRequestException(
-          'Solde de points insuffisant pour payer cet abonnement',
+          'Solde de jetons insuffisant pour payer cet abonnement',
         );
       }
       throw error;
@@ -310,7 +311,7 @@ export class WalletService {
 
     if (recipient.id === senderUserId) {
       throw new BadRequestException(
-        'Impossible de partager des points avec votre propre compte',
+        'Impossible de partager des jetons avec votre propre compte',
       );
     }
 
@@ -332,7 +333,7 @@ export class WalletService {
       const recipientAccount = accounts.get(recipient.id);
 
       if (!senderAccount || !recipientAccount) {
-        throw new NotFoundException('Compte de points introuvable');
+        throw new NotFoundException('Compte de jetons introuvable');
       }
 
       const senderNextBalance = this.roundMoney(
@@ -340,7 +341,7 @@ export class WalletService {
       );
       if (senderNextBalance < 0) {
         throw new BadRequestException(
-          'Solde de points insuffisant pour partager des points',
+          'Solde de jetons insuffisant pour partager des jetons',
         );
       }
 
@@ -355,8 +356,8 @@ export class WalletService {
         relatedEntityType: this.TRANSFER_RELATED_ENTITY_TYPE,
         relatedEntityId: transferId,
         description: note
-          ? `Partage de points vers ${recipient.id}: ${note}`
-          : `Partage de points vers ${recipient.id}`,
+          ? `Partage de jetons vers ${recipient.id}: ${note}`
+          : `Partage de jetons vers ${recipient.id}`,
       });
 
       const recipientNextBalance = this.roundMoney(
@@ -373,12 +374,12 @@ export class WalletService {
         relatedEntityType: this.TRANSFER_RELATED_ENTITY_TYPE,
         relatedEntityId: transferId,
         description: note
-          ? `Points recus de ${senderUserId}: ${note}`
-          : `Points recus de ${senderUserId}`,
+          ? `Jetons recus de ${senderUserId}: ${note}`
+          : `Jetons recus de ${senderUserId}`,
       });
 
       this.logger.warn(
-        `Wallet points transferred: transferId=${transferId}, sender=${senderUserId}, recipient=${recipient.id}, amount=${amount}`,
+        `Wallet tokens transferred: transferId=${transferId}, sender=${senderUserId}, recipient=${recipient.id}, amount=${amount}`,
       );
 
       return {
@@ -424,14 +425,14 @@ export class WalletService {
       type: WalletLedgerEntryType.LOYALTY_REWARD,
       relatedEntityType: this.BOOKING_RELATED_ENTITY_TYPE,
       relatedEntityId: booking.id,
-      description: `Points de fidelite pour la reservation ${booking.id}`,
+      description: `Jetons de fidelite pour la reservation ${booking.id}`,
     });
   }
 
   async ensureSufficientPoints(userId: string, amount: number): Promise<void> {
     const account = await this.getOrCreateAccount(userId);
     if (Number(account.balance) < amount) {
-      throw new BadRequestException('Solde de points insuffisant');
+      throw new BadRequestException('Solde de jetons insuffisant');
     }
   }
 
@@ -440,6 +441,55 @@ export class WalletService {
       this.configService.get<string>('ZWANGA_POINTS_CURRENCY')?.trim() ||
       this.DEFAULT_POINTS_CURRENCY
     ).toUpperCase();
+  }
+
+  async awardSubscriptionPaymentTokens(
+    subscription: {
+      id: string;
+      userId: string;
+    },
+    paymentTransactionId?: string | null,
+  ): Promise<WalletLedgerEntry> {
+    const entryCriteria = {
+      userId: subscription.userId,
+      type: WalletLedgerEntryType.SUBSCRIPTION_REWARD,
+      relatedEntityType: this.SUBSCRIPTION_RELATED_ENTITY_TYPE,
+      relatedEntityId: subscription.id,
+    };
+    const existingEntry = await this.ledgerRepository.findOne({
+      where: entryCriteria,
+      order: { createdAt: 'DESC' },
+    });
+    if (existingEntry) {
+      return existingEntry;
+    }
+
+    try {
+      return await this.changeBalance({
+        userId: subscription.userId,
+        amount: this.SUBSCRIPTION_PAYMENT_REWARD_TOKENS,
+        type: WalletLedgerEntryType.SUBSCRIPTION_REWARD,
+        relatedEntityType: this.SUBSCRIPTION_RELATED_ENTITY_TYPE,
+        relatedEntityId: subscription.id,
+        paymentTransactionId: paymentTransactionId ?? null,
+        description: `Bonus de 25 jetons pour l abonnement ${subscription.id}`,
+      });
+    } catch (error) {
+      if (this.isUniqueConstraintViolation(error)) {
+        const concurrentEntry = await this.ledgerRepository.findOne({
+          where: entryCriteria,
+          order: { createdAt: 'DESC' },
+        });
+        if (concurrentEntry) {
+          return concurrentEntry;
+        }
+      }
+      throw error;
+    }
+  }
+
+  public getSubscriptionPaymentRewardTokens(): number {
+    return this.SUBSCRIPTION_PAYMENT_REWARD_TOKENS;
   }
 
   public convertMoneyToPoints(
@@ -488,7 +538,7 @@ export class WalletService {
 
     if (!where.length) {
       throw new BadRequestException(
-        'Veuillez renseigner le destinataire des points',
+        'Veuillez renseigner le destinataire des jetons',
       );
     }
 
@@ -509,7 +559,7 @@ export class WalletService {
       !payment.userId
     ) {
       throw new BadRequestException(
-        'Cette transaction ne correspond pas a une recharge de points',
+        'Cette transaction ne correspond pas a une recharge de jetons',
       );
     }
 
@@ -537,7 +587,7 @@ export class WalletService {
       relatedEntityType: this.TOP_UP_RELATED_ENTITY_TYPE,
       relatedEntityId: payment.userId,
       paymentTransactionId: payment.id,
-      description: `Recharge points FlexPay ${payment.reference}`,
+      description: `Recharge de jetons FlexPay ${payment.reference}`,
     });
 
     return this.getOrCreateAccount(payment.userId);
@@ -625,7 +675,7 @@ export class WalletService {
   }): Promise<WalletLedgerEntry> {
     const amount = this.roundMoney(input.amount);
     if (!amount) {
-      throw new BadRequestException('Le montant de points est invalide');
+      throw new BadRequestException('Le montant de jetons est invalide');
     }
 
     return this.dataSource.transaction(async (manager) => {
@@ -646,7 +696,7 @@ export class WalletService {
 
       const nextBalance = this.roundMoney(Number(account.balance) + amount);
       if (nextBalance < 0) {
-        throw new BadRequestException('Solde de points insuffisant');
+        throw new BadRequestException('Solde de jetons insuffisant');
       }
 
       account.balance = nextBalance;
@@ -713,6 +763,15 @@ export class WalletService {
     return this.roundMoney(
       baseReward +
         this.convertMoneyToPoints(loyaltyMoneyValue, booking.paymentCurrency),
+    );
+  }
+
+  private isUniqueConstraintViolation(error: unknown): boolean {
+    return Boolean(
+      error &&
+        typeof error === 'object' &&
+        'code' in error &&
+        (error as { code?: string }).code === '23505',
     );
   }
 
@@ -805,7 +864,7 @@ export class WalletService {
     const pointValue = Number(raw);
     if (!Number.isFinite(pointValue) || pointValue <= 0) {
       throw new BadRequestException(
-        `Valeur du point non configuree pour ${normalizedCurrency}`,
+        `Valeur du jeton non configuree pour ${normalizedCurrency}`,
       );
     }
 
@@ -883,7 +942,7 @@ export class WalletService {
   private normalizePositiveAmount(value: number): number {
     const amount = this.roundMoney(Number(value));
     if (!Number.isFinite(amount) || amount <= 0) {
-      throw new BadRequestException('Le montant de points est invalide');
+      throw new BadRequestException('Le montant de jetons est invalide');
     }
     return amount;
   }
@@ -891,7 +950,7 @@ export class WalletService {
   private normalizeNonNegativeAmount(value: number): number {
     const amount = this.roundMoney(Number(value));
     if (!Number.isFinite(amount) || amount < 0) {
-      throw new BadRequestException('Le montant de points est invalide');
+      throw new BadRequestException('Le montant de jetons est invalide');
     }
     return amount;
   }

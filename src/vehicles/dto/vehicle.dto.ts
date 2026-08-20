@@ -27,14 +27,12 @@ export class CreateVehicleDto {
   @ApiProperty({
     enum: VehicleType,
     enumName: 'VehicleType',
-    default: VehicleType.CAR,
-    required: false,
+    example: VehicleType.CAR,
     description:
       'Type du véhicule. Une moto à 2 roues accepte au maximum 2 places, une moto à 3 roues 3 places.',
   })
   @IsEnum(VehicleType)
-  @IsOptional()
-  type?: VehicleType;
+  type: VehicleType;
 
   @ApiProperty()
   @IsString()

@@ -383,7 +383,7 @@ describe('BookingsService trip payments', () => {
         method: PaymentMethod.MOBILE_MONEY,
         phone: '+243891234567',
       }),
-    ).rejects.toThrow('points Zwanga');
+    ).rejects.toThrow('jetons Zwanga');
 
     expect(paymentsService.initiatePayment).not.toHaveBeenCalled();
   });
@@ -428,7 +428,7 @@ describe('BookingsService trip payments', () => {
       paymentStatus: BookingPaymentStatus.NOT_REQUIRED,
     });
     walletService.payForBooking.mockRejectedValue(
-      new Error('Solde de points insuffisant pour payer ce trajet'),
+      new Error('Solde de jetons insuffisant pour payer ce trajet'),
     );
 
     await expect(
@@ -437,7 +437,7 @@ describe('BookingsService trip payments', () => {
         'passenger-1',
         TripPaymentMode.POINTS,
       ),
-    ).rejects.toThrow('Solde de points insuffisant');
+    ).rejects.toThrow('Solde de jetons insuffisant');
 
     expect(bookingRepository.save).not.toHaveBeenCalled();
   });

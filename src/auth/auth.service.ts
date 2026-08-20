@@ -28,6 +28,7 @@ import {
   RefreshTokenDto,
   AuthResponseDto,
   AppleMobileAuthDto,
+  GoogleMobileAuthDto,
 } from './dto/auth.dto';
 import { FileUploadService } from '../common/services/file-upload.service';
 import { VehiclesService } from '../vehicles/vehicles.service';
@@ -83,6 +84,14 @@ interface AppleAuthProfile {
   firstName?: string;
   lastName?: string;
   emailVerified: boolean;
+}
+
+export interface GoogleAuthProfile {
+  googleId: string;
+  email: string;
+  firstName: string;
+  lastName: string;
+  profilePicture: string | null;
 }
 
 @Injectable()
@@ -442,6 +451,7 @@ export class AuthService {
     idToken: string,
     phone?: string,
     gender?: UserGender | null,
+    signupOptions?: Pick<GoogleMobileAuthDto, 'role' | 'isDriver' | 'vehicle'>,
   ): Promise<AuthResponseDto> {
     const googleProfile = await this.verifyGoogleIdToken(idToken);
     // Reuse existing linking/creation logic
@@ -455,13 +465,15 @@ export class AuthService {
       },
       phone,
       gender,
+      signupOptions,
     );
   }
 
   async validateGoogleUser(
-    googleProfile: any,
+    googleProfile: GoogleAuthProfile,
     phone?: string,
     gender?: UserGender | null,
+    signupOptions?: Pick<GoogleMobileAuthDto, 'role' | 'isDriver' | 'vehicle'>,
   ): Promise<AuthResponseDto> {
     const { googleId, email, firstName, lastName, profilePicture } =
       googleProfile;
@@ -533,6 +545,16 @@ export class AuthService {
           );
         }
 
+        const role = signupOptions?.role ?? UserRole.PASSENGER;
+        const isDriver = signupOptions?.isDriver ?? role === UserRole.DRIVER;
+        const vehicle = signupOptions?.vehicle;
+
+        if (vehicle && !isDriver) {
+          throw new BadRequestException(
+            'Les informations du vehicule sont uniquement autorisees pour les conducteurs',
+          );
+        }
+
         user = this.userRepository.create({
           googleId,
           email,
@@ -540,15 +562,18 @@ export class AuthService {
           firstName,
           lastName,
           gender: gender ?? null,
-          profilePicture,
-          role: UserRole.PASSENGER,
-          isDriver: false,
+          profilePicture: profilePicture ?? undefined,
+          role,
+          isDriver,
           status: UserStatus.PENDING_KYC,
           isEmailVerified: true,
           isPhoneVerified: false,
         });
 
         user = await this.userRepository.save(user);
+        if (vehicle && isDriver) {
+          await this.vehiclesService.create(user.id, vehicle);
+        }
         this.logger.log(`New user created via Google OAuth: ${user.id}`);
       }
     }
