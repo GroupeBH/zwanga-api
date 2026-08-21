@@ -56,7 +56,7 @@ export class KycValidationService {
       this.configService.get<string>('AWS_REKOGNITION_KYC_MIN_SIMILARITY') || '40',
     );
     this.minFaceQuality = parseFloat(
-      this.configService.get<string>('AWS_REKOGNITION_KYC_MIN_FACE_QUALITY') || '50',
+      this.configService.get<string>('AWS_REKOGNITION_KYC_MIN_FACE_QUALITY') || '35',
     );
 
     this.logger.log(`[KYC Init] Min similarity threshold: ${this.minSimilarity}%`);
