@@ -12,6 +12,7 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { TripsService } from './trips.service';
+import { BookingsService } from '../bookings/bookings.service';
 import {
   CreateTripDto,
   CreateRecurringTripDto,
@@ -33,7 +34,10 @@ import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decor
 @ApiTags('Trips')
 @Controller('trips')
 export class TripsController {
-  constructor(private readonly tripsService: TripsService) {}
+  constructor(
+    private readonly tripsService: TripsService,
+    private readonly bookingsService: BookingsService,
+  ) {}
 
   @Post()
   @Auth()
@@ -169,7 +173,7 @@ export class TripsController {
     @Param('id') id: string,
     @Body() dto: UpdateDriverLocationDto,
   ) {
-    return this.tripsService.updateDriverLocation(
+    const location = await this.tripsService.updateDriverLocation(
       req.user.userId,
       id,
       dto.coordinates,
@@ -180,6 +184,9 @@ export class TripsController {
         recordedAt: dto.recordedAt,
       },
     );
+    const autoProgress =
+      await this.bookingsService.evaluateAutomaticRideProgressForTrip(id);
+    return { ...location, autoProgress };
   }
 
   @Get(':id/driver-location')
@@ -272,10 +279,7 @@ export class TripsController {
   @SensitiveThrottle(10, 6000)
   @ApiOperation({ summary: 'Cancel a pending driver interruption request' })
   async cancelTripInterruption(@Request() req, @Param('id') id: string) {
-    return this.tripsService.cancelDriverTripInterruption(
-      id,
-      req.user.userId,
-    );
+    return this.tripsService.cancelDriverTripInterruption(id, req.user.userId);
   }
 
   @Put(':id/interruption-request/confirm')
@@ -319,6 +323,7 @@ export class TripsController {
   @SensitiveThrottle(10, 6000)
   @ApiOperation({ summary: 'Complete/end an active trip (driver only)' })
   async completeTrip(@Request() req, @Param('id') id: string) {
+    await this.bookingsService.evaluateAutomaticRideProgressForTrip(id);
     return this.tripsService.completeTrip(id, req.user.userId);
   }
 

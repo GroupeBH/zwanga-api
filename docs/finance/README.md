@@ -1,6 +1,6 @@
 # Documentation financière de Zwanga
 
-Dernière mise à jour : 20 août 2026
+Dernière mise à jour : 21 août 2026
 
 ## Objectif
 
@@ -57,6 +57,7 @@ Toute évolution financière doit respecter les règles suivantes :
 - [Expiration douze heures après la fin de la plage de départ](./trip-request-response-expiration.md)
 - [Nombre de places facultatif dans une demande](./trip-request-optional-seat-count.md)
 - [Jetons Zwanga et bonus de 25 jetons après paiement d'abonnement](./token-denomination-subscription-reward.md)
+- [Paiement à l'arrivée, progression automatique et non-embarquement](./booking-payment-at-arrival-and-automatic-no-show.md)
 - [Journal des modifications financières](./CHANGELOG.md)
 
 Les documents détaillés du paiement, des jetons et du parrainage seront ajoutés ou enrichis en même temps que les lots correspondants.

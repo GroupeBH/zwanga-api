@@ -50,6 +50,7 @@ export interface BoardingCandidateSnapshot {
   sharedMovementStartedAt: string | null;
   separationStartedAt: string | null;
   confirmedAt: string | null;
+  origin?: 'pickup' | 'in_trip_recovery';
 }
 
 export type BoardingDecision = 'CONFIRM' | 'OBSERVE' | 'REJECT';
@@ -90,6 +91,7 @@ export interface BoardingDetectionInput {
   driverLocations: BoardingLocationSample[];
   passengerLocations: BoardingLocationSample[];
   candidate: BoardingCandidateSnapshot | null;
+  allowCandidateAwayFromPickup?: boolean;
   config?: BoardingDetectionConfig;
 }
 
@@ -497,10 +499,12 @@ export function evaluateBoardingDetection(
     const passengerDistanceToPickup = input.pickupLocation
       ? calculateBoardingDistanceMeters(passengerCurrent, input.pickupLocation)
       : Number.POSITIVE_INFINITY;
+    const isAtPickup =
+      driverDistanceToPickup <= pickupRadius &&
+      passengerDistanceToPickup <= pickupRadius;
     if (
       metrics.distanceBetweenUsers > pickupRadius ||
-      driverDistanceToPickup > pickupRadius ||
-      passengerDistanceToPickup > pickupRadius
+      (!isAtPickup && !input.allowCandidateAwayFromPickup)
     ) {
       return finish('OBSERVE', BoardingRejectionReason.NOT_CLOSE_ENOUGH, null);
     }
@@ -515,6 +519,7 @@ export function evaluateBoardingDetection(
       sharedMovementStartedAt: null,
       separationStartedAt: null,
       confirmedAt: null,
+      origin: isAtPickup ? 'pickup' : 'in_trip_recovery',
     };
     currentState = candidate.state;
     previousState = candidate.previousState;
@@ -642,11 +647,11 @@ export function evaluateBoardingDetection(
   );
   const departureCompatible = Boolean(
     driverMovementStartedAt &&
-      passengerMovementStartedAt &&
-      Math.abs(
-        new Date(driverMovementStartedAt).getTime() -
-          new Date(passengerMovementStartedAt).getTime(),
-      ) <= config.maximumTimestampDifferenceMs,
+    passengerMovementStartedAt &&
+    Math.abs(
+      new Date(driverMovementStartedAt).getTime() -
+        new Date(passengerMovementStartedAt).getTime(),
+    ) <= config.maximumTimestampDifferenceMs,
   );
   const significantDriverMovement =
     metrics.driverDistanceMoved >= config.driverMinimumMovementMeters;
@@ -691,18 +696,18 @@ export function evaluateBoardingDetection(
     metrics.speedDifference <= config.maximumSpeedDifferenceKmh;
   const slowTrafficPath = Boolean(
     significantDriverMovement &&
-      significantPassengerMovement &&
-      metrics.driverSpeed !== null &&
-      metrics.passengerSpeed !== null &&
-      Math.max(metrics.driverSpeed, metrics.passengerSpeed) <=
-        config.slowTrafficMaximumSpeedKmh &&
-      nowMs - new Date(candidate.createdAt).getTime() >=
-        config.slowTrafficObservationDurationMs &&
-      metrics.sharedDistance >= config.slowTrafficMinimumSharedDistanceMeters &&
-      synchronizedMovementRatio(pairs) >= config.minimumCloseSamplesRatio &&
-      proximityStable &&
-      speedCompatible &&
-      !candidate.separationStartedAt,
+    significantPassengerMovement &&
+    metrics.driverSpeed !== null &&
+    metrics.passengerSpeed !== null &&
+    Math.max(metrics.driverSpeed, metrics.passengerSpeed) <=
+      config.slowTrafficMaximumSpeedKmh &&
+    nowMs - new Date(candidate.createdAt).getTime() >=
+      config.slowTrafficObservationDurationMs &&
+    metrics.sharedDistance >= config.slowTrafficMinimumSharedDistanceMeters &&
+    synchronizedMovementRatio(pairs) >= config.minimumCloseSamplesRatio &&
+    proximityStable &&
+    speedCompatible &&
+    !candidate.separationStartedAt,
   );
   metrics.slowTrafficPath = slowTrafficPath;
 
@@ -736,15 +741,14 @@ export function evaluateBoardingDetection(
 
   const normalPath = Boolean(
     significantDriverMovement &&
-      significantPassengerMovement &&
-      departureCompatible &&
-      directionCompatible &&
-      speedCompatible &&
-      proximityStable &&
-      metrics.sharedMovementDuration >=
-        config.minimumSharedMovementDurationMs &&
-      metrics.sharedDistance >= config.minimumSharedDistanceMeters &&
-      !candidate.separationStartedAt,
+    significantPassengerMovement &&
+    departureCompatible &&
+    directionCompatible &&
+    speedCompatible &&
+    proximityStable &&
+    metrics.sharedMovementDuration >= config.minimumSharedMovementDurationMs &&
+    metrics.sharedDistance >= config.minimumSharedDistanceMeters &&
+    !candidate.separationStartedAt,
   );
 
   if (

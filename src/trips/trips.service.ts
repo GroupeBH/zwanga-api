@@ -16,6 +16,7 @@ import {
   Brackets,
   Not,
   IsNull,
+  Raw,
 } from 'typeorm';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { Trip, TripStatus } from './entities/trip.entity';
@@ -1084,6 +1085,10 @@ export class TripsService {
       );
     }
 
+    if (trip.status === TripStatus.COMPLETED) {
+      return this.findOne(tripId);
+    }
+
     if (trip.status !== TripStatus.ACTIVE) {
       throw new BadRequestException(
         `Impossible de terminer le trajet. Statut actuel : ${trip.status}`,
@@ -1207,19 +1212,19 @@ export class TripsService {
   private hasBookingEmbarked(booking: Booking): boolean {
     return Boolean(
       booking.pickedUp ||
-        booking.pickedUpConfirmedByPassenger ||
-        booking.pickedUpAt ||
-        booking.pickedUpConfirmedAt,
+      booking.pickedUpConfirmedByPassenger ||
+      booking.pickedUpAt ||
+      booking.pickedUpConfirmedAt,
     );
   }
 
   private hasBookingBeenDroppedOff(booking: Booking): boolean {
     return Boolean(
       booking.status === BookingStatus.COMPLETED ||
-        booking.droppedOff ||
-        booking.droppedOffConfirmedByPassenger ||
-        booking.droppedOffAt ||
-        booking.droppedOffConfirmedAt,
+      booking.droppedOff ||
+      booking.droppedOffConfirmedByPassenger ||
+      booking.droppedOffAt ||
+      booking.droppedOffConfirmedAt,
     );
   }
 
@@ -3400,10 +3405,39 @@ export class TripsService {
       };
     }
 
-    trip.currentLocation = buildPointFromCoordinate(currentCoordinate);
-    trip.lastLocationUpdateAt = observedAt;
+    const currentLocation = buildPointFromCoordinate(currentCoordinate);
+    const updateResult = await this.tripRepository.update(
+      {
+        id: trip.id,
+        driverId,
+        status: TripStatus.ACTIVE,
+        lastLocationUpdateAt: Raw(
+          (alias) => `(${alias} IS NULL OR ${alias} < :observedAt)`,
+          { observedAt },
+        ),
+      },
+      {
+        currentLocation,
+        lastLocationUpdateAt: observedAt,
+      },
+    );
+    if (updateResult.affected !== 1) {
+      const latestTrip = await this.tripRepository.findOne({
+        where: { id: trip.id },
+      });
+      return {
+        tripId: trip.id,
+        coordinates: this.pointToCoordinates(
+          latestTrip?.currentLocation ?? trip.currentLocation,
+        ),
+        updatedAt:
+          latestTrip?.lastLocationUpdateAt ?? trip.lastLocationUpdateAt,
+        ignoredAsOutOfOrder: true,
+      };
+    }
 
-    await this.tripRepository.save(trip);
+    trip.currentLocation = currentLocation;
+    trip.lastLocationUpdateAt = observedAt;
     await this.locationHistoryService.recordDriverLocation(
       trip.id,
       currentCoordinate.latitude,

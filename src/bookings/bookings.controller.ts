@@ -52,7 +52,7 @@ export class BookingsController {
   @ApiOperation({
     summary: 'Initiate electronic payment for a booking',
     description:
-      "Calcule le montant cote backend a partir du prix du trajet et du nombre de places, puis initialise le paiement FlexPay.",
+      "Disponible uniquement apres l'arrivee du passager. Calcule le montant cote backend puis initialise le paiement FlexPay.",
   })
   async initiatePayment(
     @Request() req,
@@ -72,7 +72,7 @@ export class BookingsController {
   @ApiOperation({
     summary: 'Update payment mode for a booking',
     description:
-      'Permet au passager de changer entre paiement electronique, jetons Zwanga et paiement physique avant la cloture de la reservation.',
+      "Enregistre le moyen choisi sans debiter avant l'arrivee. Apres l'arrivee, selectionner les jetons declenche le debit si necessaire.",
   })
   async updatePaymentMode(
     @Request() req,
