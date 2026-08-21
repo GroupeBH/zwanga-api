@@ -10,6 +10,8 @@ describe('TripsService daily trip publication quota', () => {
   let tripRepository: {
     create: jest.Mock;
     save: jest.Mock;
+    update: jest.Mock;
+    findOne: jest.Mock;
     createQueryBuilder: jest.Mock;
   };
   let userRepository: { findOne: jest.Mock; save: jest.Mock };
@@ -31,6 +33,8 @@ describe('TripsService daily trip publication quota', () => {
     tripRepository = {
       create: jest.fn((payload) => payload),
       save: jest.fn().mockResolvedValue({ id: 'trip-1' }),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
+      findOne: jest.fn(),
       createQueryBuilder: jest.fn(),
     };
     userRepository = {
@@ -87,6 +91,54 @@ describe('TripsService daily trip publication quota', () => {
     tripRepository.createQueryBuilder.mockReturnValue(queryBuilder);
     return queryBuilder;
   }
+
+  it('persists driver samples with a timestamp compare-and-set shared by REST and Socket.IO', async () => {
+    const activeTrip = {
+      id: 'trip-1',
+      driverId: 'driver-1',
+      status: TripStatus.ACTIVE,
+      currentLocation: null,
+      lastLocationUpdateAt: null,
+      departurePoint: { type: 'Point', coordinates: [15.3, -4.3] },
+      arrivalPoint: { type: 'Point', coordinates: [15.4, -4.4] },
+    };
+    jest.spyOn(service, 'verifyTripParticipant').mockResolvedValue({
+      trip: activeTrip,
+      isDriver: true,
+    });
+    const recordedAt = new Date().toISOString();
+
+    const result = await service.updateDriverLocation(
+      'driver-1',
+      'trip-1',
+      [15.31, -4.31],
+      { recordedAt, accuracyMeters: 5 },
+    );
+
+    expect(tripRepository.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'trip-1',
+        driverId: 'driver-1',
+        status: TripStatus.ACTIVE,
+        lastLocationUpdateAt: expect.anything(),
+      }),
+      expect.objectContaining({
+        currentLocation: {
+          type: 'Point',
+          coordinates: [15.31, -4.31],
+        },
+        lastLocationUpdateAt: new Date(recordedAt),
+      }),
+    );
+    expect(tripRepository.save).not.toHaveBeenCalled();
+    expect(result).toEqual(
+      expect.objectContaining({
+        tripId: 'trip-1',
+        coordinates: [15.31, -4.31],
+        updatedAt: new Date(recordedAt),
+      }),
+    );
+  });
 
   it('blocks a non-subscribed driver after five trips in the current day', async () => {
     subscriptionsService.getPremiumOverview.mockResolvedValue({

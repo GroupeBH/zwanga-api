@@ -2,6 +2,34 @@
 
 Ce fichier répertorie les changements qui influencent un prix, un paiement, un solde, une commission, une récompense ou un retrait.
 
+## 21 août 2026
+
+### FIN-BOOKING-001 — Paiement à l'arrivée et non-embarquement automatique
+
+Statut : implémenté dans le code, migration non encore appliquée à une base de production.
+
+Résumé : le moyen de paiement est choisi à la réservation sans débit. Le paiement électronique et le débit de jetons deviennent possibles uniquement après l'arrivée. Après 10 minutes d'attente et un départ d'au moins 150 mètres, une réservation jamais embarquée passe automatiquement à `no_show` uniquement si une position passager fraîche prouve qu'il est resté au point de récupération. Si son GPS reprend ensuite et prouve un mouvement partagé dans le véhicule pendant le trajet, le `no_show` est récupéré automatiquement sans paiement anticipé. Sans preuve GPS suffisante, elle devient `boarding_uncertain` à la destination, sans paiement.
+
+Impacts financiers :
+
+- aucun prépaiement avant la prise en charge ;
+- aucun débit, revenu conducteur, fidélité ou futur gain de parrainage pour `no_show` ou `boarding_uncertain` ;
+- règlement FlexPay initié après arrivée ;
+- débit de jetons tenté après arrivée et laissé `pending` si le solde est insuffisant ;
+- suppression de la fausse réconciliation mobile qui confirmait prise en charge et dépose à la destination ;
+- déclenchement de l'automate par les positions REST d'arrière-plan comme par le WebSocket ;
+- acceptation du GPS passager après `no_show` tant que le trajet reste actif ;
+- récupération financièrement neutre de `no_show` vers `accepted` après preuve de mouvement partagé ;
+- sérialisation par trajet des décisions déclenchées simultanément par REST et Socket.IO ;
+- persistance conditionnelle des positions par horodatage afin qu'un échantillon dupliqué ou ancien n'écrase jamais le plus récent ;
+- dépose automatique depuis le GPS conducteur à la destination après un embarquement persisté ;
+- retrait des confirmations manuelles des écrans conducteur et passager ;
+- audit des méthodes de détection d'embarquement et de dépose ;
+- conservation des montants ajustés lors d'une interruption ;
+- affichage du montant serveur dans le modal passager de fin de trajet et bouton **Payer avec FlexPay** pour les réservations électroniques encore impayées.
+
+Documentation complète : [booking-payment-at-arrival-and-automatic-no-show.md](./booking-payment-at-arrival-and-automatic-no-show.md).
+
 ## 20 août 2026
 
 ### FIN-TRIP-004 — Expiration douze heures après la fin de la plage de départ
