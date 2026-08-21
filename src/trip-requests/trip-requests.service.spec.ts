@@ -2,6 +2,8 @@ import { BadRequestException } from '@nestjs/common';
 import { VehicleType } from '../vehicles/entities/vehicle.entity';
 import { DriverOfferStatus } from './entities/driver-offer.entity';
 import { TripRequestStatus } from './entities/trip-request.entity';
+import { BookingStatus } from '../bookings/entities/booking.entity';
+import { TripStatus } from '../trips/entities/trip.entity';
 import { TripRequestsService } from './trip-requests.service';
 
 describe('TripRequestsService recommended price', () => {
@@ -599,5 +601,122 @@ describe('TripRequestsService unaccepted request expiration', () => {
 
     expect(tripRequest.status).toBe(TripRequestStatus.EXPIRED);
     expect(driverOfferRepository.create).not.toHaveBeenCalled();
+  });
+});
+
+describe('TripRequestsService cancellation after driver acceptance', () => {
+  const buildService = (tripRequest: Record<string, unknown>, trip?: any) => {
+    const tripRequestRepository = {
+      findOne: jest.fn().mockResolvedValue(tripRequest),
+      save: jest.fn((payload: unknown) => Promise.resolve(payload)),
+    };
+    const driverOfferRepository = {
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
+    };
+    const tripsService = {
+      findOne: jest.fn().mockResolvedValue(trip),
+    };
+    const bookingsService = {
+      cancel: jest.fn().mockResolvedValue(undefined),
+    };
+    const service = new TripRequestsService(
+      tripRequestRepository as any,
+      driverOfferRepository as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      tripsService as any,
+      bookingsService as any,
+      {} as any,
+      {} as any,
+      {} as any,
+    );
+
+    return {
+      service,
+      tripRequestRepository,
+      driverOfferRepository,
+      tripsService,
+      bookingsService,
+    };
+  };
+
+  it('allows cancellation after an offer was accepted and before a trip exists', async () => {
+    const tripRequest = {
+      id: 'request-accepted-offer',
+      passengerId: 'passenger-1',
+      status: TripRequestStatus.DRIVER_SELECTED,
+      tripId: null,
+    };
+    const dependencies = buildService(tripRequest);
+
+    await dependencies.service.cancel('passenger-1', tripRequest.id);
+
+    expect(tripRequest.status).toBe(TripRequestStatus.CANCELLED);
+    expect(dependencies.tripRequestRepository.save).toHaveBeenCalledWith(
+      tripRequest,
+    );
+    expect(dependencies.tripsService.findOne).not.toHaveBeenCalled();
+    expect(dependencies.bookingsService.cancel).not.toHaveBeenCalled();
+    expect(dependencies.driverOfferRepository.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tripRequestId: tripRequest.id,
+        status: expect.anything(),
+      }),
+      { status: DriverOfferStatus.CANCELLED },
+    );
+  });
+
+  it('cancels the accepted booking when the generated trip has not started', async () => {
+    const tripRequest = {
+      id: 'request-with-trip',
+      passengerId: 'passenger-1',
+      status: TripRequestStatus.DRIVER_SELECTED,
+      tripId: 'trip-1',
+    };
+    const dependencies = buildService(tripRequest, {
+      id: 'trip-1',
+      status: TripStatus.PENDING,
+      startedAt: null,
+      bookings: [
+        {
+          id: 'booking-1',
+          passengerId: 'passenger-1',
+          status: BookingStatus.ACCEPTED,
+        },
+      ],
+    });
+
+    await dependencies.service.cancel('passenger-1', tripRequest.id);
+
+    expect(dependencies.bookingsService.cancel).toHaveBeenCalledWith(
+      'booking-1',
+      'passenger-1',
+    );
+    expect(tripRequest.status).toBe(TripRequestStatus.CANCELLED);
+  });
+
+  it('rejects cancellation once the generated trip has started', async () => {
+    const tripRequest = {
+      id: 'request-started',
+      passengerId: 'passenger-1',
+      status: TripRequestStatus.DRIVER_SELECTED,
+      tripId: 'trip-active',
+    };
+    const dependencies = buildService(tripRequest, {
+      id: 'trip-active',
+      status: TripStatus.ACTIVE,
+      startedAt: new Date(),
+      bookings: [],
+    });
+
+    await expect(
+      dependencies.service.cancel('passenger-1', tripRequest.id),
+    ).rejects.toThrow('le trajet a déjà démarré');
+
+    expect(dependencies.bookingsService.cancel).not.toHaveBeenCalled();
+    expect(dependencies.tripRequestRepository.save).not.toHaveBeenCalled();
+    expect(dependencies.driverOfferRepository.update).not.toHaveBeenCalled();
   });
 });

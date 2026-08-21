@@ -237,7 +237,8 @@ export class TripRequestsController {
   @SensitiveThrottle(5, 60000)
   @ApiOperation({
     summary: 'Cancel a trip request',
-    description: "Permet au passager d'annuler sa demande de trajet",
+    description:
+      "Permet au passager d'annuler sa demande de trajet, même après l'acceptation par un conducteur, tant que le trajet n'a pas démarré.",
   })
   // @ApiBearerAuth()
   async cancel(@Request() req, @Param('id') id: string) {
