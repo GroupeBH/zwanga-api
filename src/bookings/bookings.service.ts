@@ -1901,15 +1901,17 @@ export class BookingsService {
       );
     }
 
-    // Si c'est un trajet privé, terminer automatiquement le trajet et notifier le driver
+    // Si c'est un trajet privé, l'annuler avant le départ ou le terminer s'il a démarré.
     if (isPassenger && trip.isPrivate) {
+      const wasPending = trip.status === TripStatus.PENDING && !trip.startedAt;
       this.logger.log(
-        `Private trip ${trip.id} - Passenger cancelled booking. Terminating trip automatically.`,
+        `Private trip ${trip.id} - Passenger cancelled booking. ${wasPending ? 'Cancelling' : 'Completing'} trip automatically.`,
       );
 
-      // Terminer le trajet
-      trip.status = TripStatus.COMPLETED;
-      trip.completedAt = new Date();
+      trip.status = wasPending ? TripStatus.CANCELLED : TripStatus.COMPLETED;
+      if (!wasPending) {
+        trip.completedAt = new Date();
+      }
       await this.tripRepository.save(trip);
 
       // Notifier le driver
@@ -1955,8 +1957,11 @@ export class BookingsService {
         ? `${cancelledBooking.passenger.firstName} ${cancelledBooking.passenger.lastName}`
         : 'Le passager';
 
-      const title = '🚫 Trajet terminé';
-      const body = `${passengerName} a annulé sa réservation. Le trajet privé de ${trip.departureLocation} à ${trip.arrivalLocation} a été automatiquement terminé.`;
+      const wasCancelledBeforeStart = trip.status === TripStatus.CANCELLED;
+      const title = wasCancelledBeforeStart
+        ? '🚫 Trajet annulé'
+        : '🚫 Trajet terminé';
+      const body = `${passengerName} a annulé sa réservation. Le trajet privé de ${trip.departureLocation} à ${trip.arrivalLocation} a été automatiquement ${wasCancelledBeforeStart ? 'annulé' : 'terminé'}.`;
 
       const data = {
         type: 'private_trip_cancelled',

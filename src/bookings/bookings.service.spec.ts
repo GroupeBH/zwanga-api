@@ -162,6 +162,48 @@ describe('BookingsService trip payments', () => {
     );
   });
 
+  it('marks a pending private trip as cancelled when its passenger cancels', async () => {
+    const privateTrip = {
+      id: 'private-trip-1',
+      driverId: 'driver-1',
+      driver: { id: 'driver-1', fcmToken: null },
+      status: TripStatus.PENDING,
+      startedAt: null,
+      completedAt: null,
+      isPrivate: true,
+      totalSeats: 1,
+      availableSeats: 0,
+      departureLocation: 'Gombe',
+      arrivalLocation: 'Limete',
+    };
+    const privateBooking = {
+      id: 'private-booking-1',
+      tripId: privateTrip.id,
+      trip: privateTrip,
+      passengerId: 'passenger-1',
+      passenger: { firstName: 'Alice', lastName: 'Test' },
+      numberOfSeats: 1,
+      status: BookingStatus.ACCEPTED,
+      paymentMode: TripPaymentMode.CASH,
+      paymentStatus: BookingPaymentStatus.NOT_REQUIRED,
+      pickedUp: false,
+      pickedUpConfirmedByPassenger: false,
+      cancelledAt: null,
+    };
+    bookingRepository.findOne.mockResolvedValue(privateBooking);
+    tripRepository.findOne.mockResolvedValue(privateTrip);
+    jest
+      .spyOn(service as any, 'recalculateAvailableSeatsForTrip')
+      .mockResolvedValue(1);
+
+    await service.cancel(privateBooking.id, privateBooking.passengerId);
+
+    expect(privateBooking.status).toBe(BookingStatus.CANCELLED);
+    expect(privateTrip.status).toBe(TripStatus.CANCELLED);
+    expect(privateTrip.completedAt).toBeNull();
+    expect(tripRepository.save).toHaveBeenCalledWith(privateTrip);
+  });
+
   const buildLocationHistory = (
     previousCoordinates: [number, number],
     currentCoordinates: [number, number],

@@ -35,6 +35,7 @@ import {
 import { FileUploadService } from '../common/services/file-upload.service';
 import { NotificationService } from '../notifications/notifications.service';
 import { TripsService } from '../trips/trips.service';
+import { TripStatus } from '../trips/entities/trip.entity';
 import { BookingsService } from '../bookings/bookings.service';
 import { BookingStatus } from '../bookings/entities/booking.entity';
 import { GoogleMapsService } from '../google-maps/google-maps.service';
@@ -1673,18 +1674,40 @@ export class TripRequestsService {
       );
     }
 
-    if (tripRequest.status === TripRequestStatus.DRIVER_SELECTED) {
-      throw new BadRequestException(
-        'Vous ne pouvez pas annuler une demande pour laquelle un driver a été sélectionné',
+    if (
+      tripRequest.status === TripRequestStatus.DRIVER_SELECTED &&
+      tripRequest.tripId
+    ) {
+      const trip = await this.tripsService.findOne(tripRequest.tripId);
+
+      if (trip.status !== TripStatus.PENDING || trip.startedAt) {
+        throw new BadRequestException(
+          'Vous ne pouvez plus annuler cette demande car le trajet a déjà démarré',
+        );
+      }
+
+      const passengerBooking = trip.bookings?.find(
+        (booking) =>
+          booking.passengerId === passengerId &&
+          [BookingStatus.PENDING, BookingStatus.ACCEPTED].includes(
+            booking.status,
+          ),
       );
+
+      if (passengerBooking) {
+        await this.bookingsService.cancel(passengerBooking.id, passengerId);
+      }
     }
 
     tripRequest.status = TripRequestStatus.CANCELLED;
     await this.tripRequestRepository.save(tripRequest);
 
-    // Cancel all pending offers
+    // Cancel all offers that were still actionable, including the accepted one.
     await this.driverOfferRepository.update(
-      { tripRequestId, status: DriverOfferStatus.PENDING },
+      {
+        tripRequestId,
+        status: In([DriverOfferStatus.PENDING, DriverOfferStatus.ACCEPTED]),
+      },
       { status: DriverOfferStatus.CANCELLED },
     );
 
