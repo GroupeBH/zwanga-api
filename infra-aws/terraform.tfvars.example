@@ -22,6 +22,11 @@ database_import_ephemeral_storage_gb = 30
 redis_node_type          = "cache.t4g.micro"
 redis_num_cache_clusters = 1
 
+# Mandatory in production. Keeping this value in the production Terraform
+# configuration prevents an apply from deleting the SSM parameter used by ECS.
+application_s3_bucket_name    = "medias-zwanga"
+enable_rekognition_permissions = true
+
 # Economical always-on ECS profile for around 100 daily users.
 ecs_task_cpu    = "512"
 ecs_task_memory = "1024"
@@ -122,7 +127,6 @@ runtime_environment_variables = {
 # avec scripts/import-env-to-ssm.ps1. Terraform les decouvre automatiquement
 # sous /zwanga-api/production/env/* au prochain apply, sans stocker les valeurs.
 external_runtime_environment_variable_names = [
-  # "AWS_S3_BUCKET_NAME",
   # "FCM_PROJECT_ID",
   # "FCM_CLIENT_EMAIL",
   # "FCM_PRIVATE_KEY",

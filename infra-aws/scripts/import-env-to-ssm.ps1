@@ -142,6 +142,9 @@ Get-Content -LiteralPath $EnvFile | ForEach-Object {
   $value = Convert-DotEnvValue -RawValue $Matches[2]
 
   if (Test-ExcludedName -Name $name) {
+    if ($name.Equals("AWS_S3_BUCKET_NAME", [StringComparison]::OrdinalIgnoreCase)) {
+      Write-Warning "Skipping AWS_S3_BUCKET_NAME because Terraform manages it through application_s3_bucket_name together with the ECS S3 permissions."
+    }
     [void]$skippedNames.Add($name)
     return
   }
