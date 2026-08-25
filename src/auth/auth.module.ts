@@ -11,6 +11,7 @@ import { UsersModule } from '../users/users.module';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { GoogleStrategy } from './strategies/google.strategy';
 import { VehiclesModule } from '../vehicles/vehicles.module';
+import { ReferralsModule } from '../referrals/referrals.module';
 
 @Module({
   imports: [
@@ -28,10 +29,10 @@ import { VehiclesModule } from '../vehicles/vehicles.module';
       inject: [ConfigService],
     }),
     VehiclesModule,
+    ReferralsModule,
   ],
   controllers: [AuthController],
   providers: [AuthService, JwtStrategy, GoogleStrategy],
   exports: [AuthService],
 })
 export class AuthModule {}
-

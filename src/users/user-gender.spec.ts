@@ -63,6 +63,10 @@ describe('User gender', () => {
       configService as any,
       {} as any,
       {} as any,
+      {
+        assertReferralAttribution: jest.fn().mockResolvedValue(undefined),
+        registerUser: jest.fn().mockResolvedValue(undefined),
+      } as any,
     );
 
     try {

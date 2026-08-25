@@ -36,6 +36,7 @@ import { User, UserRole } from '../users/entities/user.entity';
 import { CacheService } from '../common/services/cache.service';
 import { WalletLedgerEntry } from '../wallet/entities/wallet-ledger-entry.entity';
 import { WalletService } from '../wallet/wallet.service';
+import { ReferralsService } from '../referrals/referrals.service';
 
 export interface PremiumSubscriptionFeatures {
   isActive: boolean;
@@ -95,6 +96,7 @@ export class SubscriptionsService {
     private cacheService: CacheService,
     private paymentsService: PaymentsService,
     private walletService: WalletService,
+    private referralsService: ReferralsService,
   ) {}
 
   async createTrial(userId: string): Promise<Subscription> {
@@ -767,6 +769,10 @@ export class SubscriptionsService {
           subscription,
           payment.id,
         );
+        await this.referralsService.awardSubscriptionReward(
+          subscription,
+          payment,
+        );
         return subscription;
       }
       return this.activatePaidSubscription(subscription, payment);
@@ -788,6 +794,15 @@ export class SubscriptionsService {
 
     const savedSubscription =
       await this.subscriptionRepository.save(subscription);
+    if (
+      payment.status === PaymentStatus.FAILED ||
+      payment.status === PaymentStatus.CANCELLED
+    ) {
+      await this.referralsService.reverseSubscriptionReward(
+        savedSubscription.id,
+        `Paiement FlexPay ${payment.status}`,
+      );
+    }
     this.logger.log(
       `Subscription payment state saved: subscriptionId=${savedSubscription.id}, paymentId=${payment.id}, paymentStatus=${payment.status}, subscriptionStatus=${savedSubscription.status}`,
     );
@@ -824,6 +839,10 @@ export class SubscriptionsService {
     await this.walletService.awardSubscriptionPaymentTokens(
       savedSubscription,
       payment.id,
+    );
+    await this.referralsService.awardSubscriptionReward(
+      savedSubscription,
+      payment,
     );
     await this.invalidatePremiumCaches();
 
@@ -1092,7 +1111,7 @@ export class SubscriptionsService {
     );
     const hasExplicitProPrice = Boolean(
       this.configService.get<string | number>('SUBSCRIPTION_PRO_PRICE') ||
-        this.configService.get<string | number>('SUBSCRIPTION_PRO_PRICE_USD'),
+      this.configService.get<string | number>('SUBSCRIPTION_PRO_PRICE_USD'),
     );
 
     if (hasLegacyCdfPrice && !hasExplicitProPrice) {

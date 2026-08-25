@@ -101,7 +101,7 @@ La configuration actuelle conserve la valeur historique par défaut :
 
 Le changement ne modifie ni `ZWANGA_POINT_VALUE_CDF`, ni les taux de fidélité, ni le prix des courses, ni le prix de l'abonnement.
 
-Les jetons restent une unité interne utilisable selon les fonctionnalités actuelles. Ce lot ne les rend pas automatiquement retirables en espèces et n'implémente pas encore le retrait des futurs gains de parrainage.
+Les jetons promotionnels restent une unité interne utilisable selon les fonctionnalités actuelles et ne deviennent pas retirables. `FIN-REF-001` implémente un compte séparé pour les gains de parrainage retirables ; le bonus de 25 jetons n'y est jamais versé.
 
 ## 7. Callbacks, idempotence et concurrence
 

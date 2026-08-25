@@ -15,6 +15,9 @@ import { AddVehicleTypes1780000014000 } from './1780000014000-AddVehicleTypes';
 import { AddVehicleTypeToTripRequests1780000015000 } from './1780000015000-AddVehicleTypeToTripRequests';
 import { AddSubscriptionTokenRewards1780000016000 } from './1780000016000-AddSubscriptionTokenRewards';
 import { AddBookingNoShowState1780000017000 } from './1780000017000-AddBookingNoShowState';
+import { AddReferralProgram1780000018000 } from './1780000018000-AddReferralProgram';
+import { AddBranchReferralAttribution1780000019000 } from './1780000019000-AddBranchReferralAttribution';
+import { ReplaceBranchWithChottuLink1780000020000 } from './1780000020000-ReplaceBranchWithChottuLink';
 
 export const databaseMigrations = [
   FillTotalSeats1780000000000,
@@ -34,4 +37,7 @@ export const databaseMigrations = [
   AddVehicleTypeToTripRequests1780000015000,
   AddSubscriptionTokenRewards1780000016000,
   AddBookingNoShowState1780000017000,
+  AddReferralProgram1780000018000,
+  AddBranchReferralAttribution1780000019000,
+  ReplaceBranchWithChottuLink1780000020000,
 ];

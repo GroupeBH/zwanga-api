@@ -10,7 +10,7 @@ Dernière mise à jour : 21 août 2026.
 
 Le passager choisit son moyen de paiement pendant la réservation, mais il ne paie jamais avant son arrivée. La prise en charge, la progression physique de la course et le règlement financier sont donc trois responsabilités distinctes.
 
-Si le conducteur attend au point de rendez-vous puis repart sans avoir embarqué le passager, la réservation doit être classée automatiquement `no_show` sans paiement. Ce classement reste récupérable pendant le trajet : si le GPS passager réapparaît et prouve ensuite un déplacement partagé avec le véhicule, l'embarquement est validé. Tant que cette preuve n'existe pas, la réservation ne produit ni revenu conducteur, ni jeton de fidélité, ni future récompense de parrainage.
+Si le conducteur attend au point de rendez-vous puis repart sans avoir embarqué le passager, la réservation doit être classée automatiquement `no_show` sans paiement. Ce classement reste récupérable pendant le trajet : si le GPS passager réapparaît et prouve ensuite un déplacement partagé avec le véhicule, l'embarquement est validé. Tant que cette preuve n'existe pas, la réservation ne produit ni revenu conducteur, ni jeton de fidélité, ni récompense de parrainage.
 
 ## 2. Comportement avant et après
 
@@ -240,14 +240,14 @@ Le `down` convertit les lignes `no_show` et `boarding_uncertain` en `cancelled` 
 
 ## 12. Parrainage
 
-`FIN-REF-001` reste planifié. Lors de son implémentation, une course ne pourra devenir une source de gain de parrainage que si :
+`FIN-REF-001` est maintenant implémenté. Une course ne peut devenir une source de gain de parrainage que si :
 
 - la réservation est `completed` ;
 - le paiement éligible est réellement confirmé selon la politique de la plateforme ;
 - la réservation n'est ni `no_show`, ni `boarding_uncertain`, ni annulée, ni remboursée ;
 - la source financière est unique et traçable.
 
-Aucun gain de parrainage n'est créé par ce changement.
+Le gain de parrainage est créé par `FIN-REF-001`, au point de finalisation financière décrit ici.
 
 ## 13. Tests et validation
 

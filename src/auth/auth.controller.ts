@@ -76,6 +76,33 @@ export class AuthController {
       type: 'object',
       properties: {
         phone: { type: 'string', example: '+243900000000' },
+        referralCode: {
+          type: 'string',
+          example: 'ZW7K9M2P4Q',
+          description: 'Ancien code de parrainage, conserve pour compatibilite',
+        },
+        referralToken: {
+          type: 'string',
+          example: 'Z5MJkPNEXwlUzvLTWajEGIzXq3u5PF9W',
+          description:
+            'Jeton opaque capture automatiquement depuis le lien ChottuLink',
+        },
+        referralProvider: {
+          type: 'string',
+          enum: ['chottulink', 'branch'],
+          example: 'chottulink',
+          description: 'Fournisseur ayant resolu le lien',
+        },
+        referralReferringLink: {
+          type: 'string',
+          example: 'https://zwanga.chottu.link/AbCdEf',
+          description: "Lien ChottuLink d'origine, conserve pour audit",
+        },
+        referralCapturedAt: {
+          type: 'string',
+          format: 'date-time',
+          description: "Date de capture de l'attribution ChottuLink",
+        },
         pin: {
           type: 'string',
           example: '1234',

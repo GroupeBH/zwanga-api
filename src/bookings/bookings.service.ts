@@ -44,6 +44,7 @@ import { PaymentsService } from '../payments/payments.service';
 import { TripPaymentMode } from '../payments/enums/trip-payment-mode.enum';
 import { WalletService } from '../wallet/wallet.service';
 import { DriverSettlementsService } from '../driver-settlements/driver-settlements.service';
+import { ReferralsService } from '../referrals/referrals.service';
 import { CacheService } from '../common/services/cache.service';
 import {
   LocationHistoryService,
@@ -194,6 +195,7 @@ export class BookingsService {
     private paymentsService: PaymentsService,
     private walletService: WalletService,
     private driverSettlementsService: DriverSettlementsService,
+    private referralsService: ReferralsService,
     private locationHistoryService: LocationHistoryService,
   ) {
     this.boardingDetectionConfig = loadBoardingDetectionConfig(
@@ -2358,6 +2360,7 @@ export class BookingsService {
     await this.driverSettlementsService.recordCompletedBookingEarning(
       completedBooking,
     );
+    await this.referralsService.awardBookingReward(completedBooking);
   }
 
   private async ensureLoyaltyDistanceForCompletedBooking(
@@ -2531,9 +2534,6 @@ export class BookingsService {
     booking: Booking,
     payment: PaymentTransaction,
   ): Promise<Booking> {
-    const wasAlreadyPaid =
-      booking.paymentStatus === BookingPaymentStatus.SUCCEEDED;
-
     booking.paymentMode = TripPaymentMode.ELECTRONIC;
     booking.paymentReference = payment.reference;
     booking.paymentTransactionId = payment.id;
@@ -2554,7 +2554,16 @@ export class BookingsService {
     await this.invalidateBookingCaches(savedBooking);
 
     if (
-      !wasAlreadyPaid &&
+      payment.status === PaymentStatus.FAILED ||
+      payment.status === PaymentStatus.CANCELLED
+    ) {
+      await this.referralsService.reverseBookingReward(
+        savedBooking.id,
+        `Paiement FlexPay ${payment.status}`,
+      );
+    }
+
+    if (
       savedBooking.status === BookingStatus.COMPLETED &&
       savedBooking.paymentStatus === BookingPaymentStatus.SUCCEEDED
     ) {
