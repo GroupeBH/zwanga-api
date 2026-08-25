@@ -30,6 +30,7 @@ export enum PaymentPurpose {
   TRIP_BOOKING = 'trip_booking',
   WALLET_TOP_UP = 'wallet_top_up',
   DRIVER_PAYOUT = 'driver_payout',
+  REFERRAL_PAYOUT = 'referral_payout',
 }
 
 @Entity('payment_transactions')

@@ -37,6 +37,10 @@ describe('SubscriptionsService points payments', () => {
     awardSubscriptionPaymentTokens: jest.Mock;
     getSubscriptionPaymentRewardTokens: jest.Mock;
   };
+  let referralsService: {
+    awardSubscriptionReward: jest.Mock;
+    reverseSubscriptionReward: jest.Mock;
+  };
   let service: SubscriptionsService;
 
   const driver = {
@@ -98,6 +102,10 @@ describe('SubscriptionsService points payments', () => {
       }),
       getSubscriptionPaymentRewardTokens: jest.fn().mockReturnValue(25),
     };
+    referralsService = {
+      awardSubscriptionReward: jest.fn().mockResolvedValue(null),
+      reverseSubscriptionReward: jest.fn().mockResolvedValue(null),
+    };
 
     service = new SubscriptionsService(
       subscriptionRepository as any,
@@ -107,6 +115,7 @@ describe('SubscriptionsService points payments', () => {
       cacheService as any,
       paymentsService as any,
       walletService as any,
+      referralsService as any,
     );
   });
 
@@ -199,7 +208,9 @@ describe('SubscriptionsService points payments', () => {
       { ...initiatedPayment, status: PaymentStatus.SUCCEEDED },
     );
 
-    expect(walletService.awardSubscriptionPaymentTokens).toHaveBeenCalledTimes(1);
+    expect(walletService.awardSubscriptionPaymentTokens).toHaveBeenCalledTimes(
+      1,
+    );
     expect(walletService.awardSubscriptionPaymentTokens).toHaveBeenCalledWith(
       expect.objectContaining({
         id: 'subscription-1',

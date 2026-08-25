@@ -1,6 +1,6 @@
 # Documentation financière de Zwanga
 
-Dernière mise à jour : 21 août 2026
+Dernière mise à jour : 25 août 2026
 
 ## Objectif
 
@@ -14,7 +14,7 @@ Il couvre notamment :
 - les revenus et retraits des conducteurs ;
 - les jetons Zwanga (identifiants techniques historiques `points`/`PTS`) ;
 - les ajustements et remboursements ;
-- le futur système de parrainage ;
+- le système de parrainage et ses retraits ;
 - les taux de conversion et toute configuration qui modifie un montant.
 
 Une modification financière n'est considérée comme terminée que si sa documentation et son entrée dans le journal des changements sont à jour.
@@ -29,11 +29,11 @@ Les montants CDF ou USD encaissés ou décaissés par FlexPay représentent de l
 
 Les jetons sont une unité interne du portefeuille `POINTS`. Les identifiants `points` et `PTS` sont conservés pour la compatibilité technique, mais l'appellation visible est « jetons Zwanga ». Leur valeur monétaire est configurable et ne doit jamais être supposée à partir du nom de l'unité.
 
-Les fichiers d'exemple ne sont actuellement pas homogènes : certains indiquent `1 jeton = 1 CDF`, d'autres `1 jeton = 100 CDF`. La configuration effective de chaque environnement doit donc être vérifiée avant un déploiement financier.
+La configuration livrée indique `1 jeton = 100 CDF`. La configuration effective de chaque environnement doit tout de même être vérifiée avant un déploiement financier.
 
 ### Gains de parrainage
 
-Les futurs gains de parrainage seront séparés des jetons d'usage. Ils représenteront une créance retirable en CDF avec des états `pending`, `available`, `locked`, `withdrawn` ou `cancelled`. Une variation de la valeur des jetons ne devra jamais modifier un gain de parrainage.
+Les gains de parrainage sont séparés des jetons d'usage. Ils représentent une créance retirable en CDF, répartie entre les compartiments `pending`, `available`, `reserved` et `withdrawn`. Le taux, la valeur du jeton et les montants utilisés sont figés sur chaque opération financière.
 
 ## Invariants comptables
 
@@ -58,9 +58,11 @@ Toute évolution financière doit respecter les règles suivantes :
 - [Nombre de places facultatif dans une demande](./trip-request-optional-seat-count.md)
 - [Jetons Zwanga et bonus de 25 jetons après paiement d'abonnement](./token-denomination-subscription-reward.md)
 - [Paiement à l'arrivée, progression automatique et non-embarquement](./booking-payment-at-arrival-and-automatic-no-show.md)
+- [Parrainage, commissions de 5 % et retraits FlexPay](./referral-program.md)
+- [Configuration ChottuLink du lien de parrainage automatique](./chottulink-referral-setup.md)
 - [Journal des modifications financières](./CHANGELOG.md)
 
-Les documents détaillés du paiement, des jetons et du parrainage seront ajoutés ou enrichis en même temps que les lots correspondants.
+Les documents détaillés du paiement, des jetons et du parrainage sont enrichis en même temps que les lots correspondants.
 
 ## Contenu exigé pour chaque modification
 

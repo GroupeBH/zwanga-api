@@ -40,6 +40,7 @@ import { WalletModule } from './wallet/wallet.module';
 import { DriverSettlementsModule } from './driver-settlements/driver-settlements.module';
 import { HealthModule } from './health/health.module';
 import { createRedisCacheStore } from './common/utils/redis-cache-store';
+import { ReferralsModule } from './referrals/referrals.module';
 
 @Module({
   imports: [
@@ -98,6 +99,7 @@ import { createRedisCacheStore } from './common/utils/redis-cache-store';
     WalletModule,
     DriverSettlementsModule,
     HealthModule,
+    ReferralsModule,
   ],
   controllers: [AppController],
   providers: [

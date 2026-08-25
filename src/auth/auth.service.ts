@@ -32,6 +32,7 @@ import {
 } from './dto/auth.dto';
 import { FileUploadService } from '../common/services/file-upload.service';
 import { VehiclesService } from '../vehicles/vehicles.service';
+import { ReferralsService } from '../referrals/referrals.service';
 
 const APPLE_ISSUER = 'https://appleid.apple.com';
 const APPLE_PUBLIC_KEYS_URL = 'https://appleid.apple.com/auth/keys';
@@ -110,6 +111,7 @@ export class AuthService {
     private configService: ConfigService,
     private fileUploadService: FileUploadService,
     private vehiclesService: VehiclesService,
+    private referralsService: ReferralsService,
   ) {
     this.googleClient = new OAuth2Client();
   }
@@ -124,8 +126,28 @@ export class AuthService {
   ): Promise<AuthResponseDto> {
     console.log('registerDto', registerDto);
     console.log('files', files);
-    const { phone, pin, firstName, lastName, gender, role, isDriver, vehicle } =
-      registerDto;
+    const {
+      phone,
+      pin,
+      firstName,
+      lastName,
+      gender,
+      role,
+      isDriver,
+      vehicle,
+      referralCode,
+      referralToken,
+      referralProvider,
+      referralReferringLink,
+      referralCapturedAt,
+    } = registerDto;
+    const referralAttribution = {
+      referralCode,
+      referralToken,
+      referralProvider,
+      referralReferringLink,
+      referralCapturedAt,
+    };
     const resolvedIsDriver = isDriver ?? role === UserRole.DRIVER;
 
     // Check if user already exists
@@ -136,6 +158,8 @@ export class AuthService {
     if (existingUser) {
       throw new UnauthorizedException('Ce numéro de téléphone existe déjà');
     }
+
+    await this.referralsService.assertReferralAttribution(referralAttribution);
 
     // Hash the PIN
     const saltRounds = 10;
@@ -190,6 +214,7 @@ export class AuthService {
 
     const user = this.userRepository.create(userData);
     const savedUser = await this.userRepository.save(user);
+    await this.referralsService.registerUser(savedUser.id, referralAttribution);
 
     if (vehicle && !resolvedIsDriver) {
       throw new BadRequestException(
@@ -451,7 +476,17 @@ export class AuthService {
     idToken: string,
     phone?: string,
     gender?: UserGender | null,
-    signupOptions?: Pick<GoogleMobileAuthDto, 'role' | 'isDriver' | 'vehicle'>,
+    signupOptions?: Pick<
+      GoogleMobileAuthDto,
+      | 'role'
+      | 'isDriver'
+      | 'vehicle'
+      | 'referralCode'
+      | 'referralToken'
+      | 'referralProvider'
+      | 'referralReferringLink'
+      | 'referralCapturedAt'
+    >,
   ): Promise<AuthResponseDto> {
     const googleProfile = await this.verifyGoogleIdToken(idToken);
     // Reuse existing linking/creation logic
@@ -473,7 +508,17 @@ export class AuthService {
     googleProfile: GoogleAuthProfile,
     phone?: string,
     gender?: UserGender | null,
-    signupOptions?: Pick<GoogleMobileAuthDto, 'role' | 'isDriver' | 'vehicle'>,
+    signupOptions?: Pick<
+      GoogleMobileAuthDto,
+      | 'role'
+      | 'isDriver'
+      | 'vehicle'
+      | 'referralCode'
+      | 'referralToken'
+      | 'referralProvider'
+      | 'referralReferringLink'
+      | 'referralCapturedAt'
+    >,
   ): Promise<AuthResponseDto> {
     const { googleId, email, firstName, lastName, profilePicture } =
       googleProfile;
@@ -548,6 +593,17 @@ export class AuthService {
         const role = signupOptions?.role ?? UserRole.PASSENGER;
         const isDriver = signupOptions?.isDriver ?? role === UserRole.DRIVER;
         const vehicle = signupOptions?.vehicle;
+        const referralAttribution = {
+          referralCode: signupOptions?.referralCode,
+          referralToken: signupOptions?.referralToken,
+          referralProvider: signupOptions?.referralProvider,
+          referralReferringLink: signupOptions?.referralReferringLink,
+          referralCapturedAt: signupOptions?.referralCapturedAt,
+        };
+
+        await this.referralsService.assertReferralAttribution(
+          referralAttribution,
+        );
 
         if (vehicle && !isDriver) {
           throw new BadRequestException(
@@ -571,6 +627,7 @@ export class AuthService {
         });
 
         user = await this.userRepository.save(user);
+        await this.referralsService.registerUser(user.id, referralAttribution);
         if (vehicle && isDriver) {
           await this.vehiclesService.create(user.id, vehicle);
         }
@@ -779,7 +836,15 @@ export class AuthService {
     phone?: string,
     signupOptions?: Pick<
       AppleMobileAuthDto,
-      'gender' | 'role' | 'isDriver' | 'vehicle'
+      | 'gender'
+      | 'role'
+      | 'isDriver'
+      | 'vehicle'
+      | 'referralCode'
+      | 'referralToken'
+      | 'referralProvider'
+      | 'referralReferringLink'
+      | 'referralCapturedAt'
     >,
   ): Promise<AuthResponseDto> {
     const { appleId, email, firstName, lastName, emailVerified } = appleProfile;
@@ -853,6 +918,17 @@ export class AuthService {
       const role = signupOptions?.role ?? UserRole.PASSENGER;
       const isDriver = signupOptions?.isDriver ?? role === UserRole.DRIVER;
       const vehicle = signupOptions?.vehicle;
+      const referralAttribution = {
+        referralCode: signupOptions?.referralCode,
+        referralToken: signupOptions?.referralToken,
+        referralProvider: signupOptions?.referralProvider,
+        referralReferringLink: signupOptions?.referralReferringLink,
+        referralCapturedAt: signupOptions?.referralCapturedAt,
+      };
+
+      await this.referralsService.assertReferralAttribution(
+        referralAttribution,
+      );
 
       if (vehicle && !isDriver) {
         throw new BadRequestException(
@@ -875,6 +951,7 @@ export class AuthService {
       });
 
       user = await this.userRepository.save(user);
+      await this.referralsService.registerUser(user.id, referralAttribution);
       if (vehicle && isDriver) {
         await this.vehiclesService.create(user.id, vehicle);
       }

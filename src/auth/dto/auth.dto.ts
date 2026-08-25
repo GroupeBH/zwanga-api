@@ -14,6 +14,7 @@ import { Transform, TransformFnParams, Type } from 'class-transformer';
 import { ApiProperty } from '@nestjs/swagger';
 import { UserGender, UserRole } from '../../users/entities/user.entity';
 import { CreateVehicleDto } from '../../vehicles/dto/vehicle.dto';
+import { ReferralAttributionDto } from '../../referrals/dto/referral.dto';
 
 const toTrimmedString = ({ value }: TransformFnParams): unknown => {
   if (value === undefined || value === null) {
@@ -23,7 +24,20 @@ const toTrimmedString = ({ value }: TransformFnParams): unknown => {
   return String(value).trim();
 };
 
-export class RegisterDto {
+export class RegisterDto extends ReferralAttributionDto {
+  @ApiProperty({
+    required: false,
+    example: 'ZW7K9M2P4Q',
+    description:
+      'Code du parrain, applicable uniquement a la creation du compte',
+  })
+  @Transform(toTrimmedString)
+  @IsString()
+  @IsOptional()
+  @MaxLength(16)
+  @Matches(/^[A-Za-z0-9]+$/)
+  referralCode?: string;
+
   @ApiProperty({ example: '+243900000000' })
   @Transform(toTrimmedString)
   @IsString()
@@ -128,7 +142,15 @@ export class RefreshTokenDto {
   refreshToken: string;
 }
 
-export class GoogleMobileAuthDto {
+export class GoogleMobileAuthDto extends ReferralAttributionDto {
+  @ApiProperty({ required: false, example: 'ZW7K9M2P4Q' })
+  @Transform(toTrimmedString)
+  @IsString()
+  @IsOptional()
+  @MaxLength(16)
+  @Matches(/^[A-Za-z0-9]+$/)
+  referralCode?: string;
+
   @ApiProperty({
     description: 'Google ID token obtenu cote mobile (Expo / React Native)',
   })
@@ -189,7 +211,15 @@ export class GoogleMobileAuthDto {
   vehicle?: CreateVehicleDto;
 }
 
-export class AppleMobileAuthDto {
+export class AppleMobileAuthDto extends ReferralAttributionDto {
+  @ApiProperty({ required: false, example: 'ZW7K9M2P4Q' })
+  @Transform(toTrimmedString)
+  @IsString()
+  @IsOptional()
+  @MaxLength(16)
+  @Matches(/^[A-Za-z0-9]+$/)
+  referralCode?: string;
+
   @ApiProperty({
     description: 'Apple identity token obtenu cote mobile (Sign in with Apple)',
   })

@@ -53,6 +53,10 @@ describe('BookingsService trip payments', () => {
   let driverSettlementsService: {
     recordCompletedBookingEarning: jest.Mock;
   };
+  let referralsService: {
+    awardBookingReward: jest.Mock;
+    reverseBookingReward: jest.Mock;
+  };
   let service: BookingsService;
   let boardingCandidates: Map<string, unknown>;
 
@@ -148,6 +152,10 @@ describe('BookingsService trip payments', () => {
     driverSettlementsService = {
       recordCompletedBookingEarning: jest.fn(),
     };
+    referralsService = {
+      awardBookingReward: jest.fn().mockResolvedValue(null),
+      reverseBookingReward: jest.fn().mockResolvedValue(null),
+    };
 
     service = new BookingsService(
       bookingRepository as any,
@@ -165,6 +173,7 @@ describe('BookingsService trip payments', () => {
       paymentsService as any,
       walletService as any,
       driverSettlementsService as any,
+      referralsService as any,
       locationHistoryService as any,
     );
   });
@@ -670,6 +679,46 @@ describe('BookingsService trip payments', () => {
     expect(
       driverSettlementsService.recordCompletedBookingEarning,
     ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'booking-1',
+        paymentStatus: BookingPaymentStatus.SUCCEEDED,
+      }),
+    );
+  });
+
+  it('retries idempotent financial finalization for an already paid completed booking', async () => {
+    const payment = {
+      id: 'payment-1',
+      purpose: PaymentPurpose.TRIP_BOOKING,
+      relatedEntityType: 'booking',
+      relatedEntityId: 'booking-1',
+      method: PaymentMethod.MOBILE_MONEY,
+      status: PaymentStatus.SUCCEEDED,
+      reference: 'TRIP123',
+      orderNumber: 'ORDER123',
+      providerStatusCode: '0',
+      providerMessage: 'Paiement confirme',
+      paymentUrl: null,
+      amount: 5000,
+      currency: 'CDF',
+      paidAt: new Date('2026-06-29T10:00:00.000Z'),
+    };
+    paymentsService.checkPaymentStatus.mockResolvedValue(payment);
+    bookingRepository.findOne.mockResolvedValue({
+      ...booking,
+      status: BookingStatus.COMPLETED,
+      droppedOff: true,
+      paymentStatus: BookingPaymentStatus.SUCCEEDED,
+      paymentTransactionId: payment.id,
+      trip: {
+        ...booking.trip,
+        driverId: 'driver-1',
+      },
+    });
+
+    await service.checkBookingPaymentStatus('passenger-1', 'ORDER123');
+
+    expect(referralsService.awardBookingReward).toHaveBeenCalledWith(
       expect.objectContaining({
         id: 'booking-1',
         paymentStatus: BookingPaymentStatus.SUCCEEDED,

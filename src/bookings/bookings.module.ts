@@ -12,6 +12,7 @@ import { GoogleMapsModule } from '../google-maps/google-maps.module';
 import { PaymentsModule } from '../payments/payments.module';
 import { WalletModule } from '../wallet/wallet.module';
 import { DriverSettlementsModule } from '../driver-settlements/driver-settlements.module';
+import { ReferralsModule } from '../referrals/referrals.module';
 import {
   DriverTripInterruptionConfirmation,
   DriverTripInterruptionRequest,
@@ -35,10 +36,10 @@ import {
     PaymentsModule,
     WalletModule,
     DriverSettlementsModule,
+    ReferralsModule,
   ],
   controllers: [BookingsController],
   providers: [BookingsService],
   exports: [BookingsService],
 })
 export class BookingsModule {}
-
