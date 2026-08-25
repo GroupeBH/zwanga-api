@@ -404,9 +404,9 @@ variable "runtime_environment_variables" {
   validation {
     condition = length(setintersection(
       toset(keys(var.runtime_environment_variables)),
-      toset(["DATABASE_URL", "REDIS_URL", "REDIS_TLS", "JWT_SECRET", "JWT_REFRESH_SECRET", "AOT_CONFIG_CONTENT"]),
+      toset(["DATABASE_URL", "REDIS_URL", "REDIS_TLS", "JWT_SECRET", "JWT_REFRESH_SECRET", "AWS_S3_BUCKET_NAME", "AOT_CONFIG_CONTENT"]),
     )) == 0
-    error_message = "DATABASE_URL, REDIS_URL, JWT_SECRET, JWT_REFRESH_SECRET and AOT_CONFIG_CONTENT are generated separately and must not be set in runtime_environment_variables."
+    error_message = "DATABASE_URL, REDIS_URL, JWT_SECRET, JWT_REFRESH_SECRET, AWS_S3_BUCKET_NAME and AOT_CONFIG_CONTENT are generated separately and must not be set in runtime_environment_variables."
   }
 }
 
@@ -440,6 +440,7 @@ variable "external_runtime_environment_variable_names" {
         "REDIS_TLS",
         "JWT_SECRET",
         "JWT_REFRESH_SECRET",
+        "AWS_S3_BUCKET_NAME",
         "AOT_CONFIG_CONTENT",
         "NODE_ENV",
         "HOST",
@@ -467,10 +468,26 @@ variable "external_runtime_environment_variable_names" {
 }
 
 variable "application_s3_bucket_name" {
-  description = "Optional S3 bucket name used by the backend for uploads. When set, the ECS task role receives scoped object permissions and AWS_S3_BUCKET_NAME is injected from SSM."
+  description = "S3 bucket name used by the backend for uploads. It is mandatory in production. When set, the ECS task role receives scoped object permissions and AWS_S3_BUCKET_NAME is injected from SSM."
   type        = string
   default     = null
   nullable    = true
+
+  validation {
+    condition = (
+      var.environment != "production" ||
+      (var.application_s3_bucket_name != null && length(trimspace(var.application_s3_bucket_name)) > 0)
+    )
+    error_message = "application_s3_bucket_name must be set in production. Omitting it would delete the SSM parameter required by ECS."
+  }
+
+  validation {
+    condition = (
+      var.application_s3_bucket_name == null ||
+      can(regex("^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$", var.application_s3_bucket_name))
+    )
+    error_message = "application_s3_bucket_name must be null or a valid lowercase S3 bucket name between 3 and 63 characters."
+  }
 }
 
 variable "enable_rekognition_permissions" {

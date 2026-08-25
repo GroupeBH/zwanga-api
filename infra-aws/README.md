@@ -2,6 +2,10 @@
 
 Ce dossier provisionne l'infrastructure AWS du backend NestJS en Terraform. La variante appliquee ici est la version propre economique : ECS Fargate au lieu d'App Runner, taches ECS en subnets publics sans NAT Gateway, RDS et Redis prives, monitoring AWS natif.
 
+## Documentation obligatoire des modifications
+
+Chaque modification ou opération AWS doit être décrite dans le [journal détaillé](./docs/CHANGELOG.md) en suivant le [modèle de changement](./docs/change-template.md). Le [guide documentaire](./docs/README.md) précise le périmètre, les preuves attendues et les informations qui ne doivent jamais être copiées. Un contrôle GitHub Actions fait échouer la pull request et le déploiement AWS lorsque ce journal n'est pas mis à jour.
+
 ## Architecture
 
 ```text
@@ -35,6 +39,8 @@ Observabilite
 ```text
 infra-aws/
 |-- bootstrap/                 # bucket S3 du state Terraform
+|-- docs/                      # journal, règles et modèle de changement
+|-- scripts/                   # import, migration et contrôles opérationnels
 |-- backend.tf                 # backend S3 configure par backend.hcl
 |-- providers.tf               # provider AWS et data sources
 |-- variables.tf               # entrees configurables
@@ -238,6 +244,8 @@ Ne remets pas `AWS_ACCESS_KEY_ID` ni `AWS_SECRET_ACCESS_KEY` dans SSM pour ECS. 
 
 - renseigne `application_s3_bucket_name` pour creer `AWS_S3_BUCKET_NAME` dans SSM et donner au role ECS l'acces au bucket d'uploads ;
 - mets `enable_rekognition_permissions = true` si `AWS_REKOGNITION_ENABLED` ou `AWS_REKOGNITION_KYC_ENABLED` vaut `true`.
+
+`application_s3_bucket_name` est obligatoire lorsque `environment = "production"`. Terraform refuse ainsi un apply de production qui supprimerait accidentellement `/zwanga-api/production/env/AWS_S3_BUCKET_NAME`. Ce nom reste aussi reserve a Terraform meme si la variable est absente dans un autre environnement : l'auto-decouverte SSM ne peut donc jamais conserver dans ECS une reference vers un parametre programme pour suppression.
 
 Sans fichier `terraform.tfvars`, tu peux passer ces valeurs au moment de l'apply :
 

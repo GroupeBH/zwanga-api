@@ -110,6 +110,10 @@ locals {
   } : {}
 
   reserved_runtime_environment_variable_names = toset(concat(
+    # AWS_S3_BUCKET_NAME is always Terraform-owned. Keep it reserved even when
+    # application_s3_bucket_name is null so a parameter scheduled for deletion
+    # cannot be rediscovered as an external secret in the same plan.
+    ["AWS_S3_BUCKET_NAME"],
     keys(local.generated_secret_parameter_arns_by_env),
     keys(local.ecs_environment_parameter_arns_by_env),
     keys(local.generated_runtime_environment_parameter_arns_by_env),
