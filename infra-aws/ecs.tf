@@ -25,7 +25,7 @@ locals {
       OTEL_SERVICE_NAME                    = local.ecs_service_name
       OTEL_TRACES_EXPORTER                 = "otlp"
       OTEL_TRACES_SAMPLER                  = "xray"
-      OTEL_TRACES_SAMPLER_ARG              = tostring(var.xray_sampling_rate)
+      OTEL_TRACES_SAMPLER_ARG              = "endpoint=http://127.0.0.1:2000,polling_interval=300"
       OTEL_AWS_APPLICATION_SIGNALS_ENABLED = "false"
     } : {},
   )
@@ -98,7 +98,12 @@ locals {
       awsxray:
         region: ${var.aws_region}
 
+    extensions:
+      awsproxy:
+        endpoint: 0.0.0.0:2000
+
     service:
+      extensions: [awsproxy]
       pipelines:
         traces:
           receivers: [otlp]
@@ -108,7 +113,7 @@ locals {
 
   ecs_otel_container = {
     name      = local.otel_container_name
-    image     = "public.ecr.aws/aws-observability/aws-otel-collector:latest"
+    image     = "public.ecr.aws/aws-observability/aws-otel-collector:v0.49.0"
     essential = false
 
     command = ["--config=env:AOT_CONFIG_CONTENT"]
@@ -129,6 +134,11 @@ locals {
       {
         containerPort = 4318
         hostPort      = 4318
+        protocol      = "tcp"
+      },
+      {
+        containerPort = 2000
+        hostPort      = 2000
         protocol      = "tcp"
       },
     ]

@@ -6,6 +6,8 @@ Statut : implémenté dans le code, migration non encore appliquée en productio
 
 Dernière mise à jour : 21 août 2026.
 
+Complément de fiabilité : le règlement en jetons, le statut payé et le revenu conducteur sont désormais atomiques. Voir [`FIN-BOOKING-002`](./atomic-token-trip-settlement.md).
+
 ## 1. Besoin métier
 
 Le passager choisit son moyen de paiement pendant la réservation, mais il ne paie jamais avant son arrivée. La prise en charge, la progression physique de la course et le règlement financier sont donc trois responsabilités distinctes.

@@ -1,4 +1,5 @@
 import {
+  BadGatewayException,
   BadRequestException,
   Injectable,
   Logger,
@@ -20,6 +21,7 @@ import {
   FlexPayCheckTransactionResult,
   FlexPayInitiatePaymentResult,
   FlexPayService,
+  FlexPayTransactionStatus,
 } from './flexpay.service';
 import { formatPaymentLogPayload } from './payment-log.util';
 
@@ -289,14 +291,30 @@ export class PaymentsService {
       return savedTransaction;
     } catch (error) {
       const errorMessage = this.getErrorMessage(error);
-      savedTransaction.status = PaymentStatus.FAILED;
-      savedTransaction.providerMessage =
-        this.translatePaymentMessage(errorMessage) ?? errorMessage;
+      const deliveryIsUncertain = error instanceof BadGatewayException;
+      if (
+        deliveryIsUncertain &&
+        savedTransaction.status !== PaymentStatus.FAILED
+      ) {
+        // Un timeout ou une coupure peut arriver apres que FlexPay a recu la
+        // requete. Garder la transaction reservee evite un second decaissement
+        // pendant que le callback ou la reconciliation confirme le resultat.
+        savedTransaction.status = PaymentStatus.PENDING;
+        savedTransaction.providerMessage =
+          'Demande envoyee. Confirmation FlexPay en attente';
+      } else {
+        savedTransaction.status = PaymentStatus.FAILED;
+        savedTransaction.providerMessage =
+          this.translatePaymentMessage(errorMessage) ?? errorMessage;
+      }
       await this.paymentTransactionRepository.save(savedTransaction);
       this.logger.error(
         `Payout initiation failed: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, message=${errorMessage}`,
         this.getErrorStack(error),
       );
+      if (deliveryIsUncertain) {
+        return savedTransaction;
+      }
       throw error;
     }
   }
@@ -335,21 +353,6 @@ export class PaymentsService {
     transaction.orderNumber = callback.orderNumber ?? transaction.orderNumber;
     transaction.rawCallbackPayload = callback.raw;
 
-    if (!callbackSucceeded) {
-      transaction.status = this.isCancellationMessage(callback.message)
-        ? PaymentStatus.CANCELLED
-        : PaymentStatus.FAILED;
-      transaction.providerMessage = this.getCallbackFailureMessage(
-        callback.message,
-      );
-      const savedTransaction =
-        await this.paymentTransactionRepository.save(transaction);
-      this.logger.warn(
-        `Payment marked failed from FlexPay callback: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, previousStatus=${previousStatus}, code=${callback.code}, response=${formatPaymentLogPayload(this.formatPaymentLogResponse(savedTransaction))}`,
-      );
-      return savedTransaction;
-    }
-
     if (this.shouldVerifyFlexPayCallbacks()) {
       if (!transaction.orderNumber) {
         transaction.providerMessage =
@@ -378,6 +381,21 @@ export class PaymentsService {
         );
         return savedTransaction;
       }
+    }
+
+    if (!callbackSucceeded) {
+      transaction.status = this.isCancellationMessage(callback.message)
+        ? PaymentStatus.CANCELLED
+        : PaymentStatus.FAILED;
+      transaction.providerMessage = this.getCallbackFailureMessage(
+        callback.message,
+      );
+      const savedTransaction =
+        await this.paymentTransactionRepository.save(transaction);
+      this.logger.warn(
+        `Payment marked failed from FlexPay callback: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, previousStatus=${previousStatus}, code=${callback.code}, response=${formatPaymentLogPayload(this.formatPaymentLogResponse(savedTransaction))}`,
+      );
+      return savedTransaction;
     }
 
     transaction.status = PaymentStatus.SUCCEEDED;
@@ -682,6 +700,8 @@ export class PaymentsService {
       }
     }
 
+    this.assertProviderTransactionMatches(transaction, providerTransaction);
+
     const providerTransactionStatus =
       providerTransaction.status ?? providerTransaction.code;
 
@@ -807,6 +827,50 @@ export class PaymentsService {
     }
   }
 
+  private assertProviderTransactionMatches(
+    transaction: PaymentTransaction,
+    providerTransaction: FlexPayTransactionStatus,
+  ): void {
+    const providerOrderNumber = providerTransaction.orderNumber?.trim();
+    if (
+      providerOrderNumber &&
+      transaction.orderNumber &&
+      providerOrderNumber !== transaction.orderNumber
+    ) {
+      throw new BadRequestException(
+        'Le numero de commande FlexPay ne correspond pas a cette transaction',
+      );
+    }
+
+    const storedAmount = Number(transaction.amount);
+    if (
+      providerTransaction.amount !== null &&
+      Number.isFinite(storedAmount) &&
+      storedAmount > 0
+    ) {
+      const providerAmount = Number(providerTransaction.amount);
+      if (
+        !Number.isFinite(providerAmount) ||
+        Math.round(providerAmount * 100) !== Math.round(storedAmount * 100)
+      ) {
+        throw new BadRequestException(
+          'Le montant retourne par FlexPay ne correspond pas a cette transaction',
+        );
+      }
+    }
+
+    const providerCurrency = providerTransaction.currency?.trim().toUpperCase();
+    if (
+      providerCurrency &&
+      transaction.currency?.trim() &&
+      providerCurrency !== transaction.currency.trim().toUpperCase()
+    ) {
+      throw new BadRequestException(
+        'La devise retournee par FlexPay ne correspond pas a cette transaction',
+      );
+    }
+  }
+
   private generatePaymentReference(
     referencePrefix = 'PAY',
     userId?: string | null,
@@ -864,7 +928,10 @@ export class PaymentsService {
 
   private shouldVerifyFlexPayCallbacks(): boolean {
     const value = this.configService.get<string>('FLEXPAY_VERIFY_CALLBACKS');
-    return value?.toLowerCase() === 'true';
+    // Les callbacks transportent un statut, pas une preuve cryptographique.
+    // La verification cote FlexPay est donc active par defaut et ne peut etre
+    // desactivee que volontairement (tests/sandbox controles).
+    return value?.trim().toLowerCase() !== 'false';
   }
 
   private joinUrl(...parts: string[]): string {
@@ -984,7 +1051,9 @@ export class PaymentsService {
     );
   }
 
-  private isDeclinedPaymentMessage(message: string | null | undefined): boolean {
+  private isDeclinedPaymentMessage(
+    message: string | null | undefined,
+  ): boolean {
     const normalizedMessage = this.normalizeMessage(message ?? '');
     return (
       normalizedMessage.includes('declined') ||

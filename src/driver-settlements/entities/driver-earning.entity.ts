@@ -1,4 +1,5 @@
 import {
+  Check,
   Column,
   CreateDateColumn,
   Entity,
@@ -19,6 +20,19 @@ export enum DriverEarningStatus {
 @Unique('UQ_driver_earnings_booking', ['bookingId'])
 @Index(['driverId', 'status'])
 @Index(['tripId'])
+@Check('CHK_driver_earnings_gross_positive', '"grossAmount" > 0')
+@Check(
+  'CHK_driver_earnings_commission_rate_range',
+  '"commissionRate" >= 0 AND "commissionRate" < 1',
+)
+@Check(
+  'CHK_driver_earnings_amounts_non_negative',
+  '"commissionAmount" >= 0 AND "netAmount" >= 0',
+)
+@Check(
+  'CHK_driver_earnings_amount_conservation',
+  '"grossAmount" = "commissionAmount" + "netAmount"',
+)
 export class DriverEarning {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -53,7 +67,11 @@ export class DriverEarning {
   @Column({ type: 'varchar', length: 8, default: 'CDF' })
   currency: string;
 
-  @Column({ type: 'varchar', length: 40, default: DriverEarningStatus.AVAILABLE })
+  @Column({
+    type: 'varchar',
+    length: 40,
+    default: DriverEarningStatus.AVAILABLE,
+  })
   status: DriverEarningStatus;
 
   @Column({ type: 'timestamp', nullable: true })

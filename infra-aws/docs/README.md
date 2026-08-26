@@ -6,6 +6,9 @@ Ce dossier est le registre opérationnel de l'infrastructure AWS de Zwanga. Tout
 
 - [CHANGELOG.md](./CHANGELOG.md) : historique détaillé et chronologique des changements réellement effectués ;
 - [change-template.md](./change-template.md) : modèle à copier pour chaque nouvelle entrée.
+- [xray-remote-sampling.md](./xray-remote-sampling.md) : architecture, diagnostic et validation de l'échantillonnage X-Ray.
+- [public-api-https.md](./public-api-https.md) : délégation DNS, certificat ACM, listener ALB et protections Terraform du domaine public.
+- [driver-payout-runtime.md](./driver-payout-runtime.md) : paramètres SSM, déploiement ECS et surveillance des versements conducteur.
 
 Le [README principal](../README.md) reste la documentation de l'état courant de l'architecture. Le journal explique pourquoi et comment cet état a changé.
 

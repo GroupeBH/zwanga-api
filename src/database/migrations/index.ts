@@ -18,6 +18,8 @@ import { AddBookingNoShowState1780000017000 } from './1780000017000-AddBookingNo
 import { AddReferralProgram1780000018000 } from './1780000018000-AddReferralProgram';
 import { AddBranchReferralAttribution1780000019000 } from './1780000019000-AddBranchReferralAttribution';
 import { ReplaceBranchWithChottuLink1780000020000 } from './1780000020000-ReplaceBranchWithChottuLink';
+import { HardenTokenTripSettlements1780000021000 } from './1780000021000-HardenTokenTripSettlements';
+import { HardenDriverPayouts1780000022000 } from './1780000022000-HardenDriverPayouts';
 
 export const databaseMigrations = [
   FillTotalSeats1780000000000,
@@ -40,4 +42,6 @@ export const databaseMigrations = [
   AddReferralProgram1780000018000,
   AddBranchReferralAttribution1780000019000,
   ReplaceBranchWithChottuLink1780000020000,
+  HardenTokenTripSettlements1780000021000,
+  HardenDriverPayouts1780000022000,
 ];

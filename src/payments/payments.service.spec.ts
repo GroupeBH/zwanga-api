@@ -1,4 +1,5 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-return, @typescript-eslint/require-await */
+import { BadGatewayException } from '@nestjs/common';
 import {
   PaymentMethod,
   PaymentStatus,
@@ -37,6 +38,9 @@ describe('PaymentsService', () => {
       get: jest.fn((key: string) => {
         if (key === 'FLEXPAY_CALLBACK_BASE_URL') {
           return 'https://api.zwanga.cd/api/v1';
+        }
+        if (key === 'FLEXPAY_VERIFY_CALLBACKS') {
+          return 'false';
         }
 
         return undefined;
@@ -249,7 +253,7 @@ describe('PaymentsService', () => {
     expect(payment.paidAt).toBeInstanceOf(Date);
   });
 
-  it('confirms a successful FlexPay callback locally without a status check by default', async () => {
+  it('confirms a successful callback locally when verification is explicitly disabled', async () => {
     paymentTransactionRepository.findOne.mockResolvedValue({
       id: 'payment-1',
       userId: 'user-1',
@@ -303,6 +307,55 @@ describe('PaymentsService', () => {
     expect(payment.providerMessage).toBe(
       'Paiement annule. Aucun montant confirme.',
     );
+  });
+
+  it('verifies a failed callback with FlexPay by default before releasing money', async () => {
+    configService.get.mockImplementation((key: string) => {
+      if (key === 'FLEXPAY_CALLBACK_BASE_URL') {
+        return 'https://api.zwanga.cd/api/v1';
+      }
+      return undefined;
+    });
+    flexPayService.isSuccessfulCode.mockImplementation((code) => code === '0');
+    paymentTransactionRepository.findOne.mockResolvedValue({
+      id: 'payment-1',
+      userId: 'driver-1',
+      status: PaymentStatus.INITIATED,
+      reference: 'DRV123',
+      orderNumber: 'PAYOUT123',
+      providerReference: null,
+      providerStatusCode: null,
+      providerMessage: null,
+      amount: 9500,
+      currency: 'CDF',
+      rawCallbackPayload: null,
+      rawCheckResponse: null,
+      paidAt: null,
+    });
+    flexPayService.checkTransaction.mockResolvedValue({
+      code: '0',
+      message: 'Operation annulee par le client',
+      transaction: {
+        orderNumber: 'PAYOUT123',
+        reference: 'DRV123',
+        status: '1',
+        amount: '9500',
+        amountCustomer: '9500',
+        currency: 'CDF',
+        createdAt: '2026-08-26 10:00:00',
+      },
+      raw: { Code: '0' },
+    });
+
+    const payment = await service.handleFlexPayCallback({
+      code: '1',
+      message: 'Operation annulee par le client',
+      reference: 'DRV123',
+      orderNumber: 'PAYOUT123',
+    });
+
+    expect(flexPayService.checkTransaction).toHaveBeenCalledWith('PAYOUT123');
+    expect(payment.status).toBe(PaymentStatus.CANCELLED);
   });
 
   it('returns terminal payment status locally without calling FlexPay again', async () => {
@@ -389,5 +442,28 @@ describe('PaymentsService', () => {
     );
     expect(payout.status).toBe(PaymentStatus.INITIATED);
     expect(payout.orderNumber).toBe('PAYOUT123');
+  });
+
+  it('keeps a payout pending when FlexPay delivery is uncertain', async () => {
+    flexPayService.initiatePayout.mockRejectedValue(
+      new BadGatewayException('Paiement chauffeur FlexPay indisponible'),
+    );
+
+    const payout = await service.initiatePayout({
+      userId: 'driver-1',
+      purpose: 'driver_payout',
+      relatedEntityType: 'driver_payout',
+      relatedEntityId: 'payout-1',
+      phone: '+243891234567',
+      amount: 9500,
+      currency: 'CDF',
+      description: 'Paiement chauffeur Zwanga payout-1',
+      callbackUrl:
+        'https://api.zwanga.cd/api/v1/driver-settlements/payouts/flexpay/callback',
+      referencePrefix: 'DRV',
+    });
+
+    expect(payout.status).toBe(PaymentStatus.PENDING);
+    expect(payout.providerMessage).toContain('Confirmation FlexPay en attente');
   });
 });

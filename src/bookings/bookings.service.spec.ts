@@ -4,7 +4,7 @@ import {
   BookingStatus,
 } from './entities/booking.entity';
 import { BookingsService } from './bookings.service';
-import { TripStatus } from '../trips/entities/trip.entity';
+import { Trip, TripStatus } from '../trips/entities/trip.entity';
 import {
   PaymentMethod,
   PaymentPurpose,
@@ -45,6 +45,7 @@ describe('BookingsService trip payments', () => {
   };
   let walletService: {
     payForBooking: jest.Mock;
+    payForBookingWithManager: jest.Mock;
     refundBookingPayment: jest.Mock;
     creditBookingFareAdjustment: jest.Mock;
     awardLoyaltyForBooking: jest.Mock;
@@ -52,6 +53,8 @@ describe('BookingsService trip payments', () => {
   let googleMapsService: { getDirections: jest.Mock };
   let driverSettlementsService: {
     recordCompletedBookingEarning: jest.Mock;
+    recordCompletedBookingEarningWithManager: jest.Mock;
+    notifyDriverTripRevenue: jest.Mock;
   };
   let referralsService: {
     awardBookingReward: jest.Mock;
@@ -59,6 +62,14 @@ describe('BookingsService trip payments', () => {
   };
   let service: BookingsService;
   let boardingCandidates: Map<string, unknown>;
+  let financialManager: {
+    findOne: jest.Mock;
+    save: jest.Mock;
+  };
+  let dataSource: {
+    transaction: jest.Mock;
+    query: jest.Mock;
+  };
 
   const booking = {
     id: 'booking-1',
@@ -142,6 +153,7 @@ describe('BookingsService trip payments', () => {
     };
     walletService = {
       payForBooking: jest.fn(),
+      payForBookingWithManager: jest.fn(),
       refundBookingPayment: jest.fn(),
       creditBookingFareAdjustment: jest.fn(),
       awardLoyaltyForBooking: jest.fn(),
@@ -151,10 +163,38 @@ describe('BookingsService trip payments', () => {
     };
     driverSettlementsService = {
       recordCompletedBookingEarning: jest.fn(),
+      recordCompletedBookingEarningWithManager: jest.fn(),
+      notifyDriverTripRevenue: jest.fn().mockResolvedValue(null),
     };
     referralsService = {
       awardBookingReward: jest.fn().mockResolvedValue(null),
       reverseBookingReward: jest.fn().mockResolvedValue(null),
+    };
+
+    let lockedBooking: any = null;
+    financialManager = {
+      findOne: jest.fn(async (entity: unknown, options: unknown) => {
+        if (entity === Booking) {
+          lockedBooking = await bookingRepository.findOne(options);
+          return lockedBooking;
+        }
+        if (entity === Trip) {
+          return (
+            (await tripRepository.findOne(options)) ??
+            lockedBooking?.trip ??
+            booking.trip
+          );
+        }
+        return null;
+      }),
+      save: jest.fn((payload: unknown) => bookingRepository.save(payload)),
+    };
+    dataSource = {
+      transaction: jest.fn(
+        (callback: (manager: typeof financialManager) => unknown) =>
+          callback(financialManager),
+      ),
+      query: jest.fn().mockResolvedValue([]),
     };
 
     service = new BookingsService(
@@ -175,6 +215,7 @@ describe('BookingsService trip payments', () => {
       driverSettlementsService as any,
       referralsService as any,
       locationHistoryService as any,
+      dataSource as any,
     );
   });
 
@@ -538,9 +579,16 @@ describe('BookingsService trip payments', () => {
       TripPaymentMode.POINTS,
     );
 
-    expect(walletService.payForBooking).toHaveBeenCalledWith(
+    expect(walletService.payForBookingWithManager).toHaveBeenCalledWith(
+      financialManager,
       expect.objectContaining({ id: 'booking-1', passengerId: 'passenger-1' }),
       5000,
+    );
+    expect(
+      driverSettlementsService.recordCompletedBookingEarningWithManager,
+    ).toHaveBeenCalledWith(
+      financialManager,
+      expect.objectContaining({ id: 'booking-1' }),
     );
     expect(result).toEqual(
       expect.objectContaining({
@@ -568,11 +616,95 @@ describe('BookingsService trip payments', () => {
       TripPaymentMode.POINTS,
     );
 
-    expect(walletService.payForBooking).toHaveBeenCalledWith(
+    expect(walletService.payForBookingWithManager).toHaveBeenCalledWith(
+      financialManager,
       expect.objectContaining({ id: 'booking-1' }),
       2000,
     );
     expect(result.paymentAmount).toBe(2000);
+  });
+
+  it('fails the whole token settlement when the driver earning cannot be written', async () => {
+    bookingRepository.findOne.mockResolvedValue({
+      ...booking,
+      status: BookingStatus.COMPLETED,
+      droppedOff: true,
+      paymentMode: TripPaymentMode.POINTS,
+      paymentStatus: BookingPaymentStatus.PENDING,
+      trip: {
+        ...booking.trip,
+        driverId: 'driver-1',
+      },
+    });
+    driverSettlementsService.recordCompletedBookingEarningWithManager.mockRejectedValue(
+      new Error('driver earning write failed'),
+    );
+
+    await expect(
+      service.updatePaymentMode(
+        'booking-1',
+        'passenger-1',
+        TripPaymentMode.POINTS,
+      ),
+    ).rejects.toThrow('driver earning write failed');
+
+    expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+    expect(walletService.payForBookingWithManager).toHaveBeenCalledWith(
+      financialManager,
+      expect.objectContaining({ id: 'booking-1' }),
+      5000,
+    );
+    expect(
+      driverSettlementsService.recordCompletedBookingEarning,
+    ).not.toHaveBeenCalled();
+  });
+
+  it('repairs a proven debit without creating a background debit', async () => {
+    const strandedBooking = {
+      ...booking,
+      status: BookingStatus.COMPLETED,
+      droppedOff: true,
+      paymentMode: TripPaymentMode.POINTS,
+      paymentStatus: BookingPaymentStatus.PENDING,
+      trip: {
+        ...booking.trip,
+        driverId: 'driver-1',
+      },
+    };
+    dataSource.query
+      .mockResolvedValueOnce([{ id: 'booking-1' }])
+      .mockResolvedValueOnce([{ count: 0 }])
+      .mockResolvedValueOnce([{ count: 0 }]);
+    bookingRepository.findOne.mockResolvedValue(strandedBooking);
+
+    const result = await service.reconcileTokenTripSettlements();
+
+    expect(result).toEqual({
+      inspected: 1,
+      repaired: 1,
+      failed: 0,
+      unsafeAnomalies: 0,
+      walletBalanceMismatches: 0,
+    });
+    expect(walletService.payForBookingWithManager).toHaveBeenCalledWith(
+      financialManager,
+      expect.objectContaining({ id: 'booking-1' }),
+      5000,
+    );
+    expect(walletService.payForBooking).not.toHaveBeenCalled();
+  });
+
+  it('reports a paid-without-ledger anomaly without debiting automatically', async () => {
+    dataSource.query
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ count: 2 }])
+      .mockResolvedValueOnce([{ count: 0 }]);
+
+    const result = await service.reconcileTokenTripSettlements();
+
+    expect(result.unsafeAnomalies).toBe(2);
+    expect(walletService.payForBookingWithManager).not.toHaveBeenCalled();
+    expect(walletService.payForBooking).not.toHaveBeenCalled();
   });
 
   it('keeps the booking unpaid when the points balance is insufficient', async () => {
@@ -583,7 +715,7 @@ describe('BookingsService trip payments', () => {
       paymentMode: TripPaymentMode.POINTS,
       paymentStatus: BookingPaymentStatus.PENDING,
     });
-    walletService.payForBooking.mockRejectedValue(
+    walletService.payForBookingWithManager.mockRejectedValue(
       new Error('Solde de jetons insuffisant pour payer ce trajet'),
     );
 
@@ -1854,6 +1986,9 @@ describe('BookingsService trip payments', () => {
         }),
       ]),
     );
+    expect(
+      driverSettlementsService.notifyDriverTripRevenue,
+    ).toHaveBeenCalledWith('driver-1', 'trip-1');
     expect(bookingRepository.save).toHaveBeenCalledWith(
       expect.objectContaining({
         droppedOff: true,

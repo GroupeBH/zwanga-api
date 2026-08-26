@@ -18,6 +18,7 @@ describe('TripsService daily trip publication quota', () => {
   let vehicleRepository: { findOne: jest.Mock };
   let subscriptionsService: { getPremiumOverview: jest.Mock };
   let cacheService: { del: jest.Mock };
+  let driverSettlementsService: { notifyDriverTripRevenue: jest.Mock };
 
   const baseCreateTripDto = {
     departureLocation: 'Gombe',
@@ -54,6 +55,9 @@ describe('TripsService daily trip publication quota', () => {
     cacheService = {
       del: jest.fn().mockResolvedValue(undefined),
     };
+    driverSettlementsService = {
+      notifyDriverTripRevenue: jest.fn().mockResolvedValue(null),
+    };
 
     service = new TripsService(
       tripRepository as any,
@@ -76,6 +80,7 @@ describe('TripsService daily trip publication quota', () => {
       {} as any,
       { recordDriverLocation: jest.fn().mockResolvedValue(undefined) } as any,
       {} as any,
+      driverSettlementsService as any,
     );
 
     jest.spyOn(service, 'findOne').mockResolvedValue({ id: 'trip-1' });
@@ -229,6 +234,7 @@ describe('TripsService trip deletion rules', () => {
   let tripRepository: {
     findOne: jest.Mock;
     save: jest.Mock;
+    update: jest.Mock;
     remove: jest.Mock;
   };
   let bookingRepository: { update: jest.Mock; delete: jest.Mock };
@@ -238,6 +244,7 @@ describe('TripsService trip deletion rules', () => {
     tripRepository = {
       findOne: jest.fn(),
       save: jest.fn().mockImplementation(async (trip) => trip),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
       remove: jest.fn().mockResolvedValue(undefined),
     };
     bookingRepository = {
@@ -269,6 +276,7 @@ describe('TripsService trip deletion rules', () => {
       {} as any,
       { recordDriverLocation: jest.fn().mockResolvedValue(undefined) } as any,
       {} as any,
+      { notifyDriverTripRevenue: jest.fn().mockResolvedValue(null) } as any,
     );
   });
 
@@ -472,6 +480,34 @@ describe('TripsService trip deletion rules', () => {
     ).rejects.toBeInstanceOf(BadRequestException);
     expect(tripRepository.save).not.toHaveBeenCalled();
   });
+
+  it('publishes the driver revenue notification after one successful completion transition', async () => {
+    const trip = {
+      id: 'trip-completed-with-revenue',
+      driverId: 'driver-1',
+      status: TripStatus.ACTIVE,
+      driverSafetyEmergencyContactIds: [],
+      bookings: [
+        {
+          id: 'booking-completed',
+          status: BookingStatus.COMPLETED,
+          droppedOff: true,
+        },
+      ],
+    };
+    tripRepository.findOne.mockResolvedValue(trip);
+    jest.spyOn(service, 'findOne').mockResolvedValue({ id: trip.id });
+
+    await service.completeTrip(trip.id, trip.driverId);
+
+    expect(tripRepository.update).toHaveBeenCalledWith(
+      { id: trip.id, driverId: trip.driverId, status: TripStatus.ACTIVE },
+      expect.objectContaining({ status: TripStatus.COMPLETED }),
+    );
+    expect(
+      service.driverSettlementsService.notifyDriverTripRevenue,
+    ).toHaveBeenCalledWith(trip.driverId, trip.id);
+  });
 });
 
 describe('TripsService started trip ETA expiration', () => {
@@ -549,6 +585,7 @@ describe('TripsService started trip ETA expiration', () => {
       weatherAwarenessService as any,
       { recordDriverLocation: jest.fn().mockResolvedValue(undefined) } as any,
       {} as any,
+      { notifyDriverTripRevenue: jest.fn().mockResolvedValue(null) } as any,
     );
   });
 
@@ -725,6 +762,7 @@ describe('TripsService interrupted trip fare location', () => {
       {} as any,
       {} as any,
       bookingsService as any,
+      { notifyDriverTripRevenue: jest.fn().mockResolvedValue(null) } as any,
     );
     jest
       .spyOn(service, 'calculateAvailableSeatsAfterInterruption')

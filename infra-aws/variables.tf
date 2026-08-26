@@ -327,7 +327,7 @@ variable "alb_certificate_arn" {
 }
 
 variable "api_domain_name" {
-  description = "Optional public API domain name served by the ALB, for example compute-api.zwanga-app.com."
+  description = "Public API domain name served by the ALB. It is mandatory in production through the production HTTPS guard."
   type        = string
   default     = null
   nullable    = true
@@ -342,7 +342,7 @@ variable "api_domain_name" {
 }
 
 variable "route53_hosted_zone_id" {
-  description = "Optional Route53 hosted zone ID for api_domain_name. When set with api_domain_name and no alb_certificate_arn, Terraform creates and validates the ACM certificate and DNS alias automatically."
+  description = "Route53 hosted zone ID for api_domain_name. Production requires this value unless an existing alb_certificate_arn is supplied."
   type        = string
   default     = null
   nullable    = true
@@ -546,7 +546,7 @@ variable "enable_xray_tracing" {
 }
 
 variable "xray_sampling_rate" {
-  description = "X-Ray fixed sampling rate applied after the per-second reservoir is used."
+  description = "X-Ray fixed sampling rate stored in the centralized application sampling rule and fetched through the ADOT awsproxy extension."
   type        = number
   default     = 0.05
 

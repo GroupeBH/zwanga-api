@@ -86,4 +86,8 @@ resource "aws_lb_listener" "https" {
     type             = "forward"
     target_group_arn = aws_lb_target_group.backend.arn
   }
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
