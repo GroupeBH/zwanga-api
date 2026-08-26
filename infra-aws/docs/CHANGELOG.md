@@ -2,6 +2,172 @@
 
 Les entrées sont classées de la plus récente à la plus ancienne. Elles décrivent le code versionné et les opérations réellement exécutées sur AWS, sans inclure de valeur secrète.
 
+## INFRA-2026-08-25-004 — Restauration et protection du domaine HTTPS public
+
+### Métadonnées
+
+| Champ | Valeur |
+| --- | --- |
+| Date | 25 août 2026 |
+| Environnement | production, Route53, ACM et ALB `eu-central-1` |
+| Statut | correction préparée, plan validé, application en cours |
+| Type | incident DNS/HTTPS et durcissement Terraform |
+| Déclencheur | `Could not resolve host: compute-api.zwanga-app.com` |
+
+### État observé et preuve
+
+Le domaine parent `zwanga-app.com` résolvait avec les NS Vercel. La délégation publique de `compute-api.zwanga-app.com` vers la zone Route53 `Z0100742PIM0UW6FZED7` fonctionnait également. Cependant, cette zone enfant ne contenait plus que les enregistrements `NS` et `SOA` : aucun alias `A` ne permettait d'atteindre l'ALB.
+
+L'état Terraform ne contenait plus `aws_acm_certificate.api`, `aws_route53_record.api_alias`, `aws_lb_listener.https` ni `aws_vpc_security_group_ingress_rule.alb_https`. ACM ne contenait plus de certificat pour le domaine.
+
+CloudTrail a confirmé l'événement `DeleteCertificate` du 25 août 2026 à `14:52:06Z` pour le certificat se terminant par `c3647798-12f0-4bf9-a031-c85b9dbcf906`. Son `userAgent` identifie Terraform `1.14.6` et le provider AWS `6.58.0`. La suppression a réussi sans erreur AWS.
+
+### Cause racine
+
+`api_domain_name` et `route53_hosted_zone_id` avaient tous les deux `null` comme valeur par défaut. Leurs valeurs n'étaient conservées que dans les arguments de certaines commandes manuelles. Un apply ultérieur sans ces arguments évaluait tous les `count` HTTPS à zéro et demandait légitimement à Terraform de supprimer les ressources précédemment gérées.
+
+La configuration ne possédait ni source versionnée auto-chargée pour ces valeurs non sensibles, ni précondition de production, ni `prevent_destroy` sur la chaîne HTTPS.
+
+### Modifications réalisées
+
+| Fichier | Modification | Objectif |
+| --- | --- | --- |
+| `.gitignore` | exception pour `infra-aws/production.auto.tfvars` | versionner uniquement la configuration de production non sensible |
+| `infra-aws/production.auto.tfvars` | domaine, Hosted Zone ID et autres identifiants stables | auto-charger les valeurs à chaque plan/apply |
+| `infra-aws/domain.tf` | précondition bloquante `production_https_guard` | refuser une production sans domaine et source de certificat |
+| `infra-aws/domain.tf` | `prevent_destroy` sur ACM et les enregistrements Route53 critiques | empêcher une suppression implicite |
+| `infra-aws/alb.tf` | `prevent_destroy` sur le listener HTTPS | préserver le point d'entrée TLS |
+| `infra-aws/security-groups.tf` | `prevent_destroy` sur l'entrée publique `443/TCP` | préserver l'accessibilité HTTPS |
+| `infra-aws/variables.tf` | descriptions alignées avec le caractère obligatoire en production | éviter l'interprétation erronée de variables facultatives |
+| `infra-aws/docs/public-api-https.md` | architecture, diagnostic, validation et retour arrière | fournir le runbook permanent |
+
+### Plan de restauration contrôlé
+
+Le plan ciblé généré après ajout des protections contient `8 créations`, `1 modification` et `0 destruction` :
+
+- nouveau garde-fou Terraform ;
+- nouveau certificat ACM et sa validation DNS ;
+- CAA, CNAME ACM et alias `A` Route53 ;
+- règle entrante HTTPS du Security Group ;
+- listener HTTPS `443` ;
+- modification du listener HTTP pour rediriger vers HTTPS.
+
+Il ne modifie ni ECS, ni RDS, ni Redis, ni SSM, ni les données ou paiements.
+
+### Impacts
+
+- Disponibilité : le domaine reste indisponible pendant l'émission du nouveau certificat ; l'URL HTTP technique de l'ALB reste disponible jusqu'au basculement du listener.
+- Sécurité : le port public `443/TCP` est ouvert uniquement sur l'ALB. Le trafic ALB vers ECS conserve sa règle restreinte existante.
+- Données : aucune migration et aucune écriture métier ou financière.
+- Coûts : certificat ACM public sans coût additionnel direct ; zone Route53 et ALB déjà existants ; aucun nouvel ALB.
+- Exploitation : une suppression volontaire future exige de retirer explicitement les protections dans le code et de faire revoir le plan.
+
+### Validation
+
+| Contrôle | Résultat |
+| --- | --- |
+| Délégation NS publique | réussie vers les quatre serveurs Route53 de la zone enfant |
+| Contenu initial de la zone Route53 | uniquement `NS` et `SOA`, alias `A` absent |
+| CloudTrail `DeleteCertificate` | origine Terraform confirmée |
+| `terraform fmt` | réussi |
+| `terraform validate` | réussi |
+| Plan de restauration | `8 add`, `1 change`, `0 destroy` |
+| ACM `ISSUED` | à compléter après application |
+| Résolution DNS publique | à compléter après application |
+| Test HTTPS `/health` | à compléter après application |
+| Plan post-application | à compléter après application |
+
+### Retour arrière
+
+Il n'existe aucun rollback de données. En cas d'échec avant émission du certificat, conserver le CNAME de validation et diagnostiquer la délégation ou le CAA. Ne pas supprimer à nouveau le certificat ou l'alias. Pour une désactivation volontaire, retirer les protections dans une modification dédiée, faire approuver le plan destructif et coordonner le changement avec les clients mobiles.
+
+## INFRA-2026-08-25-003 — Restauration du proxy d'échantillonnage X-Ray
+
+### Métadonnées
+
+| Champ | Valeur |
+| --- | --- |
+| Date | 25 août 2026 |
+| Environnement | production, ECS Fargate `eu-central-1` |
+| Statut | déployé et validé en production |
+| Type | observabilité, ADOT Collector et X-Ray |
+| Déclencheur | erreurs `ECONNREFUSED 127.0.0.1:2000` toutes les cinq minutes dans le conteneur `api` |
+
+### Contexte et état observé
+
+Chaque instance de l'application journalisait périodiquement un échec HTTP sur `http://localhost:2000/GetSamplingRules`. Les messages apparaissaient après les requêtes de production, car l'auto-instrumentation crée des traces pour les opérations HTTP, mais ils étaient répétés selon le cycle de rafraîchissement du sampler et non pour chaque appel métier.
+
+La tâche `aed3d876a15d4d90bc622a98683ea18f`, utilisant la définition `zwanga-api-production-api:5`, a été inspectée en lecture seule :
+
+- les conteneurs `api` et `aws-otel-collector` étaient `RUNNING` ;
+- l'application était `HEALTHY` ;
+- le collecteur ADOT `v0.49.0` écoutait correctement sur `4317` et `4318` ;
+- le paramètre `AOT_CONFIG_CONTENT` contenait le receiver OTLP et l'exporter X-Ray, mais aucune extension `awsproxy` ;
+- l'application utilisait `OTEL_TRACES_SAMPLER=xray`, dont le proxy par défaut est `localhost:2000` et le rafraîchissement par défaut cinq minutes.
+
+### Cause racine
+
+La configuration activait deux parties distinctes de l'observabilité : la production/exportation des traces et l'échantillonnage distant. La première était complète, mais la seconde ne l'était pas. Le sampler Node tentait de consulter les règles X-Ray tandis que le collecteur n'exposait aucun proxy sur le port attendu.
+
+`OTEL_TRACES_SAMPLER_ARG` recevait en plus uniquement une valeur numérique. Pour le sampler `xray`, cette variable attend des options nommées telles que `endpoint` et `polling_interval`; le taux fixe appartient à la ressource AWS `aws_xray_sampling_rule` et non à cet argument.
+
+### Modifications réalisées
+
+| Fichier | Modification | Objectif |
+| --- | --- | --- |
+| `infra-aws/ecs.tf` | ajout de `extensions.awsproxy` sur `0.0.0.0:2000` | servir les règles X-Ray au sampler Node |
+| `infra-aws/ecs.tf` | activation de `service.extensions: [awsproxy]` | démarrer réellement l'extension |
+| `infra-aws/ecs.tf` | ajout du port interne `2000/TCP` au sidecar | déclarer explicitement l'endpoint de la tâche |
+| `infra-aws/ecs.tf` | argument du sampler remplacé par endpoint local et intervalle de 300 secondes | aligner le SDK et le collecteur |
+| `infra-aws/ecs.tf` | image ADOT épinglée à `v0.49.0` | rendre les déploiements reproductibles |
+| `infra-aws/variables.tf` | description corrigée de `xray_sampling_rate` | préciser que le taux configure la règle centralisée AWS |
+| `infra-aws/docs/xray-remote-sampling.md` | guide complet du flux et du diagnostic | documenter exploitation et retour arrière |
+
+Avant l'application, le paramètre SSM existant `/zwanga-api/production/env/AWS_S3_BUCKET_NAME` a été importé dans l'état Terraform. Sa valeur n'a pas été lue ni changée manuellement. L'application du plan a uniquement normalisé sa description, son identifiant de clé KMS et ses tags Terraform ; cette synchronisation a empêché Terraform de tenter de recréer un paramètre déjà présent.
+
+### Impacts
+
+- Disponibilité : aucune modification d'un endpoint métier, d'un port ALB ou du health check NestJS. Le changement provoquera un rolling deployment ECS normal.
+- Observabilité : le sampler récupérera les règles centralisées ; les erreurs périodiques disparaîtront et le taux Terraform sera effectivement appliqué.
+- Sécurité : aucun port entrant n'est ajouté au Security Group. Le port `2000` reste dans l'interface réseau partagée de la tâche. Les permissions X-Ray en lecture et écriture existaient déjà sur le rôle de tâche.
+- Données et paiements : aucune migration, aucun changement de schéma et aucune écriture financière.
+- Coûts : pas de nouvelle ressource persistante. L'échantillonnage fonctionnel peut modifier le volume réel de traces vers le taux centralisé configuré à 5 %, ce qui est le comportement attendu.
+- Reproductibilité : le collecteur ne suivra plus implicitement les futures versions publiées sous le tag `latest`.
+
+### Déploiement réalisé
+
+1. Validation de la configuration et de la documentation locale.
+2. Import du paramètre S3 existant dans l'état Terraform.
+3. Examen puis application d'un plan ciblé : remplacement de la définition de tâche et mise à jour en place des trois paramètres SSM concernés.
+4. Création de la définition `zwanga-api-production-api:6`.
+5. Exécution d'une tâche de contrôle isolée avec la révision `:6`, puis arrêt de cette tâche après validation.
+6. Rolling deployment du service `zwanga-api-production-api` de la révision `:5` vers `:6`.
+7. Drainage automatique de l'ancienne tâche `aed3d876a15d4d90bc622a98683ea18f` après passage en bonne santé de la nouvelle tâche.
+
+### Validation réalisée avant déploiement
+
+| Contrôle | Résultat |
+| --- | --- |
+| État ECS initial et health check applicatif | tâche `:5` active et application saine malgré l'erreur de télémétrie |
+| Logs initiaux du collecteur | OTLP `4317/4318` opérationnel, proxy `2000` absent |
+| Lecture de `AOT_CONFIG_CONTENT` | cause confirmée sans lecture d'un secret applicatif |
+| Comparaison avec la documentation ADOT/AWS | `awsproxy` requis pour le sampler X-Ray distant |
+| `terraform fmt -check -recursive` | réussi |
+| `terraform validate` | réussi |
+| contrôle documentaire de l'infrastructure | réussi pour tous les fichiers d'infrastructure détectés |
+| Tâche de contrôle sur la révision `:6` | conteneur API `HEALTHY`, collector prêt, aucun échec de démarrage |
+| Logs ADOT sur la tâche de contrôle | `X-Ray proxy server started on 0.0.0.0:2000` puis `Everything is ready` |
+| Déploiement du service | `COMPLETED`, une tâche désirée et une tâche active sur `:6` |
+| Endpoint ALB `/health` | HTTP `200`, statut application, PostgreSQL et Redis à `ok` |
+| Recherche CloudWatch sur la nouvelle tâche après plus de cinq minutes | aucune occurrence de `GetSamplingRules` ni de `ECONNREFUSED` |
+| Plan Terraform ciblé après application | aucune modification restante |
+
+### Surveillance et retour arrière
+
+La procédure de surveillance détaillée se trouve dans [xray-remote-sampling.md](./xray-remote-sampling.md). Le critère principal est l'absence de nouvelle erreur `GetSamplingRules` après un intervalle supérieur à cinq minutes, accompagnée de traces récentes dans X-Ray.
+
+Si le nouveau sidecar ne démarre pas ou si l'application devient instable, remettre le service sur la révision de définition ECS précédente. Aucun rollback de données n'est requis. Cette action restaure cependant l'erreur d'échantillonnage et ne constitue qu'un retour temporaire.
+
 ## INFRA-2026-08-25-002 — Gouvernance documentaire obligatoire
 
 ### Métadonnées

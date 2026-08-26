@@ -63,6 +63,10 @@ infra-aws/
 `-- outputs.tf                 # valeurs a copier dans GitHub Actions
 ```
 
+Le flux détaillé d'observabilité et le diagnostic du sampler sont décrits dans [Échantillonnage distant X-Ray avec ADOT sur ECS](./docs/xray-remote-sampling.md).
+
+L'architecture DNS, ACM et ALB du domaine public est décrite dans [HTTPS de l'API publique](./docs/public-api-https.md).
+
 ## Prerequis
 
 - Terraform `>= 1.10`
@@ -96,7 +100,8 @@ cp terraform.tfvars.example terraform.tfvars
 Modifier au minimum :
 
 - `backend.hcl` : nom du bucket cree a l'etape precedente ;
-- `terraform.tfvars` : `github_owner` si tu utilises un fichier local de variables ;
+- `production.auto.tfvars` : source versionnee des identifiants non sensibles indispensables a la production ;
+- `terraform.tfvars` : uniquement pour des surcharges locales non versionnees ;
 - optionnellement, les variables non sensibles dans `runtime_environment_variables` ;
 - les destinataires `alert_email_addresses` ;
 - `api_domain_name = "compute-api.zwanga-app.com"` pour exposer l'API en HTTPS ;
@@ -127,7 +132,11 @@ Le service ECS peut etre cree avant que l'image `latest` existe dans ECR, car `e
 
 Le certificat ACM utilise par un Application Load Balancer doit etre cree dans la meme region que l'ALB, ici `eu-central-1`.
 
-Si la zone DNS `zwanga-app.com` est geree dans Route53, le chemin le plus propre est de donner le Hosted Zone ID a Terraform :
+Dans l'architecture de production actuelle, `zwanga-app.com` reste gere par Vercel et le sous-domaine `compute-api.zwanga-app.com` est delegue a la zone publique Route53 `Z0100742PIM0UW6FZED7`. Les quatre enregistrements NS de cette zone sont publies chez Vercel. L'alias `A`, le CNAME de validation ACM et le CAA sont ensuite geres uniquement dans cette zone enfant Route53.
+
+Les variables non sensibles correspondantes sont versionnees dans `production.auto.tfvars` et chargees automatiquement par Terraform. Un apply de production refuse de continuer si le domaine et sa source de certificat ne sont pas configures. Les ressources critiques utilisent aussi `prevent_destroy` afin qu'un oubli de variables ne puisse plus supprimer silencieusement HTTPS.
+
+Pour une autre installation utilisant une zone Route53, fournir le Hosted Zone ID autoritaire du domaine ou du sous-domaine a Terraform :
 
 ```bash
 ZONE_ID=$(aws route53 list-hosted-zones-by-name \

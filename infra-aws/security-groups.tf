@@ -66,6 +66,10 @@ resource "aws_vpc_security_group_ingress_rule" "alb_https" {
   ip_protocol       = "tcp"
   from_port         = 443
   to_port           = 443
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 resource "aws_vpc_security_group_egress_rule" "alb_to_ecs_tasks" {
