@@ -1,4 +1,5 @@
 import {
+  Check,
   Column,
   CreateDateColumn,
   Entity,
@@ -24,8 +25,11 @@ export enum WalletLedgerEntryType {
 
 @Entity('wallet_ledger_entries')
 @Index(['userId', 'createdAt'])
+@Index('IDX_wallet_ledger_entries_account_created', ['accountId', 'createdAt'])
 @Index(['relatedEntityType', 'relatedEntityId'])
 @Index(['paymentTransactionId'])
+@Check('CHK_wallet_ledger_balance_after_non_negative', '"balanceAfter" >= 0')
+@Check('CHK_wallet_ledger_amount_not_zero', '"amount" <> 0')
 export class WalletLedgerEntry {
   @PrimaryGeneratedColumn('uuid')
   id: string;

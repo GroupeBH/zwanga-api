@@ -1,4 +1,5 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-return, @typescript-eslint/require-await */
+import { BadGatewayException } from '@nestjs/common';
 import {
   PaymentMethod,
   PaymentStatus,
@@ -37,6 +38,9 @@ describe('PaymentsService', () => {
       get: jest.fn((key: string) => {
         if (key === 'FLEXPAY_CALLBACK_BASE_URL') {
           return 'https://api.zwanga.cd/api/v1';
+        }
+        if (key === 'FLEXPAY_VERIFY_CALLBACKS') {
+          return 'false';
         }
 
         return undefined;
@@ -389,5 +393,28 @@ describe('PaymentsService', () => {
     );
     expect(payout.status).toBe(PaymentStatus.INITIATED);
     expect(payout.orderNumber).toBe('PAYOUT123');
+  });
+
+  it('keeps a payout pending when FlexPay delivery is uncertain', async () => {
+    flexPayService.initiatePayout.mockRejectedValue(
+      new BadGatewayException('Paiement chauffeur FlexPay indisponible'),
+    );
+
+    const payout = await service.initiatePayout({
+      userId: 'driver-1',
+      purpose: 'driver_payout',
+      relatedEntityType: 'driver_payout',
+      relatedEntityId: 'payout-1',
+      phone: '+243891234567',
+      amount: 9500,
+      currency: 'CDF',
+      description: 'Paiement chauffeur Zwanga payout-1',
+      callbackUrl:
+        'https://api.zwanga.cd/api/v1/driver-settlements/payouts/flexpay/callback',
+      referencePrefix: 'DRV',
+    });
+
+    expect(payout.status).toBe(PaymentStatus.PENDING);
+    expect(payout.providerMessage).toContain('Confirmation FlexPay en attente');
   });
 });

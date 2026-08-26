@@ -1,6 +1,13 @@
 import { ApiProperty } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
-import { IsNumber, IsOptional, IsString, MaxLength, Min } from 'class-validator';
+import {
+  IsNumber,
+  IsOptional,
+  IsString,
+  IsUUID,
+  MaxLength,
+  Min,
+} from 'class-validator';
 
 export class RequestDriverPayoutDto {
   @ApiProperty({
@@ -23,4 +30,14 @@ export class RequestDriverPayoutDto {
   @IsOptional()
   @MaxLength(20)
   phone?: string;
+
+  @ApiProperty({
+    required: false,
+    format: 'uuid',
+    description:
+      'Cle stable generee par l application. Rejouer la meme cle retourne le meme retrait sans nouveau transfert.',
+  })
+  @IsOptional()
+  @IsUUID('4')
+  idempotencyKey?: string;
 }

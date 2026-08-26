@@ -7,7 +7,16 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { ConfigService } from '@nestjs/config';
-import { EntityManager, Repository, In, Raw, Equal, IsNull } from 'typeorm';
+import { Cron } from '@nestjs/schedule';
+import {
+  DataSource,
+  EntityManager,
+  Repository,
+  In,
+  Raw,
+  Equal,
+  IsNull,
+} from 'typeorm';
 import type { Point } from 'typeorm';
 import {
   Booking,
@@ -173,6 +182,7 @@ export class BookingsService {
     string,
     Promise<void>
   >();
+  private financialReconciliationRunning = false;
 
   constructor(
     @InjectRepository(Booking)
@@ -197,10 +207,158 @@ export class BookingsService {
     private driverSettlementsService: DriverSettlementsService,
     private referralsService: ReferralsService,
     private locationHistoryService: LocationHistoryService,
+    private readonly dataSource: DataSource,
   ) {
     this.boardingDetectionConfig = loadBoardingDetectionConfig(
       this.configService,
     );
+  }
+
+  /**
+   * Repairs only settlements for which an immutable booking debit already
+   * exists. It never creates a new passenger debit in the background.
+   */
+  @Cron('*/5 * * * *')
+  async reconcileTokenTripSettlements(): Promise<{
+    inspected: number;
+    repaired: number;
+    failed: number;
+    unsafeAnomalies: number;
+    walletBalanceMismatches: number;
+  }> {
+    if (this.financialReconciliationRunning) {
+      return {
+        inspected: 0,
+        repaired: 0,
+        failed: 0,
+        unsafeAnomalies: 0,
+        walletBalanceMismatches: 0,
+      };
+    }
+
+    this.financialReconciliationRunning = true;
+    try {
+      const candidates = (await this.dataSource.query(
+        `
+          SELECT DISTINCT b.id
+          FROM bookings b
+          INNER JOIN wallet_ledger_entries debit
+            ON debit."relatedEntityType" = $1
+           AND debit."relatedEntityId" = b.id
+           AND debit.type = $2
+          LEFT JOIN driver_earnings earning
+            ON earning."bookingId" = b.id
+          WHERE b."paymentMode" = $3
+            AND (b.status = $4 OR b."droppedOff" = true)
+            AND NOT EXISTS (
+              SELECT 1
+              FROM wallet_ledger_entries refund
+              WHERE refund."relatedEntityType" = $1
+                AND refund."relatedEntityId" = b.id
+                AND refund.type = $5
+            )
+            AND (b."paymentStatus" <> $6 OR earning.id IS NULL)
+          ORDER BY b.id
+          LIMIT 50
+        `,
+        [
+          this.BOOKING_RELATED_ENTITY_TYPE,
+          'booking_payment',
+          TripPaymentMode.POINTS,
+          BookingStatus.COMPLETED,
+          'booking_refund',
+          BookingPaymentStatus.SUCCEEDED,
+        ],
+      )) as Array<{ id: string }>;
+
+      let repaired = 0;
+      let failed = 0;
+      for (const candidate of candidates) {
+        try {
+          const booking = await this.bookingRepository.findOne({
+            where: { id: candidate.id },
+            relations: ['trip'],
+          });
+          if (!booking?.trip) {
+            failed += 1;
+            continue;
+          }
+          await this.capturePointsPaymentForBooking(booking, booking.trip);
+          repaired += 1;
+        } catch (error) {
+          failed += 1;
+          this.logger.error(
+            `TOKEN_SETTLEMENT_RECONCILIATION_FAILED bookingId=${candidate.id} reason=${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+      }
+
+      const anomalyRows = (await this.dataSource.query(
+        `
+          SELECT COUNT(*)::int AS count
+          FROM bookings b
+          WHERE b."paymentMode" = $1
+            AND b."paymentStatus" = $2
+            AND (b.status = $3 OR b."droppedOff" = true)
+            AND NOT EXISTS (
+              SELECT 1
+              FROM wallet_ledger_entries debit
+              WHERE debit."relatedEntityType" = $4
+                AND debit."relatedEntityId" = b.id
+                AND debit.type = $5
+            )
+        `,
+        [
+          TripPaymentMode.POINTS,
+          BookingPaymentStatus.SUCCEEDED,
+          BookingStatus.COMPLETED,
+          this.BOOKING_RELATED_ENTITY_TYPE,
+          'booking_payment',
+        ],
+      )) as Array<{ count: number | string }>;
+      const unsafeAnomalies = Number(anomalyRows[0]?.count ?? 0);
+      const walletMismatchRows = (await this.dataSource.query(`
+        SELECT COUNT(*)::int AS count
+        FROM wallet_accounts account
+        LEFT JOIN LATERAL (
+          SELECT ledger."balanceAfter"
+          FROM wallet_ledger_entries ledger
+          WHERE ledger."accountId" = account.id
+          ORDER BY ledger."createdAt" DESC, ledger.id DESC
+          LIMIT 1
+        ) latest ON true
+        WHERE account.balance <> COALESCE(latest."balanceAfter", 0)
+      `)) as Array<{ count: number | string }>;
+      const walletBalanceMismatches = Number(walletMismatchRows[0]?.count ?? 0);
+
+      if (unsafeAnomalies > 0) {
+        this.logger.error(
+          `FINANCIAL_INVARIANT_VIOLATION pointsBookingsSucceededWithoutDebit=${unsafeAnomalies}; automatic debit intentionally disabled`,
+        );
+      }
+      if (walletBalanceMismatches > 0) {
+        this.logger.error(
+          `FINANCIAL_INVARIANT_VIOLATION walletBalanceLedgerMismatches=${walletBalanceMismatches}; automatic balance rewrite intentionally disabled`,
+        );
+      }
+      if (candidates.length > 0) {
+        this.logger.warn(
+          `TOKEN_SETTLEMENT_RECONCILIATION inspected=${candidates.length} repaired=${repaired} failed=${failed}`,
+        );
+      }
+
+      return {
+        inspected: candidates.length,
+        repaired,
+        failed,
+        unsafeAnomalies,
+        walletBalanceMismatches,
+      };
+    } finally {
+      this.financialReconciliationRunning = false;
+    }
   }
 
   private buildPointFromLatLng(
@@ -2205,7 +2363,7 @@ export class BookingsService {
 
   private async capturePointsPaymentForBooking(
     booking: Booking,
-    trip: Trip,
+    _trip: Trip,
   ): Promise<Booking> {
     if (booking.paymentMode !== TripPaymentMode.POINTS) {
       return booking;
@@ -2220,20 +2378,70 @@ export class BookingsService {
       );
     }
 
-    const amount = this.resolveBookingPaymentAmount(booking, trip);
-    booking.paymentAmount = amount;
-    booking.paymentCurrency = this.getTripPaymentCurrency();
+    return this.dataSource.transaction(async (manager) => {
+      const lockedBooking = await manager.findOne(Booking, {
+        where: { id: booking.id },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!lockedBooking) {
+        throw new NotFoundException('Reservation non trouvee');
+      }
 
-    if (amount <= 0) {
-      booking.paymentStatus = BookingPaymentStatus.NOT_REQUIRED;
-      booking.paidAt = booking.paidAt ?? new Date();
-      return this.bookingRepository.save(booking);
-    }
+      const lockedTrip = await manager.findOne(Trip, {
+        where: { id: lockedBooking.tripId },
+      });
+      if (!lockedTrip) {
+        throw new NotFoundException('Trajet non trouve');
+      }
+      lockedBooking.trip = lockedTrip;
 
-    await this.walletService.payForBooking(booking, amount);
-    booking.paymentStatus = BookingPaymentStatus.SUCCEEDED;
-    booking.paidAt = booking.paidAt ?? new Date();
-    return this.bookingRepository.save(booking);
+      if (lockedBooking.paymentMode !== TripPaymentMode.POINTS) {
+        throw new BadRequestException(
+          'Le mode de paiement de la reservation a change',
+        );
+      }
+      if (
+        lockedBooking.status !== BookingStatus.COMPLETED &&
+        !this.hasBookingBeenDroppedOffForTripEnd(lockedBooking)
+      ) {
+        throw new BadRequestException(
+          'Le paiement en jetons est disponible uniquement apres l arrivee',
+        );
+      }
+
+      const amount = this.resolveBookingPaymentAmount(
+        lockedBooking,
+        lockedTrip,
+      );
+      lockedBooking.paymentAmount = amount;
+      lockedBooking.paymentCurrency = this.getTripPaymentCurrency();
+
+      if (amount <= 0) {
+        lockedBooking.paymentStatus = BookingPaymentStatus.NOT_REQUIRED;
+        lockedBooking.paidAt = lockedBooking.paidAt ?? new Date();
+        return manager.save(lockedBooking);
+      }
+
+      await this.walletService.payForBookingWithManager(
+        manager,
+        lockedBooking,
+        amount,
+      );
+      lockedBooking.paymentStatus = BookingPaymentStatus.SUCCEEDED;
+      lockedBooking.paidAt = lockedBooking.paidAt ?? new Date();
+      const savedBooking = await manager.save(lockedBooking);
+      savedBooking.trip = lockedTrip;
+
+      await this.driverSettlementsService.recordCompletedBookingEarningWithManager(
+        manager,
+        savedBooking,
+      );
+
+      this.logger.log(
+        `TOKEN_TRIP_SETTLEMENT_COMMITTED bookingId=${savedBooking.id} amount=${amount} currency=${savedBooking.paymentCurrency}`,
+      );
+      return savedBooking;
+    });
   }
 
   private async settlePaymentAfterArrival(booking: Booking): Promise<Booking> {
@@ -2352,13 +2560,13 @@ export class BookingsService {
       await this.bookingRepository.save(completedBooking);
     }
 
+    await this.driverSettlementsService.recordCompletedBookingEarning(
+      completedBooking,
+    );
     await this.ensureLoyaltyDistanceForCompletedBooking(completedBooking);
     await this.walletService.awardLoyaltyForBooking(
       completedBooking,
       grossAmount,
-    );
-    await this.driverSettlementsService.recordCompletedBookingEarning(
-      completedBooking,
     );
     await this.referralsService.awardBookingReward(completedBooking);
   }

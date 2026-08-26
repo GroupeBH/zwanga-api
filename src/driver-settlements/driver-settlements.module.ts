@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { PaymentsModule } from '../payments/payments.module';
+import { KycDocument } from '../users/entities/kyc-document.entity';
 import { User } from '../users/entities/user.entity';
 import { DriverSettlementsController } from './driver-settlements.controller';
 import { DriverSettlementsService } from './driver-settlements.service';
@@ -9,7 +10,12 @@ import { DriverPayout } from './entities/driver-payout.entity';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([DriverEarning, DriverPayout, User]),
+    TypeOrmModule.forFeature([
+      DriverEarning,
+      DriverPayout,
+      User,
+      KycDocument,
+    ]),
     PaymentsModule,
   ],
   controllers: [DriverSettlementsController],

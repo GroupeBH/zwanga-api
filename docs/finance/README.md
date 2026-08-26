@@ -1,6 +1,6 @@
 # Documentation financière de Zwanga
 
-Dernière mise à jour : 25 août 2026
+Dernière mise à jour : 26 août 2026
 
 ## Objectif
 
@@ -58,6 +58,7 @@ Toute évolution financière doit respecter les règles suivantes :
 - [Nombre de places facultatif dans une demande](./trip-request-optional-seat-count.md)
 - [Jetons Zwanga et bonus de 25 jetons après paiement d'abonnement](./token-denomination-subscription-reward.md)
 - [Paiement à l'arrivée, progression automatique et non-embarquement](./booking-payment-at-arrival-and-automatic-no-show.md)
+- [Règlement atomique des courses payées en jetons](./atomic-token-trip-settlement.md)
 - [Parrainage, commissions de 5 % et retraits FlexPay](./referral-program.md)
 - [Configuration ChottuLink du lien de parrainage automatique](./chottulink-referral-setup.md)
 - [Journal des modifications financières](./CHANGELOG.md)

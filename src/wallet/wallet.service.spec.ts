@@ -4,8 +4,14 @@ import {
   PaymentPurpose,
   PaymentStatus,
 } from '../payments/entities/payment-transaction.entity';
-import { WalletAccountType } from './entities/wallet-account.entity';
-import { WalletLedgerEntryType } from './entities/wallet-ledger-entry.entity';
+import {
+  WalletAccount,
+  WalletAccountType,
+} from './entities/wallet-account.entity';
+import {
+  WalletLedgerEntry,
+  WalletLedgerEntryType,
+} from './entities/wallet-ledger-entry.entity';
 import { WalletService } from './wallet.service';
 
 describe('WalletService', () => {
@@ -201,7 +207,15 @@ describe('WalletService', () => {
   });
 
   it('rejects a trip payment when the points balance is insufficient', async () => {
-    manager.findOne.mockResolvedValue({ ...account, balance: 10 });
+    manager.findOne.mockImplementation((entity: unknown) => {
+      if (entity === WalletAccount) {
+        return Promise.resolve({ ...account, balance: 10 });
+      }
+      if (entity === WalletLedgerEntry) {
+        return Promise.resolve(null);
+      }
+      return Promise.resolve(null);
+    });
 
     await expect(
       service.payForBooking(
@@ -212,6 +226,108 @@ describe('WalletService', () => {
         2500,
       ),
     ).rejects.toBeInstanceOf(BadRequestException);
+
+    expect(manager.save).not.toHaveBeenCalled();
+  });
+
+  it('writes the token debit and its immutable ledger entry in one transaction', async () => {
+    manager.findOne.mockImplementation((entity: unknown) => {
+      if (entity === WalletAccount) {
+        return Promise.resolve({ ...account, balance: 100 });
+      }
+      if (entity === WalletLedgerEntry) {
+        return Promise.resolve(null);
+      }
+      return Promise.resolve(null);
+    });
+
+    const entry = await service.payForBooking(
+      {
+        id: 'booking-atomic',
+        passengerId: 'passenger-1',
+        paymentCurrency: 'CDF',
+      } as any,
+      2500,
+    );
+
+    expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+    expect(manager.save).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'wallet-1', balance: 75 }),
+    );
+    expect(manager.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: WalletLedgerEntryType.BOOKING_PAYMENT,
+        amount: -25,
+        balanceAfter: 75,
+        relatedEntityId: 'booking-atomic',
+      }),
+    );
+    expect(entry).toEqual(
+      expect.objectContaining({
+        type: WalletLedgerEntryType.BOOKING_PAYMENT,
+        amount: -25,
+      }),
+    );
+  });
+
+  it('does not debit a booking twice when the request is retried', async () => {
+    const existingDebit = {
+      id: 'entry-existing',
+      amount: -25,
+      type: WalletLedgerEntryType.BOOKING_PAYMENT,
+      relatedEntityType: 'booking',
+      relatedEntityId: 'booking-retry',
+    };
+    let ledgerLookup = 0;
+    manager.findOne.mockImplementation((entity: unknown) => {
+      if (entity === WalletAccount) {
+        return Promise.resolve({ ...account, balance: 75 });
+      }
+      if (entity === WalletLedgerEntry) {
+        ledgerLookup += 1;
+        return Promise.resolve(ledgerLookup === 1 ? null : existingDebit);
+      }
+      return Promise.resolve(null);
+    });
+
+    const entry = await service.payForBooking(
+      {
+        id: 'booking-retry',
+        passengerId: 'passenger-1',
+        paymentCurrency: 'CDF',
+      } as any,
+      2500,
+    );
+
+    expect(entry).toBe(existingDebit);
+    expect(manager.save).not.toHaveBeenCalled();
+  });
+
+  it('never captures a booking again after an immutable refund', async () => {
+    manager.findOne.mockImplementation((entity: unknown) => {
+      if (entity === WalletAccount) {
+        return Promise.resolve({ ...account, balance: 100 });
+      }
+      if (entity === WalletLedgerEntry) {
+        return Promise.resolve({
+          id: 'refund-existing',
+          type: WalletLedgerEntryType.BOOKING_REFUND,
+          amount: 25,
+        });
+      }
+      return Promise.resolve(null);
+    });
+
+    await expect(
+      service.payForBooking(
+        {
+          id: 'booking-refunded',
+          passengerId: 'passenger-1',
+          paymentCurrency: 'CDF',
+        } as any,
+        2500,
+      ),
+    ).rejects.toThrow('deja ete remboursee');
 
     expect(manager.save).not.toHaveBeenCalled();
   });

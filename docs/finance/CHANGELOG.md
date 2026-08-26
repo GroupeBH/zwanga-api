@@ -2,6 +2,27 @@
 
 Ce fichier répertorie les changements qui influencent un prix, un paiement, un solde, une commission, une récompense ou un retrait.
 
+## 26 août 2026
+
+### FIN-BOOKING-002 — Règlement atomique des courses en jetons
+
+Statut : implémenté dans le backend et l'application mobile ; migration et déploiement de production requis.
+
+Résumé : le débit de jetons, le statut payé de la réservation et le revenu net conducteur sont désormais enregistrés dans une seule transaction PostgreSQL. Les appels concurrents REST/Socket.IO et les répétitions réseau sont idempotents. Un réconciliateur prudent complète les anciens débits prouvés sans jamais créer de débit rétroactif. L'application rafraîchit les caches financiers et rend le compte CDF conducteur visible depuis le profil.
+
+Impacts financiers :
+
+- aucune modification de la valeur d'un jeton, du prix des courses ou du taux de commission ;
+- débit passager et revenu conducteur validés ou annulés ensemble ;
+- verrous pessimistes sur réservation et portefeuille ;
+- maintien des contraintes uniques par réservation ;
+- nouvelles contraintes de non-négativité et de conservation du montant ;
+- réparation automatique uniquement en présence d'une écriture `booking_payment` existante ;
+- anomalie `succeeded` sans débit signalée sans prélèvement automatique ;
+- séparation visible entre portefeuille passager en jetons et revenus conducteur en CDF.
+
+Documentation complète : [atomic-token-trip-settlement.md](./atomic-token-trip-settlement.md).
+
 ## 25 août 2026
 
 ### FIN-REF-005 — Accès profil et fiabilisation du partage

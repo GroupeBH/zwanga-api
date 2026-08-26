@@ -1,4 +1,5 @@
 import {
+  Check,
   Column,
   CreateDateColumn,
   Entity,
@@ -15,6 +16,7 @@ export enum WalletAccountType {
 @Entity('wallet_accounts')
 @Unique('UQ_wallet_accounts_user_type', ['userId', 'type'])
 @Index(['userId', 'type'])
+@Check('CHK_wallet_accounts_balance_non_negative', '"balance" >= 0')
 export class WalletAccount {
   @PrimaryGeneratedColumn('uuid')
   id: string;

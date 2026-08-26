@@ -174,32 +174,97 @@ export class WalletService {
     return response;
   }
 
-  async payForBooking(booking: Booking, amount: number): Promise<void> {
+  async payForBooking(
+    booking: Booking,
+    amount: number,
+  ): Promise<WalletLedgerEntry | null> {
+    return this.dataSource.transaction((manager) =>
+      this.payForBookingWithManager(manager, booking, amount),
+    );
+  }
+
+  /**
+   * Debit a booking inside the caller's database transaction.
+   *
+   * The wallet row is locked before checking the booking ledger. This makes a
+   * retry (REST, Socket.IO, cron or provider callback) idempotent and prevents
+   * two concurrent requests from spending the same balance.
+   */
+  async payForBookingWithManager(
+    manager: EntityManager,
+    booking: Booking,
+    amount: number,
+  ): Promise<WalletLedgerEntry | null> {
     const pointsAmount = this.convertMoneyToPoints(
       amount,
       booking.paymentCurrency,
     );
     if (pointsAmount <= 0) {
-      return;
+      return null;
     }
 
-    const existingEntry = await this.findBookingEntry(
+    const account = await this.getOrCreateAccountWithManager(
+      manager,
       booking.passengerId,
-      booking.id,
-      WalletLedgerEntryType.BOOKING_PAYMENT,
     );
-    if (existingEntry) {
-      return;
+
+    const existingRefund = await manager.findOne(WalletLedgerEntry, {
+      where: {
+        userId: booking.passengerId,
+        type: WalletLedgerEntryType.BOOKING_REFUND,
+        relatedEntityType: this.BOOKING_RELATED_ENTITY_TYPE,
+        relatedEntityId: booking.id,
+      },
+      order: { createdAt: 'DESC' },
+    });
+    if (existingRefund) {
+      throw new BadRequestException(
+        'Cette reservation a deja ete remboursee en jetons',
+      );
     }
 
-    await this.changeBalance({
+    const existingEntry = await manager.findOne(WalletLedgerEntry, {
+      where: {
+        userId: booking.passengerId,
+        type: WalletLedgerEntryType.BOOKING_PAYMENT,
+        relatedEntityType: this.BOOKING_RELATED_ENTITY_TYPE,
+        relatedEntityId: booking.id,
+      },
+      order: { createdAt: 'DESC' },
+    });
+    if (existingEntry) {
+      const expectedDebit = this.roundMoney(-pointsAmount);
+      if (this.roundMoney(Number(existingEntry.amount)) !== expectedDebit) {
+        throw new BadRequestException(
+          'Le montant deja debite pour cette reservation est incoherent',
+        );
+      }
+      return existingEntry;
+    }
+
+    const nextBalance = this.roundMoney(Number(account.balance) - pointsAmount);
+    if (nextBalance < 0) {
+      throw new BadRequestException('Solde de jetons insuffisant');
+    }
+
+    account.balance = nextBalance;
+    await manager.save(account);
+
+    const entry = await this.createLedgerEntryWithManager(manager, {
+      account,
       userId: booking.passengerId,
       amount: -pointsAmount,
+      balanceAfter: nextBalance,
       type: WalletLedgerEntryType.BOOKING_PAYMENT,
       relatedEntityType: this.BOOKING_RELATED_ENTITY_TYPE,
       relatedEntityId: booking.id,
       description: `Paiement par jetons pour la reservation ${booking.id} (${amount} ${booking.paymentCurrency ?? this.getPointValueCurrency()})`,
     });
+
+    this.logger.log(
+      `TOKEN_BOOKING_DEBIT_COMMITTED bookingId=${booking.id} amountTokens=${pointsAmount}`,
+    );
+    return entry;
   }
 
   async refundBookingPayment(booking: Booking): Promise<boolean> {
