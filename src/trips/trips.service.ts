@@ -70,6 +70,7 @@ import {
   SubscriptionsService,
 } from '../subscriptions/subscriptions.service';
 import { WeatherAwarenessService } from '../weather/weather-awareness.service';
+import { DriverSettlementsService } from '../driver-settlements/driver-settlements.service';
 import {
   buildPointFromCoordinate,
   isCoordinateAllowedForTrip,
@@ -206,6 +207,7 @@ export class TripsService {
     private weatherAwarenessService: WeatherAwarenessService,
     private locationHistoryService: LocationHistoryService,
     private bookingsService: BookingsService,
+    private driverSettlementsService: DriverSettlementsService,
   ) {}
 
   async create(
@@ -1111,9 +1113,16 @@ export class TripsService {
     }
 
     const previousStatus = trip.status;
+    const completedAt = new Date();
+    const completionResult = await this.tripRepository.update(
+      { id: tripId, driverId, status: TripStatus.ACTIVE },
+      { status: TripStatus.COMPLETED, completedAt },
+    );
+    if (completionResult.affected !== 1) {
+      return this.findOne(tripId);
+    }
     trip.status = TripStatus.COMPLETED;
-    trip.completedAt = new Date();
-    await this.tripRepository.save(trip);
+    trip.completedAt = completedAt;
     this.logTripStateChange({
       tripId,
       driverId,
@@ -1129,6 +1138,10 @@ export class TripsService {
     await this.cacheService.del(CacheService.getTripsListKey('all'));
 
     await this.notifyDriverEmergencyContacts(trip, 'trip_completed');
+    await this.driverSettlementsService.notifyDriverTripRevenue(
+      driverId,
+      tripId,
+    );
 
     return this.findOne(tripId);
   }

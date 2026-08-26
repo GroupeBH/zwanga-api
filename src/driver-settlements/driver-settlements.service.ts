@@ -12,9 +12,10 @@ import { DataSource, EntityManager, In, Repository } from 'typeorm';
 import {
   Booking,
   BookingPaymentStatus,
+  BookingStatus,
 } from '../bookings/entities/booking.entity';
+import { NotificationService } from '../notifications/notifications.service';
 import {
-  PaymentMethod,
   PaymentPurpose,
   PaymentStatus,
   PaymentTransaction,
@@ -22,10 +23,8 @@ import {
 import { FlexPayCallbackDto } from '../payments/dto/payment.dto';
 import { PaymentsService } from '../payments/payments.service';
 import { TripPaymentMode } from '../payments/enums/trip-payment-mode.enum';
-import {
-  KycDocument,
-  KycStatus,
-} from '../users/entities/kyc-document.entity';
+import { Trip, TripStatus } from '../trips/entities/trip.entity';
+import { KycDocument, KycStatus } from '../users/entities/kyc-document.entity';
 import { User } from '../users/entities/user.entity';
 import {
   DriverEarning,
@@ -48,6 +47,18 @@ export interface DriverSettlementSummary {
   minimumPayoutAmount: number;
 }
 
+export interface DriverTripRevenueSummary {
+  tripId: string;
+  currency: string;
+  commissionRate: number;
+  confirmedAmount: number;
+  cashToCollectAmount: number;
+  electronicPendingAmount: number;
+  totalExpectedAmount: number;
+  completedBookings: number;
+  generatedAt: string;
+}
+
 export type DriverPayoutResponse = DriverPayout & {
   orderNumber: string | null;
   paymentMessage: string | null;
@@ -60,6 +71,7 @@ export class DriverSettlementsService {
   private readonly DEFAULT_COMMISSION_RATE = 0.05;
   private readonly DEFAULT_CURRENCY = 'CDF';
   private readonly DEFAULT_MINIMUM_PAYOUT_AMOUNT = 1;
+  private readonly ORPHAN_PAYOUT_GRACE_MS = 15 * 60 * 1000;
   private payoutReconciliationRunning = false;
 
   constructor(
@@ -71,9 +83,14 @@ export class DriverSettlementsService {
     private readonly userRepository: Repository<User>,
     @InjectRepository(KycDocument)
     private readonly kycRepository: Repository<KycDocument>,
+    @InjectRepository(Booking)
+    private readonly bookingRepository: Repository<Booking>,
+    @InjectRepository(Trip)
+    private readonly tripRepository: Repository<Trip>,
     private readonly configService: ConfigService,
     private readonly paymentsService: PaymentsService,
     private readonly dataSource: DataSource,
+    private readonly notificationService: NotificationService,
   ) {}
 
   async getSummary(driverId: string): Promise<DriverSettlementSummary> {
@@ -116,15 +133,197 @@ export class DriverSettlementsService {
     });
   }
 
-  async findDriverPayouts(
-    driverId: string,
-  ): Promise<DriverPayoutResponse[]> {
+  async findDriverPayouts(driverId: string): Promise<DriverPayoutResponse[]> {
     const payouts = await this.payoutRepository.find({
       where: { driverId },
       relations: ['paymentTransaction'],
       order: { createdAt: 'DESC' },
     });
     return payouts.map((payout) => this.formatPayoutForClient(payout));
+  }
+
+  async getTripRevenueSummary(
+    driverId: string,
+    tripId: string,
+  ): Promise<DriverTripRevenueSummary> {
+    const trip = await this.tripRepository.findOne({
+      where: { id: tripId, driverId },
+      select: ['id', 'driverId', 'pricePerSeat', 'isFree'],
+    });
+    if (!trip) {
+      throw new NotFoundException(
+        "Trajet introuvable ou vous n'en etes pas le conducteur",
+      );
+    }
+
+    const bookings = await this.bookingRepository.find({
+      where: { tripId },
+      relations: ['trip'],
+    });
+    return this.buildTripRevenueSummary(trip, bookings);
+  }
+
+  async notifyDriverTripRevenue(
+    driverId: string,
+    tripId: string,
+  ): Promise<DriverTripRevenueSummary | null> {
+    try {
+      const summary = await this.getTripRevenueSummary(driverId, tripId);
+      const driver = await this.userRepository.findOne({
+        where: { id: driverId },
+        select: ['id', 'fcmToken'],
+      });
+
+      if (!driver?.fcmToken) {
+        this.logger.debug(
+          `Driver ${driverId} has no FCM token; trip revenue remains available through the app`,
+        );
+        return summary;
+      }
+
+      const title = 'Montant du trajet';
+      const body = this.buildTripRevenueNotificationBody(summary);
+      await this.notificationService.sendNotification(
+        driver.fcmToken,
+        title,
+        body,
+        {
+          type: 'driver_trip_revenue',
+          role: 'driver',
+          driverId,
+          tripId,
+          currency: summary.currency,
+          confirmedAmount: summary.confirmedAmount,
+          cashToCollectAmount: summary.cashToCollectAmount,
+          electronicPendingAmount: summary.electronicPendingAmount,
+          totalExpectedAmount: summary.totalExpectedAmount,
+        },
+        driverId,
+      );
+      return summary;
+    } catch (error) {
+      this.logger.error(
+        `DRIVER_TRIP_REVENUE_NOTIFICATION_FAILED tripId=${tripId} driverId=${driverId} reason=${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return null;
+    }
+  }
+
+  private buildTripRevenueSummary(
+    trip: Trip,
+    bookings: Booking[],
+  ): DriverTripRevenueSummary {
+    const commissionRate = this.getCommissionRate();
+    const currency = this.getCurrency();
+    let confirmedAmount = 0;
+    let cashToCollectAmount = 0;
+    let electronicPendingAmount = 0;
+    let completedBookings = 0;
+
+    for (const booking of bookings) {
+      if (!this.hasCompletedRide(booking)) {
+        continue;
+      }
+
+      const grossAmount = this.resolveTripBookingGrossAmount(booking, trip);
+      if (grossAmount <= 0) {
+        continue;
+      }
+
+      completedBookings += 1;
+      if (booking.paymentMode === TripPaymentMode.CASH) {
+        cashToCollectAmount += grossAmount;
+        continue;
+      }
+
+      const netAmount = this.roundMoney(grossAmount * (1 - commissionRate));
+      if (booking.paymentStatus === BookingPaymentStatus.SUCCEEDED) {
+        confirmedAmount += netAmount;
+      } else if (booking.paymentMode === TripPaymentMode.ELECTRONIC) {
+        electronicPendingAmount += netAmount;
+      }
+    }
+
+    confirmedAmount = this.roundMoney(confirmedAmount);
+    cashToCollectAmount = this.roundMoney(cashToCollectAmount);
+    electronicPendingAmount = this.roundMoney(electronicPendingAmount);
+
+    return {
+      tripId: trip.id,
+      currency,
+      commissionRate,
+      confirmedAmount,
+      cashToCollectAmount,
+      electronicPendingAmount,
+      totalExpectedAmount: this.roundMoney(
+        confirmedAmount + cashToCollectAmount + electronicPendingAmount,
+      ),
+      completedBookings,
+      generatedAt: new Date().toISOString(),
+    };
+  }
+
+  private hasCompletedRide(booking: Booking): boolean {
+    return Boolean(
+      booking.status === BookingStatus.COMPLETED ||
+      booking.droppedOff ||
+      booking.droppedOffConfirmedByPassenger ||
+      booking.droppedOffAt ||
+      booking.droppedOffConfirmedAt,
+    );
+  }
+
+  private resolveTripBookingGrossAmount(booking: Booking, trip: Trip): number {
+    const persistedAmount = Number(booking.paymentAmount);
+    if (Number.isFinite(persistedAmount) && persistedAmount > 0) {
+      return this.roundMoney(persistedAmount);
+    }
+
+    if (trip.isFree) {
+      return 0;
+    }
+
+    const pricePerSeat = Number(
+      trip.pricePerSeat ?? booking.trip?.pricePerSeat,
+    );
+    const seats = Math.max(1, Number(booking.numberOfSeats) || 1);
+    return Number.isFinite(pricePerSeat) && pricePerSeat > 0
+      ? this.roundMoney(pricePerSeat * seats)
+      : 0;
+  }
+
+  private buildTripRevenueNotificationBody(
+    summary: DriverTripRevenueSummary,
+  ): string {
+    const parts: string[] = [];
+    if (summary.confirmedAmount > 0) {
+      parts.push(
+        `${this.formatMoney(summary.confirmedAmount)} ${summary.currency} ajoutes a vos gains`,
+      );
+    }
+    if (summary.cashToCollectAmount > 0) {
+      parts.push(
+        `${this.formatMoney(summary.cashToCollectAmount)} ${summary.currency} a encaisser en liquide`,
+      );
+    }
+    if (summary.electronicPendingAmount > 0) {
+      parts.push(
+        `${this.formatMoney(summary.electronicPendingAmount)} ${summary.currency} en attente du paiement electronique`,
+      );
+    }
+
+    return parts.length > 0
+      ? `${parts.join('. ')}.`
+      : `Aucun montant a encaisser pour ce trajet (0 ${summary.currency}).`;
+  }
+
+  private formatMoney(value: number): string {
+    return this.roundMoney(value).toLocaleString('fr-FR', {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 2,
+    });
   }
 
   async recordCompletedBookingEarning(
@@ -210,7 +409,47 @@ export class DriverSettlementsService {
     const earning = this.earningRepository.create(earningData);
     const saved = await this.earningRepository.save(earning);
     this.logRecordedEarning(saved);
+    if (booking.trip?.status === TripStatus.COMPLETED) {
+      await this.notifyDriverBookingEarningAvailable(saved);
+    }
     return saved;
+  }
+
+  private async notifyDriverBookingEarningAvailable(
+    earning: DriverEarning,
+  ): Promise<void> {
+    try {
+      const driver = await this.userRepository.findOne({
+        where: { id: earning.driverId },
+        select: ['id', 'fcmToken'],
+      });
+      if (!driver?.fcmToken) {
+        return;
+      }
+
+      const netAmount = this.roundMoney(Number(earning.netAmount));
+      await this.notificationService.sendNotification(
+        driver.fcmToken,
+        'Paiement du trajet confirmé',
+        `${this.formatMoney(netAmount)} ${earning.currency} sont maintenant disponibles dans vos gains.`,
+        {
+          type: 'driver_booking_earning_confirmed',
+          role: 'driver',
+          driverId: earning.driverId,
+          tripId: earning.tripId,
+          bookingId: earning.bookingId,
+          amount: netAmount,
+          currency: earning.currency,
+        },
+        earning.driverId,
+      );
+    } catch (error) {
+      this.logger.error(
+        `DRIVER_EARNING_NOTIFICATION_FAILED earningId=${earning.id} reason=${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
   }
 
   private buildEarningData(
@@ -385,11 +624,7 @@ export class DriverSettlementsService {
       driverId,
     );
     const payout = await this.applyPaymentToPayout(payment, driverId);
-    this.logDriverPayoutResponse(
-      'Driver payout status check',
-      payout,
-      payment,
-    );
+    this.logDriverPayoutResponse('Driver payout status check', payout, payment);
     return payout;
   }
 
@@ -398,7 +633,7 @@ export class DriverSettlementsService {
     driverId?: string,
   ): Promise<DriverPayoutResponse> {
     if (
-      payment.purpose !== PaymentPurpose.DRIVER_PAYOUT ||
+      payment.purpose !== String(PaymentPurpose.DRIVER_PAYOUT) ||
       payment.relatedEntityType !== this.PAYOUT_RELATED_ENTITY_TYPE
     ) {
       throw new BadRequestException(
@@ -445,11 +680,11 @@ export class DriverSettlementsService {
         : null;
       foundPayout.processedAt =
         payment.status === PaymentStatus.SUCCEEDED
-          ? payment.paidAt ?? new Date()
+          ? (payment.paidAt ?? new Date())
           : [PaymentStatus.FAILED, PaymentStatus.CANCELLED].includes(
                 payment.status,
               )
-            ? foundPayout.processedAt ?? new Date()
+            ? (foundPayout.processedAt ?? new Date())
             : null;
 
       return manager.save(foundPayout);
@@ -488,6 +723,17 @@ export class DriverSettlementsService {
               payout.driverId,
             ));
           if (!payment) {
+            const requestedAt = payout.requestedAt ?? payout.createdAt;
+            if (
+              requestedAt &&
+              Date.now() - new Date(requestedAt).getTime() >=
+                this.ORPHAN_PAYOUT_GRACE_MS
+            ) {
+              await this.markUnsentPayoutFailed(
+                payout.id,
+                'Aucune transaction FlexPay creee apres reservation du retrait',
+              );
+            }
             continue;
           }
           if (!payment.orderNumber) {
@@ -606,6 +852,17 @@ export class DriverSettlementsService {
         lock: { mode: 'pessimistic_write' },
       });
       if (!payout || payout.status !== DriverPayoutStatus.PENDING) {
+        return;
+      }
+      const payment = await manager.findOne(PaymentTransaction, {
+        where: {
+          relatedEntityType: this.PAYOUT_RELATED_ENTITY_TYPE,
+          relatedEntityId: payout.id,
+          userId: payout.driverId,
+        },
+        order: { createdAt: 'DESC' },
+      });
+      if (payment) {
         return;
       }
       payout.status = DriverPayoutStatus.FAILED;

@@ -253,7 +253,7 @@ describe('PaymentsService', () => {
     expect(payment.paidAt).toBeInstanceOf(Date);
   });
 
-  it('confirms a successful FlexPay callback locally without a status check by default', async () => {
+  it('confirms a successful callback locally when verification is explicitly disabled', async () => {
     paymentTransactionRepository.findOne.mockResolvedValue({
       id: 'payment-1',
       userId: 'user-1',
@@ -307,6 +307,55 @@ describe('PaymentsService', () => {
     expect(payment.providerMessage).toBe(
       'Paiement annule. Aucun montant confirme.',
     );
+  });
+
+  it('verifies a failed callback with FlexPay by default before releasing money', async () => {
+    configService.get.mockImplementation((key: string) => {
+      if (key === 'FLEXPAY_CALLBACK_BASE_URL') {
+        return 'https://api.zwanga.cd/api/v1';
+      }
+      return undefined;
+    });
+    flexPayService.isSuccessfulCode.mockImplementation((code) => code === '0');
+    paymentTransactionRepository.findOne.mockResolvedValue({
+      id: 'payment-1',
+      userId: 'driver-1',
+      status: PaymentStatus.INITIATED,
+      reference: 'DRV123',
+      orderNumber: 'PAYOUT123',
+      providerReference: null,
+      providerStatusCode: null,
+      providerMessage: null,
+      amount: 9500,
+      currency: 'CDF',
+      rawCallbackPayload: null,
+      rawCheckResponse: null,
+      paidAt: null,
+    });
+    flexPayService.checkTransaction.mockResolvedValue({
+      code: '0',
+      message: 'Operation annulee par le client',
+      transaction: {
+        orderNumber: 'PAYOUT123',
+        reference: 'DRV123',
+        status: '1',
+        amount: '9500',
+        amountCustomer: '9500',
+        currency: 'CDF',
+        createdAt: '2026-08-26 10:00:00',
+      },
+      raw: { Code: '0' },
+    });
+
+    const payment = await service.handleFlexPayCallback({
+      code: '1',
+      message: 'Operation annulee par le client',
+      reference: 'DRV123',
+      orderNumber: 'PAYOUT123',
+    });
+
+    expect(flexPayService.checkTransaction).toHaveBeenCalledWith('PAYOUT123');
+    expect(payment.status).toBe(PaymentStatus.CANCELLED);
   });
 
   it('returns terminal payment status locally without calling FlexPay again', async () => {

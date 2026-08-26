@@ -54,6 +54,7 @@ describe('BookingsService trip payments', () => {
   let driverSettlementsService: {
     recordCompletedBookingEarning: jest.Mock;
     recordCompletedBookingEarningWithManager: jest.Mock;
+    notifyDriverTripRevenue: jest.Mock;
   };
   let referralsService: {
     awardBookingReward: jest.Mock;
@@ -163,6 +164,7 @@ describe('BookingsService trip payments', () => {
     driverSettlementsService = {
       recordCompletedBookingEarning: jest.fn(),
       recordCompletedBookingEarningWithManager: jest.fn(),
+      notifyDriverTripRevenue: jest.fn().mockResolvedValue(null),
     };
     referralsService = {
       awardBookingReward: jest.fn().mockResolvedValue(null),
@@ -1984,6 +1986,9 @@ describe('BookingsService trip payments', () => {
         }),
       ]),
     );
+    expect(
+      driverSettlementsService.notifyDriverTripRevenue,
+    ).toHaveBeenCalledWith('driver-1', 'trip-1');
     expect(bookingRepository.save).toHaveBeenCalledWith(
       expect.objectContaining({
         droppedOff: true,

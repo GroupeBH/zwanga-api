@@ -52,7 +52,10 @@ import {
 import { PaymentsService } from '../payments/payments.service';
 import { TripPaymentMode } from '../payments/enums/trip-payment-mode.enum';
 import { WalletService } from '../wallet/wallet.service';
-import { DriverSettlementsService } from '../driver-settlements/driver-settlements.service';
+import {
+  DriverSettlementsService,
+  type DriverTripRevenueSummary,
+} from '../driver-settlements/driver-settlements.service';
 import { ReferralsService } from '../referrals/referrals.service';
 import { CacheService } from '../common/services/cache.service';
 import {
@@ -143,6 +146,7 @@ export interface AutomaticRideProgressEvent {
   noShowReason?: string;
   boardingUncertainReason?: string;
   detectionMethod?: string;
+  revenueSummary?: DriverTripRevenueSummary;
 }
 
 export interface AutomaticRideProgressResult {
@@ -3687,6 +3691,11 @@ export class BookingsService {
       await this.cacheService.del(CacheService.getTripKey(trip.id));
       await this.cacheService.del(CacheService.getTripsListKey());
       await this.cacheService.del(CacheService.getTripsListKey('all'));
+      const revenueSummary =
+        await this.driverSettlementsService.notifyDriverTripRevenue(
+          trip.driverId,
+          trip.id,
+        );
 
       return [
         ...bookingEvents,
@@ -3695,6 +3704,7 @@ export class BookingsService {
           tripId: trip.id,
           distanceMeters: Math.round(driverDistanceToDestination),
           detectedAt: now.toISOString(),
+          revenueSummary: revenueSummary ?? undefined,
         },
       ];
     }
@@ -3745,6 +3755,11 @@ export class BookingsService {
       await this.cacheService.del(CacheService.getTripKey(trip.id));
       await this.cacheService.del(CacheService.getTripsListKey());
       await this.cacheService.del(CacheService.getTripsListKey('all'));
+      const revenueSummary =
+        await this.driverSettlementsService.notifyDriverTripRevenue(
+          trip.driverId,
+          trip.id,
+        );
 
       return [
         ...bookingEvents,
@@ -3753,6 +3768,7 @@ export class BookingsService {
           tripId: trip.id,
           distanceMeters: Math.round(driverDistanceToDestination),
           detectedAt: now.toISOString(),
+          revenueSummary: revenueSummary ?? undefined,
         },
       ];
     }

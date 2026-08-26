@@ -4,6 +4,48 @@ Ce fichier répertorie les changements qui influencent un prix, un paiement, un 
 
 ## 26 août 2026
 
+### FIN-DRIVER-002 — Notification du montant conducteur à la fin du trajet
+
+Statut : implémenté dans le backend et l'application mobile ; déploiement requis, sans migration.
+
+Résumé : la clôture unique d'un trajet produit un résumé financier serveur, l'envoie au conducteur par push et l'affiche dans le modal de fin. L'interface sépare le revenu net confirmé, le prix brut à encaisser en liquide et le revenu électronique net encore attendu.
+
+Lorsqu'un paiement électronique attendu est confirmé après la clôture, une notification supplémentaire est envoyée uniquement lors de la création unique du revenu conducteur.
+
+Impacts financiers :
+
+- aucune nouvelle écriture, aucun débit, aucun crédit et aucun retrait ;
+- les réservations sans dépose prouvée sont exclues ;
+- le liquide n'est jamais ajouté au solde retirable ;
+- l'électronique en attente n'est jamais présenté comme acquis ;
+- calcul serveur avec le taux de commission configuré et la devise du trajet ;
+- transition conditionnelle empêchant une double notification REST/Socket.IO ;
+- endpoint limité au conducteur authentifié du trajet ;
+- aucune migration ni nouvelle variable d'environnement.
+
+Documentation complète : [driver-trip-revenue-notification.md](./driver-trip-revenue-notification.md).
+
+### FIN-DRIVER-001 — Versement Mobile Money des revenus conducteur
+
+Statut : implémenté dans le backend et l'application mobile ; migration et déploiement de production requis.
+
+Résumé : après confirmation du paiement de fin de course, le revenu net devient retirable par le conducteur dans l'application. Le décaissement utilise le service FlexPay `merchantPayOutService`, exige un KYC approuvé et reste réservé jusqu'à une confirmation finale. Un échec ou une annulation confirmés libèrent le montant et rendent une nouvelle demande possible depuis l'app.
+
+Impacts financiers :
+
+- aucune modification du prix de course ni du taux de commission de 5 % ;
+- verrou pessimiste par conducteur avant calcul et réservation du solde ;
+- clé d'idempotence unique par intention de retrait ;
+- unicité entre retrait et transaction de paiement ;
+- timeout réseau conservé en attente au lieu d'être considéré comme échec certain ;
+- callbacks vérifiés par défaut auprès de FlexPay ;
+- comparaison de la référence, de l'`orderNumber`, du montant et de la devise ;
+- rapprochement automatique toutes les cinq minutes ;
+- historique des retraits et action **Réessayer** après échec final dans l'application ;
+- migration de schéma sans modification des soldes historiques.
+
+Documentation complète : [driver-electronic-trip-payout.md](./driver-electronic-trip-payout.md).
+
 ### FIN-BOOKING-002 — Règlement atomique des courses en jetons
 
 Statut : implémenté dans le backend et l'application mobile ; migration et déploiement de production requis.

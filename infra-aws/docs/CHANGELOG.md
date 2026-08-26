@@ -2,6 +2,16 @@
 
 Les entrées sont classées de la plus récente à la plus ancienne. Elles décrivent le code versionné et les opérations réellement exécutées sur AWS, sans inclure de valeur secrète.
 
+## INFRA-2026-08-26-001 — Paramètres runtime du versement conducteur
+
+Statut : configuration et documentation préparées localement ; aucun changement AWS exécuté.
+
+Résumé : ajout de `DRIVER_PAYOUT_MIN_AMOUNT_CDF` à la configuration de production importable dans SSM. Les paramètres FlexPay de payout existants sont recensés, avec une procédure de plan, déploiement ECS, validation, surveillance et retour arrière. Le document exige que tout plan comportant une suppression ACM, DNS, ALB, SSM, RDS ou Redis soit refusé.
+
+Impacts : aucun secret documenté, aucune ressource AWS modifiée à ce stade, aucun solde ou paiement recalculé. La valeur prendra effet après import SSM et nouvelle révision ECS.
+
+Documentation complète : [driver-payout-runtime.md](./driver-payout-runtime.md).
+
 ## INFRA-2026-08-25-004 — Restauration et protection du domaine HTTPS public
 
 ### Métadonnées

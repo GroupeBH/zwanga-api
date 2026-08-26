@@ -353,21 +353,6 @@ export class PaymentsService {
     transaction.orderNumber = callback.orderNumber ?? transaction.orderNumber;
     transaction.rawCallbackPayload = callback.raw;
 
-    if (!callbackSucceeded) {
-      transaction.status = this.isCancellationMessage(callback.message)
-        ? PaymentStatus.CANCELLED
-        : PaymentStatus.FAILED;
-      transaction.providerMessage = this.getCallbackFailureMessage(
-        callback.message,
-      );
-      const savedTransaction =
-        await this.paymentTransactionRepository.save(transaction);
-      this.logger.warn(
-        `Payment marked failed from FlexPay callback: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, previousStatus=${previousStatus}, code=${callback.code}, response=${formatPaymentLogPayload(this.formatPaymentLogResponse(savedTransaction))}`,
-      );
-      return savedTransaction;
-    }
-
     if (this.shouldVerifyFlexPayCallbacks()) {
       if (!transaction.orderNumber) {
         transaction.providerMessage =
@@ -396,6 +381,21 @@ export class PaymentsService {
         );
         return savedTransaction;
       }
+    }
+
+    if (!callbackSucceeded) {
+      transaction.status = this.isCancellationMessage(callback.message)
+        ? PaymentStatus.CANCELLED
+        : PaymentStatus.FAILED;
+      transaction.providerMessage = this.getCallbackFailureMessage(
+        callback.message,
+      );
+      const savedTransaction =
+        await this.paymentTransactionRepository.save(transaction);
+      this.logger.warn(
+        `Payment marked failed from FlexPay callback: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, previousStatus=${previousStatus}, code=${callback.code}, response=${formatPaymentLogPayload(this.formatPaymentLogResponse(savedTransaction))}`,
+      );
+      return savedTransaction;
     }
 
     transaction.status = PaymentStatus.SUCCEEDED;
@@ -851,8 +851,7 @@ export class PaymentsService {
       const providerAmount = Number(providerTransaction.amount);
       if (
         !Number.isFinite(providerAmount) ||
-        Math.round(providerAmount * 100) !==
-          Math.round(storedAmount * 100)
+        Math.round(providerAmount * 100) !== Math.round(storedAmount * 100)
       ) {
         throw new BadRequestException(
           'Le montant retourne par FlexPay ne correspond pas a cette transaction',
@@ -1052,7 +1051,9 @@ export class PaymentsService {
     );
   }
 
-  private isDeclinedPaymentMessage(message: string | null | undefined): boolean {
+  private isDeclinedPaymentMessage(
+    message: string | null | undefined,
+  ): boolean {
     const normalizedMessage = this.normalizeMessage(message ?? '');
     return (
       normalizedMessage.includes('declined') ||
