@@ -69,6 +69,41 @@ export class ReferralAttributionDto {
   referralCapturedAt?: string;
 }
 
+/**
+ * Attribution submitted by an already authenticated account.
+ *
+ * Unlike the registration DTO, every field needed to prove a fresh
+ * ChottuLink attribution is required. This prevents an authenticated client
+ * from attaching an account with only a legacy or partially captured value.
+ */
+export class AttachReferralAttributionDto {
+  @ApiProperty({ enum: ['chottulink'], example: 'chottulink' })
+  @IsIn(['chottulink'])
+  referralProvider: 'chottulink';
+
+  @ApiProperty({ example: 'a19d93f458a64d75b0e2b0f36073cd51' })
+  @Transform(trim)
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(64)
+  @Matches(/^[A-Za-z0-9_-]+$/)
+  referralToken: string;
+
+  @ApiProperty({
+    required: false,
+    example: 'https://zwanga-app.chottu.link/abc123',
+  })
+  @Transform(trim)
+  @IsString()
+  @IsOptional()
+  @MaxLength(500)
+  referralReferringLink?: string;
+
+  @ApiProperty({ example: '2026-08-27T10:00:00.000Z' })
+  @IsDateString()
+  referralCapturedAt: string;
+}
+
 export class RequestReferralWithdrawalDto {
   @ApiProperty({ minimum: 50, example: 50 })
   @Type(() => Number)

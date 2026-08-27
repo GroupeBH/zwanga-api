@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { HttpModule } from '@nestjs/axios';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { PaymentsModule } from '../payments/payments.module';
+import { NotificationsModule } from '../notifications/notifications.module';
 import { PaymentTransaction } from '../payments/entities/payment-transaction.entity';
 import { KycDocument } from '../users/entities/kyc-document.entity';
 import { User } from '../users/entities/user.entity';
@@ -27,6 +28,7 @@ import { ReferralsService } from './referrals.service';
       PaymentTransaction,
     ]),
     PaymentsModule,
+    NotificationsModule,
   ],
   controllers: [ReferralsController],
   providers: [ReferralsService],

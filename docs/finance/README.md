@@ -61,8 +61,11 @@ Toute évolution financière doit respecter les règles suivantes :
 - [Règlement atomique des courses payées en jetons](./atomic-token-trip-settlement.md)
 - [Versement Mobile Money des revenus conducteur](./driver-electronic-trip-payout.md)
 - [Notification du montant conducteur à la fin du trajet](./driver-trip-revenue-notification.md)
+- [Administration des portefeuilles de jetons](./admin-token-wallet-management.md)
+- [Administration du parrainage](./admin-referral-management.md)
 - [Parrainage, commissions de 5 % et retraits FlexPay](./referral-program.md)
 - [Configuration ChottuLink du lien de parrainage automatique](./chottulink-referral-setup.md)
+- [Fiabilisation mobile et rattachement des comptes existants](./referral-attribution-reliability.md)
 - [Journal des modifications financières](./CHANGELOG.md)
 
 Les documents détaillés du paiement, des jetons et du parrainage sont enrichis en même temps que les lots correspondants.

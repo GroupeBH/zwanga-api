@@ -30,6 +30,7 @@ import {
 } from '../payments/entities/payment-transaction.entity';
 import { TripPaymentMode } from '../payments/enums/trip-payment-mode.enum';
 import { PaymentsService } from '../payments/payments.service';
+import { NotificationService } from '../notifications/notifications.service';
 import { Subscription } from '../subscriptions/entities/subscription.entity';
 import { KycDocument, KycStatus } from '../users/entities/kyc-document.entity';
 import { User, UserStatus } from '../users/entities/user.entity';
@@ -66,6 +67,17 @@ export interface ReferralRegistrationAttribution {
   referralCapturedAt?: string | Date | null;
 }
 
+interface ReferralRegistrationResult {
+  profile: ReferralProfile;
+  newlyAttached: boolean;
+  referrer: {
+    userId: string;
+    firstName: string;
+    fcmToken: string | null;
+  } | null;
+  referredFirstName: string;
+}
+
 @Injectable()
 export class ReferralsService {
   private readonly logger = new Logger(ReferralsService.name);
@@ -99,6 +111,7 @@ export class ReferralsService {
     private readonly configService: ConfigService,
     private readonly httpService: HttpService,
     private readonly paymentsService: PaymentsService,
+    private readonly notificationService: NotificationService,
   ) {}
 
   async validateCode(code: string) {
@@ -157,6 +170,39 @@ export class ReferralsService {
     userId: string,
     attribution: ReferralRegistrationAttribution = {},
   ): Promise<ReferralProfile> {
+    const result = await this.registerUserInternal(userId, attribution);
+    await this.afterReferralAssignment(userId, result);
+    return result.profile;
+  }
+
+  async attachAuthenticatedUser(
+    userId: string,
+    attribution: ReferralRegistrationAttribution,
+  ) {
+    await this.assertReferralAttribution(attribution);
+    const result = await this.registerUserInternal(userId, attribution);
+    await this.afterReferralAssignment(userId, result);
+
+    if (!result.profile.referredByUserId || !result.referrer) {
+      throw new BadRequestException(
+        "L'attribution de parrainage n'a pas pu etre enregistree",
+      );
+    }
+
+    return {
+      attached: true,
+      newlyAttached: result.newlyAttached,
+      referredAt: result.profile.referredAt,
+      referrer: {
+        firstName: result.referrer.firstName,
+      },
+    };
+  }
+
+  private async registerUserInternal(
+    userId: string,
+    attribution: ReferralRegistrationAttribution = {},
+  ): Promise<ReferralRegistrationResult> {
     const normalizedCode = this.normalizeCode(attribution.referralCode);
     const normalizedToken = this.normalizeToken(attribution.referralToken);
     const capturedAt = this.validateAttributionCapturedAt(
@@ -192,6 +238,9 @@ export class ReferralsService {
         });
       }
 
+      let newlyAttached = false;
+      let resolvedReferrer: ReferralRegistrationResult['referrer'] = null;
+
       if (normalizedCode || normalizedToken) {
         const codeProfile = normalizedCode
           ? await manager.findOne(ReferralProfile, {
@@ -218,6 +267,11 @@ export class ReferralsService {
         }
         const referrerProfile = tokenProfile ?? codeProfile;
         this.ensureReferrerIsUsable(referrerProfile);
+        resolvedReferrer = {
+          userId: referrerProfile!.userId,
+          firstName: referrerProfile!.user.firstName,
+          fcmToken: referrerProfile!.user.fcmToken,
+        };
 
         if (profile.referredByUserId) {
           if (profile.referredByUserId !== referrerProfile!.userId) {
@@ -240,13 +294,53 @@ export class ReferralsService {
           profile.attributionReferringLink =
             attribution.referralReferringLink?.trim().slice(0, 500) || null;
           profile.attributionCapturedAt = capturedAt ?? new Date();
+          newlyAttached = true;
         }
       }
 
       profile = await manager.save(profile);
       await this.getOrCreateAccount(manager, userId);
-      return profile;
+      return {
+        profile,
+        newlyAttached,
+        referrer: resolvedReferrer,
+        referredFirstName: user.firstName,
+      };
     });
+  }
+
+  private async afterReferralAssignment(
+    userId: string,
+    result: ReferralRegistrationResult,
+  ): Promise<void> {
+    if (!result.newlyAttached || !result.referrer) {
+      return;
+    }
+
+    this.logger.log(
+      `Referral attribution attached: referredUserId=${userId}, referrerUserId=${result.referrer.userId}, provider=${result.profile.attributionProvider}`,
+    );
+
+    if (!result.referrer.fcmToken) {
+      return;
+    }
+
+    try {
+      await this.notificationService.sendNotification(
+        result.referrer.fcmToken,
+        'Nouveau filleul Zwanga',
+        `${result.referredFirstName} a rejoint votre reseau de parrainage.`,
+        {
+          type: 'referral_new_referral',
+          referredUserId: userId,
+        },
+        result.referrer.userId,
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Referral notification failed for referrerUserId=${result.referrer.userId}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   async getSummary(userId: string) {
@@ -268,6 +362,10 @@ export class ReferralsService {
       shareLink,
       referralCount,
       rewardCount,
+      attribution: {
+        hasReferrer: Boolean(profile.referredByUserId),
+        referredAt: profile.referredAt,
+      },
       balances: {
         pendingTokens: Number(account.pendingTokens),
         availableTokens: Number(account.availableTokens),
@@ -663,6 +761,15 @@ export class ReferralsService {
           lock: { mode: 'pessimistic_write' },
         });
         if (!referredProfile?.referredByUserId) {
+          return null;
+        }
+        if (
+          !referredProfile.referredAt ||
+          eventAt < referredProfile.referredAt
+        ) {
+          this.logger.warn(
+            `Referral reward skipped because payment predates attribution: referredUserId=${input.referredUserId}, sourceType=${input.sourceType}, sourceEntityId=${input.sourceEntityId}`,
+          );
           return null;
         }
         const referrer = await manager.findOne(User, {

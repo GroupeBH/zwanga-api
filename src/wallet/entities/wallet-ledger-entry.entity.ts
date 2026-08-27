@@ -21,6 +21,7 @@ export enum WalletLedgerEntryType {
   SUBSCRIPTION_REWARD = 'subscription_reward',
   TRANSFER_OUT = 'transfer_out',
   TRANSFER_IN = 'transfer_in',
+  ADMIN_ADJUSTMENT = 'admin_adjustment',
 }
 
 @Entity('wallet_ledger_entries')

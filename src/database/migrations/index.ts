@@ -20,6 +20,8 @@ import { AddBranchReferralAttribution1780000019000 } from './1780000019000-AddBr
 import { ReplaceBranchWithChottuLink1780000020000 } from './1780000020000-ReplaceBranchWithChottuLink';
 import { HardenTokenTripSettlements1780000021000 } from './1780000021000-HardenTokenTripSettlements';
 import { HardenDriverPayouts1780000022000 } from './1780000022000-HardenDriverPayouts';
+import { AddAdminWalletAdjustments1780000023000 } from './1780000023000-AddAdminWalletAdjustments';
+import { AddAdminReferralReadIndexes1780000024000 } from './1780000024000-AddAdminReferralReadIndexes';
 
 export const databaseMigrations = [
   FillTotalSeats1780000000000,
@@ -44,4 +46,6 @@ export const databaseMigrations = [
   ReplaceBranchWithChottuLink1780000020000,
   HardenTokenTripSettlements1780000021000,
   HardenDriverPayouts1780000022000,
+  AddAdminWalletAdjustments1780000023000,
+  AddAdminReferralReadIndexes1780000024000,
 ];

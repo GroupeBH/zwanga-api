@@ -2,7 +2,62 @@
 
 Ce fichier répertorie les changements qui influencent un prix, un paiement, un solde, une commission, une récompense ou un retrait.
 
+## 27 août 2026
+
+### FIN-REF-007 — Fiabilisation mobile et comptes existants sans parrain
+
+Statut : implémenté dans le backend et l'application mobile ; déploiement API et nouveaux binaires Android/iOS requis, sans migration.
+
+Résumé : une invitation ChottuLink peut désormais rattacher un compte existant lorsque celui-ci ne possède pas encore de parrain. Le rattachement reste transactionnel, immuable et idempotent. Les App Links, Universal Links, attributions différées, caches de session, notifications et solutions de secours du partage ont été renforcés.
+
+Impacts financiers :
+
+- aucun changement du taux de 5 %, de la retenue de sept jours ou de la valeur du jeton ;
+- aucune commission rétroactive avant le rattachement ;
+- fenêtre de douze mois toujours déclenchée par le premier paiement éligible réussi ;
+- aucun remplacement d'un parrain déjà enregistré ;
+- aucune migration ni modification de solde ;
+- nouvelle route authentifiée `POST /referrals/me/attribution`, limitée à dix appels par minute.
+
+Documentation complète : [referral-attribution-reliability.md](./referral-attribution-reliability.md).
+
 ## 26 août 2026
+
+### FIN-REF-006 — Administration globale du parrainage
+
+Statut : implémenté dans le backend ; migration d'index et déploiement requis.
+
+Résumé : la page **Finance > Parrainage** dispose désormais de routes administratives dédiées pour les comptes, les commissions et les retraits. Le rapprochement d'un retrait consulte FlexPay et réutilise le règlement idempotent existant sans permettre à l'opérateur de forcer un succès.
+
+Impacts financiers et de confidentialité :
+
+- aucun changement du taux de 5 %, de la retenue ou de la fenêtre de douze mois ;
+- agrégats globaux des compartiments `pending`, `available`, `reserved` et `withdrawn` ;
+- aucune exposition des tokens ChottuLink ou réponses FlexPay brutes ;
+- rapprochement limité aux administrateurs et à cinq appels par minute ;
+- chargement groupé évitant les requêtes N+1 ;
+- index composites dédiés aux tris et filtres administratifs ;
+- aucune nouvelle variable d'environnement ou ressource AWS.
+
+Documentation complète : [admin-referral-management.md](./admin-referral-management.md).
+
+### FIN-WALLET-ADMIN-001 — Consultation et ajustement audité des jetons
+
+Statut : implémenté dans le backend et l'administration web ; migration et déploiement requis.
+
+Résumé : les routes globales de consultation des portefeuilles et du registre alimentent désormais la page **Finance > Jetons**. Les ajustements exceptionnels utilisent un verrou pessimiste, une transaction unique, un motif obligatoire et un UUID d'idempotence protégé par un index unique.
+
+Impacts financiers :
+
+- aucune modification de la valeur d'un jeton ni conversion monétaire ;
+- lecture globale paginée et utilisateurs assainis ;
+- crédit ou débit manuel plafonné, sans solde négatif ;
+- solde et registre validés ou annulés ensemble ;
+- répétition HTTP sans double mouvement ;
+- migration ajoutant le type `admin_adjustment`, sans modifier les soldes existants ;
+- aucune nouvelle variable d'environnement ou ressource AWS.
+
+Documentation complète : [admin-token-wallet-management.md](./admin-token-wallet-management.md).
 
 ### FIN-DRIVER-002 — Notification du montant conducteur à la fin du trajet
 

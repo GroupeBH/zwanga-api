@@ -13,6 +13,7 @@ import {
   WalletLedgerEntryType,
 } from './entities/wallet-ledger-entry.entity';
 import { WalletService } from './wallet.service';
+import { UserRole } from '../users/entities/user.entity';
 
 describe('WalletService', () => {
   let accountRepository: {
@@ -155,6 +156,83 @@ describe('WalletService', () => {
     );
     expect(result.account.balance).toBe(1000);
     expect(result.payment.orderNumber).toBe('ORDER123');
+  });
+
+  it('applies an admin adjustment and its ledger entry atomically', async () => {
+    userRepository.findOne.mockImplementation(
+      ({ where }: { where: { id: string } }) =>
+        Promise.resolve(
+          where.id === 'admin-1'
+            ? { id: 'admin-1', role: UserRole.ADMIN }
+            : { id: 'passenger-1', role: UserRole.PASSENGER },
+        ),
+    );
+    manager.findOne.mockImplementation((entity: unknown) => {
+      if (entity === WalletAccount) {
+        return Promise.resolve({ ...account });
+      }
+      return Promise.resolve(null);
+    });
+
+    const result = await service.applyAdminAdjustment(
+      'admin-1',
+      'passenger-1',
+      25,
+      'Regularisation ticket SUP-1042',
+      '123e4567-e89b-12d3-a456-426614174000',
+    );
+
+    expect(result.balance).toBe(1025);
+    expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+    expect(manager.save).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'wallet-1', balance: 1025 }),
+    );
+    expect(manager.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: WalletLedgerEntryType.ADMIN_ADJUSTMENT,
+        amount: 25,
+        balanceAfter: 1025,
+        relatedEntityType: 'admin_wallet_adjustment',
+        relatedEntityId: '123e4567-e89b-12d3-a456-426614174000',
+        description:
+          'Ajustement par admin admin-1: Regularisation ticket SUP-1042',
+      }),
+    );
+  });
+
+  it('does not apply the same admin adjustment request twice', async () => {
+    userRepository.findOne.mockImplementation(
+      ({ where }: { where: { id: string } }) =>
+        Promise.resolve(
+          where.id === 'admin-1'
+            ? { id: 'admin-1', role: UserRole.ADMIN }
+            : { id: 'passenger-1', role: UserRole.PASSENGER },
+        ),
+    );
+    manager.findOne.mockImplementation((entity: unknown) => {
+      if (entity === WalletAccount) {
+        return Promise.resolve({ ...account, balance: 1025 });
+      }
+      if (entity === WalletLedgerEntry) {
+        return Promise.resolve({
+          id: 'adjustment-1',
+          userId: 'passenger-1',
+          type: WalletLedgerEntryType.ADMIN_ADJUSTMENT,
+        });
+      }
+      return Promise.resolve(null);
+    });
+
+    const result = await service.applyAdminAdjustment(
+      'admin-1',
+      'passenger-1',
+      25,
+      'Regularisation ticket SUP-1042',
+      '123e4567-e89b-12d3-a456-426614174000',
+    );
+
+    expect(result.balance).toBe(1025);
+    expect(manager.save).not.toHaveBeenCalled();
   });
 
   it('credits points only after FlexPay confirms the purchase', async () => {

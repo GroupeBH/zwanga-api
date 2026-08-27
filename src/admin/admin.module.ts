@@ -12,6 +12,15 @@ import { DriverOffer } from '../trip-requests/entities/driver-offer.entity';
 import { TripsModule } from '../trips/trips.module';
 import { TripRequestsModule } from '../trip-requests/trip-requests.module';
 import { BookingsModule } from '../bookings/bookings.module';
+import { WalletAccount } from '../wallet/entities/wallet-account.entity';
+import { WalletLedgerEntry } from '../wallet/entities/wallet-ledger-entry.entity';
+import { WalletModule } from '../wallet/wallet.module';
+import { AdminReferralsService } from './admin-referrals.service';
+import { ReferralsModule } from '../referrals/referrals.module';
+import { ReferralAccount } from '../referrals/entities/referral-account.entity';
+import { ReferralProfile } from '../referrals/entities/referral-profile.entity';
+import { ReferralReward } from '../referrals/entities/referral-reward.entity';
+import { ReferralWithdrawal } from '../referrals/entities/referral-withdrawal.entity';
 
 @Module({
   imports: [
@@ -21,16 +30,23 @@ import { BookingsModule } from '../bookings/bookings.module';
       Trip,
       Booking,
       PaymentTransaction,
+      WalletAccount,
+      WalletLedgerEntry,
+      ReferralAccount,
+      ReferralProfile,
+      ReferralReward,
+      ReferralWithdrawal,
       TripRequest,
       DriverOffer,
     ]),
     TripsModule,
     BookingsModule,
     TripRequestsModule,
+    WalletModule,
+    ReferralsModule,
   ],
   controllers: [AdminController],
-  providers: [AdminService],
+  providers: [AdminService, AdminReferralsService],
   exports: [AdminService],
 })
 export class AdminModule {}
-
