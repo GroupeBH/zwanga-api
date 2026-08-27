@@ -124,32 +124,32 @@ Migrations : `1780000018000-AddReferralProgram.ts`, `1780000019000-AddBranchRefe
 
 ### 8.1 `referral_profiles`
 
-| Champ | Rôle |
-| --- | --- |
-| `userId` | propriétaire unique du profil et du code |
-| `code` | code alphanumérique unique en majuscules |
-| `linkToken` | jeton opaque unique embarqué dans l'URL de destination ChottuLink |
-| `shareLinkUrl` | dernier lien court créé par le fournisseur actif |
-| `shareLinkGeneratedAt` | date de création utilisée pour le renouvellement préventif |
-| `referredByUserId` | parrain immuable, ou `null` |
-| `referredAt` | date du rattachement |
-| `attributionProvider` | `chottulink`, `branch` historique ou `legacy_code` |
-| `attributionLinkToken` | jeton ayant effectivement attribué le compte |
-| `attributionReferringLink` | lien d'origine tronqué à 500 caractères pour audit |
-| `attributionCapturedAt` | date du clic reçue du SDK |
-| `qualifiedAt` | premier paiement éligible |
-| `rewardWindowEndsAt` | fin de la période de douze mois |
+| Champ                      | Rôle                                                              |
+| -------------------------- | ----------------------------------------------------------------- |
+| `userId`                   | propriétaire unique du profil et du code                          |
+| `code`                     | code alphanumérique unique en majuscules                          |
+| `linkToken`                | jeton opaque unique embarqué dans l'URL de destination ChottuLink |
+| `shareLinkUrl`             | dernier lien court créé par le fournisseur actif                  |
+| `shareLinkGeneratedAt`     | date de création utilisée pour le renouvellement préventif        |
+| `referredByUserId`         | parrain immuable, ou `null`                                       |
+| `referredAt`               | date du rattachement                                              |
+| `attributionProvider`      | `chottulink`, `branch` historique ou `legacy_code`                |
+| `attributionLinkToken`     | jeton ayant effectivement attribué le compte                      |
+| `attributionReferringLink` | lien d'origine tronqué à 500 caractères pour audit                |
+| `attributionCapturedAt`    | date du clic reçue du SDK                                         |
+| `qualifiedAt`              | premier paiement éligible                                         |
+| `rewardWindowEndsAt`       | fin de la période de douze mois                                   |
 
 Une contrainte interdit l'auto-parrainage.
 
 ### 8.2 `referral_accounts`
 
-| Compartiment | Utilisation |
-| --- | --- |
-| `pendingTokens` | commissions dans la retenue |
-| `availableTokens` | montant retirable |
-| `reservedTokens` | retrait créé, réponse FlexPay non finale |
-| `withdrawnTokens` | retraits réussis cumulés |
+| Compartiment      | Utilisation                              |
+| ----------------- | ---------------------------------------- |
+| `pendingTokens`   | commissions dans la retenue              |
+| `availableTokens` | montant retirable                        |
+| `reservedTokens`  | retrait créé, réponse FlexPay non finale |
+| `withdrawnTokens` | retraits réussis cumulés                 |
 
 Un seul compte existe par utilisateur. Les montants sont en `numeric(14,2)`.
 
@@ -226,7 +226,7 @@ Les utilisateurs historiques reçoivent un code et un compte vide lors de la mig
 
 ### 9.4 Comptes existants sans parrain
 
-`POST /api/v1/referrals/me/attribution` accepte le jeton ChottuLink d'un utilisateur authentifié. L'opération verrouille son profil avec `pessimistic_write`, puis applique les règles suivantes :
+`POST /api/v1/referrals/me/attribution` accepte le jeton ChottuLink d'un utilisateur authentifié. L'opération sérialise le filleul avec un `pg_advisory_xact_lock`, puis charge séparément le profil et l'utilisateur du parrain afin de ne jamais appliquer un verrou PostgreSQL sur une jointure externe TypeORM. Elle applique les règles suivantes :
 
 - aucun parrain : premier rattachement accepté et daté ;
 - même parrain : succès idempotent sans nouvelle mutation ni notification ;
@@ -275,19 +275,19 @@ Il n'existe pas encore de flux métier complet de remboursement après paiement 
 
 ## 12. Endpoints
 
-| Méthode | Route | Authentification | Fonction |
-| --- | --- | --- | --- |
-| `POST` | `/api/v1/referrals/validate-code` | publique, limitée | valider un code |
-| `POST` | `/api/v1/referrals/resolve-attribution` | publique, limitée | valider un jeton de lien ChottuLink |
-| `GET` | `/api/v1/referrals/me` | JWT | code, règles et soldes |
-| `POST` | `/api/v1/referrals/me/attribution` | JWT, limitée | rattacher le premier parrain d'un compte existant |
-| `GET` | `/api/v1/referrals/me/referrals` | JWT | filleuls directs |
-| `GET` | `/api/v1/referrals/me/rewards` | JWT | commissions |
-| `GET` | `/api/v1/referrals/me/ledger` | JWT | registre comptable |
-| `GET` | `/api/v1/referrals/me/withdrawals` | JWT | retraits |
-| `POST` | `/api/v1/referrals/me/withdrawals` | JWT, limité | demander un retrait |
-| `GET` | `/api/v1/referrals/withdrawals/:orderNumber/status` | JWT | vérifier FlexPay |
-| `POST` | `/api/v1/referrals/withdrawals/flexpay/callback` | publique, limitée et vérifiée | callback FlexPay |
+| Méthode | Route                                               | Authentification              | Fonction                                          |
+| ------- | --------------------------------------------------- | ----------------------------- | ------------------------------------------------- |
+| `POST`  | `/api/v1/referrals/validate-code`                   | publique, limitée             | valider un code                                   |
+| `POST`  | `/api/v1/referrals/resolve-attribution`             | publique, limitée             | valider un jeton de lien ChottuLink               |
+| `GET`   | `/api/v1/referrals/me`                              | JWT                           | code, règles et soldes                            |
+| `POST`  | `/api/v1/referrals/me/attribution`                  | JWT, limitée                  | rattacher le premier parrain d'un compte existant |
+| `GET`   | `/api/v1/referrals/me/referrals`                    | JWT                           | filleuls directs                                  |
+| `GET`   | `/api/v1/referrals/me/rewards`                      | JWT                           | commissions                                       |
+| `GET`   | `/api/v1/referrals/me/ledger`                       | JWT                           | registre comptable                                |
+| `GET`   | `/api/v1/referrals/me/withdrawals`                  | JWT                           | retraits                                          |
+| `POST`  | `/api/v1/referrals/me/withdrawals`                  | JWT, limité                   | demander un retrait                               |
+| `GET`   | `/api/v1/referrals/withdrawals/:orderNumber/status` | JWT                           | vérifier FlexPay                                  |
+| `POST`  | `/api/v1/referrals/withdrawals/flexpay/callback`    | publique, limitée et vérifiée | callback FlexPay                                  |
 
 Exemple :
 
@@ -333,22 +333,22 @@ La détection anti-abus multi-comptes par appareil ou graphe de paiement reste u
 
 ## 14. Variables d'environnement
 
-| Variable | Valeur livrée | Effet |
-| --- | --- | --- |
-| `REFERRAL_REWARD_RATE` | `0.05` | 5 % du prix total payé |
-| `REFERRAL_HOLD_DAYS` | `7` | retenue |
-| `REFERRAL_REWARD_WINDOW_MONTHS` | `12` | durée depuis le premier paiement |
-| `REFERRAL_MIN_WITHDRAWAL_TOKENS` | `50` | retrait minimum |
-| `REFERRAL_TOKENS_CURRENCY` | `PTS` | identifiant technique du jeton retirable |
-| `REFERRAL_PAYOUT_CURRENCY` | `CDF` | devise de retrait |
-| `REFERRAL_MONEY_PER_TOKEN_CDF` | `100` | valeur du jeton |
-| `REFERRAL_SHARE_BASE_URL` | `https://zwanga.app/register` | lien partagé |
-| `REFERRAL_ATTRIBUTION_DAYS` | `30` | délai maximal entre résolution du lien et inscription |
-| `CHOTTULINK_REST_API_KEY` | vide | clé REST secrète `c_api_...` utilisée uniquement par le backend |
-| `CHOTTULINK_API_URL` | endpoint officiel `create-link` | création serveur du lien |
-| `CHOTTULINK_DOMAIN` | vide | domaine `*.chottu.link` configuré dans le dashboard |
-| `CHOTTULINK_LINK_REFRESH_DAYS` | `330` | renouvellement préventif du lien court |
-| `FLEXPAY_REFERRAL_PAYOUT_CALLBACK_URL` | vide | URL dédiée optionnelle |
+| Variable                               | Valeur livrée                   | Effet                                                           |
+| -------------------------------------- | ------------------------------- | --------------------------------------------------------------- |
+| `REFERRAL_REWARD_RATE`                 | `0.05`                          | 5 % du prix total payé                                          |
+| `REFERRAL_HOLD_DAYS`                   | `7`                             | retenue                                                         |
+| `REFERRAL_REWARD_WINDOW_MONTHS`        | `12`                            | durée depuis le premier paiement                                |
+| `REFERRAL_MIN_WITHDRAWAL_TOKENS`       | `50`                            | retrait minimum                                                 |
+| `REFERRAL_TOKENS_CURRENCY`             | `PTS`                           | identifiant technique du jeton retirable                        |
+| `REFERRAL_PAYOUT_CURRENCY`             | `CDF`                           | devise de retrait                                               |
+| `REFERRAL_MONEY_PER_TOKEN_CDF`         | `100`                           | valeur du jeton                                                 |
+| `REFERRAL_SHARE_BASE_URL`              | `https://zwanga.app/register`   | lien partagé                                                    |
+| `REFERRAL_ATTRIBUTION_DAYS`            | `30`                            | délai maximal entre résolution du lien et inscription           |
+| `CHOTTULINK_REST_API_KEY`              | vide                            | clé REST secrète `c_api_...` utilisée uniquement par le backend |
+| `CHOTTULINK_API_URL`                   | endpoint officiel `create-link` | création serveur du lien                                        |
+| `CHOTTULINK_DOMAIN`                    | vide                            | domaine `*.chottu.link` configuré dans le dashboard             |
+| `CHOTTULINK_LINK_REFRESH_DAYS`         | `330`                           | renouvellement préventif du lien court                          |
+| `FLEXPAY_REFERRAL_PAYOUT_CALLBACK_URL` | vide                            | URL dédiée optionnelle                                          |
 
 Si l'URL dédiée est vide, le serveur la construit avec `FLEXPAY_CALLBACK_BASE_URL` ou `PUBLIC_API_BASE_URL`.
 

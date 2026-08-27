@@ -66,6 +66,7 @@ Toute évolution financière doit respecter les règles suivantes :
 - [Parrainage, commissions de 5 % et retraits FlexPay](./referral-program.md)
 - [Configuration ChottuLink du lien de parrainage automatique](./chottulink-referral-setup.md)
 - [Fiabilisation mobile et rattachement des comptes existants](./referral-attribution-reliability.md)
+- [Fiabilisation PostgreSQL du rattachement de parrainage](./referral-attribution-postgresql-hardening.md)
 - [Journal des modifications financières](./CHANGELOG.md)
 
 Les documents détaillés du paiement, des jetons et du parrainage sont enrichis en même temps que les lots correspondants.

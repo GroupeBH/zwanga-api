@@ -4,6 +4,23 @@ Ce fichier répertorie les changements qui influencent un prix, un paiement, un 
 
 ## 27 août 2026
 
+### FIN-REF-008 — Fiabilisation PostgreSQL du rattachement
+
+Statut : implémenté dans le backend ; déploiement API requis, sans migration.
+
+Résumé : les rattachements ChottuLink échouaient en production parce que TypeORM combinait `FOR SHARE` avec la jointure externe utilisée pour charger le parrain. Le backend sérialise désormais chaque filleul avec un verrou transactionnel PostgreSQL et charge séparément le profil et l'utilisateur du parrain.
+
+Impacts financiers et d'attribution :
+
+- suppression des HTTP 500 déterministes sur `POST /referrals/me/attribution` ;
+- rattachement atomique, immuable et idempotent, même pour un ancien compte sans profil ;
+- sérialisation commune avec la création paresseuse du profil et du compte ;
+- aucune double notification lors des reprises mobiles ;
+- aucun changement du taux de 5 %, des soldes, de la retenue ou de la fenêtre de douze mois ;
+- aucune migration, variable d'environnement ou modification Parameter Store.
+
+Documentation complète : [referral-attribution-postgresql-hardening.md](./referral-attribution-postgresql-hardening.md).
+
 ### FIN-REF-007 — Fiabilisation mobile et comptes existants sans parrain
 
 Statut : implémenté dans le backend et l'application mobile ; déploiement API et nouveaux binaires Android/iOS requis, sans migration.
