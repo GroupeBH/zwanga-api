@@ -5,7 +5,7 @@ import {
   PaymentTransaction,
 } from '../payments/entities/payment-transaction.entity';
 import { SubscriptionPlan } from '../subscriptions/entities/subscription.entity';
-import { UserStatus } from '../users/entities/user.entity';
+import { User, UserStatus } from '../users/entities/user.entity';
 import { of } from 'rxjs';
 import { ReferralAccount } from './entities/referral-account.entity';
 import { ReferralProfile } from './entities/referral-profile.entity';
@@ -49,7 +49,9 @@ describe('ReferralsService', () => {
       rewardWindowEndsAt: null,
     } as ReferralProfile;
     const manager = {
-      findOne: jest.fn((entity: unknown, _findOptions?: unknown) => {
+      query: jest.fn().mockResolvedValue([{ pg_advisory_xact_lock: null }]),
+      findOne: jest.fn((entity: unknown, findOptions?: unknown) => {
+        void findOptions;
         const result =
           entity === ReferralReward
             ? null
@@ -321,6 +323,17 @@ describe('ReferralsService', () => {
             return Promise.resolve(referrerProfile);
           }
         }
+        if (entity === User) {
+          if (findOptions?.where?.id === 'referrer-1') {
+            return Promise.resolve(referrerProfile.user);
+          }
+          return Promise.resolve({
+            id: 'existing-user',
+            firstName: 'Patrick',
+            isActive: true,
+            status: UserStatus.ACTIVE,
+          });
+        }
         if (entity === ReferralAccount) return Promise.resolve(account);
         return Promise.resolve({
           id: 'existing-user',
@@ -350,6 +363,18 @@ describe('ReferralsService', () => {
     expect(existingProfile.referredByUserId).toBe('referrer-1');
     expect(existingProfile.attributionProvider).toBe('chottulink');
     expect(notificationService.sendNotification).toHaveBeenCalledTimes(1);
+    expect(manager.query).toHaveBeenCalledWith(
+      'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
+      ['zwanga:referral-user:existing-user'],
+    );
+
+    const lockedRelationLookup = manager.findOne.mock.calls.find(
+      ([entity, findOptions]) =>
+        entity === ReferralProfile &&
+        Boolean((findOptions as { relations?: string[] })?.relations) &&
+        Boolean((findOptions as { lock?: unknown })?.lock),
+    );
+    expect(lockedRelationLookup).toBeUndefined();
 
     await expect(
       service.attachAuthenticatedUser('existing-user', attribution),
@@ -360,8 +385,13 @@ describe('ReferralsService', () => {
   });
 
   it('never replaces the referrer of an existing account', async () => {
-    const { service, account, profileRepository, manager, notificationService } =
-      buildService();
+    const {
+      service,
+      account,
+      profileRepository,
+      manager,
+      notificationService,
+    } = buildService();
     const referralToken = 'abcdefghijklmnopqrstuvwxyz123456';
     const existingProfile = {
       id: 'profile-existing',
@@ -400,6 +430,17 @@ describe('ReferralsService', () => {
             return Promise.resolve(secondReferrerProfile);
           }
         }
+        if (entity === User) {
+          if (findOptions?.where?.id === 'second-referrer') {
+            return Promise.resolve(secondReferrerProfile.user);
+          }
+          return Promise.resolve({
+            id: 'existing-user',
+            firstName: 'Patrick',
+            isActive: true,
+            status: UserStatus.ACTIVE,
+          });
+        }
         if (entity === ReferralAccount) return Promise.resolve(account);
         return Promise.resolve({
           id: 'existing-user',
@@ -422,8 +463,13 @@ describe('ReferralsService', () => {
   });
 
   it('rejects self-referral for an existing account', async () => {
-    const { service, account, profileRepository, manager, notificationService } =
-      buildService();
+    const {
+      service,
+      account,
+      profileRepository,
+      manager,
+      notificationService,
+    } = buildService();
     const referralToken = 'abcdefghijklmnopqrstuvwxyz123456';
     const existingProfile = {
       id: 'profile-existing',
@@ -459,6 +505,9 @@ describe('ReferralsService', () => {
           if (findOptions?.where?.linkToken === referralToken) {
             return Promise.resolve(selfProfile);
           }
+        }
+        if (entity === User) {
+          return Promise.resolve(selfProfile.user);
         }
         if (entity === ReferralAccount) return Promise.resolve(account);
         return Promise.resolve({

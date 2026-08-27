@@ -61,7 +61,7 @@ La route exige un JWT, limite les appels, valide le format du jeton et refuse un
 
 ### 3.2 Atomicité et concurrence
 
-La transaction verrouille le profil du filleul avec `pessimistic_write`. Elle garantit qu'entre deux invitations concurrentes :
+La transaction prend un `pg_advisory_xact_lock` 64 bits, nommé avec l'identifiant du filleul. Ce verrou fonctionne même si son profil de parrainage n'existe pas encore et est libéré automatiquement au commit ou au rollback. Le profil et l'utilisateur du parrain sont chargés séparément, sans combiner une jointure TypeORM et un verrou PostgreSQL. Elle garantit qu'entre deux invitations concurrentes :
 
 - une seule peut écrire `referredByUserId` ;
 - une répétition du même lien est idempotente ;
@@ -70,6 +70,8 @@ La transaction verrouille le profil du filleul avec `pessimistic_write`. Elle ga
 - le compte de parrainage vide est créé si nécessaire dans la même transaction.
 
 Les champs `referredAt`, `attributionProvider`, `attributionLinkToken`, `attributionReferringLink` et `attributionCapturedAt` constituent la preuve d'attribution persistée.
+
+Le correctif PostgreSQL et sa procédure de reprise sont détaillés dans [`FIN-REF-008`](./referral-attribution-postgresql-hardening.md).
 
 ## 4. Cycle mobile
 
