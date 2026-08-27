@@ -5,6 +5,7 @@ import { Public } from '../common/decorators/public.decorator';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
 import { FlexPayCallbackDto } from '../payments/dto/payment.dto';
 import {
+  AttachReferralAttributionDto,
   ResolveReferralAttributionDto,
   RequestReferralWithdrawalDto,
   ValidateReferralCodeDto,
@@ -46,6 +47,23 @@ export class ReferralsController {
   @ApiOperation({ summary: 'Get referral link, balances and program rules' })
   getMySummary(@Request() req: AuthenticatedRequest) {
     return this.referralsService.getSummary(req.user.userId);
+  }
+
+  @Post('me/attribution')
+  @Auth()
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({
+    summary:
+      'Attach the authenticated account to its first referrer when none exists',
+  })
+  attachMyAttribution(
+    @Request() req: AuthenticatedRequest,
+    @Body() dto: AttachReferralAttributionDto,
+  ) {
+    return this.referralsService.attachAuthenticatedUser(
+      req.user.userId,
+      dto,
+    );
   }
 
   @Get('me/referrals')

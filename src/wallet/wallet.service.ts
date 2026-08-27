@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
@@ -34,7 +35,7 @@ import {
   InitiateWalletTopUpDto,
   TransferWalletPointsDto,
 } from './dto/wallet.dto';
-import { User } from '../users/entities/user.entity';
+import { User, UserRole } from '../users/entities/user.entity';
 
 export interface WalletSummary {
   account: WalletAccount;
@@ -116,6 +117,92 @@ export class WalletService {
     return this.ledgerRepository.find({
       where: { userId, accountType: WalletAccountType.POINTS },
       order: { createdAt: 'DESC' },
+    });
+  }
+
+  async applyAdminAdjustment(
+    adminId: string,
+    userId: string,
+    requestedAmount: number,
+    requestedReason: string,
+    requestId: string,
+  ): Promise<WalletAccount> {
+    const amount = this.roundMoney(Number(requestedAmount));
+    const reason = requestedReason.trim();
+
+    if (
+      !Number.isFinite(amount) ||
+      amount === 0 ||
+      Math.abs(amount) > 1_000_000
+    ) {
+      throw new BadRequestException(
+        "Le montant de l'ajustement doit etre different de zero",
+      );
+    }
+    if (reason.length < 10 || reason.length > 500) {
+      throw new BadRequestException(
+        "Le motif de l'ajustement doit contenir entre 10 et 500 caracteres",
+      );
+    }
+
+    const [admin, targetUser] = await Promise.all([
+      this.userRepository.findOne({ where: { id: adminId } }),
+      this.userRepository.findOne({ where: { id: userId } }),
+    ]);
+    if (!admin || admin.role !== UserRole.ADMIN) {
+      throw new ForbiddenException('Administrateur invalide');
+    }
+    if (!targetUser) {
+      throw new NotFoundException('Utilisateur introuvable');
+    }
+
+    return this.dataSource.transaction(async (manager) => {
+      const account = await manager.findOne(WalletAccount, {
+        where: { userId, type: WalletAccountType.POINTS },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!account) {
+        throw new NotFoundException('Portefeuille de jetons introuvable');
+      }
+
+      const existingEntry = await manager.findOne(WalletLedgerEntry, {
+        where: {
+          type: WalletLedgerEntryType.ADMIN_ADJUSTMENT,
+          relatedEntityType: 'admin_wallet_adjustment',
+          relatedEntityId: requestId,
+        },
+      });
+      if (existingEntry) {
+        if (existingEntry.userId !== userId) {
+          throw new BadRequestException(
+            "L'identifiant de demande est deja associe a un autre portefeuille",
+          );
+        }
+        return account;
+      }
+
+      const nextBalance = this.roundMoney(Number(account.balance) + amount);
+      if (nextBalance < 0) {
+        throw new BadRequestException('Solde de jetons insuffisant');
+      }
+
+      account.balance = nextBalance;
+      await manager.save(account);
+      await this.createLedgerEntryWithManager(manager, {
+        account,
+        userId,
+        amount,
+        balanceAfter: nextBalance,
+        type: WalletLedgerEntryType.ADMIN_ADJUSTMENT,
+        relatedEntityType: 'admin_wallet_adjustment',
+        relatedEntityId: requestId,
+        description: `Ajustement par admin ${adminId}: ${reason}`,
+      });
+
+      this.logger.warn(
+        `Admin wallet adjustment applied: requestId=${requestId}, adminId=${adminId}, userId=${userId}, amount=${amount}, balanceAfter=${nextBalance}`,
+      );
+      return account;
     });
   }
 

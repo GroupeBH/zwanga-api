@@ -49,7 +49,7 @@ describe('ReferralsService', () => {
       rewardWindowEndsAt: null,
     } as ReferralProfile;
     const manager = {
-      findOne: jest.fn((entity: unknown) => {
+      findOne: jest.fn((entity: unknown, _findOptions?: unknown) => {
         const result =
           entity === ReferralReward
             ? null
@@ -122,6 +122,9 @@ describe('ReferralsService', () => {
         }),
       ),
     };
+    const notificationService = {
+      sendNotification: jest.fn().mockResolvedValue(true),
+    };
 
     const service = new ReferralsService(
       profileRepository as any,
@@ -136,6 +139,7 @@ describe('ReferralsService', () => {
       configService as any,
       httpService as any,
       {} as any,
+      notificationService as any,
     );
     return {
       service,
@@ -143,6 +147,7 @@ describe('ReferralsService', () => {
       profile,
       profileRepository,
       httpService,
+      notificationService,
       manager,
       dataSource,
     };
@@ -230,6 +235,25 @@ describe('ReferralsService', () => {
     expect(dataSource.transaction).not.toHaveBeenCalled();
   });
 
+  it('does not reward a payment completed before an existing account was attached', async () => {
+    const { service, account, profile } = buildService();
+    profile.referredAt = new Date('2026-08-25T10:00:00Z');
+
+    const reward = await service.awardSubscriptionReward(
+      {
+        id: 'subscription-before-attribution',
+        userId: 'referred-1',
+        plan: SubscriptionPlan.PRO,
+        isTrial: false,
+      } as any,
+      succeededSubscriptionPayment,
+    );
+
+    expect(reward).toBeNull();
+    expect(account.pendingTokens).toBe(0);
+    expect(profile.qualifiedAt).toBeNull();
+  });
+
   it('resolves an active referrer from an opaque link token', async () => {
     const { service, profileRepository } = buildService();
     profileRepository.findOne.mockResolvedValue({
@@ -249,6 +273,212 @@ describe('ReferralsService', () => {
       valid: true,
       referrer: { firstName: 'Amina' },
     });
+  });
+
+  it('attaches an existing account without a referrer and remains idempotent', async () => {
+    const {
+      service,
+      account,
+      profileRepository,
+      manager,
+      notificationService,
+    } = buildService();
+    const referralToken = 'abcdefghijklmnopqrstuvwxyz123456';
+    const existingProfile = {
+      id: 'profile-existing',
+      userId: 'existing-user',
+      code: 'ZWEXISTING',
+      linkToken: 'existing-user-link-token-123456',
+      referredByUserId: null,
+      referredAt: null,
+      attributionProvider: null,
+      attributionLinkToken: null,
+      attributionReferringLink: null,
+      attributionCapturedAt: null,
+      qualifiedAt: null,
+      rewardWindowEndsAt: null,
+    } as ReferralProfile;
+    const referrerProfile = {
+      id: 'profile-referrer',
+      userId: 'referrer-1',
+      linkToken: referralToken,
+      user: {
+        firstName: 'Amina',
+        fcmToken: 'fcm-referrer-1',
+        isActive: true,
+        status: UserStatus.ACTIVE,
+      },
+    } as ReferralProfile;
+
+    profileRepository.findOne.mockResolvedValue(referrerProfile);
+    manager.findOne.mockImplementation(
+      (entity: unknown, findOptions?: { where?: Record<string, string> }) => {
+        if (entity === ReferralProfile) {
+          if (findOptions?.where?.userId === 'existing-user') {
+            return Promise.resolve(existingProfile);
+          }
+          if (findOptions?.where?.linkToken === referralToken) {
+            return Promise.resolve(referrerProfile);
+          }
+        }
+        if (entity === ReferralAccount) return Promise.resolve(account);
+        return Promise.resolve({
+          id: 'existing-user',
+          firstName: 'Patrick',
+          isActive: true,
+          status: UserStatus.ACTIVE,
+        });
+      },
+    );
+
+    const attribution = {
+      referralProvider: 'chottulink' as const,
+      referralToken,
+      referralReferringLink: 'https://zwanga-app.chottu.link/test',
+      referralCapturedAt: new Date().toISOString(),
+    };
+
+    await expect(
+      service.attachAuthenticatedUser('existing-user', attribution),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        attached: true,
+        newlyAttached: true,
+        referrer: { firstName: 'Amina' },
+      }),
+    );
+    expect(existingProfile.referredByUserId).toBe('referrer-1');
+    expect(existingProfile.attributionProvider).toBe('chottulink');
+    expect(notificationService.sendNotification).toHaveBeenCalledTimes(1);
+
+    await expect(
+      service.attachAuthenticatedUser('existing-user', attribution),
+    ).resolves.toEqual(
+      expect.objectContaining({ attached: true, newlyAttached: false }),
+    );
+    expect(notificationService.sendNotification).toHaveBeenCalledTimes(1);
+  });
+
+  it('never replaces the referrer of an existing account', async () => {
+    const { service, account, profileRepository, manager, notificationService } =
+      buildService();
+    const referralToken = 'abcdefghijklmnopqrstuvwxyz123456';
+    const existingProfile = {
+      id: 'profile-existing',
+      userId: 'existing-user',
+      code: 'ZWEXISTING',
+      linkToken: 'existing-user-link-token-123456',
+      referredByUserId: 'first-referrer',
+      referredAt: new Date('2026-08-20T10:00:00.000Z'),
+      attributionProvider: 'chottulink',
+      attributionLinkToken: 'first-referrer-link-token-123456',
+      attributionReferringLink: null,
+      attributionCapturedAt: new Date('2026-08-20T09:59:00.000Z'),
+      qualifiedAt: null,
+      rewardWindowEndsAt: null,
+    } as ReferralProfile;
+    const secondReferrerProfile = {
+      id: 'profile-second-referrer',
+      userId: 'second-referrer',
+      linkToken: referralToken,
+      user: {
+        firstName: 'Amina',
+        fcmToken: 'fcm-second-referrer',
+        isActive: true,
+        status: UserStatus.ACTIVE,
+      },
+    } as ReferralProfile;
+
+    profileRepository.findOne.mockResolvedValue(secondReferrerProfile);
+    manager.findOne.mockImplementation(
+      (entity: unknown, findOptions?: { where?: Record<string, string> }) => {
+        if (entity === ReferralProfile) {
+          if (findOptions?.where?.userId === 'existing-user') {
+            return Promise.resolve(existingProfile);
+          }
+          if (findOptions?.where?.linkToken === referralToken) {
+            return Promise.resolve(secondReferrerProfile);
+          }
+        }
+        if (entity === ReferralAccount) return Promise.resolve(account);
+        return Promise.resolve({
+          id: 'existing-user',
+          firstName: 'Patrick',
+          isActive: true,
+          status: UserStatus.ACTIVE,
+        });
+      },
+    );
+
+    await expect(
+      service.attachAuthenticatedUser('existing-user', {
+        referralProvider: 'chottulink',
+        referralToken,
+        referralCapturedAt: new Date().toISOString(),
+      }),
+    ).rejects.toThrow('ne peut pas etre modifie');
+    expect(existingProfile.referredByUserId).toBe('first-referrer');
+    expect(notificationService.sendNotification).not.toHaveBeenCalled();
+  });
+
+  it('rejects self-referral for an existing account', async () => {
+    const { service, account, profileRepository, manager, notificationService } =
+      buildService();
+    const referralToken = 'abcdefghijklmnopqrstuvwxyz123456';
+    const existingProfile = {
+      id: 'profile-existing',
+      userId: 'existing-user',
+      code: 'ZWEXISTING',
+      linkToken: referralToken,
+      referredByUserId: null,
+      referredAt: null,
+      attributionProvider: null,
+      attributionLinkToken: null,
+      attributionReferringLink: null,
+      attributionCapturedAt: null,
+      qualifiedAt: null,
+      rewardWindowEndsAt: null,
+    } as ReferralProfile;
+    const selfProfile = {
+      ...existingProfile,
+      user: {
+        firstName: 'Patrick',
+        fcmToken: 'fcm-existing-user',
+        isActive: true,
+        status: UserStatus.ACTIVE,
+      },
+    } as ReferralProfile;
+
+    profileRepository.findOne.mockResolvedValue(selfProfile);
+    manager.findOne.mockImplementation(
+      (entity: unknown, findOptions?: { where?: Record<string, string> }) => {
+        if (entity === ReferralProfile) {
+          if (findOptions?.where?.userId === 'existing-user') {
+            return Promise.resolve(existingProfile);
+          }
+          if (findOptions?.where?.linkToken === referralToken) {
+            return Promise.resolve(selfProfile);
+          }
+        }
+        if (entity === ReferralAccount) return Promise.resolve(account);
+        return Promise.resolve({
+          id: 'existing-user',
+          firstName: 'Patrick',
+          isActive: true,
+          status: UserStatus.ACTIVE,
+        });
+      },
+    );
+
+    await expect(
+      service.attachAuthenticatedUser('existing-user', {
+        referralProvider: 'chottulink',
+        referralToken,
+        referralCapturedAt: new Date().toISOString(),
+      }),
+    ).rejects.toThrow('propre code de parrainage');
+    expect(existingProfile.referredByUserId).toBeNull();
+    expect(notificationService.sendNotification).not.toHaveBeenCalled();
   });
 
   it('rejects a ChottuLink attribution captured outside the 30-day window', async () => {

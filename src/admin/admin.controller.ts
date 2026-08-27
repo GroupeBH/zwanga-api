@@ -2,6 +2,7 @@ import {
   Controller,
   Delete,
   Get,
+  Post,
   Put,
   Param,
   Body,
@@ -17,11 +18,20 @@ import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decor
 import { UpdateTripDto } from '../trips/dto/trip.dto';
 import { UpdateTripRequestDto } from '../trip-requests/dto/trip-request.dto';
 import { BookingStatus } from '../bookings/entities/booking.entity';
+import { AdminWalletAdjustmentDto } from './dto/admin-wallet.dto';
+import { AdminReferralsService } from './admin-referrals.service';
+
+interface AuthenticatedAdminRequest {
+  user: { userId: string };
+}
 
 @ApiTags('Admin')
 @Controller('admin')
 export class AdminController {
-  constructor(private readonly adminService: AdminService) {}
+  constructor(
+    private readonly adminService: AdminService,
+    private readonly adminReferralsService: AdminReferralsService,
+  ) {}
 
   @Get('kyc/pending')
   @Auth()
@@ -38,12 +48,17 @@ export class AdminController {
   @SensitiveThrottle(20, 60000) // 20 requests per minute per IP
   @ApiOperation({ summary: 'Verify or reject KYC document' })
   async verifyKyc(
-    @Request() req,
+    @Request() req: AuthenticatedAdminRequest,
     @Param('kycId') kycId: string,
     @Body('approved') approved: boolean,
     @Body('reason') reason?: string,
   ) {
-    return this.adminService.verifyKyc(kycId, req.user.userId, approved, reason);
+    return this.adminService.verifyKyc(
+      kycId,
+      req.user.userId,
+      approved,
+      reason,
+    );
   }
 
   @Get('users')
@@ -56,6 +71,113 @@ export class AdminController {
     @Query('limit') limit: number = 10,
   ) {
     return this.adminService.getAllUsers(page, limit);
+  }
+
+  @Get('wallets')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'List token wallets and their global summary' })
+  async getWalletAccounts(
+    @Query('page') page: number = 1,
+    @Query('limit') limit: number = 25,
+    @Query('search') search?: string,
+  ) {
+    return this.adminService.getWalletAccounts(page, limit, search);
+  }
+
+  @Get('wallets/ledger')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'List the immutable token ledger' })
+  async getWalletLedger(
+    @Query('page') page: number = 1,
+    @Query('limit') limit: number = 25,
+    @Query('search') search?: string,
+    @Query('type') type?: string,
+  ) {
+    return this.adminService.getWalletLedger(page, limit, search, type);
+  }
+
+  @Post('wallets/:userId/adjustments')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(5, 60000)
+  @ApiOperation({ summary: 'Apply an audited token balance adjustment' })
+  async adjustWallet(
+    @Request() req: AuthenticatedAdminRequest,
+    @Param('userId') userId: string,
+    @Body() dto: AdminWalletAdjustmentDto,
+  ) {
+    return this.adminService.adjustWallet(
+      req.user.userId,
+      userId,
+      dto.amount,
+      dto.reason,
+      dto.requestId,
+    );
+  }
+
+  @Get('referrals/accounts')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'List referral accounts and global balances' })
+  getReferralAccounts(
+    @Query('page') page: number = 1,
+    @Query('limit') limit: number = 25,
+    @Query('search') search?: string,
+  ) {
+    return this.adminReferralsService.getAccounts(page, limit, search);
+  }
+
+  @Get('referrals/rewards')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'List referral rewards and commissions' })
+  getReferralRewards(
+    @Query('page') page: number = 1,
+    @Query('limit') limit: number = 25,
+    @Query('search') search?: string,
+    @Query('status') status?: string,
+  ) {
+    return this.adminReferralsService.getRewards(page, limit, search, status);
+  }
+
+  @Get('referrals/withdrawals')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'List referral withdrawal requests' })
+  getReferralWithdrawals(
+    @Query('page') page: number = 1,
+    @Query('limit') limit: number = 25,
+    @Query('search') search?: string,
+    @Query('status') status?: string,
+  ) {
+    return this.adminReferralsService.getWithdrawals(
+      page,
+      limit,
+      search,
+      status,
+    );
+  }
+
+  @Post('referrals/withdrawals/:withdrawalId/reconcile')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(5, 60000)
+  @ApiOperation({ summary: 'Reconcile a referral withdrawal with FlexPay' })
+  reconcileReferralWithdrawal(
+    @Request() req: AuthenticatedAdminRequest,
+    @Param('withdrawalId') withdrawalId: string,
+  ) {
+    return this.adminReferralsService.reconcileWithdrawal(
+      req.user.userId,
+      withdrawalId,
+    );
   }
 
   @Get('users/:userId/details')
@@ -252,4 +374,3 @@ export class AdminController {
     return { message: 'Trip request deleted successfully' };
   }
 }
-

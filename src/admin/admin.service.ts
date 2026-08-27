@@ -6,7 +6,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Point, Repository } from 'typeorm';
+import { In, Point, Repository, SelectQueryBuilder } from 'typeorm';
 import { Booking, BookingStatus } from '../bookings/entities/booking.entity';
 import { BookingsService } from '../bookings/bookings.service';
 import { PaymentTransaction } from '../payments/entities/payment-transaction.entity';
@@ -22,8 +22,19 @@ import { UpdateTripDto } from '../trips/dto/trip.dto';
 import { TripsService } from '../trips/trips.service';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { KycDocument, KycStatus } from '../users/entities/kyc-document.entity';
+import {
+  WalletAccount,
+  WalletAccountType,
+} from '../wallet/entities/wallet-account.entity';
+import {
+  WalletLedgerEntry,
+  WalletLedgerEntryType,
+} from '../wallet/entities/wallet-ledger-entry.entity';
+import { WalletService } from '../wallet/wallet.service';
 
 type Coordinates = [number, number] | null;
+type WalletAccountWithUser = WalletAccount & { user?: User | null };
+type WalletLedgerEntryWithUser = WalletLedgerEntry & { user?: User | null };
 
 @Injectable()
 export class AdminService {
@@ -41,6 +52,10 @@ export class AdminService {
     private bookingRepository: Repository<Booking>,
     @InjectRepository(PaymentTransaction)
     private paymentRepository: Repository<PaymentTransaction>,
+    @InjectRepository(WalletAccount)
+    private walletAccountRepository: Repository<WalletAccount>,
+    @InjectRepository(WalletLedgerEntry)
+    private walletLedgerRepository: Repository<WalletLedgerEntry>,
     @InjectRepository(TripRequest)
     private tripRequestRepository: Repository<TripRequest>,
     @InjectRepository(DriverOffer)
@@ -48,6 +63,7 @@ export class AdminService {
     private readonly tripsService: TripsService,
     private readonly bookingsService: BookingsService,
     private readonly tripRequestsService: TripRequestsService,
+    private readonly walletService: WalletService,
   ) {}
 
   async verifyKyc(
@@ -131,6 +147,153 @@ export class AdminService {
 
     this.logger.debug(`Fetched ${users.length} users (total: ${total})`);
     return { users: users.map((user) => this.sanitizeUser(user)!), total };
+  }
+
+  async getWalletAccounts(
+    page: number = 1,
+    limit: number = 25,
+    search?: string,
+  ) {
+    const { pageNumber, pageSize } = this.normalizePagination(page, limit);
+    const query = this.walletAccountRepository
+      .createQueryBuilder('account')
+      .leftJoinAndMapOne(
+        'account.user',
+        User,
+        'walletUser',
+        'walletUser.id = account.userId',
+      )
+      .addSelect([
+        'walletUser.id',
+        'walletUser.firstName',
+        'walletUser.lastName',
+        'walletUser.phone',
+        'walletUser.email',
+        'walletUser.role',
+        'walletUser.status',
+        'walletUser.isDriver',
+        'walletUser.isActive',
+      ])
+      .where('account.type = :accountType', {
+        accountType: WalletAccountType.POINTS,
+      });
+
+    this.applyWalletUserSearch(query, search, 'account', 'walletUser');
+
+    const [accounts, total] = await query
+      .orderBy('account.updatedAt', 'DESC')
+      .skip((pageNumber - 1) * pageSize)
+      .take(pageSize)
+      .getManyAndCount();
+
+    const rawSummary = await this.walletAccountRepository
+      .createQueryBuilder('account')
+      .select('COUNT(account.id)', 'accounts')
+      .addSelect('COALESCE(SUM(account.balance), 0)', 'totalBalance')
+      .addSelect(
+        'COUNT(account.id) FILTER (WHERE account.balance > 0)',
+        'positiveBalances',
+      )
+      .addSelect(
+        'COUNT(account.id) FILTER (WHERE account.balance < 0)',
+        'negativeBalances',
+      )
+      .where('account.type = :accountType', {
+        accountType: WalletAccountType.POINTS,
+      })
+      .getRawOne<{
+        accounts: string;
+        totalBalance: string;
+        positiveBalances: string;
+        negativeBalances: string;
+      }>();
+
+    return {
+      accounts: (accounts as WalletAccountWithUser[]).map((account) =>
+        this.serializeWalletAccount(account),
+      ),
+      total,
+      page: pageNumber,
+      limit: pageSize,
+      summary: {
+        accounts: Number(rawSummary?.accounts ?? 0),
+        totalBalance: Number(rawSummary?.totalBalance ?? 0),
+        positiveBalances: Number(rawSummary?.positiveBalances ?? 0),
+        negativeBalances: Number(rawSummary?.negativeBalances ?? 0),
+        currency: 'PTS',
+      },
+    };
+  }
+
+  async getWalletLedger(
+    page: number = 1,
+    limit: number = 25,
+    search?: string,
+    requestedType?: string,
+  ) {
+    const { pageNumber, pageSize } = this.normalizePagination(page, limit);
+    const entryType = this.normalizeWalletEntryType(requestedType);
+    const query = this.walletLedgerRepository
+      .createQueryBuilder('entry')
+      .leftJoinAndMapOne(
+        'entry.user',
+        User,
+        'walletUser',
+        'walletUser.id = entry.userId',
+      )
+      .addSelect([
+        'walletUser.id',
+        'walletUser.firstName',
+        'walletUser.lastName',
+        'walletUser.phone',
+        'walletUser.email',
+        'walletUser.role',
+        'walletUser.status',
+        'walletUser.isDriver',
+        'walletUser.isActive',
+      ])
+      .where('entry.accountType = :accountType', {
+        accountType: WalletAccountType.POINTS,
+      });
+
+    if (entryType) {
+      query.andWhere('entry.type = :entryType', { entryType });
+    }
+    this.applyWalletUserSearch(query, search, 'entry', 'walletUser');
+
+    const [entries, total] = await query
+      .orderBy('entry.createdAt', 'DESC')
+      .skip((pageNumber - 1) * pageSize)
+      .take(pageSize)
+      .getManyAndCount();
+
+    return {
+      entries: (entries as WalletLedgerEntryWithUser[]).map((entry) =>
+        this.serializeWalletLedgerEntry(entry),
+      ),
+      total,
+      page: pageNumber,
+      limit: pageSize,
+    };
+  }
+
+  async adjustWallet(
+    adminId: string,
+    userId: string,
+    amount: number,
+    reason: string,
+    requestId: string,
+  ) {
+    await this.ensureAdmin(adminId, 'Only admins can adjust a wallet balance');
+    const account = await this.walletService.applyAdminAdjustment(
+      adminId,
+      userId,
+      amount,
+      reason,
+      requestId,
+    );
+    const user = await this.userRepository.findOne({ where: { id: userId } });
+    return this.serializeWalletAccount({ ...account, user });
   }
 
   async getUserDetails(userId: string) {
@@ -477,6 +640,77 @@ export class AdminService {
     return {
       pageNumber,
       pageSize: Math.min(requestedLimit, this.maxPageLimit),
+    };
+  }
+
+  private applyWalletUserSearch<T extends object>(
+    query: SelectQueryBuilder<T>,
+    search: string | undefined,
+    rootAlias: 'account' | 'entry',
+    userAlias: 'walletUser',
+  ): void {
+    const normalizedSearch = search?.trim();
+    if (!normalizedSearch) {
+      return;
+    }
+
+    query.andWhere(
+      `(
+        CAST(${rootAlias}.userId AS TEXT) ILIKE :walletSearch
+        OR ${userAlias}.firstName ILIKE :walletSearch
+        OR ${userAlias}.lastName ILIKE :walletSearch
+        OR ${userAlias}.phone ILIKE :walletSearch
+        OR ${userAlias}.email ILIKE :walletSearch
+      )`,
+      { walletSearch: `%${normalizedSearch.slice(0, 160)}%` },
+    );
+  }
+
+  private normalizeWalletEntryType(
+    requestedType?: string,
+  ): WalletLedgerEntryType | undefined {
+    if (!requestedType || requestedType === 'all') {
+      return undefined;
+    }
+    if (
+      !Object.values(WalletLedgerEntryType).includes(
+        requestedType as WalletLedgerEntryType,
+      )
+    ) {
+      throw new BadRequestException("Type d'ecriture de portefeuille invalide");
+    }
+    return requestedType as WalletLedgerEntryType;
+  }
+
+  private serializeWalletAccount(account: WalletAccountWithUser) {
+    return {
+      id: account.id,
+      userId: account.userId,
+      type: account.type,
+      balance: Number(account.balance),
+      currency: account.currency,
+      createdAt: account.createdAt,
+      updatedAt: account.updatedAt,
+      user: this.sanitizeUser(account.user),
+    };
+  }
+
+  private serializeWalletLedgerEntry(entry: WalletLedgerEntryWithUser) {
+    return {
+      id: entry.id,
+      accountId: entry.accountId,
+      userId: entry.userId,
+      accountType: entry.accountType,
+      type: entry.type,
+      amount: Number(entry.amount),
+      balanceAfter: Number(entry.balanceAfter),
+      currency: entry.currency,
+      relatedEntityType: entry.relatedEntityType,
+      relatedEntityId: entry.relatedEntityId,
+      paymentTransactionId: entry.paymentTransactionId,
+      description: entry.description,
+      createdAt: entry.createdAt,
+      user: this.sanitizeUser(entry.user),
     };
   }
 

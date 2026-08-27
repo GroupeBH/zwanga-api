@@ -5,7 +5,7 @@ Périmètre : actions d'exploitation nécessaires après l'intégration du code
 
 ## 1. Ce qui est déjà intégré
 
-Le backend crée un lien ChottuLink propre à chaque parrain, conserve son URL, valide le jeton reçu à l'inscription et rattache le filleul. L'application iOS/Android écoute ChottuLink, conserve la première attribution valide, ouvre l'inscription et transmet automatiquement l'attribution pour les flux téléphone, Google et Apple.
+Le backend crée un lien ChottuLink propre à chaque parrain, conserve son URL, valide le jeton reçu et rattache le filleul. L'application iOS/Android écoute ChottuLink, conserve la première attribution valide et la transmet automatiquement pour les flux téléphone, Google et Apple. Si l'utilisateur se connecte à un compte existant sans parrain, le rattachement est effectué après l'ouverture de session.
 
 Le SDK mobile livré est `react-native-chottulink-sdk@1.1.2`. Il fonctionne avec un development build Expo ou un binaire natif, jamais avec Expo Go.
 
@@ -14,7 +14,7 @@ Le SDK mobile livré est `react-native-chottulink-sdk@1.1.2`. Il fonctionne avec
 Dans le tableau de bord ChottuLink :
 
 1. créer l'organisation et le projet Zwanga ;
-2. choisir un domaine, par exemple `zwanga.chottu.link` ;
+2. utiliser le domaine de production `zwanga-app.chottu.link` ;
 3. configurer Android avec le package `com.zwanga` et l'URL Play Store ;
 4. configurer iOS avec le bundle ID `com.biso.zwanga`, l'Apple Team ID et l'URL App Store ;
 5. vérifier Android App Links et iOS Universal Links dans le tableau de bord ;
@@ -30,7 +30,7 @@ Renseigner dans l'environnement de production du backend :
 REFERRAL_ATTRIBUTION_DAYS=30
 CHOTTULINK_REST_API_KEY=c_api_...
 CHOTTULINK_API_URL=https://api2.chottulink.com/chotuCore/pa/v1/create-link
-CHOTTULINK_DOMAIN=zwanga.chottu.link
+CHOTTULINK_DOMAIN=zwanga-app.chottu.link
 CHOTTULINK_LINK_REFRESH_DAYS=330
 ```
 
@@ -42,10 +42,10 @@ Ajouter aux environnements EAS utilisés pour les builds, au minimum `production
 
 ```dotenv
 CHOTTULINK_MOBILE_API_KEY=...
-CHOTTULINK_DOMAIN=zwanga.chottu.link
+CHOTTULINK_DOMAIN=zwanga-app.chottu.link
 ```
 
-La clé Mobile SDK est obtenue dans la section des clés d'intégration mobile du tableau de bord. Ne pas utiliser la clé REST à sa place.
+La clé Mobile SDK est obtenue dans la section des clés d'intégration mobile du tableau de bord. Ne pas utiliser la clé REST à sa place. Le profil EAS `production` charge l'environnement distant `production` et refuse désormais le build si la clé mobile ou le domaine manque.
 
 ## 5. Base de données et déploiement
 
@@ -69,7 +69,9 @@ eas build --platform android --profile production
 eas build --platform ios --profile production
 ```
 
-Exécuter `expo prebuild` dans le dépôt mobile, avec `CHOTTULINK_MOBILE_API_KEY` et `CHOTTULINK_DOMAIN` déjà définis. Cette étape synchronise le domaine associé dans `ios/zwanga/zwanga.entitlements`, l'intent filter dans `android/app/src/main/AndroidManifest.xml` et l'autolinking du SDK. Les dossiers natifs étant suivis par Git, contrôler leur diff avant de le valider ; sans cette synchronisation, EAS compile les anciens projets natifs et le lien universel ne peut pas ouvrir l'application.
+Les fichiers natifs suivis par Git contiennent explicitement `zwanga-app.chottu.link` dans `ios/zwanga/zwanga.entitlements` et `android/app/src/main/AndroidManifest.xml`. La commande `npm run validate:referrals` contrôle leur présence. Le hook `eas-build-pre-install` répète ce contrôle et vérifie les variables du profil production avant toute compilation.
+
+Si `expo prebuild` est utilisé, contrôler son diff avant de le valider : les dossiers natifs étant suivis par Git, EAS compile leur état courant et ne resynchronise pas automatiquement les champs de `app.config.js`.
 
 Incrémenter auparavant `android.versionCode` et `ios.buildNumber` s'ils ont déjà été publiés. Utiliser un development build Expo pour les essais locaux ; Expo Go ne charge pas le module ChottuLink.
 
@@ -86,8 +88,9 @@ Effectuer au moins les contrôles suivants sur de vrais appareils :
 7. créer un compte téléphone, puis répéter avec Google et Apple ;
 8. vérifier en base `referredByUserId`, `attributionProvider = chottulink`, `attributionLinkToken`, `attributionReferringLink` et `attributionCapturedAt` ;
 9. ouvrir un second lien avant inscription et vérifier que le premier reste prioritaire ;
-10. ouvrir un lien avec un compte déjà connecté et vérifier qu'il n'est pas rattaché ;
-11. confirmer un paiement FlexPay éligible et vérifier la commission de 5 %.
+10. ouvrir un lien avec un compte existant sans parrain et vérifier son rattachement ;
+11. répéter avec un compte déjà rattaché et vérifier que son parrain reste inchangé ;
+12. confirmer un paiement FlexPay éligible et vérifier la commission de 5 %.
 
 Tester aussi le parcours avec l'application déjà installée, un jeton invalide, une attribution locale vieille de plus de 30 jours et un parrain suspendu.
 

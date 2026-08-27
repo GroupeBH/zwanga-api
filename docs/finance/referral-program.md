@@ -6,7 +6,7 @@ Périmètre : inscription, abonnements, courses, paiements FlexPay, jetons retir
 
 ## 1. Décision métier
 
-Chaque utilisateur Zwanga possède un lien d'invitation ChottuLink personnel. Le filleul ouvre ce lien, installe l'application si nécessaire puis s'inscrit sans saisir de code. L'application rattache automatiquement le parrain au compte lors de sa création.
+Chaque utilisateur Zwanga possède un lien d'invitation ChottuLink personnel. Le filleul ouvre ce lien, installe l'application si nécessaire puis s'inscrit ou se connecte sans saisir de code. L'application rattache automatiquement le parrain lors de la création du compte ou, pour un compte existant, seulement si aucun parrain n'est encore enregistré.
 
 Le parrain reçoit **5 % du prix total réellement payé** par son filleul pour :
 
@@ -55,7 +55,8 @@ Une commission est créée seulement si :
 3. `payment.purpose = subscription_pro` ;
 4. `payment.status = succeeded` ;
 5. le filleul possède un parrain ;
-6. la date de paiement se trouve dans la fenêtre de douze mois.
+6. la date du paiement est postérieure ou égale à `referredAt` ;
+7. la date de paiement se trouve dans la fenêtre de douze mois.
 
 Un abonnement payé avec des jetons peut toujours recevoir le bonus promotionnel de 25 jetons, mais il ne génère aucune commission de parrainage.
 
@@ -69,7 +70,8 @@ Une commission est créée seulement si :
 4. `booking.paymentStatus = succeeded` ;
 5. la transaction FlexPay possède `purpose = trip_booking` ;
 6. le filleul possède un parrain ;
-7. la date de paiement se trouve dans la fenêtre de douze mois.
+7. la date du paiement est postérieure ou égale à `referredAt` ;
+8. la date de paiement se trouve dans la fenêtre de douze mois.
 
 Une course en espèces, en jetons, `no_show`, `boarding_uncertain`, annulée, non déposée ou non payée ne génère rien.
 
@@ -191,7 +193,9 @@ Le SDK ChottuLink est initialisé au démarrage de l'application native. L'appli
 6. `referralToken`, `referralReferringLink` et `referralCapturedAt` sont envoyés lors de la création du compte ;
 7. le serveur rattache le parrain et persiste les informations d'audit.
 
-La règle est **premier lien valide gagnant**. Un second lien ne remplace pas une attribution locale encore valide. Un lien ouvert pendant que l'utilisateur est déjà connecté est ignoré. L'attribution locale est supprimée après une création de compte réussie ou après la connexion à un compte existant.
+La règle est **premier lien valide gagnant**. Un second lien ne remplace pas une attribution locale encore valide. Un lien ouvert pendant que l'utilisateur est déjà connecté est immédiatement présenté à la route authentifiée d'attribution. Lorsqu'un utilisateur se connecte après avoir ouvert un lien, l'attribution reste conservée jusqu'à la confirmation du backend. Elle est consommée après un succès ou un refus définitif, mais reste disponible après une erreur réseau.
+
+Le SDK pouvant restituer la même attribution différée à plusieurs démarrages, l'application conserve pendant 90 jours la liste limitée des attributions différées déjà consommées. Cela interdit le rejeu automatique sur un deuxième compte du même appareil. Un nouveau clic direct reste traitable.
 
 La fenêtre locale d'attribution de 30 jours commence à la résolution du lien par le SDK ChottuLink, notamment à la première ouverture après installation. ChottuLink ne fournit pas de date de clic dans cet événement, mais une date de résolution. Cette fenêtre ne doit pas être confondue avec la rémunération de douze mois, qui commence au premier paiement éligible du filleul.
 
@@ -203,7 +207,7 @@ Les propriétés automatiques sont acceptées par :
 - `POST /api/v1/auth/google/mobile` ;
 - `POST /api/v1/auth/apple/mobile`.
 
-Le serveur valide le format, la date maximale de 30 jours et le profil correspondant avant la création. Le parrain doit exister, être actif et non suspendu. Après inscription, le lien personnel du nouvel utilisateur et son compte à zéro sont créés. Aucun endpoint ne permet de remplacer son parrain.
+Le serveur valide le format, la date maximale de 30 jours et le profil correspondant avant la création ou le rattachement authentifié. Le parrain doit exister, être actif et non suspendu. Après inscription, le lien personnel du nouvel utilisateur et son compte à zéro sont créés. Aucun endpoint ne permet de remplacer son parrain.
 
 Exemple de propriétés ajoutées au formulaire ou au JSON d'inscription :
 
@@ -218,7 +222,19 @@ Exemple de propriétés ajoutées au formulaire ou au JSON d'inscription :
 
 `referralCode` reste accepté uniquement pour la compatibilité avec d'anciens liens déjà diffusés. Il n'existe plus de champ de saisie manuelle dans l'application.
 
-Les utilisateurs historiques reçoivent un code et un compte vide lors de la migration, sans parrain ni commission rétroactive.
+Les utilisateurs historiques reçoivent un code et un compte vide lors de la migration. Ils peuvent désormais utiliser une invitation tant que `referredByUserId` est `null`. Le rattachement ne crée aucune commission rétroactive : seuls les paiements éligibles confirmés après le rattachement peuvent générer 5 %.
+
+### 9.4 Comptes existants sans parrain
+
+`POST /api/v1/referrals/me/attribution` accepte le jeton ChottuLink d'un utilisateur authentifié. L'opération verrouille son profil avec `pessimistic_write`, puis applique les règles suivantes :
+
+- aucun parrain : premier rattachement accepté et daté ;
+- même parrain : succès idempotent sans nouvelle mutation ni notification ;
+- autre parrain déjà présent : refus, sans modification ;
+- auto-parrainage : refus ;
+- jeton expiré, invalide ou parrain suspendu : refus.
+
+Le rattachement démarre seulement la relation. La fenêtre financière de douze mois commence toujours au premier paiement éligible réussi. Une notification push est envoyée au parrain uniquement lors du premier rattachement si son appareil possède un token FCM.
 
 ## 10. Retrait FlexPay
 
@@ -264,6 +280,7 @@ Il n'existe pas encore de flux métier complet de remboursement après paiement 
 | `POST` | `/api/v1/referrals/validate-code` | publique, limitée | valider un code |
 | `POST` | `/api/v1/referrals/resolve-attribution` | publique, limitée | valider un jeton de lien ChottuLink |
 | `GET` | `/api/v1/referrals/me` | JWT | code, règles et soldes |
+| `POST` | `/api/v1/referrals/me/attribution` | JWT, limitée | rattacher le premier parrain d'un compte existant |
 | `GET` | `/api/v1/referrals/me/referrals` | JWT | filleuls directs |
 | `GET` | `/api/v1/referrals/me/rewards` | JWT | commissions |
 | `GET` | `/api/v1/referrals/me/ledger` | JWT | registre comptable |
