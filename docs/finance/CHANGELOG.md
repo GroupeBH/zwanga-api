@@ -2,6 +2,27 @@
 
 Ce fichier répertorie les changements qui influencent un prix, un paiement, un solde, une commission, une récompense ou un retrait.
 
+## 31 août 2026
+
+### FIN-DRIVER-003 — Livraison fiable du gain conducteur
+
+Statut : implémenté dans le backend et l'application mobile ; déploiement API et nouveaux binaires Android/iOS requis, sans migration.
+
+Résumé : les notifications financières distinguent maintenant les tokens FCM natifs des `ExpoPushToken`, conservent les échecs critiques et les retentent toutes les cinq minutes pendant 72 heures. Lorsque l'application est ouverte hors de l'écran de navigation, le push de fin de trajet ouvre aussi un modal détaillant le total, le gain acquis, le liquide à encaisser et le paiement électronique attendu.
+
+Impacts financiers et opérationnels :
+
+- aucun changement de calcul, de commission, de solde ou de retrait ;
+- notification persistée même lorsque le conducteur n'a momentanément aucun token ;
+- livraison Expo pour iOS/Expo et Firebase pour les tokens natifs Android ;
+- suppression conditionnelle des tokens déclarés invalides par le fournisseur ;
+- reprise concurrente sûre avec `FOR UPDATE SKIP LOCKED`, réseau exécuté hors transaction ;
+- aucun double modal avec le résumé temps réel de l'écran de navigation ;
+- resynchronisation mobile automatique après rotation du token push ;
+- aucune migration ni nouvelle variable d'environnement.
+
+Documentation complète : [driver-trip-revenue-notification.md](./driver-trip-revenue-notification.md).
+
 ## 27 août 2026
 
 ### FIN-REF-008 — Fiabilisation PostgreSQL du rattachement

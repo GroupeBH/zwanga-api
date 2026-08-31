@@ -1,6 +1,6 @@
 # FIN-DRIVER-002 — Notification du montant conducteur à la fin du trajet
 
-Dernière mise à jour : 26 août 2026  
+Dernière mise à jour : 31 août 2026
 Statut : implémenté dans le backend et l'application mobile ; déploiement requis, aucune migration de base.
 
 ## 1. Besoin métier
@@ -20,7 +20,7 @@ Avant ce changement, le modal conducteur confirmait uniquement l'arrivée à des
 Après ce changement :
 
 1. la transition unique du trajet de `ongoing` vers `completed` déclenche le calcul serveur ;
-2. une notification push `driver_trip_revenue` est envoyée si le conducteur possède un token FCM ;
+2. une notification push `driver_trip_revenue` est persistée puis envoyée par le fournisseur correspondant au token du conducteur ;
 3. l'événement de progression automatique contient le même résumé pour le modal en temps réel ;
 4. l'application interroge l'endpoint authentifié si l'événement reçu par REST ou Socket.IO ne contient pas le résumé ;
 5. le modal sépare visuellement les montants confirmés, liquides et électroniques en attente ;
@@ -105,7 +105,14 @@ Exemple de données :
 }
 ```
 
-Le corps est composé uniquement des compartiments non nuls. Si FCM ou le token conducteur est indisponible, la clôture du trajet reste réussie et le résumé demeure récupérable dans l'application.
+Le corps est composé uniquement des compartiments non nuls. La livraison dépend du format du token :
+
+- `ExponentPushToken[...]` ou `ExpoPushToken[...]` : API Expo Push ;
+- tout autre token mobile : Firebase Cloud Messaging.
+
+Le backend ne mélange donc plus les tokens Expo et FCM. Pour Expo, le ticket d'acceptation est conservé puis son reçu est vérifié après quinze minutes, dans la fenêtre de disponibilité de 24 heures recommandée par Expo. Une réponse ou un reçu `DeviceNotRegistered`, `messaging/invalid-registration-token` ou `messaging/registration-token-not-registered` supprime le token uniquement s'il est encore celui enregistré sur l'utilisateur. Une rotation concurrente vers un nouveau token ne peut pas être effacée par l'échec de l'ancien.
+
+La notification est enregistrée même lorsque le token manque ou que le fournisseur est indisponible. Les notifications financières `driver_trip_revenue` et `driver_booking_earning_confirmed` en échec, ainsi que les envois restés `pending`, sont repris toutes les cinq minutes pendant 72 heures, par lots de 25. La sélection utilise `FOR UPDATE SKIP LOCKED` dans une transaction courte ; l'appel réseau est exécuté après le commit afin de ne pas garder de verrou pendant une latence externe. La clôture du trajet reste réussie et le résumé demeure récupérable dans l'application.
 
 La notification de confirmation tardive est idempotente : elle est envoyée uniquement dans la branche qui insère le nouveau `driver_earning`. Une nouvelle lecture du callback retrouve le revenu existant et n'envoie pas une seconde notification.
 
@@ -136,7 +143,7 @@ Exemple de réponse :
 
 ## 9. Interface mobile
 
-Le modal existant **Trajet terminé** est enrichi sans ajouter un second modal concurrent :
+Sur l'écran de navigation, le modal existant **Trajet terminé** est enrichi sans ajouter un second modal concurrent :
 
 - vert : argent confirmé et ajouté aux gains ;
 - ambre : liquide à encaisser directement ;
@@ -144,7 +151,15 @@ Le modal existant **Trajet terminé** est enrichi sans ajouter un second modal c
 - chargement court pendant le repli HTTP ;
 - message non bloquant si le résumé est momentanément indisponible.
 
-Le conducteur peut toujours fermer le modal ou noter les passagers. Les montants sont formatés dans la devise renvoyée par le serveur.
+En dehors de l'écran de navigation, la réception au premier plan de `driver_trip_revenue` ouvre un modal global qui affiche :
+
+- le total du trajet ;
+- la part déjà acquise dans les gains ;
+- le liquide à encaisser ;
+- l'électronique encore attendue ;
+- un bouton **Voir mes gains**.
+
+La notification `driver_booking_earning_confirmed` ouvre également un modal lorsque le paiement électronique attendu devient réellement retirable. Sur `/trip/navigate/:id`, le gestionnaire global masque son push et son modal parce que le modal local, alimenté par Socket.IO avec repli REST, possède déjà cette clôture. Le conducteur peut toujours fermer le modal ou noter les passagers. Les montants sont formatés dans la devise renvoyée par le serveur.
 
 ## 10. Données, remboursements et effets financiers
 
@@ -159,6 +174,8 @@ Le conducteur peut toujours fermer le modal ou noter les passagers. Les montants
 
 Backend :
 
+- `src/notifications/notifications.service.ts` ;
+- `src/notifications/notifications.service.spec.ts` ;
 - `src/driver-settlements/driver-settlements.service.ts` ;
 - `src/driver-settlements/driver-settlements.controller.ts` ;
 - `src/driver-settlements/driver-settlements.module.ts` ;
@@ -167,6 +184,9 @@ Backend :
 
 Application :
 
+- `components/NotificationHandler.tsx` ;
+- `components/AuthGuard.tsx` ;
+- `services/pushNotifications.ts` ;
 - `app/trip/navigate/[id].tsx` ;
 - `services/trackingSocket.ts` ;
 - `store/api/driverSettlementsApi.ts` ;
@@ -180,7 +200,8 @@ Ce changement n'ajoute aucune variable d'environnement. Il utilise :
 
 - `ZWANGA_COMMISSION_RATE` ;
 - `TRIP_PAYMENT_CURRENCY` ;
-- la configuration FCM existante.
+- la configuration Firebase existante pour les tokens natifs ;
+- l'API publique Expo Push pour les `ExpoPushToken`.
 
 ## 13. Tests
 
@@ -190,6 +211,11 @@ Les tests couvrent :
 - séparation du liquide, du confirmé et de l'électronique attendu ;
 - exclusion d'un `no_show` ;
 - contenu financier de la notification push ;
+- aiguillage d'un `ExpoPushToken` vers Expo et persistance du ticket reçu ;
+- conservation d'une notification financière sans token ;
+- suppression conditionnelle d'un token Expo déclaré `DeviceNotRegistered` ;
+- contrôle différé d'un reçu Expo refusé par APNs ou FCM ;
+- verrouillage non bloquant du lot de reprise (`FOR UPDATE SKIP LOCKED`) ;
 - notification unique lorsque le paiement électronique attendu devient un gain disponible après la clôture ;
 - publication après une seule transition de fin réussie ;
 - enrichissement de l'événement automatique ;
@@ -203,7 +229,10 @@ Les tests couvrent :
 4. Tester séparément un trajet liquide, électronique confirmé, électronique en attente et mixte.
 5. Déclencher simultanément une mise à jour REST et Socket.IO près de la destination et confirmer qu'un seul modal apparaît.
 6. Mettre l'application en arrière-plan et vérifier la réception du push.
-7. Vérifier qu'un montant liquide ne modifie pas le solde de retrait.
+7. Laisser l'application au premier plan hors navigation et vérifier le push ainsi que le modal global.
+8. Vérifier qu'un seul modal apparaît lorsque le conducteur est encore sur `/trip/navigate/:id`.
+9. Vérifier un appareil Android avec token natif et un appareil iOS avec `ExpoPushToken`.
+10. Vérifier qu'un montant liquide ne modifie pas le solde de retrait.
 
 ## 15. Rapprochement et retour arrière
 

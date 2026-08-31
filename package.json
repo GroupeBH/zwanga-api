@@ -32,6 +32,8 @@
     "migration:run:prod": "node ./node_modules/typeorm/cli.js -d dist/database/data-source.js migration:run",
     "migration:revert": "npm run build && node ./node_modules/typeorm/cli.js -d dist/database/data-source.js migration:revert",
     "migration:show": "npm run build && node ./node_modules/typeorm/cli.js -d dist/database/data-source.js migration:show",
+    "admin:create": "npm run build && npm run admin:create:prod",
+    "admin:create:prod": "node dist/database/create-admin.js",
     "test": "jest",
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",

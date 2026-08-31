@@ -169,22 +169,10 @@ export class DriverSettlementsService {
   ): Promise<DriverTripRevenueSummary | null> {
     try {
       const summary = await this.getTripRevenueSummary(driverId, tripId);
-      const driver = await this.userRepository.findOne({
-        where: { id: driverId },
-        select: ['id', 'fcmToken'],
-      });
-
-      if (!driver?.fcmToken) {
-        this.logger.debug(
-          `Driver ${driverId} has no FCM token; trip revenue remains available through the app`,
-        );
-        return summary;
-      }
-
-      const title = 'Montant du trajet';
+      const title = 'Votre gain du trajet';
       const body = this.buildTripRevenueNotificationBody(summary);
-      await this.notificationService.sendNotification(
-        driver.fcmToken,
+      await this.notificationService.sendNotificationToUser(
+        driverId,
         title,
         body,
         {
@@ -198,7 +186,6 @@ export class DriverSettlementsService {
           electronicPendingAmount: summary.electronicPendingAmount,
           totalExpectedAmount: summary.totalExpectedAmount,
         },
-        driverId,
       );
       return summary;
     } catch (error) {
@@ -419,18 +406,10 @@ export class DriverSettlementsService {
     earning: DriverEarning,
   ): Promise<void> {
     try {
-      const driver = await this.userRepository.findOne({
-        where: { id: earning.driverId },
-        select: ['id', 'fcmToken'],
-      });
-      if (!driver?.fcmToken) {
-        return;
-      }
-
       const netAmount = this.roundMoney(Number(earning.netAmount));
-      await this.notificationService.sendNotification(
-        driver.fcmToken,
-        'Paiement du trajet confirmé',
+      await this.notificationService.sendNotificationToUser(
+        earning.driverId,
+        'Gain du trajet disponible',
         `${this.formatMoney(netAmount)} ${earning.currency} sont maintenant disponibles dans vos gains.`,
         {
           type: 'driver_booking_earning_confirmed',
@@ -441,7 +420,6 @@ export class DriverSettlementsService {
           amount: netAmount,
           currency: earning.currency,
         },
-        earning.driverId,
       );
     } catch (error) {
       this.logger.error(

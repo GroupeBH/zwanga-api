@@ -38,7 +38,7 @@ describe('DriverSettlementsService', () => {
   let bookingRepository: { find: jest.Mock };
   let tripRepository: { findOne: jest.Mock };
   let userRepository: { findOne: jest.Mock };
-  let notificationService: { sendNotification: jest.Mock };
+  let notificationService: { sendNotificationToUser: jest.Mock };
   let paymentsService: {
     initiatePayout: jest.Mock;
     findLatestTransactionForRelatedEntity: jest.Mock;
@@ -86,7 +86,9 @@ describe('DriverSettlementsService', () => {
     bookingRepository = { find: jest.fn().mockResolvedValue([]) };
     tripRepository = { findOne: jest.fn() };
     userRepository = { findOne: jest.fn() };
-    notificationService = { sendNotification: jest.fn().mockResolvedValue(true) };
+    notificationService = {
+      sendNotificationToUser: jest.fn().mockResolvedValue(true),
+    };
     paymentsService = {
       initiatePayout: jest.fn(),
       findLatestTransactionForRelatedEntity: jest.fn().mockResolvedValue(null),
@@ -155,11 +157,6 @@ describe('DriverSettlementsService', () => {
 
   it('notifies the driver once when a post-trip electronic earning becomes available', async () => {
     earningRepository.findOne.mockResolvedValue(null);
-    userRepository.findOne.mockResolvedValue({
-      id: 'driver-1',
-      fcmToken: 'fcm-driver-token',
-    });
-
     await service.recordCompletedBookingEarning({
       id: 'booking-paid-after-trip',
       tripId: 'trip-1',
@@ -177,16 +174,15 @@ describe('DriverSettlementsService', () => {
       },
     } as any);
 
-    expect(notificationService.sendNotification).toHaveBeenCalledWith(
-      'fcm-driver-token',
-      'Paiement du trajet confirmé',
+    expect(notificationService.sendNotificationToUser).toHaveBeenCalledWith(
+      'driver-1',
+      'Gain du trajet disponible',
       expect.stringContaining('9'),
       expect.objectContaining({
         type: 'driver_booking_earning_confirmed',
         bookingId: 'booking-paid-after-trip',
         amount: 9500,
       }),
-      'driver-1',
     );
   });
 
@@ -268,29 +264,20 @@ describe('DriverSettlementsService', () => {
         paymentAmount: 10000,
       },
     ]);
-    userRepository.findOne.mockResolvedValue({
-      id: 'driver-1',
-      fcmToken: 'fcm-driver-token',
-    });
-
-    const result = await service.notifyDriverTripRevenue(
-      'driver-1',
-      'trip-1',
-    );
+    const result = await service.notifyDriverTripRevenue('driver-1', 'trip-1');
 
     expect(result).toEqual(
       expect.objectContaining({ cashToCollectAmount: 10000 }),
     );
-    expect(notificationService.sendNotification).toHaveBeenCalledWith(
-      'fcm-driver-token',
-      'Montant du trajet',
+    expect(notificationService.sendNotificationToUser).toHaveBeenCalledWith(
+      'driver-1',
+      'Votre gain du trajet',
       expect.stringContaining('10'),
       expect.objectContaining({
         type: 'driver_trip_revenue',
         tripId: 'trip-1',
         cashToCollectAmount: 10000,
       }),
-      'driver-1',
     );
   });
 
