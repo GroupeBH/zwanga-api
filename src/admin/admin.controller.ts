@@ -62,6 +62,15 @@ export class AdminController {
     );
   }
 
+  @Get('users/stats')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'Get platform user counts by role' })
+  async getUserStats() {
+    return this.adminService.getUserStats();
+  }
+
   @Get('users')
   @Auth()
   @Roles(UserRole.ADMIN)

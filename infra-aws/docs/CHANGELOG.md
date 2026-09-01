@@ -2,6 +2,187 @@
 
 Les entrées sont classées de la plus récente à la plus ancienne. Elles décrivent le code versionné et les opérations réellement exécutées sur AWS, sans inclure de valeur secrète.
 
+## INFRA-2026-09-01-001 — Policy IAM compacte pour les paramètres SSM runtime
+
+### Métadonnées
+
+| Champ | Valeur |
+| --- | --- |
+| Date | 1 septembre 2026 |
+| Environnement | production, ECS Fargate, IAM, SSM Parameter Store |
+| Statut | correction préparée localement ; apply de reprise requis |
+| Type | robustesse IAM et injection des secrets runtime |
+| Déclencheur | `LimitExceeded: Maximum policy size of 10240 bytes exceeded` sur `zwanga-api-production-execution-secrets` |
+
+### État observé
+
+L'ajout manuel des variables `ADMIN_BOOTSTRAP_*` dans SSM Parameter Store a été
+fait sous le bon préfixe :
+
+```text
+/zwanga-api/production/env/ADMIN_BOOTSTRAP_SECRET
+/zwanga-api/production/env/ADMIN_BOOTSTRAP_PHONE
+/zwanga-api/production/env/ADMIN_BOOTSTRAP_FIRST_NAME
+/zwanga-api/production/env/ADMIN_BOOTSTRAP_LAST_NAME
+/zwanga-api/production/env/ADMIN_BOOTSTRAP_DEFAULT_PASSWORD
+```
+
+La définition ECS active au moment du diagnostic était encore
+`zwanga-api-production-api:6`, créée le 25 août 2026. Elle ne contenait aucune
+référence `ADMIN_BOOTSTRAP_*` dans le conteneur `api`. Le backend recevait donc
+une variable absente et retournait :
+
+```json
+{
+  "message": "Le bootstrap super administrateur n'est pas configuré",
+  "error": "Unauthorized",
+  "statusCode": 401
+}
+```
+
+Lors du `terraform apply bootstrap-secrets.tfplan`, AWS a refusé la mise à jour
+de la policy inline du rôle d'exécution ECS parce que le document IAM dépassait
+10 240 bytes. Avant l'échec, Terraform avait déjà désenregistré la task
+definition `zwanga-api-production-api:6`, qui est passée `INACTIVE`.
+
+### Cause racine
+
+La policy `aws_iam_role_policy.ecs_task_execution_secrets` listait chaque ARN
+SSM runtime individuellement via `local.runtime_parameter_arns`. Ce modèle est
+trop fragile : chaque nouvelle variable importée sous `/env/*` allonge la
+policy IAM, alors qu'AWS impose une limite stricte de 10 240 bytes pour une
+policy inline attachée à un rôle.
+
+Le workflow GitHub de déploiement force un nouveau déploiement ECS, mais il ne
+recrée pas la task definition Terraform. Les nouveaux paramètres SSM ne sont
+donc injectés qu'après un `terraform plan/apply` qui génère une nouvelle
+révision de task definition.
+
+### Modification réalisée
+
+| Fichier | Modification | Objectif |
+| --- | --- | --- |
+| `infra-aws/ssm.tf` | remplacement de la liste détaillée des ARN SSM par un ARN préfixe borné `parameter/zwanga-api/production/*` | garder la policy IAM compacte et stable |
+| `infra-aws/docs/CHANGELOG.md` | documentation du diagnostic, de la cause, de la reprise et du rollback | conserver la traçabilité infra exigée |
+
+La définition ECS continue de référencer explicitement les paramètres découverts
+ou générés. Seule l'autorisation IAM qui permet à ECS de les lire devient
+préfixée.
+
+### Impact sécurité
+
+Avant : le rôle d'exécution ECS pouvait lire uniquement les paramètres listés
+un par un dans la task definition et dans la policy.
+
+Après : le rôle d'exécution ECS peut lire les paramètres SSM sous le préfixe de
+l'environnement courant :
+
+```text
+/zwanga-api/production/*
+```
+
+Ce périmètre couvre les paramètres générés par Terraform, les secrets importés
+sous `/env/*` et le paramètre temporaire de migration sous `/migration/*`. Il ne
+donne pas accès aux autres projets, aux autres environnements, ni aux valeurs
+hors du préfixe Zwanga production.
+
+### Impact disponibilité et données
+
+- Données métier : aucune migration de base, aucune écriture applicative, aucun
+  solde et aucun paiement modifié.
+- Disponibilité : une nouvelle révision ECS doit être créée rapidement parce
+  que la révision `:6` a été désenregistrée pendant l'apply échoué.
+- Sécurité : les valeurs secrètes restent dans SSM `SecureString` et ne sont pas
+  écrites en clair dans la task definition.
+- Coûts : aucun coût additionnel.
+
+### Reprise contrôlée
+
+1. Régénérer un nouveau plan Terraform après cette correction :
+
+   ```bash
+   terraform -chdir=infra-aws plan -out=bootstrap-secrets-retry.tfplan
+   ```
+
+2. Refuser le plan s'il contient une destruction non voulue de Route53, ACM,
+   ALB, RDS, Redis, SSM ou KMS.
+
+3. Vérifier que le plan contient au minimum :
+
+   - une modification de `aws_iam_role_policy.ecs_task_execution_secrets` ;
+   - une création ou nouvelle révision de `aws_ecs_task_definition.backend` ;
+   - une mise à jour du service ECS vers cette nouvelle révision.
+
+4. Appliquer :
+
+   ```bash
+   terraform -chdir=infra-aws apply bootstrap-secrets-retry.tfplan
+   ```
+
+5. Vérifier que la nouvelle task definition contient les noms
+   `ADMIN_BOOTSTRAP_*` dans `containerDefinitions[].secrets`.
+
+6. Forcer un redéploiement ECS seulement si Terraform ne l'a pas déjà fait :
+
+   ```bash
+   aws ecs update-service \
+     --region eu-central-1 \
+     --cluster zwanga-api-production-cluster \
+     --service zwanga-api-production-api \
+     --force-new-deployment
+   ```
+
+### Validation attendue
+
+Validations locales déjà effectuées après modification :
+
+| Contrôle | Résultat |
+| --- | --- |
+| `terraform -chdir=infra-aws fmt -check` | réussi |
+| `terraform -chdir=infra-aws validate` | réussi |
+
+Validations à effectuer après le prochain `apply` :
+
+```bash
+aws ecs describe-services \
+  --region eu-central-1 \
+  --cluster zwanga-api-production-cluster \
+  --services zwanga-api-production-api \
+  --query 'services[0].taskDefinition' \
+  --output text
+```
+
+Puis :
+
+```bash
+aws ecs describe-task-definition \
+  --region eu-central-1 \
+  --task-definition <nouvelle-task-definition> \
+  --query "taskDefinition.containerDefinitions[?name=='api'].secrets[].name" \
+  --output text
+```
+
+Les noms suivants doivent apparaître :
+
+```text
+ADMIN_BOOTSTRAP_SECRET
+ADMIN_BOOTSTRAP_PHONE
+ADMIN_BOOTSTRAP_FIRST_NAME
+ADMIN_BOOTSTRAP_LAST_NAME
+ADMIN_BOOTSTRAP_DEFAULT_PASSWORD
+```
+
+Le test HTTP de bootstrap ne doit plus retourner
+`Le bootstrap super administrateur n'est pas configuré`.
+
+### Retour arrière
+
+Si la nouvelle task definition ne démarre pas, revenir à la dernière révision
+ECS active connue qui contient une image saine et des secrets valides. Comme la
+révision `:6` est `INACTIVE`, éviter de compter dessus pour un nouveau
+déploiement. La correction IAM peut rester en place : elle réduit la taille de
+policy et ne modifie aucune donnée.
+
 ## INFRA-2026-08-26-001 — Paramètres runtime du versement conducteur
 
 Statut : configuration et documentation préparées localement ; aucun changement AWS exécuté.
