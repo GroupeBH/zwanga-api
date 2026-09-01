@@ -21,6 +21,7 @@ export enum UserRole {
   DRIVER = 'driver',
   PASSENGER = 'passenger',
   ADMIN = 'admin',
+  SUPER_ADMIN = 'super_admin',
 }
 
 export enum UserGender {
@@ -79,6 +80,7 @@ export class User {
   @Column({
     type: 'enum',
     enum: UserRole,
+    enumName: 'users_role_enum',
     default: UserRole.PASSENGER,
   })
   role: UserRole;
@@ -98,6 +100,9 @@ export class User {
 
   @Column({ default: false })
   isPhoneVerified: boolean;
+
+  @Column({ default: false })
+  passwordChangeRequired: boolean;
 
   @Column({ default: true })
   isActive: boolean;

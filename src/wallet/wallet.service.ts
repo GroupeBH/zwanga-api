@@ -35,7 +35,8 @@ import {
   InitiateWalletTopUpDto,
   TransferWalletPointsDto,
 } from './dto/wallet.dto';
-import { User, UserRole } from '../users/entities/user.entity';
+import { User } from '../users/entities/user.entity';
+import { isSuperAdminRole } from '../users/user-role.policy';
 
 export interface WalletSummary {
   account: WalletAccount;
@@ -149,8 +150,8 @@ export class WalletService {
       this.userRepository.findOne({ where: { id: adminId } }),
       this.userRepository.findOne({ where: { id: userId } }),
     ]);
-    if (!admin || admin.role !== UserRole.ADMIN) {
-      throw new ForbiddenException('Administrateur invalide');
+    if (!admin || !isSuperAdminRole(admin.role)) {
+      throw new ForbiddenException('Super administrateur requis');
     }
     if (!targetUser) {
       throw new NotFoundException('Utilisateur introuvable');

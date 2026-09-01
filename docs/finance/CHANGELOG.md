@@ -2,7 +2,57 @@
 
 Ce fichier répertorie les changements qui influencent un prix, un paiement, un solde, une commission, une récompense ou un retrait.
 
+## 1 septembre 2026
+
+### FIN-ADMIN-RBAC-002 — Bootstrap superadmin et création web des admins
+
+Statut : implémenté dans le backend et l'administration web ; migration,
+variables d'environnement de bootstrap, déploiement API et déploiement
+`zwanga-admin` requis.
+
+Résumé : le premier `super_admin` peut être créé par un flux OTP protégé par
+clé de bootstrap. Une fois connecté, le `super_admin` peut créer les comptes
+`admin` depuis `zwanga-admin` avec un mot de passe temporaire. Tous les comptes
+créés par bootstrap ou par l'interface doivent changer ce mot de passe avant
+d'accéder aux routes admin protégées par rôle.
+
+Impacts financiers et opérationnels :
+
+- aucun changement de prix, commission, solde, conversion ou formule ;
+- nouvelle colonne `users.passwordChangeRequired` par défaut à `false` ;
+- aucun compte existant n'est promu ou modifié par la migration ;
+- création unique du premier `super_admin`, limitée au numéro configuré et
+  protégée par OTP ;
+- création ou promotion des comptes `admin` réservée au `super_admin` ;
+- conversion possible d'un ancien compte `driver`/`passenger` en `admin`, sans
+  suppression d'historique ni recalcul financier ;
+- refus d'écraser un compte `admin` ou `super_admin` existant ;
+- accès aux routes financières protégé tant que le mot de passe temporaire n'a
+  pas été remplacé ;
+- secrets de bootstrap à stocker dans Parameter Store/Secrets Manager puis à
+  faire tourner après création.
+
+Documentation complète : [admin-finance-access-control.md](./admin-finance-access-control.md) et [../admin-account-provisioning.md](../admin-account-provisioning.md).
+
 ## 31 août 2026
+
+### FIN-ADMIN-RBAC-001 — Séparation admin / super administrateur
+
+Statut : implémenté dans le backend et l'administration web ; migration de rôle, déploiement API et déploiement `zwanga-admin` requis.
+
+Résumé : le back-office distingue désormais les administrateurs opérationnels du super administrateur. Le login web passe par `/auth/admin/login`, les comptes `admin` et `super_admin` sont acceptés dans `zwanga-admin`, et les actions financières sensibles restent réservées au super administrateur.
+
+Impacts financiers et opérationnels :
+
+- aucun changement de prix, commission, solde, conversion ou formule ;
+- ajout de `super_admin` à l'énumération PostgreSQL des rôles utilisateur ;
+- ajustements de jetons et rapprochements de retraits de parrainage réservés au `super_admin` ;
+- lecture des pages Finance autorisée aux administrateurs simples ;
+- interface web en lecture seule pour les actions sensibles lorsqu'un admin simple est connecté ;
+- création des comptes back-office de secours par CLI avec mot de passe saisi en mode masqué ;
+- refus du login admin pour les comptes `driver` et `passenger`.
+
+Documentation complète : [admin-finance-access-control.md](./admin-finance-access-control.md).
 
 ### FIN-DRIVER-003 — Livraison fiable du gain conducteur
 

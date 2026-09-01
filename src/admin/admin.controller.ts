@@ -20,6 +20,7 @@ import { UpdateTripRequestDto } from '../trip-requests/dto/trip-request.dto';
 import { BookingStatus } from '../bookings/entities/booking.entity';
 import { AdminWalletAdjustmentDto } from './dto/admin-wallet.dto';
 import { AdminReferralsService } from './admin-referrals.service';
+import { CreateAdminAccountDto } from './dto/admin-account.dto';
 
 interface AuthenticatedAdminRequest {
   user: { userId: string };
@@ -73,6 +74,31 @@ export class AdminController {
     return this.adminService.getAllUsers(page, limit);
   }
 
+  @Get('accounts')
+  @Auth()
+  @Roles(UserRole.SUPER_ADMIN)
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'List back-office administrator accounts' })
+  async getAdminAccounts(
+    @Request() req: AuthenticatedAdminRequest,
+    @Query('page') page: number = 1,
+    @Query('limit') limit: number = 25,
+  ) {
+    return this.adminService.getAdminAccounts(req.user.userId, page, limit);
+  }
+
+  @Post('accounts')
+  @Auth()
+  @Roles(UserRole.SUPER_ADMIN)
+  @SensitiveThrottle(5, 60000)
+  @ApiOperation({ summary: 'Create a back-office administrator account' })
+  async createAdminAccount(
+    @Request() req: AuthenticatedAdminRequest,
+    @Body() dto: CreateAdminAccountDto,
+  ) {
+    return this.adminService.createAdminAccount(req.user.userId, dto);
+  }
+
   @Get('wallets')
   @Auth()
   @Roles(UserRole.ADMIN)
@@ -102,7 +128,7 @@ export class AdminController {
 
   @Post('wallets/:userId/adjustments')
   @Auth()
-  @Roles(UserRole.ADMIN)
+  @Roles(UserRole.SUPER_ADMIN)
   @SensitiveThrottle(5, 60000)
   @ApiOperation({ summary: 'Apply an audited token balance adjustment' })
   async adjustWallet(
@@ -167,7 +193,7 @@ export class AdminController {
 
   @Post('referrals/withdrawals/:withdrawalId/reconcile')
   @Auth()
-  @Roles(UserRole.ADMIN)
+  @Roles(UserRole.SUPER_ADMIN)
   @SensitiveThrottle(5, 60000)
   @ApiOperation({ summary: 'Reconcile a referral withdrawal with FlexPay' })
   reconcileReferralWithdrawal(

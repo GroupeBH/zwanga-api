@@ -4,6 +4,7 @@ import {
   IsString,
   IsNotEmpty,
   IsEnum,
+  IsIn,
   MinLength,
   MaxLength,
   Matches,
@@ -12,6 +13,7 @@ import {
 import { ApiProperty } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
 import { UserGender, UserRole } from '../entities/user.entity';
+import { SELF_SERVICE_USER_ROLES } from '../user-role.policy';
 import { VehicleType } from '../../vehicles/entities/vehicle.entity';
 
 export enum PhoneVerificationContext {
@@ -56,7 +58,9 @@ export class UpdateProfileDto {
   @ApiProperty({
     required: false,
     description: 'Indique si l’utilisateur souhaite devenir conducteur',
+    enum: SELF_SERVICE_USER_ROLES,
   })
+  @IsIn(SELF_SERVICE_USER_ROLES)
   @IsOptional()
   role?: UserRole;
 }

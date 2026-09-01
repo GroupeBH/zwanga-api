@@ -1,6 +1,6 @@
 # Documentation financière de Zwanga
 
-Dernière mise à jour : 26 août 2026
+Dernière mise à jour : 1 septembre 2026
 
 ## Objectif
 
@@ -61,6 +61,7 @@ Toute évolution financière doit respecter les règles suivantes :
 - [Règlement atomique des courses payées en jetons](./atomic-token-trip-settlement.md)
 - [Versement Mobile Money des revenus conducteur](./driver-electronic-trip-payout.md)
 - [Notification du montant conducteur à la fin du trajet](./driver-trip-revenue-notification.md)
+- [Contrôle d'accès financier du back-office](./admin-finance-access-control.md)
 - [Administration des portefeuilles de jetons](./admin-token-wallet-management.md)
 - [Administration du parrainage](./admin-referral-management.md)
 - [Parrainage, commissions de 5 % et retraits FlexPay](./referral-program.md)
