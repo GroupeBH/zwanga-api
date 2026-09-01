@@ -309,3 +309,6 @@ Aucun identifiant AWS permanent n'a été ajouté à ECS, SSM, GitHub ou au dép
 ### Retour arrière
 
 Le paramètre SSM ne doit pas être supprimé tant qu'une définition ECS le référence. Pour retirer S3 dans un environnement non productif, il faut d'abord appliquer une définition de tâche sans `AWS_S3_BUCKET_NAME`, vérifier qu'aucune tâche active ne dépend du bucket, puis supprimer le paramètre et les permissions. En production, le garde-fou doit rester actif ; son retrait nécessite une conception de remplacement et une nouvelle entrée dans ce journal.
+
+### new env for super admin
+dans .env.docker.example
