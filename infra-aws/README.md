@@ -230,6 +230,12 @@ Utilise un fichier `.env.production` separe de ton `.env` local. Les valeurs loc
 
 Le script cree les parametres `/zwanga-api/production/env/*` en `SecureString`. Au prochain `terraform apply`, Terraform decouvre automatiquement ces parametres et les injecte dans la definition ECS via le bloc `secrets`, sans lire les valeurs en clair.
 
+Le role d'execution ECS lit les parametres SSM au moyen d'une autorisation IAM
+bornee au prefixe de l'environnement, par exemple
+`/zwanga-api/production/*`. La task definition continue de referencer les
+parametres exacts a injecter, mais la policy IAM n'enumere plus chaque ARN un
+par un afin d'eviter la limite AWS de 10 240 bytes sur les policies inline.
+
 ### Adapter un `.env` exporte depuis Render
 
 Garde dans `.env.production` les variables metier :

@@ -157,6 +157,23 @@ export class AdminService {
     return { users: users.map((user) => this.sanitizeUser(user)!), total };
   }
 
+  async getUserStats(): Promise<{
+    totalUsers: number;
+    drivers: number;
+    passengers: number;
+  }> {
+    const [drivers, passengers] = await Promise.all([
+      this.userRepository.count({ where: { role: UserRole.DRIVER } }),
+      this.userRepository.count({ where: { role: UserRole.PASSENGER } }),
+    ]);
+
+    return {
+      totalUsers: drivers + passengers,
+      drivers,
+      passengers,
+    };
+  }
+
   async getAdminAccounts(
     adminId: string,
     page: number = 1,

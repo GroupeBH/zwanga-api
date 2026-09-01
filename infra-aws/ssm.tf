@@ -146,12 +146,12 @@ locals {
     name => "${local.ssm_prefix}/env/${name}"
   }
 
-  runtime_parameter_arns = concat(
-    values(local.generated_secret_parameter_arns_by_env),
-    values(local.ecs_environment_parameter_arns_by_env),
-    values(local.generated_runtime_environment_parameter_arns_by_env),
-    values(local.external_runtime_environment_parameter_arns_by_env),
-    values(local.otel_environment_parameter_arns_by_env),
-    [local.database_import_source_url_parameter_arn],
-  )
+  # ECS resolves every runtime value from SSM Parameter Store at task startup.
+  # The task definition still references exact parameter ARNs, but the execution
+  # role policy must stay below the IAM inline policy size limit. Granting read
+  # access to the bounded project/environment prefix avoids a 10 KB policy when
+  # many application secrets are imported under /env/*.
+  runtime_parameter_arns = [
+    "arn:${data.aws_partition.current.partition}:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${local.ssm_prefix}/*",
+  ]
 }
