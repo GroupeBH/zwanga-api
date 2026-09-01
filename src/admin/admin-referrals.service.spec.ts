@@ -262,7 +262,7 @@ describe('AdminReferralsService', () => {
     };
     userRepository.findOne.mockResolvedValue({
       id: 'admin-1',
-      role: UserRole.ADMIN,
+      role: UserRole.SUPER_ADMIN,
     });
     withdrawalRepository.findOne
       .mockResolvedValueOnce(withdrawal)

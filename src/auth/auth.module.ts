@@ -12,6 +12,7 @@ import { JwtStrategy } from './strategies/jwt.strategy';
 import { GoogleStrategy } from './strategies/google.strategy';
 import { VehiclesModule } from '../vehicles/vehicles.module';
 import { ReferralsModule } from '../referrals/referrals.module';
+import { KeccelOtpModule } from '../keccel-otp/keccel-otp.module';
 
 @Module({
   imports: [
@@ -30,6 +31,7 @@ import { ReferralsModule } from '../referrals/referrals.module';
     }),
     VehiclesModule,
     ReferralsModule,
+    KeccelOtpModule,
   ],
   controllers: [AuthController],
   providers: [AuthService, JwtStrategy, GoogleStrategy],

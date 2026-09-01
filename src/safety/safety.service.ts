@@ -5,6 +5,7 @@ import { EmergencyContact } from './entities/emergency-contact.entity';
 import { SafetyAlert, SafetyAlertType, SafetyAlertStatus } from './entities/safety-alert.entity';
 import { UserReport, ReportReason, ReportStatus } from './entities/user-report.entity';
 import { User, UserRole } from '../users/entities/user.entity';
+import { isAdminRole } from '../users/user-role.policy';
 import { Trip, TripStatus } from '../trips/entities/trip.entity';
 import { Booking, BookingStatus } from '../bookings/entities/booking.entity';
 import { CreateEmergencyContactDto, UpdateEmergencyContactDto } from './dto/emergency-contact.dto';
@@ -650,7 +651,7 @@ export class SafetyService {
       where: { id: adminId },
     });
 
-    if (!admin || admin.role !== UserRole.ADMIN) {
+    if (!admin || !isAdminRole(admin.role)) {
       throw new ForbiddenException('Seuls les administrateurs peuvent modifier le statut d\'un signalement');
     }
 

@@ -163,7 +163,7 @@ describe('WalletService', () => {
       ({ where }: { where: { id: string } }) =>
         Promise.resolve(
           where.id === 'admin-1'
-            ? { id: 'admin-1', role: UserRole.ADMIN }
+            ? { id: 'admin-1', role: UserRole.SUPER_ADMIN }
             : { id: 'passenger-1', role: UserRole.PASSENGER },
         ),
     );
@@ -205,7 +205,7 @@ describe('WalletService', () => {
       ({ where }: { where: { id: string } }) =>
         Promise.resolve(
           where.id === 'admin-1'
-            ? { id: 'admin-1', role: UserRole.ADMIN }
+            ? { id: 'admin-1', role: UserRole.SUPER_ADMIN }
             : { id: 'passenger-1', role: UserRole.PASSENGER },
         ),
     );

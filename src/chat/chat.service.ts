@@ -12,6 +12,7 @@ import { Booking } from '../bookings/entities/booking.entity';
 import { Conversation, ConversationType } from './entities/conversation.entity';
 import { ConversationParticipant } from './entities/conversation-participant.entity';
 import { User, UserRole } from '../users/entities/user.entity';
+import { ADMIN_USER_ROLES } from '../users/user-role.policy';
 import {
   CreateConversationDto,
   ListConversationsQueryDto,
@@ -635,7 +636,7 @@ export class ChatService {
 
   private async getSupportAgents(): Promise<User[]> {
     return this.userRepository.find({
-      where: { role: UserRole.ADMIN },
+      where: { role: In([...ADMIN_USER_ROLES]) },
       select: ['id', 'firstName', 'lastName', 'fcmToken'],
     });
   }

@@ -1,6 +1,7 @@
 import { Injectable, CanActivate, ExecutionContext, ForbiddenException } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { UserRole } from '../../users/entities/user.entity';
+import { roleHasAccess } from '../../users/user-role.policy';
 
 export const ROLES_KEY = 'roles';
 
@@ -25,7 +26,18 @@ export class RolesGuard implements CanActivate {
       throw new ForbiddenException('User not authenticated');
     }
 
-    const hasRole = requiredRoles.some((role) => user.role === role);
+    if (
+      user.passwordChangeRequired &&
+      requiredRoles.some((role) => roleHasAccess(user.role, role))
+    ) {
+      throw new ForbiddenException(
+        'Changement du mot de passe administrateur requis',
+      );
+    }
+
+    const hasRole = requiredRoles.some((role) =>
+      roleHasAccess(user.role, role),
+    );
 
     if (!hasRole) {
       throw new ForbiddenException('Insufficient permissions');

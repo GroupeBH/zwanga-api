@@ -27,7 +27,6 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   }
 
   async validate(payload: JwtPayload) {
-    console.log('this user payload is', payload);
     try {
       // Vérifier que l'utilisateur existe toujours et est actif
       const user = await this.usersService.findOne(payload.sub);
@@ -50,6 +49,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
         email: user.email || user.phone,
         phone: user.phone,
         role: user.role,
+        passwordChangeRequired: user.passwordChangeRequired,
       };
     } catch (error) {
       throw new UnauthorizedException('Invalid token');

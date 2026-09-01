@@ -20,6 +20,7 @@ import {
   UpdateFaqEntryDto,
 } from '../faq/dto/faq.dto';
 import { User, UserRole } from '../users/entities/user.entity';
+import { isAdminRole } from '../users/user-role.policy';
 import {
   SupportTicket,
   SupportTicketStatus,
@@ -606,7 +607,7 @@ export class SupportService {
       throw new NotFoundException('Utilisateur admin non trouvé');
     }
 
-    if (user.role !== UserRole.ADMIN) {
+    if (!isAdminRole(user.role)) {
       throw new ForbiddenException('Action réservée aux administrateurs');
     }
   }

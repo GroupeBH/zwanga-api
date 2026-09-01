@@ -18,7 +18,8 @@ import {
   ReferralWithdrawal,
   ReferralWithdrawalStatus,
 } from '../referrals/entities/referral-withdrawal.entity';
-import { User, UserRole } from '../users/entities/user.entity';
+import { User } from '../users/entities/user.entity';
+import { isSuperAdminRole } from '../users/user-role.policy';
 
 type AdminReferralAccount = ReferralAccount & {
   user?: User | null;
@@ -277,7 +278,7 @@ export class AdminReferralsService {
   }
 
   async reconcileWithdrawal(adminId: string, withdrawalId: string) {
-    await this.ensureAdmin(adminId);
+    await this.ensureSuperAdmin(adminId);
     const withdrawal = await this.withdrawalRepository.findOne({
       where: { id: withdrawalId },
       relations: ['user', 'paymentTransaction'],
@@ -507,11 +508,11 @@ export class AdminReferralsService {
     };
   }
 
-  private async ensureAdmin(adminId: string): Promise<void> {
+  private async ensureSuperAdmin(adminId: string): Promise<void> {
     const admin = await this.userRepository.findOne({ where: { id: adminId } });
-    if (!admin || admin.role !== UserRole.ADMIN) {
+    if (!admin || !isSuperAdminRole(admin.role)) {
       throw new ForbiddenException(
-        'Seuls les administrateurs peuvent rapprocher un retrait',
+        'Seul un super administrateur peut rapprocher un retrait',
       );
     }
   }

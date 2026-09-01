@@ -1,6 +1,7 @@
 import {
   IsBoolean,
   IsEnum,
+  IsIn,
   IsNotEmpty,
   IsOptional,
   IsString,
@@ -13,6 +14,7 @@ import {
 import { Transform, TransformFnParams, Type } from 'class-transformer';
 import { ApiProperty } from '@nestjs/swagger';
 import { UserGender, UserRole } from '../../users/entities/user.entity';
+import { SELF_SERVICE_USER_ROLES } from '../../users/user-role.policy';
 import { CreateVehicleDto } from '../../vehicles/dto/vehicle.dto';
 import { ReferralAttributionDto } from '../../referrals/dto/referral.dto';
 
@@ -84,7 +86,12 @@ export class RegisterDto extends ReferralAttributionDto {
   @IsOptional()
   gender?: UserGender | null;
 
-  @ApiProperty({ enum: UserRole, example: UserRole.DRIVER })
+  @ApiProperty({
+    enum: SELF_SERVICE_USER_ROLES,
+    example: UserRole.DRIVER,
+    description: 'Role public autorise: driver ou passenger',
+  })
+  @IsIn(SELF_SERVICE_USER_ROLES)
   @IsNotEmpty()
   role: UserRole;
 
@@ -135,6 +142,103 @@ export class LoginDto {
   newPin?: string;
 }
 
+export class AdminLoginDto {
+  @ApiProperty({ example: '+243900000000' })
+  @Transform(toTrimmedString)
+  @IsString()
+  @IsNotEmpty()
+  phone: string;
+
+  @ApiProperty({
+    required: false,
+    example: 'Temporaire-2026!',
+    description:
+      'Mot de passe administrateur. Les anciens PIN admin de 4 chiffres restent acceptés à la connexion.',
+  })
+  @Transform(toTrimmedString)
+  @ValidateIf((o) => !o.pin)
+  @IsString()
+  @IsNotEmpty()
+  @MinLength(4)
+  @MaxLength(128)
+  password?: string;
+
+  @ApiProperty({
+    required: false,
+    example: '1234',
+    description: 'Compatibilité temporaire avec les anciens PIN admin.',
+  })
+  @Transform(toTrimmedString)
+  @ValidateIf((o) => !o.password)
+  @IsString()
+  @IsNotEmpty()
+  @MinLength(4)
+  @MaxLength(4)
+  @Matches(/^\d{4}$/, { message: 'PIN must be exactly 4 digits' })
+  pin?: string;
+}
+
+export class AdminChangePasswordDto {
+  @ApiProperty({ example: 'Temporaire-2026!' })
+  @Transform(toTrimmedString)
+  @IsString()
+  @IsNotEmpty()
+  @MinLength(4)
+  @MaxLength(128)
+  currentPassword: string;
+
+  @ApiProperty({ example: 'NouveauMotDePasse-2026!' })
+  @Transform(toTrimmedString)
+  @IsString()
+  @IsNotEmpty()
+  @MinLength(8)
+  @MaxLength(128)
+  newPassword: string;
+}
+
+export class AdminBootstrapSendOtpDto {
+  @ApiProperty({ example: '+243831919710' })
+  @Transform(toTrimmedString)
+  @IsString()
+  @IsNotEmpty()
+  phone: string;
+}
+
+export class AdminBootstrapConfirmDto extends AdminBootstrapSendOtpDto {
+  @ApiProperty({ example: '123456' })
+  @Transform(toTrimmedString)
+  @IsString()
+  @IsNotEmpty()
+  otp: string;
+
+  @ApiProperty({ required: false, example: 'Buania' })
+  @Transform(toTrimmedString)
+  @IsString()
+  @IsOptional()
+  @MaxLength(100)
+  firstName?: string;
+
+  @ApiProperty({ required: false, example: 'Superadmin' })
+  @Transform(toTrimmedString)
+  @IsString()
+  @IsOptional()
+  @MaxLength(100)
+  lastName?: string;
+
+  @ApiProperty({
+    required: false,
+    example: 'MotDePasseTemporaire-2026!',
+    description:
+      'Mot de passe temporaire. Si absent, ADMIN_BOOTSTRAP_DEFAULT_PASSWORD est utilisé côté serveur.',
+  })
+  @Transform(toTrimmedString)
+  @IsString()
+  @IsOptional()
+  @MinLength(8)
+  @MaxLength(128)
+  password?: string;
+}
+
 export class RefreshTokenDto {
   @ApiProperty()
   @IsString()
@@ -181,12 +285,12 @@ export class GoogleMobileAuthDto extends ReferralAttributionDto {
   gender?: UserGender | null;
 
   @ApiProperty({
-    enum: UserRole,
+    enum: SELF_SERVICE_USER_ROLES,
     example: UserRole.PASSENGER,
     required: false,
     description: 'Role choisi pendant la premiere inscription Google',
   })
-  @IsEnum(UserRole)
+  @IsIn(SELF_SERVICE_USER_ROLES)
   @IsOptional()
   role?: UserRole;
 
@@ -279,12 +383,12 @@ export class AppleMobileAuthDto extends ReferralAttributionDto {
   gender?: UserGender | null;
 
   @ApiProperty({
-    enum: UserRole,
+    enum: SELF_SERVICE_USER_ROLES,
     example: UserRole.PASSENGER,
     required: false,
     description: 'Role choisi pendant la premiere inscription Apple',
   })
-  @IsEnum(UserRole)
+  @IsIn(SELF_SERVICE_USER_ROLES)
   @IsOptional()
   role?: UserRole;
 
@@ -314,4 +418,7 @@ export class AuthResponseDto {
 
   @ApiProperty()
   refreshToken: string;
+
+  @ApiProperty({ required: false })
+  passwordChangeRequired?: boolean;
 }

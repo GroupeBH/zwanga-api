@@ -41,6 +41,7 @@ import { KeccelOtpService } from '../keccel-otp/keccel-otp.service';
 import { Express } from 'express';
 import { UserRole } from './entities/user.entity';
 import { SubscriptionsService } from '../subscriptions/subscriptions.service';
+import { assertSelfServiceUserRole, isAdminRole } from './user-role.policy';
 
 @Injectable()
 export class UsersService {
@@ -72,7 +73,15 @@ export class UsersService {
   ) {}
 
   private toSafeUser(user: User) {
-    const { password, refreshToken, ...safeUser } = user;
+    const {
+      password,
+      accessToken,
+      refreshToken,
+      googleId,
+      appleId,
+      fcmToken,
+      ...safeUser
+    } = user;
     return safeUser;
   }
 
@@ -181,7 +190,6 @@ export class UsersService {
 
   async getProfileSummary(userId: string) {
     const user = await this.findOne(userId);
-    console.log('this user:', user);
 
     const [tripsAsDriver, bookingsAsPassenger, bookingsAsDriver, messagesSent] =
       await Promise.all([
@@ -411,6 +419,7 @@ export class UsersService {
     }
 
     if (updateProfileDto.role) {
+      assertSelfServiceUserRole(updateProfileDto.role);
       user.role = updateProfileDto.role;
     }
 
@@ -781,15 +790,11 @@ export class UsersService {
     });
 
     this.logger.log(`Fetching KYC status for user: ${kyc} ${userId}`);
-    console.log('kyc', kyc);
-
     if (!kyc) {
       return null;
     }
 
     const thisUserKyc = await this.enrichKycWithPresignedUrls(kyc);
-
-    console.log('thiskyc', thisUserKyc);
 
     // Convert S3 keys to presigned URLs before returning
     return thisUserKyc;
@@ -899,6 +904,12 @@ export class UsersService {
     );
 
     const user = await this.findOne(userId);
+
+    if (isAdminRole(user.role)) {
+      throw new BadRequestException(
+        'Utilisez le changement de mot de passe administrateur pour ce compte',
+      );
+    }
 
     // If old PIN is provided, verify it
     if (changePinDto.oldPin) {

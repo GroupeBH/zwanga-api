@@ -17,7 +17,8 @@ L'interface appelait trois contrats inexistants. Les deux lectures recevaient un
 - `GET /admin/wallets` renvoie les comptes paginés et une synthèse globale.
 - `GET /admin/wallets/ledger` renvoie les écritures paginées, filtrables par type.
 - `POST /admin/wallets/:userId/adjustments` applique un crédit ou un débit exceptionnel, audité et idempotent.
-- Seuls les utilisateurs ayant le rôle `admin` peuvent accéder à ces routes.
+- Les lectures sont ouvertes aux rôles `admin` et `super_admin`.
+- L'ajustement manuel est réservé au rôle `super_admin`.
 - Les champs secrets de l'utilisateur et les payloads FlexPay ne sont jamais renvoyés.
 
 ## Contrats HTTP
@@ -26,7 +27,7 @@ L'interface appelait trois contrats inexistants. Les deux lectures recevaient un
 
 ```http
 GET /api/v1/admin/wallets?page=1&limit=25&search=Aline
-Authorization: Bearer <jeton-admin>
+Authorization: Bearer <jeton-admin-ou-super-admin>
 ```
 
 La recherche porte sur l'identifiant utilisateur, le prénom, le nom, le téléphone et l'adresse électronique. `limit` est borné à 200.
@@ -53,7 +54,7 @@ La synthèse est calculée sur tous les portefeuilles, indépendamment de la pag
 
 ```http
 GET /api/v1/admin/wallets/ledger?page=1&limit=25&type=top_up&search=Aline
-Authorization: Bearer <jeton-admin>
+Authorization: Bearer <jeton-admin-ou-super-admin>
 ```
 
 Le filtre `type` doit appartenir à l'énumération `WalletLedgerEntryType`. Une valeur inconnue produit une réponse `400`.
@@ -62,7 +63,7 @@ Le filtre `type` doit appartenir à l'énumération `WalletLedgerEntryType`. Une
 
 ```http
 POST /api/v1/admin/wallets/7bd.../adjustments
-Authorization: Bearer <jeton-admin>
+Authorization: Bearer <jeton-super-admin>
 Content-Type: application/json
 
 {
@@ -101,9 +102,11 @@ L'interface génère un UUID `requestId` une seule fois à l'ouverture du formul
 
 ## Autorisation et confidentialité
 
-- JWT obligatoire avec `UserRole.ADMIN`.
+- JWT obligatoire avec `UserRole.ADMIN` ou `UserRole.SUPER_ADMIN` pour les lectures.
+- JWT `UserRole.SUPER_ADMIN` obligatoire pour `POST /admin/wallets/:userId/adjustments`.
 - Limite de 30 lectures par minute et 5 ajustements par minute.
 - Le rôle est contrôlé par le guard et de nouveau par le service financier avant écriture.
+- Dans `zwanga-admin`, un admin simple voit la page en lecture seule et le bouton d'ajustement est désactivé.
 - Le mot de passe, les tokens d'accès, le token FCM et les identifiants sociaux ne sont pas sérialisés.
 - Le journal applicatif contient les identifiants d'audit et les montants, jamais un secret d'authentification.
 
@@ -126,8 +129,10 @@ Elle ne modifie aucun solde et ne crée aucune écriture historique.
 - `src/admin/admin.module.ts`
 - `src/admin/dto/admin-wallet.dto.ts`
 - `src/wallet/wallet.service.ts`
+- `src/users/user-role.policy.ts`
 - `src/wallet/entities/wallet-ledger-entry.entity.ts`
 - `src/database/migrations/1780000023000-AddAdminWalletAdjustments.ts`
+- `src/database/migrations/1780000025000-AddSuperAdminRole.ts`
 - `src/database/migrations/index.ts`
 
 ### Administration web

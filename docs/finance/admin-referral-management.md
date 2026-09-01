@@ -17,19 +17,21 @@ La page **Finance > Parrainage** appelait quatre contrats absents du backend et 
 - un administrateur consulte les comptes parrains et les quatre compartiments de jetons ;
 - il consulte les commissions, leurs sources, leur retenue et leur statut ;
 - il consulte les demandes de retrait et leur transaction assainie ;
-- il peut relancer une vérification FlexPay sans forcer un statut local ;
+- le super administrateur peut relancer une vérification FlexPay sans forcer un statut local ;
 - les routes privées utilisateur restent inchangées ;
 - les secrets ChottuLink et les réponses brutes FlexPay ne sont jamais exposés.
 
 ## Contrats HTTP
 
-Toutes les routes exigent un JWT associé à `UserRole.ADMIN`.
+Les routes de lecture exigent un JWT associé à `UserRole.ADMIN` ou
+`UserRole.SUPER_ADMIN`. Le rapprochement d'un retrait exige
+`UserRole.SUPER_ADMIN`.
 
 ### Comptes parrains
 
 ```http
 GET /api/v1/admin/referrals/accounts?page=1&limit=25&search=ZWALINE
-Authorization: Bearer <jeton-admin>
+Authorization: Bearer <jeton-admin-ou-super-admin>
 ```
 
 La recherche porte sur l'identifiant utilisateur, le prénom, le nom, le téléphone, l'adresse électronique et le code de parrainage.
@@ -59,7 +61,7 @@ La recherche porte sur l'identifiant utilisateur, le prénom, le nom, le télép
 
 ```http
 GET /api/v1/admin/referrals/rewards?page=1&limit=25&status=pending&search=Aline
-Authorization: Bearer <jeton-admin>
+Authorization: Bearer <jeton-admin-ou-super-admin>
 ```
 
 Les statuts acceptés sont `pending`, `available` et `reversed`. Une valeur inconnue produit une réponse `400`.
@@ -70,7 +72,7 @@ Les champs financiers sont sérialisés en nombres : `grossAmount`, `rate`, `rew
 
 ```http
 GET /api/v1/admin/referrals/withdrawals?page=1&limit=25&status=initiated
-Authorization: Bearer <jeton-admin>
+Authorization: Bearer <jeton-admin-ou-super-admin>
 ```
 
 Les statuts acceptés sont `pending`, `initiated`, `succeeded`, `failed` et `cancelled`.
@@ -79,7 +81,7 @@ Les statuts acceptés sont `pending`, `initiated`, `succeeded`, `failed` et `can
 
 ```http
 POST /api/v1/admin/referrals/withdrawals/7bd.../reconcile
-Authorization: Bearer <jeton-admin>
+Authorization: Bearer <jeton-super-admin>
 ```
 
 Cette route ne permet jamais de choisir le statut final. Elle retrouve l'`orderNumber` interne, appelle `PaymentsService.checkPaymentStatus` par l'intermédiaire du flux existant `ReferralsService.checkWithdrawalStatus`, puis applique la réponse FlexPay dans la transaction idempotente existante.
@@ -114,10 +116,11 @@ Le lien public `shareLinkUrl` et le fournisseur d'attribution peuvent être affi
 
 ## Autorisation et limitation
 
-- JWT et `Roles(UserRole.ADMIN)` obligatoires ;
+- JWT et `Roles(UserRole.ADMIN)` obligatoires pour les lectures ;
+- JWT et `Roles(UserRole.SUPER_ADMIN)` obligatoires pour le rapprochement d'un retrait ;
 - 30 lectures par minute et par adresse IP ;
 - 5 rapprochements par minute ;
-- contrôle supplémentaire du rôle administrateur dans le service avant tout appel FlexPay ;
+- contrôle supplémentaire du rôle super administrateur dans le service avant tout appel FlexPay ;
 - `limit` borné entre 1 et 200 ;
 - termes de recherche tronqués à 160 caractères et transmis comme paramètres SQL.
 
@@ -147,12 +150,14 @@ La pagination reste basée sur `page/limit` pour respecter le contrat actuel de 
 - `src/admin/admin-referrals.service.spec.ts`
 - `src/admin/admin.controller.ts`
 - `src/admin/admin.module.ts`
+- `src/users/user-role.policy.ts`
 - `src/database/migrations/1780000024000-AddAdminReferralReadIndexes.ts`
+- `src/database/migrations/1780000025000-AddSuperAdminRole.ts`
 - `src/database/migrations/index.ts`
 
 ### Administration web
 
-- `app/(admin)/referrals/page.tsx` : message de compatibilité du backend ;
+- `app/(admin)/referrals/page.tsx` : message de compatibilité du backend et mode lecture seule pour les admins simples ;
 - `docs/admin-finance-api-contract.md` : état réel du contrat.
 
 ## Variables d'environnement et infrastructure
@@ -180,7 +185,8 @@ Aucune nouvelle variable d'environnement, permission IAM, ressource AWS ou entr�
 4. Déployer `zwanga-admin`.
 5. Tester les trois vues avec un compte administrateur.
 6. Vérifier qu'un compte non-admin reçoit `403`.
-7. Rapprocher un retrait `initiated` de test et confirmer que son résultat correspond au statut FlexPay.
+7. Vérifier qu'un administrateur simple ne peut pas rapprocher un retrait.
+8. Rapprocher un retrait `initiated` de test avec le super administrateur et confirmer que son résultat correspond au statut FlexPay.
 
 ## Surveillance et rapprochement
 

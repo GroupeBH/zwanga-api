@@ -22,6 +22,8 @@ import { HardenTokenTripSettlements1780000021000 } from './1780000021000-HardenT
 import { HardenDriverPayouts1780000022000 } from './1780000022000-HardenDriverPayouts';
 import { AddAdminWalletAdjustments1780000023000 } from './1780000023000-AddAdminWalletAdjustments';
 import { AddAdminReferralReadIndexes1780000024000 } from './1780000024000-AddAdminReferralReadIndexes';
+import { AddSuperAdminRole1780000025000 } from './1780000025000-AddSuperAdminRole';
+import { AddAdminPasswordChangeRequired1780000026000 } from './1780000026000-AddAdminPasswordChangeRequired';
 
 export const databaseMigrations = [
   FillTotalSeats1780000000000,
@@ -48,4 +50,6 @@ export const databaseMigrations = [
   HardenDriverPayouts1780000022000,
   AddAdminWalletAdjustments1780000023000,
   AddAdminReferralReadIndexes1780000024000,
+  AddSuperAdminRole1780000025000,
+  AddAdminPasswordChangeRequired1780000026000,
 ];

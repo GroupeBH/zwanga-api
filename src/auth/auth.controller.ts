@@ -3,6 +3,7 @@ import {
   Post,
   Get,
   Body,
+  Headers,
   HttpCode,
   HttpStatus,
   UseInterceptors,
@@ -24,9 +25,14 @@ import {
 import { AuthGuard } from '@nestjs/passport';
 import type { Request, Response } from 'express';
 import { AuthService, type GoogleAuthProfile } from './auth.service';
+import { Auth } from './decorators/auth.decorator';
 import {
   RegisterDto,
   LoginDto,
+  AdminBootstrapConfirmDto,
+  AdminBootstrapSendOtpDto,
+  AdminChangePasswordDto,
+  AdminLoginDto,
   RefreshTokenDto,
   AuthResponseDto,
   GoogleMobileAuthDto,
@@ -36,6 +42,7 @@ import { Public } from '../common/decorators/public.decorator';
 import { UserGender, UserRole } from '../users/entities/user.entity';
 import { VehicleType } from '../vehicles/entities/vehicle.entity';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
+import { SELF_SERVICE_USER_ROLES } from '../users/user-role.policy';
 
 interface MulterFile {
   fieldname: string;
@@ -119,9 +126,9 @@ export class AuthController {
         },
         role: {
           type: 'string',
-          enum: Object.values(UserRole),
+          enum: [...SELF_SERVICE_USER_ROLES],
           example: UserRole.DRIVER,
-          description: 'Rôle de l\’utilisateur (driver, passenger, admin)',
+          description: "Rôle public de l'utilisateur (driver ou passenger)",
         },
         isDriver: {
           type: 'boolean',
@@ -188,6 +195,59 @@ export class AuthController {
   @ApiResponse({ status: 401, description: 'Invalid phone number or PIN' })
   async login(@Body() loginDto: LoginDto) {
     return this.authService.login(loginDto);
+  }
+
+  @Post('admin/login')
+  @Public()
+  @SensitiveThrottle(5, 60000)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Login administrator with phone number and password',
+  })
+  @ApiResponse({ status: 200, type: AuthResponseDto })
+  @ApiResponse({
+    status: 401,
+    description: 'Invalid admin phone number or password',
+  })
+  async adminLogin(@Body() loginDto: AdminLoginDto) {
+    return this.authService.adminLogin(loginDto);
+  }
+
+  @Post('admin/password/change')
+  @Auth()
+  @SensitiveThrottle(5, 60000)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Change administrator password' })
+  async changeAdminPassword(
+    @Req() req: Request,
+    @Body() dto: AdminChangePasswordDto,
+  ) {
+    const user = req.user as { userId: string };
+    return this.authService.changeAdminPassword(user.userId, dto);
+  }
+
+  @Post('admin/bootstrap/send-otp')
+  @Public()
+  @SensitiveThrottle(3, 60000)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Send OTP for the initial super administrator' })
+  async sendAdminBootstrapOtp(
+    @Body() dto: AdminBootstrapSendOtpDto,
+    @Headers('x-admin-bootstrap-secret') bootstrapSecret?: string,
+  ) {
+    return this.authService.sendAdminBootstrapOtp(dto, bootstrapSecret);
+  }
+
+  @Post('admin/bootstrap/confirm')
+  @Public()
+  @SensitiveThrottle(3, 60000)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Create the initial super administrator with OTP' })
+  async confirmAdminBootstrap(
+    @Body() dto: AdminBootstrapConfirmDto,
+    @Headers('x-admin-bootstrap-secret') bootstrapSecret?: string,
+  ) {
+    return this.authService.confirmAdminBootstrap(dto, bootstrapSecret);
   }
 
   @Post('refresh')

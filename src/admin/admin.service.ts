@@ -23,6 +23,12 @@ import { TripsService } from '../trips/trips.service';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { KycDocument, KycStatus } from '../users/entities/kyc-document.entity';
 import {
+  ADMIN_USER_ROLES,
+  assertSuperAdminRole,
+  isAdminRole,
+  isSuperAdminRole,
+} from '../users/user-role.policy';
+import {
   WalletAccount,
   WalletAccountType,
 } from '../wallet/entities/wallet-account.entity';
@@ -31,6 +37,8 @@ import {
   WalletLedgerEntryType,
 } from '../wallet/entities/wallet-ledger-entry.entity';
 import { WalletService } from '../wallet/wallet.service';
+import { CreateAdminAccountDto } from './dto/admin-account.dto';
+import { provisionAdminAccount } from './admin-account.provisioning';
 
 type Coordinates = [number, number] | null;
 type WalletAccountWithUser = WalletAccount & { user?: User | null };
@@ -147,6 +155,70 @@ export class AdminService {
 
     this.logger.debug(`Fetched ${users.length} users (total: ${total})`);
     return { users: users.map((user) => this.sanitizeUser(user)!), total };
+  }
+
+  async getAdminAccounts(
+    adminId: string,
+    page: number = 1,
+    limit: number = 25,
+  ) {
+    await this.ensureSuperAdmin(
+      adminId,
+      'Only super admins can list back-office accounts',
+    );
+    const { pageNumber, pageSize } = this.normalizePagination(page, limit);
+
+    const [accounts, total] = await this.userRepository.findAndCount({
+      where: { role: In([...ADMIN_USER_ROLES]) },
+      skip: (pageNumber - 1) * pageSize,
+      take: pageSize,
+      order: { createdAt: 'DESC' },
+    });
+
+    return {
+      accounts: accounts.map((account) => this.serializeAdminAccount(account)),
+      total,
+      page: pageNumber,
+      limit: pageSize,
+    };
+  }
+
+  async createAdminAccount(
+    adminId: string,
+    dto: CreateAdminAccountDto,
+  ) {
+    await this.ensureSuperAdmin(
+      adminId,
+      'Only super admins can create back-office accounts',
+    );
+
+    try {
+      const admin = await this.userRepository.manager.transaction(
+        async (manager) =>
+          provisionAdminAccount(manager.getRepository(User), {
+            phone: dto.phone,
+            firstName: dto.firstName,
+            lastName: dto.lastName,
+            password: dto.defaultPassword,
+            role: UserRole.ADMIN,
+            passwordChangeRequired: true,
+            isPhoneVerified: false,
+            existingAccountStrategy: 'promote_self_service',
+            lockExistingAccount: true,
+          }),
+      );
+
+      this.logger.warn(
+        `Super admin ${adminId} created or promoted admin account ${admin.id}`,
+      );
+
+      return this.serializeAdminAccount(admin);
+    } catch (error) {
+      if (error instanceof Error) {
+        throw new BadRequestException(error.message);
+      }
+      throw error;
+    }
   }
 
   async getWalletAccounts(
@@ -284,7 +356,10 @@ export class AdminService {
     reason: string,
     requestId: string,
   ) {
-    await this.ensureAdmin(adminId, 'Only admins can adjust a wallet balance');
+    await this.ensureSuperAdmin(
+      adminId,
+      'Only super admins can adjust a wallet balance',
+    );
     const account = await this.walletService.applyAdminAdjustment(
       adminId,
       userId,
@@ -373,12 +448,22 @@ export class AdminService {
   async suspendUser(userId: string, adminId: string) {
     this.logger.warn(`Admin ${adminId} suspending user ${userId}`);
 
-    await this.ensureAdmin(adminId, 'Only admins can suspend users');
+    const admin = await this.ensureAdmin(adminId, 'Only admins can suspend users');
 
     const user = await this.userRepository.findOne({ where: { id: userId } });
     if (!user) {
       this.logger.warn(`User suspension failed: User ${userId} not found`);
       throw new NotFoundException('User not found');
+    }
+    if (user.id === adminId) {
+      throw new BadRequestException(
+        'Un administrateur ne peut pas suspendre son propre compte',
+      );
+    }
+    if (isAdminRole(user.role) && !isSuperAdminRole(admin.role)) {
+      throw new ForbiddenException(
+        'Seul un super administrateur peut suspendre un compte administrateur',
+      );
     }
 
     user.status = UserStatus.SUSPENDED;
@@ -395,12 +480,17 @@ export class AdminService {
   async activateUser(userId: string, adminId: string) {
     this.logger.log(`Admin ${adminId} activating user ${userId}`);
 
-    await this.ensureAdmin(adminId, 'Only admins can activate users');
+    const admin = await this.ensureAdmin(adminId, 'Only admins can activate users');
 
     const user = await this.userRepository.findOne({ where: { id: userId } });
     if (!user) {
       this.logger.warn(`User activation failed: User ${userId} not found`);
       throw new NotFoundException('User not found');
+    }
+    if (isAdminRole(user.role) && !isSuperAdminRole(admin.role)) {
+      throw new ForbiddenException(
+        'Seul un super administrateur peut reactiver un compte administrateur',
+      );
     }
 
     user.status = UserStatus.ACTIVE;
@@ -597,12 +687,22 @@ export class AdminService {
     await this.tripRequestRepository.delete({ id: tripRequestId });
   }
 
-  private async ensureAdmin(adminId: string, message: string): Promise<void> {
+  private async ensureAdmin(adminId: string, message: string): Promise<User> {
     const admin = await this.userRepository.findOne({ where: { id: adminId } });
-    if (!admin || admin.role !== UserRole.ADMIN) {
+    if (!admin || !isAdminRole(admin.role)) {
       this.logger.warn(`Admin action failed: User ${adminId} is not an admin`);
       throw new ForbiddenException(message);
     }
+    return admin;
+  }
+
+  private async ensureSuperAdmin(
+    adminId: string,
+    message: string,
+  ): Promise<User> {
+    const admin = await this.ensureAdmin(adminId, message);
+    assertSuperAdminRole(admin.role, message);
+    return admin;
   }
 
   private async findTripOrFail(tripId: string): Promise<Trip> {
@@ -758,6 +858,24 @@ export class AdminService {
     } = user;
 
     return safeUser;
+  }
+
+  private serializeAdminAccount(user: User) {
+    return {
+      id: user.id,
+      phone: user.phone,
+      email: user.email,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      role: user.role,
+      status: user.status,
+      isActive: user.isActive,
+      isPhoneVerified: user.isPhoneVerified,
+      passwordChangeRequired: user.passwordChangeRequired,
+      lastLoginAt: user.lastLoginAt,
+      createdAt: user.createdAt,
+      updatedAt: user.updatedAt,
+    };
   }
 
   private sanitizeTrip(trip?: Trip | null, includeBookings = false) {
