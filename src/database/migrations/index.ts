@@ -24,6 +24,7 @@ import { AddAdminWalletAdjustments1780000023000 } from './1780000023000-AddAdmin
 import { AddAdminReferralReadIndexes1780000024000 } from './1780000024000-AddAdminReferralReadIndexes';
 import { AddSuperAdminRole1780000025000 } from './1780000025000-AddSuperAdminRole';
 import { AddAdminPasswordChangeRequired1780000026000 } from './1780000026000-AddAdminPasswordChangeRequired';
+import { AddDiditKycFields1780000027000 } from './1780000027000-AddDiditKycFields';
 
 export const databaseMigrations = [
   FillTotalSeats1780000000000,
@@ -52,4 +53,5 @@ export const databaseMigrations = [
   AddAdminReferralReadIndexes1780000024000,
   AddSuperAdminRole1780000025000,
   AddAdminPasswordChangeRequired1780000026000,
+  AddDiditKycFields1780000027000,
 ];

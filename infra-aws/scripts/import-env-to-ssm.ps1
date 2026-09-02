@@ -5,6 +5,7 @@ param(
   [string]$AwsRegion = "eu-central-1",
   [string]$KmsKeyId = "",
   [string]$TerraformNamesFile = "",
+  [string[]]$IncludeNames = @(),
   [bool]$Overwrite = $true,
   [switch]$AllowLocalEnvForProduction,
   [switch]$DryRun
@@ -79,6 +80,15 @@ $excludedNames = [System.Collections.Generic.HashSet[string]]::new([StringCompar
   "AOT_CONFIG_CONTENT"
 ) | ForEach-Object { [void]$excludedNames.Add($_) }
 
+$includedNames = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+foreach ($includeName in $IncludeNames) {
+  foreach ($namePart in ($includeName -split ",")) {
+    if (-not [string]::IsNullOrWhiteSpace($namePart)) {
+      [void]$includedNames.Add($namePart.Trim())
+    }
+  }
+}
+
 $excludedPrefixes = @(
   "DATABASE_",
   "POSTGRES_",
@@ -107,6 +117,16 @@ function Test-ExcludedName {
   }
 
   return $false
+}
+
+function Test-IncludedName {
+  param([string]$Name)
+
+  if ($includedNames.Count -eq 0) {
+    return $true
+  }
+
+  return $includedNames.Contains($Name)
 }
 
 function Convert-DotEnvValue {
@@ -140,6 +160,10 @@ Get-Content -LiteralPath $EnvFile | ForEach-Object {
 
   $name = $Matches[1]
   $value = Convert-DotEnvValue -RawValue $Matches[2]
+
+  if (-not (Test-IncludedName -Name $name)) {
+    return
+  }
 
   if (Test-ExcludedName -Name $name) {
     if ($name.Equals("AWS_S3_BUCKET_NAME", [StringComparison]::OrdinalIgnoreCase)) {

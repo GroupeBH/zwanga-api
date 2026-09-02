@@ -75,6 +75,61 @@ export class UploadKycDto {
   documentNumber?: string;
 }
 
+export class CreateDiditKycSessionDto {
+  @ApiProperty({
+    required: false,
+    description:
+      "URL de retour mobile/web appelee apres la session Didit. Les schemas d'application mobile sont acceptes.",
+    example: 'zwanga://kyc/didit-return',
+  })
+  @IsString()
+  @IsOptional()
+  @MaxLength(2048)
+  callbackUrl?: string;
+
+  @ApiProperty({
+    required: false,
+    description: 'Langue preferee pour la session Didit',
+    example: 'fr',
+  })
+  @IsString()
+  @IsOptional()
+  @MaxLength(10)
+  language?: string;
+
+  @ApiProperty({
+    required: false,
+    description: "Ecran ou contexte d'origine cote application",
+    example: 'profile',
+  })
+  @IsString()
+  @IsOptional()
+  @MaxLength(80)
+  source?: string;
+}
+
+export class SyncDiditKycSessionDto {
+  @ApiProperty({
+    required: false,
+    description:
+      "Identifiant de session Didit retourne par le callback. S'il est absent, la derniere session Didit de l'utilisateur est utilisee.",
+  })
+  @IsString()
+  @IsOptional()
+  @MaxLength(128)
+  sessionId?: string;
+
+  @ApiProperty({
+    required: false,
+    description:
+      "Statut recu cote app. Il n'est jamais utilise seul pour approuver un KYC ; le backend verifie Didit cote serveur.",
+  })
+  @IsString()
+  @IsOptional()
+  @MaxLength(80)
+  status?: string;
+}
+
 export class SendPhoneVerificationOtpDto {
   @ApiProperty({
     description: 'Numéro de téléphone à vérifier',

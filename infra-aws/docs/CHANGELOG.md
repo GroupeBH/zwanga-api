@@ -2,6 +2,128 @@
 
 Les entrées sont classées de la plus récente à la plus ancienne. Elles décrivent le code versionné et les opérations réellement exécutées sur AWS, sans inclure de valeur secrète.
 
+## INFRA-2026-09-01-003 — Import ciblé des variables Didit et déploiement ECS
+
+### Métadonnées
+
+| Champ | Valeur |
+| --- | --- |
+| Date | 1 septembre 2026 |
+| Environnement | production, SSM Parameter Store, ECS Fargate |
+| Statut | appliqué sur AWS |
+| Type | mise à jour runtime applicative |
+| Déclencheur | activation du fournisseur KYC Didit en production |
+
+### Modification réalisée
+
+Le script `infra-aws/scripts/import-env-to-ssm.ps1` accepte maintenant
+`-IncludeNames` pour importer seulement une liste ciblée de variables depuis un
+fichier `.env.*`. Le filtre accepte une liste PowerShell ou une chaîne séparée
+par virgules.
+
+Cette protection évite d'écraser accidentellement d'autres paramètres runtime
+quand l'opérateur veut uniquement mettre à jour un sous-ensemble de secrets.
+
+### Opération AWS exécutée
+
+Les paramètres suivants ont été importés depuis `.env.production` vers SSM
+Parameter Store sous `/zwanga-api/production/env/*`, en `SecureString` et sans
+afficher les valeurs :
+
+```text
+KYC_PROVIDER
+DIDIT_KYC_ENABLED
+DIDIT_API_BASE_URL
+DIDIT_API_KEY
+DIDIT_WORKFLOW_ID
+DIDIT_WEBHOOK_SECRET
+DIDIT_WEBHOOK_REQUIRE_SIGNATURE
+DIDIT_WEBHOOK_TOLERANCE_SECONDS
+```
+
+Terraform a ensuite été appliqué avec le plan `didit-env-update.tfplan`.
+
+Résultat :
+
+- nouvelle révision ECS `zwanga-api-production-api:8` ;
+- service ECS `zwanga-api-production-api` stable ;
+- `desired=1`, `running=1`, `pending=0` ;
+- aucune ressource ACM, DNS, ALB ou RDS modifiée ;
+- health check public `https://compute-api.zwanga-app.com/health` retourné avec
+  `status=ok`, `db=ok`, `redis=ok`.
+
+### Commande d'import ciblé
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infra-aws\scripts\import-env-to-ssm.ps1 `
+  -EnvFile .\.env.production `
+  -ProjectName zwanga-api `
+  -Environment production `
+  -AwsRegion eu-central-1 `
+  -IncludeNames KYC_PROVIDER,DIDIT_KYC_ENABLED,DIDIT_API_BASE_URL,DIDIT_API_KEY,DIDIT_WORKFLOW_ID,DIDIT_WEBHOOK_SECRET,DIDIT_WEBHOOK_REQUIRE_SIGNATURE,DIDIT_WEBHOOK_TOLERANCE_SECONDS
+```
+
+### Impact sécurité
+
+- les valeurs Didit restent dans SSM/KMS, hors Git et hors Terraform state ;
+- ECS reçoit uniquement des références `valueFrom` vers les paramètres ;
+- le rôle d'exécution conserve la policy compacte bornée au préfixe
+  `/zwanga-api/production/*`.
+
+## INFRA-2026-09-01-002 — Variables runtime pour le KYC Didit
+
+### Métadonnées
+
+| Champ | Valeur |
+| --- | --- |
+| Date | 1 septembre 2026 |
+| Environnement | production/staging, ECS Fargate, SSM Parameter Store |
+| Statut | documentation et exemples préparés ; import SSM et apply requis |
+| Type | configuration runtime applicative |
+| Déclencheur | migration du KYC Zwanga vers Didit |
+
+### Modification réalisée
+
+Les exemples d'environnement et `terraform.tfvars.example` documentent les
+variables non secrètes permettant d'activer le fournisseur KYC Didit :
+
+```text
+KYC_PROVIDER
+DIDIT_KYC_ENABLED
+DIDIT_API_BASE_URL
+DIDIT_WEBHOOK_REQUIRE_SIGNATURE
+DIDIT_WEBHOOK_TOLERANCE_SECONDS
+```
+
+Les valeurs secrètes suivantes doivent être créées dans SSM Parameter Store sous
+le préfixe runtime de l'environnement, sans être copiées dans Terraform state :
+
+```text
+DIDIT_API_KEY
+DIDIT_WORKFLOW_ID
+DIDIT_WEBHOOK_SECRET
+```
+
+### Déploiement requis
+
+1. Créer/configurer le workflow Didit.
+2. Ajouter les paramètres SSM sous `/zwanga-api/<environment>/env/*`.
+3. Lancer un nouveau `terraform plan/apply` pour générer une nouvelle révision
+   ECS contenant les variables.
+4. Vérifier dans la task definition que les noms `DIDIT_*` sont injectés.
+5. Configurer côté Didit l'URL webhook publique :
+
+```text
+https://<api-production>/api/v1/users/kyc/didit/webhook
+```
+
+### Impact sécurité
+
+- Les secrets Didit restent hors Git.
+- Le webhook est signé par défaut.
+- L'ancienne validation Rekognition peut rester désactivée ou disponible en
+  secours sans exposer de nouveau droit AWS.
+
 ## INFRA-2026-09-01-001 — Policy IAM compacte pour les paramètres SSM runtime
 
 ### Métadonnées
