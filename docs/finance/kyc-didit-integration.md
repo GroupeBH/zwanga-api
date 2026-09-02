@@ -58,6 +58,63 @@ back-office ne doivent donc pas connaître Didit directement.
 L'ancien endpoint `POST /users/kyc` reste présent pour compatibilité et secours,
 mais le flux mobile principal doit utiliser Didit.
 
+## Concordance des noms légaux
+
+Le backend envoie à Didit les noms du profil dans `expected_details` :
+
+```json
+{
+  "expected_details": {
+    "first_name": "Eugène",
+    "last_name": "Bosuku Buania"
+  }
+}
+```
+
+Ces valeurs sont normalisées en Unicode NFC, sans espaces en début/fin et avec
+un seul espace entre les mots. Elles ne sont ni réordonnées ni abrégées :
+l'utilisateur doit donc saisir ses prénom(s) et son nom comme ils apparaissent
+sur la pièce d'identité. Le post-nom reste facultatif.
+
+Le parcours mobile applique les garde-fous suivants :
+
+1. les champs d'inscription utilisent les libellés `Prénom(s)` et `Nom`, avec
+   un post-nom explicitement facultatif et une explication du contrôle Didit ;
+2. les noms venant de Google restent modifiables et les valeurs confirmées
+   sont envoyées au backend lors de la première inscription ;
+3. avec Apple, l'app demande les scopes `FULL_NAME` et `EMAIL`, transmet le nom
+   fourni lors de la première autorisation et ne réaffiche pas de champs de nom ;
+4. avant toute nouvelle session Didit, l'app affiche les deux valeurs et permet
+   de revenir à la modification du profil ;
+5. après un KYC approuvé, le backend refuse une modification réelle des noms.
+   Les différences de casse, d'accents ou d'espacement restent considérées
+   comme la même identité ;
+6. un changement légal doit passer par le support, qui organise une nouvelle
+   vérification avant de modifier l'identité de référence.
+
+Quand Didit renvoie `FULL_NAME_MISMATCH_WITH_PROVIDED` (ou un avertissement
+équivalent de nom fourni), le backend conserve le code d'avertissement sans les
+données personnelles dans `providerMetadata.warningCodes` et retourne un motif
+de rejet compréhensible à l'utilisateur.
+
+### Réglage requis dans la console Didit
+
+Le code Zwanga ne peut pas modifier les règles de décision du workflow Didit.
+Dans la version publiée du workflow KYC :
+
+1. ouvrir les règles de décision de l'étape de vérification du document ;
+2. rechercher la règle liée aux écarts entre `expected_details` et les données
+   OCR, notamment `FULL_NAME_MISMATCH_WITH_PROVIDED` ;
+3. configurer cet écart en `In Review` / revue manuelle, et non en refus
+   automatique ;
+4. conserver les contrôles de document, liveness et face match inchangés ;
+5. publier une nouvelle version du workflow et tester un nom identique, un nom
+   sans post-nom, puis un écart réel.
+
+Les intitulés exacts peuvent varier selon la version de la console Didit. Le
+résultat attendu est qu'un simple écart de nom soit examiné manuellement, sans
+approuver automatiquement une identité différente.
+
 ## Tables et colonnes
 
 Table touchée : `kyc_documents`
@@ -66,16 +123,16 @@ Migration : `1780000027000-AddDiditKycFields`
 
 Colonnes ajoutées :
 
-| Colonne | Type | Rôle |
-| --- | --- | --- |
-| `provider` | enum `legacy`, `didit` | distingue l'ancien flux du flux Didit |
-| `diditSessionId` | varchar nullable | identifiant de session Didit |
-| `diditSessionNumber` | integer nullable | numéro lisible de session Didit si fourni |
-| `diditWorkflowId` | varchar nullable | workflow Didit utilisé |
-| `diditVendorData` | varchar nullable | identifiant métier renvoyé par Didit |
-| `diditSessionStatus` | varchar nullable | statut brut Didit le plus récent |
-| `diditLastSyncedAt` | timestamp nullable | dernière synchronisation locale |
-| `providerMetadata` | jsonb nullable | résumé technique minimal, sans image ni secret |
+| Colonne              | Type                   | Rôle                                           |
+| -------------------- | ---------------------- | ---------------------------------------------- |
+| `provider`           | enum `legacy`, `didit` | distingue l'ancien flux du flux Didit          |
+| `diditSessionId`     | varchar nullable       | identifiant de session Didit                   |
+| `diditSessionNumber` | integer nullable       | numéro lisible de session Didit si fourni      |
+| `diditWorkflowId`    | varchar nullable       | workflow Didit utilisé                         |
+| `diditVendorData`    | varchar nullable       | identifiant métier renvoyé par Didit           |
+| `diditSessionStatus` | varchar nullable       | statut brut Didit le plus récent               |
+| `diditLastSyncedAt`  | timestamp nullable     | dernière synchronisation locale                |
+| `providerMetadata`   | jsonb nullable         | résumé technique minimal, sans image ni secret |
 
 Index :
 
@@ -162,7 +219,7 @@ Configuration Expo ajoutée :
     iosVariant: 'autodetection',
     androidVariant: 'autodetection',
   },
-]
+];
 ```
 
 Choix retenu : `autodetection`, car le besoin Zwanga est de comparer l'image de

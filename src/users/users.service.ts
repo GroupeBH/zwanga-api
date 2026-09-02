@@ -42,6 +42,10 @@ import { Express } from 'express';
 import { UserRole } from './entities/user.entity';
 import { SubscriptionsService } from '../subscriptions/subscriptions.service';
 import { assertSelfServiceUserRole, isAdminRole } from './user-role.policy';
+import {
+  areLegalNamesEquivalent,
+  normalizeLegalName,
+} from './legal-identity.util';
 
 @Injectable()
 export class UsersService {
@@ -395,12 +399,35 @@ export class UsersService {
 
     const previousProfilePicture = user.profilePicture;
 
-    if (updateProfileDto.firstName !== undefined) {
-      user.firstName = updateProfileDto.firstName;
+    const normalizedFirstName =
+      updateProfileDto.firstName === undefined
+        ? undefined
+        : normalizeLegalName(updateProfileDto.firstName);
+    const normalizedLastName =
+      updateProfileDto.lastName === undefined
+        ? undefined
+        : normalizeLegalName(updateProfileDto.lastName);
+    const changesLegalIdentity =
+      (normalizedFirstName !== undefined &&
+        !areLegalNamesEquivalent(normalizedFirstName, user.firstName)) ||
+      (normalizedLastName !== undefined &&
+        !areLegalNamesEquivalent(normalizedLastName, user.lastName));
+    const hasApprovedKyc = user.kycDocuments?.some(
+      (document) => document.status === KycStatus.APPROVED,
+    );
+
+    if (changesLegalIdentity && hasApprovedKyc) {
+      throw new BadRequestException(
+        'Vos noms sont protégés après validation KYC. Contactez le support pour déclarer un changement légal et relancer la vérification.',
+      );
     }
 
-    if (updateProfileDto.lastName !== undefined) {
-      user.lastName = updateProfileDto.lastName;
+    if (normalizedFirstName !== undefined) {
+      user.firstName = normalizedFirstName;
+    }
+
+    if (normalizedLastName !== undefined) {
+      user.lastName = normalizedLastName;
     }
 
     if (updateProfileDto.gender !== undefined) {

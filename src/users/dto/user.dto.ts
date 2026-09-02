@@ -15,6 +15,15 @@ import { Transform } from 'class-transformer';
 import { UserGender, UserRole } from '../entities/user.entity';
 import { SELF_SERVICE_USER_ROLES } from '../user-role.policy';
 import { VehicleType } from '../../vehicles/entities/vehicle.entity';
+import { normalizeLegalName } from '../legal-identity.util';
+
+const toNormalizedLegalName = ({ value }: { value: unknown }): unknown => {
+  if (value === undefined || value === null) {
+    return value;
+  }
+
+  return typeof value === 'string' ? normalizeLegalName(value) : value;
+};
 
 export enum PhoneVerificationContext {
   REGISTRATION = 'registration',
@@ -24,13 +33,19 @@ export enum PhoneVerificationContext {
 
 export class UpdateProfileDto {
   @ApiProperty({ required: false })
+  @Transform(toNormalizedLegalName)
   @IsString()
   @IsOptional()
+  @IsNotEmpty()
+  @MaxLength(100)
   firstName?: string;
 
   @ApiProperty({ required: false })
+  @Transform(toNormalizedLegalName)
   @IsString()
   @IsOptional()
+  @IsNotEmpty()
+  @MaxLength(100)
   lastName?: string;
 
   @ApiProperty({
