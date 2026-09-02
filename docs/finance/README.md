@@ -61,6 +61,7 @@ Toute évolution financière doit respecter les règles suivantes :
 - [Règlement atomique des courses payées en jetons](./atomic-token-trip-settlement.md)
 - [Versement Mobile Money des revenus conducteur](./driver-electronic-trip-payout.md)
 - [Notification du montant conducteur à la fin du trajet](./driver-trip-revenue-notification.md)
+- [KYC Didit et compatibilité Zwanga](./kyc-didit-integration.md)
 - [Contrôle d'accès financier du back-office](./admin-finance-access-control.md)
 - [Administration des portefeuilles de jetons](./admin-token-wallet-management.md)
 - [Administration du parrainage](./admin-referral-management.md)

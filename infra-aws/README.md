@@ -226,6 +226,15 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infra-aws\scripts\impo
   -EnvFile .\.env.production
 ```
 
+Pour importer uniquement une famille de variables sans écraser le reste des
+paramètres runtime, utilise `-IncludeNames` :
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\infra-aws\scripts\import-env-to-ssm.ps1 `
+  -EnvFile .\.env.production `
+  -IncludeNames KYC_PROVIDER,DIDIT_KYC_ENABLED,DIDIT_API_BASE_URL,DIDIT_API_KEY,DIDIT_WORKFLOW_ID,DIDIT_WEBHOOK_SECRET,DIDIT_WEBHOOK_REQUIRE_SIGNATURE,DIDIT_WEBHOOK_TOLERANCE_SECONDS
+```
+
 Utilise un fichier `.env.production` separe de ton `.env` local. Les valeurs locales et production ne doivent pas etre melangees. Le script refuse d'importer `.env` vers l'environnement `production`, sauf si tu passes explicitement `-AllowLocalEnvForProduction`.
 
 Le script cree les parametres `/zwanga-api/production/env/*` en `SecureString`. Au prochain `terraform apply`, Terraform decouvre automatiquement ces parametres et les injecte dans la definition ECS via le bloc `secrets`, sans lire les valeurs en clair.

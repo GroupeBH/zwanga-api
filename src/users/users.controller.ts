@@ -5,6 +5,7 @@ import {
   Put,
   Post,
   Body,
+  Headers,
   Request,
   Param,
   UploadedFiles,
@@ -24,6 +25,8 @@ import { UsersService } from './users.service';
 import {
   UpdateProfileDto,
   UploadKycDto,
+  CreateDiditKycSessionDto,
+  SyncDiditKycSessionDto,
   SendPhoneVerificationOtpDto,
   VerifyPhoneOtpDto,
   ChangePinDto,
@@ -35,11 +38,15 @@ import {
   FileFieldsInterceptor,
   FileInterceptor,
 } from '@nestjs/platform-express';
+import { DiditKycService } from './didit-kyc.service';
 
 @ApiTags('Users')
 @Controller('users')
 export class UsersController {
-  constructor(private readonly usersService: UsersService) {}
+  constructor(
+    private readonly usersService: UsersService,
+    private readonly diditKycService: DiditKycService,
+  ) {}
 
   @Get('me')
   @Auth()
@@ -128,6 +135,42 @@ export class UsersController {
   @ApiOperation({ summary: 'Get KYC verification status' })
   async getKycStatus(@Request() req) {
     return this.usersService.getKycStatus(req.user.userId);
+  }
+
+  @Post('kyc/didit/session')
+  @Auth()
+  @HttpCode(HttpStatus.OK)
+  @SensitiveThrottle(5, 60000)
+  @ApiOperation({ summary: 'Create a hosted Didit KYC verification session' })
+  async createDiditKycSession(
+    @Request() req,
+    @Body() dto: CreateDiditKycSessionDto,
+  ) {
+    return this.diditKycService.createSession(req.user.userId, dto);
+  }
+
+  @Post('kyc/didit/sync')
+  @Auth()
+  @HttpCode(HttpStatus.OK)
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({ summary: 'Synchronize the current user Didit KYC session' })
+  async syncDiditKycSession(
+    @Request() req,
+    @Body() dto: SyncDiditKycSessionDto,
+  ) {
+    return this.diditKycService.syncSession(req.user.userId, dto);
+  }
+
+  @Post('kyc/didit/webhook')
+  @Public()
+  @HttpCode(HttpStatus.OK)
+  @SensitiveThrottle(60, 60000)
+  @ApiOperation({ summary: 'Receive signed Didit KYC webhook events' })
+  async handleDiditKycWebhook(
+    @Headers() headers: Record<string, string | string[] | undefined>,
+    @Body() body: Record<string, unknown>,
+  ) {
+    return this.diditKycService.handleWebhook(headers, body);
   }
 
   @Post('fcm-token')

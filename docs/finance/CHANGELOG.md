@@ -4,6 +4,61 @@ Ce fichier répertorie les changements qui influencent un prix, un paiement, un 
 
 ## 1 septembre 2026
 
+### KYC-DIDIT-002 — Typage explicite des colonnes KYC nullable
+
+Statut : implémenté localement ; aucun changement de schéma SQL attendu, relance
+de `migration:run` requise pour appliquer la migration Didit en attente.
+
+Résumé : TypeORM refusait d'initialiser le DataSource PostgreSQL pendant
+`migration:run` parce que certains champs nullable de `KycDocument`, notamment
+`selfieUrl`, étaient inférés comme `Object` après leur typage TypeScript en
+`string | null`. Les colonnes concernées déclarent maintenant explicitement leur
+type SQL.
+
+Impacts financiers et opérationnels :
+
+- aucun changement de prix, commission, solde, jeton ou retrait ;
+- aucun recalcul des dossiers KYC existants ;
+- aucun changement de statut KYC existant ;
+- correction bloquante pour permettre à TypeORM de lancer les migrations ;
+- les retraits restent conditionnés par `kyc_documents.status = approved`.
+
+Documentation complète : [kyc-didit-integration.md](./kyc-didit-integration.md).
+
+### KYC-DIDIT-001 — Migration vers Didit comme fournisseur KYC
+
+Statut : implémenté localement ; migration, variables Didit, configuration
+webhook Didit, déploiement API, puis publication app/admin requis.
+
+Résumé : le KYC peut désormais être lancé via une session Didit créée par le
+backend, puis exécutée en priorité par le SDK React Native Didit dans l'app
+mobile. Le backend crée la session avec `vendor_data = users.id`, synchronise la
+décision côté serveur et reçoit les webhooks signés. Les modules financiers
+continuent de lire `kyc_documents.status`, ce qui évite de casser les retraits
+conducteur et parrainage.
+
+Impacts financiers et opérationnels :
+
+- aucun changement de prix, commission, taux de conversion, solde ou montant ;
+- l'app mobile utilise `session_token` avec le SDK Didit pour capturer la pièce
+  d'identité et le visage/liveness ;
+- l'URL Didit reste disponible en secours WebBrowser si le module natif n'est
+  pas encore présent dans le build installé ;
+- ajout de colonnes nullable dans `kyc_documents` pour tracer le fournisseur et
+  la session Didit ;
+- `approved` active le compte sauf suspension ;
+- `pending` et `rejected` maintiennent le compte en `pending_kyc` sauf
+  suspension ;
+- les retraits restent conditionnés par un KYC `approved` ;
+- `/users/kyc` reste disponible en compatibilité legacy ;
+- `/users/kyc/didit/sync` ne fait jamais confiance au statut fourni par l'app
+  pour approuver un KYC ;
+- les webhooks Didit sont vérifiés par signature V2, avec secours simple
+  limité aux sessions déjà connues localement ;
+- les payloads sensibles Didit ne sont pas stockés intégralement.
+
+Documentation complète : [kyc-didit-integration.md](./kyc-didit-integration.md).
+
 ### FIN-ADMIN-RBAC-002 — Bootstrap superadmin et création web des admins
 
 Statut : implémenté dans le backend et l'administration web ; migration,
