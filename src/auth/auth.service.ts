@@ -44,6 +44,7 @@ import {
 } from '../users/user-role.policy';
 import { KeccelOtpService } from '../keccel-otp/keccel-otp.service';
 import { provisionAdminAccount } from '../admin/admin-account.provisioning';
+import { normalizeLegalName } from '../users/legal-identity.util';
 
 const APPLE_ISSUER = 'https://appleid.apple.com';
 const APPLE_PUBLIC_KEYS_URL = 'https://appleid.apple.com/auth/keys';
@@ -152,6 +153,8 @@ export class AuthService {
       referralCapturedAt,
     } = registerDto;
     assertSelfServiceUserRole(role);
+    const legalFirstName = normalizeLegalName(firstName);
+    const legalLastName = normalizeLegalName(lastName);
 
     const referralAttribution = {
       referralCode,
@@ -212,8 +215,8 @@ export class AuthService {
     const userData: Partial<User> = {
       phone,
       password: hashedPin, // Store hashed PIN
-      firstName,
-      lastName,
+      firstName: legalFirstName,
+      lastName: legalLastName,
       gender: gender ?? null,
       role,
       isDriver: resolvedIsDriver,
@@ -782,6 +785,8 @@ export class AuthService {
       | 'role'
       | 'isDriver'
       | 'vehicle'
+      | 'firstName'
+      | 'lastName'
       | 'referralCode'
       | 'referralToken'
       | 'referralProvider'
@@ -814,6 +819,8 @@ export class AuthService {
       | 'role'
       | 'isDriver'
       | 'vehicle'
+      | 'firstName'
+      | 'lastName'
       | 'referralCode'
       | 'referralToken'
       | 'referralProvider'
@@ -896,6 +903,18 @@ export class AuthService {
 
         const isDriver = signupOptions?.isDriver ?? role === UserRole.DRIVER;
         const vehicle = signupOptions?.vehicle;
+        const legalFirstName = normalizeLegalName(
+          signupOptions?.firstName || firstName,
+        );
+        const legalLastName = normalizeLegalName(
+          signupOptions?.lastName || lastName,
+        );
+
+        if (isDriver && (!legalFirstName || !legalLastName)) {
+          throw new BadRequestException(
+            'Vos prénom(s) et votre nom exacts sont requis avant la vérification KYC. Le post-nom est facultatif.',
+          );
+        }
         const referralAttribution = {
           referralCode: signupOptions?.referralCode,
           referralToken: signupOptions?.referralToken,
@@ -918,8 +937,8 @@ export class AuthService {
           googleId,
           email,
           phone,
-          firstName,
-          lastName,
+          firstName: legalFirstName,
+          lastName: legalLastName,
           gender: gender ?? null,
           profilePicture: profilePicture ?? undefined,
           role,
@@ -1223,6 +1242,14 @@ export class AuthService {
 
       const isDriver = signupOptions?.isDriver ?? role === UserRole.DRIVER;
       const vehicle = signupOptions?.vehicle;
+      const legalFirstName = normalizeLegalName(firstName);
+      const legalLastName = normalizeLegalName(lastName);
+
+      if (isDriver && (!legalFirstName || !legalLastName)) {
+        throw new BadRequestException(
+          'Vos prénom(s) et votre nom exacts sont requis avant la vérification KYC. Le post-nom est facultatif.',
+        );
+      }
       const referralAttribution = {
         referralCode: signupOptions?.referralCode,
         referralToken: signupOptions?.referralToken,
@@ -1245,8 +1272,8 @@ export class AuthService {
         appleId,
         email,
         phone,
-        firstName: firstName ?? '',
-        lastName: lastName ?? '',
+        firstName: legalFirstName,
+        lastName: legalLastName,
         gender: signupOptions?.gender ?? null,
         role,
         isDriver,

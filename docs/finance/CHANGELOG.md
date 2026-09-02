@@ -2,6 +2,32 @@
 
 Ce fichier répertorie les changements qui influencent un prix, un paiement, un solde, une commission, une récompense ou un retrait.
 
+## 2 septembre 2026
+
+### KYC-DIDIT-003 — Concordance des noms légaux
+
+Statut : implémenté localement ; publication mobile/backend et ajustement du
+workflow Didit requis.
+
+Résumé : l'inscription et le profil demandent désormais les prénom(s) et le
+nom tels qu'ils figurent sur la pièce d'identité ; le post-nom est facultatif. L'app confirme ces
+valeurs avant de créer une session Didit, le backend les normalise avant de les
+envoyer dans `expected_details`, et les noms sont protégés après approbation
+KYC. Les connexions Google et Apple transmettent aussi les noms confirmés par
+l'utilisateur lors de la première inscription. Pour Apple, le nom est récupéré
+depuis l'autorisation Apple et n'est pas redemandé dans le formulaire Zwanga.
+
+Impacts financiers et opérationnels :
+
+- aucun changement de prix, commission, solde, jeton ou retrait ;
+- réduction attendue des faux rejets `FULL_NAME_MISMATCH_WITH_PROVIDED` ;
+- les écarts de nom doivent être orientés vers une revue manuelle dans le
+  workflow Didit plutôt que vers un refus automatique ;
+- un changement légal après approbation nécessite le support et une nouvelle
+  vérification KYC.
+
+Documentation complète : [kyc-didit-integration.md](./kyc-didit-integration.md).
+
 ## 1 septembre 2026
 
 ### KYC-DIDIT-002 — Typage explicite des colonnes KYC nullable

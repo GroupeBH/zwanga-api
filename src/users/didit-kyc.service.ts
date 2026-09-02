@@ -21,6 +21,7 @@ import {
   KycStatus,
 } from './entities/kyc-document.entity';
 import { User, UserStatus } from './entities/user.entity';
+import { normalizeLegalName } from './legal-identity.util';
 
 type DiditHttpMethod = 'GET' | 'POST';
 type DiditPayload = Record<string, unknown>;
@@ -98,18 +99,22 @@ export class DiditKycService {
     const user = await this.userRepository.findOne({ where: { id: userId } });
 
     if (!user) {
-      throw new NotFoundException('Utilisateur non trouve');
+      throw new NotFoundException('Utilisateur non trouvé');
     }
 
     const existingKyc = await this.findLatestUserKyc(userId);
 
     if (existingKyc?.status === KycStatus.APPROVED) {
       throw new BadRequestException(
-        "Votre identite est deja verifiee. Contactez le support si une nouvelle verification est necessaire.",
+        'Votre identité est dejà verifiée. Contactez le support si une nouvelle verification est necessaire.',
       );
     }
 
-    const payload = this.buildCreateSessionPayload(user, dto, config.workflowId);
+    const payload = this.buildCreateSessionPayload(
+      user,
+      dto,
+      config.workflowId,
+    );
     const diditSession = await this.diditRequest<DiditSessionResponse>(
       'POST',
       '/v3/session/',
@@ -129,7 +134,7 @@ export class DiditKycService {
         `Didit session creation returned an incomplete payload for user ${userId}`,
       );
       throw new InternalServerErrorException(
-        "Didit n'a pas retourne une session exploitable. Veuillez reessayer.",
+        "Didit n'a pas retourné une session exploitable. Veuillez réessayer.",
       );
     }
 
@@ -197,7 +202,7 @@ export class DiditKycService {
     const diditVendorData = this.extractVendorData(diditSession);
     if (sessionId && !existingKyc && diditVendorData !== userId) {
       throw new ForbiddenException(
-        "Cette session Didit n'est pas rattachee a votre compte Zwanga.",
+        "Cette session Didit n'est pas rattachée à votre compte Zwanga.",
       );
     }
 
@@ -340,11 +345,13 @@ export class DiditKycService {
     }
 
     const expectedDetails: Record<string, string> = {};
-    if (user.firstName) {
-      expectedDetails.first_name = user.firstName;
+    const firstName = normalizeLegalName(user.firstName);
+    const lastName = normalizeLegalName(user.lastName);
+    if (firstName) {
+      expectedDetails.first_name = firstName;
     }
-    if (user.lastName) {
-      expectedDetails.last_name = user.lastName;
+    if (lastName) {
+      expectedDetails.last_name = lastName;
     }
     if (Object.keys(expectedDetails).length > 0) {
       payload.expected_details = expectedDetails;
@@ -432,7 +439,9 @@ export class DiditKycService {
     const sessionId = input.sessionId ?? this.extractSessionId(diditPayload);
     const diditVendorData = this.extractVendorData(diditPayload);
     const statusText =
-      this.asNullableString(diditPayload.status) ?? input.fallbackStatus ?? null;
+      this.asNullableString(diditPayload.status) ??
+      input.fallbackStatus ??
+      null;
     const mappedStatus = this.mapDiditStatus(statusText);
     const now = new Date();
 
@@ -509,7 +518,8 @@ export class DiditKycService {
         null;
       kycDocument.diditWorkflowId =
         this.extractWorkflowId(diditPayload) ?? kycDocument.diditWorkflowId;
-      kycDocument.diditVendorData = diditVendorData ?? kycDocument.diditVendorData;
+      kycDocument.diditVendorData =
+        diditVendorData ?? kycDocument.diditVendorData;
       kycDocument.diditSessionStatus = statusText;
       kycDocument.diditLastSyncedAt = now;
       kycDocument.providerMetadata = this.sanitizeDiditPayloadForStorage(
@@ -587,13 +597,11 @@ export class DiditKycService {
     return config;
   }
 
-  private getOptionalDiditApiConfig():
-    | {
-        apiKey: string;
-        workflowId: string;
-        baseUrl: string;
-      }
-    | null {
+  private getOptionalDiditApiConfig(): {
+    apiKey: string;
+    workflowId: string;
+    baseUrl: string;
+  } | null {
     const enabled =
       this.configService.get<string>('DIDIT_KYC_ENABLED') === 'true' ||
       this.configService.get<string>('KYC_PROVIDER') === 'didit';
@@ -633,7 +641,7 @@ export class DiditKycService {
     if (!secret) {
       if (requireSignature) {
         throw new UnauthorizedException(
-          "Le secret webhook Didit n'est pas configure.",
+          "Le secret webhook Didit n'est pas configuré.",
         );
       }
       this.logger.warn(
@@ -679,7 +687,10 @@ export class DiditKycService {
       return { method: 'v2' };
     }
 
-    if (signatureSimple && this.verifySimpleSignature(payload, signatureSimple, timestamp, secret)) {
+    if (
+      signatureSimple &&
+      this.verifySimpleSignature(payload, signatureSimple, timestamp, secret)
+    ) {
       return { method: 'simple' };
     }
 
@@ -698,8 +709,9 @@ export class DiditKycService {
     const sessionId = this.extractSessionId(eventPayload) ?? '';
     const status = this.asNullableString(eventPayload.status) ?? '';
     const webhookType =
-      this.asNullableString(eventPayload.webhook_type ?? eventPayload.webhookType) ??
-      '';
+      this.asNullableString(
+        eventPayload.webhook_type ?? eventPayload.webhookType,
+      ) ?? '';
     const canonicalString = [
       signedTimestamp,
       sessionId,
@@ -896,6 +908,17 @@ export class DiditKycService {
     status: string | null,
     payload: DiditPayload,
   ): string {
+    const warningCodes = this.extractDiditWarningCodes(payload);
+    const hasLegalNameMismatch = warningCodes.some(
+      (code) =>
+        code === 'FULL_NAME_MISMATCH_WITH_PROVIDED' ||
+        (code.includes('NAME_MISMATCH') && code.includes('PROVIDED')),
+    );
+
+    if (hasLegalNameMismatch) {
+      return 'Les noms du compte Zwanga ne correspondent pas à ceux extraits de la pièce d’identité. Corrigez vos prénom(s) et votre nom dans votre profil, puis relancez la vérification. Le post-nom est facultatif.';
+    }
+
     const directCandidates = [
       payload.reason,
       payload.decline_reason,
@@ -918,7 +941,7 @@ export class DiditKycService {
     }
 
     const label = status || 'rejetee';
-    return `Didit n'a pas valide cette verification d'identite. Statut recu : ${label}.`;
+    return `Didit n'a pas validé cette verification d'identité. Statut reçu : ${label}.`;
   }
 
   private sanitizeDiditPayloadForStorage(
@@ -941,6 +964,7 @@ export class DiditKycService {
         payload.webhook_type ?? payload.webhookType,
       ),
       syncedAt: new Date().toISOString(),
+      warningCodes: this.extractDiditWarningCodes(payload),
       decisionSummary: decision
         ? {
             status: this.asNullableString(decision.status),
@@ -951,6 +975,50 @@ export class DiditKycService {
           }
         : null,
     };
+  }
+
+  private extractDiditWarningCodes(payload: unknown): string[] {
+    const warningCodes = new Set<string>();
+
+    const visit = (value: unknown, depth: number) => {
+      if (depth > 8 || !value || typeof value !== 'object') {
+        return;
+      }
+
+      if (Array.isArray(value)) {
+        value.forEach((item) => visit(item, depth + 1));
+        return;
+      }
+
+      const objectValue = value as Record<string, unknown>;
+      const warnings = objectValue.warnings;
+      if (Array.isArray(warnings)) {
+        warnings.forEach((warning) => {
+          if (
+            !warning ||
+            typeof warning !== 'object' ||
+            Array.isArray(warning)
+          ) {
+            return;
+          }
+
+          const warningObject = warning as Record<string, unknown>;
+          const code = this.asNullableString(
+            warningObject.risk ??
+              warningObject.code ??
+              warningObject.warning_code,
+          );
+          if (code) {
+            warningCodes.add(code.trim().toUpperCase());
+          }
+        });
+      }
+
+      Object.values(objectValue).forEach((item) => visit(item, depth + 1));
+    };
+
+    visit(payload, 0);
+    return Array.from(warningCodes).sort();
   }
 
   private extractNestedStatus(

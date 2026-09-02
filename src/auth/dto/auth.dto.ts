@@ -17,6 +17,7 @@ import { UserGender, UserRole } from '../../users/entities/user.entity';
 import { SELF_SERVICE_USER_ROLES } from '../../users/user-role.policy';
 import { CreateVehicleDto } from '../../vehicles/dto/vehicle.dto';
 import { ReferralAttributionDto } from '../../referrals/dto/referral.dto';
+import { normalizeLegalName } from '../../users/legal-identity.util';
 
 const toTrimmedString = ({ value }: TransformFnParams): unknown => {
   if (value === undefined || value === null) {
@@ -24,6 +25,14 @@ const toTrimmedString = ({ value }: TransformFnParams): unknown => {
   }
 
   return String(value).trim();
+};
+
+const toNormalizedLegalName = ({ value }: TransformFnParams): unknown => {
+  if (value === undefined || value === null) {
+    return value;
+  }
+
+  return typeof value === 'string' ? normalizeLegalName(value) : value;
 };
 
 export class RegisterDto extends ReferralAttributionDto {
@@ -65,13 +74,17 @@ export class RegisterDto extends ReferralAttributionDto {
   isDriver?: boolean;
 
   @ApiProperty({ example: 'John' })
+  @Transform(toNormalizedLegalName)
   @IsString()
   @IsNotEmpty()
+  @MaxLength(100)
   firstName: string;
 
   @ApiProperty({ example: 'Doe' })
+  @Transform(toNormalizedLegalName)
   @IsString()
   @IsNotEmpty()
+  @MaxLength(100)
   lastName: string;
 
   @ApiProperty({
@@ -273,6 +286,29 @@ export class GoogleMobileAuthDto extends ReferralAttributionDto {
   phone?: string;
 
   @ApiProperty({
+    description: 'Prenom(s) legaux confirmes pendant la premiere inscription',
+    required: false,
+  })
+  @Transform(toNormalizedLegalName)
+  @IsString()
+  @IsOptional()
+  @IsNotEmpty()
+  @MaxLength(100)
+  firstName?: string;
+
+  @ApiProperty({
+    description:
+      'Nom legal confirme pendant la premiere inscription (post-nom facultatif)',
+    required: false,
+  })
+  @Transform(toNormalizedLegalName)
+  @IsString()
+  @IsOptional()
+  @IsNotEmpty()
+  @MaxLength(100)
+  lastName?: string;
+
+  @ApiProperty({
     enum: UserGender,
     enumName: 'UserGender',
     example: UserGender.FEMALE,
@@ -355,9 +391,11 @@ export class AppleMobileAuthDto extends ReferralAttributionDto {
       'Prenom fourni par Apple uniquement lors de la premiere autorisation',
     required: false,
   })
-  @Transform(toTrimmedString)
+  @Transform(toNormalizedLegalName)
   @IsString()
   @IsOptional()
+  @IsNotEmpty()
+  @MaxLength(100)
   firstName?: string;
 
   @ApiProperty({
@@ -365,9 +403,11 @@ export class AppleMobileAuthDto extends ReferralAttributionDto {
       'Nom fourni par Apple uniquement lors de la premiere autorisation',
     required: false,
   })
-  @Transform(toTrimmedString)
+  @Transform(toNormalizedLegalName)
   @IsString()
   @IsOptional()
+  @IsNotEmpty()
+  @MaxLength(100)
   lastName?: string;
 
   @ApiProperty({

@@ -131,6 +131,8 @@ describe('DiditKycService', () => {
   });
 
   it('creates a hosted Didit session with the Zwanga user id as vendor_data', async () => {
+    user.firstName = '  Eugène  ';
+    user.lastName = 'Bosuku   Buania';
     const result = await service.createSession(user.id, {
       callbackUrl: 'zwanga://kyc/didit-return',
       language: 'fr',
@@ -139,6 +141,17 @@ describe('DiditKycService', () => {
 
     expect(result.sessionId).toBe('session-1');
     expect(result.url).toBe('https://verify.didit.test/session-1');
+    const requestBody: unknown = JSON.parse(
+      (global.fetch as jest.Mock).mock.calls[0][1].body,
+    );
+    expect(requestBody).toEqual(
+      expect.objectContaining({
+        expected_details: {
+          first_name: 'Eugène',
+          last_name: 'Bosuku Buania',
+        },
+      }),
+    );
     expect(global.fetch).toHaveBeenCalledWith(
       'https://verification.didit.me/v3/session/',
       expect.objectContaining({
@@ -216,6 +229,36 @@ describe('DiditKycService', () => {
 
     expect(result?.status).toBe(KycStatus.PENDING);
     expect(txUserRepository.save).not.toHaveBeenCalled();
+  });
+
+  it('returns an actionable reason when Didit detects a legal name mismatch', async () => {
+    (global.fetch as jest.Mock).mockResolvedValueOnce(
+      createFetchResponse({
+        session_id: 'session-1',
+        status: 'Declined',
+        vendor_data: user.id,
+        id_verifications: [
+          {
+            warnings: [{ risk: 'FULL_NAME_MISMATCH_WITH_PROVIDED' }],
+          },
+        ],
+      }) as any,
+    );
+
+    const result = await service.syncSession(user.id, {
+      sessionId: 'session-1',
+      status: 'Declined',
+    });
+
+    expect(result?.status).toBe(KycStatus.REJECTED);
+    expect(result?.rejectionReason).toContain(
+      'Les noms du compte Zwanga ne correspondent pas',
+    );
+    expect(result?.providerMetadata).toEqual(
+      expect.objectContaining({
+        warningCodes: ['FULL_NAME_MISMATCH_WITH_PROVIDED'],
+      }),
+    );
   });
 
   it('rejects Didit webhooks with an invalid signature', async () => {
