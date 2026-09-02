@@ -74,7 +74,7 @@ type DiditWebhookSignatureVerification = {
   method: 'v2' | 'simple' | 'bypassed';
 };
 
-const DIDIT_DEFAULT_BASE_URL = 'https://verification.didit.me';
+const DIDIT_API_ORIGIN = 'https://verification.didit.me';
 const DIDIT_SIGNATURE_TOLERANCE_SECONDS = 300;
 
 @Injectable()
@@ -608,11 +608,6 @@ export class DiditKycService {
     const workflowId =
       this.configService.get<string>('DIDIT_WORKFLOW_ID') ||
       this.configService.get<string>('DIDIT_KYC_WORKFLOW_ID');
-    const baseUrl =
-      this.configService.get<string>('DIDIT_API_BASE_URL') ||
-      this.configService.get<string>('DIDIT_BASE_URL') ||
-      DIDIT_DEFAULT_BASE_URL;
-
     if (!apiKey || !workflowId) {
       return null;
     }
@@ -620,7 +615,7 @@ export class DiditKycService {
     return {
       apiKey,
       workflowId,
-      baseUrl,
+      baseUrl: DIDIT_API_ORIGIN,
     };
   }
 

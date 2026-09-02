@@ -2,6 +2,56 @@
 
 Les entrées sont classées de la plus récente à la plus ancienne. Elles décrivent le code versionné et les opérations réellement exécutées sur AWS, sans inclure de valeur secrète.
 
+## INFRA-2026-09-02-001 — Retrait de DIDIT_API_BASE_URL du runtime ECS
+
+### Métadonnées
+
+| Champ | Valeur |
+| --- | --- |
+| Date | 2 septembre 2026 |
+| Environnement | production, SSM Parameter Store, ECS Fargate |
+| Statut | préparé localement ; `terraform apply` et suppression SSM requis |
+| Type | configuration runtime |
+| Déclencheur | l'hôte Didit configuré retournait `Not Found` |
+
+### Cause racine
+
+La valeur runtime `https://api.didit.me` surchargeait l'origine officielle utilisée
+par l'API de vérification. La création de session attend
+`https://verification.didit.me/v3/session/`.
+
+### Modifications préparées
+
+- le service Didit fixe l'origine autorisée et ignore l'ancienne variable ainsi que son alias ;
+- les exemples et la documentation ne publient plus `DIDIT_API_BASE_URL` ;
+- le script d'import `.env` refuse désormais cette variable retirée ;
+- Terraform exclut cette variable de la découverte SSM et des références ECS manuelles ;
+- les validations Terraform empêchent sa réintroduction dans la configuration runtime.
+
+### Procédure d'application
+
+1. Exécuter les validations Terraform puis contrôler le plan.
+2. Vérifier que la nouvelle Task Definition retire la référence
+   `/zwanga-api/production/env/DIDIT_API_BASE_URL`.
+3. Appliquer Terraform et attendre la stabilisation du service ECS.
+4. Vérifier que la Task Definition active ne référence plus cette variable.
+5. Supprimer ensuite seulement l'ancien paramètre dans SSM Parameter Store.
+6. Déployer le backend modifié et tester la création d'une session KYC authentifiée.
+
+L'ordre Terraform puis code est sûr : la version backend actuellement déployée possède
+déjà la bonne origine de repli lorsque la variable n'est pas injectée.
+
+### Impacts
+
+- aucune migration de base de données, permission IAM ou nouvelle valeur secrète ;
+- déploiement roulant ECS attendu, sans coût additionnel.
+
+### Retour arrière
+
+Avant le déploiement du nouveau code, recréer au besoin le paramètre avec l'origine
+officielle, retirer son exclusion Terraform puis appliquer. Après déploiement du code,
+la surcharge runtime est volontairement ignorée.
+
 ## INFRA-2026-09-01-003 — Import ciblé des variables Didit et déploiement ECS
 
 ### Métadonnées
