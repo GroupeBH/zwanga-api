@@ -88,6 +88,13 @@ data "aws_ssm_parameters_by_path" "external_runtime_environment" {
 }
 
 locals {
+  # Retired runtime variables stay ignored while their old external SSM
+  # parameters still exist. Terraform can remove ECS references before an
+  # operator safely deletes the stale parameters from Parameter Store.
+  retired_runtime_environment_variable_names = toset([
+    "DIDIT_API_BASE_URL",
+  ])
+
   generated_secret_parameter_arns_by_env = {
     DATABASE_URL       = aws_ssm_parameter.database_url.arn
     REDIS_URL          = aws_ssm_parameter.redis_url.arn
@@ -129,11 +136,13 @@ locals {
     if startswith(name, "${local.ssm_prefix}/env/")
     && can(regex("^[A-Za-z_][A-Za-z0-9_]*$", trimprefix(name, "${local.ssm_prefix}/env/")))
     && !contains(local.reserved_runtime_environment_variable_names, trimprefix(name, "${local.ssm_prefix}/env/"))
+    && !contains(local.retired_runtime_environment_variable_names, trimprefix(name, "${local.ssm_prefix}/env/"))
   }
 
   manual_external_runtime_environment_parameter_arns_by_env = {
     for name in sort(tolist(var.external_runtime_environment_variable_names)) :
     name => "arn:${data.aws_partition.current.partition}:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${local.ssm_prefix}/env/${name}"
+    if !contains(local.retired_runtime_environment_variable_names, name)
   }
 
   external_runtime_environment_parameter_arns_by_env = merge(

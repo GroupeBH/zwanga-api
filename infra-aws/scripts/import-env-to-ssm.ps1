@@ -77,7 +77,8 @@ $excludedNames = [System.Collections.Generic.HashSet[string]]::new([StringCompar
   "AWS_REGION",
   "ENV_FILE",
   "NODE_OPTIONS",
-  "AOT_CONFIG_CONTENT"
+  "AOT_CONFIG_CONTENT",
+  "DIDIT_API_BASE_URL"
 ) | ForEach-Object { [void]$excludedNames.Add($_) }
 
 $includedNames = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
@@ -168,6 +169,8 @@ Get-Content -LiteralPath $EnvFile | ForEach-Object {
   if (Test-ExcludedName -Name $name) {
     if ($name.Equals("AWS_S3_BUCKET_NAME", [StringComparison]::OrdinalIgnoreCase)) {
       Write-Warning "Skipping AWS_S3_BUCKET_NAME because Terraform manages it through application_s3_bucket_name together with the ECS S3 permissions."
+    } elseif ($name.Equals("DIDIT_API_BASE_URL", [StringComparison]::OrdinalIgnoreCase)) {
+      Write-Warning "Skipping retired DIDIT_API_BASE_URL because the backend pins the approved Didit API origin."
     }
     [void]$skippedNames.Add($name)
     return

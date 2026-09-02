@@ -404,9 +404,9 @@ variable "runtime_environment_variables" {
   validation {
     condition = length(setintersection(
       toset(keys(var.runtime_environment_variables)),
-      toset(["DATABASE_URL", "REDIS_URL", "REDIS_TLS", "JWT_SECRET", "JWT_REFRESH_SECRET", "AWS_S3_BUCKET_NAME", "AOT_CONFIG_CONTENT"]),
+      toset(["DATABASE_URL", "REDIS_URL", "REDIS_TLS", "JWT_SECRET", "JWT_REFRESH_SECRET", "AWS_S3_BUCKET_NAME", "AOT_CONFIG_CONTENT", "DIDIT_API_BASE_URL"]),
     )) == 0
-    error_message = "DATABASE_URL, REDIS_URL, JWT_SECRET, JWT_REFRESH_SECRET, AWS_S3_BUCKET_NAME and AOT_CONFIG_CONTENT are generated separately and must not be set in runtime_environment_variables."
+    error_message = "Generated variables and the retired DIDIT_API_BASE_URL variable must not be set in runtime_environment_variables."
   }
 }
 
@@ -442,6 +442,7 @@ variable "external_runtime_environment_variable_names" {
         "JWT_REFRESH_SECRET",
         "AWS_S3_BUCKET_NAME",
         "AOT_CONFIG_CONTENT",
+        "DIDIT_API_BASE_URL",
         "NODE_ENV",
         "HOST",
         "PORT",
@@ -463,7 +464,7 @@ variable "external_runtime_environment_variable_names" {
         "OTEL_AWS_APPLICATION_SIGNALS_ENABLED",
       ]),
     )) == 0
-    error_message = "Generated ECS, database, Redis, JWT and OpenTelemetry variables must not be listed as external SSM variables."
+    error_message = "Generated ECS variables and the retired DIDIT_API_BASE_URL variable must not be listed as external SSM variables."
   }
 }
 

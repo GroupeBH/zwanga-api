@@ -267,7 +267,6 @@ Les documents déjà stockés par l'ancien flux restent inchangés.
 ```env
 KYC_PROVIDER=didit
 DIDIT_KYC_ENABLED=true
-DIDIT_API_BASE_URL=https://verification.didit.me
 DIDIT_API_KEY=
 DIDIT_WORKFLOW_ID=
 DIDIT_WEBHOOK_SECRET=
@@ -279,11 +278,15 @@ Alias acceptés pour faciliter la migration :
 
 - `DIDIT_KYC_API_KEY`
 - `DIDIT_KYC_WORKFLOW_ID`
-- `DIDIT_BASE_URL`
 - `DIDIT_KYC_WEBHOOK_SECRET`
 
 Les valeurs secrètes doivent être stockées dans Parameter Store/Secrets Manager,
 jamais dans Git.
+
+L'origine de l'API Didit est fixée dans `DiditKycService` à
+`https://verification.didit.me`. Elle n'est volontairement pas surchargeable
+par une variable d'environnement, afin d'éviter une dérive de configuration ou
+l'envoi de la clé API vers un hôte non approuvé.
 
 ## Configuration côté Didit
 

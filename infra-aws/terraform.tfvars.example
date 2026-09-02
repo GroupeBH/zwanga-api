@@ -93,7 +93,6 @@ runtime_environment_variables = {
   AWS_REKOGNITION_KYC_MIN_FACE_QUALITY = "35"
   KYC_PROVIDER                 = "legacy"
   DIDIT_KYC_ENABLED            = "false"
-  DIDIT_API_BASE_URL           = "https://verification.didit.me"
   DIDIT_WEBHOOK_REQUIRE_SIGNATURE = "true"
   DIDIT_WEBHOOK_TOLERANCE_SECONDS = "300"
   AWS_S3_PRESIGNED_URL_EXPIRES_IN = "3600"

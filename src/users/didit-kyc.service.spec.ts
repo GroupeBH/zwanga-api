@@ -41,9 +41,10 @@ const canonicalJson = (payload: unknown): string => {
 describe('DiditKycService', () => {
   const baseConfig = {
     DIDIT_KYC_ENABLED: 'true',
+    // A stale deployment value must never override the approved Didit origin.
+    DIDIT_API_BASE_URL: 'https://api.didit.me',
     DIDIT_API_KEY: 'didit-api-key',
     DIDIT_WORKFLOW_ID: 'workflow-1',
-    DIDIT_API_BASE_URL: 'https://verification.didit.test',
     DIDIT_WEBHOOK_SECRET: 'webhook-secret',
   };
 
@@ -139,7 +140,7 @@ describe('DiditKycService', () => {
     expect(result.sessionId).toBe('session-1');
     expect(result.url).toBe('https://verify.didit.test/session-1');
     expect(global.fetch).toHaveBeenCalledWith(
-      'https://verification.didit.test/v3/session/',
+      'https://verification.didit.me/v3/session/',
       expect.objectContaining({
         method: 'POST',
         body: expect.stringContaining(`"vendor_data":"${user.id}"`),
