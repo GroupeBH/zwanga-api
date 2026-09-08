@@ -16,8 +16,9 @@ import {
   Raw,
   Equal,
   IsNull,
+  Not,
 } from 'typeorm';
-import type { Point } from 'typeorm';
+import type { FindOptionsWhere, Point } from 'typeorm';
 import {
   Booking,
   BookingPaymentStatus,
@@ -104,8 +105,21 @@ export interface BookingPaymentResponse {
     message: string | null;
     paymentUrl: string | null;
     amount: number;
+    grossAmount: number;
+    passengerAmount: number;
+    firstTripSubsidyApplied: boolean;
+    passengerPaymentRate: number | null;
+    zwangaSubsidyAmount: number;
     currency: string;
   };
+}
+
+interface BookingFareBreakdown {
+  grossAmount: number;
+  passengerAmount: number;
+  firstTripSubsidyApplied: boolean;
+  passengerPaymentRate: number | null;
+  zwangaSubsidyAmount: number;
 }
 
 export interface BookingFlexPayCallbackResponse {
@@ -181,6 +195,15 @@ export class BookingsService {
   private readonly MAX_SEATS_PER_PASSENGER = 2;
   private readonly BOOKING_RELATED_ENTITY_TYPE = 'booking';
   private readonly DEFAULT_TRIP_PAYMENT_CURRENCY = 'CDF';
+  private readonly DEFAULT_FIRST_TRIP_SUBSIDY_ENABLED = true;
+  private readonly DEFAULT_FIRST_TRIP_PASSENGER_PAYMENT_RATE = 0.4;
+  private readonly FIRST_TRIP_SUBSIDY_RELEASED_STATUSES = [
+    BookingStatus.CANCELLED,
+    BookingStatus.REJECTED,
+    BookingStatus.EXPIRED,
+    BookingStatus.NO_SHOW,
+    BookingStatus.BOARDING_UNCERTAIN,
+  ];
   private readonly boardingDetectionConfig: BoardingDetectionConfig;
   private readonly automaticRideProgressQueues = new Map<
     string,
@@ -834,6 +857,7 @@ export class BookingsService {
           booking.status = BookingStatus.REJECTED;
           booking.rejectionReason = updateStatusDto.rejectionReason.trim();
           booking.acceptedAt = null;
+          this.releaseFirstTripSubsidyReservation(booking, trip);
           const savedBooking = await bookingRepository.save(booking);
           await this.recalculateAvailableSeatsForTrip(trip.id, manager);
           return savedBooking;
@@ -850,6 +874,7 @@ export class BookingsService {
 
           booking.status = BookingStatus.CANCELLED;
           booking.cancelledAt = new Date();
+          this.releaseFirstTripSubsidyReservation(booking, trip);
           const savedBooking = await bookingRepository.save(booking);
           await this.recalculateAvailableSeatsForTrip(trip.id, manager);
           return savedBooking;
@@ -1156,7 +1181,7 @@ export class BookingsService {
             )
           : trip.arrivalPoint;
 
-    const paymentAmount = this.calculateBookingPaymentAmount(
+    const grossPaymentAmount = this.calculateBookingPaymentAmount(
       trip,
       createBookingDto.numberOfSeats,
     );
@@ -1176,18 +1201,23 @@ export class BookingsService {
         createBookingDto.passengerDestinationReference?.trim() || null,
       passengerDestinationPoint,
       paymentStatus:
-        paymentAmount > 0 &&
+        grossPaymentAmount > 0 &&
         [TripPaymentMode.ELECTRONIC, TripPaymentMode.POINTS].includes(
           paymentMode,
         )
           ? BookingPaymentStatus.PENDING
           : BookingPaymentStatus.NOT_REQUIRED,
-      paymentAmount,
+      paymentAmount: grossPaymentAmount,
+      grossPaymentAmount,
       paymentCurrency,
       paymentMode,
     });
 
-    const savedBooking = await this.bookingRepository.save(booking);
+    await this.applyFirstTripSubsidyPolicy(booking, trip);
+    const savedBooking = await this.saveBookingWithFirstTripSubsidyRaceFallback(
+      booking,
+      trip,
+    );
 
     await this.recalculateAvailableSeatsForTrip(trip.id);
 
@@ -1607,7 +1637,11 @@ export class BookingsService {
     );
 
     if (fareAdjustment) {
+      const previousPassengerAmount = this.roundMoney(
+        Number(booking.paymentAmount ?? fareAdjustment.originalAmount),
+      );
       booking.originalPaymentAmount = fareAdjustment.originalAmount;
+      booking.grossPaymentAmount = fareAdjustment.finalAmount;
       booking.plannedDistanceMeters = fareAdjustment.plannedDistanceMeters;
       booking.travelledDistanceMeters = fareAdjustment.travelledDistanceMeters;
       booking.pricePerKilometer = fareAdjustment.pricePerKilometer;
@@ -1617,10 +1651,20 @@ export class BookingsService {
       booking.paymentCurrency =
         booking.paymentCurrency || this.getTripPaymentCurrency();
 
-      await this.bookingRepository.save(booking);
+      await this.applyFirstTripSubsidyPolicy(booking, booking.trip);
+      await this.saveBookingWithFirstTripSubsidyRaceFallback(
+        booking,
+        booking.trip,
+      );
 
+      const passengerFareAdjustmentAmount = this.roundMoney(
+        Math.max(
+          0,
+          previousPassengerAmount - Number(booking.paymentAmount ?? 0),
+        ),
+      );
       if (
-        fareAdjustment.adjustmentAmount > 0 &&
+        passengerFareAdjustmentAmount > 0 &&
         [TripPaymentMode.ELECTRONIC, TripPaymentMode.POINTS].includes(
           booking.paymentMode,
         ) &&
@@ -1628,7 +1672,7 @@ export class BookingsService {
       ) {
         await this.walletService.creditBookingFareAdjustment(
           booking,
-          fareAdjustment.adjustmentAmount,
+          passengerFareAdjustmentAmount,
         );
       }
     }
@@ -1666,7 +1710,9 @@ export class BookingsService {
     pricePerKilometer: number;
   } | null> {
     const storedOriginalAmount = Number(
-      booking.originalPaymentAmount ?? booking.paymentAmount,
+      booking.originalPaymentAmount ??
+        booking.grossPaymentAmount ??
+        booking.paymentAmount,
     );
     const originalAmount =
       Number.isFinite(storedOriginalAmount) && storedOriginalAmount > 0
@@ -1689,7 +1735,9 @@ export class BookingsService {
     ) {
       return {
         originalAmount,
-        finalAmount: Number(booking.paymentAmount ?? originalAmount),
+        finalAmount: Number(
+          booking.grossPaymentAmount ?? booking.paymentAmount ?? originalAmount,
+        ),
         adjustmentAmount: Number(booking.fareAdjustmentAmount),
         plannedDistanceMeters: booking.plannedDistanceMeters,
         travelledDistanceMeters: booking.travelledDistanceMeters,
@@ -1849,16 +1897,28 @@ export class BookingsService {
     this.ensurePassengerOwnsBooking(booking, passengerId);
     this.prepareBookingForElectronicPayment(booking);
 
-    const amount = this.resolveBookingPaymentAmount(booking, booking.trip);
     const currency = this.getTripPaymentCurrency();
 
-    booking.paymentAmount = amount;
     booking.paymentCurrency = currency;
+
+    if (booking.paymentStatus !== BookingPaymentStatus.SUCCEEDED) {
+      await this.applyFirstTripSubsidyPolicy(booking, booking.trip);
+      await this.saveBookingWithFirstTripSubsidyRaceFallback(
+        booking,
+        booking.trip,
+      );
+    }
+
+    const amount = Number(booking.paymentAmount ?? 0);
 
     if (amount <= 0) {
       booking.paymentStatus = BookingPaymentStatus.NOT_REQUIRED;
       booking.paidAt = booking.paidAt ?? new Date();
-      const savedBooking = await this.bookingRepository.save(booking);
+      const savedBooking =
+        await this.saveBookingWithFirstTripSubsidyRaceFallback(
+          booking,
+          booking.trip,
+        );
       await this.invalidateBookingCaches(savedBooking);
       const response = this.buildPaymentResponse(savedBooking, null);
       this.logBookingPaymentResponse('Trip payment not required', response);
@@ -2054,6 +2114,7 @@ export class BookingsService {
 
     booking.status = BookingStatus.CANCELLED;
     booking.cancelledAt = new Date();
+    this.releaseFirstTripSubsidyReservation(booking, trip);
     await this.bookingRepository.save(booking);
     await this.refundPointsPaymentIfNeeded(booking);
 
@@ -2208,12 +2269,12 @@ export class BookingsService {
       return booking;
     }
 
-    const amount = this.resolveBookingPaymentAmount(booking, booking.trip);
     booking.paymentMode = paymentMode;
-    booking.paymentAmount = amount;
     booking.paymentCurrency = this.getTripPaymentCurrency();
     booking.paymentReference = null;
     booking.paymentTransactionId = null;
+    await this.applyFirstTripSubsidyPolicy(booking, booking.trip);
+    const amount = Number(booking.paymentAmount ?? 0);
 
     if (amount <= 0) {
       booking.paymentStatus = BookingPaymentStatus.NOT_REQUIRED;
@@ -2229,7 +2290,10 @@ export class BookingsService {
       booking.paidAt = null;
     }
 
-    let savedBooking = await this.bookingRepository.save(booking);
+    let savedBooking = await this.saveBookingWithFirstTripSubsidyRaceFallback(
+      booking,
+      booking.trip,
+    );
     if (
       savedBooking.status === BookingStatus.COMPLETED &&
       savedBooking.paymentMode === TripPaymentMode.POINTS
@@ -2413,27 +2477,35 @@ export class BookingsService {
         );
       }
 
-      const amount = this.resolveBookingPaymentAmount(
+      lockedBooking.paymentCurrency = this.getTripPaymentCurrency();
+      await this.applyFirstTripSubsidyPolicy(
         lockedBooking,
         lockedTrip,
+        manager,
       );
-      lockedBooking.paymentAmount = amount;
-      lockedBooking.paymentCurrency = this.getTripPaymentCurrency();
+      const savedFareBooking =
+        await this.saveBookingWithFirstTripSubsidyRaceFallback(
+          lockedBooking,
+          lockedTrip,
+          manager,
+        );
+      savedFareBooking.trip = lockedTrip;
+      const amount = Number(savedFareBooking.paymentAmount ?? 0);
 
       if (amount <= 0) {
-        lockedBooking.paymentStatus = BookingPaymentStatus.NOT_REQUIRED;
-        lockedBooking.paidAt = lockedBooking.paidAt ?? new Date();
-        return manager.save(lockedBooking);
+        savedFareBooking.paymentStatus = BookingPaymentStatus.NOT_REQUIRED;
+        savedFareBooking.paidAt = savedFareBooking.paidAt ?? new Date();
+        return manager.save(savedFareBooking);
       }
 
       await this.walletService.payForBookingWithManager(
         manager,
-        lockedBooking,
+        savedFareBooking,
         amount,
       );
-      lockedBooking.paymentStatus = BookingPaymentStatus.SUCCEEDED;
-      lockedBooking.paidAt = lockedBooking.paidAt ?? new Date();
-      const savedBooking = await manager.save(lockedBooking);
+      savedFareBooking.paymentStatus = BookingPaymentStatus.SUCCEEDED;
+      savedFareBooking.paidAt = savedFareBooking.paidAt ?? new Date();
+      const savedBooking = await manager.save(savedFareBooking);
       savedBooking.trip = lockedTrip;
 
       await this.driverSettlementsService.recordCompletedBookingEarningWithManager(
@@ -2460,9 +2532,14 @@ export class BookingsService {
       return completedBooking;
     }
 
-    const amount = this.resolveBookingPaymentAmount(completedBooking, trip);
-    completedBooking.paymentAmount = amount;
     completedBooking.paymentCurrency = this.getTripPaymentCurrency();
+    await this.applyFirstTripSubsidyPolicy(completedBooking, trip);
+    completedBooking = await this.saveBookingWithFirstTripSubsidyRaceFallback(
+      completedBooking,
+      trip,
+    );
+    completedBooking.trip = trip;
+    const amount = Number(completedBooking.paymentAmount ?? 0);
 
     if (amount <= 0 || completedBooking.paymentMode === TripPaymentMode.CASH) {
       completedBooking.paymentStatus = BookingPaymentStatus.NOT_REQUIRED;
@@ -2534,18 +2611,11 @@ export class BookingsService {
       return;
     }
 
-    const calculatedGrossAmount = this.calculateBookingPaymentAmount(
+    const grossAmount = this.resolveBookingGrossPaymentAmount(
+      completedBooking,
       completedBooking.trip,
-      completedBooking.numberOfSeats,
     );
-    const persistedAmount = Number(completedBooking.paymentAmount);
-    const grossAmount =
-      completedBooking.paymentAmount !== null &&
-      completedBooking.paymentAmount !== undefined &&
-      Number.isFinite(persistedAmount) &&
-      persistedAmount >= 0
-        ? persistedAmount
-        : calculatedGrossAmount;
+    const passengerAmount = Number(completedBooking.paymentAmount ?? 0);
 
     if (
       grossAmount > 0 &&
@@ -2558,10 +2628,20 @@ export class BookingsService {
       return;
     }
 
+    if (grossAmount > 0 && !completedBooking.grossPaymentAmount) {
+      completedBooking.grossPaymentAmount = grossAmount;
+    }
+
     if (grossAmount > 0 && !completedBooking.paymentAmount) {
-      completedBooking.paymentAmount = grossAmount;
+      await this.applyFirstTripSubsidyPolicy(
+        completedBooking,
+        completedBooking.trip,
+      );
       completedBooking.paymentCurrency = this.getTripPaymentCurrency();
-      await this.bookingRepository.save(completedBooking);
+      await this.saveBookingWithFirstTripSubsidyRaceFallback(
+        completedBooking,
+        completedBooking.trip,
+      );
     }
 
     await this.driverSettlementsService.recordCompletedBookingEarning(
@@ -2570,7 +2650,9 @@ export class BookingsService {
     await this.ensureLoyaltyDistanceForCompletedBooking(completedBooking);
     await this.walletService.awardLoyaltyForBooking(
       completedBooking,
-      grossAmount,
+      Number.isFinite(passengerAmount) && passengerAmount > 0
+        ? passengerAmount
+        : Number(completedBooking.paymentAmount ?? grossAmount),
     );
     await this.referralsService.awardBookingReward(completedBooking);
   }
@@ -2630,10 +2712,35 @@ export class BookingsService {
   }
 
   private resolveBookingPaymentAmount(booking: Booking, trip: Trip): number {
-    const calculatedAmount = this.calculateBookingPaymentAmount(
-      trip,
-      booking.numberOfSeats,
-    );
+    const grossAmount = this.resolveBookingGrossPaymentAmount(booking, trip);
+    if (
+      this.isFirstTripSubsidyReserved(booking) &&
+      booking.passengerPaymentRate !== null &&
+      booking.passengerPaymentRate !== undefined
+    ) {
+      const rate = Number(booking.passengerPaymentRate);
+      if (Number.isFinite(rate) && rate > 0 && rate < 1) {
+        return this.roundMoney(grossAmount * rate);
+      }
+    }
+
+    return grossAmount;
+  }
+
+  private resolveBookingGrossPaymentAmount(
+    booking: Booking,
+    trip: Trip,
+  ): number {
+    const persistedGrossAmount = Number(booking.grossPaymentAmount);
+    if (
+      booking.grossPaymentAmount !== null &&
+      booking.grossPaymentAmount !== undefined &&
+      Number.isFinite(persistedGrossAmount) &&
+      persistedGrossAmount >= 0
+    ) {
+      return this.roundMoney(persistedGrossAmount);
+    }
+
     const persistedAmount = Number(booking.paymentAmount);
 
     if (
@@ -2643,10 +2750,278 @@ export class BookingsService {
       Number.isFinite(persistedAmount) &&
       persistedAmount >= 0
     ) {
-      return persistedAmount;
+      return this.roundMoney(persistedAmount);
     }
 
-    return calculatedAmount;
+    return this.calculateBookingPaymentAmount(trip, booking.numberOfSeats);
+  }
+
+  private async applyFirstTripSubsidyPolicy(
+    booking: Booking,
+    trip: Trip,
+    manager?: EntityManager,
+  ): Promise<BookingFareBreakdown> {
+    const grossAmount = this.resolveBookingGrossPaymentAmount(booking, trip);
+    booking.grossPaymentAmount = grossAmount;
+
+    if (grossAmount <= 0) {
+      this.resetFirstTripSubsidyReservation(booking, trip, 0);
+      return this.buildBookingFareBreakdown(booking, 0, 0);
+    }
+
+    if (
+      booking.paymentStatus === BookingPaymentStatus.SUCCEEDED &&
+      !this.isFirstTripSubsidyReserved(booking)
+    ) {
+      booking.paymentAmount = this.roundMoney(
+        Number(booking.paymentAmount ?? grossAmount),
+      );
+      booking.firstTripSubsidyApplied = false;
+      booking.passengerPaymentRate = null;
+      booking.zwangaSubsidyAmount = 0;
+      return this.buildBookingFareBreakdown(
+        booking,
+        grossAmount,
+        booking.paymentAmount,
+      );
+    }
+
+    const canUseSubsidy =
+      this.isFirstTripSubsidyReserved(booking) ||
+      (await this.canReserveFirstTripSubsidy(booking, grossAmount, manager));
+
+    if (!canUseSubsidy) {
+      this.resetFirstTripSubsidyReservation(booking, trip, grossAmount);
+      return this.buildBookingFareBreakdown(booking, grossAmount, grossAmount);
+    }
+
+    const passengerPaymentRate = this.isFirstTripSubsidyReserved(booking)
+      ? this.resolvePersistedPassengerPaymentRate(booking)
+      : this.getFirstTripPassengerPaymentRate();
+    const passengerAmount = this.roundMoney(grossAmount * passengerPaymentRate);
+    const zwangaSubsidyAmount = this.roundMoney(
+      Math.max(0, grossAmount - passengerAmount),
+    );
+
+    booking.firstTripSubsidyApplied = true;
+    booking.passengerPaymentRate = passengerPaymentRate;
+    booking.paymentAmount = passengerAmount;
+    booking.zwangaSubsidyAmount = zwangaSubsidyAmount;
+
+    return this.buildBookingFareBreakdown(
+      booking,
+      grossAmount,
+      passengerAmount,
+    );
+  }
+
+  private buildBookingFareBreakdown(
+    booking: Booking,
+    grossAmount: number,
+    passengerAmount: number,
+  ): BookingFareBreakdown {
+    return {
+      grossAmount: this.roundMoney(grossAmount),
+      passengerAmount: this.roundMoney(passengerAmount),
+      firstTripSubsidyApplied: Boolean(booking.firstTripSubsidyApplied),
+      passengerPaymentRate:
+        booking.passengerPaymentRate === null ||
+        booking.passengerPaymentRate === undefined
+          ? null
+          : Number(booking.passengerPaymentRate),
+      zwangaSubsidyAmount: this.roundMoney(
+        Number(booking.zwangaSubsidyAmount ?? 0),
+      ),
+    };
+  }
+
+  private async canReserveFirstTripSubsidy(
+    booking: Booking,
+    grossAmount: number,
+    manager?: EntityManager,
+  ): Promise<boolean> {
+    if (!this.isFirstTripSubsidyEnabled() || grossAmount <= 0) {
+      return false;
+    }
+
+    if (this.FIRST_TRIP_SUBSIDY_RELEASED_STATUSES.includes(booking.status)) {
+      return false;
+    }
+
+    if (!booking.passengerId) {
+      return false;
+    }
+
+    if (await this.hasPassengerCompletedRideBefore(booking, manager)) {
+      return false;
+    }
+
+    const where: FindOptionsWhere<Booking> = {
+      passengerId: booking.passengerId,
+      firstTripSubsidyApplied: true,
+      status: Not(In(this.FIRST_TRIP_SUBSIDY_RELEASED_STATUSES)),
+    };
+
+    if (booking.id) {
+      where.id = Not(booking.id);
+    }
+
+    const existingReservationCount = manager
+      ? await manager.count(Booking, { where })
+      : await this.bookingRepository.count({ where });
+
+    return existingReservationCount === 0;
+  }
+
+  private async hasPassengerCompletedRideBefore(
+    booking: Booking,
+    manager?: EntityManager,
+  ): Promise<boolean> {
+    if (!booking.passengerId) {
+      return false;
+    }
+
+    const baseWhere: FindOptionsWhere<Booking> = {
+      passengerId: booking.passengerId,
+    };
+    if (booking.id) {
+      baseWhere.id = Not(booking.id);
+    }
+
+    const where: FindOptionsWhere<Booking>[] = [
+      { ...baseWhere, status: BookingStatus.COMPLETED },
+      { ...baseWhere, droppedOff: true },
+      { ...baseWhere, droppedOffConfirmedByPassenger: true },
+      { ...baseWhere, paymentStatus: BookingPaymentStatus.SUCCEEDED },
+    ];
+
+    const completedRideCount = manager
+      ? await manager.count(Booking, { where })
+      : await this.bookingRepository.count({ where });
+
+    return completedRideCount > 0;
+  }
+
+  private isFirstTripSubsidyEnabled(): boolean {
+    const raw = this.configService.get<string | boolean>(
+      'FIRST_TRIP_SUBSIDY_ENABLED',
+    );
+    if (raw === undefined || raw === null || raw === '') {
+      return this.DEFAULT_FIRST_TRIP_SUBSIDY_ENABLED;
+    }
+
+    if (typeof raw === 'boolean') {
+      return raw;
+    }
+
+    const normalized = raw.trim().toLowerCase();
+    if (['1', 'true', 'yes', 'on'].includes(normalized)) {
+      return true;
+    }
+    if (['0', 'false', 'no', 'off'].includes(normalized)) {
+      return false;
+    }
+
+    this.logger.warn(
+      `FIRST_TRIP_SUBSIDY_ENABLED=${raw} is invalid; using ${this.DEFAULT_FIRST_TRIP_SUBSIDY_ENABLED}`,
+    );
+    return this.DEFAULT_FIRST_TRIP_SUBSIDY_ENABLED;
+  }
+
+  private getFirstTripPassengerPaymentRate(): number {
+    const raw =
+      this.configService.get<string | number>(
+        'FIRST_TRIP_PASSENGER_PAYMENT_RATE',
+      ) ?? this.DEFAULT_FIRST_TRIP_PASSENGER_PAYMENT_RATE;
+    const rate = Number(raw);
+    if (!Number.isFinite(rate) || rate <= 0 || rate >= 1) {
+      this.logger.warn(
+        `FIRST_TRIP_PASSENGER_PAYMENT_RATE=${raw} is invalid; using ${this.DEFAULT_FIRST_TRIP_PASSENGER_PAYMENT_RATE}`,
+      );
+      return this.DEFAULT_FIRST_TRIP_PASSENGER_PAYMENT_RATE;
+    }
+
+    return rate;
+  }
+
+  private resolvePersistedPassengerPaymentRate(booking: Booking): number {
+    const rate = Number(booking.passengerPaymentRate);
+    if (Number.isFinite(rate) && rate > 0 && rate < 1) {
+      return rate;
+    }
+
+    return this.getFirstTripPassengerPaymentRate();
+  }
+
+  private isFirstTripSubsidyReserved(booking: Booking): boolean {
+    return Boolean(
+      booking.firstTripSubsidyApplied &&
+      !this.FIRST_TRIP_SUBSIDY_RELEASED_STATUSES.includes(booking.status),
+    );
+  }
+
+  private resetFirstTripSubsidyReservation(
+    booking: Booking,
+    trip?: Trip,
+    grossAmountOverride?: number,
+  ): void {
+    const grossAmount =
+      grossAmountOverride ??
+      (trip ? this.resolveBookingGrossPaymentAmount(booking, trip) : 0);
+    const normalizedGrossAmount = this.roundMoney(Math.max(0, grossAmount));
+
+    booking.grossPaymentAmount = normalizedGrossAmount;
+    booking.paymentAmount = normalizedGrossAmount;
+    booking.firstTripSubsidyApplied = false;
+    booking.passengerPaymentRate = null;
+    booking.zwangaSubsidyAmount = 0;
+  }
+
+  private releaseFirstTripSubsidyReservation(
+    booking: Booking,
+    trip?: Trip,
+  ): void {
+    if (!booking.firstTripSubsidyApplied) {
+      return;
+    }
+
+    this.resetFirstTripSubsidyReservation(booking, trip);
+  }
+
+  private async saveBookingWithFirstTripSubsidyRaceFallback(
+    booking: Booking,
+    trip: Trip,
+    manager?: EntityManager,
+  ): Promise<Booking> {
+    try {
+      return await (manager
+        ? manager.save(booking)
+        : this.bookingRepository.save(booking));
+    } catch (error) {
+      if (
+        !booking.firstTripSubsidyApplied ||
+        !this.isUniqueConstraintViolation(error)
+      ) {
+        throw error;
+      }
+
+      this.logger.warn(
+        `First-trip subsidy race detected for passenger ${booking.passengerId}; booking ${booking.id} will use the full fare`,
+      );
+      this.resetFirstTripSubsidyReservation(booking, trip);
+      return await (manager
+        ? manager.save(booking)
+        : this.bookingRepository.save(booking));
+    }
+  }
+
+  private isUniqueConstraintViolation(error: unknown): boolean {
+    return Boolean(
+      error &&
+      typeof error === 'object' &&
+      'code' in error &&
+      (error as { code?: string }).code === '23505',
+    );
   }
 
   private getTripPaymentCurrency(): string {
@@ -2699,6 +3074,18 @@ export class BookingsService {
       return null;
     }
 
+    const expectedAmount = Number(booking.paymentAmount ?? 0);
+    const persistedPaymentAmount = Number(payment.amount ?? 0);
+    if (
+      Number.isFinite(expectedAmount) &&
+      expectedAmount > 0 &&
+      (!Number.isFinite(persistedPaymentAmount) ||
+        this.roundMoney(persistedPaymentAmount) !==
+          this.roundMoney(expectedAmount))
+    ) {
+      return null;
+    }
+
     return [PaymentStatus.PENDING, PaymentStatus.INITIATED].includes(
       payment.status,
     )
@@ -2746,12 +3133,29 @@ export class BookingsService {
     booking: Booking,
     payment: PaymentTransaction,
   ): Promise<Booking> {
+    const grossAmount = booking.trip
+      ? this.resolveBookingGrossPaymentAmount(booking, booking.trip)
+      : Number(booking.grossPaymentAmount ?? booking.paymentAmount ?? 0);
     booking.paymentMode = TripPaymentMode.ELECTRONIC;
     booking.paymentReference = payment.reference;
     booking.paymentTransactionId = payment.id;
+    booking.grossPaymentAmount = this.roundMoney(Math.max(0, grossAmount));
     booking.paymentAmount = Number(
       payment.amount ?? booking.paymentAmount ?? 0,
     );
+    if (this.isFirstTripSubsidyReserved(booking)) {
+      booking.zwangaSubsidyAmount = this.roundMoney(
+        Math.max(
+          0,
+          Number(booking.grossPaymentAmount ?? 0) - booking.paymentAmount,
+        ),
+      );
+      booking.passengerPaymentRate =
+        booking.passengerPaymentRate ??
+        (booking.grossPaymentAmount && booking.grossPaymentAmount > 0
+          ? this.roundMoney(booking.paymentAmount / booking.grossPaymentAmount)
+          : this.getFirstTripPassengerPaymentRate());
+    }
     booking.paymentCurrency =
       payment.currency ||
       booking.paymentCurrency ||
@@ -2805,6 +3209,12 @@ export class BookingsService {
     booking: Booking,
     payment: PaymentTransaction | null,
   ): BookingPaymentResponse {
+    const grossAmount = this.roundMoney(
+      Number(booking.grossPaymentAmount ?? booking.paymentAmount ?? 0),
+    );
+    const passengerAmount = this.roundMoney(
+      Number(payment?.amount ?? booking.paymentAmount ?? 0),
+    );
     return {
       booking,
       payment: {
@@ -2818,7 +3228,18 @@ export class BookingsService {
           ? this.paymentsService.getClientPaymentMessage(payment)
           : this.getBookingPaymentMessage(booking),
         paymentUrl: payment?.paymentUrl ?? null,
-        amount: Number(payment?.amount ?? booking.paymentAmount ?? 0),
+        amount: passengerAmount,
+        grossAmount,
+        passengerAmount,
+        firstTripSubsidyApplied: Boolean(booking.firstTripSubsidyApplied),
+        passengerPaymentRate:
+          booking.passengerPaymentRate === null ||
+          booking.passengerPaymentRate === undefined
+            ? null
+            : Number(booking.passengerPaymentRate),
+        zwangaSubsidyAmount: this.roundMoney(
+          Number(booking.zwangaSubsidyAmount ?? 0),
+        ),
         currency: payment?.currency ?? booking.paymentCurrency,
       },
     };
@@ -3865,6 +4286,13 @@ export class BookingsService {
         `Uncertain boarding ${booking.id} already has a succeeded payment; manual financial review required`,
       );
     }
+    const shouldReleaseFirstTripSubsidy = !preservesSucceededPayment;
+    const releasedGrossAmount = this.roundMoney(
+      Number(booking.grossPaymentAmount ?? booking.paymentAmount ?? 0),
+    );
+    const releasedPaymentAmount = booking.firstTripSubsidyApplied
+      ? releasedGrossAmount
+      : this.roundMoney(Number(booking.paymentAmount ?? releasedGrossAmount));
 
     const updateResult = await this.bookingRepository.update(
       {
@@ -3881,6 +4309,15 @@ export class BookingsService {
         boardingUncertainReason,
         boardingUncertainDriverDistanceMeters,
         rejectionReason,
+        ...(shouldReleaseFirstTripSubsidy
+          ? {
+              grossPaymentAmount: releasedGrossAmount,
+              paymentAmount: releasedPaymentAmount,
+              firstTripSubsidyApplied: false,
+              passengerPaymentRate: null,
+              zwangaSubsidyAmount: 0,
+            }
+          : {}),
         ...(!preservesSucceededPayment
           ? {
               paymentStatus: BookingPaymentStatus.CANCELLED,
@@ -3901,6 +4338,13 @@ export class BookingsService {
     booking.boardingUncertainDriverDistanceMeters =
       boardingUncertainDriverDistanceMeters;
     booking.rejectionReason = rejectionReason;
+    if (shouldReleaseFirstTripSubsidy) {
+      booking.grossPaymentAmount = releasedGrossAmount;
+      booking.paymentAmount = releasedPaymentAmount;
+      booking.firstTripSubsidyApplied = false;
+      booking.passengerPaymentRate = null;
+      booking.zwangaSubsidyAmount = 0;
+    }
     if (!preservesSucceededPayment) {
       booking.paymentStatus = BookingPaymentStatus.CANCELLED;
       booking.paidAt = null;
@@ -4309,6 +4753,13 @@ export class BookingsService {
         `No-show booking ${booking.id} already has a succeeded payment; manual financial review required`,
       );
     }
+    const shouldReleaseFirstTripSubsidy = !preservesSucceededPayment;
+    const releasedGrossAmount = this.roundMoney(
+      Number(booking.grossPaymentAmount ?? booking.paymentAmount ?? 0),
+    );
+    const releasedPaymentAmount = booking.firstTripSubsidyApplied
+      ? releasedGrossAmount
+      : this.roundMoney(Number(booking.paymentAmount ?? releasedGrossAmount));
 
     const updateResult = await this.bookingRepository.update(
       {
@@ -4325,6 +4776,15 @@ export class BookingsService {
         noShowReason,
         noShowDriverDistanceMeters,
         rejectionReason,
+        ...(shouldReleaseFirstTripSubsidy
+          ? {
+              grossPaymentAmount: releasedGrossAmount,
+              paymentAmount: releasedPaymentAmount,
+              firstTripSubsidyApplied: false,
+              passengerPaymentRate: null,
+              zwangaSubsidyAmount: 0,
+            }
+          : {}),
         ...(!preservesSucceededPayment
           ? {
               paymentStatus: BookingPaymentStatus.CANCELLED,
@@ -4344,6 +4804,13 @@ export class BookingsService {
     booking.noShowReason = noShowReason;
     booking.noShowDriverDistanceMeters = noShowDriverDistanceMeters;
     booking.rejectionReason = rejectionReason;
+    if (shouldReleaseFirstTripSubsidy) {
+      booking.grossPaymentAmount = releasedGrossAmount;
+      booking.paymentAmount = releasedPaymentAmount;
+      booking.firstTripSubsidyApplied = false;
+      booking.passengerPaymentRate = null;
+      booking.zwangaSubsidyAmount = 0;
+    }
     if (!preservesSucceededPayment) {
       booking.paymentStatus = BookingPaymentStatus.CANCELLED;
       booking.paidAt = null;

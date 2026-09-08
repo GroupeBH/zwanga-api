@@ -21,6 +21,7 @@ import {
 import type { Server, ServerOptions } from 'socket.io';
 import type { Server as HttpServer } from 'http';
 import type { Socket } from 'net';
+import { ApiExceptionFilter } from './common/filters/api-exception.filter';
 
 class RedisSocketIoAdapter extends IoAdapter {
   private redisAdapter?: ReturnType<typeof createAdapter>;
@@ -143,6 +144,7 @@ async function bootstrap() {
   });
 
   app.useLogger(app.get(WINSTON_MODULE_NEST_PROVIDER));
+  app.useGlobalFilters(new ApiExceptionFilter());
   configureHttpGracefulShutdown(app);
   app.enableShutdownHooks([ShutdownSignal.SIGTERM, ShutdownSignal.SIGINT], {
     useProcessExit: true,

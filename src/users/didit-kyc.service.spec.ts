@@ -2,7 +2,7 @@ import { UnauthorizedException } from '@nestjs/common';
 import { createHmac } from 'crypto';
 import { DiditKycService } from './didit-kyc.service';
 import { KycProvider, KycStatus } from './entities/kyc-document.entity';
-import { UserStatus } from './entities/user.entity';
+import { UserRole, UserStatus } from './entities/user.entity';
 
 const createConfigService = (values: Record<string, string | undefined>) => ({
   get: jest.fn((key: string) => values[key]),
@@ -54,6 +54,7 @@ describe('DiditKycService', () => {
   let kycRepository: any;
   let txUserRepository: any;
   let txKycRepository: any;
+  let txVehicleRepository: any;
   let dataSource: any;
   let service: DiditKycService;
 
@@ -65,6 +66,8 @@ describe('DiditKycService', () => {
       phone: '+243000000000',
       email: null,
       status: UserStatus.PENDING_KYC,
+      role: UserRole.PASSENGER,
+      isDriver: false,
     };
     kyc = {
       id: 'kyc-1',
@@ -96,12 +99,18 @@ describe('DiditKycService', () => {
       create: jest.fn((payload) => payload),
       save: jest.fn(async (payload) => payload),
     };
+    txVehicleRepository = {
+      exists: jest.fn().mockResolvedValue(false),
+    };
     dataSource = {
       transaction: jest.fn(async (callback) =>
         callback({
           getRepository: jest.fn((entity) => {
             if (entity.name === 'User') {
               return txUserRepository;
+            }
+            if (entity.name === 'Vehicle') {
+              return txVehicleRepository;
             }
             return txKycRepository;
           }),
@@ -192,6 +201,66 @@ describe('DiditKycService', () => {
     expect(result.url).toBe('');
   });
 
+  it('returns a stable service-unavailable error when Didit cannot be reached', async () => {
+    (global.fetch as jest.Mock).mockRejectedValueOnce(
+      new TypeError('fetch failed'),
+    );
+
+    await expect(
+      service.createSession(user.id, {
+        callbackUrl: 'zwanga://kyc/didit-return',
+        language: 'fr',
+        source: 'profile',
+      }),
+    ).rejects.toMatchObject({
+      status: 503,
+      response: expect.objectContaining({
+        code: 'KYC_PROVIDER_UNAVAILABLE',
+      }),
+    });
+  });
+
+  it('returns a stable timeout error when Didit takes too long', async () => {
+    const timeoutError = new Error('The operation was aborted due to timeout');
+    timeoutError.name = 'TimeoutError';
+    (global.fetch as jest.Mock).mockRejectedValueOnce(timeoutError);
+
+    await expect(
+      service.createSession(user.id, {
+        callbackUrl: 'zwanga://kyc/didit-return',
+        language: 'fr',
+        source: 'profile',
+      }),
+    ).rejects.toMatchObject({
+      status: 504,
+      response: expect.objectContaining({
+        code: 'KYC_PROVIDER_TIMEOUT',
+      }),
+    });
+  });
+
+  it('reports missing Didit configuration as a server availability issue', async () => {
+    service = new DiditKycService(
+      userRepository,
+      kycRepository,
+      createConfigService({ DIDIT_KYC_ENABLED: 'false' }) as any,
+      dataSource,
+    );
+
+    await expect(
+      service.createSession(user.id, {
+        callbackUrl: 'zwanga://kyc/didit-return',
+        language: 'fr',
+        source: 'profile',
+      }),
+    ).rejects.toMatchObject({
+      status: 503,
+      response: expect.objectContaining({
+        code: 'KYC_PROVIDER_NOT_CONFIGURED',
+      }),
+    });
+  });
+
   it('approves local KYC only after a server-side Didit decision fetch', async () => {
     (global.fetch as jest.Mock).mockResolvedValueOnce(
       createFetchResponse({
@@ -212,6 +281,59 @@ describe('DiditKycService', () => {
     expect(txUserRepository.save).toHaveBeenCalledWith(
       expect.objectContaining({ status: UserStatus.ACTIVE }),
     );
+  });
+
+  it('keeps role and isDriver consistent when Didit approves a driver profile', async () => {
+    user.role = UserRole.DRIVER;
+    user.isDriver = false;
+
+    (global.fetch as jest.Mock).mockResolvedValueOnce(
+      createFetchResponse({
+        session_id: 'session-1',
+        status: 'Approved',
+        vendor_data: user.id,
+        workflow_id: 'workflow-1',
+      }) as any,
+    );
+
+    await service.syncSession(user.id, {
+      sessionId: 'session-1',
+      status: 'Approved',
+    });
+
+    expect(user.role).toBe(UserRole.DRIVER);
+    expect(user.isDriver).toBe(true);
+    expect(txUserRepository.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        role: UserRole.DRIVER,
+        isDriver: true,
+        status: UserStatus.ACTIVE,
+      }),
+    );
+  });
+
+  it('promotes a pending user with active vehicles to a coherent driver profile', async () => {
+    user.role = UserRole.PASSENGER;
+    user.isDriver = false;
+    txVehicleRepository.exists.mockResolvedValue(true);
+
+    (global.fetch as jest.Mock).mockResolvedValueOnce(
+      createFetchResponse({
+        session_id: 'session-1',
+        status: 'Not Started',
+        vendor_data: user.id,
+        workflow_id: 'workflow-1',
+      }) as any,
+    );
+
+    await service.syncSession(user.id, {
+      sessionId: 'session-1',
+      status: 'Not Started',
+    });
+
+    expect(user.role).toBe(UserRole.DRIVER);
+    expect(user.isDriver).toBe(true);
+    expect(user.status).toBe(UserStatus.PENDING_KYC);
   });
 
   it('keeps the local status unchanged when sync is called without Didit API configuration', async () => {

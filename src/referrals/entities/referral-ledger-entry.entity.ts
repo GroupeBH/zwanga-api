@@ -13,6 +13,7 @@ import { ReferralReward } from './referral-reward.entity';
 import { ReferralWithdrawal } from './referral-withdrawal.entity';
 
 export enum ReferralLedgerEntryType {
+  ATTRIBUTION_BONUS = 'attribution_bonus',
   REWARD_PENDING = 'reward_pending',
   REWARD_RELEASED = 'reward_released',
   REWARD_REVERSED = 'reward_reversed',
@@ -78,6 +79,12 @@ export class ReferralLedgerEntry {
   @ManyToOne(() => PaymentTransaction, { nullable: true, onDelete: 'SET NULL' })
   @JoinColumn({ name: 'paymentTransactionId' })
   paymentTransaction: PaymentTransaction | null;
+
+  @Column({ type: 'varchar', length: 40, nullable: true })
+  sourceType?: string | null;
+
+  @Column({ type: 'uuid', nullable: true })
+  sourceEntityId?: string | null;
 
   @Column({ type: 'varchar', length: 500 })
   description: string;

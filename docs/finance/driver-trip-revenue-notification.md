@@ -39,16 +39,19 @@ Une réservation contribue au résumé uniquement lorsqu'au moins une preuve per
 
 Les réservations `pending`, `rejected`, `cancelled`, `no_show`, `boarding_uncertain` ou `expired` sans preuve de dépose ne génèrent aucun montant.
 
-Le montant brut vient en priorité de `booking.paymentAmount`, figé par le serveur à l'arrivée. Pour une ancienne réservation où cette valeur manque, le repli est `trip.pricePerSeat × max(1, numberOfSeats)`. Un trajet gratuit produit `0`.
+Le montant brut vient en priorité de `booking.grossPaymentAmount`, puis de `booking.paymentAmount` pour les anciennes réservations. Pour une ancienne réservation où ces valeurs manquent, le repli est `trip.pricePerSeat × max(1, numberOfSeats)`. Un trajet gratuit produit `0`.
+
+Depuis `FIN-BOOKING-003`, une réservation de premier trajet peut être subventionnée. Dans ce cas, `paymentAmount` représente le montant payé ou encaissé auprès du passager, tandis que `grossPaymentAmount` représente le prix total du trajet. Le résumé conducteur affiche aussi `zwangaSubsidyAmount`.
 
 ## 4. Calculs affichés
 
-Soit `G` le montant brut d'une réservation terminée et `r` le taux `ZWANGA_COMMISSION_RATE`.
+Soit `G` le montant brut d'une réservation terminée, `P` le montant réellement payé par le passager et `r` le taux `ZWANGA_COMMISSION_RATE`.
 
 ```text
 net électronique ou jetons = arrondi_centime(G × (1 - r))
-liquide à encaisser = G
-total attendu affiché = confirmé net + électronique attendu net + liquide brut
+liquide à encaisser = P
+subvention Zwanga = max(0, G - P)
+total attendu affiché = confirmé net + électronique attendu net + liquide à encaisser
 ```
 
 Avec `r = 0,05` :
@@ -56,16 +59,18 @@ Avec `r = 0,05` :
 - paiement électronique confirmé de `10 000 CDF` : `9 500 CDF` dans **Gain ajouté** ;
 - paiement électronique non confirmé de `10 000 CDF` : `9 500 CDF` dans **Paiement électronique attendu** ;
 - paiement liquide de `10 000 CDF` : `10 000 CDF` dans **À encaisser en liquide**.
+- premier trajet liquide de `10 000 CDF` : `4 000 CDF` dans **À encaisser en liquide** et `6 000 CDF` en subvention Zwanga.
 
-Le montant liquide correspond à la somme que le passager remet directement au conducteur. Il n'est pas inséré dans `driver_earnings`, n'augmente pas le solde retirable et ne déclenche pas de transfert FlexPay. Le système actuel ne prélève pas automatiquement la commission Zwanga sur le liquide ; un mécanisme de dette ou de compensation serait une évolution financière distincte.
+Le montant liquide correspond à la somme que le passager remet directement au conducteur. Hors subvention, il n'est pas inséré dans `driver_earnings`, n'augmente pas le solde retirable et ne déclenche pas de transfert FlexPay. Pour un premier trajet cash subventionné, seule la part Zwanga est insérée comme revenu conducteur retirable avec `commissionRate = 0`. Le système actuel ne prélève pas automatiquement la commission Zwanga sur le liquide ; un mécanisme de dette ou de compensation serait une évolution financière distincte.
 
 ## 5. Signification des trois montants
 
 | Champ API                 | Libellé application           | Signification comptable                                                |
 | ------------------------- | ----------------------------- | ---------------------------------------------------------------------- |
 | `confirmedAmount`         | Gain ajouté                   | revenu net d'un paiement électronique ou en jetons confirmé            |
-| `cashToCollectAmount`     | À encaisser en liquide        | prix brut à recevoir directement du passager                           |
+| `cashToCollectAmount`     | À encaisser en liquide        | montant à recevoir directement du passager                             |
 | `electronicPendingAmount` | Paiement électronique attendu | revenu net estimé, non retirable avant confirmation                    |
+| `zwangaSubsidyAmount`     | Subvention Zwanga             | part commerciale prise en charge par Zwanga                            |
 | `totalExpectedAmount`     | total technique               | somme des trois compartiments, sans création d'écriture supplémentaire |
 
 ## 6. Idempotence et concurrence REST/Socket.IO
@@ -98,9 +103,11 @@ Exemple de données :
   "driverId": "uuid-conducteur",
   "tripId": "uuid-trajet",
   "currency": "CDF",
+  "grossTripAmount": 20000,
   "confirmedAmount": 9500,
   "cashToCollectAmount": 5000,
   "electronicPendingAmount": 4750,
+  "zwangaSubsidyAmount": 0,
   "totalExpectedAmount": 19250
 }
 ```
@@ -132,9 +139,11 @@ Exemple de réponse :
   "tripId": "uuid-trajet",
   "currency": "CDF",
   "commissionRate": 0.05,
+  "grossTripAmount": 20000,
   "confirmedAmount": 9500,
   "cashToCollectAmount": 5000,
   "electronicPendingAmount": 4750,
+  "zwangaSubsidyAmount": 0,
   "totalExpectedAmount": 19250,
   "completedBookings": 3,
   "generatedAt": "2026-08-26T11:00:00.000Z"

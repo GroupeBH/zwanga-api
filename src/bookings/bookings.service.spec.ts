@@ -16,6 +16,8 @@ describe('BookingsService trip payments', () => {
   let bookingRepository: {
     find: jest.Mock;
     findOne: jest.Mock;
+    count: jest.Mock;
+    create: jest.Mock;
     save: jest.Mock;
     update: jest.Mock;
     manager?: unknown;
@@ -64,6 +66,7 @@ describe('BookingsService trip payments', () => {
   let boardingCandidates: Map<string, unknown>;
   let financialManager: {
     findOne: jest.Mock;
+    count: jest.Mock;
     save: jest.Mock;
   };
   let dataSource: {
@@ -98,6 +101,8 @@ describe('BookingsService trip payments', () => {
     bookingRepository = {
       find: jest.fn(),
       findOne: jest.fn(),
+      count: jest.fn().mockResolvedValue(0),
+      create: jest.fn((payload: unknown) => payload),
       save: jest.fn((payload: unknown) => Promise.resolve(payload)),
       update: jest.fn().mockResolvedValue({ affected: 1 }),
       remove: jest.fn((payload: unknown) => Promise.resolve(payload)),
@@ -139,6 +144,9 @@ describe('BookingsService trip payments', () => {
       get: jest.fn((key: string) => {
         if (key === 'FLEXPAY_CALLBACK_BASE_URL') {
           return 'https://api.zwanga.cd/api/v1';
+        }
+        if (key === 'FIRST_TRIP_SUBSIDY_ENABLED') {
+          return 'false';
         }
         return undefined;
       }),
@@ -186,6 +194,12 @@ describe('BookingsService trip payments', () => {
           );
         }
         return null;
+      }),
+      count: jest.fn(async (entity: unknown, options: unknown) => {
+        if (entity === Booking) {
+          return bookingRepository.count(options);
+        }
+        return 0;
       }),
       save: jest.fn((payload: unknown) => bookingRepository.save(payload)),
     };
@@ -418,6 +432,119 @@ describe('BookingsService trip payments', () => {
     );
     expect(result.booking.paymentStatus).toBe(BookingPaymentStatus.INITIATED);
     expect(result.payment.amount).toBe(5000);
+  });
+
+  it('applies a 40 percent first-trip subsidy to an eligible passenger booking', async () => {
+    configService.get.mockImplementation((key: string) => {
+      if (key === 'FLEXPAY_CALLBACK_BASE_URL') {
+        return 'https://api.zwanga.cd/api/v1';
+      }
+      if (key === 'FIRST_TRIP_SUBSIDY_ENABLED') {
+        return 'true';
+      }
+      if (key === 'FIRST_TRIP_PASSENGER_PAYMENT_RATE') {
+        return '0.40';
+      }
+      return undefined;
+    });
+    const point = {
+      type: 'Point' as const,
+      coordinates: [15.3663, -4.425],
+    };
+    tripRepository.findOne.mockResolvedValue({
+      id: 'trip-first',
+      driverId: 'driver-1',
+      driver: { id: 'driver-1', fcmToken: null },
+      status: TripStatus.PENDING,
+      isFree: false,
+      pricePerSeat: 10000,
+      totalSeats: 3,
+      availableSeats: 3,
+      bookings: [],
+      departureLocation: 'Gombe',
+      arrivalLocation: 'Limete',
+      departurePoint: point,
+      arrivalPoint: point,
+    });
+    bookingRepository.findOne.mockResolvedValue(null);
+    bookingRepository.count.mockResolvedValue(0);
+    jest
+      .spyOn(service as any, 'recalculateAvailableSeatsForTrip')
+      .mockResolvedValue(3);
+    jest
+      .spyOn(service as any, 'notifyDriverOfNewBooking')
+      .mockResolvedValue(undefined);
+
+    const result = await service.create('new-passenger', {
+      tripId: 'trip-first',
+      numberOfSeats: 1,
+      paymentMode: TripPaymentMode.ELECTRONIC,
+    });
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        paymentAmount: 4000,
+        grossPaymentAmount: 10000,
+        firstTripSubsidyApplied: true,
+        passengerPaymentRate: 0.4,
+        zwangaSubsidyAmount: 6000,
+      }),
+    );
+  });
+
+  it('does not apply the first-trip subsidy when the passenger already completed a ride', async () => {
+    configService.get.mockImplementation((key: string) => {
+      if (key === 'FLEXPAY_CALLBACK_BASE_URL') {
+        return 'https://api.zwanga.cd/api/v1';
+      }
+      if (key === 'FIRST_TRIP_SUBSIDY_ENABLED') {
+        return 'true';
+      }
+      return undefined;
+    });
+    const point = {
+      type: 'Point' as const,
+      coordinates: [15.3663, -4.425],
+    };
+    tripRepository.findOne.mockResolvedValue({
+      id: 'trip-not-first',
+      driverId: 'driver-1',
+      driver: { id: 'driver-1', fcmToken: null },
+      status: TripStatus.PENDING,
+      isFree: false,
+      pricePerSeat: 10000,
+      totalSeats: 3,
+      availableSeats: 3,
+      bookings: [],
+      departureLocation: 'Gombe',
+      arrivalLocation: 'Limete',
+      departurePoint: point,
+      arrivalPoint: point,
+    });
+    bookingRepository.findOne.mockResolvedValue(null);
+    bookingRepository.count.mockResolvedValueOnce(1);
+    jest
+      .spyOn(service as any, 'recalculateAvailableSeatsForTrip')
+      .mockResolvedValue(3);
+    jest
+      .spyOn(service as any, 'notifyDriverOfNewBooking')
+      .mockResolvedValue(undefined);
+
+    const result = await service.create('existing-passenger', {
+      tripId: 'trip-not-first',
+      numberOfSeats: 1,
+      paymentMode: TripPaymentMode.ELECTRONIC,
+    });
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        paymentAmount: 10000,
+        grossPaymentAmount: 10000,
+        firstTripSubsidyApplied: false,
+        passengerPaymentRate: null,
+        zwangaSubsidyAmount: 0,
+      }),
+    );
   });
 
   it('preserves a distance-adjusted fare when initiating payment after arrival', async () => {
@@ -727,7 +854,14 @@ describe('BookingsService trip payments', () => {
       ),
     ).rejects.toThrow('Solde de jetons insuffisant');
 
-    expect(bookingRepository.save).not.toHaveBeenCalled();
+    expect(bookingRepository.save).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        paymentStatus: BookingPaymentStatus.SUCCEEDED,
+      }),
+    );
+    expect(
+      driverSettlementsService.recordCompletedBookingEarningWithManager,
+    ).not.toHaveBeenCalled();
   });
 
   it('marks the booking paid after a successful FlexPay status check', async () => {

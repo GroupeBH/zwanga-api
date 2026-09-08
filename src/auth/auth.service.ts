@@ -41,6 +41,7 @@ import { ReferralsService } from '../referrals/referrals.service';
 import {
   assertSelfServiceUserRole,
   isAdminRole,
+  resolveSelfServiceDriverState,
 } from '../users/user-role.policy';
 import { KeccelOtpService } from '../keccel-otp/keccel-otp.service';
 import { provisionAdminAccount } from '../admin/admin-account.provisioning';
@@ -163,7 +164,11 @@ export class AuthService {
       referralReferringLink,
       referralCapturedAt,
     };
-    const resolvedIsDriver = isDriver ?? role === UserRole.DRIVER;
+    const driverState = resolveSelfServiceDriverState({
+      role,
+      isDriver,
+      hasVehicle: Boolean(vehicle),
+    });
 
     // Check if user already exists
     const existingUser = await this.userRepository.findOne({
@@ -218,8 +223,8 @@ export class AuthService {
       firstName: legalFirstName,
       lastName: legalLastName,
       gender: gender ?? null,
-      role,
-      isDriver: resolvedIsDriver,
+      role: driverState.role,
+      isDriver: driverState.isDriver,
       status: UserStatus.PENDING_KYC,
     };
 
@@ -231,13 +236,13 @@ export class AuthService {
     const savedUser = await this.userRepository.save(user);
     await this.referralsService.registerUser(savedUser.id, referralAttribution);
 
-    if (vehicle && !resolvedIsDriver) {
+    if (vehicle && !driverState.isDriver) {
       throw new BadRequestException(
         'Les informations du véhicule sont uniquement autorisées pour les conducteurs',
       );
     }
 
-    if (vehicle && resolvedIsDriver) {
+    if (vehicle && driverState.isDriver) {
       await this.vehiclesService.create(savedUser.id, vehicle);
     }
 
@@ -901,8 +906,12 @@ export class AuthService {
         const role = signupOptions?.role ?? UserRole.PASSENGER;
         assertSelfServiceUserRole(role);
 
-        const isDriver = signupOptions?.isDriver ?? role === UserRole.DRIVER;
         const vehicle = signupOptions?.vehicle;
+        const driverState = resolveSelfServiceDriverState({
+          role,
+          isDriver: signupOptions?.isDriver,
+          hasVehicle: Boolean(vehicle),
+        });
         const legalFirstName = normalizeLegalName(
           signupOptions?.firstName || firstName,
         );
@@ -910,7 +919,7 @@ export class AuthService {
           signupOptions?.lastName || lastName,
         );
 
-        if (isDriver && (!legalFirstName || !legalLastName)) {
+        if (driverState.isDriver && (!legalFirstName || !legalLastName)) {
           throw new BadRequestException(
             'Vos prénom(s) et votre nom exacts sont requis avant la vérification KYC. Le post-nom est facultatif.',
           );
@@ -927,7 +936,7 @@ export class AuthService {
           referralAttribution,
         );
 
-        if (vehicle && !isDriver) {
+        if (vehicle && !driverState.isDriver) {
           throw new BadRequestException(
             'Les informations du vehicule sont uniquement autorisees pour les conducteurs',
           );
@@ -941,8 +950,8 @@ export class AuthService {
           lastName: legalLastName,
           gender: gender ?? null,
           profilePicture: profilePicture ?? undefined,
-          role,
-          isDriver,
+          role: driverState.role,
+          isDriver: driverState.isDriver,
           status: UserStatus.PENDING_KYC,
           isEmailVerified: true,
           isPhoneVerified: false,
@@ -950,7 +959,7 @@ export class AuthService {
 
         user = await this.userRepository.save(user);
         await this.referralsService.registerUser(user.id, referralAttribution);
-        if (vehicle && isDriver) {
+        if (vehicle && driverState.isDriver) {
           await this.vehiclesService.create(user.id, vehicle);
         }
         this.logger.log(`New user created via Google OAuth: ${user.id}`);
@@ -1240,12 +1249,16 @@ export class AuthService {
       const role = signupOptions?.role ?? UserRole.PASSENGER;
       assertSelfServiceUserRole(role);
 
-      const isDriver = signupOptions?.isDriver ?? role === UserRole.DRIVER;
       const vehicle = signupOptions?.vehicle;
+      const driverState = resolveSelfServiceDriverState({
+        role,
+        isDriver: signupOptions?.isDriver,
+        hasVehicle: Boolean(vehicle),
+      });
       const legalFirstName = normalizeLegalName(firstName);
       const legalLastName = normalizeLegalName(lastName);
 
-      if (isDriver && (!legalFirstName || !legalLastName)) {
+      if (driverState.isDriver && (!legalFirstName || !legalLastName)) {
         throw new BadRequestException(
           'Vos prénom(s) et votre nom exacts sont requis avant la vérification KYC. Le post-nom est facultatif.',
         );
@@ -1262,7 +1275,7 @@ export class AuthService {
         referralAttribution,
       );
 
-      if (vehicle && !isDriver) {
+      if (vehicle && !driverState.isDriver) {
         throw new BadRequestException(
           'Les informations du vehicule sont uniquement autorisees pour les conducteurs',
         );
@@ -1275,8 +1288,8 @@ export class AuthService {
         firstName: legalFirstName,
         lastName: legalLastName,
         gender: signupOptions?.gender ?? null,
-        role,
-        isDriver,
+        role: driverState.role,
+        isDriver: driverState.isDriver,
         status: UserStatus.PENDING_KYC,
         isEmailVerified: emailVerified,
         isPhoneVerified: false,
@@ -1284,7 +1297,7 @@ export class AuthService {
 
       user = await this.userRepository.save(user);
       await this.referralsService.registerUser(user.id, referralAttribution);
-      if (vehicle && isDriver) {
+      if (vehicle && driverState.isDriver) {
         await this.vehiclesService.create(user.id, vehicle);
       }
       this.logger.log(`New user created via Apple OAuth: ${user.id}`);

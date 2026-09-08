@@ -56,7 +56,10 @@ interface RewardSourceInput {
   referredUserId: string;
   sourceType: ReferralRewardSourceType;
   sourceEntityId: string;
-  payment: PaymentTransaction;
+  paymentTransactionId: string | null;
+  grossAmount: number;
+  sourceCurrency: string;
+  eventAt: Date;
 }
 
 export interface ReferralRegistrationAttribution {
@@ -76,13 +79,19 @@ interface ReferralRegistrationResult {
     fcmToken: string | null;
   } | null;
   referredFirstName: string;
+  attributionBonusTokens: number;
 }
 
 @Injectable()
 export class ReferralsService {
   private readonly logger = new Logger(ReferralsService.name);
   private readonly WITHDRAWAL_RELATED_ENTITY_TYPE = 'referral_withdrawal';
-  private readonly DEFAULT_REWARD_RATE = 0.05;
+  private readonly ATTRIBUTION_BONUS_SOURCE_TYPE = 'referral_attribution';
+  private readonly DEFAULT_SUBSCRIPTION_REWARD_RATE = 0.05;
+  private readonly DEFAULT_BOOKING_REWARD_RATE = 0.01;
+  private readonly MAX_BOOKING_REWARD_RATE = 0.01;
+  private readonly DEFAULT_ATTRIBUTION_BONUS_TOKENS = 5;
+  private readonly DEFAULT_PLATFORM_COMMISSION_RATE = 0.05;
   private readonly DEFAULT_HOLD_DAYS = 7;
   private readonly DEFAULT_PROGRAM_MONTHS = 12;
   private readonly DEFAULT_MIN_WITHDRAWAL_TOKENS = 50;
@@ -241,6 +250,7 @@ export class ReferralsService {
 
       let newlyAttached = false;
       let resolvedReferrer: ReferralRegistrationResult['referrer'] = null;
+      let attributionBonusTokens = 0;
 
       if (normalizedCode || normalizedToken) {
         const codeProfile = normalizedCode
@@ -306,11 +316,19 @@ export class ReferralsService {
 
       profile = await manager.save(profile);
       await this.getOrCreateAccount(manager, userId);
+      if (newlyAttached && resolvedReferrer) {
+        attributionBonusTokens = await this.creditAttributionBonus(
+          manager,
+          resolvedReferrer.userId,
+          userId,
+        );
+      }
       return {
         profile,
         newlyAttached,
         referrer: resolvedReferrer,
         referredFirstName: user.firstName,
+        attributionBonusTokens,
       };
     });
   }
@@ -335,10 +353,15 @@ export class ReferralsService {
       await this.notificationService.sendNotification(
         result.referrer.fcmToken,
         'Nouveau filleul Zwanga',
-        `${result.referredFirstName} a rejoint votre reseau de parrainage.`,
+        `${result.referredFirstName} a rejoint votre reseau de parrainage.${
+          result.attributionBonusTokens > 0
+            ? ` Vous recevez ${result.attributionBonusTokens} jetons.`
+            : ''
+        }`,
         {
           type: 'referral_new_referral',
           referredUserId: userId,
+          attributionBonusTokens: result.attributionBonusTokens,
         },
         result.referrer.userId,
       );
@@ -362,6 +385,16 @@ export class ReferralsService {
     const payoutCurrency = this.getPayoutCurrency();
     const payoutMoneyPerToken = this.getMoneyPerToken(payoutCurrency);
     const shareLink = await this.getOrCreateChottuLinkShareLink(profile);
+    const bookingRewardRate = this.getRewardRate(
+      ReferralRewardSourceType.BOOKING_PAYMENT,
+    );
+    const subscriptionRewardRate = this.getRewardRate(
+      ReferralRewardSourceType.SUBSCRIPTION_PAYMENT,
+    );
+    const platformCommissionRate = this.getPlatformCommissionRate();
+    const platformRetainedBookingCommissionRate = this.roundRate(
+      Math.max(platformCommissionRate - bookingRewardRate, 0),
+    );
 
     return {
       code: profile.code,
@@ -390,8 +423,18 @@ export class ReferralsService {
         currency: payoutCurrency,
       },
       rules: {
-        rewardRate: this.getRewardRate(),
-        eligiblePayments: ['subscription_flexpay', 'booking_flexpay'],
+        rewardRate: bookingRewardRate,
+        subscriptionRewardRate,
+        bookingRewardRate,
+        bookingRewardFunding: 'platform_commission_share',
+        platformCommissionRate,
+        platformRetainedBookingCommissionRate,
+        attributionBonusTokens: this.getAttributionBonusTokens(),
+        eligiblePayments: [
+          'subscription_flexpay',
+          'booking_flexpay',
+          'booking_tokens',
+        ],
         holdDays: this.getHoldDays(),
         rewardWindowMonths: this.getProgramMonths(),
         rewardWindowStartsAt: 'first_eligible_successful_payment',
@@ -565,7 +608,10 @@ export class ReferralsService {
       referredUserId: subscription.userId,
       sourceType: ReferralRewardSourceType.SUBSCRIPTION_PAYMENT,
       sourceEntityId: subscription.id,
-      payment,
+      paymentTransactionId: payment.id,
+      grossAmount: Number(payment.amount),
+      sourceCurrency: payment.currency,
+      eventAt: payment.paidAt ?? new Date(),
     });
   }
 
@@ -573,28 +619,53 @@ export class ReferralsService {
     if (
       booking.status !== BookingStatus.COMPLETED ||
       !booking.droppedOff ||
-      booking.paymentMode !== TripPaymentMode.ELECTRONIC ||
-      booking.paymentStatus !== BookingPaymentStatus.SUCCEEDED ||
-      !booking.paymentTransactionId
+      ![TripPaymentMode.ELECTRONIC, TripPaymentMode.POINTS].includes(
+        booking.paymentMode,
+      ) ||
+      booking.paymentStatus !== BookingPaymentStatus.SUCCEEDED
     ) {
       return null;
     }
-    const payment = await this.paymentRepository.findOne({
-      where: { id: booking.paymentTransactionId },
-    });
-    if (
-      !payment ||
-      payment.status !== PaymentStatus.SUCCEEDED ||
-      payment.provider !== PaymentProvider.FLEXPAY ||
-      String(payment.purpose) !== String(PaymentPurpose.TRIP_BOOKING)
-    ) {
+
+    if (booking.paymentMode === TripPaymentMode.ELECTRONIC) {
+      if (!booking.paymentTransactionId) {
+        return null;
+      }
+      const payment = await this.paymentRepository.findOne({
+        where: { id: booking.paymentTransactionId },
+      });
+      if (
+        !payment ||
+        payment.status !== PaymentStatus.SUCCEEDED ||
+        payment.provider !== PaymentProvider.FLEXPAY ||
+        String(payment.purpose) !== String(PaymentPurpose.TRIP_BOOKING)
+      ) {
+        return null;
+      }
+      return this.awardReward({
+        referredUserId: booking.passengerId,
+        sourceType: ReferralRewardSourceType.BOOKING_PAYMENT,
+        sourceEntityId: booking.id,
+        paymentTransactionId: payment.id,
+        grossAmount: Number(payment.amount),
+        sourceCurrency: payment.currency,
+        eventAt: payment.paidAt ?? booking.paidAt ?? new Date(),
+      });
+    }
+
+    const grossAmount = Number(booking.paymentAmount ?? 0);
+    if (!Number.isFinite(grossAmount) || grossAmount <= 0) {
       return null;
     }
+
     return this.awardReward({
       referredUserId: booking.passengerId,
       sourceType: ReferralRewardSourceType.BOOKING_PAYMENT,
       sourceEntityId: booking.id,
-      payment,
+      paymentTransactionId: booking.paymentTransactionId ?? null,
+      grossAmount,
+      sourceCurrency: booking.paymentCurrency,
+      eventAt: booking.paidAt ?? new Date(),
     });
   }
 
@@ -738,18 +809,16 @@ export class ReferralsService {
       return existing;
     }
 
-    const grossAmount = this.normalizePositiveAmount(
-      Number(input.payment.amount),
-    );
-    const sourceCurrency = input.payment.currency.toUpperCase();
-    const rate = this.getRewardRate();
+    const grossAmount = this.normalizePositiveAmount(Number(input.grossAmount));
+    const sourceCurrency = input.sourceCurrency.toUpperCase();
+    const rate = this.getRewardRate(input.sourceType);
     const rewardAmount = this.roundMoney(grossAmount * rate);
     const sourceMoneyPerToken = this.getMoneyPerToken(sourceCurrency);
     const rewardTokens = this.roundMoney(rewardAmount / sourceMoneyPerToken);
     if (rewardTokens <= 0) {
       return null;
     }
-    const eventAt = input.payment.paidAt ?? new Date();
+    const eventAt = input.eventAt;
 
     try {
       return await this.dataSource.transaction(async (manager) => {
@@ -813,7 +882,7 @@ export class ReferralsService {
           referredUserId: input.referredUserId,
           sourceType: input.sourceType,
           sourceEntityId: input.sourceEntityId,
-          paymentTransactionId: input.payment.id,
+          paymentTransactionId: input.paymentTransactionId,
           grossAmount,
           sourceCurrency,
           rate,
@@ -839,11 +908,11 @@ export class ReferralsService {
           balanceAfter: Number(account.pendingTokens),
           rewardId: reward.id,
           withdrawalId: null,
-          paymentTransactionId: input.payment.id,
-          description: `Commission de 5 % en attente pour ${input.sourceType} ${input.sourceEntityId}`,
+          paymentTransactionId: input.paymentTransactionId,
+          description: `Commission de ${this.formatRate(rate)} en attente pour ${input.sourceType} ${input.sourceEntityId}`,
         });
         this.logger.log(
-          `Referral reward recorded: rewardId=${reward.id}, referrer=${reward.referrerUserId}, referred=${reward.referredUserId}, tokens=${rewardTokens}`,
+          `Referral reward recorded: rewardId=${reward.id}, referrer=${reward.referrerUserId}, referred=${reward.referredUserId}, rate=${rate}, tokens=${rewardTokens}`,
         );
         return reward;
       });
@@ -1328,6 +1397,55 @@ export class ReferralsService {
     return account;
   }
 
+  private async creditAttributionBonus(
+    manager: EntityManager,
+    referrerUserId: string,
+    referredUserId: string,
+  ): Promise<number> {
+    const bonusTokens = this.getAttributionBonusTokens();
+    if (bonusTokens <= 0) {
+      return 0;
+    }
+
+    const existingBonus = await manager.findOne(ReferralLedgerEntry, {
+      where: {
+        userId: referrerUserId,
+        type: ReferralLedgerEntryType.ATTRIBUTION_BONUS,
+        sourceType: this.ATTRIBUTION_BONUS_SOURCE_TYPE,
+        sourceEntityId: referredUserId,
+      },
+    });
+    if (existingBonus) {
+      return 0;
+    }
+
+    const account = await this.getOrCreateAccount(
+      manager,
+      referrerUserId,
+      true,
+    );
+    account.availableTokens = this.roundMoney(
+      Number(account.availableTokens) + bonusTokens,
+    );
+    await manager.save(account);
+    await this.createLedgerEntry(manager, account, {
+      type: ReferralLedgerEntryType.ATTRIBUTION_BONUS,
+      bucket: ReferralBalanceBucket.AVAILABLE,
+      amountTokens: bonusTokens,
+      balanceAfter: Number(account.availableTokens),
+      rewardId: null,
+      withdrawalId: null,
+      paymentTransactionId: null,
+      sourceType: this.ATTRIBUTION_BONUS_SOURCE_TYPE,
+      sourceEntityId: referredUserId,
+      description: `Bonus de ${bonusTokens} jetons pour le rattachement du filleul ${referredUserId}`,
+    });
+    this.logger.log(
+      `Referral attribution bonus credited: referrer=${referrerUserId}, referred=${referredUserId}, tokens=${bonusTokens}`,
+    );
+    return bonusTokens;
+  }
+
   private async createLedgerEntry(
     manager: EntityManager,
     account: ReferralAccount,
@@ -1477,14 +1595,60 @@ export class ReferralsService {
     return capturedAt;
   }
 
-  private getRewardRate(): number {
-    const rate = Number(
-      this.configService.get<string | number>('REFERRAL_REWARD_RATE') ??
-        this.DEFAULT_REWARD_RATE,
+  private getRewardRate(sourceType: ReferralRewardSourceType): number {
+    if (sourceType === ReferralRewardSourceType.BOOKING_PAYMENT) {
+      return this.getBookingRewardRate();
+    }
+
+    return this.configRate(
+      ['REFERRAL_SUBSCRIPTION_REWARD_RATE', 'REFERRAL_REWARD_RATE'],
+      this.DEFAULT_SUBSCRIPTION_REWARD_RATE,
     );
-    return Number.isFinite(rate) && rate > 0 && rate < 1
-      ? rate
-      : this.DEFAULT_REWARD_RATE;
+  }
+
+  private getBookingRewardRate(): number {
+    const rate = this.configRate(
+      ['REFERRAL_BOOKING_REWARD_RATE'],
+      this.DEFAULT_BOOKING_REWARD_RATE,
+    );
+    const platformCommissionRate = this.getPlatformCommissionRate();
+    const maxAllowedRate =
+      platformCommissionRate > 0
+        ? Math.min(this.MAX_BOOKING_REWARD_RATE, platformCommissionRate)
+        : this.MAX_BOOKING_REWARD_RATE;
+    if (rate > maxAllowedRate) {
+      this.logger.warn(
+        `REFERRAL_BOOKING_REWARD_RATE=${rate} exceeds the approved trip referral share ${maxAllowedRate} within ZWANGA_COMMISSION_RATE=${platformCommissionRate}; using ${maxAllowedRate}`,
+      );
+      return maxAllowedRate;
+    }
+    return rate;
+  }
+
+  private getPlatformCommissionRate(): number {
+    return this.configRate(
+      ['ZWANGA_COMMISSION_RATE'],
+      this.DEFAULT_PLATFORM_COMMISSION_RATE,
+    );
+  }
+
+  private getAttributionBonusTokens(): number {
+    return this.positiveConfig(
+      'REFERRAL_ATTRIBUTION_BONUS_TOKENS',
+      this.DEFAULT_ATTRIBUTION_BONUS_TOKENS,
+    );
+  }
+
+  private configRate(keys: string[], fallback: number): number {
+    let configured: string | number | undefined;
+    for (const key of keys) {
+      configured = this.configService.get<string | number>(key);
+      if (configured !== undefined && configured !== null) {
+        break;
+      }
+    }
+    const rate = Number(configured ?? fallback);
+    return Number.isFinite(rate) && rate > 0 && rate < 1 ? rate : fallback;
   }
 
   private getHoldDays(): number {
@@ -1580,6 +1744,14 @@ export class ReferralsService {
 
   private roundMoney(value: number): number {
     return Math.round(Number(value) * 100) / 100;
+  }
+
+  private roundRate(value: number): number {
+    return Math.round(Number(value) * 1_000_000) / 1_000_000;
+  }
+
+  private formatRate(rate: number): string {
+    return `${this.roundMoney(rate * 100)} %`;
   }
 
   private addDays(value: Date, days: number): Date {

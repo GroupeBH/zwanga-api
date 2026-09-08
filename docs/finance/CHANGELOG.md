@@ -2,6 +2,100 @@
 
 Ce fichier répertorie les changements qui influencent un prix, un paiement, un solde, une commission, une récompense ou un retrait.
 
+## 4 septembre 2026
+
+### FIN-BOOKING-003 — Subvention Zwanga du premier trajet passager
+
+Statut : implémenté localement ; migration, import SSM et déploiement backend requis.
+
+Résumé : le premier trajet réel d'un passager est subventionné par Zwanga. Le passager paie 40 % du prix total dû, tandis que les 60 % restants sont tracés comme subvention Zwanga. La réduction est calculée côté serveur, réservée une seule fois par passager, libérée si la réservation ne devient pas un trajet payable, et refusée si le passager possède déjà un trajet complété ou payé.
+
+Impacts financiers et opérationnels :
+
+- `bookings.paymentAmount` devient le montant passager lorsque la subvention s'applique ;
+- `bookings.grossPaymentAmount` conserve le prix total avant subvention ;
+- `bookings.zwangaSubsidyAmount` trace la part prise en charge par Zwanga ;
+- les paiements FlexPay et les débits en jetons utilisent uniquement les 40 % dus par le passager ;
+- les revenus conducteur électroniques/jetons restent calculés sur le prix brut du trajet ;
+- pour le cash, le conducteur encaisse 40 % auprès du passager et reçoit la part subventionnée en revenu conducteur retirable ;
+- les commissions de parrainage restent calculées sur le montant réellement payé par le filleul, pas sur la subvention ;
+- une migration ajoute les colonnes, contraintes et index nécessaires sans recalcul historique.
+
+Documentation complète : [first-trip-subsidy.md](./first-trip-subsidy.md).
+
+### FIN-REF-010 — Verrouillage du partage de commission trajet parrainée
+
+Statut : implémenté localement ; migration et déploiement backend requis.
+
+Résumé : la commission parrain liée aux courses est verrouillée à 1 % maximum
+du prix réellement payé, même si une variable d'environnement est mal configurée
+à 5 %. Ce 1 % reste financé par la commission plateforme Zwanga de 5 %, ce qui
+laisse économiquement 4 % à Zwanga sur une course parrainée. Le bonus fixe de
+rattachement reste de 5 jetons disponibles.
+
+Impacts financiers et opérationnels :
+
+- une migration ajoute une contrainte PostgreSQL sur les nouvelles commissions
+  de course ;
+- aucune transaction historique n'est recalculée ;
+- les courses FlexPay et les courses payées en jetons restent éligibles ;
+- les courses en espèces restent exclues ;
+- le contrat `/referrals/me` expose explicitement le financement par commission
+  plateforme et le taux net conservé par Zwanga après parrainage ;
+- un test anti-régression couvre le cas d'une mauvaise configuration
+  `REFERRAL_BOOKING_REWARD_RATE=0.05`.
+
+Documentation complète : [referral-program.md](./referral-program.md).
+
+## 3 septembre 2026
+
+### FIN-REF-009 — Partage de la commission trajet et bonus de rattachement
+
+Statut : implémenté localement ; migration et déploiement backend requis.
+
+Résumé : la commission de parrainage sur les courses ne vaut plus 5 % du prix
+total. Zwanga conserve une commission trajet globale de 5 %, et le parrain
+reçoit désormais 1 % du prix total, prélevé économiquement sur cette commission.
+Zwanga garde donc 4 % net sur une course parrainée. Les courses payées en
+jetons Zwanga deviennent également éligibles, sans ouvrir le cash.
+
+Impacts financiers et opérationnels :
+
+- le conducteur conserve le même calcul de gain : brut moins 5 % de commission
+  plateforme ;
+- le parrain reçoit 1 % sur les courses FlexPay ou jetons, pendant la fenêtre
+  de douze mois ;
+- les abonnements FlexPay restent rémunérés à 5 %, sauf configuration contraire ;
+- le premier rattachement d'un filleul crédite automatiquement 5 jetons
+  disponibles au parrain ;
+- une nouvelle écriture `referral_ledger_entries.type = attribution_bonus`
+  trace ce bonus, avec unicité par couple parrain/filleul ;
+- `referral_rewards.paymentTransactionId` devient nullable afin de supporter les
+  courses payées en jetons, qui n'ont pas toujours de transaction FlexPay.
+
+Documentation complète : [referral-program.md](./referral-program.md).
+
+### KYC-DRIVER-001 — Cohérence du profil conducteur
+
+Statut : implémenté localement ; migration et déploiement backend requis.
+
+Résumé : le backend ne persiste plus de contradiction entre `users.role` et
+`users.isDriver`. Les inscriptions téléphone, Google et Apple normalisent les
+anciennes charges utiles mobiles, la création/réactivation d'un véhicule
+transforme le compte public en profil conducteur cohérent, et les synchronisations
+KYC Didit/legacy alignent le profil conducteur avant sauvegarde.
+
+Impacts financiers et opérationnels :
+
+- aucun changement de prix, commission, solde ou jeton ;
+- correction des blocages conducteur où KYC et véhicules étaient présents mais
+  `role` et `isDriver` se contredisaient ;
+- les comptes administrateurs restent hors flux conducteur avec `isDriver=false` ;
+- la migration répare les lignes existantes et ajoute une contrainte SQL contre
+  les futures incohérences.
+
+Documentation complète : [driver-role-consistency.md](./driver-role-consistency.md).
+
 ## 2 septembre 2026
 
 ### KYC-DIDIT-003 — Concordance des noms légaux

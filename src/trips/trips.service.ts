@@ -71,6 +71,7 @@ import {
 } from '../subscriptions/subscriptions.service';
 import { WeatherAwarenessService } from '../weather/weather-awareness.service';
 import { DriverSettlementsService } from '../driver-settlements/driver-settlements.service';
+import { normalizeUserDriverFlags } from '../users/user-role.policy';
 import {
   buildPointFromCoordinate,
   isCoordinateAllowedForTrip,
@@ -576,7 +577,11 @@ export class TripsService {
 
     if (!trip) {
       this.logger.warn(`Trip not found: ${id}`);
-      throw new NotFoundException('Trajet non trouve');
+      throw new NotFoundException({
+        error: 'Trajet introuvable',
+        code: 'TRIP_NOT_FOUND',
+        message: "Ce trajet n'existe pas ou a déjà été supprimé.",
+      });
     }
 
     trip.interruptionRequest =
@@ -777,17 +782,29 @@ export class TripsService {
     });
 
     if (!trip) {
-      throw new NotFoundException('Trajet non trouve');
+      throw new NotFoundException({
+        error: 'Trajet introuvable',
+        code: 'TRIP_NOT_FOUND',
+        message: "Ce trajet n'existe pas ou a déjà été supprimé.",
+      });
     }
 
     if (!trip.isPrivate) {
-      throw new BadRequestException('Ce trajet est déjà public');
+      throw new BadRequestException({
+        error: 'Trajet déjà public',
+        code: 'TRIP_ALREADY_PUBLIC',
+        message:
+          'Ce trajet est déjà public. Aucune nouvelle publication nécessaire.',
+      });
     }
 
     if (!trip.tripRequestId) {
-      throw new BadRequestException(
-        "Ce trajet n'a pas été créé à partir d'une demande de trajet",
-      );
+      throw new BadRequestException({
+        error: 'Publication non applicable',
+        code: 'TRIP_NOT_CREATED_FROM_REQUEST',
+        message:
+          "Ce trajet n'a pas été créé à partir d'une demande de trajet et ne peut pas être publié avec cette action.",
+      });
     }
 
     // Vérifier que l'utilisateur est le passager qui a créé la demande de trajet
@@ -797,14 +814,22 @@ export class TripsService {
     });
 
     if (!tripRequest) {
-      throw new NotFoundException('Demande de Trajet non trouvee');
+      throw new NotFoundException({
+        error: 'Demande de trajet introuvable',
+        code: 'TRIP_REQUEST_NOT_FOUND',
+        message:
+          "La demande à l'origine de ce trajet n'existe pas ou a été supprimée.",
+      });
     }
 
     // Seul le passager qui a créé la demande peut autoriser la publication
     if (tripRequest.passengerId !== userId) {
-      throw new ForbiddenException(
-        "Seul le passager qui a créé la demande de trajet peut autoriser que le trajet devienne public. Vous n'êtes pas autorisé à effectuer cette action.",
-      );
+      throw new ForbiddenException({
+        error: 'Publication non autorisée',
+        code: 'TRIP_PUBLICATION_NOT_ALLOWED',
+        message:
+          'Seul le passager ayant créé la demande peut rendre ce trajet public.',
+      });
     }
 
     // Vérifier que le conducteur du trajet a les prérequis (KYC + véhicules)
@@ -815,14 +840,21 @@ export class TripsService {
     });
 
     if (!driver) {
-      throw new NotFoundException('Conducteur du Trajet non trouve');
+      throw new NotFoundException({
+        error: 'Conducteur introuvable',
+        code: 'TRIP_DRIVER_NOT_FOUND',
+        message: "Le conducteur associé à ce trajet n'existe plus.",
+      });
     }
 
     // Vérifier que le conducteur a passé le KYC (status ACTIVE)
     if (driver.status !== UserStatus.ACTIVE) {
-      throw new BadRequestException(
-        'Le conducteur du trajet doit avoir passé la vérification KYC (compte actif) pour que le trajet puisse être rendu public.',
-      );
+      throw new BadRequestException({
+        error: 'Compte conducteur inactif',
+        code: 'DRIVER_ACCOUNT_NOT_ACTIVE',
+        message:
+          'Le compte du conducteur doit être actif avant de rendre ce trajet public.',
+      });
     }
 
     // Vérifier que le KYC est approuvé
@@ -832,17 +864,23 @@ export class TripsService {
     });
 
     if (!kycDocument || kycDocument.status !== KycStatus.APPROVED) {
-      throw new BadRequestException(
-        'Le conducteur du trajet doit avoir un KYC approuvé pour que le trajet puisse être rendu public.',
-      );
+      throw new BadRequestException({
+        error: 'KYC conducteur requis',
+        code: 'DRIVER_KYC_NOT_APPROVED',
+        message:
+          "Le KYC du conducteur n'est pas encore approuvé. La publication sera possible après validation de son identité.",
+      });
     }
 
     // Vérifier que le conducteur a au moins un véhicule actif
     const activeVehicles = driver.vehicles?.filter((v) => v.isActive) || [];
     if (activeVehicles.length === 0) {
-      throw new BadRequestException(
-        'Le conducteur du trajet doit avoir au moins un véhicule actif pour que le trajet puisse être rendu public.',
-      );
+      throw new BadRequestException({
+        error: 'Véhicule conducteur requis',
+        code: 'DRIVER_ACTIVE_VEHICLE_REQUIRED',
+        message:
+          'Le conducteur doit enregistrer et activer au moins un véhicule avant la publication du trajet.',
+      });
     }
 
     // Rendre le trajet public
@@ -2260,7 +2298,11 @@ export class TripsService {
     const user = await this.userRepository.findOne({ where: { id: driverId } });
     if (!user) {
       this.logger.warn(`Trip publication failed: User not found - ${driverId}`);
-      throw new NotFoundException('Utilisateur non trouve');
+      throw new NotFoundException({
+        error: 'Utilisateur introuvable',
+        code: 'USER_NOT_FOUND',
+        message: "Votre compte utilisateur n'existe pas ou plus.",
+      });
     }
 
     let vehicle: Vehicle | null = null;
@@ -2274,42 +2316,55 @@ export class TripsService {
         this.logger.warn(
           `Trip publication failed: Vehicle ${vehicleId} not found or does not belong to user ${driverId}`,
         );
-        throw new BadRequestException(
-          'Vehicule non trouve ou ne vous appartient pas',
-        );
+        throw new BadRequestException({
+          error: 'Véhicule invalide',
+          code: 'TRIP_VEHICLE_NOT_OWNED',
+          message:
+            "Le véhicule sélectionné n'existe pas ou ne vous appartient pas. Sélectionnez un véhicule de votre liste.",
+        });
       }
 
       if (!vehicle.isActive) {
         this.logger.warn(
           `Trip publication failed: Vehicle ${vehicleId} is not active`,
         );
-        throw new BadRequestException(
-          'Le vehicule selectionne n est pas actif',
-        );
+        throw new BadRequestException({
+          error: 'Véhicule inactif',
+          code: 'TRIP_VEHICLE_INACTIVE',
+          message:
+            'Le véhicule sélectionné est inactif. Réactivez-le ou choisissez un autre véhicule avant de publier le trajet.',
+        });
       }
 
-      if (!this.isDriverRole(user.role)) {
+      if (normalizeUserDriverFlags(user, { hasActiveVehicle: true })) {
         this.logger.log(
-          `Promoting user ${driverId} to driver for trip publication`,
+          `Aligning user ${driverId} as driver for trip publication`,
         );
-        user.role = UserRole.DRIVER;
-        user.isDriver = true;
         await this.userRepository.save(user);
       }
     } else {
       if (requireVehicle) {
-        throw new BadRequestException(
-          'Veuillez selectionner un vehicule actif',
-        );
+        throw new BadRequestException({
+          error: 'Véhicule requis',
+          code: 'TRIP_ACTIVE_VEHICLE_REQUIRED',
+          message: 'Sélectionnez un véhicule actif avant de publier le trajet.',
+        });
+      }
+
+      if (normalizeUserDriverFlags(user)) {
+        await this.userRepository.save(user);
       }
 
       if (!this.isDriverRole(user.role)) {
         this.logger.warn(
           `Trip publication failed: User ${driverId} is not a driver`,
         );
-        throw new BadRequestException(
-          'Vous devez etre conducteur ou fournir un vehicule pour creer un trajet',
-        );
+        throw new BadRequestException({
+          error: 'Profil conducteur requis',
+          code: 'DRIVER_PROFILE_REQUIRED',
+          message:
+            'Votre profil doit être conducteur, ou vous devez sélectionner un véhicule vous appartenant, avant de publier un trajet.',
+        });
       }
     }
 
@@ -2322,9 +2377,11 @@ export class TripsService {
   ): void {
     const maxSeats = getVehicleMaxSeats(vehicle?.type);
     if (maxSeats !== null && totalSeats > maxSeats) {
-      throw new BadRequestException(
-        `Ce type de moto accepte au maximum ${maxSeats} places`,
-      );
+      throw new BadRequestException({
+        error: 'Nombre de places invalide',
+        code: 'VEHICLE_SEAT_CAPACITY_EXCEEDED',
+        message: `Ce véhicule accepte au maximum ${maxSeats} place(s). Réduisez le nombre de places proposées.`,
+      });
     }
   }
 
