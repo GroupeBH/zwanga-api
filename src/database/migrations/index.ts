@@ -25,6 +25,10 @@ import { AddAdminReferralReadIndexes1780000024000 } from './1780000024000-AddAdm
 import { AddSuperAdminRole1780000025000 } from './1780000025000-AddSuperAdminRole';
 import { AddAdminPasswordChangeRequired1780000026000 } from './1780000026000-AddAdminPasswordChangeRequired';
 import { AddDiditKycFields1780000027000 } from './1780000027000-AddDiditKycFields';
+import { EnforceUserDriverRoleConsistency1780000028000 } from './1780000028000-EnforceUserDriverRoleConsistency';
+import { AddReferralAttributionBonus1780000029000 } from './1780000029000-AddReferralAttributionBonus';
+import { EnforceReferralBookingRewardRateCap1780000030000 } from './1780000030000-EnforceReferralBookingRewardRateCap';
+import { AddFirstTripSubsidyToBookings1780000031000 } from './1780000031000-AddFirstTripSubsidyToBookings';
 
 export const databaseMigrations = [
   FillTotalSeats1780000000000,
@@ -54,4 +58,8 @@ export const databaseMigrations = [
   AddSuperAdminRole1780000025000,
   AddAdminPasswordChangeRequired1780000026000,
   AddDiditKycFields1780000027000,
+  EnforceUserDriverRoleConsistency1780000028000,
+  AddReferralAttributionBonus1780000029000,
+  EnforceReferralBookingRewardRateCap1780000030000,
+  AddFirstTripSubsidyToBookings1780000031000,
 ];

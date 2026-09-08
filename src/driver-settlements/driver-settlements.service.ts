@@ -51,9 +51,11 @@ export interface DriverTripRevenueSummary {
   tripId: string;
   currency: string;
   commissionRate: number;
+  grossTripAmount: number;
   confirmedAmount: number;
   cashToCollectAmount: number;
   electronicPendingAmount: number;
+  zwangaSubsidyAmount: number;
   totalExpectedAmount: number;
   completedBookings: number;
   generatedAt: string;
@@ -181,9 +183,11 @@ export class DriverSettlementsService {
           driverId,
           tripId,
           currency: summary.currency,
+          grossTripAmount: summary.grossTripAmount,
           confirmedAmount: summary.confirmedAmount,
           cashToCollectAmount: summary.cashToCollectAmount,
           electronicPendingAmount: summary.electronicPendingAmount,
+          zwangaSubsidyAmount: summary.zwangaSubsidyAmount,
           totalExpectedAmount: summary.totalExpectedAmount,
         },
       );
@@ -204,9 +208,11 @@ export class DriverSettlementsService {
   ): DriverTripRevenueSummary {
     const commissionRate = this.getCommissionRate();
     const currency = this.getCurrency();
+    let grossTripAmount = 0;
     let confirmedAmount = 0;
     let cashToCollectAmount = 0;
     let electronicPendingAmount = 0;
+    let zwangaSubsidyAmount = 0;
     let completedBookings = 0;
 
     for (const booking of bookings) {
@@ -220,8 +226,14 @@ export class DriverSettlementsService {
       }
 
       completedBookings += 1;
+      grossTripAmount += grossAmount;
+      zwangaSubsidyAmount += this.resolveBookingSubsidyAmount(booking);
       if (booking.paymentMode === TripPaymentMode.CASH) {
-        cashToCollectAmount += grossAmount;
+        cashToCollectAmount += this.resolveTripBookingPassengerAmount(
+          booking,
+          trip,
+        );
+        confirmedAmount += this.resolveCashSubsidyEarningAmount(booking);
         continue;
       }
 
@@ -233,17 +245,21 @@ export class DriverSettlementsService {
       }
     }
 
+    grossTripAmount = this.roundMoney(grossTripAmount);
     confirmedAmount = this.roundMoney(confirmedAmount);
     cashToCollectAmount = this.roundMoney(cashToCollectAmount);
     electronicPendingAmount = this.roundMoney(electronicPendingAmount);
+    zwangaSubsidyAmount = this.roundMoney(zwangaSubsidyAmount);
 
     return {
       tripId: trip.id,
       currency,
       commissionRate,
+      grossTripAmount,
       confirmedAmount,
       cashToCollectAmount,
       electronicPendingAmount,
+      zwangaSubsidyAmount,
       totalExpectedAmount: this.roundMoney(
         confirmedAmount + cashToCollectAmount + electronicPendingAmount,
       ),
@@ -263,6 +279,16 @@ export class DriverSettlementsService {
   }
 
   private resolveTripBookingGrossAmount(booking: Booking, trip: Trip): number {
+    const persistedGrossAmount = Number(booking.grossPaymentAmount);
+    if (
+      booking.grossPaymentAmount !== null &&
+      booking.grossPaymentAmount !== undefined &&
+      Number.isFinite(persistedGrossAmount) &&
+      persistedGrossAmount > 0
+    ) {
+      return this.roundMoney(persistedGrossAmount);
+    }
+
     const persistedAmount = Number(booking.paymentAmount);
     if (Number.isFinite(persistedAmount) && persistedAmount > 0) {
       return this.roundMoney(persistedAmount);
@@ -278,6 +304,47 @@ export class DriverSettlementsService {
     const seats = Math.max(1, Number(booking.numberOfSeats) || 1);
     return Number.isFinite(pricePerSeat) && pricePerSeat > 0
       ? this.roundMoney(pricePerSeat * seats)
+      : 0;
+  }
+
+  private resolveTripBookingPassengerAmount(
+    booking: Booking,
+    trip: Trip,
+  ): number {
+    const persistedAmount = Number(booking.paymentAmount);
+    if (Number.isFinite(persistedAmount) && persistedAmount >= 0) {
+      return this.roundMoney(persistedAmount);
+    }
+
+    return this.resolveTripBookingGrossAmount(booking, trip);
+  }
+
+  private resolveBookingSubsidyAmount(booking: Booking): number {
+    if (!booking.firstTripSubsidyApplied) {
+      return 0;
+    }
+
+    const persistedSubsidyAmount = Number(booking.zwangaSubsidyAmount);
+    if (Number.isFinite(persistedSubsidyAmount) && persistedSubsidyAmount > 0) {
+      return this.roundMoney(persistedSubsidyAmount);
+    }
+
+    const grossAmount = Number(booking.grossPaymentAmount ?? 0);
+    const passengerAmount = Number(booking.paymentAmount ?? 0);
+    if (
+      Number.isFinite(grossAmount) &&
+      Number.isFinite(passengerAmount) &&
+      grossAmount > passengerAmount
+    ) {
+      return this.roundMoney(grossAmount - passengerAmount);
+    }
+
+    return 0;
+  }
+
+  private resolveCashSubsidyEarningAmount(booking: Booking): number {
+    return booking.paymentMode === TripPaymentMode.CASH
+      ? this.resolveBookingSubsidyAmount(booking)
       : 0;
   }
 
@@ -298,6 +365,11 @@ export class DriverSettlementsService {
     if (summary.electronicPendingAmount > 0) {
       parts.push(
         `${this.formatMoney(summary.electronicPendingAmount)} ${summary.currency} en attente du paiement electronique`,
+      );
+    }
+    if (summary.zwangaSubsidyAmount > 0) {
+      parts.push(
+        `${this.formatMoney(summary.zwangaSubsidyAmount)} ${summary.currency} subventionnes par Zwanga`,
       );
     }
 
@@ -328,18 +400,7 @@ export class DriverSettlementsService {
     manager: EntityManager,
     booking: Booking,
   ): Promise<DriverEarning | null> {
-    if (
-      ![TripPaymentMode.ELECTRONIC, TripPaymentMode.POINTS].includes(
-        booking.paymentMode,
-      )
-    ) {
-      return null;
-    }
-
-    if (booking.paymentStatus !== BookingPaymentStatus.SUCCEEDED) {
-      this.logger.warn(
-        `Driver earning skipped for booking ${booking.id}: booking is not paid`,
-      );
+    if (!this.canRecordDriverEarning(booking)) {
       return null;
     }
 
@@ -365,18 +426,7 @@ export class DriverSettlementsService {
   private async recordCompletedBookingEarningUsingRepository(
     booking: Booking,
   ): Promise<DriverEarning | null> {
-    if (
-      ![TripPaymentMode.ELECTRONIC, TripPaymentMode.POINTS].includes(
-        booking.paymentMode,
-      )
-    ) {
-      return null;
-    }
-
-    if (booking.paymentStatus !== BookingPaymentStatus.SUCCEEDED) {
-      this.logger.warn(
-        `Driver earning skipped for booking ${booking.id}: booking is not paid`,
-      );
+    if (!this.canRecordDriverEarning(booking)) {
       return null;
     }
 
@@ -433,14 +483,12 @@ export class DriverSettlementsService {
   private buildEarningData(
     booking: Booking,
   ): Omit<DriverEarning, 'id' | 'createdAt' | 'updatedAt'> | null {
-    const grossAmount = this.normalizeAmount(
-      Number(booking.paymentAmount ?? 0),
-    );
+    const grossAmount = this.resolveDriverEarningGrossAmount(booking);
     if (grossAmount <= 0) {
       return null;
     }
 
-    const commissionRate = this.getCommissionRate();
+    const commissionRate = this.resolveDriverEarningCommissionRate(booking);
     const commissionAmount = this.roundMoney(grossAmount * commissionRate);
     const netAmount = this.roundMoney(grossAmount - commissionAmount);
 
@@ -471,12 +519,23 @@ export class DriverSettlementsService {
     earning: DriverEarning,
     booking: Booking,
   ): void {
-    const expectedGross = this.normalizeAmount(
-      Number(booking.paymentAmount ?? 0),
-    );
+    const expectedEarning = this.buildEarningData(booking);
+    if (!expectedEarning) {
+      throw new BadRequestException(
+        `Aucun gain conducteur attendu pour la reservation ${booking.id}`,
+      );
+    }
+
     const expectedDriverId = booking.trip?.driverId;
     if (
-      this.roundMoney(Number(earning.grossAmount)) !== expectedGross ||
+      this.roundMoney(Number(earning.grossAmount)) !==
+        this.roundMoney(Number(expectedEarning.grossAmount)) ||
+      this.roundMoney(Number(earning.commissionRate)) !==
+        this.roundMoney(Number(expectedEarning.commissionRate)) ||
+      this.roundMoney(Number(earning.commissionAmount)) !==
+        this.roundMoney(Number(expectedEarning.commissionAmount)) ||
+      this.roundMoney(Number(earning.netAmount)) !==
+        this.roundMoney(Number(expectedEarning.netAmount)) ||
       earning.tripId !== booking.tripId ||
       earning.passengerId !== booking.passengerId ||
       (expectedDriverId && earning.driverId !== expectedDriverId)
@@ -491,6 +550,52 @@ export class DriverSettlementsService {
     this.logger.log(
       `DRIVER_EARNING_COMMITTED bookingId=${earning.bookingId} gross=${Number(earning.grossAmount)} commission=${Number(earning.commissionAmount)} net=${Number(earning.netAmount)}`,
     );
+  }
+
+  private canRecordDriverEarning(booking: Booking): boolean {
+    if (
+      [TripPaymentMode.ELECTRONIC, TripPaymentMode.POINTS].includes(
+        booking.paymentMode,
+      )
+    ) {
+      if (booking.paymentStatus !== BookingPaymentStatus.SUCCEEDED) {
+        this.logger.warn(
+          `Driver earning skipped for booking ${booking.id}: booking is not paid`,
+        );
+        return false;
+      }
+      return true;
+    }
+
+    if (booking.paymentMode === TripPaymentMode.CASH) {
+      return this.resolveBookingSubsidyAmount(booking) > 0;
+    }
+
+    return false;
+  }
+
+  private resolveDriverEarningGrossAmount(booking: Booking): number {
+    if (booking.paymentMode === TripPaymentMode.CASH) {
+      return this.resolveBookingSubsidyAmount(booking);
+    }
+
+    const persistedGrossAmount = Number(booking.grossPaymentAmount);
+    if (
+      booking.grossPaymentAmount !== null &&
+      booking.grossPaymentAmount !== undefined &&
+      Number.isFinite(persistedGrossAmount) &&
+      persistedGrossAmount > 0
+    ) {
+      return this.roundMoney(persistedGrossAmount);
+    }
+
+    return this.normalizeAmount(Number(booking.paymentAmount ?? 0));
+  }
+
+  private resolveDriverEarningCommissionRate(booking: Booking): number {
+    return booking.paymentMode === TripPaymentMode.CASH
+      ? 0
+      : this.getCommissionRate();
   }
 
   async requestPayout(

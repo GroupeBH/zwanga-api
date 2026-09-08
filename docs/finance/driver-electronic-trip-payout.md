@@ -57,6 +57,10 @@ commission Zwanga = 10 000 × 0,05 = 500 CDF
 revenu conducteur = 10 000 - 500 = 9 500 CDF
 ```
 
+Depuis la subvention premier trajet (`FIN-BOOKING-003`), `G` vient en priorité de `bookings.grossPaymentAmount`. `bookings.paymentAmount` peut représenter seulement les 40 % payés par le passager. Le conducteur ne doit donc jamais être crédité sur `paymentAmount` lorsqu'une subvention est appliquée.
+
+Pour un premier trajet cash subventionné, la part payée en liquide reste encaissée directement par le conducteur et seule la part `zwangaSubsidyAmount` est créée comme revenu conducteur retirable avec un taux de commission `0`.
+
 Les valeurs `grossAmount`, `commissionRate`, `commissionAmount`, `netAmount` et `currency` sont figées dans `driver_earnings`. Une modification future du taux ne recalcule pas les revenus historiques.
 
 ## 5. Calcul du solde retirable
@@ -71,13 +75,13 @@ Les retraits `failed` et `cancelled` ne sont plus bloqués et leur montant redev
 
 ## 6. États du retrait
 
-| État | Signification | Effet sur le solde |
-| --- | --- | --- |
-| `pending` | demande réservée localement ou livraison FlexPay incertaine | montant bloqué |
-| `initiated` | FlexPay a accepté la demande et a renvoyé un `orderNumber` | montant bloqué |
-| `succeeded` | transfert confirmé par FlexPay | montant payé et définitivement consommé |
-| `failed` | échec final confirmé | montant libéré et retirable à nouveau |
-| `cancelled` | annulation finale confirmée | montant libéré et retirable à nouveau |
+| État        | Signification                                               | Effet sur le solde                      |
+| ----------- | ----------------------------------------------------------- | --------------------------------------- |
+| `pending`   | demande réservée localement ou livraison FlexPay incertaine | montant bloqué                          |
+| `initiated` | FlexPay a accepté la demande et a renvoyé un `orderNumber`  | montant bloqué                          |
+| `succeeded` | transfert confirmé par FlexPay                              | montant payé et définitivement consommé |
+| `failed`    | échec final confirmé                                        | montant libéré et retirable à nouveau   |
+| `cancelled` | annulation finale confirmée                                 | montant libéré et retirable à nouveau   |
 
 La réponse initiale `code = 0` de `merchantPayOutService` signifie seulement « demande reçue ». Elle ne doit jamais être interprétée comme un transfert final réussi.
 
@@ -155,14 +159,14 @@ Un callback répété est idempotent. Un callback d'échec ne peut pas rétrogra
 
 Tous les endpoints privés utilisent l'identité issue du JWT ; un conducteur ne peut lire ou vérifier que ses propres retraits.
 
-| Méthode | Route | Usage |
-| --- | --- | --- |
-| `GET` | `/api/v1/driver-settlements/me` | solde, KYC, téléphone et minimum |
-| `GET` | `/api/v1/driver-settlements/earnings` | historique des courses créditées |
-| `GET` | `/api/v1/driver-settlements/payouts` | historique et statut des retraits |
-| `POST` | `/api/v1/driver-settlements/payouts` | demande manuelle de retrait |
-| `GET` | `/api/v1/driver-settlements/payouts/:orderNumber/status` | vérification manuelle |
-| `POST` | `/api/v1/driver-settlements/payouts/flexpay/callback` | callback public FlexPay limité en fréquence |
+| Méthode | Route                                                    | Usage                                       |
+| ------- | -------------------------------------------------------- | ------------------------------------------- |
+| `GET`   | `/api/v1/driver-settlements/me`                          | solde, KYC, téléphone et minimum            |
+| `GET`   | `/api/v1/driver-settlements/earnings`                    | historique des courses créditées            |
+| `GET`   | `/api/v1/driver-settlements/payouts`                     | historique et statut des retraits           |
+| `POST`  | `/api/v1/driver-settlements/payouts`                     | demande manuelle de retrait                 |
+| `GET`   | `/api/v1/driver-settlements/payouts/:orderNumber/status` | vérification manuelle                       |
+| `POST`  | `/api/v1/driver-settlements/payouts/flexpay/callback`    | callback public FlexPay limité en fréquence |
 
 Exemple de demande :
 
@@ -202,18 +206,18 @@ La migration ne crée, ne débite, ne crédite et ne recalcule aucun montant. El
 
 ## 11. Variables d'environnement
 
-| Variable | Type | Rôle |
-| --- | --- | --- |
-| `ZWANGA_COMMISSION_RATE` | décimal | taux de commission, `0.05` |
-| `TRIP_PAYMENT_CURRENCY` | texte | devise des courses et revenus, `CDF` |
-| `DRIVER_PAYOUT_MIN_AMOUNT_CDF` | décimal positif | minimum d'un retrait conducteur |
-| `FLEXPAY_PAYOUT_SERVICE_URL` | URL | endpoint `merchantPayOutService` |
-| `FLEXPAY_CHECK_TRANSACTION_URL` | URL | vérification par `orderNumber` |
-| `FLEXPAY_DRIVER_PAYOUT_CALLBACK_URL` | URL | callback dédié, facultatif si base publique configurée |
-| `FLEXPAY_CALLBACK_BASE_URL` | URL | base publique de repli |
-| `FLEXPAY_TOKEN` | secret | jeton Bearer FlexPay |
-| `FLEXPAY_MERCHANT_CODE` | configuration sensible | code marchand |
-| `FLEXPAY_VERIFY_CALLBACKS` | booléen | vérification serveur ; conserver `true` en production |
+| Variable                             | Type                   | Rôle                                                   |
+| ------------------------------------ | ---------------------- | ------------------------------------------------------ |
+| `ZWANGA_COMMISSION_RATE`             | décimal                | taux de commission, `0.05`                             |
+| `TRIP_PAYMENT_CURRENCY`              | texte                  | devise des courses et revenus, `CDF`                   |
+| `DRIVER_PAYOUT_MIN_AMOUNT_CDF`       | décimal positif        | minimum d'un retrait conducteur                        |
+| `FLEXPAY_PAYOUT_SERVICE_URL`         | URL                    | endpoint `merchantPayOutService`                       |
+| `FLEXPAY_CHECK_TRANSACTION_URL`      | URL                    | vérification par `orderNumber`                         |
+| `FLEXPAY_DRIVER_PAYOUT_CALLBACK_URL` | URL                    | callback dédié, facultatif si base publique configurée |
+| `FLEXPAY_CALLBACK_BASE_URL`          | URL                    | base publique de repli                                 |
+| `FLEXPAY_TOKEN`                      | secret                 | jeton Bearer FlexPay                                   |
+| `FLEXPAY_MERCHANT_CODE`              | configuration sensible | code marchand                                          |
+| `FLEXPAY_VERIFY_CALLBACKS`           | booléen                | vérification serveur ; conserver `true` en production  |
 
 Sur AWS, ces variables sont importées depuis `.env.production` vers le préfixe SSM avec `infra-aws/scripts/import-env-to-ssm.ps1`. Aucune valeur secrète ne doit être copiée dans la documentation ou les logs.
 

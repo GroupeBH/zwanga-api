@@ -665,3 +665,5 @@ Le paramètre SSM ne doit pas être supprimé tant qu'une définition ECS le ré
 
 ### new env for super admin
 dans .env.docker.example
+### ajout des variables d'environnement sur le bonus au premier trajet
+nouvelle fonctionnalité dans service trip et booking

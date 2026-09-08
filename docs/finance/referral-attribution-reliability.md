@@ -18,7 +18,8 @@ Un compte déjà rattaché ne peut jamais changer de parrain. Le premier rattach
 
 Cette modification ne change aucun calcul monétaire :
 
-- commission : 5 % du paiement FlexPay éligible réellement confirmé ;
+- commission : 5 % du paiement abonnement FlexPay éligible ou 1 % de la course FlexPay/jetons réellement confirmée ;
+- bonus de rattachement : 5 jetons disponibles pour le parrain, une seule fois par filleul ;
 - retenue : sept jours ;
 - durée : douze mois à partir du premier paiement éligible réussi ;
 - conversion : valeur du jeton figée dans chaque récompense ;
@@ -151,7 +152,7 @@ Tester sur de vrais appareils :
 11. partage WhatsApp, SMS et copie de secours ;
 12. apparition unique du filleul et de la notification chez le parrain.
 
-Vérifier ensuite qu'un paiement éligible postérieur au rattachement génère exactement une commission de 5 %, et qu'aucun paiement antérieur n'est récompensé.
+Vérifier ensuite que le rattachement crédite une seule fois 5 jetons disponibles au parrain, qu'un paiement éligible postérieur au rattachement génère exactement 5 % sur abonnement ou 1 % sur course FlexPay/jetons, et qu'aucun paiement antérieur n'est récompensé.
 
 ## 9. Retour arrière
 

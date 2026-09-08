@@ -1,13 +1,22 @@
 import {
+  BookingPaymentStatus,
+  BookingStatus,
+} from '../bookings/entities/booking.entity';
+import {
   PaymentProvider,
   PaymentPurpose,
   PaymentStatus,
   PaymentTransaction,
 } from '../payments/entities/payment-transaction.entity';
+import { TripPaymentMode } from '../payments/enums/trip-payment-mode.enum';
 import { SubscriptionPlan } from '../subscriptions/entities/subscription.entity';
 import { User, UserStatus } from '../users/entities/user.entity';
 import { of } from 'rxjs';
 import { ReferralAccount } from './entities/referral-account.entity';
+import {
+  ReferralLedgerEntry,
+  ReferralLedgerEntryType,
+} from './entities/referral-ledger-entry.entity';
 import { ReferralProfile } from './entities/referral-profile.entity';
 import {
   ReferralReward,
@@ -29,6 +38,8 @@ describe('ReferralsService', () => {
       releasedTokens: string;
       reversedTokens: string;
     }[];
+    bookingPayment?: PaymentTransaction | null;
+    configOverrides?: Record<string, string | number>;
   }) => {
     const account = {
       id: 'account-1',
@@ -45,6 +56,9 @@ describe('ReferralsService', () => {
       code: 'ZWREFERRED',
       referredByUserId: 'referrer-1',
       referredAt: new Date('2026-08-01T00:00:00Z'),
+      linkToken: 'referred-link-token-abcdefghijklmnopqrstuvwxyz',
+      shareLinkUrl: null,
+      shareLinkGeneratedAt: null,
       qualifiedAt: null,
       rewardWindowEndsAt: null,
     } as ReferralProfile;
@@ -59,19 +73,21 @@ describe('ReferralsService', () => {
               ? profile
               : entity === ReferralAccount
                 ? account
-                : {
-                    id: 'referrer-1',
-                    isActive: true,
-                    status: UserStatus.ACTIVE,
-                  };
+                : entity === ReferralLedgerEntry
+                  ? null
+                  : {
+                      id: 'referrer-1',
+                      isActive: true,
+                      status: UserStatus.ACTIVE,
+                    };
         return Promise.resolve(result);
       }),
       create: jest.fn((_entity: unknown, value: Record<string, unknown>) => ({
         ...value,
       })),
       save: jest.fn((value: Record<string, unknown>) => {
-        if ('sourceType' in value && !value.id) value.id = 'reward-1';
         if ('description' in value && !value.id) value.id = 'ledger-1';
+        if ('sourceType' in value && !value.id) value.id = 'reward-1';
         return Promise.resolve(value);
       }),
     };
@@ -91,10 +107,14 @@ describe('ReferralsService', () => {
     const rewardRepository = {
       findOne: jest.fn().mockResolvedValue(options?.existingReward ?? null),
       find: jest.fn().mockResolvedValue([]),
+      count: jest.fn().mockResolvedValue(0),
       createQueryBuilder: jest.fn().mockReturnValue(rewardStatsQuery),
     };
     const profileRepository = {
       findOne: jest.fn(),
+      count: jest
+        .fn()
+        .mockResolvedValue(options?.referralProfiles?.length ?? 0),
       find: jest.fn().mockResolvedValue(options?.referralProfiles ?? []),
       save: jest.fn((value: ReferralProfile) => Promise.resolve(value)),
     };
@@ -102,6 +122,10 @@ describe('ReferralsService', () => {
       get: jest.fn((key: string) => {
         const values: Record<string, string | number> = {
           REFERRAL_REWARD_RATE: 0.05,
+          REFERRAL_SUBSCRIPTION_REWARD_RATE: 0.05,
+          REFERRAL_BOOKING_REWARD_RATE: 0.01,
+          REFERRAL_ATTRIBUTION_BONUS_TOKENS: 5,
+          ZWANGA_COMMISSION_RATE: 0.05,
           REFERRAL_HOLD_DAYS: 7,
           REFERRAL_REWARD_WINDOW_MONTHS: 12,
           REFERRAL_MONEY_PER_TOKEN_CDF: 100,
@@ -113,6 +137,7 @@ describe('ReferralsService', () => {
                   'https://api2.chottulink.com/chotuCore/pa/v1/create-link',
               }
             : {}),
+          ...options?.configOverrides,
         };
         return values[key];
       }),
@@ -127,6 +152,12 @@ describe('ReferralsService', () => {
     const notificationService = {
       sendNotification: jest.fn().mockResolvedValue(true),
     };
+    const paymentRepository = {
+      findOne: jest.fn().mockResolvedValue(options?.bookingPayment ?? null),
+    };
+    const kycRepository = {
+      exists: jest.fn().mockResolvedValue(false),
+    };
 
     const service = new ReferralsService(
       profileRepository as any,
@@ -135,8 +166,8 @@ describe('ReferralsService', () => {
       {} as any,
       {} as any,
       {} as any,
-      {} as any,
-      {} as any,
+      kycRepository as any,
+      paymentRepository as any,
       dataSource as any,
       configService as any,
       httpService as any,
@@ -150,6 +181,8 @@ describe('ReferralsService', () => {
       profileRepository,
       httpService,
       notificationService,
+      paymentRepository,
+      kycRepository,
       manager,
       dataSource,
     };
@@ -163,6 +196,17 @@ describe('ReferralsService', () => {
     provider: PaymentProvider.FLEXPAY,
     status: PaymentStatus.SUCCEEDED,
     amount: 5000,
+    currency: 'CDF',
+    paidAt: paymentPaidAt,
+  } as unknown as PaymentTransaction;
+
+  const succeededBookingPayment = {
+    id: 'payment-booking-1',
+    userId: 'referred-1',
+    purpose: PaymentPurpose.TRIP_BOOKING,
+    provider: PaymentProvider.FLEXPAY,
+    status: PaymentStatus.SUCCEEDED,
+    amount: 10000,
     currency: 'CDF',
     paidAt: paymentPaidAt,
   } as unknown as PaymentTransaction;
@@ -256,6 +300,157 @@ describe('ReferralsService', () => {
     expect(profile.qualifiedAt).toBeNull();
   });
 
+  it('credits 1 percent of an eligible electronic trip payment from the Zwanga commission', async () => {
+    const { service, account } = buildService({
+      bookingPayment: succeededBookingPayment,
+    });
+
+    const reward = await service.awardBookingReward({
+      id: 'booking-electronic-1',
+      passengerId: 'referred-1',
+      status: BookingStatus.COMPLETED,
+      droppedOff: true,
+      paymentMode: TripPaymentMode.ELECTRONIC,
+      paymentStatus: BookingPaymentStatus.SUCCEEDED,
+      paymentTransactionId: 'payment-booking-1',
+      paidAt: paymentPaidAt,
+    } as any);
+
+    expect(reward).toEqual(
+      expect.objectContaining({
+        sourceType: ReferralRewardSourceType.BOOKING_PAYMENT,
+        grossAmount: 10000,
+        rewardAmount: 100,
+        rewardTokens: 1,
+        rate: 0.01,
+        paymentTransactionId: 'payment-booking-1',
+        status: ReferralRewardStatus.PENDING,
+      }),
+    );
+    expect(account.pendingTokens).toBe(1);
+  });
+
+  it('caps trip referral rewards at 1 percent even if the booking rate is misconfigured at 5 percent', async () => {
+    const { service, account } = buildService({
+      bookingPayment: succeededBookingPayment,
+      configOverrides: {
+        REFERRAL_BOOKING_REWARD_RATE: 0.05,
+      },
+    });
+
+    const reward = await service.awardBookingReward({
+      id: 'booking-electronic-misconfigured-rate',
+      passengerId: 'referred-1',
+      status: BookingStatus.COMPLETED,
+      droppedOff: true,
+      paymentMode: TripPaymentMode.ELECTRONIC,
+      paymentStatus: BookingPaymentStatus.SUCCEEDED,
+      paymentTransactionId: 'payment-booking-1',
+      paidAt: paymentPaidAt,
+    } as any);
+
+    expect(reward).toEqual(
+      expect.objectContaining({
+        sourceType: ReferralRewardSourceType.BOOKING_PAYMENT,
+        grossAmount: 10000,
+        rewardAmount: 100,
+        rewardTokens: 1,
+        rate: 0.01,
+      }),
+    );
+    expect(account.pendingTokens).toBe(1);
+  });
+
+  it('exposes trip rewards as a 1 percent share funded from the 5 percent Zwanga commission', async () => {
+    const { service } = buildService({
+      configOverrides: {
+        REFERRAL_BOOKING_REWARD_RATE: 0.05,
+      },
+    });
+
+    await expect(service.getSummary('referrer-1')).resolves.toEqual(
+      expect.objectContaining({
+        rules: expect.objectContaining({
+          rewardRate: 0.01,
+          bookingRewardRate: 0.01,
+          bookingRewardFunding: 'platform_commission_share',
+          platformCommissionRate: 0.05,
+          platformRetainedBookingCommissionRate: 0.04,
+          attributionBonusTokens: 5,
+        }),
+      }),
+    );
+  });
+
+  it('credits 1 percent of an eligible trip paid with Zwanga tokens without requiring FlexPay', async () => {
+    const { service, account, paymentRepository } = buildService();
+
+    const reward = await service.awardBookingReward({
+      id: 'booking-points-1',
+      passengerId: 'referred-1',
+      status: BookingStatus.COMPLETED,
+      droppedOff: true,
+      paymentMode: TripPaymentMode.POINTS,
+      paymentStatus: BookingPaymentStatus.SUCCEEDED,
+      paymentAmount: 10000,
+      paymentCurrency: 'CDF',
+      paymentTransactionId: null,
+      paidAt: paymentPaidAt,
+    } as any);
+
+    expect(paymentRepository.findOne).not.toHaveBeenCalled();
+    expect(reward).toEqual(
+      expect.objectContaining({
+        sourceType: ReferralRewardSourceType.BOOKING_PAYMENT,
+        grossAmount: 10000,
+        rewardAmount: 100,
+        rewardTokens: 1,
+        rate: 0.01,
+        paymentTransactionId: null,
+        status: ReferralRewardStatus.PENDING,
+      }),
+    );
+    expect(account.pendingTokens).toBe(1);
+  });
+
+  it('calculates referral rewards for a subsidized first trip on the amount paid by the filleul only', async () => {
+    const { service, account } = buildService({
+      bookingPayment: {
+        ...succeededBookingPayment,
+        id: 'payment-booking-subsidized',
+        amount: 4000,
+      } as PaymentTransaction,
+    });
+
+    const reward = await service.awardBookingReward({
+      id: 'booking-subsidized-1',
+      passengerId: 'referred-1',
+      status: BookingStatus.COMPLETED,
+      droppedOff: true,
+      paymentMode: TripPaymentMode.ELECTRONIC,
+      paymentStatus: BookingPaymentStatus.SUCCEEDED,
+      paymentTransactionId: 'payment-booking-subsidized',
+      paymentAmount: 4000,
+      grossPaymentAmount: 10000,
+      firstTripSubsidyApplied: true,
+      zwangaSubsidyAmount: 6000,
+      paidAt: paymentPaidAt,
+    } as any);
+
+    expect(reward).toEqual(
+      expect.objectContaining({
+        sourceType: ReferralRewardSourceType.BOOKING_PAYMENT,
+        grossAmount: 4000,
+        rewardAmount: 40,
+        rewardTokens: 0.4,
+        rate: 0.01,
+        paymentTransactionId: 'payment-booking-subsidized',
+        status: ReferralRewardStatus.PENDING,
+      }),
+    );
+    expect(account.pendingTokens).toBe(0.4);
+  });
+
   it('resolves an active referrer from an opaque link token', async () => {
     const { service, profileRepository } = buildService();
     profileRepository.findOne.mockResolvedValue({
@@ -323,6 +518,9 @@ describe('ReferralsService', () => {
             return Promise.resolve(referrerProfile);
           }
         }
+        if (entity === ReferralLedgerEntry) {
+          return Promise.resolve(null);
+        }
         if (entity === User) {
           if (findOptions?.where?.id === 'referrer-1') {
             return Promise.resolve(referrerProfile.user);
@@ -362,6 +560,17 @@ describe('ReferralsService', () => {
     );
     expect(existingProfile.referredByUserId).toBe('referrer-1');
     expect(existingProfile.attributionProvider).toBe('chottulink');
+    expect(account.availableTokens).toBe(5);
+    expect(manager.create).toHaveBeenCalledWith(
+      ReferralLedgerEntry,
+      expect.objectContaining({
+        type: ReferralLedgerEntryType.ATTRIBUTION_BONUS,
+        bucket: 'available',
+        amountTokens: 5,
+        sourceType: 'referral_attribution',
+        sourceEntityId: 'existing-user',
+      }),
+    );
     expect(notificationService.sendNotification).toHaveBeenCalledTimes(1);
     expect(manager.query).toHaveBeenCalledWith(
       'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
@@ -381,6 +590,7 @@ describe('ReferralsService', () => {
     ).resolves.toEqual(
       expect.objectContaining({ attached: true, newlyAttached: false }),
     );
+    expect(account.availableTokens).toBe(5);
     expect(notificationService.sendNotification).toHaveBeenCalledTimes(1);
   });
 

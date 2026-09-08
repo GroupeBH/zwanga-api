@@ -155,6 +155,76 @@ describe('DriverSettlementsService', () => {
     );
   });
 
+  it('records electronic first-trip driver earnings on the full fare, not only the passenger-paid amount', async () => {
+    earningRepository.findOne.mockResolvedValue(null);
+
+    const result = await service.recordCompletedBookingEarning({
+      id: 'booking-first-electronic',
+      tripId: 'trip-1',
+      passengerId: 'passenger-1',
+      numberOfSeats: 1,
+      status: BookingStatus.COMPLETED,
+      paymentStatus: BookingPaymentStatus.SUCCEEDED,
+      paymentMode: TripPaymentMode.ELECTRONIC,
+      paymentAmount: 4000,
+      grossPaymentAmount: 10000,
+      firstTripSubsidyApplied: true,
+      passengerPaymentRate: 0.4,
+      zwangaSubsidyAmount: 6000,
+      paymentCurrency: 'CDF',
+      trip: {
+        id: 'trip-1',
+        driverId: 'driver-1',
+        status: TripStatus.COMPLETED,
+      },
+    } as any);
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        grossAmount: 10000,
+        commissionRate: 0.05,
+        commissionAmount: 500,
+        netAmount: 9500,
+        status: DriverEarningStatus.AVAILABLE,
+      }),
+    );
+  });
+
+  it('records the Zwanga subsidy as a withdrawable driver earning for a first cash trip', async () => {
+    earningRepository.findOne.mockResolvedValue(null);
+
+    const result = await service.recordCompletedBookingEarning({
+      id: 'booking-first-cash',
+      tripId: 'trip-1',
+      passengerId: 'passenger-1',
+      numberOfSeats: 1,
+      status: BookingStatus.COMPLETED,
+      paymentStatus: BookingPaymentStatus.NOT_REQUIRED,
+      paymentMode: TripPaymentMode.CASH,
+      paymentAmount: 4000,
+      grossPaymentAmount: 10000,
+      firstTripSubsidyApplied: true,
+      passengerPaymentRate: 0.4,
+      zwangaSubsidyAmount: 6000,
+      paymentCurrency: 'CDF',
+      trip: {
+        id: 'trip-1',
+        driverId: 'driver-1',
+        status: TripStatus.COMPLETED,
+      },
+    } as any);
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        grossAmount: 6000,
+        commissionRate: 0,
+        commissionAmount: 0,
+        netAmount: 6000,
+        status: DriverEarningStatus.AVAILABLE,
+      }),
+    );
+  });
+
   it('notifies the driver once when a post-trip electronic earning becomes available', async () => {
     earningRepository.findOne.mockResolvedValue(null);
     await service.recordCompletedBookingEarning({

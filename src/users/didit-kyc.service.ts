@@ -1,10 +1,13 @@
 import {
+  BadGatewayException,
   BadRequestException,
+  ConflictException,
   ForbiddenException,
+  GatewayTimeoutException,
   Injectable,
-  InternalServerErrorException,
   Logger,
   NotFoundException,
+  ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -22,6 +25,8 @@ import {
 } from './entities/kyc-document.entity';
 import { User, UserStatus } from './entities/user.entity';
 import { normalizeLegalName } from './legal-identity.util';
+import { Vehicle } from '../vehicles/entities/vehicle.entity';
+import { normalizeUserDriverFlags } from './user-role.policy';
 
 type DiditHttpMethod = 'GET' | 'POST';
 type DiditPayload = Record<string, unknown>;
@@ -99,15 +104,22 @@ export class DiditKycService {
     const user = await this.userRepository.findOne({ where: { id: userId } });
 
     if (!user) {
-      throw new NotFoundException('Utilisateur non trouvé');
+      throw new NotFoundException({
+        error: 'Utilisateur introuvable',
+        code: 'USER_NOT_FOUND',
+        message: "Votre compte utilisateur n'existe pas ou plus.",
+      });
     }
 
     const existingKyc = await this.findLatestUserKyc(userId);
 
     if (existingKyc?.status === KycStatus.APPROVED) {
-      throw new BadRequestException(
-        'Votre identité est dejà verifiée. Contactez le support si une nouvelle verification est necessaire.',
-      );
+      throw new ConflictException({
+        error: 'Identité déjà vérifiée',
+        code: 'KYC_ALREADY_APPROVED',
+        message:
+          'Votre identité est déjà vérifiée. Contactez le support si une nouvelle vérification est nécessaire.',
+      });
     }
 
     const payload = this.buildCreateSessionPayload(
@@ -133,9 +145,12 @@ export class DiditKycService {
       this.logger.error(
         `Didit session creation returned an incomplete payload for user ${userId}`,
       );
-      throw new InternalServerErrorException(
-        "Didit n'a pas retourné une session exploitable. Veuillez réessayer.",
-      );
+      throw new BadGatewayException({
+        error: 'Réponse KYC invalide',
+        code: 'KYC_PROVIDER_INVALID_RESPONSE',
+        message:
+          "Le service de vérification d'identité a retourné une réponse incomplète. Réessayez dans quelques instants.",
+      });
     }
 
     await this.applyDiditState({
@@ -171,7 +186,11 @@ export class DiditKycService {
     const user = await this.userRepository.findOne({ where: { id: userId } });
 
     if (!user) {
-      throw new NotFoundException('Utilisateur non trouve');
+      throw new NotFoundException({
+        error: 'Utilisateur introuvable',
+        code: 'USER_NOT_FOUND',
+        message: "Votre compte utilisateur n'existe pas ou plus.",
+      });
     }
 
     const sessionId = this.asNullableString(dto.sessionId);
@@ -393,17 +412,52 @@ export class DiditKycService {
     baseUrl: string,
   ): Promise<T> {
     const normalizedBaseUrl = baseUrl.replace(/\/+$/, '');
-    const response = await fetch(`${normalizedBaseUrl}${path}`, {
-      method,
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-      },
-      body: payload ? JSON.stringify(payload) : undefined,
-      signal: AbortSignal.timeout(20_000),
-    });
+    let response: Response;
+    let responseText: string;
 
-    const responseText = await response.text();
+    try {
+      response = await fetch(`${normalizedBaseUrl}${path}`, {
+        method,
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': apiKey,
+        },
+        body: payload ? JSON.stringify(payload) : undefined,
+        signal: AbortSignal.timeout(20_000),
+      });
+      responseText = await response.text();
+    } catch (error) {
+      const isTimeout =
+        error instanceof Error &&
+        (error.name === 'TimeoutError' ||
+          error.name === 'AbortError' ||
+          ('code' in error &&
+            ['ETIMEDOUT', 'ESOCKETTIMEDOUT'].includes(
+              String((error as Error & { code?: string }).code),
+            )));
+
+      this.logger.error(
+        `Didit API ${method} ${path} could not be reached: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+
+      if (isTimeout) {
+        throw new GatewayTimeoutException({
+          error: 'Délai KYC dépassé',
+          code: 'KYC_PROVIDER_TIMEOUT',
+          message:
+            "Le service de vérification d'identité n'a pas répondu à temps. Vérifiez votre connexion puis réessayez.",
+        });
+      }
+
+      throw new ServiceUnavailableException({
+        error: 'Service KYC indisponible',
+        code: 'KYC_PROVIDER_UNAVAILABLE',
+        message:
+          "Le service de vérification d'identité est temporairement indisponible. Réessayez dans quelques instants.",
+      });
+    }
     let responsePayload: unknown = null;
 
     if (responseText) {
@@ -419,9 +473,32 @@ export class DiditKycService {
       this.logger.error(
         `Didit API ${method} ${path} failed with HTTP ${response.status}: ${message}`,
       );
-      throw new BadRequestException(
-        message || "Didit n'a pas accepte la demande de verification.",
-      );
+
+      if (response.status === 401 || response.status === 403) {
+        throw new ServiceUnavailableException({
+          error: 'Configuration KYC refusée',
+          code: 'KYC_PROVIDER_AUTHENTICATION_FAILED',
+          message:
+            "Le service de vérification d'identité est temporairement indisponible en raison d'un problème de configuration. Contactez le support si le problème persiste.",
+        });
+      }
+
+      if (response.status === 429 || response.status >= 500) {
+        throw new ServiceUnavailableException({
+          error: 'Service KYC indisponible',
+          code: 'KYC_PROVIDER_UNAVAILABLE',
+          message:
+            "Le service de vérification d'identité est temporairement indisponible ou saturé. Réessayez plus tard.",
+        });
+      }
+
+      throw new BadRequestException({
+        error: 'Demande KYC refusée',
+        code: 'KYC_PROVIDER_REJECTED_REQUEST',
+        message:
+          message ||
+          "Le service de vérification d'identité n'a pas accepté la demande. Vérifiez les informations fournies puis réessayez.",
+      });
     }
 
     return this.unwrapDiditPayload(responsePayload as DiditPayload) as T;
@@ -537,16 +614,30 @@ export class DiditKycService {
 
       const savedKyc = await kycRepository.save(kycDocument);
 
+      const hasActiveVehicle = await manager.getRepository(Vehicle).exists({
+        where: { ownerId: input.userId, isActive: true },
+      });
+      const driverProfileChanged = normalizeUserDriverFlags(user, {
+        hasActiveVehicle,
+      });
+      let userStatusChanged = false;
+
       if (mappedStatus === KycStatus.APPROVED && !isStalePendingEvent) {
         if (user.status !== UserStatus.SUSPENDED) {
-          user.status = UserStatus.ACTIVE;
-          await userRepository.save(user);
+          const nextStatus = UserStatus.ACTIVE;
+          userStatusChanged = user.status !== nextStatus;
+          user.status = nextStatus;
         }
       } else if (
         [KycStatus.PENDING, KycStatus.REJECTED].includes(savedKyc.status) &&
         user.status !== UserStatus.SUSPENDED
       ) {
-        user.status = UserStatus.PENDING_KYC;
+        const nextStatus = UserStatus.PENDING_KYC;
+        userStatusChanged = user.status !== nextStatus;
+        user.status = nextStatus;
+      }
+
+      if (driverProfileChanged || userStatusChanged) {
         await userRepository.save(user);
       }
 
@@ -589,9 +680,12 @@ export class DiditKycService {
     const config = this.getOptionalDiditApiConfig();
 
     if (!config?.apiKey || !config.workflowId) {
-      throw new UnauthorizedException(
-        "La verification Didit n'est pas configuree.",
-      );
+      throw new ServiceUnavailableException({
+        error: 'Service KYC non configuré',
+        code: 'KYC_PROVIDER_NOT_CONFIGURED',
+        message:
+          "La vérification d'identité est temporairement indisponible. Le support technique doit finaliser sa configuration.",
+      });
     }
 
     return config;

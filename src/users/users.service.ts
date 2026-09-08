@@ -41,7 +41,12 @@ import { KeccelOtpService } from '../keccel-otp/keccel-otp.service';
 import { Express } from 'express';
 import { UserRole } from './entities/user.entity';
 import { SubscriptionsService } from '../subscriptions/subscriptions.service';
-import { assertSelfServiceUserRole, isAdminRole } from './user-role.policy';
+import {
+  assertSelfServiceUserRole,
+  isAdminRole,
+  normalizeUserDriverFlags,
+  resolveSelfServiceDriverState,
+} from './user-role.policy';
 import {
   areLegalNamesEquivalent,
   normalizeLegalName,
@@ -447,7 +452,11 @@ export class UsersService {
 
     if (updateProfileDto.role) {
       assertSelfServiceUserRole(updateProfileDto.role);
-      user.role = updateProfileDto.role;
+      const driverState = resolveSelfServiceDriverState({
+        role: updateProfileDto.role,
+      });
+      user.role = driverState.role;
+      user.isDriver = driverState.isDriver;
     }
 
     if (updateProfileDto.phone) {
@@ -760,13 +769,25 @@ export class UsersService {
 
       const savedKyc = await queryRunner.manager.save(kycDocument);
 
+      const hasActiveVehicle = await queryRunner.manager
+        .getRepository(Vehicle)
+        .exists({ where: { ownerId: userId, isActive: true } });
+      const driverProfileChanged = normalizeUserDriverFlags(user, {
+        hasActiveVehicle,
+      });
+
       // Update user status ONLY if approval is confirmed
       if (isApprovalConfirmed) {
         user.status = UserStatus.ACTIVE;
+      }
+
+      if (isApprovalConfirmed || driverProfileChanged) {
         await queryRunner.manager.save(user); // Transactional user save
-        this.logger.log(
-          `User ${userId} status updated to ACTIVE after KYC approval`,
-        );
+        if (isApprovalConfirmed) {
+          this.logger.log(
+            `User ${userId} status updated to ACTIVE after KYC approval`,
+          );
+        }
       }
 
       await queryRunner.commitTransaction();

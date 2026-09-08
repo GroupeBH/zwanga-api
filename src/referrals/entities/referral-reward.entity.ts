@@ -50,12 +50,12 @@ export class ReferralReward {
   @Column({ type: 'uuid' })
   sourceEntityId: string;
 
-  @Column({ type: 'uuid' })
-  paymentTransactionId: string;
+  @Column({ type: 'uuid', nullable: true })
+  paymentTransactionId: string | null;
 
-  @ManyToOne(() => PaymentTransaction, { onDelete: 'RESTRICT' })
+  @ManyToOne(() => PaymentTransaction, { nullable: true, onDelete: 'RESTRICT' })
   @JoinColumn({ name: 'paymentTransactionId' })
-  paymentTransaction: PaymentTransaction;
+  paymentTransaction: PaymentTransaction | null;
 
   @Column({ type: 'decimal', precision: 12, scale: 2 })
   grossAmount: number;

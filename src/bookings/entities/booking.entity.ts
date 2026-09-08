@@ -134,7 +134,19 @@ export class Booking {
   paymentAmount: number | null;
 
   @Column({ type: 'decimal', precision: 10, scale: 2, nullable: true })
+  grossPaymentAmount: number | null;
+
+  @Column({ type: 'decimal', precision: 10, scale: 2, nullable: true })
   originalPaymentAmount: number | null;
+
+  @Column({ type: 'boolean', default: false })
+  firstTripSubsidyApplied: boolean;
+
+  @Column({ type: 'decimal', precision: 7, scale: 6, nullable: true })
+  passengerPaymentRate: number | null;
+
+  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
+  zwangaSubsidyAmount: number;
 
   @Column({ type: 'int', nullable: true })
   plannedDistanceMeters: number | null;

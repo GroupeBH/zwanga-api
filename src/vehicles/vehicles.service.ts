@@ -13,6 +13,10 @@ import {
   VehicleType,
 } from './entities/vehicle.entity';
 import { User } from '../users/entities/user.entity';
+import {
+  isAdminRole,
+  normalizeUserDriverFlags,
+} from '../users/user-role.policy';
 import { Trip, TripStatus } from '../trips/entities/trip.entity';
 import { CacheService } from '../common/services/cache.service';
 import { FileUploadService } from '../common/services/file-upload.service';
@@ -96,6 +100,7 @@ export class VehiclesService {
         this.logger.warn(`Vehicle creation failed: Owner ${ownerId} not found`);
         throw new NotFoundException('Proprietaire non trouve');
       }
+      this.assertPublicOwnerCanRegisterVehicle(owner);
 
       const existingVehicle = await this.findByNormalizedLicensePlate(
         normalizedLicensePlate,
@@ -103,6 +108,7 @@ export class VehiclesService {
 
       if (existingVehicle) {
         if (existingVehicle.ownerId === ownerId) {
+          await this.ensureOwnerDriverProfile(owner);
           return this.reactivateOrUpdateExistingVehicle(
             existingVehicle,
             ownerId,
@@ -129,6 +135,7 @@ export class VehiclesService {
             : true,
       });
 
+      await this.ensureOwnerDriverProfile(owner);
       const savedVehicle = await this.vehicleRepository.save(vehicle);
       await this.invalidateVehicleCaches(ownerId);
 
@@ -297,9 +304,11 @@ export class VehiclesService {
       this.logger.warn(
         `Vehicle deactivation failed: Vehicle ${id} is associated with ${activeTrips.length} active or pending trip(s)`,
       );
-      throw new BadRequestException(
-        `Impossible de desactiver ce vehicule. Il est associe a ${activeTrips.length} trajet(s) en cours ou en attente.`,
-      );
+      throw new BadRequestException({
+        error: 'Véhicule utilisé par un trajet',
+        code: 'VEHICLE_HAS_ACTIVE_TRIPS',
+        message: `Impossible de supprimer ce véhicule : ${activeTrips.length} trajet(s) en cours ou en attente l'utilisent encore. Annulez ou terminez ces trajets, puis réessayez.`,
+      });
     }
 
     vehicle.isActive = false;
@@ -320,7 +329,12 @@ export class VehiclesService {
 
     if (!vehicle) {
       this.logger.warn(`Vehicle not found: ${id} for owner ${ownerId}`);
-      throw new NotFoundException('Vehicle not found');
+      throw new NotFoundException({
+        error: 'Véhicule introuvable',
+        code: 'VEHICLE_NOT_FOUND',
+        message:
+          "Ce véhicule n'existe pas, a déjà été supprimé ou ne vous appartient pas.",
+      });
     }
 
     return vehicle;
@@ -384,6 +398,24 @@ export class VehiclesService {
         { licensePlate: normalizedLicensePlate },
       )
       .getOne();
+  }
+
+  private assertPublicOwnerCanRegisterVehicle(owner: User): void {
+    if (isAdminRole(owner.role)) {
+      throw new BadRequestException(
+        'Les comptes administrateurs ne peuvent pas enregistrer de vehicule conducteur',
+      );
+    }
+  }
+
+  private async ensureOwnerDriverProfile(owner: User): Promise<void> {
+    const changed = normalizeUserDriverFlags(owner, {
+      hasActiveVehicle: true,
+    });
+
+    if (changed) {
+      await this.userRepository.save(owner);
+    }
   }
 
   private async reactivateOrUpdateExistingVehicle(
