@@ -852,6 +852,11 @@ export class UsersService {
     this.logger.debug(`Updating FCM token for user: ${userId}`);
 
     const user = await this.findOne(userId);
+    if (user.fcmToken === fcmToken) {
+      this.logger.debug(`FCM token already up to date for user: ${userId}`);
+      return;
+    }
+
     user.fcmToken = fcmToken;
     await this.userRepository.save(user);
 

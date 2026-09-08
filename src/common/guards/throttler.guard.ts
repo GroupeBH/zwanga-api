@@ -2,32 +2,43 @@ import { Injectable } from '@nestjs/common';
 import { ThrottlerGuard } from '@nestjs/throttler';
 import { Request } from 'express';
 
+type AuthenticatedRequest = Request & {
+  user?: {
+    userId?: string;
+  };
+};
+
 @Injectable()
 export class IpThrottlerGuard extends ThrottlerGuard {
   protected async getTracker(req: Record<string, any>): Promise<string> {
-    const request = req as Request;
+    const request = req as AuthenticatedRequest;
 
     if (!request) {
       return super.getTracker(req);
     }
 
+    const userId = request.user?.userId?.trim();
+    if (userId) {
+      return `user:${userId}`;
+    }
+
     const headerIp = this.extractFromHeaders(request);
     if (headerIp) {
-      return headerIp;
+      return `ip:${headerIp}`;
     }
 
     if (request.ips && request.ips.length > 0) {
-      return request.ips[0];
+      return `ip:${request.ips[0]}`;
     }
 
     if (request.ip) {
-      return request.ip;
+      return `ip:${request.ip}`;
     }
 
     const connectionIp =
       request.connection?.remoteAddress || request.socket?.remoteAddress;
     if (connectionIp) {
-      return connectionIp;
+      return `ip:${connectionIp}`;
     }
 
     return 'unknown';
@@ -53,4 +64,3 @@ export class IpThrottlerGuard extends ThrottlerGuard {
     return undefined;
   }
 }
-
