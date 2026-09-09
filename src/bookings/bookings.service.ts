@@ -838,6 +838,12 @@ export class BookingsService {
         }
 
         case BookingStatus.REJECTED: {
+          if (trip.tripRequestId) {
+            throw new BadRequestException(
+              'Une réservation liée à une demande de trajet ne peut pas être rejetée par le conducteur. Le conducteur peut uniquement arrêter le trajet avant la prise en charge.',
+            );
+          }
+
           if (
             ![BookingStatus.PENDING, BookingStatus.ACCEPTED].includes(oldStatus)
           ) {
@@ -864,6 +870,12 @@ export class BookingsService {
         }
 
         case BookingStatus.CANCELLED: {
+          if (trip.tripRequestId) {
+            throw new BadRequestException(
+              'Une réservation liée à une demande de trajet ne peut pas être annulée par le conducteur. Le conducteur peut uniquement arrêter le trajet avant la prise en charge.',
+            );
+          }
+
           if (
             ![BookingStatus.PENDING, BookingStatus.ACCEPTED].includes(oldStatus)
           ) {
@@ -2068,6 +2080,12 @@ export class BookingsService {
       throw new ForbiddenException('Accès refusé');
     }
 
+    if (isDriver && booking.trip.tripRequestId) {
+      throw new BadRequestException(
+        'Une réservation liée à une demande de trajet ne peut pas être annulée par le conducteur. Le conducteur peut uniquement arrêter le trajet avant la prise en charge.',
+      );
+    }
+
     if (isDriver && booking.status !== BookingStatus.ACCEPTED) {
       this.logger.warn(
         `Booking cancellation failed: Driver ${userId} tried to cancel booking ${bookingId} with status ${booking.status}`,
@@ -2128,15 +2146,24 @@ export class BookingsService {
       );
     }
 
-    // Si c'est un trajet privé, l'annuler avant le départ ou le terminer s'il a démarré.
+    // Si c'est un trajet privé, l'annuler tant que le passager n'a pas été
+    // pris en charge. Un simple démarrage/arrêt du conducteur ne doit pas
+    // transformer l'annulation du passager en trajet terminé.
     if (isPassenger && trip.isPrivate) {
-      const wasPending = trip.status === TripStatus.PENDING && !trip.startedAt;
+      const wasPassengerPickedUp = Boolean(
+        booking.pickedUp ||
+        booking.pickedUpConfirmedByPassenger ||
+        booking.pickedUpAt,
+      );
+      const shouldCancelTrip = !wasPassengerPickedUp;
       this.logger.log(
-        `Private trip ${trip.id} - Passenger cancelled booking. ${wasPending ? 'Cancelling' : 'Completing'} trip automatically.`,
+        `Private trip ${trip.id} - Passenger cancelled booking. ${shouldCancelTrip ? 'Cancelling' : 'Completing'} trip automatically.`,
       );
 
-      trip.status = wasPending ? TripStatus.CANCELLED : TripStatus.COMPLETED;
-      if (!wasPending) {
+      trip.status = shouldCancelTrip
+        ? TripStatus.CANCELLED
+        : TripStatus.COMPLETED;
+      if (!shouldCancelTrip) {
         trip.completedAt = new Date();
       }
       await this.tripRepository.save(trip);

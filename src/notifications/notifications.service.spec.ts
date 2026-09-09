@@ -1,7 +1,7 @@
 import { NotificationStatus } from './entities/notification.entity';
 import { NotificationService } from './notifications.service';
 
-describe('NotificationService financial push reliability', () => {
+describe('NotificationService critical push reliability', () => {
   const buildService = () => {
     const queryBuilder = {
       where: jest.fn().mockReturnThis(),
@@ -169,6 +169,12 @@ describe('NotificationService financial push reliability', () => {
 
     expect(queryBuilder.setLock).toHaveBeenCalledWith('pessimistic_write');
     expect(queryBuilder.setOnLocked).toHaveBeenCalledWith('skip_locked');
+    expect(queryBuilder.andWhere).toHaveBeenCalledWith(
+      "notification.data ->> 'type' IN (:...types)",
+      {
+        types: expect.arrayContaining(['trip_request_driver_overdue']),
+      },
+    );
     expect(transactionalRepository.save).toHaveBeenCalledWith([
       expect.objectContaining({
         status: NotificationStatus.PENDING,

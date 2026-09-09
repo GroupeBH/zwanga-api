@@ -1,3 +1,4 @@
+import { BadRequestException } from '@nestjs/common';
 import {
   Booking,
   BookingPaymentStatus,
@@ -210,7 +211,6 @@ describe('BookingsService trip payments', () => {
       ),
       query: jest.fn().mockResolvedValue([]),
     };
-
     service = new BookingsService(
       bookingRepository as any,
       tripRepository as any,
@@ -273,6 +273,88 @@ describe('BookingsService trip payments', () => {
     expect(privateTrip.status).toBe(TripStatus.CANCELLED);
     expect(privateTrip.completedAt).toBeNull();
     expect(tripRepository.save).toHaveBeenCalledWith(privateTrip);
+  });
+
+  it('blocks cancellation by the selected driver for a request-linked booking', async () => {
+    const privateTrip = {
+      id: 'private-trip-2',
+      tripRequestId: 'request-1',
+      driverId: 'driver-1',
+      driver: { id: 'driver-1', fcmToken: null },
+      status: TripStatus.PENDING,
+      startedAt: null,
+      isPrivate: true,
+      totalSeats: 1,
+      availableSeats: 0,
+      departureLocation: 'Gombe',
+      arrivalLocation: 'Limete',
+    };
+    const privateBooking = {
+      id: 'private-booking-2',
+      tripId: privateTrip.id,
+      trip: privateTrip,
+      passengerId: 'passenger-1',
+      passenger: {
+        firstName: 'Alice',
+        lastName: 'Test',
+        fcmToken: null,
+      },
+      numberOfSeats: 1,
+      status: BookingStatus.ACCEPTED,
+      paymentMode: TripPaymentMode.CASH,
+      paymentStatus: BookingPaymentStatus.NOT_REQUIRED,
+      pickedUp: false,
+      pickedUpConfirmedByPassenger: false,
+      cancelledAt: null,
+    };
+    bookingRepository.findOne.mockResolvedValue(privateBooking);
+
+    await expect(
+      service.cancel(privateBooking.id, privateTrip.driverId),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    expect(privateBooking.status).toBe(BookingStatus.ACCEPTED);
+    expect(tripRepository.findOne).not.toHaveBeenCalled();
+    expect(bookingRepository.save).not.toHaveBeenCalled();
+  });
+
+  it('blocks rejection by the selected driver for a request-linked booking', async () => {
+    const linkedTrip = {
+      id: 'private-trip-3',
+      tripRequestId: 'request-1',
+      driverId: 'driver-1',
+      status: TripStatus.PENDING,
+    };
+    const linkedBooking = {
+      id: 'private-booking-3',
+      tripId: linkedTrip.id,
+      passengerId: 'passenger-1',
+      numberOfSeats: 1,
+      status: BookingStatus.ACCEPTED,
+    };
+    const transactionalManager = {
+      getRepository: jest.fn((entity: unknown) =>
+        entity === Booking ? bookingRepository : tripRepository,
+      ),
+    };
+    bookingRepository.manager = {
+      transaction: jest.fn(
+        (work: (manager: typeof transactionalManager) => Promise<unknown>) =>
+          work(transactionalManager),
+      ),
+    };
+    bookingRepository.findOne.mockResolvedValue(linkedBooking);
+    tripRepository.findOne.mockResolvedValue(linkedTrip);
+
+    await expect(
+      service.updateStatus(linkedBooking.id, linkedTrip.driverId, {
+        status: BookingStatus.REJECTED,
+        rejectionReason: 'Je ne peux plus assurer ce trajet',
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    expect(bookingRepository.save).not.toHaveBeenCalled();
+    expect(tripRepository.save).not.toHaveBeenCalled();
   });
 
   const buildLocationHistory = (

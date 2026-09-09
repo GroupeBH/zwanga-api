@@ -44,6 +44,7 @@ import { SubscriptionsService } from '../subscriptions/subscriptions.service';
 import { WeatherAwarenessService } from '../weather/weather-awareness.service';
 import { WeatherRouteImpact } from '../weather/weather.types';
 import { TripPaymentMode } from '../payments/enums/trip-payment-mode.enum';
+import { TripRequestRecoveryService } from './trip-request-recovery.service';
 
 export interface SanitizedUser {
   id: string;
@@ -122,6 +123,7 @@ export interface SanitizedTripRequest {
   selectedPricePerSeat: number | null;
   selectedAt: Date | null;
   tripId: string | null;
+  driverPickupOverdueNotifiedAt: Date | null;
   driverOffers: SanitizedDriverOffer[];
   createdAt: Date;
   updatedAt: Date;
@@ -196,6 +198,7 @@ export class TripRequestsService {
     private googleMapsService: GoogleMapsService,
     private subscriptionsService: SubscriptionsService,
     private weatherAwarenessService: WeatherAwarenessService,
+    private tripRequestRecoveryService: TripRequestRecoveryService,
   ) {}
 
   async create(
@@ -212,10 +215,7 @@ export class TripRequestsService {
     }
 
     const numberOfSeats = createTripRequestDto.numberOfSeats ?? 1;
-    if (
-      numberOfSeats < 1 ||
-      numberOfSeats > this.MAX_SEATS_PER_PASSENGER
-    ) {
+    if (numberOfSeats < 1 || numberOfSeats > this.MAX_SEATS_PER_PASSENGER) {
       throw new BadRequestException(
         `Pour des raisons de securite du conducteur, vous ne pouvez pas reserver plus de ${this.MAX_SEATS_PER_PASSENGER} places par trajet`,
       );
@@ -1270,6 +1270,7 @@ export class TripRequestsService {
     tripRequest.selectedVehicleId = offer.vehicleId;
     tripRequest.selectedPricePerSeat = offer.pricePerSeat;
     tripRequest.selectedAt = new Date();
+    tripRequest.driverPickupOverdueNotifiedAt = null;
 
     await this.tripRequestRepository.save(tripRequest);
 
@@ -1608,6 +1609,7 @@ export class TripRequestsService {
     tripRequest.selectedPricePerSeat = pricePerSeat;
     tripRequest.selectedAt = new Date();
     tripRequest.tripId = trip.id;
+    tripRequest.driverPickupOverdueNotifiedAt = null;
     await this.tripRequestRepository.save(tripRequest);
 
     // Reject all pending offers for this trip request
@@ -1712,6 +1714,88 @@ export class TripRequestsService {
     );
 
     this.logger.log(`Trip request ${tripRequestId} cancelled`);
+  }
+
+  async releaseOverdueSelectedDriver(
+    passengerId: string,
+    tripRequestId: string,
+  ): Promise<SanitizedTripRequest> {
+    const tripRequest = await this.tripRequestRepository.findOne({
+      where: { id: tripRequestId, passengerId },
+    });
+
+    if (!tripRequest) {
+      throw new NotFoundException(
+        "Demande de trajet non trouvée ou vous n'êtes pas le propriétaire",
+      );
+    }
+
+    if (
+      tripRequest.status !== TripRequestStatus.DRIVER_SELECTED ||
+      !tripRequest.selectedDriverId
+    ) {
+      throw new BadRequestException(
+        "Cette demande n'a plus de conducteur sélectionné",
+      );
+    }
+
+    const latestPickupAt = new Date(tripRequest.departureDateMax).getTime();
+    if (!Number.isFinite(latestPickupAt) || latestPickupAt > Date.now()) {
+      throw new BadRequestException(
+        "La plage de prise en charge n'est pas encore dépassée",
+      );
+    }
+
+    if (tripRequest.tripId) {
+      let linkedTrip: Awaited<ReturnType<TripsService['findOne']>> | null =
+        null;
+
+      try {
+        linkedTrip = await this.tripsService.findOne(tripRequest.tripId);
+      } catch (error) {
+        if (!(error instanceof NotFoundException)) {
+          throw error;
+        }
+      }
+
+      const passengerBooking = linkedTrip?.bookings?.find(
+        (booking) => booking.passengerId === passengerId,
+      );
+
+      if (
+        passengerBooking &&
+        (passengerBooking.pickedUp ||
+          passengerBooking.pickedUpConfirmedByPassenger ||
+          passengerBooking.pickedUpAt)
+      ) {
+        throw new BadRequestException(
+          'Le conducteur ne peut plus être libéré après la prise en charge du passager',
+        );
+      }
+
+      if (
+        passengerBooking &&
+        [BookingStatus.PENDING, BookingStatus.ACCEPTED].includes(
+          passengerBooking.status,
+        )
+      ) {
+        await this.bookingsService.cancel(passengerBooking.id, passengerId);
+      }
+    }
+
+    const reopened =
+      await this.tripRequestRecoveryService.reopenAfterPassengerReleasesOverdueDriver(
+        tripRequestId,
+        passengerId,
+      );
+
+    if (!reopened) {
+      throw new BadRequestException(
+        'La demande a changé entre-temps. Actualisez-la avant de réessayer.',
+      );
+    }
+
+    return this.findOne(tripRequestId, passengerId);
   }
 
   private buildPointFromCoordinates(
@@ -2025,9 +2109,11 @@ export class TripRequestsService {
   ): void {
     const requestedType = tripRequest.vehicleType ?? VehicleType.CAR;
     if ((vehicle.type ?? VehicleType.CAR) !== requestedType) {
-      throw new BadRequestException(
-        `Le passager a choisi le type de véhicule ${this.VEHICLE_TYPE_DISPLAY_NAMES[requestedType]}`,
-      );
+      throw new BadRequestException({
+        error: 'Type de véhicule incompatible',
+        code: 'TRIP_REQUEST_VEHICLE_TYPE_MISMATCH',
+        message: `Cette demande nécessite le type ${this.VEHICLE_TYPE_DISPLAY_NAMES[requestedType]}. Sélectionnez un véhicule actif correspondant.`,
+      });
     }
   }
 
@@ -2171,6 +2257,7 @@ export class TripRequestsService {
         : null,
       selectedAt: tripRequest.selectedAt,
       tripId: tripRequest.tripId,
+      driverPickupOverdueNotifiedAt: tripRequest.driverPickupOverdueNotifiedAt,
       driverOffers: tripRequest.driverOffers
         ? await Promise.all(
             tripRequest.driverOffers.map((offer) =>
@@ -2219,10 +2306,7 @@ export class TripRequestsService {
       tripRequest.status === TripRequestStatus.PENDING ||
       tripRequest.status === TripRequestStatus.OFFERS_RECEIVED;
 
-    if (
-      !isAwaitingAcceptance ||
-      this.hasAcceptedDriver(tripRequest)
-    ) {
+    if (!isAwaitingAcceptance || this.hasAcceptedDriver(tripRequest)) {
       return false;
     }
 
@@ -2272,6 +2356,102 @@ export class TripRequestsService {
   }
 
   // ==================== Cron Jobs ====================
+
+  /**
+   * Notifie une seule fois le passager lorsque le conducteur sélectionné n'a
+   * toujours pas effectué la prise en charge à la fin de la plage souhaitée.
+   * Le timestamp persistant permet également au mobile d'afficher la modale
+   * après un redémarrage, même si la notification push n'a pas été ouverte.
+   */
+  @Cron(CronExpression.EVERY_MINUTE)
+  async notifyPassengersAboutOverdueDriverPickup(
+    now = new Date(),
+  ): Promise<void> {
+    const candidates = await this.tripRequestRepository
+      .createQueryBuilder('request')
+      .where('request.status = :status', {
+        status: TripRequestStatus.DRIVER_SELECTED,
+      })
+      .andWhere('request.departureDateMax <= :now', { now })
+      .andWhere('request.driverPickupOverdueNotifiedAt IS NULL')
+      .andWhere(
+        `(
+          request."tripId" IS NULL
+          OR NOT EXISTS (
+            SELECT 1
+            FROM "trips" "linkedTrip"
+            WHERE "linkedTrip"."id" = request."tripId"::uuid
+              AND "linkedTrip"."status" = :completedTripStatus
+          )
+        )`,
+        { completedTripStatus: TripStatus.COMPLETED },
+      )
+      .andWhere(
+        `NOT EXISTS (
+          SELECT 1
+          FROM "bookings" "passengerBooking"
+          WHERE "passengerBooking"."tripId" = request."tripId"::uuid
+            AND "passengerBooking"."passengerId" = request."passengerId"
+            AND (
+              "passengerBooking"."pickedUp" = true
+              OR "passengerBooking"."pickedUpConfirmedByPassenger" = true
+              OR "passengerBooking"."pickedUpAt" IS NOT NULL
+            )
+        )`,
+      )
+      .orderBy('request.departureDateMax', 'ASC')
+      .take(100)
+      .getMany();
+
+    for (const tripRequest of candidates) {
+      if (!tripRequest.selectedDriverId) {
+        continue;
+      }
+
+      const notifiedAt = new Date();
+      const claim = await this.tripRequestRepository.update(
+        {
+          id: tripRequest.id,
+          passengerId: tripRequest.passengerId,
+          status: TripRequestStatus.DRIVER_SELECTED,
+          selectedDriverId: tripRequest.selectedDriverId,
+          driverPickupOverdueNotifiedAt: IsNull(),
+          departureDateMax: LessThanOrEqual(now),
+        },
+        { driverPickupOverdueNotifiedAt: notifiedAt },
+      );
+
+      if (claim.affected !== 1) {
+        continue;
+      }
+
+      try {
+        await this.notificationService.sendNotificationToUser(
+          tripRequest.passengerId,
+          'Votre prise en charge est en retard',
+          "L'heure maximale souhaitée est dépassée et vous n'avez pas encore été pris en charge. Vous pouvez attendre ou choisir un autre conducteur. Pensez aussi à ajuster la date et l'heure de votre demande.",
+          {
+            type: 'trip_request_driver_overdue',
+            recipientUserId: tripRequest.passengerId,
+            tripRequestId: tripRequest.id,
+            tripId: tripRequest.tripId ?? '',
+            departureDateMax: new Date(
+              tripRequest.departureDateMax,
+            ).toISOString(),
+            driverPickupOverdueNotifiedAt: notifiedAt.toISOString(),
+            suggestScheduleUpdate: 'true',
+          },
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const stack = error instanceof Error ? error.stack : undefined;
+        this.logger.error(
+          `Unable to notify passenger about overdue pickup for trip request ${tripRequest.id}: ${message}`,
+          stack,
+        );
+      }
+    }
+  }
 
   /**
    * Cron job to mark expired trip requests

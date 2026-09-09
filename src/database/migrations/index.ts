@@ -29,6 +29,7 @@ import { EnforceUserDriverRoleConsistency1780000028000 } from './1780000028000-E
 import { AddReferralAttributionBonus1780000029000 } from './1780000029000-AddReferralAttributionBonus';
 import { EnforceReferralBookingRewardRateCap1780000030000 } from './1780000030000-EnforceReferralBookingRewardRateCap';
 import { AddFirstTripSubsidyToBookings1780000031000 } from './1780000031000-AddFirstTripSubsidyToBookings';
+import { AddTripRequestDriverPickupOverdueNotification1780000032000 } from './1780000032000-AddTripRequestDriverPickupOverdueNotification';
 
 export const databaseMigrations = [
   FillTotalSeats1780000000000,
@@ -62,4 +63,5 @@ export const databaseMigrations = [
   AddReferralAttributionBonus1780000029000,
   EnforceReferralBookingRewardRateCap1780000030000,
   AddFirstTripSubsidyToBookings1780000031000,
+  AddTripRequestDriverPickupOverdueNotification1780000032000,
 ];

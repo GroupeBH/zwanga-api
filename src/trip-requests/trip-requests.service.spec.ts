@@ -30,6 +30,7 @@ describe('TripRequestsService recommended price', () => {
       {} as any,
       {} as any,
       weatherAwarenessService as any,
+      {} as any,
     );
     jest
       .spyOn(service as any, 'resolvePointFromCoordinatesOrAddress')
@@ -82,6 +83,7 @@ describe('TripRequestsService recommended price', () => {
       {} as any,
       {} as any,
       weatherAwarenessService as any,
+      {} as any,
     );
     jest
       .spyOn(service as any, 'resolvePointFromCoordinatesOrAddress')
@@ -133,6 +135,7 @@ describe('TripRequestsService recommended price', () => {
       {} as any,
       {} as any,
       weatherAwarenessService as any,
+      {} as any,
     );
     jest
       .spyOn(service as any, 'resolvePointFromCoordinatesOrAddress')
@@ -193,6 +196,7 @@ describe('TripRequestsService optional seat count', () => {
       {} as any,
       {} as any,
       {} as any,
+      {} as any,
     );
 
     jest
@@ -207,7 +211,9 @@ describe('TripRequestsService optional seat count', () => {
     jest
       .spyOn(service as any, 'notifyDriversAboutTripRequest')
       .mockResolvedValue(undefined);
-    jest.spyOn(service, 'findOne').mockResolvedValue({ id: 'request-1' } as any);
+    jest
+      .spyOn(service, 'findOne')
+      .mockResolvedValue({ id: 'request-1' } as any);
 
     const now = Date.now();
     await service.create('passenger-1', {
@@ -251,6 +257,7 @@ describe('TripRequestsService vehicle type update', () => {
     };
     const service = new TripRequestsService(
       tripRequestRepository as any,
+      {} as any,
       {} as any,
       {} as any,
       {} as any,
@@ -352,6 +359,7 @@ describe('TripRequestsService motorcycle capacity', () => {
       {} as any,
       {} as any,
       {} as any,
+      {} as any,
     );
 
     await expect(
@@ -407,6 +415,7 @@ describe('TripRequestsService motorcycle capacity', () => {
       {} as any,
       {} as any,
       {} as any,
+      {} as any,
     );
 
     await expect(
@@ -416,7 +425,13 @@ describe('TripRequestsService motorcycle capacity', () => {
         availableSeats: 1,
         vehicleId: 'vehicle-1',
       }),
-    ).rejects.toThrow('Le passager a choisi le type de véhicule Voiture');
+    ).rejects.toMatchObject({
+      response: expect.objectContaining({
+        code: 'TRIP_REQUEST_VEHICLE_TYPE_MISMATCH',
+        message:
+          'Cette demande nécessite le type Voiture. Sélectionnez un véhicule actif correspondant.',
+      }),
+    });
 
     expect(driverOfferRepository.create).not.toHaveBeenCalled();
   });
@@ -426,6 +441,7 @@ describe('TripRequestsService unaccepted request expiration', () => {
   const buildService = (tripRequestRepository: Record<string, jest.Mock>) =>
     new TripRequestsService(
       tripRequestRepository as any,
+      {} as any,
       {} as any,
       {} as any,
       {} as any,
@@ -490,9 +506,7 @@ describe('TripRequestsService unaccepted request expiration', () => {
       createdAt: new Date(now - 30 * 24 * 60 * 60 * 1000),
       departureDateMin: new Date(now - 30 * 24 * 60 * 60 * 1000),
       departureDateMax: new Date(now - 29 * 24 * 60 * 60 * 1000),
-      driverOffers: [
-        { id: 'offer-1', status: DriverOfferStatus.PENDING },
-      ],
+      driverOffers: [{ id: 'offer-1', status: DriverOfferStatus.PENDING }],
     };
     const acceptedRequest = {
       id: 'request-accepted',
@@ -500,9 +514,7 @@ describe('TripRequestsService unaccepted request expiration', () => {
       createdAt: new Date(now - 30 * 24 * 60 * 60 * 1000),
       departureDateMin: new Date(now - 30 * 24 * 60 * 60 * 1000),
       departureDateMax: new Date(now - 29 * 24 * 60 * 60 * 1000),
-      driverOffers: [
-        { id: 'offer-2', status: DriverOfferStatus.ACCEPTED },
-      ],
+      driverOffers: [{ id: 'offer-2', status: DriverOfferStatus.ACCEPTED }],
     };
     const freshOfferRequest = {
       id: 'request-fresh-offer',
@@ -510,17 +522,17 @@ describe('TripRequestsService unaccepted request expiration', () => {
       createdAt: new Date(now - 30 * 24 * 60 * 60 * 1000),
       departureDateMin: new Date(now - 2 * 60 * 60 * 1000),
       departureDateMax: new Date(now - 60 * 60 * 1000),
-      driverOffers: [
-        { id: 'offer-3', status: DriverOfferStatus.PENDING },
-      ],
+      driverOffers: [{ id: 'offer-3', status: DriverOfferStatus.PENDING }],
     };
     const tripRequestRepository = {
-      find: jest.fn().mockResolvedValue([
-        unansweredRequest,
-        unacceptedOfferRequest,
-        acceptedRequest,
-        freshOfferRequest,
-      ]),
+      find: jest
+        .fn()
+        .mockResolvedValue([
+          unansweredRequest,
+          unacceptedOfferRequest,
+          acceptedRequest,
+          freshOfferRequest,
+        ]),
       update: jest.fn().mockResolvedValue({ affected: 1 }),
     };
     const service = buildService(tripRequestRepository);
@@ -589,6 +601,7 @@ describe('TripRequestsService unaccepted request expiration', () => {
       {} as any,
       {} as any,
       {} as any,
+      {} as any,
     );
 
     await expect(
@@ -628,6 +641,7 @@ describe('TripRequestsService cancellation after driver acceptance', () => {
       {} as any,
       tripsService as any,
       bookingsService as any,
+      {} as any,
       {} as any,
       {} as any,
       {} as any,
@@ -718,5 +732,178 @@ describe('TripRequestsService cancellation after driver acceptance', () => {
     expect(dependencies.bookingsService.cancel).not.toHaveBeenCalled();
     expect(dependencies.tripRequestRepository.save).not.toHaveBeenCalled();
     expect(dependencies.driverOfferRepository.update).not.toHaveBeenCalled();
+  });
+});
+
+describe('TripRequestsService overdue selected driver recovery', () => {
+  const createService = (overrides?: {
+    tripRequestRepository?: Record<string, unknown>;
+    notificationService?: Record<string, unknown>;
+    tripsService?: Record<string, unknown>;
+    bookingsService?: Record<string, unknown>;
+    recoveryService?: Record<string, unknown>;
+  }) =>
+    new TripRequestsService(
+      (overrides?.tripRequestRepository ?? {}) as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      (overrides?.notificationService ?? {}) as any,
+      (overrides?.tripsService ?? {}) as any,
+      (overrides?.bookingsService ?? {}) as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      (overrides?.recoveryService ?? {}) as any,
+    );
+
+  it('claims an overdue request once and sends the passenger notification used by the modal', async () => {
+    const now = new Date('2026-09-08T15:14:25.000Z');
+    const request = {
+      id: 'request-overdue',
+      passengerId: 'passenger-1',
+      selectedDriverId: 'driver-1',
+      tripId: 'trip-1',
+      status: TripRequestStatus.DRIVER_SELECTED,
+      departureDateMax: new Date('2026-09-08T15:00:00.000Z'),
+    };
+    const queryBuilder = {
+      where: jest.fn(),
+      andWhere: jest.fn(),
+      orderBy: jest.fn(),
+      take: jest.fn(),
+      getMany: jest.fn().mockResolvedValue([request]),
+    };
+    Object.values(queryBuilder)
+      .filter((value) => value !== queryBuilder.getMany)
+      .forEach((mock) => mock.mockReturnValue(queryBuilder));
+    const tripRequestRepository = {
+      createQueryBuilder: jest.fn().mockReturnValue(queryBuilder),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
+    };
+    const notificationService = {
+      sendNotificationToUser: jest.fn().mockResolvedValue(true),
+    };
+    const service = createService({
+      tripRequestRepository,
+      notificationService,
+    });
+
+    await service.notifyPassengersAboutOverdueDriverPickup(now);
+
+    const overdueCandidatePredicates = queryBuilder.andWhere.mock.calls.map(
+      ([predicate]) => String(predicate),
+    );
+    expect(overdueCandidatePredicates).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('"linkedTrip"."id" = request."tripId"::uuid'),
+        expect.stringContaining(
+          '"passengerBooking"."tripId" = request."tripId"::uuid',
+        ),
+      ]),
+    );
+    expect(tripRequestRepository.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: request.id,
+        status: TripRequestStatus.DRIVER_SELECTED,
+        selectedDriverId: request.selectedDriverId,
+      }),
+      { driverPickupOverdueNotifiedAt: expect.any(Date) },
+    );
+    expect(notificationService.sendNotificationToUser).toHaveBeenCalledWith(
+      request.passengerId,
+      expect.any(String),
+      expect.stringContaining("l'heure"),
+      expect.objectContaining({
+        type: 'trip_request_driver_overdue',
+        recipientUserId: request.passengerId,
+        tripRequestId: request.id,
+      }),
+    );
+  });
+
+  it('lets the passenger release an overdue driver and returns the reopened request', async () => {
+    const selectedRequest = {
+      id: 'request-overdue',
+      passengerId: 'passenger-1',
+      selectedDriverId: 'driver-1',
+      tripId: null,
+      status: TripRequestStatus.DRIVER_SELECTED,
+      departureDateMax: new Date(Date.now() - 60_000),
+    };
+    const tripRequestRepository = {
+      findOne: jest.fn().mockResolvedValue(selectedRequest),
+    };
+    const recoveryService = {
+      reopenAfterPassengerReleasesOverdueDriver: jest.fn().mockResolvedValue({
+        ...selectedRequest,
+        selectedDriverId: null,
+        status: TripRequestStatus.PENDING,
+      }),
+    };
+    const service = createService({
+      tripRequestRepository,
+      recoveryService,
+    });
+    jest.spyOn(service, 'findOne').mockResolvedValue({
+      id: selectedRequest.id,
+      status: TripRequestStatus.PENDING,
+    } as any);
+
+    await expect(
+      service.releaseOverdueSelectedDriver(
+        selectedRequest.passengerId,
+        selectedRequest.id,
+      ),
+    ).resolves.toEqual(
+      expect.objectContaining({ status: TripRequestStatus.PENDING }),
+    );
+    expect(
+      recoveryService.reopenAfterPassengerReleasesOverdueDriver,
+    ).toHaveBeenCalledWith(selectedRequest.id, selectedRequest.passengerId);
+  });
+
+  it('refuses to release the driver after the passenger was picked up', async () => {
+    const selectedRequest = {
+      id: 'request-picked-up',
+      passengerId: 'passenger-1',
+      selectedDriverId: 'driver-1',
+      tripId: 'trip-1',
+      status: TripRequestStatus.DRIVER_SELECTED,
+      departureDateMax: new Date(Date.now() - 60_000),
+    };
+    const recoveryService = {
+      reopenAfterPassengerReleasesOverdueDriver: jest.fn(),
+    };
+    const service = createService({
+      tripRequestRepository: {
+        findOne: jest.fn().mockResolvedValue(selectedRequest),
+      },
+      tripsService: {
+        findOne: jest.fn().mockResolvedValue({
+          id: selectedRequest.tripId,
+          bookings: [
+            {
+              id: 'booking-1',
+              passengerId: selectedRequest.passengerId,
+              status: BookingStatus.ACCEPTED,
+              pickedUp: true,
+            },
+          ],
+        }),
+      },
+      recoveryService,
+    });
+
+    await expect(
+      service.releaseOverdueSelectedDriver(
+        selectedRequest.passengerId,
+        selectedRequest.id,
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(
+      recoveryService.reopenAfterPassengerReleasesOverdueDriver,
+    ).not.toHaveBeenCalled();
   });
 });

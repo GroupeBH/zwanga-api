@@ -906,7 +906,7 @@ export class TripsService {
 
     const trip = await this.tripRepository.findOne({
       where: { id, driverId },
-      relations: ['vehicle'],
+      relations: ['vehicle', 'bookings'],
     });
 
     if (!trip) {
@@ -926,6 +926,18 @@ export class TripsService {
       trip.status !== TripStatus.ACTIVE
     ) {
       return this.startTrip(id, driverId);
+    }
+    if (updateTripDto.status === TripStatus.CANCELLED) {
+      if (trip.tripRequestId) {
+        throw new BadRequestException(
+          "Un trajet issu d'une demande ne peut pas être annulé par le conducteur. Utilisez l'arrêt du trajet.",
+        );
+      }
+      return this.cancelTripAfterDriverAbandonment(
+        trip,
+        driverId,
+        'driver_cancelled_trip',
+      );
     }
 
     const {
@@ -1060,6 +1072,70 @@ export class TripsService {
 
     this.logger.log(`Trip ${id} updated successfully`);
     return this.findOne(id);
+  }
+
+  private async cancelTripAfterDriverAbandonment(
+    trip: Trip,
+    driverId: string,
+    reason: string,
+  ): Promise<SanitizedTrip> {
+    const bookings = trip.bookings ?? [];
+    const hasPassengerOnBoard = bookings.some(
+      (booking) =>
+        this.hasBookingEmbarked(booking) &&
+        !this.hasBookingBeenDroppedOff(booking),
+    );
+
+    if (hasPassengerOnBoard) {
+      throw new BadRequestException(
+        "Vous ne pouvez pas annuler ce trajet tant qu'un passager est à bord",
+      );
+    }
+
+    if (trip.status === TripStatus.COMPLETED) {
+      throw new BadRequestException(
+        'Vous ne pouvez pas annuler un trajet déjà terminé',
+      );
+    }
+
+    const acceptedBookings = bookings.filter(
+      (booking) => booking.status === BookingStatus.ACCEPTED,
+    );
+    for (const booking of acceptedBookings) {
+      await this.bookingsService.cancel(booking.id, driverId);
+    }
+
+    const pendingBookingIds = bookings
+      .filter((booking) => booking.status === BookingStatus.PENDING)
+      .map((booking) => booking.id);
+    if (pendingBookingIds.length > 0) {
+      await this.bookingRepository.update(pendingBookingIds, {
+        status: BookingStatus.CANCELLED,
+        cancelledAt: new Date(),
+      });
+    }
+
+    const previousStatus = trip.status;
+    if (trip.status !== TripStatus.CANCELLED) {
+      trip.status = TripStatus.CANCELLED;
+      await this.tripRepository.save(trip);
+      this.logTripStateChange({
+        tripId: trip.id,
+        driverId,
+        from: previousStatus,
+        to: TripStatus.CANCELLED,
+        reason,
+        acceptedBookings: acceptedBookings.length,
+        availableSeats: trip.availableSeats,
+      });
+    }
+
+    await this.cacheService.del(CacheService.getTripKey(trip.id));
+    await this.cacheService.del(CacheService.getTripsListKey());
+    await this.cacheService.del(CacheService.getTripsListKey('all'));
+    await this.cacheService.del(CacheService.getTripsListKey('allTrips'));
+
+    return this.findOne(trip.id);
   }
 
   async setDriverEmergencyContacts(
@@ -1198,6 +1274,13 @@ export class TripsService {
       );
       throw new NotFoundException('Trajet non trouve');
     }
+
+    if (trip.tripRequestId) {
+      throw new BadRequestException(
+        "Un trajet issu d'une demande ne peut pas être supprimé par le conducteur. Utilisez l'arrêt du trajet.",
+      );
+    }
+
     const bookings = trip.bookings ?? [];
     const hasPassengerOnBoard = bookings.some(
       (booking) =>

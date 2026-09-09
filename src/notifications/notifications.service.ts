@@ -33,6 +33,7 @@ const EXPO_RECEIPT_CHECKING = 'EXPO_RECEIPT_CHECKING';
 const CRITICAL_NOTIFICATION_TYPES = [
   'driver_trip_revenue',
   'driver_booking_earning_confirmed',
+  'trip_request_driver_overdue',
 ] as const;
 
 interface ExpoPushTicket {
