@@ -98,6 +98,9 @@ export class Trip {
   @Column({ type: 'boolean', default: false })
   isFree: boolean;
 
+  @Column({ type: 'boolean', default: false })
+  requiresPassengerKyc: boolean;
+
   @Column({ nullable: true })
   description: string;
 
@@ -168,10 +171,7 @@ export class Trip {
   @OneToMany(() => Booking, (booking) => booking.trip)
   bookings: Booking[];
 
-  @OneToMany(
-    () => PassengerTripInterruptionRequest,
-    (request) => request.trip,
-  )
+  @OneToMany(() => PassengerTripInterruptionRequest, (request) => request.trip)
   passengerInterruptionRequests: PassengerTripInterruptionRequest[];
 
   @OneToMany(() => DriverTripInterruptionRequest, (request) => request.trip)

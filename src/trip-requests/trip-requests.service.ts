@@ -45,6 +45,7 @@ import { WeatherAwarenessService } from '../weather/weather-awareness.service';
 import { WeatherRouteImpact } from '../weather/weather.types';
 import { TripPaymentMode } from '../payments/enums/trip-payment-mode.enum';
 import { TripRequestRecoveryService } from './trip-request-recovery.service';
+import { KycStatus } from '../users/entities/kyc-document.entity';
 
 export interface SanitizedUser {
   id: string;
@@ -75,6 +76,7 @@ export interface SanitizedDriverOffer {
   pricePerSeat: number;
   availableSeats: number;
   message: string | null;
+  requiresPassengerKyc: boolean;
   departureReference: string | null;
   departureCoordinates: [number, number] | null;
   arrivalReference: string | null;
@@ -121,6 +123,7 @@ export interface SanitizedTripRequest {
   selectedDriver: SanitizedUser | null;
   selectedVehicle: SanitizedVehicle | null;
   selectedPricePerSeat: number | null;
+  selectedDriverRequiresPassengerKyc: boolean;
   selectedAt: Date | null;
   tripId: string | null;
   driverPickupOverdueNotifiedAt: Date | null;
@@ -1114,6 +1117,7 @@ export class TripRequestsService {
         driverId: offer.driverId,
         pricePerSeat: offer.pricePerSeat.toString(),
         proposedDepartureDate: offer.proposedDepartureDate.toISOString(),
+        requiresPassengerKyc: offer.requiresPassengerKyc ? 'true' : 'false',
       };
 
       await this.notificationService.sendNotification(
@@ -1246,6 +1250,16 @@ export class TripRequestsService {
     }
     this.assertVehicleMatchesTripRequest(offer.vehicle, tripRequest);
 
+    if (offer.requiresPassengerKyc) {
+      await this.ensurePassengerKycApprovedForDriverRequirement(passengerId, {
+        tripRequestId,
+        offerId: offer.id,
+        driverId: offer.driverId,
+        message:
+          "Ce conducteur exige une verification d'identite approuvee avant d'accepter son offre.",
+      });
+    }
+
     // Accept the offer
     offer.status = DriverOfferStatus.ACCEPTED;
     offer.acceptedAt = new Date();
@@ -1269,6 +1283,7 @@ export class TripRequestsService {
     tripRequest.selectedDriverId = offer.driverId;
     tripRequest.selectedVehicleId = offer.vehicleId;
     tripRequest.selectedPricePerSeat = offer.pricePerSeat;
+    tripRequest.selectedDriverRequiresPassengerKyc = offer.requiresPassengerKyc;
     tripRequest.selectedAt = new Date();
     tripRequest.driverPickupOverdueNotifiedAt = null;
 
@@ -1331,6 +1346,22 @@ export class TripRequestsService {
       throw new NotFoundException('Offre acceptée non trouvée');
     }
 
+    const requiresPassengerKyc =
+      acceptedOffer.requiresPassengerKyc ||
+      tripRequest.selectedDriverRequiresPassengerKyc;
+    if (requiresPassengerKyc) {
+      await this.ensurePassengerKycApprovedForDriverRequirement(
+        tripRequest.passengerId,
+        {
+          tripRequestId,
+          offerId: acceptedOffer.id,
+          driverId,
+          message:
+            "Ce conducteur exige une verification d'identite approuvee avant de demarrer ce trajet.",
+        },
+      );
+    }
+
     const departureCoordinates =
       this.pointToCoordinates(acceptedOffer.departurePoint) ??
       this.pointToCoordinates(tripRequest.departurePoint);
@@ -1358,6 +1389,7 @@ export class TripRequestsService {
         totalSeats: acceptedOffer.availableSeats,
         pricePerSeat: tripRequest.selectedPricePerSeat || 0,
         isFree: (tripRequest.selectedPricePerSeat || 0) === 0,
+        requiresPassengerKyc,
         vehicleId: tripRequest.selectedVehicleId || undefined,
         description: tripRequest.description || undefined,
       },
@@ -1474,6 +1506,19 @@ export class TripRequestsService {
     // Use the maximum price accepted by the passenger, or 0 (free trip) if not specified
     // The driver accepts the request as-is, without proposing a price
     const pricePerSeat = tripRequest.maxPricePerSeat ?? 0;
+    const requiresPassengerKyc = acceptDto.requiresPassengerKyc ?? false;
+
+    if (requiresPassengerKyc) {
+      await this.ensurePassengerKycApprovedForDriverRequirement(
+        tripRequest.passengerId,
+        {
+          tripRequestId,
+          driverId,
+          message:
+            "Ce conducteur exige une verification d'identite approuvee avant d'accepter cette demande.",
+        },
+      );
+    }
 
     // Determine total seats: use provided value or default to number of seats requested by passenger
     // The driver accepts the request with the number of seats requested by the passenger
@@ -1570,6 +1615,7 @@ export class TripRequestsService {
         totalSeats: totalSeats, // Use calculated totalSeats (passenger's request or driver's override)
         pricePerSeat: pricePerSeat, // Driver's proposed price (or 0 if not specified)
         isFree: pricePerSeat === 0,
+        requiresPassengerKyc,
         vehicleId: vehicle.id,
         description: tripRequest.description || undefined,
       },
@@ -1607,6 +1653,7 @@ export class TripRequestsService {
     tripRequest.selectedDriverId = driverId;
     tripRequest.selectedVehicleId = vehicle.id;
     tripRequest.selectedPricePerSeat = pricePerSeat;
+    tripRequest.selectedDriverRequiresPassengerKyc = requiresPassengerKyc;
     tripRequest.selectedAt = new Date();
     tripRequest.tripId = trip.id;
     tripRequest.driverPickupOverdueNotifiedAt = null;
@@ -1641,6 +1688,7 @@ export class TripRequestsService {
             tripRequestId: tripRequest.id,
             tripId: trip.id,
             driverId: driverId,
+            requiresPassengerKyc: requiresPassengerKyc ? 'true' : 'false',
           },
           tripRequest.passengerId,
         );
@@ -2117,6 +2165,43 @@ export class TripRequestsService {
     }
   }
 
+  private async hasApprovedPassengerKyc(passengerId: string): Promise<boolean> {
+    const passenger = await this.userRepository.findOne({
+      where: { id: passengerId },
+      relations: ['kycDocuments'],
+    });
+
+    return Boolean(
+      passenger?.kycDocuments?.some(
+        (document) => document.status === KycStatus.APPROVED,
+      ),
+    );
+  }
+
+  private async ensurePassengerKycApprovedForDriverRequirement(
+    passengerId: string,
+    context: {
+      tripRequestId: string;
+      offerId?: string;
+      driverId: string;
+      message: string;
+    },
+  ): Promise<void> {
+    if (await this.hasApprovedPassengerKyc(passengerId)) {
+      return;
+    }
+
+    throw new BadRequestException({
+      error: 'KYC passager requis',
+      code: 'PASSENGER_KYC_REQUIRED',
+      message: context.message,
+      action: 'complete_kyc',
+      tripRequestId: context.tripRequestId,
+      offerId: context.offerId,
+      driverId: context.driverId,
+    });
+  }
+
   private async sanitizeDriverOffer(
     offer: DriverOffer,
   ): Promise<SanitizedDriverOffer> {
@@ -2137,6 +2222,7 @@ export class TripRequestsService {
       pricePerSeat: Number(offer.pricePerSeat),
       availableSeats: offer.availableSeats,
       message: offer.message,
+      requiresPassengerKyc: Boolean(offer.requiresPassengerKyc),
       departureReference: offer.departureReference,
       departureCoordinates: this.pointToCoordinates(offer.departurePoint),
       arrivalReference: offer.arrivalReference,
@@ -2185,6 +2271,7 @@ export class TripRequestsService {
       pricePerSeat: Number(offer.pricePerSeat),
       availableSeats: offer.availableSeats,
       message: offer.message,
+      requiresPassengerKyc: Boolean(offer.requiresPassengerKyc),
       departureReference: offer.departureReference,
       departureCoordinates: this.pointToCoordinates(offer.departurePoint),
       arrivalReference: offer.arrivalReference,
@@ -2255,6 +2342,9 @@ export class TripRequestsService {
       selectedPricePerSeat: tripRequest.selectedPricePerSeat
         ? Number(tripRequest.selectedPricePerSeat)
         : null,
+      selectedDriverRequiresPassengerKyc: Boolean(
+        tripRequest.selectedDriverRequiresPassengerKyc,
+      ),
       selectedAt: tripRequest.selectedAt,
       tripId: tripRequest.tripId,
       driverPickupOverdueNotifiedAt: tripRequest.driverPickupOverdueNotifiedAt,

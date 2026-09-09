@@ -6,6 +6,7 @@ import {
 } from './entities/booking.entity';
 import { BookingsService } from './bookings.service';
 import { Trip, TripStatus } from '../trips/entities/trip.entity';
+import { KycStatus } from '../users/entities/kyc-document.entity';
 import {
   PaymentMethod,
   PaymentPurpose,
@@ -28,6 +29,7 @@ describe('BookingsService trip payments', () => {
     save: jest.Mock;
     update: jest.Mock;
   };
+  let userRepository: { findOne: jest.Mock };
   let cacheService: { del: jest.Mock };
   let notificationService: { sendNotification: jest.Mock };
   let locationHistoryService: {
@@ -112,6 +114,9 @@ describe('BookingsService trip payments', () => {
       findOne: jest.fn(),
       save: jest.fn((payload: unknown) => Promise.resolve(payload)),
       update: jest.fn().mockResolvedValue({ affected: 1 }),
+    };
+    userRepository = {
+      findOne: jest.fn(),
     };
     cacheService = { del: jest.fn() };
     notificationService = {
@@ -214,7 +219,7 @@ describe('BookingsService trip payments', () => {
     service = new BookingsService(
       bookingRepository as any,
       tripRepository as any,
-      {} as any,
+      userRepository as any,
       {} as any,
       {} as any,
       cacheService as any,
@@ -572,6 +577,45 @@ describe('BookingsService trip payments', () => {
         zwangaSubsidyAmount: 6000,
       }),
     );
+  });
+
+  it('rejects a booking when the trip requires passenger KYC and the passenger is not approved', async () => {
+    tripRepository.findOne.mockResolvedValue({
+      id: 'trip-kyc',
+      driverId: 'driver-1',
+      driver: { id: 'driver-1', fcmToken: null },
+      status: TripStatus.PENDING,
+      isFree: false,
+      requiresPassengerKyc: true,
+      pricePerSeat: 5000,
+      totalSeats: 2,
+      availableSeats: 2,
+      bookings: [],
+      departureLocation: 'Gombe',
+      arrivalLocation: 'Limete',
+      departurePoint: null,
+      arrivalPoint: null,
+    });
+    userRepository.findOne.mockResolvedValue({
+      id: 'passenger-1',
+      kycDocuments: [{ status: KycStatus.PENDING }],
+    });
+
+    await expect(
+      service.create('passenger-1', {
+        tripId: 'trip-kyc',
+        numberOfSeats: 1,
+      }),
+    ).rejects.toMatchObject({
+      response: expect.objectContaining({
+        code: 'PASSENGER_KYC_REQUIRED',
+        action: 'complete_kyc',
+        tripId: 'trip-kyc',
+      }),
+    });
+
+    expect(bookingRepository.create).not.toHaveBeenCalled();
+    expect(bookingRepository.save).not.toHaveBeenCalled();
   });
 
   it('does not apply the first-trip subsidy when the passenger already completed a ride', async () => {

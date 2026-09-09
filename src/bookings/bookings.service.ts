@@ -33,6 +33,7 @@ import {
 } from '../trips/entities/trip-interruption.entity';
 import { RequestTripInterruptionDto } from '../trips/dto/trip-interruption.dto';
 import { User } from '../users/entities/user.entity';
+import { KycStatus } from '../users/entities/kyc-document.entity';
 import {
   CreateBookingDto,
   ConfirmDropoffDto,
@@ -702,6 +703,49 @@ export class BookingsService {
     return Number(result?.seats ?? 0);
   }
 
+  private async hasApprovedPassengerKyc(
+    passengerId: string,
+    manager?: EntityManager,
+  ): Promise<boolean> {
+    const userRepository = manager
+      ? manager.getRepository(User)
+      : this.userRepository;
+    const passenger = await userRepository.findOne({
+      where: { id: passengerId },
+      relations: ['kycDocuments'],
+    });
+
+    return Boolean(
+      passenger?.kycDocuments?.some(
+        (document) => document.status === KycStatus.APPROVED,
+      ),
+    );
+  }
+
+  private async ensurePassengerKycApprovedForTrip(
+    trip: Pick<Trip, 'id' | 'requiresPassengerKyc'> | null | undefined,
+    passengerId: string,
+    context: { tripId: string; bookingId?: string; message: string },
+    manager?: EntityManager,
+  ): Promise<void> {
+    if (!trip?.requiresPassengerKyc) {
+      return;
+    }
+
+    if (await this.hasApprovedPassengerKyc(passengerId, manager)) {
+      return;
+    }
+
+    throw new BadRequestException({
+      error: 'KYC passager requis',
+      code: 'PASSENGER_KYC_REQUIRED',
+      message: context.message,
+      action: 'complete_kyc',
+      tripId: context.tripId,
+      bookingId: context.bookingId,
+    });
+  }
+
   private async recalculateAvailableSeatsForTrip(
     tripId: string,
     manager?: EntityManager,
@@ -802,6 +846,17 @@ export class BookingsService {
               "Ce trajet n'est plus disponible pour accepter une reservation",
             );
           }
+          await this.ensurePassengerKycApprovedForTrip(
+            trip,
+            booking.passengerId,
+            {
+              tripId: trip.id,
+              bookingId: booking.id,
+              message:
+                "Ce trajet exige une verification d'identite approuvee avant acceptation.",
+            },
+            manager,
+          );
           if (trip.totalSeats === null || trip.totalSeats === undefined) {
             throw new BadRequestException(
               "Ce trajet n'a pas de nombre de places defini",
@@ -1069,6 +1124,12 @@ export class BookingsService {
         'Vous ne pouvez pas réserver votre propre trajet',
       );
     }
+
+    await this.ensurePassengerKycApprovedForTrip(trip, passengerId, {
+      tripId: trip.id,
+      message:
+        "Ce trajet exige une verification d'identite approuvee avant reservation.",
+    });
 
     // Vérifier que le trajet a des places totales définies
     if (trip.totalSeats === null || trip.totalSeats === undefined) {
@@ -3511,6 +3572,17 @@ export class BookingsService {
       );
     }
 
+    await this.ensurePassengerKycApprovedForTrip(
+      booking.trip,
+      booking.passengerId,
+      {
+        tripId: booking.tripId,
+        bookingId: booking.id,
+        message:
+          "Ce trajet exige une verification d'identite approuvee avant embarquement.",
+      },
+    );
+
     if (booking.pickedUp && booking.pickedUpConfirmedByPassenger) {
       throw new BadRequestException(
         'Le passager est déjà marqué comme pris en charge',
@@ -3570,6 +3642,17 @@ export class BookingsService {
         'La reservation doit etre acceptee avant de confirmer la prise en charge',
       );
     }
+
+    await this.ensurePassengerKycApprovedForTrip(
+      booking.trip,
+      booking.passengerId,
+      {
+        tripId: booking.tripId,
+        bookingId: booking.id,
+        message:
+          "Ce trajet exige une verification d'identite approuvee avant embarquement.",
+      },
+    );
 
     if (booking.pickedUp && booking.pickedUpConfirmedByPassenger) {
       throw new BadRequestException(
@@ -4506,6 +4589,18 @@ export class BookingsService {
       (booking.pickedUp && booking.pickedUpConfirmedByPassenger)
     ) {
       return null;
+    }
+
+    if (booking.trip?.requiresPassengerKyc) {
+      const passengerKycApproved = await this.hasApprovedPassengerKyc(
+        booking.passengerId,
+      );
+      if (!passengerKycApproved) {
+        this.logger.warn(
+          `Automatic pickup skipped for booking ${booking.id}: passenger KYC is required but not approved`,
+        );
+        return null;
+      }
     }
 
     const now = new Date();

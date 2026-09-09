@@ -120,6 +120,9 @@ export class TripRequest {
   @Column({ type: 'decimal', precision: 10, scale: 2, nullable: true })
   selectedPricePerSeat: number | null; // Prix accepté pour le driver sélectionné
 
+  @Column({ type: 'boolean', default: false })
+  selectedDriverRequiresPassengerKyc: boolean;
+
   @Column({ type: 'timestamp', nullable: true })
   selectedAt: Date | null; // Date de sélection du driver
 

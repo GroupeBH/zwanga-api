@@ -89,6 +89,9 @@ export class RecurringTripTemplate {
   @Column({ type: 'boolean', default: false })
   isFree: boolean;
 
+  @Column({ type: 'boolean', default: false })
+  requiresPassengerKyc: boolean;
+
   @Column({ type: 'text', nullable: true })
   description: string | null;
 

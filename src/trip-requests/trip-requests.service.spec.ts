@@ -5,6 +5,7 @@ import { TripRequestStatus } from './entities/trip-request.entity';
 import { BookingStatus } from '../bookings/entities/booking.entity';
 import { TripStatus } from '../trips/entities/trip.entity';
 import { TripRequestsService } from './trip-requests.service';
+import { KycStatus } from '../users/entities/kyc-document.entity';
 
 describe('TripRequestsService recommended price', () => {
   it('recommends 500 FC per kilometer for cars and applies the heavy-rain coefficient', async () => {
@@ -614,6 +615,154 @@ describe('TripRequestsService unaccepted request expiration', () => {
 
     expect(tripRequest.status).toBe(TripRequestStatus.EXPIRED);
     expect(driverOfferRepository.create).not.toHaveBeenCalled();
+  });
+});
+
+describe('TripRequestsService passenger KYC requirements', () => {
+  it('rejects direct driver acceptance when KYC is required and the passenger is not approved', async () => {
+    const now = Date.now();
+    const tripRequest = {
+      id: 'request-kyc',
+      passengerId: 'passenger-1',
+      passenger: { id: 'passenger-1' },
+      departureLocation: 'Gombe',
+      arrivalLocation: 'Limete',
+      departureDateMin: new Date(now + 30 * 60 * 1000),
+      departureDateMax: new Date(now + 90 * 60 * 1000),
+      maxPricePerSeat: 5000,
+      numberOfSeats: 1,
+      vehicleType: VehicleType.CAR,
+      paymentMode: 'cash',
+      status: TripRequestStatus.PENDING,
+      tripId: null,
+      driverOffers: [],
+    };
+    const tripRequestRepository = {
+      findOne: jest.fn().mockResolvedValue(tripRequest),
+      save: jest.fn(),
+    };
+    const userRepository = {
+      findOne: jest.fn(async ({ where }: any) => {
+        if (where.id === 'driver-1') {
+          return { id: 'driver-1' };
+        }
+        if (where.id === 'passenger-1') {
+          return {
+            id: 'passenger-1',
+            kycDocuments: [{ status: KycStatus.PENDING }],
+          };
+        }
+        return null;
+      }),
+    };
+    const tripsService = {
+      create: jest.fn(),
+    };
+    const service = new TripRequestsService(
+      tripRequestRepository as any,
+      { update: jest.fn() } as any,
+      userRepository as any,
+      { findOne: jest.fn() } as any,
+      {} as any,
+      {} as any,
+      tripsService as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+    );
+
+    await expect(
+      service.acceptTripRequest('driver-1', tripRequest.id, {
+        requiresPassengerKyc: true,
+      }),
+    ).rejects.toMatchObject({
+      response: expect.objectContaining({
+        code: 'PASSENGER_KYC_REQUIRED',
+        action: 'complete_kyc',
+        tripRequestId: tripRequest.id,
+        driverId: 'driver-1',
+      }),
+    });
+
+    expect(tripsService.create).not.toHaveBeenCalled();
+    expect(tripRequestRepository.save).not.toHaveBeenCalled();
+  });
+
+  it('rejects passenger acceptance of a driver offer that requires KYC when the passenger is not approved', async () => {
+    const now = Date.now();
+    const offer = {
+      id: 'offer-kyc',
+      driverId: 'driver-1',
+      vehicleId: 'vehicle-1',
+      vehicle: {
+        id: 'vehicle-1',
+        type: VehicleType.CAR,
+        isActive: true,
+      },
+      status: DriverOfferStatus.PENDING,
+      requiresPassengerKyc: true,
+      pricePerSeat: 5000,
+      proposedDepartureDate: new Date(now + 60 * 60 * 1000),
+    };
+    const tripRequest = {
+      id: 'request-offer-kyc',
+      passengerId: 'passenger-1',
+      passenger: { id: 'passenger-1' },
+      departureLocation: 'Gombe',
+      arrivalLocation: 'Limete',
+      departureDateMin: new Date(now + 30 * 60 * 1000),
+      departureDateMax: new Date(now + 90 * 60 * 1000),
+      numberOfSeats: 1,
+      vehicleType: VehicleType.CAR,
+      status: TripRequestStatus.OFFERS_RECEIVED,
+      driverOffers: [offer],
+    };
+    const tripRequestRepository = {
+      findOne: jest.fn().mockResolvedValue(tripRequest),
+      save: jest.fn(),
+    };
+    const driverOfferRepository = {
+      save: jest.fn(),
+    };
+    const userRepository = {
+      findOne: jest.fn().mockResolvedValue({
+        id: 'passenger-1',
+        kycDocuments: [{ status: KycStatus.REJECTED }],
+      }),
+    };
+    const service = new TripRequestsService(
+      tripRequestRepository as any,
+      driverOfferRepository as any,
+      userRepository as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+    );
+
+    await expect(
+      service.acceptDriverOffer('passenger-1', tripRequest.id, {
+        offerId: offer.id,
+      }),
+    ).rejects.toMatchObject({
+      response: expect.objectContaining({
+        code: 'PASSENGER_KYC_REQUIRED',
+        action: 'complete_kyc',
+        tripRequestId: tripRequest.id,
+        offerId: offer.id,
+        driverId: 'driver-1',
+      }),
+    });
+
+    expect(driverOfferRepository.save).not.toHaveBeenCalled();
+    expect(tripRequestRepository.save).not.toHaveBeenCalled();
   });
 });
 

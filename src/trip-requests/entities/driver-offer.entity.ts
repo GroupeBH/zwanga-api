@@ -29,7 +29,9 @@ export class DriverOffer {
   @Column()
   tripRequestId: string;
 
-  @ManyToOne(() => TripRequest, (tripRequest) => tripRequest.driverOffers, { onDelete: 'CASCADE' })
+  @ManyToOne(() => TripRequest, (tripRequest) => tripRequest.driverOffers, {
+    onDelete: 'CASCADE',
+  })
   @JoinColumn({ name: 'tripRequestId' })
   tripRequest: TripRequest;
 
@@ -58,6 +60,9 @@ export class DriverOffer {
 
   @Column({ type: 'text', nullable: true })
   message: string | null; // Message optionnel du driver
+
+  @Column({ type: 'boolean', default: false })
+  requiresPassengerKyc: boolean;
 
   @Column({ type: 'text', nullable: true })
   departureReference: string | null;
@@ -103,4 +108,3 @@ export class DriverOffer {
   @UpdateDateColumn()
   updatedAt: Date;
 }
-

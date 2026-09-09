@@ -262,6 +262,7 @@ export class TripsService {
       pricePerSeat,
       totalSeats: baseTripData.totalSeats,
       availableSeats: baseTripData.totalSeats,
+      requiresPassengerKyc: createTripDto.requiresPassengerKyc ?? false,
       isPrivate: options?.isPrivate ?? false,
       tripRequestId: options?.tripRequestId || null,
       recurringTemplateId: null,
@@ -691,6 +692,8 @@ export class TripsService {
       totalSeats: createRecurringTripDto.totalSeats,
       pricePerSeat,
       isFree,
+      requiresPassengerKyc:
+        createRecurringTripDto.requiresPassengerKyc ?? false,
       description: createRecurringTripDto.description?.trim() || null,
       status: RecurringTripTemplateStatus.ACTIVE,
       lastGeneratedDate: null,
@@ -1040,6 +1043,22 @@ export class TripsService {
       resultingVehicle,
       totalSeats ?? trip.totalSeats ?? trip.availableSeats,
     );
+
+    if (
+      restPayload.requiresPassengerKyc === true &&
+      !trip.requiresPassengerKyc
+    ) {
+      await this.ensurePassengerKycApprovedForBookings(
+        (trip.bookings ?? []).filter((booking) =>
+          this.isBookingSubjectToPassengerKycRequirement(booking),
+        ),
+        {
+          tripId: trip.id,
+          message:
+            "Impossible d'exiger le KYC: des reservations actives appartiennent a des passagers dont le KYC n'est pas approuve.",
+        },
+      );
+    }
 
     // Gérer totalSeats et recalculer availableSeats si nécessaire
     if (
@@ -1402,6 +1421,15 @@ export class TripsService {
       trip.bookings?.filter(
         (booking) => booking.status === BookingStatus.ACCEPTED,
       ) || [];
+
+    if (trip.requiresPassengerKyc) {
+      await this.ensurePassengerKycApprovedForBookings(acceptedBookings, {
+        tripId: trip.id,
+        message:
+          'Ce trajet exige le KYC passager. Tous les passagers acceptes doivent etre verifies avant le demarrage.',
+      });
+    }
+
     const totalAcceptedSeats = acceptedBookings.reduce(
       (sum, booking) => sum + booking.numberOfSeats,
       0,
@@ -2468,6 +2496,64 @@ export class TripsService {
     }
   }
 
+  private isBookingSubjectToPassengerKycRequirement(
+    booking: Pick<Booking, 'status'>,
+  ): boolean {
+    return [
+      BookingStatus.PENDING,
+      BookingStatus.ACCEPTED,
+      BookingStatus.NO_SHOW,
+    ].includes(booking.status);
+  }
+
+  private async ensurePassengerKycApprovedForBookings(
+    bookings: Array<Pick<Booking, 'id' | 'passengerId' | 'status'>>,
+    context: { tripId: string; message: string },
+  ): Promise<void> {
+    const passengerIds = [
+      ...new Set(
+        bookings
+          .filter((booking) =>
+            this.isBookingSubjectToPassengerKycRequirement(booking),
+          )
+          .map((booking) => booking.passengerId)
+          .filter(Boolean),
+      ),
+    ];
+
+    if (passengerIds.length === 0) {
+      return;
+    }
+
+    const approvedDocuments = await this.kycDocumentRepository.find({
+      where: {
+        userId: In(passengerIds),
+        status: KycStatus.APPROVED,
+      },
+      select: ['userId'],
+    });
+    const approvedPassengerIds = new Set(
+      approvedDocuments
+        .map((document) => document.userId)
+        .filter((userId): userId is string => Boolean(userId)),
+    );
+
+    const hasUnverifiedPassenger = passengerIds.some(
+      (passengerId) => !approvedPassengerIds.has(passengerId),
+    );
+    if (!hasUnverifiedPassenger) {
+      return;
+    }
+
+    throw new BadRequestException({
+      error: 'KYC passager requis',
+      code: 'PASSENGER_KYC_REQUIRED',
+      message: context.message,
+      action: 'complete_kyc',
+      tripId: context.tripId,
+    });
+  }
+
   private isDriverRole(role?: User['role'] | null): boolean {
     return role === UserRole.DRIVER;
   }
@@ -2605,6 +2691,7 @@ export class TripsService {
           availableSeats: template.totalSeats,
           pricePerSeat: template.isFree ? 0 : template.pricePerSeat,
           isFree: template.isFree,
+          requiresPassengerKyc: template.requiresPassengerKyc,
           description: template.description ?? undefined,
           status: TripStatus.PENDING,
           isPrivate: false,

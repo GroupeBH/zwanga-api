@@ -62,6 +62,7 @@ export class TripRequestRecoveryService {
             selectedDriverId: null,
             selectedVehicleId: null,
             selectedPricePerSeat: null,
+            selectedDriverRequiresPassengerKyc: false,
             selectedAt: null,
             tripId: null,
             expirationNotificationSent: false,

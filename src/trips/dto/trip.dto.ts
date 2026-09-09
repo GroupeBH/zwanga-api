@@ -116,6 +116,17 @@ export class CreateTripDto {
   @IsOptional()
   isFree?: boolean;
 
+  @ApiProperty({
+    required: false,
+    default: false,
+    description:
+      'Exige que chaque passager ait un KYC approuve avant de reserver ou embarquer.',
+    example: false,
+  })
+  @IsBoolean()
+  @IsOptional()
+  requiresPassengerKyc?: boolean;
+
   @ApiProperty({ required: false })
   @IsString()
   @IsOptional()
@@ -325,6 +336,17 @@ export class UpdateTripDto {
   @IsBoolean()
   @IsOptional()
   isFree?: boolean;
+
+  @ApiProperty({
+    required: false,
+    default: false,
+    description:
+      'Exige que chaque passager ait un KYC approuve avant de reserver ou embarquer.',
+    example: false,
+  })
+  @IsBoolean()
+  @IsOptional()
+  requiresPassengerKyc?: boolean;
 
   @ApiProperty({ required: false })
   @IsString()
@@ -538,6 +560,17 @@ export class CreateRecurringTripDto {
   @IsBoolean()
   @IsOptional()
   isFree?: boolean;
+
+  @ApiProperty({
+    required: false,
+    default: false,
+    description:
+      'Exige que chaque passager ait un KYC approuve sur les occurrences generees.',
+    example: false,
+  })
+  @IsBoolean()
+  @IsOptional()
+  requiresPassengerKyc?: boolean;
 
   @ApiProperty({ required: false })
   @IsString()
