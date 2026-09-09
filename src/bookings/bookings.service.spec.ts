@@ -1,3 +1,4 @@
+import { BadRequestException } from '@nestjs/common';
 import {
   Booking,
   BookingPaymentStatus,
@@ -5,6 +6,7 @@ import {
 } from './entities/booking.entity';
 import { BookingsService } from './bookings.service';
 import { Trip, TripStatus } from '../trips/entities/trip.entity';
+import { KycStatus } from '../users/entities/kyc-document.entity';
 import {
   PaymentMethod,
   PaymentPurpose,
@@ -27,6 +29,7 @@ describe('BookingsService trip payments', () => {
     save: jest.Mock;
     update: jest.Mock;
   };
+  let userRepository: { findOne: jest.Mock };
   let cacheService: { del: jest.Mock };
   let notificationService: { sendNotification: jest.Mock };
   let locationHistoryService: {
@@ -111,6 +114,9 @@ describe('BookingsService trip payments', () => {
       findOne: jest.fn(),
       save: jest.fn((payload: unknown) => Promise.resolve(payload)),
       update: jest.fn().mockResolvedValue({ affected: 1 }),
+    };
+    userRepository = {
+      findOne: jest.fn(),
     };
     cacheService = { del: jest.fn() };
     notificationService = {
@@ -210,11 +216,10 @@ describe('BookingsService trip payments', () => {
       ),
       query: jest.fn().mockResolvedValue([]),
     };
-
     service = new BookingsService(
       bookingRepository as any,
       tripRepository as any,
-      {} as any,
+      userRepository as any,
       {} as any,
       {} as any,
       cacheService as any,
@@ -273,6 +278,88 @@ describe('BookingsService trip payments', () => {
     expect(privateTrip.status).toBe(TripStatus.CANCELLED);
     expect(privateTrip.completedAt).toBeNull();
     expect(tripRepository.save).toHaveBeenCalledWith(privateTrip);
+  });
+
+  it('blocks cancellation by the selected driver for a request-linked booking', async () => {
+    const privateTrip = {
+      id: 'private-trip-2',
+      tripRequestId: 'request-1',
+      driverId: 'driver-1',
+      driver: { id: 'driver-1', fcmToken: null },
+      status: TripStatus.PENDING,
+      startedAt: null,
+      isPrivate: true,
+      totalSeats: 1,
+      availableSeats: 0,
+      departureLocation: 'Gombe',
+      arrivalLocation: 'Limete',
+    };
+    const privateBooking = {
+      id: 'private-booking-2',
+      tripId: privateTrip.id,
+      trip: privateTrip,
+      passengerId: 'passenger-1',
+      passenger: {
+        firstName: 'Alice',
+        lastName: 'Test',
+        fcmToken: null,
+      },
+      numberOfSeats: 1,
+      status: BookingStatus.ACCEPTED,
+      paymentMode: TripPaymentMode.CASH,
+      paymentStatus: BookingPaymentStatus.NOT_REQUIRED,
+      pickedUp: false,
+      pickedUpConfirmedByPassenger: false,
+      cancelledAt: null,
+    };
+    bookingRepository.findOne.mockResolvedValue(privateBooking);
+
+    await expect(
+      service.cancel(privateBooking.id, privateTrip.driverId),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    expect(privateBooking.status).toBe(BookingStatus.ACCEPTED);
+    expect(tripRepository.findOne).not.toHaveBeenCalled();
+    expect(bookingRepository.save).not.toHaveBeenCalled();
+  });
+
+  it('blocks rejection by the selected driver for a request-linked booking', async () => {
+    const linkedTrip = {
+      id: 'private-trip-3',
+      tripRequestId: 'request-1',
+      driverId: 'driver-1',
+      status: TripStatus.PENDING,
+    };
+    const linkedBooking = {
+      id: 'private-booking-3',
+      tripId: linkedTrip.id,
+      passengerId: 'passenger-1',
+      numberOfSeats: 1,
+      status: BookingStatus.ACCEPTED,
+    };
+    const transactionalManager = {
+      getRepository: jest.fn((entity: unknown) =>
+        entity === Booking ? bookingRepository : tripRepository,
+      ),
+    };
+    bookingRepository.manager = {
+      transaction: jest.fn(
+        (work: (manager: typeof transactionalManager) => Promise<unknown>) =>
+          work(transactionalManager),
+      ),
+    };
+    bookingRepository.findOne.mockResolvedValue(linkedBooking);
+    tripRepository.findOne.mockResolvedValue(linkedTrip);
+
+    await expect(
+      service.updateStatus(linkedBooking.id, linkedTrip.driverId, {
+        status: BookingStatus.REJECTED,
+        rejectionReason: 'Je ne peux plus assurer ce trajet',
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    expect(bookingRepository.save).not.toHaveBeenCalled();
+    expect(tripRepository.save).not.toHaveBeenCalled();
   });
 
   const buildLocationHistory = (
@@ -490,6 +577,45 @@ describe('BookingsService trip payments', () => {
         zwangaSubsidyAmount: 6000,
       }),
     );
+  });
+
+  it('rejects a booking when the trip requires passenger KYC and the passenger is not approved', async () => {
+    tripRepository.findOne.mockResolvedValue({
+      id: 'trip-kyc',
+      driverId: 'driver-1',
+      driver: { id: 'driver-1', fcmToken: null },
+      status: TripStatus.PENDING,
+      isFree: false,
+      requiresPassengerKyc: true,
+      pricePerSeat: 5000,
+      totalSeats: 2,
+      availableSeats: 2,
+      bookings: [],
+      departureLocation: 'Gombe',
+      arrivalLocation: 'Limete',
+      departurePoint: null,
+      arrivalPoint: null,
+    });
+    userRepository.findOne.mockResolvedValue({
+      id: 'passenger-1',
+      kycDocuments: [{ status: KycStatus.PENDING }],
+    });
+
+    await expect(
+      service.create('passenger-1', {
+        tripId: 'trip-kyc',
+        numberOfSeats: 1,
+      }),
+    ).rejects.toMatchObject({
+      response: expect.objectContaining({
+        code: 'PASSENGER_KYC_REQUIRED',
+        action: 'complete_kyc',
+        tripId: 'trip-kyc',
+      }),
+    });
+
+    expect(bookingRepository.create).not.toHaveBeenCalled();
+    expect(bookingRepository.save).not.toHaveBeenCalled();
   });
 
   it('does not apply the first-trip subsidy when the passenger already completed a ride', async () => {

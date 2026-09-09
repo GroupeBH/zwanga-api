@@ -262,6 +262,7 @@ export class TripsService {
       pricePerSeat,
       totalSeats: baseTripData.totalSeats,
       availableSeats: baseTripData.totalSeats,
+      requiresPassengerKyc: createTripDto.requiresPassengerKyc ?? false,
       isPrivate: options?.isPrivate ?? false,
       tripRequestId: options?.tripRequestId || null,
       recurringTemplateId: null,
@@ -691,6 +692,8 @@ export class TripsService {
       totalSeats: createRecurringTripDto.totalSeats,
       pricePerSeat,
       isFree,
+      requiresPassengerKyc:
+        createRecurringTripDto.requiresPassengerKyc ?? false,
       description: createRecurringTripDto.description?.trim() || null,
       status: RecurringTripTemplateStatus.ACTIVE,
       lastGeneratedDate: null,
@@ -906,7 +909,7 @@ export class TripsService {
 
     const trip = await this.tripRepository.findOne({
       where: { id, driverId },
-      relations: ['vehicle'],
+      relations: ['vehicle', 'bookings'],
     });
 
     if (!trip) {
@@ -926,6 +929,18 @@ export class TripsService {
       trip.status !== TripStatus.ACTIVE
     ) {
       return this.startTrip(id, driverId);
+    }
+    if (updateTripDto.status === TripStatus.CANCELLED) {
+      if (trip.tripRequestId) {
+        throw new BadRequestException(
+          "Un trajet issu d'une demande ne peut pas être annulé par le conducteur. Utilisez l'arrêt du trajet.",
+        );
+      }
+      return this.cancelTripAfterDriverAbandonment(
+        trip,
+        driverId,
+        'driver_cancelled_trip',
+      );
     }
 
     const {
@@ -1029,6 +1044,22 @@ export class TripsService {
       totalSeats ?? trip.totalSeats ?? trip.availableSeats,
     );
 
+    if (
+      restPayload.requiresPassengerKyc === true &&
+      !trip.requiresPassengerKyc
+    ) {
+      await this.ensurePassengerKycApprovedForBookings(
+        (trip.bookings ?? []).filter((booking) =>
+          this.isBookingSubjectToPassengerKycRequirement(booking),
+        ),
+        {
+          tripId: trip.id,
+          message:
+            "Impossible d'exiger le KYC: des reservations actives appartiennent a des passagers dont le KYC n'est pas approuve.",
+        },
+      );
+    }
+
     // Gérer totalSeats et recalculer availableSeats si nécessaire
     if (
       totalSeats !== undefined &&
@@ -1060,6 +1091,70 @@ export class TripsService {
 
     this.logger.log(`Trip ${id} updated successfully`);
     return this.findOne(id);
+  }
+
+  private async cancelTripAfterDriverAbandonment(
+    trip: Trip,
+    driverId: string,
+    reason: string,
+  ): Promise<SanitizedTrip> {
+    const bookings = trip.bookings ?? [];
+    const hasPassengerOnBoard = bookings.some(
+      (booking) =>
+        this.hasBookingEmbarked(booking) &&
+        !this.hasBookingBeenDroppedOff(booking),
+    );
+
+    if (hasPassengerOnBoard) {
+      throw new BadRequestException(
+        "Vous ne pouvez pas annuler ce trajet tant qu'un passager est à bord",
+      );
+    }
+
+    if (trip.status === TripStatus.COMPLETED) {
+      throw new BadRequestException(
+        'Vous ne pouvez pas annuler un trajet déjà terminé',
+      );
+    }
+
+    const acceptedBookings = bookings.filter(
+      (booking) => booking.status === BookingStatus.ACCEPTED,
+    );
+    for (const booking of acceptedBookings) {
+      await this.bookingsService.cancel(booking.id, driverId);
+    }
+
+    const pendingBookingIds = bookings
+      .filter((booking) => booking.status === BookingStatus.PENDING)
+      .map((booking) => booking.id);
+    if (pendingBookingIds.length > 0) {
+      await this.bookingRepository.update(pendingBookingIds, {
+        status: BookingStatus.CANCELLED,
+        cancelledAt: new Date(),
+      });
+    }
+
+    const previousStatus = trip.status;
+    if (trip.status !== TripStatus.CANCELLED) {
+      trip.status = TripStatus.CANCELLED;
+      await this.tripRepository.save(trip);
+      this.logTripStateChange({
+        tripId: trip.id,
+        driverId,
+        from: previousStatus,
+        to: TripStatus.CANCELLED,
+        reason,
+        acceptedBookings: acceptedBookings.length,
+        availableSeats: trip.availableSeats,
+      });
+    }
+
+    await this.cacheService.del(CacheService.getTripKey(trip.id));
+    await this.cacheService.del(CacheService.getTripsListKey());
+    await this.cacheService.del(CacheService.getTripsListKey('all'));
+    await this.cacheService.del(CacheService.getTripsListKey('allTrips'));
+
+    return this.findOne(trip.id);
   }
 
   async setDriverEmergencyContacts(
@@ -1198,6 +1293,13 @@ export class TripsService {
       );
       throw new NotFoundException('Trajet non trouve');
     }
+
+    if (trip.tripRequestId) {
+      throw new BadRequestException(
+        "Un trajet issu d'une demande ne peut pas être supprimé par le conducteur. Utilisez l'arrêt du trajet.",
+      );
+    }
+
     const bookings = trip.bookings ?? [];
     const hasPassengerOnBoard = bookings.some(
       (booking) =>
@@ -1319,6 +1421,15 @@ export class TripsService {
       trip.bookings?.filter(
         (booking) => booking.status === BookingStatus.ACCEPTED,
       ) || [];
+
+    if (trip.requiresPassengerKyc) {
+      await this.ensurePassengerKycApprovedForBookings(acceptedBookings, {
+        tripId: trip.id,
+        message:
+          'Ce trajet exige le KYC passager. Tous les passagers acceptes doivent etre verifies avant le demarrage.',
+      });
+    }
+
     const totalAcceptedSeats = acceptedBookings.reduce(
       (sum, booking) => sum + booking.numberOfSeats,
       0,
@@ -2385,6 +2496,64 @@ export class TripsService {
     }
   }
 
+  private isBookingSubjectToPassengerKycRequirement(
+    booking: Pick<Booking, 'status'>,
+  ): boolean {
+    return [
+      BookingStatus.PENDING,
+      BookingStatus.ACCEPTED,
+      BookingStatus.NO_SHOW,
+    ].includes(booking.status);
+  }
+
+  private async ensurePassengerKycApprovedForBookings(
+    bookings: Array<Pick<Booking, 'id' | 'passengerId' | 'status'>>,
+    context: { tripId: string; message: string },
+  ): Promise<void> {
+    const passengerIds = [
+      ...new Set(
+        bookings
+          .filter((booking) =>
+            this.isBookingSubjectToPassengerKycRequirement(booking),
+          )
+          .map((booking) => booking.passengerId)
+          .filter(Boolean),
+      ),
+    ];
+
+    if (passengerIds.length === 0) {
+      return;
+    }
+
+    const approvedDocuments = await this.kycDocumentRepository.find({
+      where: {
+        userId: In(passengerIds),
+        status: KycStatus.APPROVED,
+      },
+      select: ['userId'],
+    });
+    const approvedPassengerIds = new Set(
+      approvedDocuments
+        .map((document) => document.userId)
+        .filter((userId): userId is string => Boolean(userId)),
+    );
+
+    const hasUnverifiedPassenger = passengerIds.some(
+      (passengerId) => !approvedPassengerIds.has(passengerId),
+    );
+    if (!hasUnverifiedPassenger) {
+      return;
+    }
+
+    throw new BadRequestException({
+      error: 'KYC passager requis',
+      code: 'PASSENGER_KYC_REQUIRED',
+      message: context.message,
+      action: 'complete_kyc',
+      tripId: context.tripId,
+    });
+  }
+
   private isDriverRole(role?: User['role'] | null): boolean {
     return role === UserRole.DRIVER;
   }
@@ -2522,6 +2691,7 @@ export class TripsService {
           availableSeats: template.totalSeats,
           pricePerSeat: template.isFree ? 0 : template.pricePerSeat,
           isFree: template.isFree,
+          requiresPassengerKyc: template.requiresPassengerKyc,
           description: template.description ?? undefined,
           status: TripStatus.PENDING,
           isPrivate: false,

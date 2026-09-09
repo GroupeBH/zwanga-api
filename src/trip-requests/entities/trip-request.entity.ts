@@ -120,6 +120,9 @@ export class TripRequest {
   @Column({ type: 'decimal', precision: 10, scale: 2, nullable: true })
   selectedPricePerSeat: number | null; // Prix accepté pour le driver sélectionné
 
+  @Column({ type: 'boolean', default: false })
+  selectedDriverRequiresPassengerKyc: boolean;
+
   @Column({ type: 'timestamp', nullable: true })
   selectedAt: Date | null; // Date de sélection du driver
 
@@ -128,6 +131,9 @@ export class TripRequest {
 
   @Column({ type: 'boolean', default: false })
   expirationNotificationSent: boolean; // Notification du délai de douze heures envoyée
+
+  @Column({ type: 'timestamptz', nullable: true })
+  driverPickupOverdueNotifiedAt: Date | null; // Notification envoyée lorsque le conducteur sélectionné dépasse la plage de prise en charge
 
   @CreateDateColumn()
   createdAt: Date;

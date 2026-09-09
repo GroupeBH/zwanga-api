@@ -6,6 +6,7 @@ import {
   UpdateDateColumn,
   ManyToOne,
   JoinColumn,
+  Index,
 } from 'typeorm';
 import { User } from './user.entity';
 
@@ -21,6 +22,9 @@ export enum KycProvider {
 }
 
 @Entity('kyc_documents')
+@Index('IDX_kyc_documents_user_approved', ['userId'], {
+  where: `"status" = 'approved'`,
+})
 export class KycDocument {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -98,4 +102,3 @@ export class KycDocument {
   @UpdateDateColumn()
   updatedAt: Date;
 }
-

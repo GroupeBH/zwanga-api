@@ -536,9 +536,19 @@ describe('WalletService', () => {
       note: 'Pour ton trajet',
     });
 
-    expect(userRepository.findOne).toHaveBeenCalledWith({
-      where: [{ phone: '+243899999999' }],
-    });
+    const transferRecipientLookup = userRepository.findOne.mock.calls[0][0];
+    const transferPhoneLookup = transferRecipientLookup.where[0];
+    expect(transferPhoneLookup).toEqual(
+      expect.objectContaining({ isActive: true }),
+    );
+    expect(transferPhoneLookup.phone.value).toEqual(
+      expect.arrayContaining([
+        '+243899999999',
+        '243899999999',
+        '899999999',
+        '0899999999',
+      ]),
+    );
     expect(result.amount).toBe(2500);
     expect(result.recipient.id).toBe('recipient-1');
     expect(manager.save).toHaveBeenCalledWith(
@@ -566,6 +576,23 @@ describe('WalletService', () => {
         amount: 2500,
         relatedEntityType: 'wallet_transfer',
       }),
+    );
+  });
+
+  it('matches common Congolese phone formats when sharing points', () => {
+    const candidates = (
+      service as unknown as {
+        buildPhoneSearchCandidates: (phone: string) => string[];
+      }
+    ).buildPhoneSearchCandidates('0998877600');
+
+    expect(candidates).toEqual(
+      expect.arrayContaining([
+        '0998877600',
+        '+243998877600',
+        '243998877600',
+        '998877600',
+      ]),
     );
   });
 

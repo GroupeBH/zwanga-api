@@ -106,11 +106,11 @@ import { ReferralsModule } from './referrals/referrals.module';
     AppService,
     {
       provide: APP_GUARD,
-      useClass: IpThrottlerGuard,
+      useClass: JwtAuthGuard,
     },
     {
       provide: APP_GUARD,
-      useClass: JwtAuthGuard,
+      useClass: IpThrottlerGuard,
     },
     {
       provide: APP_GUARD,

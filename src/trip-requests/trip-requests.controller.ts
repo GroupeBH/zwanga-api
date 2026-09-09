@@ -212,6 +212,24 @@ export class TripRequestsController {
     return this.tripRequestsService.startTripFromRequest(id, req.user.userId);
   }
 
+  @Put(':id/release-driver')
+  @Auth()
+  @SensitiveThrottle(5, 60000)
+  @ApiOperation({
+    summary: 'Release an overdue selected driver',
+    description:
+      'Permet au passager, après dépassement de sa plage de prise en charge et avant embarquement, de libérer le conducteur sélectionné et de rendre la demande à nouveau visible aux autres conducteurs.',
+  })
+  async releaseOverdueSelectedDriver(
+    @Request() req: { user: { userId: string } },
+    @Param('id') id: string,
+  ) {
+    return this.tripRequestsService.releaseOverdueSelectedDriver(
+      req.user.userId,
+      id,
+    );
+  }
+
   @Put(':id')
   @Auth()
   @SensitiveThrottle(10, 60000)

@@ -14,6 +14,7 @@ import { BookingsModule } from '../bookings/bookings.module';
 import { GoogleMapsModule } from '../google-maps/google-maps.module';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
 import { WeatherModule } from '../weather/weather.module';
+import { TripRequestRecoveryModule } from './trip-request-recovery.module';
 
 @Module({
   imports: [
@@ -26,6 +27,7 @@ import { WeatherModule } from '../weather/weather.module';
     GoogleMapsModule,
     SubscriptionsModule,
     WeatherModule,
+    TripRequestRecoveryModule,
   ],
   controllers: [TripRequestsController],
   providers: [TripRequestsService],

@@ -10,6 +10,7 @@ import {
   IsArray,
   ArrayMinSize,
   ArrayMaxSize,
+  IsBoolean,
 } from 'class-validator';
 import { ApiProperty, OmitType } from '@nestjs/swagger';
 import { TripPaymentMode } from '../../payments/enums/trip-payment-mode.enum';
@@ -91,8 +92,7 @@ export class CreateTripRequestDto {
     default: 1,
     minimum: 1,
     maximum: 2,
-    description:
-      'Nombre de places nécessaires (optionnel, 1 place par défaut)',
+    description: 'Nombre de places nécessaires (optionnel, 1 place par défaut)',
     example: 2,
   })
   @IsNumber()
@@ -290,6 +290,17 @@ export class CreateDriverOfferDto {
 
   @ApiProperty({
     required: false,
+    default: false,
+    description:
+      'Indique que le conducteur exige un KYC approuve avant embarquement.',
+    example: false,
+  })
+  @IsBoolean()
+  @IsOptional()
+  requiresPassengerKyc?: boolean;
+
+  @ApiProperty({
+    required: false,
     description:
       'Reference ou repere propose par le conducteur pour la prise en charge',
     example: "Je m'arrete devant la station",
@@ -378,6 +389,17 @@ export class AcceptTripRequestDto {
   @Min(1)
   @IsOptional()
   totalSeats?: number;
+
+  @ApiProperty({
+    required: false,
+    default: false,
+    description:
+      'Indique que le conducteur exige un KYC approuve avant embarquement.',
+    example: false,
+  })
+  @IsBoolean()
+  @IsOptional()
+  requiresPassengerKyc?: boolean;
 
   @ApiProperty({
     required: false,

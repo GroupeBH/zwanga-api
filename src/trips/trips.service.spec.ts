@@ -254,7 +254,6 @@ describe('TripsService trip deletion rules', () => {
     cacheService = {
       del: jest.fn().mockResolvedValue(undefined),
     };
-
     service = new TripsService(
       tripRepository as any,
       {} as any,
@@ -280,9 +279,10 @@ describe('TripsService trip deletion rules', () => {
     );
   });
 
-  it('allows deleting a non-terminal trip when there is no accepted/in-progress booking', async () => {
+  it('blocks deletion of a trip linked to a passenger request', async () => {
     const trip = {
       id: 'trip-1',
+      tripRequestId: 'request-1',
       driverId: 'driver-1',
       status: TripStatus.ACTIVE,
       departureDate: new Date(Date.now() + 60 * 60 * 1000),
@@ -300,16 +300,57 @@ describe('TripsService trip deletion rules', () => {
 
     tripRepository.findOne.mockResolvedValue(trip);
 
-    await expect(service.remove('trip-1', 'driver-1')).resolves.toBeUndefined();
-    expect(bookingRepository.update).toHaveBeenCalledWith(
-      ['booking-pending'],
-      expect.objectContaining({
-        status: BookingStatus.CANCELLED,
-        cancelledAt: expect.any(Date),
-      }),
+    await expect(service.remove('trip-1', 'driver-1')).rejects.toBeInstanceOf(
+      BadRequestException,
     );
-    expect(bookingRepository.delete).toHaveBeenCalledWith({ tripId: 'trip-1' });
-    expect(tripRepository.remove).toHaveBeenCalledWith(trip);
+    expect(bookingRepository.update).not.toHaveBeenCalled();
+    expect(bookingRepository.delete).not.toHaveBeenCalled();
+    expect(tripRepository.remove).not.toHaveBeenCalled();
+  });
+
+  it('pauses a linked trip without reopening or cancelling the request', async () => {
+    const trip = {
+      id: 'trip-request-active',
+      tripRequestId: 'request-2',
+      driverId: 'driver-1',
+      status: TripStatus.ACTIVE,
+      availableSeats: 1,
+      bookings: [],
+      driver: { id: 'driver-1' },
+    };
+    tripRepository.findOne.mockResolvedValue(trip);
+    jest.spyOn(service, 'findOne').mockResolvedValue({
+      id: trip.id,
+      status: TripStatus.PENDING,
+    });
+
+    await expect(service.pauseTrip(trip.id, trip.driverId)).resolves.toEqual(
+      expect.objectContaining({ status: TripStatus.PENDING }),
+    );
+
+    expect(trip.status).toBe(TripStatus.PENDING);
+    expect(tripRepository.save).toHaveBeenCalledWith(trip);
+  });
+
+  it('blocks driver cancellation of a linked request trip', async () => {
+    const trip = {
+      id: 'trip-request-pending',
+      tripRequestId: 'request-3',
+      driverId: 'driver-1',
+      status: TripStatus.PENDING,
+      availableSeats: 1,
+      bookings: [],
+      vehicle: null,
+    };
+    tripRepository.findOne.mockResolvedValue(trip);
+    await expect(
+      service.update(trip.id, trip.driverId, {
+        status: TripStatus.CANCELLED,
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    expect(trip.status).toBe(TripStatus.PENDING);
+    expect(tripRepository.save).not.toHaveBeenCalled();
   });
 
   it('cancels an accepted booking without pickup and deletes the trip', async () => {

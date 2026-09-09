@@ -15,6 +15,10 @@ import {
   NotificationStatus,
 } from './entities/notification.entity';
 import { User } from '../users/entities/user.entity';
+import {
+  TripRequest,
+  TripRequestStatus,
+} from '../trip-requests/entities/trip-request.entity';
 
 const AUTOMATIC_NOTIFICATION_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000;
 const EXPO_PUSH_API_URL = 'https://exp.host/--/api/v2/push/send';
@@ -33,6 +37,7 @@ const EXPO_RECEIPT_CHECKING = 'EXPO_RECEIPT_CHECKING';
 const CRITICAL_NOTIFICATION_TYPES = [
   'driver_trip_revenue',
   'driver_booking_earning_confirmed',
+  'trip_request_driver_overdue',
 ] as const;
 
 interface ExpoPushTicket {
@@ -63,6 +68,8 @@ export class NotificationService implements OnModuleInit {
     private readonly notificationRepository: Repository<Notification>,
     @InjectRepository(User)
     private readonly userRepository: Repository<User>,
+    @InjectRepository(TripRequest)
+    private readonly tripRequestRepository: Repository<TripRequest>,
   ) {}
 
   onModuleInit() {
@@ -406,6 +413,14 @@ export class NotificationService implements OnModuleInit {
 
     let delivered = 0;
     for (const notification of notifications) {
+      if (!(await this.isCriticalNotificationStillDeliverable(notification))) {
+        await this.suppressCriticalNotification(
+          notification,
+          'Notification critique obsolete: demande de trajet non recuperable',
+        );
+        continue;
+      }
+
       if (!notification.userId) {
         await this.markNotificationFailed(
           notification,
@@ -442,6 +457,7 @@ export class NotificationService implements OnModuleInit {
         .andWhere("notification.data ->> 'type' IN (:...types)", {
           types: [...CRITICAL_NOTIFICATION_TYPES],
         })
+        .andWhere('notification.isActive = true')
         .andWhere('notification.updatedAt <= :retryBefore', { retryBefore })
         .andWhere('notification.createdAt >= :createdAfter', { createdAfter })
         .orderBy('notification.updatedAt', 'ASC')
@@ -460,6 +476,61 @@ export class NotificationService implements OnModuleInit {
         ? repository.save(notifications)
         : notifications;
     });
+  }
+
+  private async isCriticalNotificationStillDeliverable(
+    notification: Notification,
+  ): Promise<boolean> {
+    const type = notification.data?.type;
+    if (type !== 'trip_request_driver_overdue') {
+      return true;
+    }
+
+    const tripRequestId = this.extractTripRequestId(notification.data);
+    if (!tripRequestId || !notification.userId) {
+      return false;
+    }
+
+    const request = await this.tripRequestRepository.findOne({
+      where: { id: tripRequestId },
+      select: [
+        'id',
+        'passengerId',
+        'status',
+        'selectedDriverId',
+        'driverPickupOverdueNotifiedAt',
+        'departureDateMax',
+      ],
+    });
+
+    if (!request || request.passengerId !== notification.userId) {
+      return false;
+    }
+
+    const latestPickupAt = new Date(request.departureDateMax).getTime();
+    return (
+      request.status === TripRequestStatus.DRIVER_SELECTED &&
+      Boolean(request.selectedDriverId) &&
+      Boolean(request.driverPickupOverdueNotifiedAt) &&
+      Number.isFinite(latestPickupAt) &&
+      latestPickupAt <= Date.now()
+    );
+  }
+
+  private extractTripRequestId(data: Record<string, any> | null): string | null {
+    const value = data?.tripRequestId ?? data?.requestId;
+    return typeof value === 'string' && value.trim() ? value.trim() : null;
+  }
+
+  private async suppressCriticalNotification(
+    notification: Notification,
+    reason: string,
+  ): Promise<void> {
+    notification.status = NotificationStatus.FAILED;
+    notification.isActive = false;
+    notification.messageId = null;
+    notification.errorMessage = reason;
+    await this.notificationRepository.save(notification);
   }
 
   @Cron(CronExpression.EVERY_5_MINUTES)
@@ -559,6 +630,7 @@ export class NotificationService implements OnModuleInit {
         .andWhere("notification.data ->> 'type' IN (:...types)", {
           types: [...CRITICAL_NOTIFICATION_TYPES],
         })
+        .andWhere('notification.isActive = true')
         .andWhere(
           '(notification.errorMessage IS NULL OR notification.errorMessage = :checking)',
           { checking: EXPO_RECEIPT_CHECKING },
