@@ -1,5 +1,6 @@
 import { NotificationStatus } from './entities/notification.entity';
 import { NotificationService } from './notifications.service';
+import { TripRequestStatus } from '../trip-requests/entities/trip-request.entity';
 
 describe('NotificationService critical push reliability', () => {
   const buildService = () => {
@@ -39,17 +40,22 @@ describe('NotificationService critical push reliability', () => {
       findOne: jest.fn(),
       update: jest.fn().mockResolvedValue({ affected: 1 }),
     };
+    const tripRequestRepository = {
+      findOne: jest.fn(),
+    };
     const configService = { get: jest.fn() };
     const service = new NotificationService(
       configService as any,
       notificationRepository as any,
       userRepository as any,
+      tripRequestRepository as any,
     );
 
     return {
       service,
       notificationRepository,
       userRepository,
+      tripRequestRepository,
       queryBuilder,
       transactionalRepository,
     };
@@ -182,6 +188,52 @@ describe('NotificationService critical push reliability', () => {
       }),
     ]);
     expect(claimed).toHaveLength(1);
+  });
+
+  it('does not retry an overdue pickup notification once the trip request expired', async () => {
+    const {
+      service,
+      queryBuilder,
+      notificationRepository,
+      userRepository,
+      tripRequestRepository,
+    } = buildService();
+    queryBuilder.getMany.mockResolvedValue([
+      {
+        id: 'notification-overdue',
+        userId: 'passenger-1',
+        fcmToken: '',
+        data: {
+          type: 'trip_request_driver_overdue',
+          tripRequestId: 'request-expired',
+        },
+        status: NotificationStatus.FAILED,
+        isActive: true,
+        errorMessage: 'Aucun token push actif pour cet utilisateur',
+      },
+    ]);
+    tripRequestRepository.findOne.mockResolvedValue({
+      id: 'request-expired',
+      passengerId: 'passenger-1',
+      status: TripRequestStatus.EXPIRED,
+      selectedDriverId: null,
+      driverPickupOverdueNotifiedAt: null,
+      departureDateMax: new Date(Date.now() - 60_000),
+    });
+
+    await service.retryCriticalFinancialNotifications();
+
+    expect(userRepository.findOne).not.toHaveBeenCalled();
+    expect(notificationRepository.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'notification-overdue',
+        status: NotificationStatus.FAILED,
+        isActive: false,
+        messageId: null,
+        errorMessage:
+          'Notification critique obsolete: demande de trajet non recuperable',
+      }),
+    );
   });
 
   it('checks Expo receipts and clears a token rejected by APNs or FCM', async () => {

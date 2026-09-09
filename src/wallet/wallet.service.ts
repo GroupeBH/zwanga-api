@@ -12,6 +12,7 @@ import {
   DataSource,
   EntityManager,
   FindOptionsWhere,
+  In,
   Repository,
 } from 'typeorm';
 import {
@@ -680,13 +681,16 @@ export class WalletService {
     const recipientEmail = dto.recipientEmail?.trim().toLowerCase();
 
     if (recipientUserId) {
-      where.push({ id: recipientUserId });
+      where.push({ id: recipientUserId, isActive: true });
     }
     if (recipientPhone) {
-      where.push({ phone: recipientPhone });
+      where.push({
+        phone: In(this.buildPhoneSearchCandidates(recipientPhone)),
+        isActive: true,
+      });
     }
     if (recipientEmail) {
-      where.push({ email: recipientEmail });
+      where.push({ email: recipientEmail, isActive: true });
     }
 
     if (!where.length) {
@@ -696,11 +700,64 @@ export class WalletService {
     }
 
     const recipient = await this.userRepository.findOne({ where });
-    if (!recipient || !recipient.isActive) {
+    if (!recipient) {
       throw new NotFoundException('Utilisateur destinataire introuvable');
     }
 
     return recipient;
+  }
+
+  private buildPhoneSearchCandidates(phone: string): string[] {
+    const candidates = new Set<string>();
+    const trimmed = phone.trim();
+    const compact = trimmed.replace(/[\s().-]/g, '');
+    const digits = compact.replace(/\D/g, '');
+    const defaultCountryCode = (
+      this.configService.get<string>('DEFAULT_COUNTRY_CODE') || '+243'
+    ).replace(/\D/g, '');
+
+    if (trimmed) {
+      candidates.add(trimmed);
+    }
+    if (compact) {
+      candidates.add(compact);
+    }
+    if (!digits) {
+      return [...candidates];
+    }
+
+    candidates.add(digits);
+
+    const addInternationalVariants = (internationalDigits: string) => {
+      if (!internationalDigits) {
+        return;
+      }
+      candidates.add(`+${internationalDigits}`);
+      candidates.add(internationalDigits);
+
+      if (internationalDigits.startsWith(defaultCountryCode)) {
+        const nationalDigits = internationalDigits.slice(
+          defaultCountryCode.length,
+        );
+        if (nationalDigits) {
+          candidates.add(nationalDigits);
+          candidates.add(`0${nationalDigits}`);
+        }
+      }
+    };
+
+    if (digits.startsWith('00')) {
+      addInternationalVariants(digits.slice(2));
+    } else if (digits.startsWith(defaultCountryCode)) {
+      addInternationalVariants(digits);
+    } else if (digits.startsWith('0')) {
+      addInternationalVariants(`${defaultCountryCode}${digits.slice(1)}`);
+      candidates.add(digits);
+    } else {
+      addInternationalVariants(`${defaultCountryCode}${digits}`);
+    }
+
+    return [...candidates];
   }
 
   private async applyTopUpPayment(
