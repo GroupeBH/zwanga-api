@@ -72,6 +72,7 @@ describe('TripRequestRecoveryService', () => {
       TripRequest,
       expect.objectContaining({
         id: selectedRequest.id,
+        tripId: expect.objectContaining({ _type: 'isNull' }),
         selectedDriverId: selectedRequest.selectedDriverId,
         status: TripRequestStatus.DRIVER_SELECTED,
       }),
@@ -80,6 +81,7 @@ describe('TripRequestRecoveryService', () => {
         selectedDriverId: null,
         selectedVehicleId: null,
         selectedPricePerSeat: null,
+        selectedDriverRequiresPassengerKyc: false,
         selectedAt: null,
         tripId: null,
         expirationNotificationSent: false,
