@@ -2442,7 +2442,50 @@ export class TripRequestsService {
       request.status = TripRequestStatus.EXPIRED;
     });
 
+    await Promise.all(
+      successfullyExpiredRequests.map((request) =>
+        this.notifyPassengerAboutExpiredUnacceptedRequest(request),
+      ),
+    );
+
     return successfullyExpiredRequests.map((request) => request.id);
+  }
+
+  /**
+   * Sends an informational push only. The actionable modal is exclusively
+   * triggered by the trip_request_driver_overdue notification type.
+   */
+  private async notifyPassengerAboutExpiredUnacceptedRequest(
+    tripRequest: TripRequest,
+  ): Promise<void> {
+    if (!tripRequest.passengerId) {
+      this.logger.warn(
+        `Unable to notify the passenger about expired trip request ${tripRequest.id}: passengerId is missing`,
+      );
+      return;
+    }
+
+    try {
+      await this.notificationService.sendNotificationToUser(
+        tripRequest.passengerId,
+        'Demande de trajet expirée',
+        `Votre demande de trajet de ${tripRequest.departureLocation} à ${tripRequest.arrivalLocation} a expiré car aucun conducteur ne l'a acceptée.`,
+        {
+          type: 'trip_request_expired',
+          presentation: 'push_only',
+          tripRequestId: tripRequest.id,
+          status: TripRequestStatus.EXPIRED,
+          reason: 'no_driver_accepted',
+        },
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const stack = error instanceof Error ? error.stack : undefined;
+      this.logger.error(
+        `Unable to notify passenger about expired unaccepted trip request ${tripRequest.id}: ${message}`,
+        stack,
+      );
+    }
   }
 
   // ==================== Cron Jobs ====================

@@ -439,14 +439,17 @@ describe('TripRequestsService motorcycle capacity', () => {
 });
 
 describe('TripRequestsService unaccepted request expiration', () => {
-  const buildService = (tripRequestRepository: Record<string, jest.Mock>) =>
+  const buildService = (
+    tripRequestRepository: Record<string, jest.Mock>,
+    notificationService: Record<string, jest.Mock> = {},
+  ) =>
     new TripRequestsService(
       tripRequestRepository as any,
       {} as any,
       {} as any,
       {} as any,
       {} as any,
-      {} as any,
+      notificationService as any,
       {} as any,
       {} as any,
       {} as any,
@@ -489,6 +492,53 @@ describe('TripRequestsService unaccepted request expiration', () => {
     expect(
       tripRequestRepository.find.mock.calls[0][0].where,
     ).not.toHaveProperty('createdAt');
+  });
+
+  it('sends a push-only expiration notification when no driver was accepted', async () => {
+    const now = Date.now();
+    const request = {
+      id: 'request-unanswered',
+      passengerId: 'passenger-1',
+      departureLocation: 'Gombe',
+      arrivalLocation: 'Limete',
+      status: TripRequestStatus.PENDING,
+      departureDateMax: new Date(now - 12 * 60 * 60 * 1000 - 1),
+      driverOffers: [],
+    };
+    const tripRequestRepository = {
+      find: jest.fn().mockResolvedValue([request]),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
+    };
+    const notificationService = {
+      sendNotificationToUser: jest.fn().mockResolvedValue(true),
+    };
+    const service = buildService(tripRequestRepository, notificationService);
+    jest.spyOn(service as any, 'sanitizeTripRequest').mockResolvedValue({
+      id: request.id,
+      status: TripRequestStatus.EXPIRED,
+    });
+
+    await service.findByPassenger(request.passengerId);
+
+    expect(notificationService.sendNotificationToUser).toHaveBeenCalledTimes(1);
+    expect(notificationService.sendNotificationToUser).toHaveBeenCalledWith(
+      request.passengerId,
+      'Demande de trajet expirée',
+      expect.stringContaining("aucun conducteur ne l'a acceptée"),
+      expect.objectContaining({
+        type: 'trip_request_expired',
+        presentation: 'push_only',
+        tripRequestId: request.id,
+        status: TripRequestStatus.EXPIRED,
+        reason: 'no_driver_accepted',
+      }),
+    );
+    expect(notificationService.sendNotificationToUser).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({ type: 'trip_request_driver_overdue' }),
+    );
   });
 
   it('expires pending and offers-received requests after twelve hours unless a driver was accepted', async () => {
