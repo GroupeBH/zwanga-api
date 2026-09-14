@@ -130,7 +130,7 @@ export class TripRequest {
   tripId: string | null; // ID du trip créé à partir de cette demande
 
   @Column({ type: 'boolean', default: false })
-  expirationNotificationSent: boolean; // Notification du délai de douze heures envoyée
+  expirationNotificationSent: boolean; // Rappel avant l'expiration de la demande déjà envoyé
 
   @Column({ type: 'timestamptz', nullable: true })
   driverPickupOverdueNotifiedAt: Date | null; // Notification envoyée lorsque le conducteur sélectionné dépasse la plage de prise en charge

@@ -6,7 +6,6 @@ import {
   IsOptional,
   IsEnum,
   Min,
-  Max,
   IsArray,
   ArrayMinSize,
   ArrayMaxSize,
@@ -91,16 +90,12 @@ export class CreateTripRequestDto {
     required: false,
     default: 1,
     minimum: 1,
-    maximum: 2,
-    description: 'Nombre de places nécessaires (optionnel, 1 place par défaut)',
-    example: 2,
+    description:
+      'Nombre de places nécessaires (1 par défaut). Jusqu’à 2 sans KYC ; au-delà, le KYC du passager doit être approuvé et la capacité du véhicule respectée.',
+    example: 3,
   })
   @IsNumber()
   @Min(1)
-  @Max(2, {
-    message:
-      'Pour des raisons de sécurité du conducteur, vous ne pouvez pas réserver plus de 2 places par trajet',
-  })
   @IsOptional()
   numberOfSeats?: number;
 
@@ -214,13 +209,11 @@ export class RecommendTripRequestPriceDto {
   @ApiProperty({
     required: false,
     minimum: 1,
-    maximum: 2,
     description: 'Nombre de passagers pour calculer le total recommande',
-    example: 2,
+    example: 3,
   })
   @IsNumber()
   @Min(1)
-  @Max(2)
   @IsOptional()
   numberOfSeats?: number;
 
@@ -527,16 +520,12 @@ export class UpdateTripRequestDto {
   @ApiProperty({
     required: false,
     minimum: 1,
-    maximum: 2,
-    description: 'Nombre de places nécessaires',
-    example: 2,
+    description:
+      'Nombre de places nécessaires. Jusqu’à 2 sans KYC ; au-delà, le KYC du passager doit être approuvé et la capacité du véhicule respectée.',
+    example: 3,
   })
   @IsNumber()
   @Min(1)
-  @Max(2, {
-    message:
-      'Pour des raisons de sécurité du conducteur, vous ne pouvez pas réserver plus de 2 places par trajet',
-  })
   @IsOptional()
   numberOfSeats?: number;
 

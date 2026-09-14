@@ -40,7 +40,7 @@ export class BookingsController {
   @ApiOperation({
     summary: 'Create a new booking',
     description:
-      "La reservation d'un trajet par un passager ne requiert pas un KYC approuve. Seul un compte suspendu est bloque via l'authentification.",
+      "La réservation de 1 ou 2 places ne requiert pas de KYC approuvé, sauf si le conducteur l'exige. Au-delà de 2 places, le KYC du passager doit être approuvé.",
   })
   async create(@Request() req, @Body() createBookingDto: CreateBookingDto) {
     return this.bookingsService.create(req.user.userId, createBookingDto);
@@ -325,4 +325,3 @@ export class BookingsController {
     return this.bookingsService.getPassengersLocations(tripId, req.user.userId);
   }
 }
-

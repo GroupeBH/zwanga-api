@@ -35,7 +35,7 @@ export class TripRequestsController {
   @ApiOperation({
     summary: 'Create a trip request',
     description:
-      "Permet a un passager de creer une demande de trajet avec un delai pour le depart. Le KYC passager n'est pas requis pour cette action. Les drivers pourront ensuite faire des offres.",
+      'Permet à un passager de créer une demande de trajet avec un délai pour le départ. Le KYC approuvé est requis uniquement au-delà de 2 places. Les drivers pourront ensuite faire des offres.',
   })
   // @ApiBearerAuth()
   async create(

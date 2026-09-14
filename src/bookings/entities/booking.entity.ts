@@ -163,6 +163,9 @@ export class Booking {
   @Column({ type: 'timestamp', nullable: true })
   fareAdjustedAt: Date | null;
 
+  @Column({ type: 'boolean', default: false })
+  interruptionFareLocked: boolean;
+
   @Column({ type: 'varchar', length: 8, default: 'CDF' })
   paymentCurrency: string;
 

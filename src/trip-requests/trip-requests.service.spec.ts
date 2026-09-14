@@ -175,7 +175,7 @@ describe('TripRequestsService recommended price', () => {
 });
 
 describe('TripRequestsService optional seat count', () => {
-  it('stores one seat when creation omits numberOfSeats', async () => {
+  it.each([undefined, 0, 1945, 2000, 6000])('stores one seat and preserves the confirmed price %s', async (confirmedPrice) => {
     const tripRequestRepository = {
       create: jest.fn().mockImplementation((request) => request),
       save: jest.fn().mockImplementation(async (request) => ({
@@ -206,7 +206,7 @@ describe('TripRequestsService optional seat count', () => {
         type: 'Point',
         coordinates: [15.3136, -4.3073],
       });
-    jest
+    const calculatePrice = jest
       .spyOn(service as any, 'calculateRecommendedPricePerSeat')
       .mockResolvedValue(2500);
     jest
@@ -223,11 +223,140 @@ describe('TripRequestsService optional seat count', () => {
       departureDateMin: new Date(now + 30 * 60 * 1000).toISOString(),
       departureDateMax: new Date(now + 90 * 60 * 1000).toISOString(),
       vehicleType: VehicleType.CAR,
+      ...(confirmedPrice !== undefined ? { maxPricePerSeat: confirmedPrice } : {}),
     });
 
     expect(tripRequestRepository.create).toHaveBeenCalledWith(
-      expect.objectContaining({ numberOfSeats: 1 }),
+      expect.objectContaining({ numberOfSeats: 1, maxPricePerSeat: confirmedPrice ?? 2500 }),
     );
+    expect(calculatePrice).toHaveBeenCalledTimes(confirmedPrice === undefined ? 1 : 0);
+  });
+});
+
+describe('TripRequestsService KYC seat limit', () => {
+  const buildCreateService = (kycStatus: KycStatus) => {
+    const tripRequestRepository = {
+      findOne: jest.fn(),
+      create: jest.fn().mockImplementation((request) => request),
+      save: jest.fn().mockImplementation(async (request) => ({
+        ...request,
+        id: 'request-extra-seats',
+      })),
+    };
+    const userRepository = {
+      findOne: jest.fn().mockResolvedValue({
+        id: 'passenger-1',
+        kycDocuments: [{ status: kycStatus }],
+      }),
+    };
+    const service = new TripRequestsService(
+      tripRequestRepository as any,
+      {} as any,
+      userRepository as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+    );
+
+    return { service, tripRequestRepository };
+  };
+
+  it('allows an approved passenger to request three seats', async () => {
+    const { service, tripRequestRepository } = buildCreateService(
+      KycStatus.APPROVED,
+    );
+    jest
+      .spyOn(service as any, 'resolvePointFromCoordinatesOrAddress')
+      .mockResolvedValue({ type: 'Point', coordinates: [15.3, -4.3] });
+    jest
+      .spyOn(service as any, 'calculateRecommendedPricePerSeat')
+      .mockResolvedValue(2500);
+    jest
+      .spyOn(service as any, 'notifyDriversAboutTripRequest')
+      .mockResolvedValue(undefined);
+    jest
+      .spyOn(service, 'findOne')
+      .mockResolvedValue({ id: 'request-extra-seats' } as any);
+    const now = Date.now();
+
+    await service.create('passenger-1', {
+      departureLocation: 'Gombe',
+      arrivalLocation: 'Limete',
+      departureDateMin: new Date(now + 30 * 60 * 1000).toISOString(),
+      departureDateMax: new Date(now + 90 * 60 * 1000).toISOString(),
+      vehicleType: VehicleType.MOTORCYCLE_THREE_WHEELS,
+      numberOfSeats: 3,
+    });
+
+    expect(tripRequestRepository.create).toHaveBeenCalledWith(
+      expect.objectContaining({ numberOfSeats: 3 }),
+    );
+  });
+
+  it('allows an approved passenger to update a request to three seats', async () => {
+    const { service, tripRequestRepository } = buildCreateService(
+      KycStatus.APPROVED,
+    );
+    const tripRequest = {
+      id: 'request-to-update',
+      passengerId: 'passenger-1',
+      departureLocation: 'Gombe',
+      arrivalLocation: 'Limete',
+      departurePoint: null,
+      arrivalPoint: null,
+      departureDateMin: new Date(Date.now() + 30 * 60 * 1000),
+      departureDateMax: new Date(Date.now() + 90 * 60 * 1000),
+      numberOfSeats: 1,
+      vehicleType: VehicleType.CAR,
+      status: TripRequestStatus.PENDING,
+      driverOffers: [],
+    };
+    tripRequestRepository.findOne.mockResolvedValue(tripRequest);
+    jest
+      .spyOn(service, 'findOne')
+      .mockResolvedValue({ id: tripRequest.id, numberOfSeats: 3 } as any);
+
+    await service.update('passenger-1', tripRequest.id, {
+      numberOfSeats: 3,
+    });
+
+    expect(tripRequest.numberOfSeats).toBe(3);
+    expect(tripRequestRepository.save).toHaveBeenCalledWith(
+      expect.objectContaining({ id: tripRequest.id, numberOfSeats: 3 }),
+    );
+  });
+
+  it('requires an approved KYC to request more than two seats', async () => {
+    const { service, tripRequestRepository } = buildCreateService(
+      KycStatus.PENDING,
+    );
+    const now = Date.now();
+
+    await expect(
+      service.create('passenger-1', {
+        departureLocation: 'Gombe',
+        arrivalLocation: 'Limete',
+        departureDateMin: new Date(now + 30 * 60 * 1000).toISOString(),
+        departureDateMax: new Date(now + 90 * 60 * 1000).toISOString(),
+        vehicleType: VehicleType.CAR,
+        numberOfSeats: 3,
+      }),
+    ).rejects.toMatchObject({
+      response: expect.objectContaining({
+        code: 'PASSENGER_KYC_REQUIRED',
+        action: 'complete_kyc',
+        reason: 'extra_seats',
+        maximumSeatsWithoutKyc: 2,
+      }),
+    });
+
+    expect(tripRequestRepository.create).not.toHaveBeenCalled();
   });
 });
 
@@ -277,7 +406,7 @@ describe('TripRequestsService vehicle type update', () => {
     return { service, tripRequest, tripRequestRepository };
   };
 
-  it('changes the vehicle type and recalculates the recommendation when no custom ceiling is sent', async () => {
+  it('changes the vehicle type without recalculating the confirmed price when no new price is sent', async () => {
     const { service, tripRequest, tripRequestRepository } = buildService();
     const calculateRecommendedPricePerSeat = jest
       .spyOn(service as any, 'calculateRecommendedPricePerSeat')
@@ -287,15 +416,27 @@ describe('TripRequestsService vehicle type update', () => {
       vehicleType: VehicleType.MOTORCYCLE_TWO_WHEELS,
     });
 
-    expect(calculateRecommendedPricePerSeat).toHaveBeenCalledWith(
-      tripRequest.departurePoint,
-      tripRequest.arrivalPoint,
-      VehicleType.MOTORCYCLE_TWO_WHEELS,
-      'trip request request-1 update',
-    );
+    expect(calculateRecommendedPricePerSeat).not.toHaveBeenCalled();
     expect(tripRequest.vehicleType).toBe(VehicleType.MOTORCYCLE_TWO_WHEELS);
-    expect(tripRequest.maxPricePerSeat).toBe(5000);
+    expect(tripRequest.maxPricePerSeat).toBe(2500);
     expect(tripRequestRepository.save).toHaveBeenCalledWith(tripRequest);
+  });
+
+  it.each([
+    { departureReference: 'Gare centrale' },
+    { arrivalLocation: 'Lemba' },
+    { departureCoordinates: [15.32, -4.32] },
+    { maxPricePerSeat: null },
+  ])('preserves the confirmed price for a non-price change: %j', async (payload) => {
+    const { service, tripRequest } = buildService();
+    jest.spyOn(service as any, 'resolvePointFromCoordinatesOrAddress')
+      .mockResolvedValue(tripRequest.departurePoint);
+    const calculatePrice = jest.spyOn(service as any, 'calculateRecommendedPricePerSeat');
+
+    await service.update('passenger-1', 'request-1', payload as any);
+
+    expect(tripRequest.maxPricePerSeat).toBe(2500);
+    expect(calculatePrice).not.toHaveBeenCalled();
   });
 
   it('keeps the passenger custom ceiling when it is sent with the new vehicle type', async () => {
@@ -458,14 +599,14 @@ describe('TripRequestsService unaccepted request expiration', () => {
       {} as any,
     );
 
-  it('keeps an old request visible until twelve hours after the end of its departure window', async () => {
+  it('keeps an old unaccepted request visible until thirty seconds after its departure window', async () => {
     const now = Date.now();
     const request = {
       id: 'request-recent',
       status: TripRequestStatus.PENDING,
       createdAt: new Date(now - 30 * 24 * 60 * 60 * 1000),
       departureDateMin: new Date(now - 13 * 60 * 60 * 1000),
-      departureDateMax: new Date(now - (12 * 60 - 1) * 60 * 1000),
+      departureDateMax: new Date(now + 10_000),
       driverOffers: [],
     };
     const tripRequestRepository = {
@@ -541,7 +682,7 @@ describe('TripRequestsService unaccepted request expiration', () => {
     );
   });
 
-  it('expires pending and offers-received requests after twelve hours unless a driver was accepted', async () => {
+  it('expires unaccepted requests after thirty seconds and keeps accepted requests for two hours', async () => {
     const now = Date.now();
     const unansweredRequest = {
       id: 'request-unanswered',
@@ -564,7 +705,7 @@ describe('TripRequestsService unaccepted request expiration', () => {
       status: TripRequestStatus.OFFERS_RECEIVED,
       createdAt: new Date(now - 30 * 24 * 60 * 60 * 1000),
       departureDateMin: new Date(now - 30 * 24 * 60 * 60 * 1000),
-      departureDateMax: new Date(now - 29 * 24 * 60 * 60 * 1000),
+      departureDateMax: new Date(now - 60 * 60 * 1000),
       driverOffers: [{ id: 'offer-2', status: DriverOfferStatus.ACCEPTED }],
     };
     const freshOfferRequest = {
@@ -572,7 +713,7 @@ describe('TripRequestsService unaccepted request expiration', () => {
       status: TripRequestStatus.OFFERS_RECEIVED,
       createdAt: new Date(now - 30 * 24 * 60 * 60 * 1000),
       departureDateMin: new Date(now - 2 * 60 * 60 * 1000),
-      departureDateMax: new Date(now - 60 * 60 * 1000),
+      departureDateMax: new Date(now + 10_000),
       driverOffers: [{ id: 'offer-3', status: DriverOfferStatus.PENDING }],
     };
     const tripRequestRepository = {
@@ -621,7 +762,7 @@ describe('TripRequestsService unaccepted request expiration', () => {
     );
   });
 
-  it('rejects a driver response once the twelve-hour deadline has passed', async () => {
+  it('rejects a driver response once the thirty-second deadline has passed', async () => {
     const now = Date.now();
     const tripRequest = {
       id: 'request-expired',

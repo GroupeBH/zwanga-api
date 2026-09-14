@@ -24,6 +24,8 @@ import {
 } from './dto/trip.dto';
 import {
   ConfirmDriverTripInterruptionDto,
+  DriverInterruptionFareQueryDto,
+  DriverInterruptionDecisionDto,
   RejectTripInterruptionDto,
   RequestTripInterruptionDto,
 } from './dto/trip-interruption.dto';
@@ -253,6 +255,20 @@ export class TripsController {
   @ApiOperation({ summary: 'Pause/interrupt an active trip' })
   async pauseTrip(@Request() req, @Param('id') id: string) {
     return this.tripsService.pauseTrip(id, req.user.userId);
+  }
+
+  @Get(':id/interruption-request/fare')
+  @Auth()
+  @SensitiveThrottle(20, 60000)
+  async interruptionFare(@Param('id') id: string, @Request() req, @Query() dto: DriverInterruptionFareQueryDto) {
+    return this.tripsService.getDriverInterruptionFare(id, req.user.userId, dto);
+  }
+
+  @Put(':id/interruption-request/decision')
+  @Auth()
+  @SensitiveThrottle(20, 60000)
+  async interruptionDecision(@Param('id') id: string, @Request() req, @Body() dto: DriverInterruptionDecisionDto) {
+    return this.tripsService.decideDriverInterruption(id, req.user.userId, dto);
   }
 
   @Post(':id/interruption-request')

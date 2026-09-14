@@ -32,6 +32,7 @@ import {
   TripInterruptionStatus,
 } from '../trips/entities/trip-interruption.entity';
 import { RequestTripInterruptionDto } from '../trips/dto/trip-interruption.dto';
+import { calculateInterruptionFare, InterruptionFareQuote } from './interruption-fare';
 import { User } from '../users/entities/user.entity';
 import { KycStatus } from '../users/entities/kyc-document.entity';
 import {
@@ -193,7 +194,7 @@ export class BookingsService {
   private readonly AUTO_TRIP_DESTINATION_REACHED_THRESHOLD_METERS = 25;
   private readonly AUTO_TRIP_DESTINATION_PASSED_GRACE_METERS = 0;
   private readonly AUTO_TRIP_DESTINATION_COMPLETION_DELAY_MS = 10 * 60 * 1000;
-  private readonly MAX_SEATS_PER_PASSENGER = 2;
+  private readonly MAX_SEATS_WITHOUT_APPROVED_KYC = 2;
   private readonly BOOKING_RELATED_ENTITY_TYPE = 'booking';
   private readonly DEFAULT_TRIP_PAYMENT_CURRENCY = 'CDF';
   private readonly DEFAULT_FIRST_TRIP_SUBSIDY_ENABLED = true;
@@ -722,6 +723,28 @@ export class BookingsService {
     );
   }
 
+  private async ensurePassengerKycForExtraSeats(
+    passengerId: string,
+    numberOfSeats: number,
+  ): Promise<void> {
+    if (numberOfSeats <= this.MAX_SEATS_WITHOUT_APPROVED_KYC) {
+      return;
+    }
+
+    if (await this.hasApprovedPassengerKyc(passengerId)) {
+      return;
+    }
+
+    throw new BadRequestException({
+      error: 'KYC passager requis',
+      code: 'PASSENGER_KYC_REQUIRED',
+      message: `Pour réserver plus de ${this.MAX_SEATS_WITHOUT_APPROVED_KYC} places, votre KYC doit être approuvé.`,
+      action: 'complete_kyc',
+      reason: 'extra_seats',
+      maximumSeatsWithoutKyc: this.MAX_SEATS_WITHOUT_APPROVED_KYC,
+    });
+  }
+
   private async ensurePassengerKycApprovedForTrip(
     trip: Pick<Trip, 'id' | 'requiresPassengerKyc'> | null | undefined,
     passengerId: string,
@@ -1098,11 +1121,10 @@ export class BookingsService {
       throw new BadRequestException('Le nombre de places doit être au moins 1');
     }
 
-    if (createBookingDto.numberOfSeats > this.MAX_SEATS_PER_PASSENGER) {
-      throw new BadRequestException(
-        `Pour des raisons de securite du conducteur, vous ne pouvez pas reserver plus de ${this.MAX_SEATS_PER_PASSENGER} places par trajet`,
-      );
-    }
+    await this.ensurePassengerKycForExtraSeats(
+      passengerId,
+      createBookingDto.numberOfSeats,
+    );
 
     const trip = await this.tripRepository.findOne({
       where: { id: createBookingDto.tripId },
@@ -1444,7 +1466,7 @@ export class BookingsService {
         ? await this.driverTripInterruptionRepository.find({
             where: {
               tripId: In(tripIds),
-              status: TripInterruptionStatus.PENDING,
+              status: In([TripInterruptionStatus.PENDING, TripInterruptionStatus.CONFIRMED]),
             },
             relations: ['confirmations', 'confirmations.passenger'],
             order: { createdAt: 'DESC' },
@@ -1671,6 +1693,67 @@ export class BookingsService {
     );
 
     return this.findOne(booking.id);
+  }
+
+  async quoteDriverInterruptionFare(bookingId: string, location: Point | null) {
+    const booking = await this.bookingRepository.findOne({ where: { id: bookingId }, relations: ['trip'] });
+    if (!booking || booking.status !== BookingStatus.ACCEPTED || !this.hasBookingBeenPickedUpForRideProgress(booking)) {
+      throw new BadRequestException('Cette réservation ne peut plus être interrompue.');
+    }
+    const origin = booking.passengerOriginPoint ?? booking.trip.departurePoint;
+    const destination = booking.passengerDestinationPoint ?? booking.trip.arrivalPoint;
+    if (!origin || !destination || !location) throw new BadRequestException("Le montant ne peut pas encore être calculé : la position d'arrêt est indisponible. Vous pouvez attendre et réessayer.");
+    const [planned, travelled] = await Promise.all([
+      this.calculateRouteDistanceMeters(origin, destination, `interruption ${bookingId}: planned`),
+      this.calculateRouteDistanceMeters(origin, location, `interruption ${bookingId}: travelled`),
+    ]);
+    if (planned === null || planned <= 0 || travelled === null || travelled < 0) {
+      throw new BadRequestException('La distance est indisponible. Attendez quelques instants puis réessayez.');
+    }
+    const quote = calculateInterruptionFare(this.resolveBookingGrossPaymentAmount(booking, booking.trip), Number(booking.paymentAmount ?? this.resolveBookingPaymentAmount(booking, booking.trip)), planned, travelled);
+    return { ...quote, prepaidAmount: booking.paymentStatus === BookingPaymentStatus.SUCCEEDED ? quote.originalPassengerAmount : 0 };
+  }
+
+  async applyDriverInterruptionFare(booking: Booking, quote: InterruptionFareQuote, manager: EntityManager) {
+    if (booking.paymentTransactionId && [BookingPaymentStatus.PENDING, BookingPaymentStatus.INITIATED].includes(booking.paymentStatus)) {
+      throw new BadRequestException('Un paiement est déjà en cours. Attendez sa confirmation avant de terminer cette réservation.');
+    }
+    // Record what was actually prepaid at acceptance, not a later payment of the reduced fare.
+    quote.prepaidAmount = booking.paymentStatus === BookingPaymentStatus.SUCCEEDED ? Number(booking.paymentAmount) : 0;
+    if (Number(booking.paymentAmount) !== quote.originalPassengerAmount || Number(booking.grossPaymentAmount ?? booking.paymentAmount) !== quote.originalAmount) {
+      throw new BadRequestException('Le montant de la réservation a changé. Contactez notre assistance avant de payer.');
+    }
+    const now = new Date();
+    booking.originalPaymentAmount = quote.originalAmount;
+    booking.grossPaymentAmount = quote.finalAmount;
+    booking.paymentAmount = quote.passengerAmount;
+    booking.paymentCurrency = quote.currency;
+    booking.zwangaSubsidyAmount = this.roundMoney(quote.finalAmount - quote.passengerAmount);
+    booking.passengerPaymentRate = quote.finalAmount > 0 ? quote.passengerAmount / quote.finalAmount : null;
+    booking.plannedDistanceMeters = quote.plannedDistanceMeters;
+    booking.travelledDistanceMeters = quote.travelledDistanceMeters;
+    booking.pricePerKilometer = this.roundMoney(quote.originalAmount / (quote.plannedDistanceMeters / 1000));
+    booking.fareAdjustmentAmount = this.roundMoney(quote.originalAmount - quote.finalAmount);
+    booking.fareAdjustedAt = now;
+    booking.interruptionFareLocked = true;
+    booking.droppedOff = true;
+    booking.droppedOffAt = now;
+    booking.droppedOffConfirmedByPassenger = true;
+    booking.droppedOffConfirmedAt = now;
+    booking.status = BookingStatus.COMPLETED;
+    await manager.save(Booking, booking);
+  }
+
+  async settleDriverInterruptionFare(bookingId: string, prepaidAmount: number) {
+    const booking = await this.bookingRepository.findOne({ where: { id: bookingId }, relations: ['trip', 'trip.driver', 'passenger'] });
+    if (!booking || !booking.interruptionFareLocked) throw new BadRequestException("Le montant de l'arrêt n'a pas été confirmé.");
+    const refund = this.roundMoney(Math.max(0, prepaidAmount - Number(booking.paymentAmount)));
+    if (refund > 0 && booking.paymentStatus === BookingPaymentStatus.SUCCEEDED && [TripPaymentMode.ELECTRONIC, TripPaymentMode.POINTS].includes(booking.paymentMode)) {
+      await this.walletService.creditBookingFareAdjustment(booking, refund);
+    }
+    const saved = await this.settlePaymentAfterArrival(booking);
+    await this.invalidateBookingCaches(saved);
+    return saved;
   }
 
   async completeBookingByTripInterruption(
@@ -2800,6 +2883,7 @@ export class BookingsService {
   }
 
   private resolveBookingPaymentAmount(booking: Booking, trip: Trip): number {
+    if (booking.interruptionFareLocked) return this.roundMoney(Number(booking.paymentAmount));
     const grossAmount = this.resolveBookingGrossPaymentAmount(booking, trip);
     if (
       this.isFirstTripSubsidyReserved(booking) &&
@@ -2849,6 +2933,9 @@ export class BookingsService {
     trip: Trip,
     manager?: EntityManager,
   ): Promise<BookingFareBreakdown> {
+    if (booking.interruptionFareLocked) {
+      return this.buildBookingFareBreakdown(booking, Number(booking.grossPaymentAmount), Number(booking.paymentAmount));
+    }
     const grossAmount = this.resolveBookingGrossPaymentAmount(booking, trip);
     booking.grossPaymentAmount = grossAmount;
 
@@ -3228,20 +3315,21 @@ export class BookingsService {
     booking.paymentReference = payment.reference;
     booking.paymentTransactionId = payment.id;
     booking.grossPaymentAmount = this.roundMoney(Math.max(0, grossAmount));
-    booking.paymentAmount = Number(
-      payment.amount ?? booking.paymentAmount ?? 0,
-    );
+    // A repeated callback for a prepaid original fare must not overwrite an agreed interruption fare.
+    if (!booking.interruptionFareLocked) {
+      booking.paymentAmount = Number(payment.amount ?? booking.paymentAmount ?? 0);
+    }
     if (this.isFirstTripSubsidyReserved(booking)) {
       booking.zwangaSubsidyAmount = this.roundMoney(
         Math.max(
           0,
-          Number(booking.grossPaymentAmount ?? 0) - booking.paymentAmount,
+          Number(booking.grossPaymentAmount ?? 0) - Number(booking.paymentAmount ?? 0),
         ),
       );
       booking.passengerPaymentRate =
         booking.passengerPaymentRate ??
         (booking.grossPaymentAmount && booking.grossPaymentAmount > 0
-          ? this.roundMoney(booking.paymentAmount / booking.grossPaymentAmount)
+          ? this.roundMoney(Number(booking.paymentAmount ?? 0) / booking.grossPaymentAmount)
           : this.getFirstTripPassengerPaymentRate());
     }
     booking.paymentCurrency =

@@ -7,6 +7,7 @@ import {
   IsOptional,
   IsString,
   IsUUID,
+  IsIn,
   Max,
   Min,
   ValidateNested,
@@ -57,6 +58,23 @@ export class ConfirmDriverTripInterruptionDto {
   @IsUUID()
   @IsOptional()
   bookingId?: string;
+}
+
+export class DriverInterruptionFareQueryDto {
+  @IsUUID()
+  requestId: string;
+
+  @IsUUID()
+  bookingId: string;
+}
+
+export class DriverInterruptionDecisionDto extends DriverInterruptionFareQueryDto {
+  @IsIn(['wait', 'stop'])
+  decision: 'wait' | 'stop';
+
+  @IsOptional()
+  @IsUUID()
+  quoteId?: string;
 }
 
 export class RejectTripInterruptionDto {

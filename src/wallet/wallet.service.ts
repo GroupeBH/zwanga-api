@@ -889,6 +889,15 @@ export class WalletService {
     }
 
     return this.dataSource.transaction(async (manager) => {
+      // Serialize fare-adjustment retries even when this passenger has no wallet yet.
+      // All callers lock the booking before the wallet, and recheck the ledger inside the transaction.
+      if (input.type === WalletLedgerEntryType.BOOKING_FARE_ADJUSTMENT && input.relatedEntityId) {
+        await manager.findOne(Booking, { where: { id: input.relatedEntityId }, lock: { mode: 'pessimistic_write' } });
+        const existing = await manager.findOne(WalletLedgerEntry, {
+          where: { userId: input.userId, type: input.type, relatedEntityType: input.relatedEntityType!, relatedEntityId: input.relatedEntityId },
+        });
+        if (existing) return existing;
+      }
       let account = await manager.findOne(WalletAccount, {
         where: { userId: input.userId, type: WalletAccountType.POINTS },
         lock: { mode: 'pessimistic_write' },
