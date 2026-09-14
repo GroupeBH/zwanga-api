@@ -439,7 +439,7 @@ describe('WalletService', () => {
   });
 
   it('credits an interrupted-trip fare difference as reusable points', async () => {
-    manager.findOne.mockResolvedValue({ ...account, balance: 1000 });
+    manager.findOne.mockImplementation(async (entity) => entity === WalletLedgerEntry ? null : { ...account, balance: 1000 });
 
     await service.creditBookingFareAdjustment(
       {
@@ -484,6 +484,15 @@ describe('WalletService', () => {
 
     expect(result).toBe(existingAdjustment);
     expect(dataSource.transaction).not.toHaveBeenCalled();
+  });
+
+  it('rechecks interruption refunds under a lock when concurrent retries passed the first check', async () => {
+    const existing = { id: 'refund', amount: 15 };
+    ledgerRepository.findOne.mockResolvedValue(null);
+    manager.findOne.mockImplementation(async (entity) => entity === WalletLedgerEntry ? existing : { id: 'booking-1' });
+    const result = await service.creditBookingFareAdjustment({ id: 'booking-1', passengerId: 'passenger-1' } as any, 1500);
+    expect(result).toBe(existing);
+    expect(manager.save).not.toHaveBeenCalled();
   });
 
   it('pays a subscription with points once', async () => {

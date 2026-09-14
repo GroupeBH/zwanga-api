@@ -68,16 +68,11 @@ export class CreateBookingDto {
 
   @ApiProperty({
     minimum: 1,
-    maximum: 2,
     description:
-      'Nombre de places à réserver. Maximum 2 places par réservation pour des raisons de sécurité du conducteur.',
+      'Nombre de places à réserver. Jusqu’à 2 sans KYC ; au-delà, le KYC du passager doit être approuvé et les places doivent être disponibles.',
   })
   @IsNumber()
   @Min(1, { message: 'Le nombre de places doit être au moins 1' })
-  @Max(2, {
-    message:
-      'Pour des raisons de sécurité du conducteur, vous ne pouvez pas réserver plus de 2 places par trajet',
-  })
   @IsNotEmpty()
   numberOfSeats: number;
 

@@ -97,6 +97,49 @@ describe('TripsService daily trip publication quota', () => {
     return queryBuilder;
   }
 
+  it.each([
+    { pricePerSeat: 3500 },
+    { pricePerSeat: 0 },
+    { isFree: true },
+    { pricePerSeat: 2000, isFree: true },
+    { pricePerSeat: null },
+    { pricePerSeat: 3500, status: TripStatus.ACTIVE },
+  ])('rejects a linked-trip price change before any write: %j', async (payload) => {
+    const trip = { id: 'trip-1', driverId: 'driver-1', tripRequestId: 'request-1',
+      pricePerSeat: '2000.00', isFree: false, status: TripStatus.PENDING };
+    tripRepository.findOne.mockResolvedValue(trip);
+    const startTrip = jest.spyOn(service, 'startTrip');
+
+    await expect(service.update(trip.id, trip.driverId, payload)).rejects.toMatchObject({
+      response: expect.objectContaining({ code: 'TRIP_REQUEST_PRICE_LOCKED' }),
+    });
+    expect(startTrip).not.toHaveBeenCalled();
+    expect(tripRepository.save).not.toHaveBeenCalled();
+    expect(tripRepository.update).not.toHaveBeenCalled();
+    expect(trip.pricePerSeat).toBe('2000.00');
+  });
+
+  it.each([undefined, 2000])('allows other linked-trip edits with the same or omitted price: %s', async (pricePerSeat) => {
+    const trip = { id: 'trip-1', driverId: 'driver-1', tripRequestId: 'request-1',
+      pricePerSeat: '2000.00', isFree: false, status: TripStatus.PENDING, bookings: [] };
+    tripRepository.findOne.mockResolvedValue(trip);
+
+    await service.update(trip.id, trip.driverId, { description: 'Point de rendez-vous confirmé',
+      ...(pricePerSeat !== undefined ? { pricePerSeat, isFree: false } : {}) });
+
+    expect(Number(trip.pricePerSeat)).toBe(2000);
+    expect(tripRepository.save).toHaveBeenCalledWith(expect.objectContaining({ description: 'Point de rendez-vous confirmé' }));
+  });
+
+  it('keeps ordinary published-trip pricing editable', async () => {
+    const trip = { id: 'trip-1', driverId: 'driver-1', tripRequestId: null,
+      pricePerSeat: 2000, isFree: false, status: TripStatus.PENDING, bookings: [] };
+    tripRepository.findOne.mockResolvedValue(trip);
+    await service.update(trip.id, trip.driverId, { pricePerSeat: 3500 });
+    expect(trip.pricePerSeat).toBe(3500);
+    expect(tripRepository.save).toHaveBeenCalledWith(trip);
+  });
+
   it('persists driver samples with a timestamp compare-and-set shared by REST and Socket.IO', async () => {
     const activeTrip = {
       id: 'trip-1',
@@ -738,99 +781,21 @@ describe('TripsService started trip ETA expiration', () => {
   });
 });
 
-describe('TripsService interrupted trip fare location', () => {
-  it('uses the driver interruption point for every onboard booking', async () => {
-    const interruptionPoint = {
-      type: 'Point' as const,
-      coordinates: [15.3063, -4.365],
-    };
-    const trip = {
-      id: 'trip-1',
-      status: TripStatus.ACTIVE,
-      totalSeats: 3,
-      availableSeats: 0,
-      currentLocation: {
-        type: 'Point' as const,
-        coordinates: [15.3, -4.36],
-      },
-      bookings: [],
-    };
-    const interruptionRequest = {
-      id: 'request-1',
-      tripId: 'trip-1',
-      requestedLocation: interruptionPoint,
-      trip,
-      confirmations: [
-        {
-          bookingId: 'booking-1',
-          status: 'confirmed',
-        },
-        {
-          bookingId: 'booking-2',
-          status: 'confirmed',
-        },
-      ],
-    };
-    const tripRepository = {
-      findOne: jest.fn().mockResolvedValue(trip),
-      save: jest.fn().mockImplementation(async (payload) => payload),
-    };
-    const driverInterruptionRepository = {
-      findOne: jest.fn().mockResolvedValue(interruptionRequest),
-      save: jest.fn().mockImplementation(async (payload) => payload),
-    };
-    const bookingsService = {
-      completeBookingByTripInterruption: jest.fn().mockResolvedValue(undefined),
-    };
-    const service: any = new TripsService(
-      tripRepository as any,
-      {} as any,
-      {} as any,
-      {} as any,
-      {} as any,
-      {} as any,
-      {} as any,
-      {} as any,
-      {} as any,
-      driverInterruptionRepository as any,
-      {} as any,
-      { del: jest.fn() } as any,
-      {} as any,
-      {} as any,
-      {} as any,
-      {} as any,
-      {} as any,
-      {} as any,
-      {} as any,
-      bookingsService as any,
-      { notifyDriverTripRevenue: jest.fn().mockResolvedValue(null) } as any,
-    );
-    jest
-      .spyOn(service, 'calculateAvailableSeatsAfterInterruption')
-      .mockReturnValue(3);
-    jest
-      .spyOn(service, 'invalidateDriverInterruptionCaches')
-      .mockResolvedValue(undefined);
-    jest
-      .spyOn(service, 'notifyDriverAboutDriverInterruptionCompleted')
-      .mockResolvedValue(undefined);
-    jest
-      .spyOn(service, 'notifyPassengersAboutDriverInterruptionCompleted')
-      .mockResolvedValue(undefined);
-
-    await service.finalizeDriverTripInterruption({ id: 'request-1' });
-
-    expect(
-      bookingsService.completeBookingByTripInterruption,
-    ).toHaveBeenNthCalledWith(1, 'booking-1', interruptionPoint);
-    expect(
-      bookingsService.completeBookingByTripInterruption,
-    ).toHaveBeenNthCalledWith(2, 'booking-2', interruptionPoint);
-    expect(tripRepository.save).toHaveBeenCalledWith(
-      expect.objectContaining({
-        status: TripStatus.PENDING,
-        availableSeats: 3,
-      }),
-    );
+describe('TripsService interruption confirmation', () => {
+  it('notifies passengers about their choice after the atomic pause, without completing bookings', async () => {
+    const service: any = Object.create(TripsService.prototype);
+    const request = { id: 'request', trip: { id: 'trip', status: TripStatus.PENDING } };
+    const workflow = { respond: jest.fn().mockResolvedValue({ request, confirmation: {}, paused: true }) };
+    jest.spyOn(service, 'driverInterruptionWorkflow', 'get').mockReturnValue(workflow);
+    service.driverTripInterruptionRepository = { findOneOrFail: jest.fn().mockResolvedValue(request) };
+    service.notifyDriverAboutDriverInterruptionCompleted = jest.fn();
+    service.notifyPassengersAboutDriverInterruptionCompleted = jest.fn();
+    service.invalidateDriverInterruptionCaches = jest.fn();
+    service.findOne = jest.fn().mockResolvedValue(request.trip);
+    service.bookingsService = { completeBookingByTripInterruption: jest.fn() };
+    await service.confirmDriverTripInterruption('trip', 'passenger', { bookingId: 'booking' });
+    expect(workflow.respond).toHaveBeenCalledWith('trip', 'passenger', 'booking', true);
+    expect(service.notifyPassengersAboutDriverInterruptionCompleted).toHaveBeenCalledWith(request.trip, request);
+    expect(service.bookingsService.completeBookingByTripInterruption).not.toHaveBeenCalled();
   });
 });

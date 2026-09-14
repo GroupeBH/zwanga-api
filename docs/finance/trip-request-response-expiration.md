@@ -1,153 +1,102 @@
-# FIN-TRIP-004 — Expiration douze heures après la fin de la plage de départ
+# Expiration des demandes selon l'acceptation
 
-Date : 20 août 2026
-Statut : implémenté dans le code
-Remplace : `FIN-TRIP-002`, qui expirait seulement les demandes sans aucune offre après deux heures
+Règle corrigée le 12 septembre 2026. Elle remplace l'ancien délai de douze heures.
 
-## 1. Besoin métier
+## Échéances
 
-Une demande de trajet ne doit pas rester indéfiniment dans la liste publique ou sur l'écran d'accueil. Elle reste ouverte jusqu'à douze heures après la date et l'heure maximales de départ acceptées par le passager. À l'issue de ce délai, elle expire si aucun conducteur n'a été accepté.
+Les deux délais partent de `departureDateMax`, l'heure maximale de départ souhaitée.
 
-Une simple offre conducteur ne prolonge plus la durée de vie de la demande. Cette correction couvre notamment les anciennes demandes `offers_received` qui pouvaient rester visibles pendant plusieurs mois.
+- Sans conducteur accepté : `departureDateMax + 30 secondes`.
+- Avec conducteur accepté : `departureDateMax + 2 heures`.
 
-## 2. Formule
+Exemple pour un départ souhaité au plus tard à 15 h : 15 h 00 min 30 s sans
+acceptation, 17 h avec acceptation. La comparaison est inclusive à l'échéance.
 
-```text
-dateExpiration = departureDateMax + 12 heures
+`createdAt`, `selectedAt`, une nouvelle offre et les rafraîchissements n'ajoutent
+aucun délai. Les dix minutes de mise en avant sur Home sont indépendantes.
 
-expiration =
-  dateCourante >= dateExpiration
-  ET status appartient à {pending, offers_received}
-  ET aucune offre conducteur n'est accepted
-  ET selectedDriverId est null
-  ET tripId est null
-```
+Une acceptation est reconnue par `driver_selected`, `selectedDriverId`,
+`tripId` ou une offre `accepted`. Une offre seulement en attente, rejetée ou
+annulée reste dans le régime des trente secondes.
 
-La comparaison est inclusive : à exactement `departureDateMax + 12 heures`, la demande est expirée avant toute nouvelle réponse ou acceptation.
+## Demande, trajet et historique
 
-`departureDateMin` est la date et l'heure initialement choisies dans le formulaire. `departureDateMax` représente la fin de la marge de flexibilité acceptée par le passager. L'expiration part de `departureDateMax`, et non de `createdAt` ou de `departureDateMin`.
+Seule la demande passe à `expired`. Les liens vers le conducteur, le véhicule,
+les offres et le trajet sont conservés pour l'historique.
 
-## 3. États concernés
+**L'expiration ne supprime ni n'annule aucun trajet, réservation ou paiement.**
+Le suivi d'un trajet démarré reste disponible dans les écrans de trajets.
+Aucun débit, remboursement, crédit ou versement n'est déclenché par ce contrôle.
 
-| État | Après 12 heures | Motif |
-| --- | --- | --- |
-| `pending` | devient `expired` | aucune acceptation |
-| `offers_received` avec offres en attente, rejetées ou annulées | devient `expired` | aucune offre acceptée |
-| `offers_received` avec une offre `accepted` | conservé, puis normalement `driver_selected` | conducteur accepté |
-| `driver_selected` | conservé | demande déjà attribuée |
-| `cancelled` | inchangé | état terminal |
-| `expired` | inchangé | état terminal |
+Les demandes acceptées ne sont plus publiques dès l'acceptation. Le délai de deux
+heures concerne leur présence dans les demandes actives de leurs participants,
+pas une exposition supplémentaire aux autres conducteurs. Le détail et l'historique
+restent accessibles aux personnes autorisées après expiration. La confidentialité
+continue d'utiliser les identifiants du conducteur et du trajet, même avec le statut
+`expired` et sans ancien enregistrement d'offre.
 
-Une nouvelle offre ne donne pas douze heures supplémentaires. L'échéance reste liée à la fin de la plage de départ acceptée, même si la demande a été créée plusieurs jours auparavant.
+## Backend
 
-## 4. Comportement backend
+`expireRequests` applique les échéances lors des lectures de demandes, des
+actions existantes et avant la création d'un trajet depuis une demande acceptée.
+Le cron `markExpiredTripRequests` passe toutes les trente secondes, attend sa
+promesse complète et ne superpose pas deux exécutions dans une même instance.
 
-Le service centralise la règle dans `expireUnacceptedRequests`.
+Les candidats sont filtrés sur `departureDateMax` (index existant), puis la règle
+choisit le délai selon l'acceptation. La mise à jour ne porte que sur le statut de
+la demande et vérifie son statut, son conducteur, son trajet, sa plage de départ
+et son horodatage de modification lus auparavant. La comparaison de `updatedAt`
+conserve le contrôle de version à la précision milliseconde fournie par le pilote
+Postgres à JavaScript ; le stockage Postgres peut avoir des microsecondes.
 
-La vérification est exécutée lors :
+Une acceptation ou un changement d'horaire déjà persisté n'est pas écrasé si ces
+conditions ne correspondent plus. Seules les mises à jour affectant une ligne
+produisent une expiration locale ou une notification. Les notifications partent
+après les écritures, sans appel réseau dans une transaction. Aucun schéma ni index
+n'est modifié, et aucune migration n'est nécessaire.
 
-- de la lecture de la liste publique des demandes ;
-- de la lecture d'une demande particulière ;
-- de la lecture de l'historique du passager ;
-- d'une modification de demande ;
-- de la création, du rejet ou de l'acceptation d'une offre ;
-- de l'acceptation directe d'une demande par un conducteur ;
-- du cron d'expiration exécuté chaque minute.
+La persistance par cron peut arriver au passage suivant ; les lectures appliquent
+la règle immédiatement, sans attendre le cron. La disparition mobile ne dépend
+pas de cette latence.
 
-La liste publique charge les états `pending` et `offers_received`, persiste les expirations échues, puis retire immédiatement les demandes `expired` de la réponse.
+## Notifications
 
-## 5. Nettoyage des anciennes demandes
+Une demande non acceptée conserve sa notification informative d'expiration.
+Une demande acceptée ne reçoit pas de faux message « aucun conducteur accepté »,
+ni de message assimilable à une annulation de son trajet.
 
-Aucune migration de schéma n'est nécessaire. Les anciennes demandes de janvier ou d'une autre période sont traitées automatiquement :
+Le rappel de prise en charge en retard ne vise que les demandes acceptées encore
+dans leur délai de deux heures. L'expiration ne déclenche pas la modale de libération
+du conducteur. Les rappels avant expiration des demandes non acceptées suivent
+désormais la nouvelle échéance.
 
-1. le cron charge les demandes `pending` et `offers_received` dont `departureDateMax` est dépassé d'au moins douze heures ;
-2. les demandes sans conducteur accepté passent à `expired` ;
-3. la lecture de la liste publique applique la même règle sans attendre le prochain cron ;
-4. elles disparaissent du Home tout en restant consultables comme historique du passager.
+## Application
 
-Le traitement est idempotent : une ligne déjà `expired` n'est pas modifiée une seconde fois.
+`features/trip-request/requestExpiration.ts` porte les mêmes constantes et critères.
+Le middleware `store/middleware/tripRequestExpiration.ts` utilise un seul minuteur
+pour les caches RTK Query. Il vise l'échéance la plus proche avec une réévaluation
+bornée à trente secondes, sans aucune requête HTTP supplémentaire.
 
-## 6. Protection contre une acceptation concurrente
+Le cache public perd les demandes expirées ; les caches de détail et d'historique
+conservent les demandes avec `expired`. Le Home, la recherche, les marqueurs et les
+compteurs actifs se mettent ainsi à jour ensemble. Le cache des trajets et des
+réservations reste intact. Les actions sur une demande expirée sont désactivées,
+mais l'ouverture du trajet déjà créé reste possible.
 
-Avant l'expiration, le service recherche une offre `accepted`, un `selectedDriverId` ou un `tripId`. La mise à jour finale exige encore :
+Le minuteur est suspendu en arrière-plan et réévalue les données au retour au premier
+plan ; il est annulé à la réinitialisation de l'API. Les données déjà chargées expirent
+aussi hors connexion, sous réserve de l'heure de l'appareil. Le serveur conserve
+l'autorité sur une acceptation reçue ensuite. Aucune demande déjà expirée n'est
+réactivée automatiquement par le déploiement.
 
-- un état `pending` ou `offers_received` ;
-- `selectedDriverId IS NULL` ;
-- `tripId IS NULL`.
+## Vérifications et déploiement
 
-Ces conditions empêchent le cron d'écraser une demande dont l'attribution a déjà été persistée entre la lecture et la mise à jour.
+Les tests couvrent les limites à trente secondes et deux heures, les offres non
+acceptées, une acceptation tardive, les liens au trajet, la confidentialité après
+expiration, les écritures conditionnelles, le contrôle de version, le cron attendu,
+le hors-ligne, l'arrière-plan et l'isolation de compte.
 
-## 7. Protection supplémentaire dans l'application
-
-Le Home mobile applique aussi une limite locale calculée avec `departureDateMax + 12 heures` aux demandes non acceptées. Ce filtre défensif évite qu'une ancienne réponse mise en cache, ou provenant temporairement d'un backend pas encore mis à jour, réapparaisse à l'écran.
-
-Le filtre mobile conserve une demande si l'application détecte au moins un des éléments suivants :
-
-- état `driver_selected` ;
-- `selectedDriverId` présent ;
-- `tripId` présent ;
-- offre avec l'état `accepted`.
-
-Le backend reste la source de vérité et persiste réellement l'état `expired`.
-
-## 8. Notification avant expiration
-
-Le contrôle des notifications continue toutes les quinze minutes. Une notification peut être envoyée dans les trente dernières minutes avant l'échéance, donc à partir de onze heures et trente minutes après `departureDateMax`.
-
-Le message indique désormais que la demande expirera si aucun conducteur n'est confirmé.
-
-## 9. Impact financier
-
-Cette correction ne crée aucun paiement, débit, crédit ou jeton :
-
-- le prix recommandé enregistré avec la demande n'est pas recalculé ;
-- aucun paiement existant n'est annulé ou remboursé ;
-- aucun gain conducteur ou gain de parrainage n'est créé ;
-- les anciennes écritures financières ne sont pas modifiées.
-
-Une demande sans conducteur accepté ne doit normalement posséder aucune réservation payée. Si une incohérence historique associe déjà un `tripId`, la protection `tripId IS NULL` empêche son expiration automatique et impose une vérification manuelle.
-
-## 10. API et compatibilité
-
-Aucun contrat d'API ne change. Les valeurs existantes restent utilisées :
-
-- `pending` ;
-- `offers_received` ;
-- `driver_selected` ;
-- `cancelled` ;
-- `expired`.
-
-Les clients déjà publiés reçoivent simplement moins de demandes obsolètes dans `GET /api/v1/trip-requests`.
-
-## 11. Fichiers modifiés
-
-| Fichier | Modification |
-| --- | --- |
-| `src/trip-requests/trip-requests.service.ts` | délai de douze heures, expiration des états ouverts, cron et contrôles d'action |
-| `src/trip-requests/entities/trip-request.entity.ts` | commentaire de notification mis à jour |
-| `src/trip-requests/trip-requests.service.spec.ts` | scénarios de délai, offres non acceptées et offre acceptée |
-| `app/(tabs)/index.tsx` | filtre défensif du Home |
-
-## 12. Tests couverts
-
-- une demande créée depuis longtemps reste visible si `departureDateMax` remonte à moins de douze heures ;
-- une demande `pending` dont `departureDateMax` remonte à plus de douze heures expire ;
-- une demande `offers_received` très ancienne sans offre acceptée expire ;
-- une demande avec une offre `accepted` n'est pas expirée ;
-- une demande récente avec une offre en attente reste visible ;
-- une nouvelle réponse conducteur est refusée après l'échéance ;
-- le build backend et le typage mobile restent valides.
-
-## 13. Déploiement et vérification
-
-Ordre recommandé :
-
-1. déployer le backend ;
-2. confirmer dans les logs l'exécution du cron d'expiration ;
-3. vérifier le nombre de lignes `pending` et `offers_received` dont `departureDateMax` remonte à plus de douze heures ;
-4. confirmer que les lignes sans conducteur accepté passent à `expired` ;
-5. déployer l'application mobile ;
-6. vider ou rafraîchir le cache de la liste des demandes ;
-7. confirmer que les demandes anciennes ne sont plus présentes sur la carte ni dans la liste du Home.
-
-Le retour arrière remettrait en service l'ancien comportement qui pouvait conserver indéfiniment les demandes ayant reçu une offre. Les demandes déjà marquées `expired` ne doivent pas être réactivées automatiquement.
+Déployer le backend et l'application, puis tester sur appareils les deux échéances,
+un changement d'horaire, une acceptation juste avant expiration et une course en
+cours au moment de l'expiration de sa demande. Les tests locaux ne constituent pas
+un test de charge ni une validation contre la base de production.

@@ -618,6 +618,73 @@ describe('BookingsService trip payments', () => {
     expect(bookingRepository.save).not.toHaveBeenCalled();
   });
 
+  it('allows an approved passenger to book more than two available seats', async () => {
+    tripRepository.findOne.mockResolvedValue({
+      id: 'trip-extra-seats',
+      driverId: 'driver-1',
+      driver: { id: 'driver-1', fcmToken: null },
+      status: TripStatus.PENDING,
+      isFree: false,
+      requiresPassengerKyc: false,
+      pricePerSeat: 2500,
+      totalSeats: 4,
+      availableSeats: 4,
+      bookings: [],
+      departureLocation: 'Gombe',
+      arrivalLocation: 'Limete',
+      departurePoint: null,
+      arrivalPoint: null,
+    });
+    userRepository.findOne.mockResolvedValue({
+      id: 'passenger-approved',
+      kycDocuments: [{ status: KycStatus.APPROVED }],
+    });
+    bookingRepository.findOne.mockResolvedValue(null);
+    jest
+      .spyOn(service as any, 'recalculateAvailableSeatsForTrip')
+      .mockResolvedValue(1);
+    jest
+      .spyOn(service as any, 'notifyDriverOfNewBooking')
+      .mockResolvedValue(undefined);
+
+    const result = await service.create('passenger-approved', {
+      tripId: 'trip-extra-seats',
+      numberOfSeats: 3,
+    });
+
+    expect(result).toEqual(expect.objectContaining({ numberOfSeats: 3 }));
+    expect(bookingRepository.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        passengerId: 'passenger-approved',
+        numberOfSeats: 3,
+      }),
+    );
+  });
+
+  it('requires an approved KYC to book more than two seats', async () => {
+    userRepository.findOne.mockResolvedValue({
+      id: 'passenger-unverified',
+      kycDocuments: [{ status: KycStatus.REJECTED }],
+    });
+
+    await expect(
+      service.create('passenger-unverified', {
+        tripId: 'trip-extra-seats',
+        numberOfSeats: 3,
+      }),
+    ).rejects.toMatchObject({
+      response: expect.objectContaining({
+        code: 'PASSENGER_KYC_REQUIRED',
+        action: 'complete_kyc',
+        reason: 'extra_seats',
+        maximumSeatsWithoutKyc: 2,
+      }),
+    });
+
+    expect(tripRepository.findOne).not.toHaveBeenCalled();
+    expect(bookingRepository.create).not.toHaveBeenCalled();
+  });
+
   it('does not apply the first-trip subsidy when the passenger already completed a ride', async () => {
     configService.get.mockImplementation((key: string) => {
       if (key === 'FLEXPAY_CALLBACK_BASE_URL') {

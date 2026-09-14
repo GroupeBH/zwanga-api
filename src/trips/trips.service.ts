@@ -53,6 +53,8 @@ import {
   RequestTripInterruptionDto,
 } from './dto/trip-interruption.dto';
 import { BookingsService } from '../bookings/bookings.service';
+import { DriverInterruptionWorkflow } from './driver-interruption.workflow';
+import { DriverInterruptionDecisionDto, DriverInterruptionFareQueryDto } from './dto/trip-interruption.dto';
 import { CacheService } from '../common/services/cache.service';
 import {
   LocationHistoryService,
@@ -918,6 +920,22 @@ export class TripsService {
       );
       throw new NotFoundException('Trajet non trouve');
     }
+    // For request-linked trips the passenger has already confirmed the fare.
+    // Reject changes before geocoding, status transitions or any other writes.
+    if (
+      trip.tripRequestId &&
+      ((updateTripDto.pricePerSeat !== undefined &&
+        (updateTripDto.pricePerSeat === null ||
+          Number(updateTripDto.pricePerSeat) !== Number(trip.pricePerSeat))) ||
+        (updateTripDto.isFree !== undefined &&
+          updateTripDto.isFree !== (Number(trip.pricePerSeat) === 0)))
+    ) {
+      throw new BadRequestException({
+        code: 'TRIP_REQUEST_PRICE_LOCKED',
+        message:
+          'Le prix de ce trajet a déjà été validé par le passager et ne peut plus être modifié.',
+      });
+    }
     if (
       updateTripDto.status === TripStatus.COMPLETED &&
       trip.status !== TripStatus.COMPLETED
@@ -1430,6 +1448,13 @@ export class TripsService {
       });
     }
 
+    if (trip.startedAt && await this.driverInterruptionWorkflow.resume(tripId, driverId)) {
+      await this.invalidateDriverInterruptionCaches(tripId);
+      const resumedBookings = await this.bookingRepository.find({ where: { tripId, status: BookingStatus.ACCEPTED }, relations: ['passenger'] });
+      await this.notifyBookedPassengersAboutTripStart(trip, resumedBookings);
+      return this.findOne(tripId);
+    }
+
     const totalAcceptedSeats = acceptedBookings.reduce(
       (sum, booking) => sum + booking.numberOfSeats,
       0,
@@ -1641,22 +1666,12 @@ export class TripsService {
     tripId: string,
     driverId: string,
   ): Promise<SanitizedTrip> {
-    const request = await this.driverTripInterruptionRepository.findOne({
-      where: {
-        tripId,
-        requestedByDriverId: driverId,
-        status: TripInterruptionStatus.PENDING,
-      },
+    const cancelled = await this.driverInterruptionWorkflow.cancel(tripId, driverId);
+    const request = await this.driverTripInterruptionRepository.findOneOrFail({
+      where: { id: cancelled.id },
       relations: ['confirmations', 'confirmations.passenger', 'trip'],
     });
 
-    if (!request) {
-      throw new NotFoundException("Aucune demande d'interruption en attente");
-    }
-
-    request.status = TripInterruptionStatus.CANCELLED;
-    request.cancelledAt = new Date();
-    await this.driverTripInterruptionRepository.save(request);
     await this.invalidateDriverInterruptionCaches(tripId);
     await this.notifyPassengersAboutDriverInterruptionCancelled(request);
 
@@ -1668,50 +1683,21 @@ export class TripsService {
     passengerId: string,
     dto: ConfirmDriverTripInterruptionDto = {},
   ): Promise<SanitizedTrip> {
-    const request = await this.getPendingDriverInterruptionRequest(tripId);
-    const confirmation =
-      await this.getDriverInterruptionConfirmationForPassenger(
-        request.id,
-        passengerId,
-        dto.bookingId,
-      );
-
-    if (confirmation.status === TripInterruptionConfirmationStatus.REJECTED) {
-      throw new BadRequestException(
-        "Vous avez deja refuse cette demande d'interruption",
-      );
-    }
-
-    if (confirmation.status !== TripInterruptionConfirmationStatus.CONFIRMED) {
-      confirmation.status = TripInterruptionConfirmationStatus.CONFIRMED;
-      confirmation.confirmedAt = new Date();
-      confirmation.rejectedAt = null;
-      confirmation.rejectionReason = null;
-      await this.driverTripInterruptionConfirmationRepository.save(
-        confirmation,
-      );
-    }
-
-    const refreshedRequest = await this.refreshDriverInterruptionRequestCounts(
-      request.id,
-    );
-
-    if (
-      refreshedRequest.confirmedPassengerCount >=
-        refreshedRequest.requiredPassengerCount &&
-      refreshedRequest.rejectedPassengerCount === 0
-    ) {
-      await this.finalizeDriverTripInterruption(refreshedRequest);
+    const result = await this.driverInterruptionWorkflow.respond(tripId, passengerId, dto.bookingId, true);
+    await this.invalidateDriverInterruptionCaches(tripId);
+    const request = await this.driverTripInterruptionRepository.findOneOrFail({
+      where: { id: result.request.id }, relations: ['trip', 'trip.driver', 'confirmations', 'confirmations.passenger'],
+    });
+    if (result.paused) {
+      await this.notifyDriverAboutDriverInterruptionCompleted(request.trip, request);
+      await this.notifyPassengersAboutDriverInterruptionCompleted(request.trip, request);
     } else {
-      await this.driverTripInterruptionRepository.save(refreshedRequest);
-      await this.invalidateDriverInterruptionCaches(tripId);
       await this.notifyDriverAboutDriverInterruptionResponse(
-        refreshedRequest,
-        confirmation,
+        request,
+        result.confirmation,
         true,
       );
     }
-
     return this.findOne(tripId);
   }
 
@@ -1720,39 +1706,12 @@ export class TripsService {
     passengerId: string,
     dto: RejectTripInterruptionDto = {},
   ): Promise<SanitizedTrip> {
-    const request = await this.getPendingDriverInterruptionRequest(tripId);
-    const confirmation =
-      await this.getDriverInterruptionConfirmationForPassenger(
-        request.id,
-        passengerId,
-        dto.bookingId,
-      );
-
-    if (confirmation.status === TripInterruptionConfirmationStatus.CONFIRMED) {
-      throw new BadRequestException(
-        "Vous avez deja confirme cette demande d'interruption",
-      );
-    }
-
-    if (confirmation.status !== TripInterruptionConfirmationStatus.REJECTED) {
-      confirmation.status = TripInterruptionConfirmationStatus.REJECTED;
-      confirmation.rejectedAt = new Date();
-      confirmation.rejectionReason = dto.reason ?? null;
-      await this.driverTripInterruptionConfirmationRepository.save(
-        confirmation,
-      );
-    }
-
-    const refreshedRequest = await this.refreshDriverInterruptionRequestCounts(
-      request.id,
-    );
-    refreshedRequest.status = TripInterruptionStatus.REJECTED;
-    refreshedRequest.rejectedAt = refreshedRequest.rejectedAt ?? new Date();
-    await this.driverTripInterruptionRepository.save(refreshedRequest);
+    const result = await this.driverInterruptionWorkflow.respond(tripId, passengerId, dto.bookingId, false, dto.reason);
+    const refreshedRequest = await this.driverTripInterruptionRepository.findOneOrFail({ where: { id: result.request.id }, relations: ['trip', 'confirmations', 'confirmations.passenger'] });
     await this.invalidateDriverInterruptionCaches(tripId);
     await this.notifyDriverAboutDriverInterruptionResponse(
       refreshedRequest,
-      confirmation,
+      result.confirmation,
       false,
     );
 
@@ -1765,151 +1724,32 @@ export class TripsService {
     return this.driverTripInterruptionRepository.findOne({
       where: {
         tripId,
-        status: TripInterruptionStatus.PENDING,
+        status: In([TripInterruptionStatus.PENDING, TripInterruptionStatus.CONFIRMED]),
       },
       relations: ['confirmations', 'confirmations.passenger'],
       order: { createdAt: 'DESC' },
     });
   }
 
-  private async getPendingDriverInterruptionRequest(
-    tripId: string,
-  ): Promise<DriverTripInterruptionRequest> {
-    const request = await this.findActiveDriverInterruptionRequest(tripId);
-    if (!request) {
-      throw new NotFoundException("Aucune demande d'interruption en attente");
-    }
-    return request;
+  private get driverInterruptionWorkflow() {
+    return new DriverInterruptionWorkflow(this.tripRepository.manager, this.bookingsService);
   }
 
-  private async getDriverInterruptionConfirmationForPassenger(
-    requestId: string,
-    passengerId: string,
-    bookingId?: string,
-  ): Promise<DriverTripInterruptionConfirmation> {
-    const confirmation =
-      await this.driverTripInterruptionConfirmationRepository.findOne({
-        where: bookingId
-          ? { requestId, passengerId, bookingId }
-          : { requestId, passengerId },
-        relations: ['booking', 'passenger'],
-      });
-
-    if (!confirmation) {
-      throw new ForbiddenException(
-        'Vous ne faites pas partie des passagers devant confirmer cette interruption',
-      );
-    }
-
-    return confirmation;
+  @Cron(CronExpression.EVERY_MINUTE)
+  async retryInterruptionSettlements() {
+    await this.driverInterruptionWorkflow.retryPendingSettlements((error) => {
+      this.logger.warn(`Interruption settlement will be retried: ${error instanceof Error ? error.message : 'temporary failure'}`);
+    });
   }
 
-  private async refreshDriverInterruptionRequestCounts(
-    requestId: string,
-  ): Promise<DriverTripInterruptionRequest> {
-    const request = await this.driverTripInterruptionRepository.findOne({
-      where: { id: requestId },
-      relations: ['confirmations', 'confirmations.passenger'],
-    });
-
-    if (!request) {
-      throw new NotFoundException("Demande d'interruption introuvable");
-    }
-
-    const confirmations = request.confirmations ?? [];
-    request.requiredPassengerCount =
-      request.requiredPassengerCount || confirmations.length;
-    request.confirmedPassengerCount = confirmations.filter(
-      (confirmation) =>
-        confirmation.status === TripInterruptionConfirmationStatus.CONFIRMED,
-    ).length;
-    request.rejectedPassengerCount = confirmations.filter(
-      (confirmation) =>
-        confirmation.status === TripInterruptionConfirmationStatus.REJECTED,
-    ).length;
-
-    return request;
+  async getDriverInterruptionFare(tripId: string, passengerId: string, dto: DriverInterruptionFareQueryDto) {
+    return this.driverInterruptionWorkflow.quote(tripId, passengerId, dto);
   }
 
-  private async finalizeDriverTripInterruption(
-    request: DriverTripInterruptionRequest,
-  ): Promise<void> {
-    const requestWithRelations =
-      await this.driverTripInterruptionRepository.findOne({
-        where: { id: request.id },
-        relations: [
-          'confirmations',
-          'confirmations.passenger',
-          'trip',
-          'trip.driver',
-        ],
-      });
-
-    if (!requestWithRelations) {
-      throw new NotFoundException("Demande d'interruption introuvable");
-    }
-
-    const confirmations = requestWithRelations.confirmations ?? [];
-    const hasMissingConfirmation = confirmations.some(
-      (confirmation) =>
-        confirmation.status !== TripInterruptionConfirmationStatus.CONFIRMED,
-    );
-
-    if (hasMissingConfirmation) {
-      throw new BadRequestException(
-        'Tous les passagers doivent confirmer avant interruption du trajet',
-      );
-    }
-
-    for (const confirmation of confirmations) {
-      await this.bookingsService.completeBookingByTripInterruption(
-        confirmation.bookingId,
-        requestWithRelations.requestedLocation ??
-          requestWithRelations.trip.currentLocation,
-      );
-    }
-
-    const trip = await this.tripRepository.findOne({
-      where: { id: requestWithRelations.tripId },
-      relations: ['bookings', 'bookings.passenger', 'driver'],
-    });
-
-    if (!trip) {
-      throw new NotFoundException('Trajet non trouve');
-    }
-
-    const previousStatus = trip.status;
-    trip.status = TripStatus.PENDING;
-    trip.availableSeats = this.calculateAvailableSeatsAfterInterruption(trip);
-    await this.tripRepository.save(trip);
-    this.logTripStateChange({
-      tripId: trip.id,
-      driverId: trip.driverId,
-      from: previousStatus,
-      to: TripStatus.PENDING,
-      reason: 'driver_interruption_confirmed_by_passengers',
-      acceptedBookings: trip.bookings?.length ?? 0,
-      availableSeats: trip.availableSeats,
-    });
-
-    const now = new Date();
-    requestWithRelations.status = TripInterruptionStatus.COMPLETED;
-    requestWithRelations.confirmedAt = now;
-    requestWithRelations.completedAt = now;
-    requestWithRelations.requiredPassengerCount = confirmations.length;
-    requestWithRelations.confirmedPassengerCount = confirmations.length;
-    requestWithRelations.rejectedPassengerCount = 0;
-    await this.driverTripInterruptionRepository.save(requestWithRelations);
-
-    await this.invalidateDriverInterruptionCaches(trip.id);
-    await this.notifyDriverAboutDriverInterruptionCompleted(
-      trip,
-      requestWithRelations,
-    );
-    await this.notifyPassengersAboutDriverInterruptionCompleted(
-      trip,
-      requestWithRelations,
-    );
+  async decideDriverInterruption(tripId: string, passengerId: string, dto: DriverInterruptionDecisionDto) {
+    const result = await this.driverInterruptionWorkflow.decide(tripId, passengerId, dto);
+    await this.invalidateDriverInterruptionCaches(tripId);
+    return result;
   }
 
   private getOnboardBookings(bookings: Booking[]): Booking[] {
@@ -1919,22 +1759,6 @@ export class TripsService {
         this.hasBookingEmbarked(booking) &&
         !this.hasBookingBeenDroppedOff(booking),
     );
-  }
-
-  private calculateAvailableSeatsAfterInterruption(trip: Trip): number {
-    if (!trip.totalSeats) {
-      return Math.max(0, trip.availableSeats ?? 0);
-    }
-
-    const activeAcceptedSeats = (trip.bookings ?? [])
-      .filter(
-        (booking) =>
-          booking.status === BookingStatus.ACCEPTED &&
-          !this.hasBookingBeenDroppedOff(booking),
-      )
-      .reduce((sum, booking) => sum + booking.numberOfSeats, 0);
-
-    return Math.max(0, trip.totalSeats - activeAcceptedSeats);
   }
 
   private buildDriverInterruptionPoint(
@@ -1963,11 +1787,14 @@ export class TripsService {
   private async invalidateDriverInterruptionCaches(
     tripId: string,
   ): Promise<void> {
-    await this.cacheService.del(CacheService.getTripKey(tripId));
-    await this.cacheService.del(CacheService.getBookingsByTripKey(tripId));
-    await this.cacheService.del(CacheService.getTripsListKey());
-    await this.cacheService.del(CacheService.getTripsListKey('all'));
-    await this.cacheService.del(CacheService.getTripsListKey('allTrips'));
+    // Booking responses embed the interruption; invalidate those snapshots too, in one batch.
+    const bookings = await this.bookingRepository.find({ where: { tripId }, select: ['id', 'passengerId'] });
+    const keys = new Set([
+      CacheService.getTripKey(tripId), CacheService.getBookingsByTripKey(tripId),
+      CacheService.getTripsListKey(), CacheService.getTripsListKey('all'), CacheService.getTripsListKey('allTrips'),
+      ...bookings.flatMap((booking) => [CacheService.getBookingKey(booking.id), CacheService.getBookingsByPassengerKey(booking.passengerId)]),
+    ]);
+    await Promise.all([...keys].map((key) => this.cacheService.del(key)));
   }
 
   private async notifyPassengersAboutDriverInterruptionRequest(
@@ -2155,7 +1982,7 @@ export class TripsService {
             this.notificationService.sendNotification(
               passenger.fcmToken!,
               'Trajet interrompu',
-              'Le trajet a ete interrompu apres confirmation des passagers.',
+              "Le trajet est en pause. Choisissez d'attendre le redémarrage ou de vous arrêter ici et régler la distance parcourue.",
               {
                 type: 'driver_trip_interruption_completed',
                 tripId: trip.id,
