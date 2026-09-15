@@ -35,6 +35,7 @@ import {
   DriverPayoutStatus,
 } from './entities/driver-payout.entity';
 import { RequestDriverPayoutDto } from './dto/driver-settlement.dto';
+import { getPayoutFailureMessage, normalizePayoutPhone, PAYOUT_MESSAGES } from '../payments/payout-policy';
 
 export interface DriverSettlementSummary {
   availableBalance: number;
@@ -64,6 +65,8 @@ export interface DriverTripRevenueSummary {
 export type DriverPayoutResponse = DriverPayout & {
   orderNumber: string | null;
   paymentMessage: string | null;
+  reference: string | null;
+  requiresReview: boolean;
 };
 
 @Injectable()
@@ -154,7 +157,7 @@ export class DriverSettlementsService {
     });
     if (!trip) {
       throw new NotFoundException(
-        "Trajet introuvable ou vous n'en etes pas le conducteur",
+        "Trajet introuvable ou vous n'en êtes pas le conducteur",
       );
     }
 
@@ -364,7 +367,7 @@ export class DriverSettlementsService {
     }
     if (summary.electronicPendingAmount > 0) {
       parts.push(
-        `${this.formatMoney(summary.electronicPendingAmount)} ${summary.currency} en attente du paiement electronique`,
+        `${this.formatMoney(summary.electronicPendingAmount)} ${summary.currency} en attente du paiement électronique`,
       );
     }
     if (summary.zwangaSubsidyAmount > 0) {
@@ -494,7 +497,7 @@ export class DriverSettlementsService {
 
     if (!booking.trip?.driverId) {
       throw new BadRequestException(
-        `Conducteur introuvable pour la reservation ${booking.id}`,
+        `Conducteur introuvable pour la réservation ${booking.id}`,
       );
     }
 
@@ -522,7 +525,7 @@ export class DriverSettlementsService {
     const expectedEarning = this.buildEarningData(booking);
     if (!expectedEarning) {
       throw new BadRequestException(
-        `Aucun gain conducteur attendu pour la reservation ${booking.id}`,
+        `Aucun gain conducteur attendu pour la réservation ${booking.id}`,
       );
     }
 
@@ -541,7 +544,7 @@ export class DriverSettlementsService {
       (expectedDriverId && earning.driverId !== expectedDriverId)
     ) {
       throw new BadRequestException(
-        `Le gain conducteur existant est incoherent pour la reservation ${booking.id}`,
+        `Le gain conducteur existant est incohérent pour la réservation ${booking.id}`,
       );
     }
   }
@@ -720,7 +723,7 @@ export class DriverSettlementsService {
       payment.relatedEntityType !== this.PAYOUT_RELATED_ENTITY_TYPE
     ) {
       throw new BadRequestException(
-        'Cette transaction ne correspond pas a un paiement chauffeur',
+        'Cette transaction ne correspond pas à un paiement chauffeur',
       );
     }
 
@@ -814,7 +817,7 @@ export class DriverSettlementsService {
             ) {
               await this.markUnsentPayoutFailed(
                 payout.id,
-                'Aucune transaction FlexPay creee apres reservation du retrait',
+                'Aucune transaction FlexPay créée après réservation du retrait',
               );
             }
             continue;
@@ -859,12 +862,13 @@ export class DriverSettlementsService {
         throw new NotFoundException('Chauffeur introuvable');
       }
 
-      const phone = requestedPhone?.trim() || driver.phone?.trim();
-      if (!phone) {
+      const rawPhone = requestedPhone?.trim() || driver.phone?.trim();
+      if (!rawPhone) {
         throw new BadRequestException(
-          'Un numero Mobile Money est requis pour le paiement chauffeur',
+          'Un numéro Mobile Money est requis pour le paiement chauffeur',
         );
       }
+      const phone = normalizePayoutPhone(rawPhone);
 
       const existing = await manager.findOne(DriverPayout, {
         where: { driverId, idempotencyKey },
@@ -880,7 +884,7 @@ export class DriverSettlementsService {
       });
       if (!kycApproved) {
         throw new BadRequestException(
-          'Votre identite KYC doit etre approuvee avant tout retrait',
+          'Votre identité doit être vérifiée avant le versement de vos gains',
         );
       }
 
@@ -917,10 +921,10 @@ export class DriverSettlementsService {
   ): void {
     if (
       this.roundMoney(Number(payout.amount)) !== amount ||
-      payout.phone.trim() !== phone.trim()
+      normalizePayoutPhone(payout.phone) !== normalizePayoutPhone(phone)
     ) {
       throw new BadRequestException(
-        "La cle d'idempotence a deja ete utilisee pour un autre retrait",
+        "La clé d'idempotence a déjà été utilisée pour un autre retrait",
       );
     }
   }
@@ -959,14 +963,23 @@ export class DriverSettlementsService {
     payout: DriverPayout,
     payment: PaymentTransaction | null = payout.paymentTransaction ?? null,
   ): DriverPayoutResponse {
+    const awaiting = [DriverPayoutStatus.PENDING, DriverPayoutStatus.INITIATED].includes(payout.status);
+    const requiresReview = awaiting && Boolean(payment) && !payment?.orderNumber;
+    const paymentMessage = payout.status === DriverPayoutStatus.SUCCEEDED
+      ? 'Zwanga a versé vos gains sur votre compte Mobile Money.'
+      : payout.status === DriverPayoutStatus.CANCELLED
+        ? 'Le versement a été annulé. Le montant est à nouveau disponible dans vos revenus.'
+        : awaiting ? (requiresReview ? PAYOUT_MESSAGES.review : PAYOUT_MESSAGES.pending)
+          : getPayoutFailureMessage(payment?.providerMessage ?? payout.failureReason);
     return {
       ...payout,
       amount: Number(payout.amount),
       paymentTransaction: payment,
       orderNumber: payment?.orderNumber ?? null,
-      paymentMessage: payment
-        ? this.paymentsService.getClientPaymentMessage(payment)
-        : payout.failureReason,
+      paymentMessage,
+      failureReason: payout.failureReason ? getPayoutFailureMessage(payout.failureReason) : null,
+      reference: payment?.reference ?? null,
+      requiresReview,
     };
   }
 

@@ -121,7 +121,7 @@ export class TripsController {
   @ApiOperation({
     summary: 'Create a recurring trip template',
     description:
-      'Permet a un conducteur de creer un schema recurrent et de generer automatiquement les prochaines occurrences.',
+      'Permet à un conducteur de créer un schéma récurrent et de générer automatiquement les prochaines occurrences.',
   })
   async createRecurring(
     @Request() req,
@@ -212,7 +212,7 @@ export class TripsController {
   @ApiOperation({
     summary: 'Update a trip',
     description:
-      "Permet de modifier un trajet existant, y compris l'adresse de depart et/ou d'arrivee.",
+      "Permet de modifier un trajet existant, y compris l'adresse de départ et/ou d'arrivée.",
   })
   async update(
     @Request() req,

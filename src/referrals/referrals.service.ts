@@ -170,7 +170,7 @@ export class ReferralsService {
       codeProfile.userId !== tokenProfile.userId
     ) {
       throw new BadRequestException(
-        'Les informations de parrainage ne correspondent pas au meme parrain',
+        'Les informations de parrainage ne correspondent pas au même parrain',
       );
     }
   }
@@ -194,7 +194,7 @@ export class ReferralsService {
 
     if (!result.profile.referredByUserId || !result.referrer) {
       throw new BadRequestException(
-        "L'attribution de parrainage n'a pas pu etre enregistree",
+        "L'attribution de parrainage n'a pas pu être enregistrée",
       );
     }
 
@@ -269,7 +269,7 @@ export class ReferralsService {
           codeProfile.userId !== tokenProfile.userId
         ) {
           throw new BadRequestException(
-            'Les informations de parrainage ne correspondent pas au meme parrain',
+            'Les informations de parrainage ne correspondent pas au même parrain',
           );
         }
         const referrerProfile = tokenProfile ?? codeProfile;
@@ -292,7 +292,7 @@ export class ReferralsService {
         if (profile.referredByUserId) {
           if (profile.referredByUserId !== referrerProfile.userId) {
             throw new BadRequestException(
-              'Le parrain d un compte deja inscrit ne peut pas etre modifie',
+              'Le parrain d’un compte déjà inscrit ne peut pas être modifié',
             );
           }
         } else {
@@ -707,7 +707,7 @@ export class ReferralsService {
     });
     if (!kycApproved) {
       throw new BadRequestException(
-        'Votre identite KYC doit etre approuvee avant tout retrait',
+        "Votre identité doit être vérifiée avant tout retrait.",
       );
     }
     const user = await this.userRepository.findOne({ where: { id: userId } });
@@ -717,7 +717,7 @@ export class ReferralsService {
     const phone = dto.phone?.trim() || user.phone;
     if (!phone) {
       throw new BadRequestException(
-        'Un numero Mobile Money est requis pour le retrait',
+        'Un numéro Mobile Money est requis pour le retrait',
       );
     }
 
@@ -1043,7 +1043,7 @@ export class ReferralsService {
         rewardId: reward.id,
         withdrawalId: null,
         paymentTransactionId: reward.paymentTransactionId,
-        description: `Commission disponible apres retenue de ${this.getHoldDays()} jours`,
+        description: `Commission disponible après retenue de ${this.getHoldDays()} jours`,
       });
       reward.status = ReferralRewardStatus.AVAILABLE;
       reward.availableAt = new Date();
@@ -1097,7 +1097,7 @@ export class ReferralsService {
         rewardId: null,
         withdrawalId: withdrawal.id,
         paymentTransactionId: null,
-        description: `Jetons reserves pour le retrait ${withdrawal.id}`,
+        description: `Jetons réservés pour le retrait ${withdrawal.id}`,
       });
 
       account.reservedTokens = this.roundMoney(
@@ -1127,7 +1127,7 @@ export class ReferralsService {
       payment.relatedEntityType !== this.WITHDRAWAL_RELATED_ENTITY_TYPE
     ) {
       throw new BadRequestException(
-        'Cette transaction ne correspond pas a un retrait de parrainage',
+        'Cette transaction ne correspond pas à un retrait de parrainage',
       );
     }
     return this.dataSource.transaction(async (manager) => {
@@ -1242,7 +1242,7 @@ export class ReferralsService {
       paymentTransactionId: payment?.id ?? withdrawal.paymentTransactionId,
       description: succeeded
         ? `Retrait FlexPay confirme ${withdrawal.id}`
-        : `Reservation annulee pour le retrait ${withdrawal.id}`,
+        : `Réservation annulée pour le retrait ${withdrawal.id}`,
     });
 
     if (succeeded) {
@@ -1270,8 +1270,8 @@ export class ReferralsService {
       withdrawalId: withdrawal.id,
       paymentTransactionId: payment?.id ?? withdrawal.paymentTransactionId,
       description: succeeded
-        ? `Jetons payes par FlexPay pour le retrait ${withdrawal.id}`
-        : `Jetons rendus disponibles apres echec du retrait ${withdrawal.id}`,
+        ? `Jetons payés par FlexPay pour le retrait ${withdrawal.id}`
+        : `Jetons rendus disponibles après échec du retrait ${withdrawal.id}`,
     });
   }
 
@@ -1298,7 +1298,7 @@ export class ReferralsService {
       rewardId: null,
       withdrawalId: withdrawal.id,
       paymentTransactionId: payment.id,
-      description: `Correction apres confirmation FlexPay tardive du retrait ${withdrawal.id}`,
+      description: `Correction après confirmation FlexPay tardive du retrait ${withdrawal.id}`,
     });
 
     account.withdrawnTokens = this.roundMoney(
@@ -1313,7 +1313,7 @@ export class ReferralsService {
       rewardId: null,
       withdrawalId: withdrawal.id,
       paymentTransactionId: payment.id,
-      description: `Paiement FlexPay tardif confirme pour le retrait ${withdrawal.id}`,
+      description: `Paiement FlexPay tardif confirmé pour le retrait ${withdrawal.id}`,
     });
   }
 
@@ -1523,7 +1523,7 @@ export class ReferralsService {
       }
     }
     throw new BadRequestException(
-      'Impossible de generer un code de parrainage pour le moment',
+      'Impossible de générer un code de parrainage pour le moment',
     );
   }
 
@@ -1540,7 +1540,7 @@ export class ReferralsService {
       }
     }
     throw new BadRequestException(
-      'Impossible de generer un lien de parrainage pour le moment',
+      'Impossible de générer un lien de parrainage pour le moment',
     );
   }
 
@@ -1589,7 +1589,7 @@ export class ReferralsService {
       capturedAt.getTime() < now - maxAgeMs
     ) {
       throw new BadRequestException(
-        `Ce lien de parrainage a expire apres ${this.getAttributionDays()} jours`,
+        `Ce lien de parrainage a expiré après ${this.getAttributionDays()} jours`,
       );
     }
     return capturedAt;
@@ -1721,7 +1721,7 @@ export class ReferralsService {
     const value = Number(configured);
     if (!Number.isFinite(value) || value <= 0) {
       throw new BadRequestException(
-        `Valeur du jeton de parrainage non configuree pour ${normalizedCurrency}`,
+        `Valeur du jeton de parrainage non configurée pour ${normalizedCurrency}`,
       );
     }
     return value;
@@ -1817,7 +1817,7 @@ export class ReferralsService {
       );
       const shortUrl = response.data?.short_url?.trim();
       if (!shortUrl || !this.isExpectedChottuLinkUrl(shortUrl, domain)) {
-        throw new Error('ChottuLink n a pas retourne de lien HTTPS valide');
+        throw new Error('ChottuLink n’a pas retourné de lien HTTPS valide');
       }
       profile.shareLinkUrl = shortUrl;
       profile.shareLinkGeneratedAt = new Date();

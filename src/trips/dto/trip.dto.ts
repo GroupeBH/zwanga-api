@@ -28,8 +28,8 @@ export class CreateTripDto {
   @ApiProperty({
     required: false,
     description:
-      'Reference ou repere connu donne par le conducteur pour le depart',
-    example: 'Devant la station, cote parking',
+      'Référence ou repère connu donné par le conducteur pour le départ',
+    example: 'Devant la station, côté parking',
   })
   @IsString()
   @IsOptional()
@@ -58,8 +58,8 @@ export class CreateTripDto {
   @ApiProperty({
     required: false,
     description:
-      "Reference ou repere connu donne par le conducteur pour l'arrivee",
-    example: 'Entree principale, pres du rond-point',
+      "Référence ou repère connu donné par le conducteur pour l'arrivée",
+    example: 'Entrée principale, près du rond-point',
   })
   @IsString()
   @IsOptional()
@@ -120,7 +120,7 @@ export class CreateTripDto {
     required: false,
     default: false,
     description:
-      'Exige que chaque passager ait un KYC approuve avant de reserver ou embarquer.',
+      'Exige que chaque passager ait un KYC approuvé avant de réserver ou embarquer.',
     example: false,
   })
   @IsBoolean()
@@ -146,7 +146,7 @@ export class SearchTripsDto {
   @ApiProperty({
     required: false,
     description:
-      "Mots-cles de recherche. Chaque mot est teste sur l'adresse de depart ou d'arrivee.",
+      "Mots-clés de recherche. Chaque mot est testé sur l'adresse de départ ou d'arrivée.",
     example: 'gombe aeroport',
   })
   @IsString()
@@ -259,7 +259,7 @@ export class UpdateTripDto {
   @ApiProperty({
     required: false,
     description:
-      'Reference ou repere connu donne par le conducteur pour le depart',
+      'Référence ou repère connu donné par le conducteur pour le départ',
   })
   @IsString()
   @IsOptional()
@@ -286,7 +286,7 @@ export class UpdateTripDto {
   @ApiProperty({
     required: false,
     description:
-      "Reference ou repere connu donne par le conducteur pour l'arrivee",
+      "Référence ou repère connu donné par le conducteur pour l'arrivée",
   })
   @IsString()
   @IsOptional()
@@ -341,7 +341,7 @@ export class UpdateTripDto {
     required: false,
     default: false,
     description:
-      'Exige que chaque passager ait un KYC approuve avant de reserver ou embarquer.',
+      'Exige que chaque passager ait un KYC approuvé avant de réserver ou embarquer.',
     example: false,
   })
   @IsBoolean()
@@ -378,21 +378,21 @@ export class DriverEmergencyContactsDto {
   })
   @IsArray()
   @ArrayMinSize(1, {
-    message: "Vous devez selectionner au moins 1 contact d'urgence",
+    message: "Vous devez sélectionner au moins 1 contact d'urgence",
   })
   @ArrayMaxSize(5, {
-    message: "Vous ne pouvez pas selectionner plus de 5 contacts d'urgence",
+    message: "Vous ne pouvez pas sélectionner plus de 5 contacts d'urgence",
   })
   @IsUUID(undefined, {
     each: true,
-    message: 'Chaque ID de contact doit etre un UUID valide',
+    message: 'Chaque ID de contact doit être un UUID valide',
   })
   emergencyContactIds: string[];
 }
 
 export class UpdateDriverLocationDto {
   @ApiProperty({
-    description: 'Coordonnees actuelles du conducteur [longitude, latitude]',
+    description: 'Coordonnées actuelles du conducteur [longitude, latitude]',
     example: [15.3136, -4.3276],
     minItems: 2,
     maxItems: 2,
@@ -442,15 +442,15 @@ export class CreateRecurringTripDto {
   @ApiProperty({
     required: false,
     description:
-      'Reference ou repere connu donne par le conducteur pour le depart',
-    example: 'Devant la station, cote parking',
+      'Référence ou repère connu donné par le conducteur pour le départ',
+    example: 'Devant la station, côté parking',
   })
   @IsString()
   @IsOptional()
   departureReference?: string;
 
   @ApiProperty({
-    description: 'Coordonnees du point de depart [longitude, latitude]',
+    description: 'Coordonnées du point de départ [longitude, latitude]',
     example: [15.2663, -4.325],
     minItems: 2,
     maxItems: 2,
@@ -470,15 +470,15 @@ export class CreateRecurringTripDto {
   @ApiProperty({
     required: false,
     description:
-      "Reference ou repere connu donne par le conducteur pour l'arrivee",
-    example: 'Entree principale, pres du rond-point',
+      "Référence ou repère connu donné par le conducteur pour l'arrivée",
+    example: 'Entrée principale, près du rond-point',
   })
   @IsString()
   @IsOptional()
   arrivalReference?: string;
 
   @ApiProperty({
-    description: "Coordonnees du point d'arrivee [longitude, latitude]",
+    description: "Coordonnées du point d'arrivée [longitude, latitude]",
     example: [15.3222, -4.4419],
     minItems: 2,
     maxItems: 2,
@@ -491,7 +491,7 @@ export class CreateRecurringTripDto {
   arrivalCoordinates?: [number, number];
 
   @ApiProperty({
-    description: 'Date de debut du schema recurrent (format YYYY-MM-DD)',
+    description: 'Date de début du schéma récurrent (format YYYY-MM-DD)',
     example: '2026-03-30',
   })
   @IsDateString()
@@ -501,7 +501,7 @@ export class CreateRecurringTripDto {
   @ApiProperty({
     required: false,
     description:
-      'Date de fin optionnelle du schema recurrent (format YYYY-MM-DD)',
+      'Date de fin optionnelle du schéma récurrent (format YYYY-MM-DD)',
     example: '2026-06-30',
   })
   @IsDateString()
@@ -509,7 +509,7 @@ export class CreateRecurringTripDto {
   endDate?: string;
 
   @ApiProperty({
-    description: 'Heure de depart quotidienne (format HH:mm)',
+    description: 'Heure de départ quotidienne (format HH:mm)',
     example: '07:30',
   })
   @Matches(/^([01]\d|2[0-3]):([0-5]\d)$/)
@@ -554,7 +554,7 @@ export class CreateRecurringTripDto {
   @ApiProperty({
     required: false,
     default: false,
-    description: 'Indique si le trajet recurrent est gratuit.',
+    description: 'Indique si le trajet récurrent est gratuit.',
     example: false,
   })
   @IsBoolean()
@@ -565,7 +565,7 @@ export class CreateRecurringTripDto {
     required: false,
     default: false,
     description:
-      'Exige que chaque passager ait un KYC approuve sur les occurrences generees.',
+      'Exige que chaque passager ait un KYC approuvé sur les occurrences générées.',
     example: false,
   })
   @IsBoolean()
@@ -578,7 +578,7 @@ export class CreateRecurringTripDto {
   description?: string;
 
   @ApiProperty({
-    description: 'ID du vehicule a associer au schema recurrent',
+    description: 'ID du véhicule à associer au schéma récurrent',
   })
   @IsString()
   @IsNotEmpty()
@@ -595,7 +595,7 @@ export class SearchByPointsDto {
   @ApiProperty({
     required: false,
     description:
-      "Mots-cles de recherche. Chaque mot est teste sur l'adresse de depart ou d'arrivee.",
+      "Mots-clés de recherche. Chaque mot est testé sur l'adresse de départ ou d'arrivée.",
     example: 'gombe aeroport',
   })
   @IsString()

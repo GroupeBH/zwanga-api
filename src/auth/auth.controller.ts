@@ -280,7 +280,7 @@ export class AuthController {
     summary: 'Google Sign-In (mobile): idToken + phone -> JWT tokens',
   })
   @ApiResponse({ status: 200, type: AuthResponseDto })
-  @ApiResponse({ status: 401, description: 'Invalid Google token' })
+  @ApiResponse({ status: 401, description: "La connexion avec Google n’a pas pu être vérifiée. Réessayez." })
   async googleMobile(@Body() dto: GoogleMobileAuthDto) {
     return this.authService.googleMobileLogin(
       dto.idToken,
@@ -298,7 +298,7 @@ export class AuthController {
     summary: 'Apple Sign-In (mobile): identityToken + phone -> JWT tokens',
   })
   @ApiResponse({ status: 200, type: AuthResponseDto })
-  @ApiResponse({ status: 401, description: 'Invalid Apple token' })
+  @ApiResponse({ status: 401, description: "La connexion avec Apple n’a pas pu être vérifiée. Réessayez." })
   async appleMobile(@Body() dto: AppleMobileAuthDto) {
     return this.authService.appleMobileLogin(dto);
   }
@@ -317,10 +317,10 @@ export class AuthController {
   @UseGuards(AuthGuard('google'))
   @ApiOperation({ summary: 'Google OAuth callback' })
   @ApiResponse({ status: 200, type: AuthResponseDto })
-  @ApiResponse({ status: 401, description: 'Authentication failed' })
+  @ApiResponse({ status: 401, description: "La connexion a échoué. Veuillez réessayer." })
   async googleAuthCallback(@Req() req: Request, @Res() res: Response) {
     if (!req.user) {
-      throw new UnauthorizedException('Authentication failed');
+      throw new UnauthorizedException("La connexion a échoué. Veuillez réessayer.");
     }
 
     const googleProfile = req.user as unknown as GoogleAuthProfile;

@@ -17,7 +17,7 @@ export class TrackingController {
   @ApiOperation({
     summary: 'Create a public tracking link for a trip',
     description:
-      "Genere un lien web limite dans le temps pour permettre a un proche de suivre un trajet sans installer l'application.",
+      "Génère un lien web limité dans le temps pour permettre à un proche de suivre un trajet sans installer l'application.",
   })
   async createTripShareLink(
     @Request() req,

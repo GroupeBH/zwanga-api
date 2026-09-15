@@ -105,7 +105,7 @@ export class SubscriptionsService {
     const user = await this.getDriverUser(userId);
     await this.ensureNoActiveSubscription(
       userId,
-      'Vous avez deja un abonnement actif',
+      'Vous avez déjà un abonnement actif',
     );
 
     const trialPeriodDays = this.getNumberConfig('TRIAL_PERIOD_DAYS', 7);
@@ -534,7 +534,7 @@ export class SubscriptionsService {
       Number(dto.amountRequested) > Number(subscription.documentFundingLimit)
     ) {
       throw new BadRequestException(
-        `Le montant demande depasse le plafond de financement (${subscription.documentFundingLimit} ${subscription.documentFundingCurrency})`,
+        `Le montant demandé dépasse le plafond de financement (${subscription.documentFundingLimit} ${subscription.documentFundingCurrency})`,
       );
     }
 
@@ -605,7 +605,7 @@ export class SubscriptionsService {
       !dto.phone?.trim()
     ) {
       throw new BadRequestException(
-        'Le numero de telephone est requis pour payer par Mobile Money',
+        'Le numéro de téléphone est requis pour payer par Mobile Money',
       );
     }
 
@@ -613,7 +613,7 @@ export class SubscriptionsService {
       const normalizedPhone = dto.phone?.trim().replace(/[\s()-]/g, '');
       if (!normalizedPhone || !/^\+243\d{9}$/.test(normalizedPhone)) {
         throw new BadRequestException(
-          'Le numero Mobile Money doit commencer par +243, par exemple +243891234567',
+          'Le numéro Mobile Money doit commencer par +243, par exemple +243891234567',
         );
       }
     }
@@ -622,7 +622,7 @@ export class SubscriptionsService {
       dto.paymentMethod !== PaymentMethod.MOBILE_MONEY &&
       dto.paymentMethod !== PaymentMethod.CARD
     ) {
-      throw new BadRequestException('Methode de paiement non supportee');
+      throw new BadRequestException('Méthode de paiement non prise en charge');
     }
   }
 
@@ -733,7 +733,7 @@ export class SubscriptionsService {
   ): Promise<Subscription> {
     if (String(payment.purpose) !== 'subscription_pro') {
       throw new BadRequestException(
-        'Cette transaction ne correspond pas a un abonnement Pro',
+        'Cette transaction ne correspond pas à un abonnement Pro',
       );
     }
 
@@ -750,7 +750,7 @@ export class SubscriptionsService {
       return subscription;
     }
 
-    throw new NotFoundException('Abonnement lie au paiement introuvable');
+    throw new NotFoundException('Abonnement lié au paiement introuvable');
   }
 
   private async applyPaymentToSubscription(
@@ -925,7 +925,7 @@ export class SubscriptionsService {
         orderNumber: null,
         status: PaymentStatus.SUCCEEDED,
         statusCode: null,
-        message: 'Abonnement paye avec jetons Zwanga',
+        message: 'Abonnement payé avec jetons Zwanga',
         paymentUrl: null,
         amount: Math.abs(Number(walletEntry.amount ?? subscription.amount)),
         currency: walletEntry.currency ?? subscription.currency,
@@ -1013,7 +1013,7 @@ export class SubscriptionsService {
 
     if (!user.isDriver && user.role !== UserRole.DRIVER) {
       throw new BadRequestException(
-        'Les abonnements premium sont reserves aux conducteurs',
+        'Les abonnements premium sont réservés aux conducteurs',
       );
     }
 

@@ -24,7 +24,7 @@ export class RequestDriverPayoutDto {
     required: false,
     example: '+243891234567',
     description:
-      'Numero Mobile Money receveur. Si absent, le telephone du compte chauffeur est utilise.',
+      'Numéro Mobile Money receveur. Si absent, le téléphone du compte chauffeur est utilisé.',
   })
   @IsString()
   @IsOptional()
@@ -35,7 +35,7 @@ export class RequestDriverPayoutDto {
     required: false,
     format: 'uuid',
     description:
-      'Cle stable generee par l application. Rejouer la meme cle retourne le meme retrait sans nouveau transfert.',
+      'Clé stable générée par l’application. Rejouer la même clé retourne le même retrait sans nouveau transfert.',
   })
   @IsOptional()
   @IsUUID('4')

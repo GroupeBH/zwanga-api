@@ -405,7 +405,7 @@ describe('WalletService', () => {
         } as any,
         2500,
       ),
-    ).rejects.toThrow('deja ete remboursee');
+    ).rejects.toThrow('déjà été remboursée');
 
     expect(manager.save).not.toHaveBeenCalled();
   });
@@ -649,7 +649,7 @@ describe('WalletService', () => {
         relatedEntityId: '123e4567-e89b-12d3-a456-426614174000',
         paymentTransactionId: 'payment-1',
         description:
-          'Bonus de 25 jetons pour l abonnement 123e4567-e89b-12d3-a456-426614174000',
+          'Bonus de 25 jetons pour l’abonnement 123e4567-e89b-12d3-a456-426614174000',
       }),
     );
     expect(entry).toEqual(

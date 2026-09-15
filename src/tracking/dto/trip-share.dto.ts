@@ -14,7 +14,7 @@ export class CreateTripShareLinkDto {
   @ApiProperty({
     required: false,
     description:
-      'Reservation a associer au lien public lorsque le passager partage son propre suivi',
+      'Réservation à associer au lien public lorsque le passager partage son propre suivi',
   })
   @IsUUID()
   @IsOptional()
@@ -56,7 +56,7 @@ export class CreateTripShareLinkDto {
     minimum: 1,
     maximum: 168,
     default: 48,
-    description: 'Duree de validite du lien public en heures',
+    description: 'Durée de validité du lien public en heures',
   })
   @IsInt()
   @Min(1)

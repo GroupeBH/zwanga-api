@@ -1246,7 +1246,7 @@ export class TripRequestsService {
         offerId: offer.id,
         driverId: offer.driverId,
         message:
-          "Ce conducteur exige une verification d'identite approuvee avant d'accepter son offre.",
+          "Ce conducteur exige une vérification d'identité approuvée avant d'accepter son offre.",
       });
     }
 
@@ -1354,7 +1354,7 @@ export class TripRequestsService {
           offerId: acceptedOffer.id,
           driverId,
           message:
-            "Ce conducteur exige une verification d'identite approuvee avant de demarrer ce trajet.",
+            "Ce conducteur exige une vérification d'identité approuvée avant de démarrer ce trajet.",
         },
       );
     }
@@ -1512,7 +1512,7 @@ export class TripRequestsService {
           tripRequestId,
           driverId,
           message:
-            "Ce conducteur exige une verification d'identite approuvee avant d'accepter cette demande.",
+            "Ce conducteur exige une vérification d'identité approuvée avant d'accepter cette demande.",
         },
       );
     }
@@ -2223,9 +2223,9 @@ export class TripRequestsService {
 
   private throwPassengerKycRequiredForExtraSeats(): never {
     throw new BadRequestException({
-      error: 'KYC passager requis',
+      error: "Vérification d’identité du passager requise",
       code: 'PASSENGER_KYC_REQUIRED',
-      message: `Pour réserver plus de ${this.MAX_SEATS_WITHOUT_APPROVED_KYC} places, votre KYC doit être approuvé.`,
+      message: `Pour réserver plus de ${this.MAX_SEATS_WITHOUT_APPROVED_KYC} places, votre identité doit être vérifiée.`,
       action: 'complete_kyc',
       reason: 'extra_seats',
       maximumSeatsWithoutKyc: this.MAX_SEATS_WITHOUT_APPROVED_KYC,
@@ -2246,7 +2246,7 @@ export class TripRequestsService {
     }
 
     throw new BadRequestException({
-      error: 'KYC passager requis',
+      error: "Vérification d’identité du passager requise",
       code: 'PASSENGER_KYC_REQUIRED',
       message: context.message,
       action: 'complete_kyc',

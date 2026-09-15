@@ -290,7 +290,7 @@ export class NotificationService implements OnModuleInit {
     pushToken: string,
   ): Promise<string> {
     if (!this.firebaseApp) {
-      throw new Error('FCM non configure sur le serveur');
+      throw new Error('FCM non configuré sur le serveur');
     }
     return getMessaging(this.firebaseApp).send({
       token: pushToken,
@@ -335,7 +335,7 @@ export class NotificationService implements OnModuleInit {
       const error = new Error(
         ticket?.message ||
           payload.errors?.[0]?.message ||
-          'Expo Push a refuse la notification',
+          'Expo Push a refusé la notification',
       ) as Error & { code?: string };
       error.code = `expo/${ticket?.details?.error || payload.errors?.[0]?.code || 'unknown'}`;
       throw error;
@@ -586,7 +586,7 @@ export class NotificationService implements OnModuleInit {
         }
 
         const error = new Error(
-          receipt.message || 'Expo Push receipt a signale un echec',
+          receipt.message || 'Expo Push receipt a signalé un échec',
         ) as Error & { code?: string };
         error.code = `expo/${receipt.details?.error || 'unknown'}`;
         await this.markNotificationFailed(notification, error.message);

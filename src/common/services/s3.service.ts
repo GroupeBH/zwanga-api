@@ -65,7 +65,7 @@ export class S3Service {
       return key;
     } catch (error) {
       this.logger.error('S3 upload error:', error);
-      throw new InternalServerErrorException('Failed to upload file to S3');
+      throw new InternalServerErrorException("Le fichier n’a pas pu être envoyé. Veuillez réessayer.");
     }
   }
 

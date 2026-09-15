@@ -9,8 +9,8 @@ export class SendWhatsAppNotificationDto {
     maxItems: 5,
   })
   @IsArray()
-  @ArrayMinSize(1, { message: "Vous devez selectionner au moins 1 contact d'urgence" })
-  @ArrayMaxSize(5, { message: "Vous ne pouvez pas selectionner plus de 5 contacts d'urgence" })
-  @IsUUID(undefined, { each: true, message: 'Chaque ID de contact doit etre un UUID valide' })
+  @ArrayMinSize(1, { message: "Vous devez sélectionner au moins 1 contact d'urgence" })
+  @ArrayMaxSize(5, { message: "Vous ne pouvez pas sélectionner plus de 5 contacts d'urgence" })
+  @IsUUID(undefined, { each: true, message: 'Chaque ID de contact doit être un UUID valide' })
   emergencyContactIds: string[];
 }

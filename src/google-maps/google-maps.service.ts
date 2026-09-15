@@ -667,7 +667,7 @@ export class GoogleMapsService {
 
       if (providerRoutes.length === 0) {
         throw new BadRequestException(
-          'Aucun itineraire trouve entre le depart et la destination',
+          'Aucun itinéraire trouvé entre le départ et la destination',
         );
       }
 

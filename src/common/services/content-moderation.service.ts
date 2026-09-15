@@ -166,7 +166,7 @@ export class ContentModerationService {
         return {
           isApproved: false,
           moderationLabels,
-          reason: `Image contains inappropriate content: ${blockedLabelsFound}`,
+          reason: 'Cette image contient du contenu non autorisé. Choisissez une autre image.',
         };
       }
 
@@ -181,7 +181,7 @@ export class ContentModerationService {
       // 1. Reject the image (safer but might block legitimate content)
       // 2. Approve the image (less safe but better UX)
       // We'll reject by default for safety
-      throw new InternalServerErrorException('Failed to moderate image content');
+      throw new InternalServerErrorException("La vérification de cette image est temporairement indisponible. Réessayez plus tard.");
     }
   }
 
@@ -197,7 +197,7 @@ export class ContentModerationService {
         return {
           isApproved: false,
           moderationLabels: [],
-          reason: error.message || 'Moderation failed',
+          reason: error.message || "La vérification de cette image a échoué. Veuillez réessayer.",
         };
       })),
     );

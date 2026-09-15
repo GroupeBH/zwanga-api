@@ -36,7 +36,7 @@ export class TrackingGateway
   private parseCoordinates(coordinates?: [number, number]): [number, number] {
     const normalizedCoordinates = normalizeLngLatCoordinates(coordinates);
     if (!normalizedCoordinates) {
-      throw new Error('Coordonnees invalides');
+      throw new Error('Coordonnées invalides');
     }
 
     return normalizedCoordinates;

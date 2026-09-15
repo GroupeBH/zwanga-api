@@ -179,7 +179,7 @@ export class UsersController {
   @ApiOperation({ summary: 'Update FCM token for push notifications' })
   async updateFcmToken(@Request() req, @Body('fcmToken') fcmToken: string) {
     await this.usersService.updateFcmToken(req.user.userId, fcmToken);
-    return { message: 'FCM token updated successfully' };
+    return { message: "Les notifications ont été configurées avec succès." };
   }
 
   @Get(':id/public')

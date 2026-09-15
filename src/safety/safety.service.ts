@@ -215,14 +215,14 @@ export class SafetyService {
     if (createDto.tripId) {
       trip = await this.tripRepository.findOne({ where: { id: createDto.tripId } });
       if (!trip) {
-        throw new NotFoundException('Trip non trouvé');
+        throw new NotFoundException("Trajet introuvable.");
       }
     }
 
     if (createDto.bookingId) {
       booking = await this.bookingRepository.findOne({ where: { id: createDto.bookingId } });
       if (!booking) {
-        throw new NotFoundException('Booking non trouvé');
+        throw new NotFoundException("Réservation introuvable.");
       }
     }
 
@@ -520,15 +520,15 @@ export class SafetyService {
       });
 
       if (!booking) {
-        throw new NotFoundException('Booking non trouvé');
+        throw new NotFoundException("Réservation introuvable.");
       }
 
       if (!booking.trip) {
-        throw new BadRequestException('Ce booking n a pas de trajet associé');
+        throw new BadRequestException("Aucun trajet n’est associé à cette réservation.");
       }
 
       if (createDto.tripId && createDto.tripId !== booking.tripId) {
-        throw new BadRequestException('Le tripId fourni ne correspond pas au booking');
+        throw new BadRequestException("Le trajet indiqué ne correspond pas à cette réservation.");
       }
 
       const isDriver = booking.trip.driverId === userId;
@@ -562,7 +562,7 @@ export class SafetyService {
       });
 
       if (!trip) {
-        throw new NotFoundException('Trip non trouvé');
+        throw new NotFoundException("Trajet introuvable.");
       }
 
       if (!this.isTripInProgress(trip)) {
@@ -584,7 +584,7 @@ export class SafetyService {
 
       if (!participantIds.has(createDto.reportedUserId)) {
         throw new BadRequestException(
-          'L utilisateur signalé ne participe pas à ce trajet actif',
+          'L’utilisateur signalé ne participe pas à ce trajet actif',
         );
       }
 

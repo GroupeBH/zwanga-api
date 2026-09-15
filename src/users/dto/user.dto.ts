@@ -94,7 +94,7 @@ export class CreateDiditKycSessionDto {
   @ApiProperty({
     required: false,
     description:
-      "URL de retour mobile/web appelee apres la session Didit. Les schemas d'application mobile sont acceptes.",
+      "URL de retour mobile/web appelée après la session Didit. Les schémas d'application mobile sont acceptés.",
     example: 'zwanga://kyc/didit-return',
   })
   @IsString()
@@ -104,7 +104,7 @@ export class CreateDiditKycSessionDto {
 
   @ApiProperty({
     required: false,
-    description: 'Langue preferee pour la session Didit',
+    description: 'Langue préférée pour la session Didit',
     example: 'fr',
   })
   @IsString()
@@ -127,7 +127,7 @@ export class SyncDiditKycSessionDto {
   @ApiProperty({
     required: false,
     description:
-      "Identifiant de session Didit retourne par le callback. S'il est absent, la derniere session Didit de l'utilisateur est utilisee.",
+      "Identifiant de session Didit retourné par le callback. S'il est absent, la dernière session Didit de l'utilisateur est utilisée.",
   })
   @IsString()
   @IsOptional()
@@ -137,7 +137,7 @@ export class SyncDiditKycSessionDto {
   @ApiProperty({
     required: false,
     description:
-      "Statut recu cote app. Il n'est jamais utilise seul pour approuver un KYC ; le backend verifie Didit cote serveur.",
+      "Statut reçu côté app. Il n'est jamais utilisé seul pour approuver un KYC ; le backend vérifie Didit côté serveur.",
   })
   @IsString()
   @IsOptional()
@@ -181,7 +181,7 @@ export class SendPhoneVerificationOtpDto {
   @IsNotEmpty({ message: 'context should not be empty' })
   @IsEnum(PhoneVerificationContext, {
     message:
-      'context must be one of the following values: registration, login, update',
+      "Le contexte de vérification est invalide. Choisissez l’inscription, la connexion ou la mise à jour.",
   })
   context: PhoneVerificationContext;
 }
@@ -210,7 +210,7 @@ export class PublicUserInfoDto {
   })
   isPremium: boolean;
 
-  @ApiProperty({ description: 'Indique si le badge premium doit etre affiche' })
+  @ApiProperty({ description: 'Indique si le badge premium doit être affiché' })
   premiumBadge: boolean;
 
   @ApiProperty({ description: "Statut de l'utilisateur" })
@@ -266,7 +266,7 @@ export class ChangePinDto {
   @IsString()
   @MinLength(4)
   @MaxLength(4)
-  @Matches(/^\d{4}$/, { message: 'Old PIN must be exactly 4 digits' })
+  @Matches(/^\d{4}$/, { message: "L’ancien code PIN doit contenir exactement 4 chiffres." })
   oldPin?: string;
 
   @ApiProperty({ example: '5678', description: 'Nouveau PIN (4 chiffres)' })
@@ -274,7 +274,7 @@ export class ChangePinDto {
   @IsNotEmpty()
   @MinLength(4)
   @MaxLength(4)
-  @Matches(/^\d{4}$/, { message: 'New PIN must be exactly 4 digits' })
+  @Matches(/^\d{4}$/, { message: "Le nouveau code PIN doit contenir exactement 4 chiffres." })
   newPin: string;
 }
 

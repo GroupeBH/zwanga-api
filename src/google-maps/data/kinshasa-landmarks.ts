@@ -8,7 +8,7 @@ export const KINSHASA_LANDMARKS: LandmarkPlace[] = [
     address: 'Avenue Victoire, Kalamu, Kinshasa',
     commune: 'Kalamu',
     category: 'rond-point',
-    description: 'Grand repere populaire pour les trajets et rendez-vous.',
+    description: 'Grand repère populaire pour les trajets et rendez-vous.',
     keywords: ['victoire', 'kalamu', 'marche victoire', 'avenue victoire'],
   },
   {
@@ -18,7 +18,7 @@ export const KINSHASA_LANDMARKS: LandmarkPlace[] = [
     address: 'Marche Central, Gombe, Kinshasa',
     commune: 'Gombe',
     category: 'marche',
-    description: 'Repere commercial connu pour les courses et les departs.',
+    description: 'Repère commercial connu pour les courses et les départs.',
     keywords: ['zando', 'marche central', 'gombe', 'shopping'],
   },
   {
@@ -28,7 +28,7 @@ export const KINSHASA_LANDMARKS: LandmarkPlace[] = [
     address: 'Universite Pedagogique Nationale, Ngaliema, Kinshasa',
     commune: 'Ngaliema',
     category: 'universite',
-    description: 'Repere tres utilise dans la zone ouest de Kinshasa.',
+    description: 'Repère très utilisé dans la zone ouest de Kinshasa.',
     keywords: ['upn', 'universite pedagogique nationale', 'ngaliema'],
   },
   {
@@ -38,7 +38,7 @@ export const KINSHASA_LANDMARKS: LandmarkPlace[] = [
     address: 'Rond-point Ngaba, Kinshasa',
     commune: 'Ngaba',
     category: 'rond-point',
-    description: 'Carrefour connu utilise comme point de rencontre.',
+    description: 'Carrefour connu utilisé comme point de rencontre.',
     keywords: ['ngaba', 'rond-point ngaba', 'carrefour ngaba'],
   },
   {
@@ -48,7 +48,7 @@ export const KINSHASA_LANDMARKS: LandmarkPlace[] = [
     address: 'Quartier Matonge, Kalamu, Kinshasa',
     commune: 'Kalamu',
     category: 'quartier',
-    description: 'Quartier tres connu pour ses commerces et sa vie locale.',
+    description: 'Quartier très connu pour ses commerces et sa vie locale.',
     keywords: ['matonge', 'kalamu', 'quartier matonge'],
   },
   {
@@ -58,7 +58,7 @@ export const KINSHASA_LANDMARKS: LandmarkPlace[] = [
     address: 'Kintambo Magasin, Kintambo, Kinshasa',
     commune: 'Kintambo',
     category: 'quartier',
-    description: 'Repere classique dans les trajets quotidiens.',
+    description: 'Repère classique dans les trajets quotidiens.',
     keywords: ['kintambo', 'kintambo magasin', 'magasin'],
   },
   {
@@ -78,7 +78,7 @@ export const KINSHASA_LANDMARKS: LandmarkPlace[] = [
     address: 'Stade des Martyrs, Lingwala, Kinshasa',
     commune: 'Lingwala',
     category: 'stade',
-    description: 'Repere facile a reconnaitre pour les rendez-vous.',
+    description: 'Repère facile à reconnaître pour les rendez-vous.',
     keywords: ['stade des martyrs', 'martyrs', 'lingwala', 'stade'],
   },
   {
@@ -98,7 +98,7 @@ export const KINSHASA_LANDMARKS: LandmarkPlace[] = [
     address: 'Quartier GB, Gombe, Kinshasa',
     commune: 'Gombe',
     category: 'quartier',
-    description: 'Repere courant pour les activites et trajets en ville.',
+    description: 'Repère courant pour les activités et trajets en ville.',
     keywords: ['gb', 'gombe', 'quartier gb'],
   },
 ];

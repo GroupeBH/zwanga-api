@@ -23,8 +23,8 @@ export class CreateTripRequestDto {
 
   @ApiProperty({
     required: false,
-    description: 'Reference ou repere connu pour faciliter la prise en charge',
-    example: 'Entree principale, devant la station',
+    description: 'Référence ou repère connu pour faciliter la prise en charge',
+    example: 'Entrée principale, devant la station',
   })
   @IsString()
   @IsOptional()
@@ -50,8 +50,8 @@ export class CreateTripRequestDto {
 
   @ApiProperty({
     required: false,
-    description: "Reference ou repere connu pour faciliter l'arrivee",
-    example: 'Portail noir, a cote du supermarche',
+    description: "Référence ou repère connu pour faciliter l'arrivée",
+    example: 'Portail noir, à côté du supermarché',
   })
   @IsString()
   @IsOptional()
@@ -119,7 +119,7 @@ export class CreateTripRequestDto {
     example: VehicleType.CAR,
   })
   @IsEnum(VehicleType, {
-    message: 'Le type de vehicule selectionne est invalide',
+    message: 'Le type de véhicule sélectionné est invalide',
   })
   vehicleType: VehicleType;
 
@@ -128,11 +128,11 @@ export class CreateTripRequestDto {
     enum: TripPaymentMode,
     enumName: 'TripPaymentMode',
     description:
-      'Mode de reglement: paiement electronique via FlexPay, jetons Zwanga ou paiement physique a l arrivee',
+      'Mode de règlement : paiement électronique via FlexPay, jetons Zwanga ou paiement physique à l’arrivée',
     example: TripPaymentMode.ELECTRONIC,
   })
   @IsEnum(TripPaymentMode, {
-    message: 'Le mode de paiement selectionne est invalide',
+    message: 'Le mode de paiement sélectionné est invalide',
   })
   @IsOptional()
   paymentMode?: TripPaymentMode;
@@ -147,7 +147,7 @@ export class RecommendTripRequestPriceDto {
   @ApiProperty({
     required: false,
     description:
-      'Adresse de depart, utilisee si les coordonnees ne sont pas fournies',
+      'Adresse de départ, utilisée si les coordonnées ne sont pas fournies',
   })
   @IsString()
   @IsOptional()
@@ -155,7 +155,7 @@ export class RecommendTripRequestPriceDto {
 
   @ApiProperty({
     required: false,
-    description: 'Reference ou repere connu pour faciliter la prise en charge',
+    description: 'Référence ou repère connu pour faciliter la prise en charge',
   })
   @IsString()
   @IsOptional()
@@ -163,7 +163,7 @@ export class RecommendTripRequestPriceDto {
 
   @ApiProperty({
     required: false,
-    description: 'Coordonnees du point de depart [longitude, latitude]',
+    description: 'Coordonnées du point de départ [longitude, latitude]',
     example: [15.2663, -4.325],
     minItems: 2,
     maxItems: 2,
@@ -178,7 +178,7 @@ export class RecommendTripRequestPriceDto {
   @ApiProperty({
     required: false,
     description:
-      'Adresse d arrivee, utilisee si les coordonnees ne sont pas fournies',
+      'Adresse d’arrivée, utilisée si les coordonnées ne sont pas fournies',
   })
   @IsString()
   @IsOptional()
@@ -186,7 +186,7 @@ export class RecommendTripRequestPriceDto {
 
   @ApiProperty({
     required: false,
-    description: "Reference ou repere connu pour faciliter l'arrivee",
+    description: "Référence ou repère connu pour faciliter l'arrivée",
   })
   @IsString()
   @IsOptional()
@@ -194,7 +194,7 @@ export class RecommendTripRequestPriceDto {
 
   @ApiProperty({
     required: false,
-    description: 'Coordonnees du point d arrivee [longitude, latitude]',
+    description: 'Coordonnées du point d’arrivée [longitude, latitude]',
     example: [15.3222, -4.4419],
     minItems: 2,
     maxItems: 2,
@@ -209,7 +209,7 @@ export class RecommendTripRequestPriceDto {
   @ApiProperty({
     required: false,
     minimum: 1,
-    description: 'Nombre de passagers pour calculer le total recommande',
+    description: 'Nombre de passagers pour calculer le total recommandé',
     example: 3,
   })
   @IsNumber()
@@ -223,11 +223,11 @@ export class RecommendTripRequestPriceDto {
     enumName: 'VehicleType',
     default: VehicleType.CAR,
     description:
-      'Type de vehicule utilise pour la grille tarifaire: voiture = 500 FC/km, moto = 1000 FC/km',
+      'Type de véhicule utilisé pour la grille tarifaire : voiture = 500 FC/km, moto = 1000 FC/km',
     example: VehicleType.MOTORCYCLE_TWO_WHEELS,
   })
   @IsEnum(VehicleType, {
-    message: 'Le type de vehicule selectionne est invalide',
+    message: 'Le type de véhicule sélectionné est invalide',
   })
   @IsOptional()
   vehicleType?: VehicleType;
@@ -285,7 +285,7 @@ export class CreateDriverOfferDto {
     required: false,
     default: false,
     description:
-      'Indique que le conducteur exige un KYC approuve avant embarquement.',
+      'Indique que le conducteur exige un KYC approuvé avant embarquement.',
     example: false,
   })
   @IsBoolean()
@@ -295,8 +295,8 @@ export class CreateDriverOfferDto {
   @ApiProperty({
     required: false,
     description:
-      'Reference ou repere propose par le conducteur pour la prise en charge',
-    example: "Je m'arrete devant la station",
+      'Référence ou repère proposé par le conducteur pour la prise en charge',
+    example: "Je m'arrête devant la station",
   })
   @IsString()
   @IsOptional()
@@ -305,7 +305,7 @@ export class CreateDriverOfferDto {
   @ApiProperty({
     required: false,
     description:
-      'Coordonnees de prise en charge proposees par le conducteur [longitude, latitude]',
+      'Coordonnées de prise en charge proposées par le conducteur [longitude, latitude]',
     example: [15.2663, -4.325],
     minItems: 2,
     maxItems: 2,
@@ -319,7 +319,7 @@ export class CreateDriverOfferDto {
 
   @ApiProperty({
     required: false,
-    description: "Reference ou repere propose par le conducteur pour l'arrivee",
+    description: "Référence ou repère proposé par le conducteur pour l'arrivée",
     example: 'Arrivee possible au parking principal',
   })
   @IsString()
@@ -329,7 +329,7 @@ export class CreateDriverOfferDto {
   @ApiProperty({
     required: false,
     description:
-      "Coordonnees d'arrivee proposees par le conducteur [longitude, latitude]",
+      "Coordonnées d'arrivée proposées par le conducteur [longitude, latitude]",
     example: [15.3222, -4.4419],
     minItems: 2,
     maxItems: 2,
@@ -387,7 +387,7 @@ export class AcceptTripRequestDto {
     required: false,
     default: false,
     description:
-      'Indique que le conducteur exige un KYC approuve avant embarquement.',
+      'Indique que le conducteur exige un KYC approuvé avant embarquement.',
     example: false,
   })
   @IsBoolean()
@@ -397,7 +397,7 @@ export class AcceptTripRequestDto {
   @ApiProperty({
     required: false,
     description:
-      'Reference ou repere ajoute par le conducteur pour la prise en charge',
+      'Référence ou repère ajouté par le conducteur pour la prise en charge',
     example: 'Je vous prends devant la station',
   })
   @IsString()
@@ -407,7 +407,7 @@ export class AcceptTripRequestDto {
   @ApiProperty({
     required: false,
     description:
-      'Coordonnees de prise en charge ajoutees par le conducteur [longitude, latitude]',
+      'Coordonnées de prise en charge ajoutées par le conducteur [longitude, latitude]',
     example: [15.2663, -4.325],
     minItems: 2,
     maxItems: 2,
@@ -421,7 +421,7 @@ export class AcceptTripRequestDto {
 
   @ApiProperty({
     required: false,
-    description: "Reference ou repere ajoute par le conducteur pour l'arrivee",
+    description: "Référence ou repère ajouté par le conducteur pour l'arrivée",
     example: 'Arrivee au parking principal',
   })
   @IsString()
@@ -431,7 +431,7 @@ export class AcceptTripRequestDto {
   @ApiProperty({
     required: false,
     description:
-      "Coordonnees d'arrivee ajoutees par le conducteur [longitude, latitude]",
+      "Coordonnées d'arrivée ajoutées par le conducteur [longitude, latitude]",
     example: [15.3222, -4.4419],
     minItems: 2,
     maxItems: 2,
@@ -452,7 +452,7 @@ export class UpdateTripRequestDto {
 
   @ApiProperty({
     required: false,
-    description: 'Reference ou repere connu pour faciliter la prise en charge',
+    description: 'Référence ou repère connu pour faciliter la prise en charge',
   })
   @IsString()
   @IsOptional()
@@ -479,7 +479,7 @@ export class UpdateTripRequestDto {
 
   @ApiProperty({
     required: false,
-    description: "Reference ou repere connu pour faciliter l'arrivee",
+    description: "Référence ou repère connu pour faciliter l'arrivée",
   })
   @IsString()
   @IsOptional()
@@ -545,11 +545,11 @@ export class UpdateTripRequestDto {
     enum: VehicleType,
     enumName: 'VehicleType',
     description:
-      'Type de vehicule a utiliser si le backend doit recalculer le prix recommande: voiture = 500 FC/km, moto = 1000 FC/km',
+      'Type de véhicule à utiliser si le backend doit recalculer le prix recommandé : voiture = 500 FC/km, moto = 1000 FC/km',
     example: VehicleType.CAR,
   })
   @IsEnum(VehicleType, {
-    message: 'Le type de vehicule selectionne est invalide',
+    message: 'Le type de véhicule sélectionné est invalide',
   })
   @IsOptional()
   vehicleType?: VehicleType;
@@ -559,11 +559,11 @@ export class UpdateTripRequestDto {
     enum: TripPaymentMode,
     enumName: 'TripPaymentMode',
     description:
-      'Mode de reglement: paiement electronique via FlexPay, jetons Zwanga ou paiement physique a l arrivee',
+      'Mode de règlement : paiement électronique via FlexPay, jetons Zwanga ou paiement physique à l’arrivée',
     example: TripPaymentMode.ELECTRONIC,
   })
   @IsEnum(TripPaymentMode, {
-    message: 'Le mode de paiement selectionne est invalide',
+    message: 'Le mode de paiement sélectionné est invalide',
   })
   @IsOptional()
   paymentMode?: TripPaymentMode;

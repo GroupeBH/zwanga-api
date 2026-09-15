@@ -27,7 +27,7 @@ export class InitiateWalletTopUpDto {
     enum: PaymentMethod,
     enumName: 'PaymentMethod',
     example: PaymentMethod.MOBILE_MONEY,
-    description: 'Canal FlexPay utilise pour acheter les jetons.',
+    description: 'Canal FlexPay utilisé pour acheter les jetons.',
   })
   @IsEnum(PaymentMethod)
   method: PaymentMethod;
@@ -35,7 +35,7 @@ export class InitiateWalletTopUpDto {
   @ApiProperty({
     required: false,
     example: '+243891234567',
-    description: 'Numero Mobile Money du client.',
+    description: 'Numéro Mobile Money du client.',
   })
   @IsString()
   @IsOptional()
@@ -84,7 +84,7 @@ export class TransferWalletPointsDto {
 
   @ApiProperty({
     required: false,
-    description: 'Telephone du destinataire deja inscrit sur Zwanga.',
+    description: 'Téléphone du destinataire déjà inscrit sur Zwanga.',
     example: '+243891234567',
   })
   @IsString()
@@ -94,7 +94,7 @@ export class TransferWalletPointsDto {
 
   @ApiProperty({
     required: false,
-    description: 'Email du destinataire deja inscrit sur Zwanga.',
+    description: 'Email du destinataire déjà inscrit sur Zwanga.',
     example: 'client@zwanga.cd',
   })
   @IsEmail()
@@ -104,7 +104,7 @@ export class TransferWalletPointsDto {
 
   @ApiProperty({
     required: false,
-    description: 'Petit message associe au partage de jetons.',
+    description: 'Petit message associé au partage de jetons.',
     example: 'Pour ton prochain trajet',
   })
   @IsString()

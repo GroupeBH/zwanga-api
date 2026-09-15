@@ -137,7 +137,7 @@ export class ChatService {
     });
 
     if (!conversation) {
-      throw new NotFoundException('Conversation not found');
+      throw new NotFoundException("Conversation introuvable.");
     }
 
     this.ensureMembership(conversation.participants, userId);
@@ -157,7 +157,7 @@ export class ChatService {
     });
 
     if (!conversation) {
-      throw new NotFoundException('Conversation not found');
+      throw new NotFoundException("Conversation introuvable.");
     }
 
     this.ensureMembership(conversation.participants, userId);
@@ -183,7 +183,7 @@ export class ChatService {
     });
 
     if (!conversation) {
-      throw new NotFoundException('Conversation not found');
+      throw new NotFoundException("Conversation introuvable.");
     }
 
     this.ensureMembership(conversation.participants, senderId);
@@ -241,7 +241,7 @@ export class ChatService {
     });
 
     if (!participant) {
-      throw new NotFoundException('Participant not found');
+      throw new NotFoundException("Participant introuvable.");
     }
 
     await this.participantRepository.remove(participant);
@@ -269,7 +269,7 @@ export class ChatService {
     });
 
     if (!conversation) {
-      throw new NotFoundException('Conversation not found');
+      throw new NotFoundException("Conversation introuvable.");
     }
 
     // Ensure the user is part of this conversation
@@ -300,7 +300,7 @@ export class ChatService {
     });
 
     if (!booking) {
-      throw new NotFoundException('Booking not found');
+      throw new NotFoundException("Réservation introuvable.");
     }
 
     return this.findOrCreateConversationForBooking(booking.id, booking);
@@ -327,7 +327,7 @@ export class ChatService {
     });
 
     if (!message) {
-      throw new NotFoundException('Message not found');
+      throw new NotFoundException("Message introuvable.");
     }
 
     await this.markConversationRead(message.conversationId, userId);
@@ -344,7 +344,7 @@ export class ChatService {
     });
 
     if (!message) {
-      throw new NotFoundException('Message not found');
+      throw new NotFoundException("Message introuvable.");
     }
 
     if (message.senderId !== userId) {
@@ -370,7 +370,7 @@ export class ChatService {
     });
 
     if (!message) {
-      throw new NotFoundException('Message not found');
+      throw new NotFoundException("Message introuvable.");
     }
 
     if (message.senderId !== userId) {
@@ -519,7 +519,7 @@ export class ChatService {
     });
 
     if (!conversation) {
-      throw new NotFoundException('Conversation not found');
+      throw new NotFoundException("Conversation introuvable.");
     }
 
     this.ensureConversationType(conversation, ConversationType.SUPPORT);
@@ -569,7 +569,7 @@ export class ChatService {
     });
 
     if (found.length !== unique.length) {
-      throw new NotFoundException('One or more users not found');
+      throw new NotFoundException("Un ou plusieurs utilisateurs sont introuvables.");
     }
   }
 
@@ -578,7 +578,7 @@ export class ChatService {
     userId: string,
   ) {
     if (!participants.some((participant) => participant.userId === userId)) {
-      throw new ForbiddenException('User not part of this conversation');
+      throw new ForbiddenException("Vous ne faites pas partie de cette conversation.");
     }
   }
 
@@ -591,7 +591,7 @@ export class ChatService {
     });
 
     if (!participant) {
-      throw new ForbiddenException('User not part of this conversation');
+      throw new ForbiddenException("Vous ne faites pas partie de cette conversation.");
     }
   }
 
@@ -612,7 +612,7 @@ export class ChatService {
       }));
 
     if (!booking) {
-      throw new NotFoundException('Booking not found');
+      throw new NotFoundException("Réservation introuvable.");
     }
 
     if (!conversation) {
@@ -646,7 +646,7 @@ export class ChatService {
     expectedType?: ConversationType,
   ) {
     if (expectedType && conversation.type !== expectedType) {
-      throw new BadRequestException('Invalid conversation type');
+      throw new BadRequestException("Ce type de conversation ne permet pas cette action.");
     }
   }
 

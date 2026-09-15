@@ -62,7 +62,7 @@ export class BookingsController {
   @ApiOperation({
     summary: 'Initiate electronic payment for a booking',
     description:
-      "Disponible uniquement apres l'arrivee du passager. Calcule le montant cote backend puis initialise le paiement FlexPay.",
+      "Disponible uniquement après l'arrivée du passager. Calcule le montant côté backend puis initialise le paiement FlexPay.",
   })
   async initiatePayment(
     @Request() req,
@@ -82,7 +82,7 @@ export class BookingsController {
   @ApiOperation({
     summary: 'Update payment mode for a booking',
     description:
-      "Enregistre le moyen choisi sans debiter avant l'arrivee. Apres l'arrivee, selectionner les jetons declenche le debit si necessaire.",
+      "Enregistre le moyen choisi sans débiter avant l'arrivée. Après l'arrivée, sélectionner les jetons déclenche le débit si nécessaire.",
   })
   async updatePaymentMode(
     @Request() req,
@@ -177,7 +177,7 @@ export class BookingsController {
   @ApiOperation({ summary: 'Cancel a booking (passenger or driver before pickup)' })
   async cancel(@Request() req, @Param('id') id: string) {
     await this.bookingsService.cancel(id, req.user.userId);
-    return { message: 'Booking cancelled successfully' };
+    return { message: "Réservation annulée avec succès." };
   }
 
   @Post(':id/interruption-request')

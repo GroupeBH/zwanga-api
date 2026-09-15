@@ -105,7 +105,7 @@ export function assertSelfServiceUserRole(
 ): asserts role is SelfServiceUserRole {
   if (!isSelfServiceUserRole(role)) {
     throw new BadRequestException(
-      "Ce role ne peut pas etre attribue par l'inscription ou le profil utilisateur",
+      "Ce rôle ne peut pas être attribué par l'inscription ou le profil utilisateur",
     );
   }
 }

@@ -8,30 +8,30 @@ export class InitiatePaymentDto {
     enum: PaymentMethod,
     enumName: 'PaymentMethod',
     example: PaymentMethod.MOBILE_MONEY,
-    description: 'Canal technique utilise pour la transaction FlexPay.',
+    description: 'Canal technique utilisé pour la transaction FlexPay.',
   })
   @IsEnum(PaymentMethod, {
-    message: 'La methode de paiement selectionnee est invalide',
+    message: 'La méthode de paiement sélectionnée est invalide',
   })
   method: PaymentMethod;
 
   @ApiProperty({
     required: false,
-    description: 'Numero du client au format international pour Mobile Money',
+    description: 'Numéro du client au format international pour Mobile Money',
     example: '243891234567',
   })
   @IsString({
-    message: 'Le numero de telephone doit etre une chaine de caracteres',
+    message: 'Le numéro de téléphone doit être une chaîne de caractères',
   })
   @IsOptional()
   @MaxLength(20, {
-    message: 'Le numero de telephone ne peut pas depasser 20 caracteres',
+    message: 'Le numéro de téléphone ne peut pas dépasser 20 caractères',
   })
   phone?: string;
 
   @ApiProperty({
     required: false,
-    description: 'URL appelee apres un paiement carte approuve',
+    description: 'URL appelée après un paiement carte approuvé',
     example: 'zwanga://payments/trips?status=success',
   })
   @IsString()
@@ -41,7 +41,7 @@ export class InitiatePaymentDto {
 
   @ApiProperty({
     required: false,
-    description: 'URL appelee apres une annulation du paiement carte',
+    description: 'URL appelée après une annulation du paiement carte',
     example: 'zwanga://payments/trips?status=cancel',
   })
   @IsString()
@@ -51,7 +51,7 @@ export class InitiatePaymentDto {
 
   @ApiProperty({
     required: false,
-    description: 'URL appelee apres un refus du paiement carte',
+    description: 'URL appelée après un refus du paiement carte',
     example: 'zwanga://payments/trips?status=decline',
   })
   @IsString()
@@ -93,7 +93,7 @@ export class FlexPayCallbackDto {
 
   @ApiProperty({
     required: false,
-    description: 'Reference de la transaction chez l operateur',
+    description: 'Référence de la transaction chez l’opérateur',
     example: '7KI81020PHS',
   })
   @IsString()
@@ -102,7 +102,7 @@ export class FlexPayCallbackDto {
 
   @ApiProperty({
     required: false,
-    description: 'Reference de la transaction chez l operateur',
+    description: 'Référence de la transaction chez l’opérateur',
     example: '7KI81020PHS',
   })
   @IsString()
@@ -111,7 +111,7 @@ export class FlexPayCallbackDto {
 
   @ApiProperty({
     required: false,
-    description: 'Reference de la transaction chez l operateur',
+    description: 'Référence de la transaction chez l’opérateur',
     example: '7KI81020PHS',
   })
   @IsString()
@@ -120,7 +120,7 @@ export class FlexPayCallbackDto {
 
   @ApiProperty({
     required: false,
-    description: 'Reference de la transaction chez l operateur',
+    description: 'Référence de la transaction chez l’opérateur',
     example: '7KI81020PHS',
   })
   @IsString()
@@ -129,7 +129,7 @@ export class FlexPayCallbackDto {
 
   @ApiProperty({
     required: false,
-    description: 'Numero de commande genere par FlexPay',
+    description: 'Numéro de commande généré par FlexPay',
     example: '9bsTX7qXdpQe243815877848',
   })
   @IsString()
@@ -138,7 +138,7 @@ export class FlexPayCallbackDto {
 
   @ApiProperty({
     required: false,
-    description: 'Numero de commande genere par FlexPay',
+    description: 'Numéro de commande généré par FlexPay',
     example: '9bsTX7qXdpQe243815877848',
   })
   @IsString()
@@ -147,7 +147,7 @@ export class FlexPayCallbackDto {
 
   @ApiProperty({
     required: false,
-    description: 'Numero de commande genere par FlexPay',
+    description: 'Numéro de commande généré par FlexPay',
     example: '9bsTX7qXdpQe243815877848',
   })
   @IsString()
