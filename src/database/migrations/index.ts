@@ -32,6 +32,7 @@ import { AddFirstTripSubsidyToBookings1780000031000 } from './1780000031000-AddF
 import { AddTripRequestDriverPickupOverdueNotification1780000032000 } from './1780000032000-AddTripRequestDriverPickupOverdueNotification';
 import { AddPassengerKycRequirements1780000033000 } from './1780000033000-AddPassengerKycRequirements';
 import { AddInterruptionPassengerDecisions1780000034000 } from './1780000034000-AddInterruptionPassengerDecisions';
+import { AddRideDeclarations1780000035000 } from './1780000035000-AddRideDeclarations';
 
 export const databaseMigrations = [
   FillTotalSeats1780000000000,
@@ -68,4 +69,5 @@ export const databaseMigrations = [
   AddTripRequestDriverPickupOverdueNotification1780000032000,
   AddPassengerKycRequirements1780000033000,
   AddInterruptionPassengerDecisions1780000034000,
+  AddRideDeclarations1780000035000,
 ];

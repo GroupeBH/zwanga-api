@@ -22,6 +22,7 @@ describe('BookingsService trip payments', () => {
     create: jest.Mock;
     save: jest.Mock;
     update: jest.Mock;
+    remove: jest.Mock;
     manager?: unknown;
   };
   let tripRepository: {
@@ -2073,10 +2074,11 @@ describe('BookingsService trip payments', () => {
         pickupWaitSeconds: 600,
       }),
     ]);
-    expect(bookingRepository.save).toHaveBeenCalledWith(
-      expect.objectContaining({
+    expect(bookingRepository.update).toHaveBeenCalledWith(
+      expect.objectContaining({ id: autoBooking.id, status: BookingStatus.ACCEPTED }),
+      {
         driverPickupArrivedAt: expect.any(Date),
-      }),
+      },
     );
   });
 
@@ -2260,10 +2262,11 @@ describe('BookingsService trip payments', () => {
         detectedAt: expect.any(String),
       }),
     ]);
-    expect(bookingRepository.save).toHaveBeenCalledWith(
-      expect.objectContaining({
+    expect(bookingRepository.update).toHaveBeenCalledWith(
+      expect.objectContaining({ id: autoBooking.id, status: BookingStatus.ACCEPTED }),
+      {
         passengerDestinationApproachNotifiedAt: expect.any(Date),
-      }),
+      },
     );
     expect(autoBooking.trip.status).toBe(TripStatus.ACTIVE);
   });

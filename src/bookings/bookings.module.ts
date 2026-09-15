@@ -1,4 +1,6 @@
 import { Module } from '@nestjs/common';
+import { RideDeclarationsController } from '../ride-declarations/ride-declarations.controller';
+import { RideDeclarationsService } from '../ride-declarations/ride-declarations.service';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { BookingsService } from './bookings.service';
 import { BookingsController } from './bookings.controller';
@@ -38,8 +40,8 @@ import {
     DriverSettlementsModule,
     ReferralsModule,
   ],
-  controllers: [BookingsController],
-  providers: [BookingsService],
+  controllers: [BookingsController, RideDeclarationsController],
+  providers: [BookingsService, RideDeclarationsService],
   exports: [BookingsService],
 })
 export class BookingsModule {}

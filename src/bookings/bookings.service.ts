@@ -8,6 +8,9 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { ConfigService } from '@nestjs/config';
 import { Cron } from '@nestjs/schedule';
+import { NO_RIDE_DISPUTE_SQL } from '../ride-declarations/ride-declaration.policy';
+import type { RideStage } from '../ride-declarations/ride-declaration.model';
+import { hasRideDispute } from '../ride-declarations/ride-declaration.model';
 import {
   DataSource,
   EntityManager,
@@ -3708,6 +3711,63 @@ export class BookingsService {
     return booking;
   }
 
+  async validateManualRidePassenger(trip: Trip, passengerId: string, manager: EntityManager) {
+    await this.ensurePassengerKycApprovedForTrip(trip, passengerId, {
+      tripId: trip.id, message: 'Ce trajet exige une identité vérifiée avant l’embarquement.',
+    }, manager);
+  }
+
+  async invalidateManualRideCaches(bookingId: string) {
+    const booking = await this.bookingRepository.findOneBy({ id: bookingId });
+    if (booking) await this.invalidateBookingCaches(booking);
+  }
+
+  /** Only invoked for a committed, two-party transition by the durable worker. */
+  async finishManualRideEffects(bookingId: string, stage: RideStage) {
+    const booking = await this.bookingRepository.findOne({
+      where: { id: bookingId }, relations: ['trip', 'trip.driver', 'passenger'],
+    });
+    if (!booking) return;
+    if (stage === 'pickup' ? !booking.pickedUp : !booking.droppedOff) {
+      await this.notifyManualRideDeclaration(booking, stage);
+      return;
+    }
+    if (stage === 'dropoff') {
+      if (!booking.droppedOff || booking.dropoffDetectionMethod !== 'manual_dual_confirmation') return;
+      await this.settlePaymentAfterArrival(booking);
+      await this.notifySelectedEmergencyContacts(booking, 'dropoff');
+      await this.notifyPassengerAboutAutomaticDropoffConfirmation(booking);
+      await this.notifyDriverAboutAutomaticDropoffConfirmation(booking);
+    } else {
+      if (!booking.pickedUp || booking.pickupDetectionMethod !== 'manual_dual_confirmation') return;
+      await this.notifySelectedEmergencyContacts(booking, 'pickup');
+      await this.notifyDriverEmergencyContactsOnPickup(booking);
+      await this.notifyPassengerAboutAutomaticPickupConfirmation(booking);
+      await this.notifyDriverAboutAutomaticPickupConfirmation(booking);
+    }
+    await this.touchTripInteraction(booking.tripId);
+    await this.invalidateBookingCaches(booking);
+  }
+
+  private async notifyManualRideDeclaration(booking: Booking, stage: RideStage) {
+    const receipt = await this.bookingRepository.createQueryBuilder('b')
+      .select('b.id').addSelect('b.rideDeclarations').where('b.id = :id', { id: booking.id }).getOne();
+    const votes = receipt?.rideDeclarations?.[stage];
+    if (!votes) return;
+    const latestActor = !votes.passenger || (votes.driver && votes.driver.receivedAt > votes.passenger.receivedAt) ? 'driver' : 'passenger';
+    const recipientId = latestActor === 'driver' ? booking.passengerId : booking.trip.driverId;
+    const recipient = await this.userRepository.findOne({ where: { id: recipientId }, select: ['id', 'fcmToken'] });
+    const disputed = hasRideDispute(receipt?.rideDeclarations);
+    await this.notificationService.sendNotification(
+      recipient?.fcmToken ?? '',
+      disputed ? 'Confirmation à vérifier' : 'Votre confirmation est attendue',
+      disputed ? 'Les réponses ne concordent pas. Consultez le trajet et contactez l’assistance si nécessaire.'
+        : `L’autre personne a déclaré ${stage === 'pickup' ? 'l’embarquement' : 'l’arrivée'}. Confirmez ce qui s’est réellement passé dans le suivi du trajet.`,
+      { type: 'ride_confirmation_required', tripId: booking.tripId, bookingId: booking.id, role: latestActor === 'driver' ? 'passenger' : 'driver' },
+      recipientId,
+    );
+  }
+
   async confirmPickupByPassenger(
     bookingId: string,
     passengerId: string,
@@ -4060,7 +4120,12 @@ export class BookingsService {
     }
 
     booking.passengerDestinationApproachNotifiedAt = now;
-    const savedBooking = await this.bookingRepository.save(booking);
+    const update = await this.bookingRepository.update(
+      { id: booking.id, status: BookingStatus.ACCEPTED, passengerDestinationApproachNotifiedAt: IsNull() },
+      { passengerDestinationApproachNotifiedAt: now },
+    );
+    if (update.affected !== 1) return null;
+    const savedBooking = booking;
 
     return {
       type: 'passenger_near_destination',
@@ -4500,6 +4565,7 @@ export class BookingsService {
         passengerLastLocationUpdateAt: booking.passengerLastLocationUpdateAt
           ? Equal(booking.passengerLastLocationUpdateAt)
           : IsNull(),
+        rideDeclarations: Raw(column => `${NO_RIDE_DISPUTE_SQL(column)} AND NOT (${column} ? 'pickup')`),
       },
       {
         status: BookingStatus.BOARDING_UNCERTAIN,
@@ -4726,7 +4792,10 @@ export class BookingsService {
       !booking.driverPickupArrivedAt
     ) {
       booking.driverPickupArrivedAt = now;
-      await this.bookingRepository.save(booking);
+      await this.bookingRepository.update(
+        { id: booking.id, status: BookingStatus.ACCEPTED, driverPickupArrivedAt: IsNull() },
+        { driverPickupArrivedAt: now },
+      );
     }
 
     const driverId = booking.trip?.driverId;
@@ -4796,6 +4865,7 @@ export class BookingsService {
         id: booking.id,
         status: In([BookingStatus.ACCEPTED, BookingStatus.NO_SHOW]),
         pickedUp: false,
+        rideDeclarations: Raw(NO_RIDE_DISPUTE_SQL),
       },
       {
         status: BookingStatus.ACCEPTED,
@@ -4979,6 +5049,7 @@ export class BookingsService {
         passengerLastLocationUpdateAt: booking.passengerLastLocationUpdateAt
           ? Equal(booking.passengerLastLocationUpdateAt)
           : IsNull(),
+        rideDeclarations: Raw(column => `${NO_RIDE_DISPUTE_SQL(column)} AND NOT (${column} ? 'pickup')`),
       },
       {
         status: BookingStatus.NO_SHOW,
@@ -5164,6 +5235,7 @@ export class BookingsService {
         id: booking.id,
         status: BookingStatus.ACCEPTED,
         droppedOff: false,
+        rideDeclarations: Raw(NO_RIDE_DISPUTE_SQL),
       },
       {
         pickedUp: true,
@@ -6395,7 +6467,11 @@ export class BookingsService {
 
     // Marquer comme notifié et envoyer les notifications
     booking.destinationProximityNotified = true;
-    await this.bookingRepository.save(booking);
+    const update = await this.bookingRepository.update(
+      { id: booking.id, status: BookingStatus.ACCEPTED, destinationProximityNotified: false },
+      { destinationProximityNotified: true },
+    );
+    if (update.affected !== 1) return;
 
     // Envoyer les notifications au conducteur et au passager
     await this.notifyDestinationProximity(booking, distance);
