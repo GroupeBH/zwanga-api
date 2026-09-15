@@ -9,6 +9,8 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { BookingsService } from './bookings.service';
+import { randomUUID } from 'crypto';
+import { RideDeclarationsService } from '../ride-declarations/ride-declarations.service';
 import { CreateBookingDto, UpdateBookingStatusDto, RejectBookingDto, ConfirmPickupDto, ConfirmDropoffDto, ReportBookingProblemDto, UpdatePassengerLocationDto, UpdateBookingPaymentModeDto } from './dto/booking.dto';
 import { SendWhatsAppNotificationDto } from './dto/send-whatsapp-notification.dto';
 import { Auth } from '../auth/decorators/auth.decorator';
@@ -23,7 +25,15 @@ import {
 @ApiTags('Bookings')
 @Controller('bookings')
 export class BookingsController {
-  constructor(private readonly bookingsService: BookingsService) { }
+  constructor(private readonly bookingsService: BookingsService, private readonly rideDeclarations: RideDeclarationsService) { }
+
+  // Older clients use these URLs. They must obey the same two-party rule.
+  private async declareLegacy(id: string, userId: string, stage: 'pickup' | 'dropoff', actor: 'driver' | 'passenger') {
+    await this.rideDeclarations.declare(id, userId, {
+      eventId: randomUUID(), actorUserId: userId, stage, decision: 'confirm', occurredAt: new Date().toISOString(),
+    }, actor);
+    return this.bookingsService.findOne(id);
+  }
 
   @Post('flexpay/callback')
   @Public()
@@ -265,7 +275,7 @@ export class BookingsController {
   @SensitiveThrottle(20, 60000)
   @ApiOperation({ summary: 'Confirm passenger pickup (driver only)' })
   async confirmPickup(@Request() req, @Param('id') id: string, @Body() dto: ConfirmPickupDto) {
-    return this.bookingsService.confirmPickup(id, req.user.userId);
+    return this.declareLegacy(id, req.user.userId, 'pickup', 'driver');
   }
 
   @Put(':id/confirm-pickup-passenger')
@@ -273,7 +283,7 @@ export class BookingsController {
   @SensitiveThrottle(20, 60000)
   @ApiOperation({ summary: 'Confirm pickup by passenger' })
   async confirmPickupByPassenger(@Request() req, @Param('id') id: string, @Body() dto: ConfirmPickupDto) {
-    return this.bookingsService.confirmPickupByPassenger(id, req.user.userId);
+    return this.declareLegacy(id, req.user.userId, 'pickup', 'passenger');
   }
 
   @Put(':id/confirm-dropoff')
@@ -282,7 +292,7 @@ export class BookingsController {
   @SensitiveThrottle(20, 60000)
   @ApiOperation({ summary: 'Confirm passenger-requested dropoff (driver only)' })
   async confirmDropoff(@Request() req, @Param('id') id: string, @Body() dto: ConfirmDropoffDto) {
-    return this.bookingsService.confirmDropoff(id, req.user.userId);
+    return this.declareLegacy(id, req.user.userId, 'dropoff', 'driver');
   }
 
   @Put(':id/confirm-dropoff-passenger')
@@ -290,7 +300,7 @@ export class BookingsController {
   @SensitiveThrottle(20, 60000)
   @ApiOperation({ summary: 'Request dropoff by passenger' })
   async confirmDropoffByPassenger(@Request() req, @Param('id') id: string, @Body() dto: ConfirmDropoffDto) {
-    return this.bookingsService.confirmDropoffByPassenger(id, req.user.userId, dto);
+    return this.declareLegacy(id, req.user.userId, 'dropoff', 'passenger');
   }
 
   @Post(':id/report-problem')

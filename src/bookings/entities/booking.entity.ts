@@ -1,4 +1,5 @@
 import type { Point } from 'typeorm';
+import type { RideDeclarations, RideStage } from '../../ride-declarations/ride-declaration.model';
 import {
   Entity,
   PrimaryGeneratedColumn,
@@ -46,6 +47,20 @@ export enum BookingPaymentStatus {
 export class Booking {
   @PrimaryGeneratedColumn('uuid')
   id: string;
+
+  // Explicitly selected only by the declarations service. Existing GPS/payment
+  // saves must never write an old copy of these concurrent receipts.
+  @Column({ type: 'jsonb', default: () => "'{}'::jsonb", select: false })
+  rideDeclarations: RideDeclarations;
+
+  @Column({ type: 'jsonb', default: () => "'[]'::jsonb", select: false })
+  rideEffectsPending: RideStage[];
+
+  @Column({ type: 'int', default: 0, select: false })
+  rideEffectsVersion: number;
+
+  @Column({ type: 'timestamptz', nullable: true, select: false })
+  rideEffectsRetryAt: Date | null;
 
   @Column()
   tripId: string;
