@@ -781,7 +781,7 @@ describe('BookingsService trip payments', () => {
         method: PaymentMethod.MOBILE_MONEY,
         phone: '+243891234567',
       }),
-    ).rejects.toThrow("uniquement après l'arrivée");
+    ).rejects.toThrow('150 mètres');
 
     expect(paymentsService.initiatePayment).not.toHaveBeenCalled();
   });

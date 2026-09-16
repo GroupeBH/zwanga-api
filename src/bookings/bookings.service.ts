@@ -11,6 +11,7 @@ import { Cron } from '@nestjs/schedule';
 import { NO_RIDE_DISPUTE_SQL } from '../ride-declarations/ride-declaration.policy';
 import type { RideStage } from '../ride-declarations/ride-declaration.model';
 import { hasRideDispute } from '../ride-declarations/ride-declaration.model';
+import { canPayNearArrival } from './near-arrival-payment';
 import {
   DataSource,
   EntityManager,
@@ -2435,10 +2436,12 @@ export class BookingsService {
 
     if (booking.paymentMode === paymentMode) {
       if (
-        booking.status === BookingStatus.COMPLETED &&
+        (booking.status === BookingStatus.COMPLETED || canPayNearArrival(booking)) &&
         paymentMode === TripPaymentMode.POINTS
       ) {
-        return this.capturePointsPaymentForBooking(booking, booking.trip);
+        const paidBooking = await this.capturePointsPaymentForBooking(booking, booking.trip);
+        await this.invalidateBookingCaches(paidBooking);
+        return paidBooking;
       }
       return booking;
     }
@@ -2469,7 +2472,7 @@ export class BookingsService {
       booking.trip,
     );
     if (
-      savedBooking.status === BookingStatus.COMPLETED &&
+      (savedBooking.status === BookingStatus.COMPLETED || canPayNearArrival(savedBooking)) &&
       savedBooking.paymentMode === TripPaymentMode.POINTS
     ) {
       savedBooking = await this.capturePointsPaymentForBooking(
@@ -2577,10 +2580,11 @@ export class BookingsService {
 
     if (
       booking.status !== BookingStatus.COMPLETED &&
-      !this.hasBookingBeenDroppedOffForTripEnd(booking)
+      !this.hasBookingBeenDroppedOffForTripEnd(booking) &&
+      !canPayNearArrival(booking)
     ) {
       throw new BadRequestException(
-        "Le paiement du trajet est disponible uniquement après l'arrivée",
+        "Le paiement est disponible à moins de 150 mètres de votre destination ou après l’arrivée, lorsque votre position est confirmée.",
       );
     }
 
@@ -2613,10 +2617,11 @@ export class BookingsService {
 
     if (
       booking.status !== BookingStatus.COMPLETED &&
-      !this.hasBookingBeenDroppedOffForTripEnd(booking)
+      !this.hasBookingBeenDroppedOffForTripEnd(booking) &&
+      !canPayNearArrival(booking)
     ) {
       throw new BadRequestException(
-        "Le paiement en jetons est disponible uniquement après l'arrivée",
+        "Le paiement en jetons est disponible à moins de 150 mètres de votre destination ou après l’arrivée.",
       );
     }
 
@@ -2642,12 +2647,14 @@ export class BookingsService {
           'Le mode de paiement de la réservation a changé',
         );
       }
+      if (lockedBooking.paymentStatus === BookingPaymentStatus.SUCCEEDED) return lockedBooking;
       if (
         lockedBooking.status !== BookingStatus.COMPLETED &&
-        !this.hasBookingBeenDroppedOffForTripEnd(lockedBooking)
+        !this.hasBookingBeenDroppedOffForTripEnd(lockedBooking) &&
+        !canPayNearArrival(lockedBooking)
       ) {
         throw new BadRequestException(
-          'Le paiement en jetons est disponible uniquement après l’arrivée',
+          'Votre position doit être confirmée à moins de 150 mètres de votre destination pour payer avant l’arrivée.',
         );
       }
 
@@ -2682,10 +2689,10 @@ export class BookingsService {
       const savedBooking = await manager.save(savedFareBooking);
       savedBooking.trip = lockedTrip;
 
-      await this.driverSettlementsService.recordCompletedBookingEarningWithManager(
-        manager,
-        savedBooking,
-      );
+      // Paying early does not complete a ride or release its driver earnings early.
+      if (savedBooking.status === BookingStatus.COMPLETED) {
+        await this.driverSettlementsService.recordCompletedBookingEarningWithManager(manager, savedBooking);
+      }
 
       this.logger.log(
         `TOKEN_TRIP_SETTLEMENT_COMMITTED bookingId=${savedBooking.id} amount=${amount} currency=${savedBooking.paymentCurrency}`,
