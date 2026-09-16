@@ -15,7 +15,7 @@ export class AdminWalletAdjustmentDto {
   @ApiProperty({
     example: '123e4567-e89b-12d3-a456-426614174000',
     description:
-      "Identifiant unique stable de la demande, utilise pour garantir l'idempotence.",
+      "Identifiant unique stable de la demande, utilisé pour garantir l'idempotence.",
   })
   @IsUUID()
   requestId: string;
@@ -23,7 +23,7 @@ export class AdminWalletAdjustmentDto {
   @ApiProperty({
     example: 25,
     description:
-      'Nombre signe de jetons. Une valeur positive credite le compte et une valeur negative le debite.',
+      'Nombre signé de jetons. Une valeur positive crédite le compte et une valeur négative le débite.',
     minimum: -1_000_000,
     maximum: 1_000_000,
   })
@@ -35,7 +35,7 @@ export class AdminWalletAdjustmentDto {
   amount: number;
 
   @ApiProperty({
-    example: 'Regularisation validee sous le ticket SUP-1042',
+    example: 'Régularisation validée sous le ticket SUP-1042',
     minLength: 10,
     maxLength: 500,
   })

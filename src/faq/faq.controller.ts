@@ -61,7 +61,7 @@ export class FaqController {
   @ApiOperation({ summary: 'Supprimer une entrée FAQ' })
   async remove(@Param('id') id: string) {
     await this.faqService.remove(id);
-    return { message: 'FAQ entry removed' };
+    return { message: "Question d’aide supprimée." };
   }
 }
 

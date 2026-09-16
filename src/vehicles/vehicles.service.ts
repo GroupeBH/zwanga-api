@@ -121,7 +121,7 @@ export class VehiclesService {
           `Vehicle creation failed: License plate ${normalizedLicensePlate} already exists (vehicle ID: ${existingVehicle.id}, owner: ${existingVehicle.ownerId})`,
         );
         throw new BadRequestException(
-          `Cette plaque d'immatriculation (${normalizedLicensePlate}) est deja utilisee par un autre vehicule`,
+          `Cette plaque d'immatriculation (${normalizedLicensePlate}) est déjà utilisée par un autre véhicule`,
         );
       }
 
@@ -169,7 +169,7 @@ export class VehiclesService {
           error instanceof Error ? error.stack : undefined,
         );
         throw new BadRequestException(
-          `Cette plaque d'immatriculation (${normalizedLicensePlate}) est deja utilisee par un autre vehicule`,
+          `Cette plaque d'immatriculation (${normalizedLicensePlate}) est déjà utilisée par un autre véhicule`,
         );
       }
 
@@ -178,7 +178,7 @@ export class VehiclesService {
         error instanceof Error ? error.stack : undefined,
       );
       throw new InternalServerErrorException(
-        "Une erreur inattendue s'est produite lors de la creation du vehicule",
+        "Une erreur inattendue s'est produite lors de la création du véhicule",
       );
     }
   }
@@ -257,7 +257,7 @@ export class VehiclesService {
       );
       if (existingVehicle && existingVehicle.id !== id) {
         throw new BadRequestException(
-          `Cette plaque d'immatriculation (${normalizedLicensePlate}) est deja utilisee par un autre vehicule`,
+          `Cette plaque d'immatriculation (${normalizedLicensePlate}) est déjà utilisée par un autre véhicule`,
         );
       }
     }
@@ -276,7 +276,7 @@ export class VehiclesService {
     } catch (error) {
       if (this.isUniqueConstraintError(error)) {
         throw new BadRequestException(
-          `Cette plaque d'immatriculation (${vehicle.licensePlate}) est deja utilisee par un autre vehicule`,
+          `Cette plaque d'immatriculation (${vehicle.licensePlate}) est déjà utilisée par un autre véhicule`,
         );
       }
       throw error;
@@ -403,7 +403,7 @@ export class VehiclesService {
   private assertPublicOwnerCanRegisterVehicle(owner: User): void {
     if (isAdminRole(owner.role)) {
       throw new BadRequestException(
-        'Les comptes administrateurs ne peuvent pas enregistrer de vehicule conducteur',
+        'Les comptes administrateurs ne peuvent pas enregistrer de véhicule conducteur',
       );
     }
   }
@@ -467,7 +467,7 @@ export class VehiclesService {
 
     if (incompatibleTrip) {
       throw new BadRequestException(
-        `Impossible de changer le type du vehicule : le trajet ${incompatibleTrip.id} depasse la limite de ${maxSeats} places`,
+        `Impossible de changer le type du véhicule : le trajet ${incompatibleTrip.id} dépasse la limite de ${maxSeats} places`,
       );
     }
   }

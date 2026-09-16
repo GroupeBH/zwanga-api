@@ -667,7 +667,7 @@ describe('ReferralsService', () => {
         referralToken,
         referralCapturedAt: new Date().toISOString(),
       }),
-    ).rejects.toThrow('ne peut pas etre modifie');
+    ).rejects.toThrow('ne peut pas être modifié');
     expect(existingProfile.referredByUserId).toBe('first-referrer');
     expect(notificationService.sendNotification).not.toHaveBeenCalled();
   });
@@ -748,7 +748,7 @@ describe('ReferralsService', () => {
         referralToken: 'abcdefghijklmnopqrstuvwxyz123456',
         referralCapturedAt: '2020-01-01T00:00:00.000Z',
       }),
-    ).rejects.toThrow('expire apres 30 jours');
+    ).rejects.toThrow('expiré après 30 jours');
     expect(profileRepository.findOne).not.toHaveBeenCalled();
   });
 

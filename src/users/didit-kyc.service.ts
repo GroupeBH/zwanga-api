@@ -1035,7 +1035,7 @@ export class DiditKycService {
     }
 
     const label = status || 'rejetee';
-    return `Didit n'a pas validé cette verification d'identité. Statut reçu : ${label}.`;
+    return `Didit n'a pas validé cette vérification d'identité. Statut reçu : ${label}.`;
   }
 
   private sanitizeDiditPayloadForStorage(

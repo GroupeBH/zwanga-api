@@ -18,6 +18,7 @@ describe('PaymentsService', () => {
   };
   let flexPayService: {
     initiatePayment: jest.Mock;
+    initiatePayout: jest.Mock;
     checkTransaction: jest.Mock;
     isSuccessfulCode: jest.Mock;
     isSuccessfulTransaction: jest.Mock;
@@ -207,7 +208,7 @@ describe('PaymentsService', () => {
     expect(payment.status).toBe(PaymentStatus.FAILED);
     expect(payment.providerStatusCode).toBe('4');
     expect(payment.providerMessage).toBe(
-      'Paiement refuse par l operateur. Aucun montant confirme.',
+      'Paiement refusé par l’opérateur. Aucun montant confirmé.',
     );
   });
 
@@ -249,7 +250,7 @@ describe('PaymentsService', () => {
     );
 
     expect(payment.status).toBe(PaymentStatus.SUCCEEDED);
-    expect(payment.providerMessage).toBe('Paiement confirme avec succes');
+    expect(payment.providerMessage).toBe('Paiement confirmé avec succès');
     expect(payment.paidAt).toBeInstanceOf(Date);
   });
 
@@ -275,7 +276,7 @@ describe('PaymentsService', () => {
     });
 
     expect(payment.status).toBe(PaymentStatus.SUCCEEDED);
-    expect(payment.providerMessage).toBe('Paiement confirme avec succes');
+    expect(payment.providerMessage).toBe('Paiement confirmé avec succès');
     expect(payment.providerReference).toBe('7KI81020PHS');
     expect(payment.paidAt).toBeInstanceOf(Date);
     expect(flexPayService.checkTransaction).not.toHaveBeenCalled();
@@ -305,7 +306,7 @@ describe('PaymentsService', () => {
 
     expect(payment.status).toBe(PaymentStatus.CANCELLED);
     expect(payment.providerMessage).toBe(
-      'Paiement annule. Aucun montant confirme.',
+      'Paiement annulé. Aucun montant confirmé.',
     );
   });
 
@@ -414,7 +415,7 @@ describe('PaymentsService', () => {
     await expect(
       service.checkPaymentStatus('r2npySEnChn6243831919710', 'user-1'),
     ).rejects.toThrow(
-      'La reference FlexPay ne correspond pas a cette transaction',
+      'La référence FlexPay ne correspond pas à cette transaction',
     );
   });
 
@@ -464,6 +465,6 @@ describe('PaymentsService', () => {
     });
 
     expect(payout.status).toBe(PaymentStatus.PENDING);
-    expect(payout.providerMessage).toContain('Confirmation FlexPay en attente');
+    expect(payout.providerMessage).toContain('Aucun paiement ne vous est demandé');
   });
 });

@@ -295,7 +295,7 @@ export class AdminController {
   @ApiOperation({ summary: 'Delete a trip as admin' })
   async deleteTrip(@Request() req, @Param('tripId') tripId: string) {
     await this.adminService.deleteTrip(tripId, req.user.userId);
-    return { message: 'Trip deleted successfully' };
+    return { message: "Trajet supprimé avec succès." };
   }
 
   @Get('bookings')
@@ -406,6 +406,6 @@ export class AdminController {
     @Param('tripRequestId') tripRequestId: string,
   ) {
     await this.adminService.deleteTripRequest(tripRequestId, req.user.userId);
-    return { message: 'Trip request deleted successfully' };
+    return { message: "Demande de trajet supprimée avec succès." };
   }
 }

@@ -640,7 +640,7 @@ export class TripsService {
 
     if (!vehicle) {
       throw new BadRequestException(
-        'Un vehicule actif est requis pour creer un trajet recurrent',
+        'Un véhicule actif est requis pour créer un trajet récurrent',
       );
     }
     this.assertVehicleSeatCapacity(vehicle, createRecurringTripDto.totalSeats);
@@ -652,7 +652,7 @@ export class TripsService {
 
     if (endDate && endDate < startDate) {
       throw new BadRequestException(
-        'La date de fin doit etre posterieure a la date de debut',
+        'La date de fin doit être postérieure à la date de début',
       );
     }
 
@@ -870,10 +870,10 @@ export class TripsService {
 
     if (!kycDocument || kycDocument.status !== KycStatus.APPROVED) {
       throw new BadRequestException({
-        error: 'KYC conducteur requis',
+        error: "Vérification d’identité du conducteur requise",
         code: 'DRIVER_KYC_NOT_APPROVED',
         message:
-          "Le KYC du conducteur n'est pas encore approuvé. La publication sera possible après validation de son identité.",
+          "L’identité du conducteur n’a pas encore été vérifiée. La publication sera possible après vérification.",
       });
     }
 
@@ -918,7 +918,7 @@ export class TripsService {
       this.logger.warn(
         `Trip update failed: Trip ${id} not found for driver ${driverId}`,
       );
-      throw new NotFoundException('Trajet non trouve');
+      throw new NotFoundException('Trajet non trouvé');
     }
     // For request-linked trips the passenger has already confirmed the fare.
     // Reject changes before geocoding, status transitions or any other writes.
@@ -1073,7 +1073,7 @@ export class TripsService {
         {
           tripId: trip.id,
           message:
-            "Impossible d'exiger le KYC: des reservations actives appartiennent a des passagers dont le KYC n'est pas approuve.",
+            "Vous ne pouvez pas activer cette exigence : certains passagers ayant une réservation active n’ont pas encore fait vérifier leur identité.",
         },
       );
     }
@@ -1189,7 +1189,7 @@ export class TripsService {
     });
 
     if (!trip) {
-      throw new NotFoundException('Trajet non trouve');
+      throw new NotFoundException('Trajet non trouvé');
     }
 
     const selectedContacts = await this.emergencyContactRepository.find({
@@ -1234,7 +1234,7 @@ export class TripsService {
 
     if (!trip) {
       throw new NotFoundException(
-        "Trajet non trouve ou vous n'etes pas le conducteur",
+        "Trajet non trouvé ou vous n'êtes pas le conducteur",
       );
     }
 
@@ -1259,7 +1259,7 @@ export class TripsService {
         `Trip completion failed: Trip ${tripId} still has ${unfinishedBookings.length} accepted booking(s) not dropped off`,
       );
       throw new BadRequestException(
-        "Impossible de terminer le trajet tant que tous les passagers acceptes n'ont pas ete deposes",
+        "Impossible de terminer le trajet tant que tous les passagers acceptés n'ont pas été déposés",
       );
     }
 
@@ -1309,7 +1309,7 @@ export class TripsService {
       this.logger.warn(
         `Trip deletion failed: Trip ${id} not found for driver ${driverId}`,
       );
-      throw new NotFoundException('Trajet non trouve');
+      throw new NotFoundException('Trajet non trouvé');
     }
 
     if (trip.tripRequestId) {
@@ -1330,7 +1330,7 @@ export class TripsService {
         `Trip deletion failed: Trip ${id} still has at least one passenger on board`,
       );
       throw new BadRequestException(
-        'Vous ne pouvez pas supprimer ce trajet car un passager a embarque et son arrivee n a pas encore ete confirmee',
+        'Vous ne pouvez pas supprimer ce trajet car un passager a embarqué et son arrivée n’a pas encore été confirmée',
       );
     }
 
@@ -1419,7 +1419,7 @@ export class TripsService {
         `Trip start failed: Trip ${tripId} not found for driver ${driverId}`,
       );
       throw new NotFoundException(
-        "Trajet non trouve ou vous n'êtes pas le conducteur",
+        "Trajet non trouvé ou vous n'êtes pas le conducteur",
       );
     }
 
@@ -1444,7 +1444,7 @@ export class TripsService {
       await this.ensurePassengerKycApprovedForBookings(acceptedBookings, {
         tripId: trip.id,
         message:
-          'Ce trajet exige le KYC passager. Tous les passagers acceptes doivent etre verifies avant le demarrage.',
+          "Ce trajet exige une vérification d’identité. Tous les passagers acceptés doivent avoir fait vérifier leur identité avant le démarrage.",
       });
     }
 
@@ -1520,7 +1520,7 @@ export class TripsService {
         `Trip pause failed: Trip ${tripId} not found for driver ${driverId}`,
       );
       throw new NotFoundException(
-        "Trajet non trouve ou vous n'êtes pas le conducteur",
+        "Trajet non trouvé ou vous n'êtes pas le conducteur",
       );
     }
 
@@ -1594,7 +1594,7 @@ export class TripsService {
 
     if (!trip) {
       throw new NotFoundException(
-        "Trajet non trouve ou vous n'etes pas le conducteur",
+        "Trajet non trouvé ou vous n'êtes pas le conducteur",
       );
     }
 
@@ -1777,7 +1777,7 @@ export class TripsService {
 
     if (!coordinate) {
       throw new BadRequestException(
-        "Position d'interruption invalide ou incoherente avec le trajet",
+        "Position d'interruption invalide ou incohérente avec le trajet",
       );
     }
 
@@ -1863,8 +1863,8 @@ export class TripsService {
           .map((passenger) =>
             this.notificationService.sendNotification(
               passenger.fcmToken!,
-              'Demande annulee',
-              "Le conducteur a annule sa demande d'interruption du trajet.",
+              'Demande annulée',
+              "Le conducteur a annulé sa demande d'interruption du trajet.",
               {
                 type: 'driver_trip_interruption_cancelled',
                 tripId: request.tripId,
@@ -1906,8 +1906,8 @@ export class TripsService {
         driver.fcmToken,
         confirmed ? 'Interruption confirmee' : 'Interruption refusee',
         confirmed
-          ? `${passengerName} a confirme votre demande d'interruption.`
-          : `${passengerName} a refuse votre demande d'interruption.`,
+          ? `${passengerName} a confirmé votre demande d'interruption.`
+          : `${passengerName} a refusé votre demande d'interruption.`,
         {
           type: confirmed
             ? 'driver_trip_interruption_passenger_confirmed'
@@ -1945,7 +1945,7 @@ export class TripsService {
       await this.notificationService.sendNotification(
         driver.fcmToken,
         'Trajet interrompu',
-        'Tous les passagers ont confirme. Le trajet est maintenant interrompu.',
+        'Tous les passagers ont confirmé. Le trajet est maintenant interrompu.',
         {
           type: 'driver_trip_interruption_completed',
           tripId: trip.id,
@@ -2373,7 +2373,7 @@ export class TripsService {
     }
 
     throw new BadRequestException({
-      error: 'KYC passager requis',
+      error: "Vérification d’identité du passager requise",
       code: 'PASSENGER_KYC_REQUIRED',
       message: context.message,
       action: 'complete_kyc',
@@ -2395,7 +2395,7 @@ export class TripsService {
     });
 
     if (!template) {
-      throw new NotFoundException('Trajet recurrent non trouve');
+      throw new NotFoundException('Trajet récurrent non trouvé');
     }
 
     return template;
@@ -2430,7 +2430,7 @@ export class TripsService {
       }));
     if (!vehicle || !vehicle.isActive) {
       throw new BadRequestException(
-        'Le vehicule du trajet recurrent est introuvable ou inactif',
+        'Le véhicule du trajet récurrent est introuvable ou inactif',
       );
     }
     this.assertVehicleSeatCapacity(vehicle, template.totalSeats);
@@ -2685,7 +2685,7 @@ export class TripsService {
       `Trip start failed: driver ${driverId} already has active trip ${activeTrip.id}`,
     );
     throw new BadRequestException(
-      'Vous avez deja un trajet en cours. Terminez ou interrompez ce trajet avant d en demarrer un autre.',
+      'Vous avez déjà un trajet en cours. Terminez ou interrompez ce trajet avant d’en démarrer un autre.',
     );
   }
 
@@ -2717,7 +2717,7 @@ export class TripsService {
       `Trip publication blocked: driver ${driverId} reached the daily free limit`,
     );
     throw new BadRequestException(
-      `Les conducteurs sans abonnement ne peuvent publier que ${this.DAILY_FREE_TRIP_PUBLICATION_LIMIT} trajets par jour. Vous avez deja atteint cette limite aujourd hui.`,
+      `Les conducteurs sans abonnement ne peuvent publier que ${this.DAILY_FREE_TRIP_PUBLICATION_LIMIT} trajets par jour. Vous avez déjà atteint cette limite aujourd’hui.`,
     );
   }
 
@@ -3389,7 +3389,7 @@ export class TripsService {
     });
 
     if (!trip) {
-      throw new NotFoundException('Trajet non trouve');
+      throw new NotFoundException('Trajet non trouvé');
     }
 
     const isDriver = trip.driverId === userId;
@@ -3450,14 +3450,14 @@ export class TripsService {
 
     const normalizedCoordinates = normalizeLngLatCoordinates(coordinates);
     if (!normalizedCoordinates) {
-      throw new BadRequestException('Coordonnees conducteur invalides');
+      throw new BadRequestException('Coordonnées conducteur invalides');
     }
 
     const [longitude, latitude] = normalizedCoordinates;
     const currentCoordinate = { latitude, longitude };
     if (!isCoordinateAllowedForTrip(currentCoordinate, trip)) {
       throw new BadRequestException(
-        'Position conducteur incoherente avec le trajet',
+        'Position conducteur incohérente avec le trajet',
       );
     }
 
@@ -4031,22 +4031,22 @@ export class TripsService {
       const passengersLabel =
         passengerNames.length > 0
           ? passengerNames.join(', ')
-          : 'aucun passager confirme';
+          : 'aucun passager confirmé';
       const message =
         eventType === 'trip_started'
           ? [
-              'ZWANGA - Mise a jour securite conducteur',
-              `${driverName} vient de demarrer son trajet.`,
-              `Depart: ${trip.departureLocation}.`,
+              'ZWANGA - Mise à jour sécurité conducteur',
+              `${driverName} vient de démarrer son trajet.`,
+              `Départ : ${trip.departureLocation}.`,
               `Arrivee: ${trip.arrivalLocation}.`,
               `Conducteur: ${driverName}.`,
               `Vehicule: ${vehicleDetails}.`,
               `Passagers: ${passengersLabel}.`,
             ].join('\n')
           : [
-              'ZWANGA - Mise a jour securite conducteur',
-              `${driverName} a termine son trajet.`,
-              `Depart: ${trip.departureLocation}.`,
+              'ZWANGA - Mise à jour sécurité conducteur',
+              `${driverName} a terminé son trajet.`,
+              `Départ : ${trip.departureLocation}.`,
               `Arrivee: ${trip.arrivalLocation}.`,
               `Conducteur: ${driverName}.`,
               `Vehicule: ${vehicleDetails}.`,
@@ -4144,12 +4144,12 @@ export class TripsService {
         const otherPassengersLabel =
           otherPassengers.length > 0
             ? otherPassengers.join(', ')
-            : 'aucun autre passager confirme';
+            : 'aucun autre passager confirmé';
 
         const message = [
-          'ZWANGA - Alerte securite',
-          `Le trajet est termine mais l'arrivee de ${passengerName} n'a pas ete confirmee.`,
-          `Depart: ${trip.departureLocation}.`,
+          'ZWANGA - Alerte sécurité',
+          `Le trajet est terminé mais l'arrivée de ${passengerName} n'a pas été confirmée.`,
+          `Départ : ${trip.departureLocation}.`,
           `Arrivee: ${booking.passengerDestination || trip.arrivalLocation}.`,
           `Conducteur: ${driverPhone ? `${driverName} (${driverPhone})` : driverName}.`,
           `Vehicule: ${vehicleDetails}.`,

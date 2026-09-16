@@ -88,7 +88,7 @@ export class CreateBookingDto {
 
   @ApiProperty({
     description:
-      'Reference ou repere connu pour faciliter la prise en charge du passager',
+      'Référence ou repère connu pour faciliter la prise en charge du passager',
     required: false,
     example: 'Devant la pharmacie, portail bleu',
   })
@@ -119,9 +119,9 @@ export class CreateBookingDto {
 
   @ApiProperty({
     description:
-      "Reference ou repere connu pour faciliter l'arrivee du passager",
+      "Référence ou repère connu pour faciliter l'arrivée du passager",
     required: false,
-    example: 'Entree principale, pres du rond-point',
+    example: 'Entrée principale, près du rond-point',
   })
   @IsString()
   @IsOptional()
@@ -143,11 +143,11 @@ export class CreateBookingDto {
     enum: TripPaymentMode,
     enumName: 'TripPaymentMode',
     description:
-      "Mode choisi a la reservation. Aucun debit n'est effectue avant l'arrivee du passager.",
+      "Mode choisi à la réservation. Aucun débit n'est effectué avant l'arrivée du passager.",
     example: TripPaymentMode.ELECTRONIC,
   })
   @IsEnum(TripPaymentMode, {
-    message: 'Le mode de paiement selectionne est invalide',
+    message: 'Le mode de paiement sélectionné est invalide',
   })
   @IsOptional()
   paymentMode?: TripPaymentMode;
@@ -193,11 +193,11 @@ export class ConfirmDropoffDto {
     enum: TripPaymentMode,
     enumName: 'TripPaymentMode',
     description:
-      "Mode de reglement choisi par le passager au moment de signaler son arrivee: paiement electronique, jetons Zwanga ou paiement physique",
+      "Mode de règlement choisi par le passager au moment de signaler son arrivée : paiement électronique, jetons Zwanga ou paiement physique",
     example: TripPaymentMode.CASH,
   })
   @IsEnum(TripPaymentMode, {
-    message: 'Le mode de paiement selectionne est invalide',
+    message: 'Le mode de paiement sélectionné est invalide',
   })
   @IsOptional()
   paymentMode?: TripPaymentMode;
@@ -208,11 +208,11 @@ export class UpdateBookingPaymentModeDto {
     enum: TripPaymentMode,
     enumName: 'TripPaymentMode',
     description:
-      "Nouveau mode de reglement. Avant l'arrivee, ce choix n'effectue aucun debit.",
+      "Nouveau mode de règlement. Avant l'arrivée, ce choix n'effectue aucun débit.",
     example: TripPaymentMode.CASH,
   })
   @IsEnum(TripPaymentMode, {
-    message: 'Le mode de paiement selectionne est invalide',
+    message: 'Le mode de paiement sélectionné est invalide',
   })
   @IsNotEmpty()
   paymentMode: TripPaymentMode;

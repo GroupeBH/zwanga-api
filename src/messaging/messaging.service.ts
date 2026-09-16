@@ -581,12 +581,12 @@ export class MessagingService {
 
     let message = `*ZWANGA - Information de Trajet*\n\n`;
     message += `Bonjour,\n\n`;
-    message += `${data.passengerName} utilise Zwanga pour un trajet et vous a ajoute comme contact d'urgence.\n\n`;
-    message += `*Details du trajet :*\n`;
-    message += `Depart : ${data.departureLocation}\n`;
+    message += `${data.passengerName} utilise Zwanga pour un trajet et vous a ajouté comme contact d'urgence.\n\n`;
+    message += `*Détails du trajet :*\n`;
+    message += `Départ : ${data.departureLocation}\n`;
     message += `Arrivee : ${data.arrivalLocation}\n`;
     message += `Date/Heure : ${formattedDate}\n\n`;
-    message += `*Informations du vehicule :*\n`;
+    message += `*Informations du véhicule :*\n`;
     message += `Couleur : ${data.vehicleColor}\n`;
     message += `Plaque d'immatriculation : ${data.licensePlate}\n\n`;
 
@@ -594,13 +594,13 @@ export class MessagingService {
       message += `*Conducteur :*\n`;
       message += `Nom : ${data.driverName}\n`;
       if (data.driverPhone) {
-        message += `Telephone : ${data.driverPhone}\n`;
+        message += `Téléphone : ${data.driverPhone}\n`;
       }
       message += `\n`;
     }
 
-    message += `En cas d'urgence ou de probleme, contactez ${data.passengerName} ou utilisez l'application Zwanga.\n\n`;
-    message += `_Message envoye automatiquement par Zwanga_`;
+    message += `En cas d'urgence ou de problème, contactez ${data.passengerName} ou utilisez l'application Zwanga.\n\n`;
+    message += `_Message envoyé automatiquement par Zwanga_`;
 
     return message;
   }

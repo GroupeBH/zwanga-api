@@ -95,7 +95,7 @@ export class AdminService {
       this.logger.warn(
         `KYC verification failed: KYC document ${kycId} not found`,
       );
-      throw new NotFoundException('KYC document not found');
+      throw new NotFoundException("Document de vérification d’identité introuvable.");
     }
 
     kycDocument.status = approved ? KycStatus.APPROVED : KycStatus.REJECTED;
@@ -393,7 +393,7 @@ export class AdminService {
 
     const user = await this.userRepository.findOne({ where: { id: userId } });
     if (!user) {
-      throw new NotFoundException('User not found');
+      throw new NotFoundException("Utilisateur introuvable.");
     }
 
     const [
@@ -470,7 +470,7 @@ export class AdminService {
     const user = await this.userRepository.findOne({ where: { id: userId } });
     if (!user) {
       this.logger.warn(`User suspension failed: User ${userId} not found`);
-      throw new NotFoundException('User not found');
+      throw new NotFoundException("Utilisateur introuvable.");
     }
     if (user.id === adminId) {
       throw new BadRequestException(
@@ -502,7 +502,7 @@ export class AdminService {
     const user = await this.userRepository.findOne({ where: { id: userId } });
     if (!user) {
       this.logger.warn(`User activation failed: User ${userId} not found`);
-      throw new NotFoundException('User not found');
+      throw new NotFoundException("Utilisateur introuvable.");
     }
     if (isAdminRole(user.role) && !isSuperAdminRole(admin.role)) {
       throw new ForbiddenException(
@@ -589,7 +589,7 @@ export class AdminService {
     const booking = await this.findBookingOrFail(bookingId);
 
     if (!booking.trip?.driverId) {
-      throw new BadRequestException('Booking trip driver is missing');
+      throw new BadRequestException("Aucun conducteur n’est associé à cette réservation.");
     }
 
     this.logger.warn(`Admin ${adminId} accepting booking ${bookingId}`);
@@ -605,14 +605,14 @@ export class AdminService {
     const booking = await this.findBookingOrFail(bookingId);
 
     if (!booking.trip?.driverId) {
-      throw new BadRequestException('Booking trip driver is missing');
+      throw new BadRequestException("Aucun conducteur n’est associé à cette réservation.");
     }
 
     this.logger.warn(`Admin ${adminId} rejecting booking ${bookingId}`);
     const rejected = await this.bookingsService.rejectBooking(
       bookingId,
       booking.trip.driverId,
-      reason?.trim() || 'Rejet effectue par un administrateur',
+      reason?.trim() || 'Rejet effectué par un administrateur',
     );
     return this.sanitizeBooking(rejected);
   }
@@ -725,7 +725,7 @@ export class AdminService {
   private async findTripOrFail(tripId: string): Promise<Trip> {
     const trip = await this.tripRepository.findOne({ where: { id: tripId } });
     if (!trip) {
-      throw new NotFoundException('Trip not found');
+      throw new NotFoundException("Trajet introuvable.");
     }
     return trip;
   }
@@ -736,7 +736,7 @@ export class AdminService {
       relations: ['passenger', 'trip', 'trip.driver', 'paymentTransaction'],
     });
     if (!booking) {
-      throw new NotFoundException('Booking not found');
+      throw new NotFoundException("Réservation introuvable.");
     }
     return booking;
   }
@@ -746,7 +746,7 @@ export class AdminService {
       where: { id: tripRequestId },
     });
     if (!tripRequest) {
-      throw new NotFoundException('Trip request not found');
+      throw new NotFoundException("Demande de trajet introuvable.");
     }
     return tripRequest;
   }
@@ -794,7 +794,7 @@ export class AdminService {
         requestedType as WalletLedgerEntryType,
       )
     ) {
-      throw new BadRequestException("Type d'ecriture de portefeuille invalide");
+      throw new BadRequestException("Type d'écriture de portefeuille invalide");
     }
     return requestedType as WalletLedgerEntryType;
   }

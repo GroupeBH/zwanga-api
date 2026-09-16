@@ -3,6 +3,8 @@
 Dernière mise à jour : 26 août 2026  
 Statut : implémenté dans le backend et l'application ; migration et déploiement de production requis.
 
+Complément du 15 septembre 2026 : [normalisation, refus et suivi des versements](driver-payout-corrections.md).
+
 ## 1. Besoin métier
 
 Après la fin d'une course, le passager paie le montant calculé par le serveur. Quand ce paiement électronique est réellement confirmé, Zwanga doit :

@@ -68,7 +68,7 @@ export function normalizeAdminProvisioningInput(
 
   const role = input.role ?? UserRole.ADMIN;
   if (!isAdminRole(role)) {
-    throw new Error('Le role doit etre admin ou super_admin');
+    throw new Error('Le rôle doit être admin ou super_admin');
   }
 
   return {

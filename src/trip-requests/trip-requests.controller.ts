@@ -89,7 +89,7 @@ export class TripRequestsController {
   @ApiOperation({
     summary: 'Recommend a trip request price',
     description:
-      'Calcule le prix recommande pour une demande de trajet: voiture = 500 FC par kilometre et par passager, moto = 1000 FC par kilometre et par passager. Une forte pluie dans une zone du parcours applique un coefficient de 1.3.',
+      'Calcule le prix recommandé pour une demande de trajet : voiture = 500 FC par kilomètre et par passager, moto = 1000 FC par kilomètre et par passager. Une forte pluie dans une zone du parcours applique un coefficient de 1.3.',
   })
   async recommendPrice(@Body() payload: RecommendTripRequestPriceDto) {
     return this.tripRequestsService.recommendPrice(payload);
@@ -236,7 +236,7 @@ export class TripRequestsController {
   @ApiOperation({
     summary: 'Update a trip request',
     description:
-      "Permet au passager de modifier sa demande de trajet (dont l'adresse de depart et/ou d'arrivee). La modification n'est possible que si aucun driver n'a ete selectionne et qu'aucune offre n'a ete acceptee.",
+      "Permet au passager de modifier sa demande de trajet (dont l'adresse de départ et/ou d'arrivée). La modification n'est possible que si aucun driver n'a été sélectionné et qu'aucune offre n'a été acceptée.",
   })
   async update(
     @Request() req,
@@ -261,6 +261,6 @@ export class TripRequestsController {
   // @ApiBearerAuth()
   async cancel(@Request() req, @Param('id') id: string) {
     await this.tripRequestsService.cancel(req.user.userId, id);
-    return { message: 'Trip request cancelled successfully' };
+    return { message: "Demande de trajet annulée avec succès." };
   }
 }

@@ -138,12 +138,12 @@ export class WalletService {
       Math.abs(amount) > 1_000_000
     ) {
       throw new BadRequestException(
-        "Le montant de l'ajustement doit etre different de zero",
+        "Le montant de l'ajustement doit être différent de zéro",
       );
     }
     if (reason.length < 10 || reason.length > 500) {
       throw new BadRequestException(
-        "Le motif de l'ajustement doit contenir entre 10 et 500 caracteres",
+        "Le motif de l'ajustement doit contenir entre 10 et 500 caractères",
       );
     }
 
@@ -177,7 +177,7 @@ export class WalletService {
       if (existingEntry) {
         if (existingEntry.userId !== userId) {
           throw new BadRequestException(
-            "L'identifiant de demande est deja associe a un autre portefeuille",
+            "L'identifiant de demande est déjà associé à un autre portefeuille",
           );
         }
         return account;
@@ -308,7 +308,7 @@ export class WalletService {
     });
     if (existingRefund) {
       throw new BadRequestException(
-        'Cette reservation a deja ete remboursee en jetons',
+        'Cette réservation a déjà été remboursée en jetons',
       );
     }
 
@@ -325,7 +325,7 @@ export class WalletService {
       const expectedDebit = this.roundMoney(-pointsAmount);
       if (this.roundMoney(Number(existingEntry.amount)) !== expectedDebit) {
         throw new BadRequestException(
-          'Le montant deja debite pour cette reservation est incoherent',
+          'Le montant déjà débité pour cette réservation est incohérent',
         );
       }
       return existingEntry;
@@ -347,7 +347,7 @@ export class WalletService {
       type: WalletLedgerEntryType.BOOKING_PAYMENT,
       relatedEntityType: this.BOOKING_RELATED_ENTITY_TYPE,
       relatedEntityId: booking.id,
-      description: `Paiement par jetons pour la reservation ${booking.id} (${amount} ${booking.paymentCurrency ?? this.getPointValueCurrency()})`,
+      description: `Paiement par jetons pour la réservation ${booking.id} (${amount} ${booking.paymentCurrency ?? this.getPointValueCurrency()})`,
     });
 
     this.logger.log(
@@ -381,7 +381,7 @@ export class WalletService {
       type: WalletLedgerEntryType.BOOKING_REFUND,
       relatedEntityType: this.BOOKING_RELATED_ENTITY_TYPE,
       relatedEntityId: booking.id,
-      description: `Remboursement en jetons pour la reservation ${booking.id}`,
+      description: `Remboursement en jetons pour la réservation ${booking.id}`,
     });
     return true;
   }
@@ -414,7 +414,7 @@ export class WalletService {
       relatedEntityType: this.BOOKING_RELATED_ENTITY_TYPE,
       relatedEntityId: booking.id,
       paymentTransactionId: booking.paymentTransactionId,
-      description: `Ajustement du prix kilometrique pour la reservation ${booking.id} (${amount} ${booking.paymentCurrency ?? this.getPointValueCurrency()})`,
+      description: `Ajustement du prix kilométrique pour la réservation ${booking.id} (${amount} ${booking.paymentCurrency ?? this.getPointValueCurrency()})`,
     });
   }
 
@@ -444,7 +444,7 @@ export class WalletService {
         type: WalletLedgerEntryType.SUBSCRIPTION_PAYMENT,
         relatedEntityType: this.SUBSCRIPTION_RELATED_ENTITY_TYPE,
         relatedEntityId: subscription.id,
-        description: `Paiement par jetons pour l abonnement ${subscription.id}`,
+        description: `Paiement par jetons pour l’abonnement ${subscription.id}`,
       });
     } catch (error) {
       if (error instanceof BadRequestException) {
@@ -528,8 +528,8 @@ export class WalletService {
         relatedEntityType: this.TRANSFER_RELATED_ENTITY_TYPE,
         relatedEntityId: transferId,
         description: note
-          ? `Jetons recus de ${senderUserId}: ${note}`
-          : `Jetons recus de ${senderUserId}`,
+          ? `Jetons reçus de ${senderUserId}: ${note}`
+          : `Jetons reçus de ${senderUserId}`,
       });
 
       this.logger.warn(
@@ -579,7 +579,7 @@ export class WalletService {
       type: WalletLedgerEntryType.LOYALTY_REWARD,
       relatedEntityType: this.BOOKING_RELATED_ENTITY_TYPE,
       relatedEntityId: booking.id,
-      description: `Jetons de fidelite pour la reservation ${booking.id}`,
+      description: `Jetons de fidélité pour la réservation ${booking.id}`,
     });
   }
 
@@ -626,7 +626,7 @@ export class WalletService {
         relatedEntityType: this.SUBSCRIPTION_RELATED_ENTITY_TYPE,
         relatedEntityId: subscription.id,
         paymentTransactionId: paymentTransactionId ?? null,
-        description: `Bonus de 25 jetons pour l abonnement ${subscription.id}`,
+        description: `Bonus de 25 jetons pour l’abonnement ${subscription.id}`,
       });
     } catch (error) {
       if (this.isUniqueConstraintViolation(error)) {
@@ -769,7 +769,7 @@ export class WalletService {
       !payment.userId
     ) {
       throw new BadRequestException(
-        'Cette transaction ne correspond pas a une recharge de jetons',
+        'Cette transaction ne correspond pas à une recharge de jetons',
       );
     }
 
@@ -1083,7 +1083,7 @@ export class WalletService {
     const pointValue = Number(raw);
     if (!Number.isFinite(pointValue) || pointValue <= 0) {
       throw new BadRequestException(
-        `Valeur du jeton non configuree pour ${normalizedCurrency}`,
+        `Valeur du jeton non configurée pour ${normalizedCurrency}`,
       );
     }
 

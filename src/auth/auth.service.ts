@@ -417,7 +417,7 @@ export class AuthService {
     if (!isAdminRole(user.role)) {
       this.logger.warn(`Admin login rejected for non-admin user ${user.id}`);
       throw new UnauthorizedException(
-        "Ce compte n'a pas acces a l'interface admin",
+        "Ce compte n'a pas accès à l'interface admin",
       );
     }
 
@@ -460,7 +460,7 @@ export class AuthService {
 
     if (!isAdminRole(user.role)) {
       throw new UnauthorizedException(
-        "Ce compte n'a pas acces a l'interface admin",
+        "Ce compte n'a pas accès à l'interface admin",
       );
     }
 
@@ -755,7 +755,7 @@ export class AuthService {
     const audience = this.getGoogleAudiences();
     if (audience.length === 0) {
       this.logger.error('Missing GOOGLE_MOBILE_CLIENT_IDS / GOOGLE_CLIENT_ID');
-      throw new UnauthorizedException('Google OAuth is not configured');
+      throw new UnauthorizedException("La connexion avec Google est temporairement indisponible.");
     }
 
     try {
@@ -765,7 +765,7 @@ export class AuthService {
       });
       const payload = ticket.getPayload();
       if (!payload || !payload.sub || !payload.email) {
-        throw new UnauthorizedException('Invalid Google token payload');
+        throw new UnauthorizedException("La réponse de connexion Google est invalide. Relancez la connexion.");
       }
 
       return {
@@ -777,7 +777,7 @@ export class AuthService {
         emailVerified: payload.email_verified ?? false,
       };
     } catch (e) {
-      throw new UnauthorizedException('Invalid Google token');
+      throw new UnauthorizedException("La connexion avec Google n’a pas pu être vérifiée. Réessayez.");
     }
   }
 
@@ -938,7 +938,7 @@ export class AuthService {
 
         if (vehicle && !driverState.isDriver) {
           throw new BadRequestException(
-            'Les informations du vehicule sont uniquement autorisees pour les conducteurs',
+            'Les informations du véhicule sont uniquement autorisées pour les conducteurs',
           );
         }
 
@@ -1029,7 +1029,7 @@ export class AuthService {
       return this.applePublicKeys;
     } catch (error) {
       this.logger.error('Unable to fetch Apple public keys', error);
-      throw new UnauthorizedException('Apple OAuth is currently unavailable');
+      throw new UnauthorizedException("La connexion avec Apple est temporairement indisponible. Réessayez plus tard.");
     }
   }
 
@@ -1055,28 +1055,28 @@ export class AuthService {
     expectedNonce?: string,
   ): void {
     if (!payload.sub) {
-      throw new UnauthorizedException('Invalid Apple token payload');
+      throw new UnauthorizedException("La réponse de connexion Apple est invalide. Relancez la connexion.");
     }
 
     if (payload.iss !== APPLE_ISSUER) {
-      throw new UnauthorizedException('Invalid Apple token issuer');
+      throw new UnauthorizedException("L’origine de la réponse de connexion Apple n’a pas pu être vérifiée. Réessayez.");
     }
 
     if (!this.isAppleAudienceAllowed(payload.aud, allowedAudiences)) {
-      throw new UnauthorizedException('Invalid Apple token audience');
+      throw new UnauthorizedException("Cette connexion Apple n’est pas destinée à cette application. Relancez la connexion.");
     }
 
     const now = Math.floor(Date.now() / 1000);
     if (!payload.exp || payload.exp + TOKEN_CLOCK_TOLERANCE_SECONDS < now) {
-      throw new UnauthorizedException('Apple token has expired');
+      throw new UnauthorizedException("Votre connexion Apple a expiré. Reconnectez-vous.");
     }
 
     if (payload.iat && payload.iat - TOKEN_CLOCK_TOLERANCE_SECONDS > now) {
-      throw new UnauthorizedException('Invalid Apple token issued-at time');
+      throw new UnauthorizedException("L’heure de la réponse de connexion Apple est invalide. Relancez la connexion.");
     }
 
     if (expectedNonce && payload.nonce !== expectedNonce) {
-      throw new UnauthorizedException('Invalid Apple token nonce');
+      throw new UnauthorizedException("La réponse Apple ne correspond pas à cette tentative de connexion. Réessayez.");
     }
   }
 
@@ -1087,26 +1087,26 @@ export class AuthService {
     const allowedAudiences = this.getAppleAudiences();
     if (allowedAudiences.length === 0) {
       this.logger.error('Missing APPLE_CLIENT_IDS / APPLE_CLIENT_ID');
-      throw new UnauthorizedException('Apple OAuth is not configured');
+      throw new UnauthorizedException("La connexion avec Apple est temporairement indisponible.");
     }
 
     const tokenParts = idToken.split('.');
     if (tokenParts.length !== 3) {
-      throw new UnauthorizedException('Invalid Apple token');
+      throw new UnauthorizedException("La connexion avec Apple n’a pas pu être vérifiée. Réessayez.");
     }
 
     const [encodedHeader, encodedPayload, encodedSignature] = tokenParts;
     const header = this.decodeJwtPart<AppleJwtHeader>(
       encodedHeader,
-      'Invalid Apple token header',
+      "La réponse de connexion Apple est invalide. Relancez la connexion.",
     );
     const payload = this.decodeJwtPart<AppleIdTokenPayload>(
       encodedPayload,
-      'Invalid Apple token payload',
+      "La réponse de connexion Apple est invalide. Relancez la connexion.",
     );
 
     if (header.alg !== 'RS256' || !header.kid) {
-      throw new UnauthorizedException('Invalid Apple token header');
+      throw new UnauthorizedException("La réponse de connexion Apple est invalide. Relancez la connexion.");
     }
 
     let appleKeys = await this.getApplePublicKeys();
@@ -1118,7 +1118,7 @@ export class AuthService {
     }
 
     if (!appleKey) {
-      throw new UnauthorizedException('Invalid Apple token key');
+      throw new UnauthorizedException("La connexion avec Apple n’a pas pu être vérifiée. Réessayez.");
     }
 
     const signingInput = `${encodedHeader}.${encodedPayload}`;
@@ -1132,13 +1132,13 @@ export class AuthService {
     );
 
     if (!isSignatureValid) {
-      throw new UnauthorizedException('Invalid Apple token signature');
+      throw new UnauthorizedException("L’authenticité de la réponse Apple n’a pas pu être vérifiée. Relancez la connexion.");
     }
 
     this.validateAppleClaims(payload, allowedAudiences, expectedNonce);
     const appleId = payload.sub;
     if (!appleId) {
-      throw new UnauthorizedException('Invalid Apple token payload');
+      throw new UnauthorizedException("La réponse de connexion Apple est invalide. Relancez la connexion.");
     }
 
     return {
@@ -1277,7 +1277,7 @@ export class AuthService {
 
       if (vehicle && !driverState.isDriver) {
         throw new BadRequestException(
-          'Les informations du vehicule sont uniquement autorisees pour les conducteurs',
+          'Les informations du véhicule sont uniquement autorisées pour les conducteurs',
         );
       }
 

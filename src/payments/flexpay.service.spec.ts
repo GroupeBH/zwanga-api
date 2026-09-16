@@ -92,7 +92,7 @@ describe('FlexPayService', () => {
         phone: '+243 891 234 567',
       }),
     ).rejects.toThrow(
-      'Initialisation paiement Mobile Money FlexPay indisponible (delai depasse apres 30000ms)',
+      'Initialisation paiement Mobile Money FlexPay indisponible (délai dépassé après 30000ms)',
     );
   });
 

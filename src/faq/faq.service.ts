@@ -85,7 +85,7 @@ export class FaqService {
     const entry = await this.faqRepository.findOne({ where: { id } });
 
     if (!entry || (!entry.isPublished && !includeUnpublished)) {
-      throw new NotFoundException('FAQ entry not found');
+      throw new NotFoundException("Question d’aide introuvable.");
     }
 
     return entry;

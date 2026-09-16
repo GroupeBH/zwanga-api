@@ -11,6 +11,7 @@ import { Cron } from '@nestjs/schedule';
 import { NO_RIDE_DISPUTE_SQL } from '../ride-declarations/ride-declaration.policy';
 import type { RideStage } from '../ride-declarations/ride-declaration.model';
 import { hasRideDispute } from '../ride-declarations/ride-declaration.model';
+import { canPayNearArrival } from './near-arrival-payment';
 import {
   DataSource,
   EntityManager,
@@ -410,7 +411,7 @@ export class BookingsService {
     const coordinate = normalizeCoordinateForTrip(latitude, longitude, trip);
     if (!coordinate) {
       throw new BadRequestException(
-        `Coordonnees ${context} invalides ou incoherentes avec le trajet`,
+        `Coordonnées ${context} invalides ou incoherentes avec le trajet`,
       );
     }
 
@@ -739,9 +740,9 @@ export class BookingsService {
     }
 
     throw new BadRequestException({
-      error: 'KYC passager requis',
+      error: "Vérification d’identité du passager requise",
       code: 'PASSENGER_KYC_REQUIRED',
-      message: `Pour réserver plus de ${this.MAX_SEATS_WITHOUT_APPROVED_KYC} places, votre KYC doit être approuvé.`,
+      message: `Pour réserver plus de ${this.MAX_SEATS_WITHOUT_APPROVED_KYC} places, votre identité doit être vérifiée.`,
       action: 'complete_kyc',
       reason: 'extra_seats',
       maximumSeatsWithoutKyc: this.MAX_SEATS_WITHOUT_APPROVED_KYC,
@@ -763,7 +764,7 @@ export class BookingsService {
     }
 
     throw new BadRequestException({
-      error: 'KYC passager requis',
+      error: "Vérification d’identité du passager requise",
       code: 'PASSENGER_KYC_REQUIRED',
       message: context.message,
       action: 'complete_kyc',
@@ -782,7 +783,7 @@ export class BookingsService {
     const trip = await tripRepository.findOne({ where: { id: tripId } });
 
     if (!trip) {
-      throw new NotFoundException('Trajet non trouve');
+      throw new NotFoundException('Trajet non trouvé');
     }
 
     if (trip.totalSeats === null || trip.totalSeats === undefined) {
@@ -818,7 +819,7 @@ export class BookingsService {
         this.logger.warn(
           `Booking status update failed: Booking ${bookingId} not found`,
         );
-        throw new NotFoundException('Reservation non trouvee');
+        throw new NotFoundException('Réservation non trouvée');
       }
 
       const trip = await tripRepository.findOne({
@@ -827,7 +828,7 @@ export class BookingsService {
       });
 
       if (!trip) {
-        throw new NotFoundException('Trajet non trouve');
+        throw new NotFoundException('Trajet non trouvé');
       }
 
       if (trip.driverId !== driverId) {
@@ -835,7 +836,7 @@ export class BookingsService {
           `Booking status update failed: Driver ${driverId} tried to update booking ${bookingId} (owner: ${trip.driverId})`,
         );
         throw new BadRequestException(
-          'Seul le conducteur du trajet peut modifier le statut de la reservation',
+          'Seul le conducteur du trajet peut modifier le statut de la réservation',
         );
       }
 
@@ -856,7 +857,7 @@ export class BookingsService {
         ].includes(oldStatus)
       ) {
         throw new BadRequestException(
-          `Impossible de modifier une reservation ${oldStatus}`,
+          `Impossible de modifier une réservation ${oldStatus}`,
         );
       }
 
@@ -864,12 +865,12 @@ export class BookingsService {
         case BookingStatus.ACCEPTED: {
           if (oldStatus !== BookingStatus.PENDING) {
             throw new BadRequestException(
-              'Seule une reservation en attente peut etre acceptee',
+              'Seule une réservation en attente peut être acceptée',
             );
           }
           if (![TripStatus.PENDING, TripStatus.ACTIVE].includes(trip.status)) {
             throw new BadRequestException(
-              "Ce trajet n'est plus disponible pour accepter une reservation",
+              "Ce trajet n'est plus disponible pour accepter une réservation",
             );
           }
           await this.ensurePassengerKycApprovedForTrip(
@@ -879,7 +880,7 @@ export class BookingsService {
               tripId: trip.id,
               bookingId: booking.id,
               message:
-                "Ce trajet exige une verification d'identite approuvee avant acceptation.",
+                "Ce trajet exige une vérification d'identité approuvée avant acceptation.",
             },
             manager,
           );
@@ -929,7 +930,7 @@ export class BookingsService {
             ![BookingStatus.PENDING, BookingStatus.ACCEPTED].includes(oldStatus)
           ) {
             throw new BadRequestException(
-              'Seule une reservation en attente ou acceptee peut etre rejetee',
+              'Seule une réservation en attente ou acceptée peut être rejetée',
             );
           }
           if (!updateStatusDto.rejectionReason?.trim()) {
@@ -937,7 +938,7 @@ export class BookingsService {
               `Driver ${driverId} tried to reject booking ${bookingId} without reason`,
             );
             throw new BadRequestException(
-              "Un motif de refus est requis lors du rejet d'une reservation",
+              "Un motif de refus est requis lors du rejet d'une réservation",
             );
           }
 
@@ -961,7 +962,7 @@ export class BookingsService {
             ![BookingStatus.PENDING, BookingStatus.ACCEPTED].includes(oldStatus)
           ) {
             throw new BadRequestException(
-              'Seule une reservation en attente ou acceptee peut etre annulee',
+              'Seule une réservation en attente ou acceptée peut être annulée',
             );
           }
 
@@ -976,12 +977,12 @@ export class BookingsService {
         case BookingStatus.COMPLETED: {
           if (oldStatus !== BookingStatus.ACCEPTED) {
             throw new BadRequestException(
-              'Seule une reservation acceptee peut etre terminee',
+              'Seule une réservation acceptée peut être terminée',
             );
           }
           if (!this.hasBookingBeenPickedUpForRideProgress(booking)) {
             throw new BadRequestException(
-              'La prise en charge doit etre detectee avant de terminer la reservation',
+              'La prise en charge doit être détectée avant de terminer la réservation',
             );
           }
 
@@ -1002,7 +1003,7 @@ export class BookingsService {
 
         default:
           throw new BadRequestException(
-            `Transition de reservation non autorisee vers ${nextStatus}`,
+            `Transition de réservation non autorisée vers ${nextStatus}`,
           );
       }
     });
@@ -1153,7 +1154,7 @@ export class BookingsService {
     await this.ensurePassengerKycApprovedForTrip(trip, passengerId, {
       tripId: trip.id,
       message:
-        "Ce trajet exige une verification d'identite approuvee avant reservation.",
+        "Ce trajet exige une vérification d'identité approuvée avant réservation.",
     });
 
     // Vérifier que le trajet a des places totales définies
@@ -1203,7 +1204,7 @@ export class BookingsService {
         `Booking creation failed: Not enough seats on trip ${createBookingDto.tripId} (requested: ${createBookingDto.numberOfSeats}, available: ${effectiveAvailableSeats}, total: ${trip.totalSeats})`,
       );
       throw new BadRequestException(
-        `Pas assez de places disponibles. Disponibles : ${effectiveAvailableSeats}, demandees : ${createBookingDto.numberOfSeats}. Vous pouvez reserver jusqu'a ${effectiveAvailableSeats} place(s).`,
+        `Pas assez de places disponibles. Disponibles : ${effectiveAvailableSeats}, demandees : ${createBookingDto.numberOfSeats}. Vous pouvez réserver jusqu'à ${effectiveAvailableSeats} place(s).`,
       );
     }
 
@@ -1232,7 +1233,7 @@ export class BookingsService {
         `Booking creation failed: Passenger ${passengerId} already has pending or accepted booking for trip ${createBookingDto.tripId}`,
       );
       throw new BadRequestException(
-        'Vous avez deja une reservation en attente ou acceptee pour ce trajet',
+        'Vous avez déjà une réservation en attente ou acceptée pour ce trajet',
       );
     }
 
@@ -1244,7 +1245,7 @@ export class BookingsService {
           createBookingDto.passengerOriginCoordinates.latitude,
           createBookingDto.passengerOriginCoordinates.longitude,
           trip,
-          'du point de depart passager',
+          'du point de départ passager',
         )
       : createBookingDto.passengerOrigin
         ? this.sanitizePointForTrip(
@@ -1266,7 +1267,7 @@ export class BookingsService {
             createBookingDto.passengerDestinationCoordinates.latitude,
             createBookingDto.passengerDestinationCoordinates.longitude,
             trip,
-            "de l'arrivee passager",
+            "de l'arrivée passager",
           )
         : createBookingDto.passengerDestination
           ? this.sanitizePointForTrip(
@@ -1507,7 +1508,7 @@ export class BookingsService {
     });
 
     if (!booking) {
-      throw new NotFoundException('Reservation non trouvee');
+      throw new NotFoundException('Réservation non trouvée');
     }
 
     if (booking.trip.status !== TripStatus.ACTIVE) {
@@ -1518,18 +1519,18 @@ export class BookingsService {
 
     if (booking.status !== BookingStatus.ACCEPTED) {
       throw new BadRequestException(
-        'Seule une reservation acceptee peut etre interrompue',
+        'Seule une réservation acceptée peut être interrompue',
       );
     }
 
     if (!this.hasBookingBeenPickedUpForRideProgress(booking)) {
       throw new BadRequestException(
-        'Vous devez etre a bord avant de demander une interruption',
+        'Vous devez être à bord avant de demander une interruption',
       );
     }
 
     if (this.hasBookingBeenDroppedOffForTripEnd(booking)) {
-      throw new BadRequestException('Cette reservation est deja terminee');
+      throw new BadRequestException('Cette réservation est déjà terminée');
     }
 
     const existingRequest =
@@ -1542,7 +1543,7 @@ export class BookingsService {
 
     if (existingRequest) {
       throw new BadRequestException(
-        "Une demande d'interruption est deja en attente",
+        "Une demande d'interruption est déjà en attente",
       );
     }
 
@@ -1584,7 +1585,7 @@ export class BookingsService {
     });
 
     if (!booking) {
-      throw new NotFoundException('Reservation non trouvee');
+      throw new NotFoundException('Réservation non trouvée');
     }
 
     const request = await this.passengerTripInterruptionRepository.findOne({
@@ -1616,12 +1617,12 @@ export class BookingsService {
     });
 
     if (!booking) {
-      throw new NotFoundException('Reservation non trouvee');
+      throw new NotFoundException('Réservation non trouvée');
     }
 
     if (booking.trip.driverId !== driverId) {
       throw new ForbiddenException(
-        "Vous n'etes pas le conducteur de ce trajet",
+        "Vous n'êtes pas le conducteur de ce trajet",
       );
     }
 
@@ -1664,12 +1665,12 @@ export class BookingsService {
     });
 
     if (!booking) {
-      throw new NotFoundException('Reservation non trouvee');
+      throw new NotFoundException('Réservation non trouvée');
     }
 
     if (booking.trip.driverId !== driverId) {
       throw new ForbiddenException(
-        "Vous n'etes pas le conducteur de ce trajet",
+        "Vous n'êtes pas le conducteur de ce trajet",
       );
     }
 
@@ -1769,7 +1770,7 @@ export class BookingsService {
     });
 
     if (!booking) {
-      throw new NotFoundException('Reservation non trouvee');
+      throw new NotFoundException('Réservation non trouvée');
     }
 
     if (this.hasBookingBeenDroppedOffForTripEnd(booking)) {
@@ -1778,13 +1779,13 @@ export class BookingsService {
 
     if (booking.status !== BookingStatus.ACCEPTED) {
       throw new BadRequestException(
-        'Seule une reservation acceptee peut etre interrompue',
+        'Seule une réservation acceptée peut être interrompue',
       );
     }
 
     if (!this.hasBookingBeenPickedUpForRideProgress(booking)) {
       throw new BadRequestException(
-        'La prise en charge du passager doit etre confirmee avant interruption',
+        'La prise en charge du passager doit être confirmée avant interruption',
       );
     }
 
@@ -2028,7 +2029,7 @@ export class BookingsService {
 
     if (!coordinate) {
       throw new BadRequestException(
-        "Position d'interruption invalide ou incoherente avec le trajet",
+        "Position d'interruption invalide ou incohérente avec le trajet",
       );
     }
 
@@ -2050,7 +2051,7 @@ export class BookingsService {
     });
 
     if (!booking) {
-      throw new NotFoundException('Reservation non trouvee');
+      throw new NotFoundException('Réservation non trouvée');
     }
 
     this.ensurePassengerOwnsBooking(booking, passengerId);
@@ -2263,7 +2264,7 @@ export class BookingsService {
         `Booking cancellation failed: Booking ${bookingId} is already terminal (${booking.status})`,
       );
       throw new BadRequestException(
-        "Impossible d'annuler une reservation deja terminee",
+        "Impossible d'annuler une réservation déjà terminée",
       );
     }
 
@@ -2410,7 +2411,7 @@ export class BookingsService {
     });
 
     if (!booking) {
-      throw new NotFoundException('Reservation non trouvee');
+      throw new NotFoundException('Réservation non trouvée');
     }
 
     if (
@@ -2423,22 +2424,24 @@ export class BookingsService {
       ].includes(booking.status)
     ) {
       throw new BadRequestException(
-        'Le mode de paiement ne peut plus etre modifie',
+        'Le mode de paiement ne peut plus être modifié',
       );
     }
 
     if (booking.paymentStatus === BookingPaymentStatus.SUCCEEDED) {
       throw new BadRequestException(
-        'Impossible de changer un paiement deja confirme',
+        'Impossible de changer un paiement déjà confirmé',
       );
     }
 
     if (booking.paymentMode === paymentMode) {
       if (
-        booking.status === BookingStatus.COMPLETED &&
+        (booking.status === BookingStatus.COMPLETED || canPayNearArrival(booking)) &&
         paymentMode === TripPaymentMode.POINTS
       ) {
-        return this.capturePointsPaymentForBooking(booking, booking.trip);
+        const paidBooking = await this.capturePointsPaymentForBooking(booking, booking.trip);
+        await this.invalidateBookingCaches(paidBooking);
+        return paidBooking;
       }
       return booking;
     }
@@ -2469,7 +2472,7 @@ export class BookingsService {
       booking.trip,
     );
     if (
-      savedBooking.status === BookingStatus.COMPLETED &&
+      (savedBooking.status === BookingStatus.COMPLETED || canPayNearArrival(savedBooking)) &&
       savedBooking.paymentMode === TripPaymentMode.POINTS
     ) {
       savedBooking = await this.capturePointsPaymentForBooking(
@@ -2557,7 +2560,7 @@ export class BookingsService {
   private ensureBookingCanBePaid(booking: Booking): void {
     if (booking.paymentMode === TripPaymentMode.POINTS) {
       throw new BadRequestException(
-        'Cette reservation est reglee avec les jetons Zwanga',
+        'Cette réservation est réglée avec les jetons Zwanga',
       );
     }
 
@@ -2571,21 +2574,22 @@ export class BookingsService {
       ].includes(booking.status)
     ) {
       throw new BadRequestException(
-        'Cette reservation ne peut plus etre payee',
+        'Cette réservation ne peut plus être payée',
       );
     }
 
     if (
       booking.status !== BookingStatus.COMPLETED &&
-      !this.hasBookingBeenDroppedOffForTripEnd(booking)
+      !this.hasBookingBeenDroppedOffForTripEnd(booking) &&
+      !canPayNearArrival(booking)
     ) {
       throw new BadRequestException(
-        "Le paiement du trajet est disponible uniquement apres l'arrivee",
+        "Le paiement est disponible à moins de 150 mètres de votre destination ou après l’arrivée, lorsque votre position est confirmée.",
       );
     }
 
     if (booking.trip?.status === TripStatus.CANCELLED) {
-      throw new BadRequestException('Ce trajet ne peut plus etre paye');
+      throw new BadRequestException('Ce trajet ne peut plus être payé');
     }
   }
 
@@ -2613,10 +2617,11 @@ export class BookingsService {
 
     if (
       booking.status !== BookingStatus.COMPLETED &&
-      !this.hasBookingBeenDroppedOffForTripEnd(booking)
+      !this.hasBookingBeenDroppedOffForTripEnd(booking) &&
+      !canPayNearArrival(booking)
     ) {
       throw new BadRequestException(
-        "Le paiement en jetons est disponible uniquement apres l'arrivee",
+        "Le paiement en jetons est disponible à moins de 150 mètres de votre destination ou après l’arrivée.",
       );
     }
 
@@ -2626,28 +2631,30 @@ export class BookingsService {
         lock: { mode: 'pessimistic_write' },
       });
       if (!lockedBooking) {
-        throw new NotFoundException('Reservation non trouvee');
+        throw new NotFoundException('Réservation non trouvée');
       }
 
       const lockedTrip = await manager.findOne(Trip, {
         where: { id: lockedBooking.tripId },
       });
       if (!lockedTrip) {
-        throw new NotFoundException('Trajet non trouve');
+        throw new NotFoundException('Trajet non trouvé');
       }
       lockedBooking.trip = lockedTrip;
 
       if (lockedBooking.paymentMode !== TripPaymentMode.POINTS) {
         throw new BadRequestException(
-          'Le mode de paiement de la reservation a change',
+          'Le mode de paiement de la réservation a changé',
         );
       }
+      if (lockedBooking.paymentStatus === BookingPaymentStatus.SUCCEEDED) return lockedBooking;
       if (
         lockedBooking.status !== BookingStatus.COMPLETED &&
-        !this.hasBookingBeenDroppedOffForTripEnd(lockedBooking)
+        !this.hasBookingBeenDroppedOffForTripEnd(lockedBooking) &&
+        !canPayNearArrival(lockedBooking)
       ) {
         throw new BadRequestException(
-          'Le paiement en jetons est disponible uniquement apres l arrivee',
+          'Votre position doit être confirmée à moins de 150 mètres de votre destination pour payer avant l’arrivée.',
         );
       }
 
@@ -2682,10 +2689,10 @@ export class BookingsService {
       const savedBooking = await manager.save(savedFareBooking);
       savedBooking.trip = lockedTrip;
 
-      await this.driverSettlementsService.recordCompletedBookingEarningWithManager(
-        manager,
-        savedBooking,
-      );
+      // Paying early does not complete a ride or release its driver earnings early.
+      if (savedBooking.status === BookingStatus.COMPLETED) {
+        await this.driverSettlementsService.recordCompletedBookingEarningWithManager(manager, savedBooking);
+      }
 
       this.logger.log(
         `TOKEN_TRIP_SETTLEMENT_COMMITTED bookingId=${savedBooking.id} amount=${amount} currency=${savedBooking.paymentCurrency}`,
@@ -3280,7 +3287,7 @@ export class BookingsService {
       payment.relatedEntityType !== this.BOOKING_RELATED_ENTITY_TYPE
     ) {
       throw new BadRequestException(
-        'Cette transaction ne correspond pas a une reservation de trajet',
+        'Cette transaction ne correspond pas à une réservation de trajet',
       );
     }
 
@@ -3301,7 +3308,7 @@ export class BookingsService {
     });
 
     if (!booking) {
-      throw new NotFoundException('Reservation liee au paiement introuvable');
+      throw new NotFoundException('Réservation liée au paiement introuvable');
     }
 
     return booking;
@@ -3460,13 +3467,13 @@ export class BookingsService {
       case BookingPaymentStatus.NOT_REQUIRED:
         return 'Aucun paiement requis pour ce trajet';
       case BookingPaymentStatus.SUCCEEDED:
-        return 'Paiement confirme avec succes';
+        return 'Paiement confirmé avec succès';
       case BookingPaymentStatus.FAILED:
-        return 'Le paiement a echoue';
+        return 'Le paiement a échoué';
       case BookingPaymentStatus.CANCELLED:
-        return 'Le paiement a ete annule';
+        return 'Le paiement a été annulé';
       case BookingPaymentStatus.INITIATED:
-        return 'Paiement initialise. Verification en cours';
+        return 'Paiement initialisé. Vérification en cours';
       case BookingPaymentStatus.PENDING:
       default:
         return 'Paiement en attente de confirmation';
@@ -3670,7 +3677,7 @@ export class BookingsService {
         tripId: booking.tripId,
         bookingId: booking.id,
         message:
-          "Ce trajet exige une verification d'identite approuvee avant embarquement.",
+          "Ce trajet exige une vérification d'identité approuvée avant embarquement.",
       },
     );
 
@@ -3787,7 +3794,7 @@ export class BookingsService {
 
     if (booking.status !== BookingStatus.ACCEPTED) {
       throw new BadRequestException(
-        'La reservation doit etre acceptee avant de confirmer la prise en charge',
+        'La réservation doit être acceptée avant de confirmer la prise en charge',
       );
     }
 
@@ -3798,7 +3805,7 @@ export class BookingsService {
         tripId: booking.tripId,
         bookingId: booking.id,
         message:
-          "Ce trajet exige une verification d'identite approuvee avant embarquement.",
+          "Ce trajet exige une vérification d'identité approuvée avant embarquement.",
       },
     );
 
@@ -4148,18 +4155,18 @@ export class BookingsService {
 
     if (!booking) {
       throw new NotFoundException(
-        "Reservation non trouvee ou vous n'etes pas le passager",
+        "Réservation non trouvée ou vous n'êtes pas le passager",
       );
     }
 
     if (!this.canEvaluateAutomaticProgress(booking)) {
       throw new BadRequestException(
-        'Le trajet doit etre actif et la reservation acceptee pour vous signaler',
+        'Le trajet doit être actif et la réservation acceptée pour vous signaler',
       );
     }
 
     if (booking.pickedUp || booking.pickedUpConfirmedByPassenger) {
-      throw new BadRequestException('La prise en charge est deja confirmee');
+      throw new BadRequestException('La prise en charge est déjà confirmée');
     }
 
     return {
@@ -5414,13 +5421,13 @@ export class BookingsService {
     const otherPassengersLabel =
       otherPassengerNames.length > 0
         ? otherPassengerNames.join(', ')
-        : 'aucun autre passager confirme';
+        : 'aucun autre passager confirmé';
 
     if (eventType === 'dropoff') {
       return [
-        'ZWANGA - Mise a jour securite',
+        'ZWANGA - Mise à jour sécurité',
         `${passengerName} est bien arrive(e).`,
-        `Depart: ${departure}.`,
+        `Départ : ${departure}.`,
         `Arrivee: ${arrival}.`,
         `Conducteur: ${driverLabel}.`,
         `Vehicule: ${vehicleDetails}.`,
@@ -5430,9 +5437,9 @@ export class BookingsService {
 
     if (eventType === 'trip_end_without_dropoff') {
       return [
-        'ZWANGA - Alerte securite',
-        `Le trajet est termine mais l'arrivee de ${passengerName} n'a pas ete confirmee.`,
-        `Depart: ${departure}.`,
+        'ZWANGA - Alerte sécurité',
+        `Le trajet est terminé mais l'arrivée de ${passengerName} n'a pas été confirmée.`,
+        `Départ : ${departure}.`,
         `Arrivee: ${arrival}.`,
         `Conducteur: ${driverLabel}.`,
         `Vehicule: ${vehicleDetails}.`,
@@ -5441,9 +5448,9 @@ export class BookingsService {
     }
 
     return [
-      'ZWANGA - Mise a jour securite',
+      'ZWANGA - Mise à jour sécurité',
       `${passengerName} vient d'embarquer.`,
-      `Depart: ${departure}.`,
+      `Départ : ${departure}.`,
       `Arrivee: ${arrival}.`,
       `Conducteur: ${driverLabel}.`,
       `Vehicule: ${vehicleDetails}.`,
@@ -5498,12 +5505,12 @@ export class BookingsService {
       const passengersLabel =
         passengerNames.length > 0
           ? passengerNames.join(', ')
-          : 'aucun passager confirme';
+          : 'aucun passager confirmé';
 
       const message = [
-        'ZWANGA - Mise a jour securite conducteur',
-        `${driverName} vient de recuperer ${passengerName}.`,
-        `Depart: ${trip.departureLocation}.`,
+        'ZWANGA - Mise à jour sécurité conducteur',
+        `${driverName} vient de récupérer ${passengerName}.`,
+        `Départ : ${trip.departureLocation}.`,
         `Arrivee: ${trip.arrivalLocation}.`,
         `Conducteur: ${driverName}.`,
         `Vehicule: ${vehicleDetails}.`,
@@ -5711,8 +5718,8 @@ export class BookingsService {
         passenger.fcmToken,
         approved ? 'Interruption confirmee' : 'Interruption refusee',
         approved
-          ? 'Le conducteur a confirme votre descente avant destination.'
-          : "Le conducteur a refuse votre demande d'interruption.",
+          ? 'Le conducteur a confirmé votre descente avant destination.'
+          : "Le conducteur a refusé votre demande d'interruption.",
         {
           type: approved
             ? 'passenger_trip_interruption_confirmed'
@@ -5911,8 +5918,8 @@ export class BookingsService {
 
       await this.notificationService.sendNotification(
         passenger.fcmToken,
-        'Le conducteur est deja parti',
-        `Le conducteur est maintenant a environ ${driverDistanceMeters} m du point de rendez-vous et votre prise en charge n'a pas ete detectee. Aucun paiement n'a ete effectue. Gardez votre localisation active si vous rejoignez le vehicule pendant le trajet.`,
+        'Le conducteur est déjà parti',
+        `Le conducteur est maintenant à environ ${driverDistanceMeters} m du point de rendez-vous et votre prise en charge n'a pas été détectée. Aucun paiement n'a été effectué. Gardez votre localisation active si vous rejoignez le véhicule pendant le trajet.`,
         {
           type: 'passenger_no_show',
           bookingId: booking.id,
@@ -5949,8 +5956,8 @@ export class BookingsService {
 
       await this.notificationService.sendNotification(
         passenger.fcmToken,
-        'Embarquement non confirme',
-        "Le trajet est termine, mais les donnees GPS n'ont pas permis de confirmer votre embarquement. Aucun paiement n'a ete effectue.",
+        'Embarquement non confirmé',
+        "Le trajet est terminé, mais les données GPS n'ont pas permis de confirmer votre embarquement. Aucun paiement n'a été effectué.",
         {
           type: 'passenger_boarding_uncertain',
           bookingId: booking.id,
@@ -5983,8 +5990,8 @@ export class BookingsService {
 
       await this.notificationService.sendNotification(
         passenger.fcmToken,
-        'Recuperation confirmee',
-        `Votre recuperation a ete confirmee automatiquement par GPS pour le trajet ${booking.trip.departureLocation} -> ${booking.passengerDestination || booking.trip.arrivalLocation}.`,
+        'Récupération confirmée',
+        `Votre récupération a été confirmée automatiquement par GPS pour le trajet ${booking.trip.departureLocation} -> ${booking.passengerDestination || booking.trip.arrivalLocation}.`,
         {
           type: 'pickup_confirmed_automatically',
           bookingId: booking.id,
@@ -6054,7 +6061,7 @@ export class BookingsService {
       await this.notificationService.sendNotification(
         passenger.fcmToken,
         'Arrivee confirmee',
-        `Votre arrivee a ete confirmee automatiquement par GPS pour le trajet ${booking.trip.departureLocation} -> ${booking.passengerDestination || booking.trip.arrivalLocation}.`,
+        `Votre arrivée a été confirmée automatiquement par GPS pour le trajet ${booking.trip.departureLocation} -> ${booking.passengerDestination || booking.trip.arrivalLocation}.`,
         {
           type: 'dropoff_confirmed_automatically',
           bookingId: booking.id,
@@ -6258,7 +6265,7 @@ export class BookingsService {
       ![BookingStatus.ACCEPTED, BookingStatus.NO_SHOW].includes(booking.status)
     ) {
       throw new BadRequestException(
-        'Seules les reservations acceptees ou recuperables peuvent partager leur position',
+        'Seules les réservations acceptées ou récupérables peuvent partager leur position',
       );
     }
 
@@ -6277,7 +6284,7 @@ export class BookingsService {
     );
     if (!currentCoordinate) {
       throw new BadRequestException(
-        'Position passager invalide ou incoherente avec le trajet',
+        'Position passager invalide ou incohérente avec le trajet',
       );
     }
 

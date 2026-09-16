@@ -781,7 +781,7 @@ describe('BookingsService trip payments', () => {
         method: PaymentMethod.MOBILE_MONEY,
         phone: '+243891234567',
       }),
-    ).rejects.toThrow("uniquement apres l'arrivee");
+    ).rejects.toThrow('150 mètres');
 
     expect(paymentsService.initiatePayment).not.toHaveBeenCalled();
   });
@@ -2170,8 +2170,8 @@ describe('BookingsService trip payments', () => {
     expect(notificationService.sendNotification).toHaveBeenCalledTimes(1);
     expect(notificationService.sendNotification).toHaveBeenCalledWith(
       'passenger-fcm-token',
-      'Le conducteur est deja parti',
-      expect.stringContaining("votre prise en charge n'a pas ete detectee"),
+      'Le conducteur est déjà parti',
+      expect.stringContaining("votre prise en charge n'a pas été détectée"),
       expect.objectContaining({
         type: 'passenger_no_show',
         bookingId: 'booking-1',

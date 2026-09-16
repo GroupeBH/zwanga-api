@@ -58,7 +58,7 @@ export class FileUploadService {
     if (!allowedMimes.includes(file.mimetype)) {
       this.logger.warn(`File upload rejected: Invalid file type ${file.mimetype} for file ${file.originalname}`);
       throw new BadRequestException(
-        `Invalid file type. Allowed types: ${allowedMimes.join(', ')}`,
+        'Ce format d’image n’est pas accepté. Choisissez une image JPEG, PNG ou WebP.',
       );
     }
 
@@ -66,7 +66,7 @@ export class FileUploadService {
     const maxSize = this.configService.get<number>('MAX_FILE_SIZE') || 5242880;
     if (file.size > maxSize) {
       this.logger.warn(`File upload rejected: File size ${(file.size / 1024 / 1024).toFixed(2)}MB exceeds limit for file ${file.originalname}`);
-      throw new BadRequestException(`File size exceeds ${maxSize / 1024 / 1024}MB limit`);
+      throw new BadRequestException(`L’image est trop volumineuse. Sa taille ne doit pas dépasser ${maxSize / 1024 / 1024} Mo.`);
     }
 
     // Content moderation - check for inappropriate content
@@ -78,7 +78,7 @@ export class FileUploadService {
         if (!moderationResult.isApproved) {
           this.logger.warn(`File upload rejected: Content moderation failed for ${file.originalname} - ${moderationResult.reason}`);
           throw new BadRequestException(
-            moderationResult.reason || 'Image contains inappropriate content and cannot be uploaded',
+            moderationResult.reason || "Cette image contient du contenu non autorisé. Choisissez une autre image.",
           );
         }
 
@@ -110,7 +110,7 @@ export class FileUploadService {
         return s3Key;
       } catch (error) {
         this.logger.error(`S3 upload failed for file ${file.originalname}:`, error);
-        throw new BadRequestException('Failed to upload file to cloud storage');
+        throw new BadRequestException("Le fichier n’a pas pu être envoyé. Veuillez réessayer.");
       }
     } else {
       // Local storage fallback

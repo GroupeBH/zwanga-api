@@ -40,7 +40,7 @@ export class RegisterDto extends ReferralAttributionDto {
     required: false,
     example: 'ZW7K9M2P4Q',
     description:
-      'Code du parrain, applicable uniquement a la creation du compte',
+      'Code du parrain, applicable uniquement à la création du compte',
   })
   @Transform(toTrimmedString)
   @IsString()
@@ -61,7 +61,7 @@ export class RegisterDto extends ReferralAttributionDto {
   @IsNotEmpty()
   @MinLength(4)
   @MaxLength(4)
-  @Matches(/^\d{4}$/, { message: 'PIN must be exactly 4 digits' })
+  @Matches(/^\d{4}$/, { message: "Le code PIN doit contenir exactement 4 chiffres." })
   pin: string;
 
   @ApiProperty({
@@ -137,7 +137,7 @@ export class LoginDto {
   @IsNotEmpty({ message: 'PIN is required if newPin is not provided' })
   @MinLength(4)
   @MaxLength(4)
-  @Matches(/^\d{4}$/, { message: 'PIN must be exactly 4 digits' })
+  @Matches(/^\d{4}$/, { message: "Le code PIN doit contenir exactement 4 chiffres." })
   pin?: string;
 
   @ApiProperty({
@@ -151,7 +151,7 @@ export class LoginDto {
   @IsNotEmpty({ message: 'newPin is required if PIN is not provided' })
   @MinLength(4)
   @MaxLength(4)
-  @Matches(/^\d{4}$/, { message: 'New PIN must be exactly 4 digits' })
+  @Matches(/^\d{4}$/, { message: "Le nouveau code PIN doit contenir exactement 4 chiffres." })
   newPin?: string;
 }
 
@@ -187,7 +187,7 @@ export class AdminLoginDto {
   @IsNotEmpty()
   @MinLength(4)
   @MaxLength(4)
-  @Matches(/^\d{4}$/, { message: 'PIN must be exactly 4 digits' })
+  @Matches(/^\d{4}$/, { message: "Le code PIN doit contenir exactement 4 chiffres." })
   pin?: string;
 }
 
@@ -276,7 +276,7 @@ export class GoogleMobileAuthDto extends ReferralAttributionDto {
   idToken: string;
 
   @ApiProperty({
-    description: 'Numero de telephone requis au premier login Google',
+    description: 'Numéro de téléphone requis au premier login Google',
     example: '+243900000000',
     required: false,
   })
@@ -286,7 +286,7 @@ export class GoogleMobileAuthDto extends ReferralAttributionDto {
   phone?: string;
 
   @ApiProperty({
-    description: 'Prenom(s) legaux confirmes pendant la premiere inscription',
+    description: 'Prénom(s) légaux confirmés pendant la première inscription',
     required: false,
   })
   @Transform(toNormalizedLegalName)
@@ -298,7 +298,7 @@ export class GoogleMobileAuthDto extends ReferralAttributionDto {
 
   @ApiProperty({
     description:
-      'Nom legal confirme pendant la premiere inscription (post-nom facultatif)',
+      'Nom légal confirmé pendant la première inscription (post-nom facultatif)',
     required: false,
   })
   @Transform(toNormalizedLegalName)
@@ -314,7 +314,7 @@ export class GoogleMobileAuthDto extends ReferralAttributionDto {
     example: UserGender.FEMALE,
     required: false,
     nullable: true,
-    description: 'Sexe choisi lors de la premiere inscription Google',
+    description: 'Sexe choisi lors de la première inscription Google',
   })
   @IsEnum(UserGender)
   @IsOptional()
@@ -324,7 +324,7 @@ export class GoogleMobileAuthDto extends ReferralAttributionDto {
     enum: SELF_SERVICE_USER_ROLES,
     example: UserRole.PASSENGER,
     required: false,
-    description: 'Role choisi pendant la premiere inscription Google',
+    description: 'Rôle choisi pendant la première inscription Google',
   })
   @IsIn(SELF_SERVICE_USER_ROLES)
   @IsOptional()
@@ -343,7 +343,7 @@ export class GoogleMobileAuthDto extends ReferralAttributionDto {
     required: false,
     type: () => CreateVehicleDto,
     description:
-      'Infos vehicule pour la premiere inscription Google conducteur',
+      'Infos véhicule pour la première inscription Google conducteur',
   })
   @ValidateNested()
   @IsOptional()
@@ -368,7 +368,7 @@ export class AppleMobileAuthDto extends ReferralAttributionDto {
   idToken: string;
 
   @ApiProperty({
-    description: 'Nonce envoye a Apple au moment de la demande, si utilise',
+    description: 'Nonce envoyé à Apple au moment de la demande, si utilisé',
     required: false,
   })
   @Transform(toTrimmedString)
@@ -377,7 +377,7 @@ export class AppleMobileAuthDto extends ReferralAttributionDto {
   nonce?: string;
 
   @ApiProperty({
-    description: 'Numero de telephone requis au premier login Apple',
+    description: 'Numéro de téléphone requis au premier login Apple',
     example: '+243900000000',
     required: false,
   })
@@ -388,7 +388,7 @@ export class AppleMobileAuthDto extends ReferralAttributionDto {
 
   @ApiProperty({
     description:
-      'Prenom fourni par Apple uniquement lors de la premiere autorisation',
+      'Prénom fourni par Apple uniquement lors de la première autorisation',
     required: false,
   })
   @Transform(toNormalizedLegalName)
@@ -400,7 +400,7 @@ export class AppleMobileAuthDto extends ReferralAttributionDto {
 
   @ApiProperty({
     description:
-      'Nom fourni par Apple uniquement lors de la premiere autorisation',
+      'Nom fourni par Apple uniquement lors de la première autorisation',
     required: false,
   })
   @Transform(toNormalizedLegalName)
@@ -416,7 +416,7 @@ export class AppleMobileAuthDto extends ReferralAttributionDto {
     example: UserGender.FEMALE,
     required: false,
     nullable: true,
-    description: 'Sexe choisi lors de la premiere inscription Apple',
+    description: 'Sexe choisi lors de la première inscription Apple',
   })
   @IsEnum(UserGender)
   @IsOptional()
@@ -426,7 +426,7 @@ export class AppleMobileAuthDto extends ReferralAttributionDto {
     enum: SELF_SERVICE_USER_ROLES,
     example: UserRole.PASSENGER,
     required: false,
-    description: 'Role choisi pendant la premiere inscription Apple',
+    description: 'Rôle choisi pendant la première inscription Apple',
   })
   @IsIn(SELF_SERVICE_USER_ROLES)
   @IsOptional()
@@ -444,7 +444,7 @@ export class AppleMobileAuthDto extends ReferralAttributionDto {
   @ApiProperty({
     required: false,
     type: () => CreateVehicleDto,
-    description: 'Infos vehicule pour la premiere inscription Apple conducteur',
+    description: 'Infos véhicule pour la première inscription Apple conducteur',
   })
   @ValidateNested()
   @IsOptional()

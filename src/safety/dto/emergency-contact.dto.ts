@@ -19,11 +19,11 @@ export class CreateEmergencyContactDto {
   @IsNotEmpty()
   name: string;
 
-  @ApiProperty({ description: 'Numero de telephone du contact' })
+  @ApiProperty({ description: 'Numéro de téléphone du contact' })
   @IsString()
   @IsNotEmpty()
   @Matches(/^\+?[1-9]\d{1,14}$/, {
-    message: 'Le numero de telephone doit etre au format international valide',
+    message: 'Le numéro de téléphone doit être au format international valide',
   })
   phone: string;
 
@@ -40,7 +40,7 @@ export class CreateEmergencyContactDto {
 
 export class CreateMultipleEmergencyContactsDto {
   @ApiProperty({
-    description: "Liste des contacts d'urgence a creer (maximum 5 au total par utilisateur)",
+    description: "Liste des contacts d'urgence à créer (maximum 5 au total par utilisateur)",
     type: [CreateEmergencyContactDto],
     example: [
       { name: 'Jean Dupont', phone: '+33612345678', relationship: 'Famille' },
@@ -63,11 +63,11 @@ export class UpdateEmergencyContactDto {
   @IsOptional()
   name?: string;
 
-  @ApiProperty({ description: 'Numero de telephone du contact', required: false })
+  @ApiProperty({ description: 'Numéro de téléphone du contact', required: false })
   @IsString()
   @IsOptional()
   @Matches(/^\+?[1-9]\d{1,14}$/, {
-    message: 'Le numero de telephone doit etre au format international valide',
+    message: 'Le numéro de téléphone doit être au format international valide',
   })
   phone?: string;
 
