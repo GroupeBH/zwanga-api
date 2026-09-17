@@ -6,19 +6,35 @@ import {
   MessageBody,
   OnGatewayConnection,
   OnGatewayDisconnect,
+  WsException,
 } from '@nestjs/websockets';
-import { Logger } from '@nestjs/common';
+import { Logger, UseFilters, UseGuards, UsePipes } from '@nestjs/common';
 import { Namespace, Socket } from 'socket.io';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { TripsService } from '../trips/trips.service';
 import { BookingsService } from '../bookings/bookings.service';
 import { normalizeLngLatCoordinates } from '../common/utils/tracking-coordinates';
+import {
+  BookingSocketDto,
+  DriverLocationSocketDto,
+  PassengerLocationSocketDto,
+  TripSocketDto,
+} from './dto/tracking-socket.dto';
+import {
+  authenticateSocket,
+  createWsValidationPipe,
+  emitSocketError,
+  WsAuthenticatedGuard,
+  WsErrorFilter,
+} from '../common/websocket-security';
 
 @WebSocketGateway({
-  cors: { origin: '*' },
   namespace: '/tracking',
 })
+@UseGuards(new WsAuthenticatedGuard())
+@UsePipes(createWsValidationPipe())
+@UseFilters(new WsErrorFilter())
 export class TrackingGateway
   implements OnGatewayConnection, OnGatewayDisconnect
 {
@@ -36,7 +52,7 @@ export class TrackingGateway
   private parseCoordinates(coordinates?: [number, number]): [number, number] {
     const normalizedCoordinates = normalizeLngLatCoordinates(coordinates);
     if (!normalizedCoordinates) {
-      throw new Error('Coordonnées invalides');
+      throw new WsException('Coordonnées invalides');
     }
 
     return normalizedCoordinates;
@@ -118,20 +134,11 @@ export class TrackingGateway
 
   async handleConnection(client: Socket) {
     try {
-      const token =
-        client.handshake.auth.token ||
-        client.handshake.headers.authorization?.split(' ')[1];
-
-      if (!token) {
-        client.disconnect();
+      if (
+        !(await authenticateSocket(client, this.jwtService, this.configService))
+      ) {
         return;
       }
-
-      const payload = await this.jwtService.verifyAsync(token, {
-        secret: this.configService.get<string>('JWT_SECRET'),
-      });
-
-      client.data.userId = payload.sub;
       const tripId =
         typeof client.handshake.auth.tripId === 'string'
           ? client.handshake.auth.tripId
@@ -159,41 +166,34 @@ export class TrackingGateway
   @SubscribeMessage('join_trip')
   async handleJoinTrip(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data: { tripId: string },
+    @MessageBody() data: TripSocketDto,
   ) {
     try {
       await this.tripsService.ensureUserCanTrackTrip(
         data.tripId,
         client.data.userId,
       );
-      client.join(`trip:${data.tripId}`);
+      await client.join(`trip:${data.tripId}`);
       client.data.tripId = data.tripId;
       await this.evaluateAndEmitAutomaticProgress(client, data.tripId);
     } catch (error) {
-      client.emit('error', { message: error.message });
+      emitSocketError(client, error);
     }
   }
 
   @SubscribeMessage('leave_trip')
   async handleLeaveTrip(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data: { tripId: string },
+    @MessageBody() data: TripSocketDto,
   ) {
-    client.leave(`trip:${data.tripId}`);
+    await client.leave(`trip:${data.tripId}`);
   }
 
   @SubscribeMessage('driver_location_update')
   async handleDriverLocationUpdate(
     @ConnectedSocket() client: Socket,
     @MessageBody()
-    data: {
-      tripId: string;
-      coordinates: [number, number];
-      accuracy?: number;
-      speed?: number;
-      heading?: number;
-      recordedAt?: string;
-    },
+    data: DriverLocationSocketDto,
   ) {
     try {
       const coordinates = this.parseCoordinates(data.coordinates);
@@ -231,7 +231,7 @@ export class TrackingGateway
         recordedAt: data.recordedAt,
       });
     } catch (error) {
-      client.emit('error', { message: error.message });
+      emitSocketError(client, error);
     }
   }
 
@@ -239,15 +239,7 @@ export class TrackingGateway
   async handlePassengerLocationUpdate(
     @ConnectedSocket() client: Socket,
     @MessageBody()
-    data: {
-      tripId: string;
-      bookingId: string;
-      coordinates: [number, number];
-      accuracy?: number;
-      speed?: number;
-      heading?: number;
-      recordedAt?: string;
-    },
+    data: PassengerLocationSocketDto,
   ) {
     try {
       const [longitude, latitude] = this.parseCoordinates(data.coordinates);
@@ -293,14 +285,14 @@ export class TrackingGateway
         recordedAt: data.recordedAt,
       });
     } catch (error) {
-      client.emit('error', { message: error.message });
+      emitSocketError(client, error);
     }
   }
 
   @SubscribeMessage('resume_boarding_detection')
   async handleResumeBoardingDetection(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data: { tripId: string },
+    @MessageBody() data: TripSocketDto,
   ) {
     try {
       await this.tripsService.ensureUserCanTrackTrip(
@@ -309,14 +301,14 @@ export class TrackingGateway
       );
       await this.evaluateAndEmitAutomaticProgress(client, data.tripId);
     } catch (error) {
-      client.emit('error', { message: error.message });
+      emitSocketError(client, error);
     }
   }
 
   @SubscribeMessage('get_passenger_locations')
   async handleGetPassengerLocations(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data: { tripId: string },
+    @MessageBody() data: TripSocketDto,
   ) {
     try {
       const locations = await this.bookingsService.getPassengersLocations(
@@ -333,14 +325,14 @@ export class TrackingGateway
         })),
       });
     } catch (error) {
-      client.emit('error', { message: error.message });
+      emitSocketError(client, error);
     }
   }
 
   @SubscribeMessage('passenger_pickup_signal')
   async handlePassengerPickupSignal(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data: { bookingId: string },
+    @MessageBody() data: BookingSocketDto,
   ) {
     try {
       const event = await this.bookingsService.buildPassengerPickupSignal(
@@ -353,14 +345,14 @@ export class TrackingGateway
         events: [event],
       });
     } catch (error) {
-      client.emit('error', { message: error.message });
+      emitSocketError(client, error);
     }
   }
 
   @SubscribeMessage('get_driver_location')
   async handleGetDriverLocation(
     @ConnectedSocket() client: Socket,
-    @MessageBody() data: { tripId: string },
+    @MessageBody() data: TripSocketDto,
   ) {
     try {
       const location = await this.tripsService.getDriverLocationForUser(
@@ -370,7 +362,7 @@ export class TrackingGateway
 
       client.emit('driver_location', location);
     } catch (error) {
-      client.emit('error', { message: error.message });
+      emitSocketError(client, error);
     }
   }
 }

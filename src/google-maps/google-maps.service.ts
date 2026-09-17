@@ -9,6 +9,7 @@ import { ConfigService } from '@nestjs/config';
 import { firstValueFrom } from 'rxjs';
 import * as crypto from 'crypto';
 import { CacheService } from '../common/services/cache.service';
+import { rememberRoutePreview } from '../common/route-preview';
 import { AxiosError } from 'axios';
 import {
   GeocodeDto,
@@ -579,6 +580,7 @@ export class GoogleMapsService {
       // Try to get from cache first
       const cached = await this.cacheService.get<DirectionsResponse>(cacheKey);
       if (cached) {
+        await rememberRoutePreview(this.cacheService, dto, cached);
         // this.logger.debug('Returning directions from cache');
         return {
           ...cached,
@@ -727,6 +729,7 @@ export class GoogleMapsService {
 
       // Cache the result for one week (604800 seconds)
       await this.cacheService.set(cacheKey, result, 604800);
+      await rememberRoutePreview(this.cacheService, dto, result);
 
       return result;
     } catch (error) {

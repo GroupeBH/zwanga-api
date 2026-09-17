@@ -43,6 +43,7 @@ export enum BookingPaymentStatus {
 }
 
 @Entity('bookings')
+@Index('IDX_bookings_passenger_history', ['passengerId', 'tripId', 'id'])
 @Index(['tripId', 'passengerId'])
 export class Booking {
   @PrimaryGeneratedColumn('uuid')

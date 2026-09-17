@@ -12,6 +12,7 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { TripsService } from './trips.service';
+import { HistoryPageQuery } from '../common/history-page';
 import { BookingsService } from '../bookings/bookings.service';
 import {
   CreateTripDto,
@@ -111,8 +112,15 @@ export class TripsController {
   @Auth()
   @SensitiveThrottle(20, 6000)
   @ApiOperation({ summary: 'Get trips created by current user' })
-  async findMyTrips(@Request() req) {
-    return this.tripsService.findByDriver(req.user.userId);
+  async findMyTrips(@Request() req, @Query('scope') scope?: string) {
+    return this.tripsService.findByDriver(req.user.userId, scope === 'activity');
+  }
+
+  @Get('my-trips/history')
+  @Auth()
+  @SensitiveThrottle(60, 60000)
+  async history(@Request() req, @Query() query: HistoryPageQuery) {
+    return this.tripsService.findDriverHistory(req.user.userId, query);
   }
 
   @Post('recurring')

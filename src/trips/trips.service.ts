@@ -20,6 +20,10 @@ import {
 } from 'typeorm';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { Trip, TripStatus } from './entities/trip.entity';
+import { activeTripWhere } from '../common/activity-read-policy';
+import { selectTripHistory } from './trip-history';
+import { orderHistory, type HistoryPageQuery } from '../common/history-page';
+import { getTripRoutePreview } from '../common/route-preview';
 import {
   DriverTripInterruptionConfirmation,
   DriverTripInterruptionRequest,
@@ -603,11 +607,23 @@ export class TripsService {
     return sanitized;
   }
 
-  async findByDriver(driverId: string): Promise<SanitizedTrip[]> {
+  async findDriverHistory(driverId: string, options: HistoryPageQuery) {
+    const page = await selectTripHistory(this.tripRepository, driverId, options);
+    if (!page.ids.length) return { data: [], nextCursor: page.nextCursor };
+    const trips = await this.tripRepository.find({ where: { driverId, id: In(page.ids) },
+      relations: ['vehicle', 'bookings', 'bookings.passenger', 'driver'] });
+    const userIds = this.collectTripUserIds(trips);
+    const [ratings, premium] = await Promise.all([this.buildUserRatingsMap(userIds),
+      this.subscriptionsService.getPremiumFeaturesForUsers(userIds)]);
+    const data = await Promise.all(orderHistory(page.ids, trips).map(trip => this.sanitizeTrip(trip, ratings, premium)));
+    return { data, nextCursor: page.nextCursor };
+  }
+
+  async findByDriver(driverId: string, activityOnly = false): Promise<SanitizedTrip[]> {
     this.logger.debug(`Fetching trips for driver: ${driverId}`);
 
     const trips = await this.tripRepository.find({
-      where: { driverId },
+      where: activityOnly ? activeTripWhere(driverId) : { driverId },
       relations: ['vehicle', 'bookings', 'bookings.passenger', 'driver'],
       order: { departureDate: 'DESC' },
     });
@@ -3157,6 +3173,7 @@ export class TripsService {
       bookings: sanitizedBookings,
       vehicle: sanitizedVehicle,
       isFeatured: driverPremium.featuredTripsEnabled,
+      ...await getTripRoutePreview(this.cacheService, trip),
     } as SanitizedTrip;
   }
 

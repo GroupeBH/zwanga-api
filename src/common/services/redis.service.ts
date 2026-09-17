@@ -47,6 +47,12 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     return value ? JSON.parse(value) : null;
   }
 
+  /** Read and delete in one Redis command: a one-time value cannot be replayed. */
+  async consume<T>(key: string): Promise<T | null> {
+    const value = await this.client.getDel(key);
+    return value === null ? null : (JSON.parse(value) as T);
+  }
+
   async set(key: string, value: any, ttl?: number): Promise<void> {
     const stringValue = JSON.stringify(value);
     if (ttl) {
@@ -58,6 +64,29 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
 
   async del(key: string): Promise<void> {
     await this.client.del(key);
+  }
+
+  /** Atomically consumes a JSON value when it matches the expected value. */
+  async consumeIfValueMatches<T>(
+    key: string,
+    expectedValue: T,
+  ): Promise<boolean> {
+    const result = await this.client.eval(
+      `
+        local current = redis.call('GET', KEYS[1])
+        if current and current == ARGV[1] then
+          redis.call('DEL', KEYS[1])
+          return 1
+        end
+        return 0
+      `,
+      {
+        keys: [key],
+        arguments: [JSON.stringify(expectedValue)],
+      },
+    );
+
+    return result === 1;
   }
 
   async delPattern(pattern: string): Promise<void> {
@@ -72,4 +101,3 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     return result === 1;
   }
 }
-

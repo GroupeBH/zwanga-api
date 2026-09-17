@@ -4,7 +4,7 @@ import { IsNull, Repository } from 'typeorm';
 import type { FindOptionsWhere } from 'typeorm';
 import { NotificationService } from '../notifications/notifications.service';
 import { Trip, TripStatus } from '../trips/entities/trip.entity';
-import { User } from '../users/entities/user.entity';
+import { User, UserRole } from '../users/entities/user.entity';
 import { DriverOffer, DriverOfferStatus } from './entities/driver-offer.entity';
 import { TripRequest, TripRequestStatus } from './entities/trip-request.entity';
 
@@ -134,7 +134,7 @@ export class TripRequestRecoveryService {
       );
 
       const drivers = await this.userRepository.find({
-        where: { isDriver: true, isActive: true },
+        where: { isDriver: true, role: UserRole.DRIVER, isActive: true },
         select: ['id', 'fcmToken'],
       });
       const driversWithTokens = drivers.filter(
@@ -150,12 +150,12 @@ export class TripRequestRecoveryService {
       await this.notificationService.sendToMultiple(
         driversWithTokens.map((driver) => driver.fcmToken!.trim()),
         'Demande de trajet à nouveau disponible',
-        `Un passager cherche un trajet de ${tripRequest.departureLocation} à ${tripRequest.arrivalLocation}`,
+        'Un passager cherche un trajet. Consultez la demande pour voir les points de départ et d’arrivée.',
         {
           type: 'trip_request',
           tripRequestId: tripRequest.id,
-          departureLocation: tripRequest.departureLocation,
-          arrivalLocation: tripRequest.arrivalLocation,
+          departureLocation: 'Point de départ',
+          arrivalLocation: 'Point d’arrivée',
           numberOfSeats: String(tripRequest.numberOfSeats),
           vehicleType: tripRequest.vehicleType,
           maxPricePerSeat: String(Number(tripRequest.maxPricePerSeat ?? 0)),

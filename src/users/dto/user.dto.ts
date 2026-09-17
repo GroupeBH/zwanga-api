@@ -8,7 +8,6 @@ import {
   MinLength,
   MaxLength,
   Matches,
-  ValidateIf,
 } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
@@ -257,17 +256,17 @@ export class PublicUserInfoDto {
 
 export class ChangePinDto {
   @ApiProperty({
-    required: false,
     example: '1234',
-    description: 'Ancien PIN (4 chiffres) - optionnel si oublié',
+    description: 'Ancien PIN (4 chiffres)',
   })
-  @IsOptional()
-  @ValidateIf((o) => o.oldPin !== undefined && o.oldPin !== null)
   @IsString()
+  @IsNotEmpty()
   @MinLength(4)
   @MaxLength(4)
-  @Matches(/^\d{4}$/, { message: "L’ancien code PIN doit contenir exactement 4 chiffres." })
-  oldPin?: string;
+  @Matches(/^\d{4}$/, {
+    message: 'L’ancien code PIN doit contenir exactement 4 chiffres.',
+  })
+  oldPin: string;
 
   @ApiProperty({ example: '5678', description: 'Nouveau PIN (4 chiffres)' })
   @IsString()

@@ -12,6 +12,10 @@ import { NO_RIDE_DISPUTE_SQL } from '../ride-declarations/ride-declaration.polic
 import type { RideStage } from '../ride-declarations/ride-declaration.model';
 import { hasRideDispute } from '../ride-declarations/ride-declaration.model';
 import { canPayNearArrival } from './near-arrival-payment';
+import { activeBookingWhere } from '../common/activity-read-policy';
+import { selectBookingHistory } from './booking-history';
+import { orderHistory, type HistoryPageQuery } from '../common/history-page';
+import { attachBookingRoutePreviews } from '../common/route-preview';
 import {
   DataSource,
   EntityManager,
@@ -1339,10 +1343,22 @@ export class BookingsService {
     return savedBooking;
   }
 
-  async findAllByPassenger(passengerId: string): Promise<Booking[]> {
+  async findPassengerHistory(passengerId: string, options: HistoryPageQuery) {
+    const page = await selectBookingHistory(this.bookingRepository, passengerId, options);
+    if (!page.ids.length) return { data: [], nextCursor: page.nextCursor };
+    const records = await this.bookingRepository.find({ where: { passengerId, id: In(page.ids) },
+      relations: ['trip', 'trip.driver', 'trip.vehicle'] });
+    await this.attachActiveInterruptionRequestsToBookings(records);
+    await attachBookingRoutePreviews(this.cacheService, records);
+    return { data: orderHistory(page.ids, records), nextCursor: page.nextCursor };
+  }
+
+  async findAllByPassenger(passengerId: string, activityOnly = false): Promise<Booking[]> {
     this.logger.debug(`Fetching bookings for passenger: ${passengerId}`);
 
-    const cacheKey = CacheService.getBookingsByPassengerKey(passengerId);
+    const cacheKey = activityOnly
+      ? CacheService.getBookingsByPassengerActivityKey(passengerId)
+      : CacheService.getBookingsByPassengerKey(passengerId);
     const cached = await this.cacheService.get<Booking[]>(cacheKey);
 
     if (cached) {
@@ -1353,12 +1369,13 @@ export class BookingsService {
     }
 
     const bookings = await this.bookingRepository.find({
-      where: { passengerId },
+      where: activityOnly ? activeBookingWhere(passengerId) : { passengerId },
       relations: ['trip', 'trip.driver'],
       order: { createdAt: 'DESC' },
     });
 
     await this.attachActiveInterruptionRequestsToBookings(bookings);
+    await attachBookingRoutePreviews(this.cacheService, bookings);
     await this.cacheService.set(cacheKey, bookings, this.CACHE_TTL);
     this.logger.debug(
       `Fetched ${bookings.length} bookings from database for passenger ${passengerId}`,

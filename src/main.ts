@@ -8,7 +8,8 @@ import {
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { ConfigService } from '@nestjs/config';
 import { NestExpressApplication } from '@nestjs/platform-express';
-import { IoAdapter } from '@nestjs/platform-socket.io';
+import { ConfiguredIoAdapter } from './common/configured-io.adapter';
+import { createCorsOptions } from './common/cors-policy';
 import { WINSTON_MODULE_NEST_PROVIDER } from 'nest-winston';
 import { join } from 'path';
 import { AppModule } from './app.module';
@@ -23,14 +24,14 @@ import type { Server as HttpServer } from 'http';
 import type { Socket } from 'net';
 import { ApiExceptionFilter } from './common/filters/api-exception.filter';
 
-class RedisSocketIoAdapter extends IoAdapter {
+class RedisSocketIoAdapter extends ConfiguredIoAdapter {
   private redisAdapter?: ReturnType<typeof createAdapter>;
   private readonly socketIoServers = new Set<Server>();
   private pubClient?: ReturnType<typeof createClient>;
   private subClient?: ReturnType<typeof createClient>;
 
-  constructor(app: NestExpressApplication) {
-    super(app);
+  constructor(app: NestExpressApplication, configService: ConfigService) {
+    super(app, configService);
   }
 
   setRedisAdapter(redisAdapter: ReturnType<typeof createAdapter>): void {
@@ -152,7 +153,7 @@ async function bootstrap() {
 
   const configService = app.get(ConfigService);
   const apiPrefix = configService.get<string>('API_PREFIX') || 'api/v1';
-  const redisIoAdapter = new RedisSocketIoAdapter(app);
+  const redisIoAdapter = new RedisSocketIoAdapter(app, configService);
   app.useWebSocketAdapter(redisIoAdapter);
   await configureSocketIoRedisAdapter(redisIoAdapter, configService);
 
@@ -189,39 +190,7 @@ async function bootstrap() {
   );
 
   // CORS
-  const corsOrigins =
-    configService
-      .get<string>('CORS_ORIGINS')
-      ?.split(',')
-      .map((origin) => origin.trim())
-      .filter((origin) => origin.length > 0) ?? [];
-  const isProduction =
-    (configService.get<string>('NODE_ENV') || 'development') === 'production';
-
-  app.enableCors({
-    origin: (origin, callback) => {
-      // Native mobile clients often do not send Origin header.
-      if (!origin) {
-        callback(null, true);
-        return;
-      }
-
-      // In non-production, allow all origins for local mobile/web testing.
-      if (!isProduction) {
-        callback(null, true);
-        return;
-      }
-
-      if (corsOrigins.includes(origin)) {
-        callback(null, true);
-        return;
-      }
-
-      callback(new Error(`Origin ${origin} is not allowed by CORS`));
-    },
-    methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
-    credentials: true,
-  });
+  app.enableCors(createCorsOptions(configService));
 
   // Serve static files (uploads) - only if not using S3
   const useS3 = configService.get<string>('AWS_S3_BUCKET_NAME') ? true : false;

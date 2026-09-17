@@ -33,6 +33,7 @@ import { AddTripRequestDriverPickupOverdueNotification1780000032000 } from './17
 import { AddPassengerKycRequirements1780000033000 } from './1780000033000-AddPassengerKycRequirements';
 import { AddInterruptionPassengerDecisions1780000034000 } from './1780000034000-AddInterruptionPassengerDecisions';
 import { AddRideDeclarations1780000035000 } from './1780000035000-AddRideDeclarations';
+import { AddRideHistoryIndexes1780000036000 } from './1780000036000-AddRideHistoryIndexes';
 
 export const databaseMigrations = [
   FillTotalSeats1780000000000,
@@ -70,4 +71,5 @@ export const databaseMigrations = [
   AddPassengerKycRequirements1780000033000,
   AddInterruptionPassengerDecisions1780000034000,
   AddRideDeclarations1780000035000,
+  AddRideHistoryIndexes1780000036000,
 ];

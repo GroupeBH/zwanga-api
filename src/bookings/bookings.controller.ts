@@ -6,9 +6,11 @@ import {
   Param,
   Body,
   Request,
+  Query,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { BookingsService } from './bookings.service';
+import { HistoryPageQuery } from '../common/history-page';
 import { randomUUID } from 'crypto';
 import { RideDeclarationsService } from '../ride-declarations/ride-declarations.service';
 import { CreateBookingDto, UpdateBookingStatusDto, RejectBookingDto, ConfirmPickupDto, ConfirmDropoffDto, ReportBookingProblemDto, UpdatePassengerLocationDto, UpdateBookingPaymentModeDto } from './dto/booking.dto';
@@ -116,8 +118,15 @@ export class BookingsController {
   @Auth()
   @SensitiveThrottle(20, 60000)
   @ApiOperation({ summary: 'Get all bookings of the current user' })
-  async findMyBookings(@Request() req) {
-    return this.bookingsService.findAllByPassenger(req.user.userId);
+  async findMyBookings(@Request() req, @Query('scope') scope?: string) {
+    return this.bookingsService.findAllByPassenger(req.user.userId, scope === 'activity');
+  }
+
+  @Get('my-bookings/history')
+  @Auth()
+  @SensitiveThrottle(60, 60000)
+  async history(@Request() req, @Query() query: HistoryPageQuery) {
+    return this.bookingsService.findPassengerHistory(req.user.userId, query);
   }
 
   @Get('trip/:tripId')

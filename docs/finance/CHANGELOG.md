@@ -2,6 +2,21 @@
 
 Ce fichier répertorie les changements qui influencent un prix, un paiement, un solde, une commission, une récompense ou un retrait.
 
+## 17 septembre 2026
+
+### FIN-DRIVER-002 — Alignement du retrait sur FlexPaie Payout v1.03
+
+Statut : implémenté localement ; configuration marchand et validation réelle encore requises. Aucun déploiement ni transfert d'argent effectué.
+
+- Authentification dédiée avec cache du token selon `expire_in`, sans réutiliser le token d'encaissement.
+- Envoi à l'URL `/pay` fournie par FlexPaie avec `customer`, `description` et `callback_url`.
+- Vérification des réponses à plat et des callbacks avec les identifiants payout, y compris pour les retraits de parrainage.
+- Acceptation initiale distincte du succès final ; gains réservés en cas de réponse ambiguë, de service occupé ou de timeout. Aucun renvoi automatique de versement.
+- Variables ajoutées vides aux modèles d'environnement et au `.env` local. Le PDF ne fournit pas les hôtes réels ni les identifiants.
+- Aucune migration ni modification des montants, commissions, règles KYC ou clés d'idempotence.
+
+Configuration et rapprochement des anciennes demandes : [FLEXPAY_SETUP.md](../../FLEXPAY_SETUP.md#driver-earnings-payouts-flexpaie-payout-v103).
+
 ## 4 septembre 2026
 
 ### FIN-BOOKING-003 — Subvention Zwanga du premier trajet passager
