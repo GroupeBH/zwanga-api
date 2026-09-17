@@ -27,6 +27,7 @@ export enum TripStatus {
 }
 
 @Entity('trips')
+@Index('IDX_trips_driver_history', ['driverId', 'departureDate', 'id'])
 @Index(['departureLocation'])
 @Index(['arrivalLocation'])
 @Index(['departureDate'])

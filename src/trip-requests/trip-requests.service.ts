@@ -52,7 +52,7 @@ export interface SanitizedUser {
   id: string;
   firstName: string;
   lastName: string;
-  phone: string;
+  phone?: string;
   gender: UserGender | null;
   profilePicture: string | null;
   isPremium: boolean;
@@ -616,6 +616,7 @@ export class TripRequestsService {
       const drivers = await this.userRepository.find({
         where: {
           isDriver: true,
+          role: UserRole.DRIVER,
           isActive: true,
         },
         select: ['id', 'fcmToken', 'firstName'],
@@ -637,13 +638,14 @@ export class TripRequestsService {
       const driverIds = driversWithTokens.map((driver) => driver.id);
 
       const title = 'Nouvelle demande de trajet disponible';
-      const body = `Un passager cherche un trajet de ${tripRequest.departureLocation} à ${tripRequest.arrivalLocation}`;
+      const body =
+        'Un passager cherche un trajet. Consultez la demande pour voir les points de départ et d’arrivée.';
 
       const data = {
         type: 'trip_request',
         tripRequestId: tripRequest.id,
-        departureLocation: tripRequest.departureLocation,
-        arrivalLocation: tripRequest.arrivalLocation,
+        departureLocation: 'Point de départ',
+        arrivalLocation: 'Point d’arrivée',
         numberOfSeats: tripRequest.numberOfSeats.toString(),
         vehicleType: tripRequest.vehicleType ?? VehicleType.CAR,
         maxPricePerSeat: Number(tripRequest.maxPricePerSeat ?? 0).toString(),
@@ -670,7 +672,8 @@ export class TripRequestsService {
     }
   }
 
-  async findAll(): Promise<SanitizedTripRequest[]> {
+  async findAll(driverId: string): Promise<SanitizedTripRequest[]> {
+    await this.assertDriverViewer(driverId);
     this.logger.debug('Fetching all trip requests');
 
     // Get all trip requests that are not cancelled, expired, or have an accepted offer
@@ -703,12 +706,18 @@ export class TripRequestsService {
     );
 
     return Promise.all(
-      visibleTripRequests.map((tr) => this.sanitizeTripRequest(tr)),
+      visibleTripRequests.map((tr) =>
+        this.sanitizeTripRequest(tr, driverId, true),
+      ),
     );
   }
 
   async findOne(id: string, userId?: string): Promise<SanitizedTripRequest> {
     this.logger.debug(`Fetching trip request: ${id}`);
+
+    if (!userId) {
+      throw new NotFoundException('Demande de trajet non trouvée');
+    }
 
     const tripRequest = await this.tripRequestRepository.findOne({
       where: { id },
@@ -728,65 +737,22 @@ export class TripRequestsService {
 
     await this.expireRequests([tripRequest]);
 
-    const isPassenger = userId && tripRequest.passengerId === userId;
-    const isSelectedDriver =
-      userId &&
-      tripRequest.selectedDriverId &&
-      tripRequest.selectedDriverId === userId;
-
-    const userAcceptedOffer = userId
-      ? tripRequest.driverOffers?.find(
-          (offer) =>
-            offer.driverId === userId &&
-            offer.status === DriverOfferStatus.ACCEPTED,
-        )
-      : undefined;
-
-    // Si aucune offre n'est acceptée, garder le comportement existant (visibilité large)
-    if (!this.hasAcceptedDriver(tripRequest)) {
-      if (userId && !isPassenger) {
-        const hasOffer = tripRequest.driverOffers?.some(
-          (offer) => offer.driverId === userId,
-        );
-        if (!hasOffer) {
-          // Ne montrer au driver que ses propres offres
-          tripRequest.driverOffers =
-            tripRequest.driverOffers?.filter(
-              (offer) => offer.driverId === userId,
-            ) || [];
+    const isPassenger = tripRequest.passengerId === userId;
+    if (!isPassenger) {
+      if (this.hasAcceptedDriver(tripRequest)) {
+        if (this.getSelectedDriverId(tripRequest) !== userId) {
+          throw new NotFoundException('Demande de trajet non trouvée');
         }
+      } else if (
+        tripRequest.status !== TripRequestStatus.PENDING &&
+        tripRequest.status !== TripRequestStatus.OFFERS_RECEIVED
+      ) {
+        throw new NotFoundException('Demande de trajet non trouvée');
       }
-
-      return this.sanitizeTripRequest(tripRequest);
+      await this.assertDriverViewer(userId);
     }
 
-    // À partir du moment où une offre est acceptée / le driver sélectionné :
-    // - Le passager doit toujours avoir accès
-    // - Le driver sélectionné (ou celui avec l'offre acceptée) doit avoir accès
-    // - Les autres utilisateurs ne doivent plus voir la trip-request
-
-    // Aucun utilisateur (public) ne voit les demandes avec offre acceptée
-    if (!userId) {
-      this.logger.debug(
-        `Trip request ${id} has an accepted offer and no user authenticated, hiding it`,
-      );
-      throw new NotFoundException('Demande de trajet non trouvée');
-    }
-
-    // Si ce n'est ni le passager, ni le driver sélectionné, ni le driver de l'offre acceptée -> masquer
-    if (!isPassenger && !isSelectedDriver && !userAcceptedOffer) {
-      this.logger.debug(
-        `Trip request ${id} has an accepted offer and user ${userId} is not passenger/selected driver, hiding it`,
-      );
-      throw new NotFoundException('Demande de trajet non trouvée');
-    }
-
-    // Si c'est un driver non passager, ne lui montrer que sa propre offre (l'acceptée)
-    if (!isPassenger && userAcceptedOffer) {
-      tripRequest.driverOffers = [userAcceptedOffer];
-    }
-
-    return this.sanitizeTripRequest(tripRequest);
+    return this.sanitizeTripRequest(tripRequest, userId);
   }
 
   async getOffersForTripRequest(
@@ -809,7 +775,7 @@ export class TripRequestsService {
     }
 
     // Only passenger can see all offers
-    if (userId && tripRequest.passengerId !== userId) {
+    if (!userId || tripRequest.passengerId !== userId) {
       throw new ForbiddenException(
         'Seul le passager peut voir toutes les offres',
       );
@@ -820,7 +786,9 @@ export class TripRequestsService {
     }
 
     return Promise.all(
-      tripRequest.driverOffers.map((offer) => this.sanitizeDriverOffer(offer)),
+      tripRequest.driverOffers.map((offer) =>
+        this.sanitizeDriverOffer(offer, tripRequest, userId),
+      ),
     );
   }
 
@@ -844,12 +812,15 @@ export class TripRequestsService {
 
     await this.expireRequests(tripRequests);
 
-    return Promise.all(tripRequests.map((tr) => this.sanitizeTripRequest(tr)));
+    return Promise.all(
+      tripRequests.map((tr) => this.sanitizeTripRequest(tr, passengerId)),
+    );
   }
 
   async findByDriver(
     driverId: string,
   ): Promise<SanitizedDriverOfferWithTripRequest[]> {
+    await this.assertDriverViewer(driverId);
     this.logger.debug(`Fetching driver offers for driver: ${driverId}`);
 
     const offers = await this.driverOfferRepository.find({
@@ -859,7 +830,9 @@ export class TripRequestsService {
     });
 
     return Promise.all(
-      offers.map((offer) => this.sanitizeDriverOfferWithTripRequest(offer)),
+      offers.map((offer) =>
+        this.sanitizeDriverOfferWithTripRequest(offer, driverId),
+      ),
     );
   }
 
@@ -1073,7 +1046,7 @@ export class TripRequestsService {
       offerWithRelations!,
     );
 
-    return this.sanitizeDriverOffer(offerWithRelations!);
+    return this.sanitizeDriverOffer(offerWithRelations!, tripRequest, driverId);
   }
 
   private async notifyPassengerAboutDriverOffer(
@@ -1430,7 +1403,7 @@ export class TripRequestsService {
 
     return {
       trip: startedTrip,
-      tripRequest: await this.findOne(tripRequestId, tripRequest.passengerId),
+      tripRequest: await this.findOne(tripRequestId, driverId),
     };
   }
 
@@ -1702,7 +1675,7 @@ export class TripRequestsService {
 
     return {
       trip,
-      tripRequest: await this.findOne(tripRequestId, tripRequest.passengerId),
+      tripRequest: await this.findOne(tripRequestId, driverId),
     };
   }
 
@@ -2089,7 +2062,38 @@ export class TripRequestsService {
     return [Number(longitude), Number(latitude)];
   }
 
-  private async sanitizeUser(user?: User): Promise<SanitizedUser | null> {
+  private async assertDriverViewer(userId: string): Promise<void> {
+    const user = userId
+      ? await this.userRepository.findOne({ where: { id: userId } })
+      : null;
+    if (user?.role !== UserRole.DRIVER) {
+      throw new ForbiddenException('Accès réservé aux conducteurs');
+    }
+  }
+
+  private getSelectedDriverId(tripRequest: TripRequest): string | null {
+    return (
+      tripRequest.selectedDriverId ??
+      tripRequest.driverOffers?.find(
+        (offer) => offer.status === DriverOfferStatus.ACCEPTED,
+      )?.driverId ??
+      null
+    );
+  }
+
+  private canShareContact(tripRequest: TripRequest, viewerId?: string): boolean {
+    const selectedDriverId = this.getSelectedDriverId(tripRequest);
+    return Boolean(
+      selectedDriverId &&
+        viewerId &&
+        (viewerId === tripRequest.passengerId || viewerId === selectedDriverId),
+    );
+  }
+
+  private async sanitizeUser(
+    user?: User,
+    includePhone = false,
+  ): Promise<SanitizedUser | null> {
     if (!user) {
       return null;
     }
@@ -2103,7 +2107,7 @@ export class TripRequestsService {
       id: user.id,
       firstName: user.firstName,
       lastName: user.lastName,
-      phone: user.phone,
+      ...(includePhone ? { phone: user.phone } : {}),
       gender: user.gender ?? null,
       profilePicture: profilePicture || user.profilePicture,
       isPremium: premium.isPremium,
@@ -2258,12 +2262,20 @@ export class TripRequestsService {
 
   private async sanitizeDriverOffer(
     offer: DriverOffer,
+    tripRequest?: TripRequest,
+    viewerId?: string,
   ): Promise<SanitizedDriverOffer> {
     if (!offer.driver) {
       throw new Error(`Driver offer ${offer.id} has no driver associated`);
     }
 
-    const driver = await this.sanitizeUser(offer.driver);
+    const accepted = Boolean(
+      tripRequest &&
+        offer.status === DriverOfferStatus.ACCEPTED &&
+        this.getSelectedDriverId(tripRequest) === offer.driverId &&
+        this.canShareContact(tripRequest, viewerId),
+    );
+    const driver = await this.sanitizeUser(offer.driver, accepted);
     if (!driver) {
       throw new Error(`Failed to sanitize driver for offer ${offer.id}`);
     }
@@ -2288,6 +2300,7 @@ export class TripRequestsService {
 
   private async sanitizeDriverOfferWithTripRequest(
     offer: DriverOffer,
+    viewerId: string,
   ): Promise<SanitizedDriverOfferWithTripRequest> {
     if (!offer.driver) {
       throw new Error(`Driver offer ${offer.id} has no driver associated`);
@@ -2305,12 +2318,13 @@ export class TripRequestsService {
       );
     }
 
-    const driver = await this.sanitizeUser(offer.driver);
-    if (!driver) {
-      throw new Error(`Failed to sanitize driver for offer ${offer.id}`);
-    }
-
-    const passenger = await this.sanitizeUser(offer.tripRequest.passenger);
+    // my-offers does not load tripRequest.driverOffers; supply this offer for legacy selections.
+    const tripRequest = { ...offer.tripRequest, driverOffers: [offer] };
+    const accepted =
+      offer.status === DriverOfferStatus.ACCEPTED &&
+      this.getSelectedDriverId(tripRequest) === offer.driverId &&
+      this.canShareContact(tripRequest, viewerId);
+    const passenger = await this.sanitizeUser(tripRequest.passenger, accepted);
     if (!passenger) {
       throw new Error(
         `Failed to sanitize passenger for trip request ${offer.tripRequest.id}`,
@@ -2318,20 +2332,7 @@ export class TripRequestsService {
     }
 
     return {
-      id: offer.id,
-      driver,
-      vehicle: await this.sanitizeVehicle(offer.vehicle || undefined),
-      proposedDepartureDate: offer.proposedDepartureDate,
-      pricePerSeat: Number(offer.pricePerSeat),
-      availableSeats: offer.availableSeats,
-      message: offer.message,
-      requiresPassengerKyc: Boolean(offer.requiresPassengerKyc),
-      departureReference: offer.departureReference,
-      departureCoordinates: this.pointToCoordinates(offer.departurePoint),
-      arrivalReference: offer.arrivalReference,
-      arrivalCoordinates: this.pointToCoordinates(offer.arrivalPoint),
-      status: offer.status,
-      createdAt: offer.createdAt,
+      ...(await this.sanitizeDriverOffer(offer, tripRequest, viewerId)),
       tripRequest: {
         id: offer.tripRequest.id,
         departureLocation: offer.tripRequest.departureLocation,
@@ -2354,6 +2355,8 @@ export class TripRequestsService {
 
   private async sanitizeTripRequest(
     tripRequest: TripRequest,
+    viewerId?: string,
+    previewOnly = false,
   ): Promise<SanitizedTripRequest> {
     if (!tripRequest.passenger) {
       throw new Error(
@@ -2361,7 +2364,14 @@ export class TripRequestsService {
       );
     }
 
-    const passenger = await this.sanitizeUser(tripRequest.passenger);
+    const isOwner =
+      !previewOnly && Boolean(viewerId) && viewerId === tripRequest.passengerId;
+    const shareContact =
+      !previewOnly && this.canShareContact(tripRequest, viewerId);
+    const passenger = await this.sanitizeUser(
+      tripRequest.passenger,
+      shareContact,
+    );
     if (!passenger) {
       throw new Error(
         `Failed to sanitize passenger for trip request ${tripRequest.id}`,
@@ -2371,6 +2381,8 @@ export class TripRequestsService {
     return {
       id: tripRequest.id,
       passenger,
+      // Authenticated drivers need exact pickup/drop-off points before accepting.
+      // Contact disclosure is a separate, acceptance-dependent permission.
       departureLocation: tripRequest.departureLocation,
       departureReference: tripRequest.departureReference,
       arrivalLocation: tripRequest.arrivalLocation,
@@ -2389,6 +2401,7 @@ export class TripRequestsService {
       status: tripRequest.status,
       selectedDriver: await this.sanitizeUser(
         tripRequest.selectedDriver || undefined,
+        shareContact,
       ),
       selectedVehicle: await this.sanitizeVehicle(
         tripRequest.selectedVehicle || undefined,
@@ -2404,9 +2417,17 @@ export class TripRequestsService {
       driverPickupOverdueNotifiedAt: tripRequest.driverPickupOverdueNotifiedAt,
       driverOffers: tripRequest.driverOffers
         ? await Promise.all(
-            tripRequest.driverOffers.map((offer) =>
-              this.sanitizeDriverOffer(offer),
-            ),
+            tripRequest.driverOffers
+              .filter(
+                (offer) => isOwner || (viewerId && offer.driverId === viewerId),
+              )
+              .map((offer) =>
+                this.sanitizeDriverOffer(
+                  offer,
+                  tripRequest,
+                  previewOnly ? undefined : viewerId,
+                ),
+              ),
           )
         : [],
       createdAt: tripRequest.createdAt,

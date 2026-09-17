@@ -6,6 +6,7 @@ import { BookingStatus } from '../bookings/entities/booking.entity';
 import { TripStatus } from '../trips/entities/trip.entity';
 import { TripRequestsService } from './trip-requests.service';
 import { KycStatus } from '../users/entities/kyc-document.entity';
+import { UserRole } from '../users/entities/user.entity';
 
 describe('TripRequestsService recommended price', () => {
   it('recommends 500 FC per kilometer for cars and applies the heavy-rain coefficient', async () => {
@@ -587,7 +588,9 @@ describe('TripRequestsService unaccepted request expiration', () => {
     new TripRequestsService(
       tripRequestRepository as any,
       {} as any,
-      {} as any,
+      {
+        findOne: jest.fn().mockResolvedValue({ id: 'driver-1', role: UserRole.DRIVER }),
+      } as any,
       {} as any,
       {} as any,
       notificationService as any,
@@ -621,7 +624,7 @@ describe('TripRequestsService unaccepted request expiration', () => {
         status: tripRequest.status,
       }));
 
-    const result = await service.findAll();
+    const result = await service.findAll('driver-1');
 
     expect(result).toEqual([
       expect.objectContaining({
@@ -735,7 +738,7 @@ describe('TripRequestsService unaccepted request expiration', () => {
         status: tripRequest.status,
       }));
 
-    const result = await service.findAll();
+    const result = await service.findAll('driver-1');
 
     expect(unansweredRequest.status).toBe(TripRequestStatus.EXPIRED);
     expect(unacceptedOfferRequest.status).toBe(TripRequestStatus.EXPIRED);

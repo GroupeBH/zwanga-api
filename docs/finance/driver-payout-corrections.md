@@ -1,5 +1,12 @@
 # Versements conducteur : correctif du 15 septembre 2026
 
+> Mise à jour du 17 septembre 2026 : les références à `merchantPayOutService`
+> et au token d'encaissement ci-dessous décrivent l'ancien contrat. Le retrait
+> utilise désormais l'API Payout v1.03 avec authentification dédiée et URL `/pay`.
+> Voir [la configuration actuelle](../../FLEXPAY_SETUP.md#driver-earnings-payouts-flexpaie-payout-v103).
+> Les garanties de réservation et d'idempotence restent conservées. Les variables
+> payout ont été ajoutées vides au `.env` local ; aucun déploiement ni virement réel.
+
 ## Sens du transfert
 
 Conformément à la documentation FlexPay API v1.4 fournie (pages 8 à 10),

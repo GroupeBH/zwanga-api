@@ -64,6 +64,16 @@ export class FlexPayCallbackDto {
   @ApiProperty({ required: false, example: '0' })
   @IsString()
   @IsOptional()
+  status?: string;
+
+  @ApiProperty({ required: false, example: '20/03/2024 17:30:45' })
+  @IsString()
+  @IsOptional()
+  created_at?: string;
+
+  @ApiProperty({ required: false, example: '0' })
+  @IsString()
+  @IsOptional()
   code?: string;
 
   @ApiProperty({ required: false, example: '0' })

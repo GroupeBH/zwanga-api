@@ -175,6 +175,83 @@ await paymentsService.initiatePayment({
 });
 ```
 
+## Driver earnings payouts (FlexPaie Payout v1.03)
+
+The payout adapter follows `FlexPay_API_Documentation_Payout_v1_03.pdf`
+(revision 22 April 2024), pages 3 and 5-13 in the document's printed numbering.
+This is a separate API from Mobile Money collections: do not use
+`paymentService`, the former `merchantPayOutService` URL, or the collection token.
+The PDF uses placeholder hosts and a placeholder `version`; obtain the actual
+payout URL, username and password from FlexPaie before enabling withdrawals.
+
+Required configuration (also added, empty, to the environment templates):
+
+```env
+FLEXPAY_PAYOUT_SERVICE_URL=
+FLEXPAY_PAYOUT_USERNAME=
+FLEXPAY_PAYOUT_PASSWORD=
+```
+
+`FLEXPAY_PAYOUT_SERVICE_URL` must be the full HTTPS payout URL ending in `/pay`.
+The payout merchant defaults to `FLEXPAY_MERCHANT_CODE` (or `FLEXPAY_MERCHANT`);
+set `FLEXPAY_PAYOUT_MERCHANT_CODE` if FlexPaie assigned a separate merchant code.
+Passwords and tokens stay on the backend, never in the mobile app.
+
+Optional overrides if FlexPaie provides different hosts:
+
+| Variable | Default when empty |
+| --- | --- |
+| `FLEXPAY_PAYOUT_AUTH_URL` | Payout origin + `/api/v1/auth/authenticate` |
+| `FLEXPAY_PAYOUT_CHECK_TRANSACTION_URL` | Payout origin + `/api/rest/v1/check/{orderNumber}` |
+| `FLEXPAY_PAYOUT_BALANCE_URL` | Payout origin + `/api/rest/v1/balance/{merchant}` |
+| `FLEXPAY_DRIVER_PAYOUT_CALLBACK_URL` | Callback base + `/driver-settlements/payouts/flexpay/callback` |
+
+The check/balance overrides accept the placeholders shown above; otherwise the
+encoded order number / merchant is appended to the configured URL.
+Confirm these default hosts with FlexPaie: the PDF does not supply them.
+
+The mobile API is unchanged:
+
+1. `POST /api/v1/driver-settlements/payouts` reserves the available driver earnings
+   using the existing driver lock and idempotency key.
+2. The backend authenticates with `{ username, password }`, caches the returned
+   Bearer token in memory according to `expire_in` with an expiry margin, then
+   submits `{ merchant, type, reference, amount, currency, customer, description,
+   callback_url }`. The beneficiary number uses `243…`, without `+`.
+3. An accepted request (`code=0`, `status=0XX0`, nonempty `orderNumber`) remains
+   `initiated`, not `succeeded`. The PDF example's `OXX0` spelling is also accepted.
+4. The callback or `GET /api/v1/driver-settlements/payouts/:orderNumber/status`
+   verifies the flat payout check response with the payout token. Both the
+   merchant reference and order number must match. Only `code=0`, `status=0`
+   confirms delivery. A matching transaction with `status=1` and `code=0` or `1`
+   confirms failure. A transaction-not-found response without transaction details
+   does not release reserved earnings.
+
+Payout callbacks are always verified, including failures, regardless of
+`FLEXPAY_VERIFY_CALLBACKS`. The new adapter also serves referral payouts because
+they share the same outgoing-payment service. Incoming collections are unchanged.
+
+Explicit initiation rejections (`code=1`) map `0XX2` to insufficient **merchant**
+funds, `0XX3` to unsupported beneficiary, `0XX4` to token/configuration failure,
+and `0XX5` to another refusal. The driver is never asked to pay or replenish a
+wallet to receive earnings. `0XX1` (provider busy / transaction pending), unknown
+acknowledgements and uncertain network delivery keep the reservation pending.
+The PDF mentions waiting 30 seconds for `0XX1`; the backend deliberately does not
+resend money automatically. Reconcile using the order number or contact FlexPaie
+with the merchant reference when no order number was returned.
+
+Missing configuration or failed authentication prevents `/pay` from being called
+and releases an unsent reservation. Expired/rejected tokens are discarded; no
+payout POST is automatically replayed. `checkPayoutBalance()` provides an internal
+authenticated diagnostic for the merchant's USD/CDF balances; it is not exposed
+as a public endpoint or used as a guarantee that a payout will succeed.
+
+Before rollout, configure the real URLs/credentials, ensure the HTTPS callback
+is externally reachable, and verify the merchant's payout account is funded.
+Existing withdrawals created with the former API must be reconciled with
+FlexPaie before any new attempt; this change never resubmits them automatically.
+Automated tests mock HTTP and do not validate credentials or transfer real funds.
+
 ## Required environment variables
 
 ```env

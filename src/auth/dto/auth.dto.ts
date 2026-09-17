@@ -127,32 +127,60 @@ export class LoginDto {
   phone: string;
 
   @ApiProperty({
-    required: false,
     example: '1234',
-    description: 'PIN a 4 chiffres - requis si newPin absent',
+    description: 'PIN a 4 chiffres',
   })
   @Transform(toTrimmedString)
-  @ValidateIf((o) => !o.newPin)
   @IsString()
-  @IsNotEmpty({ message: 'PIN is required if newPin is not provided' })
+  @IsNotEmpty()
   @MinLength(4)
   @MaxLength(4)
   @Matches(/^\d{4}$/, { message: "Le code PIN doit contenir exactement 4 chiffres." })
-  pin?: string;
+  pin: string;
+}
 
+export class PinResetRequestDto {
   @ApiProperty({
-    required: false,
-    example: '5678',
-    description: 'Nouveau PIN a 4 chiffres - utilise si PIN oublie',
+    example: '+243831919710',
+    description: 'Numero de telephone du compte',
   })
   @Transform(toTrimmedString)
-  @ValidateIf((o) => !o.pin)
   @IsString()
-  @IsNotEmpty({ message: 'newPin is required if PIN is not provided' })
+  @IsNotEmpty()
+  phone: string;
+}
+
+export class PinResetVerifyOtpDto extends PinResetRequestDto {
+  @ApiProperty({ example: '123456', description: 'Code OTP Keccel' })
+  @Transform(toTrimmedString)
+  @IsString()
+  @IsNotEmpty()
+  @Matches(/^\d{4,8}$/, {
+    message: 'Le code OTP doit contenir entre 4 et 8 chiffres.',
+  })
+  otp: string;
+}
+
+export class PinResetConfirmDto {
+  @ApiProperty({
+    description: 'Jeton de reinitialisation a usage unique obtenu apres OTP',
+  })
+  @Transform(toTrimmedString)
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(256)
+  resetToken: string;
+
+  @ApiProperty({ example: '5678', description: 'Nouveau PIN a 4 chiffres' })
+  @Transform(toTrimmedString)
+  @IsString()
+  @IsNotEmpty()
   @MinLength(4)
   @MaxLength(4)
-  @Matches(/^\d{4}$/, { message: "Le nouveau code PIN doit contenir exactement 4 chiffres." })
-  newPin?: string;
+  @Matches(/^\d{4}$/, {
+    message: 'Le nouveau code PIN doit contenir exactement 4 chiffres.',
+  })
+  newPin: string;
 }
 
 export class AdminLoginDto {
@@ -450,6 +478,18 @@ export class AppleMobileAuthDto extends ReferralAttributionDto {
   @IsOptional()
   @Type(() => CreateVehicleDto)
   vehicle?: CreateVehicleDto;
+}
+
+export class OAuthExchangeDto {
+  @ApiProperty({
+    description: 'Code de connexion à usage unique, valable 60 secondes',
+    minLength: 64,
+    maxLength: 64,
+  })
+  @IsString()
+  @IsNotEmpty()
+  @Matches(/^[a-f0-9]{64}$/, { message: 'Code de connexion invalide.' })
+  code: string;
 }
 
 export class AuthResponseDto {

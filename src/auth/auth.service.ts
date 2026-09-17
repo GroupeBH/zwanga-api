@@ -10,7 +10,9 @@ import { Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { OAuth2Client } from 'google-auth-library';
 import {
+  createHash,
   createPublicKey,
+  randomBytes,
   timingSafeEqual,
   verify as verifySignature,
   type JsonWebKey,
@@ -34,6 +36,9 @@ import {
   AdminChangePasswordDto,
   AdminLoginDto,
   GoogleMobileAuthDto,
+  PinResetConfirmDto,
+  PinResetRequestDto,
+  PinResetVerifyOtpDto,
 } from './dto/auth.dto';
 import { FileUploadService } from '../common/services/file-upload.service';
 import { VehiclesService } from '../vehicles/vehicles.service';
@@ -44,13 +49,21 @@ import {
   resolveSelfServiceDriverState,
 } from '../users/user-role.policy';
 import { KeccelOtpService } from '../keccel-otp/keccel-otp.service';
+import { OTP_SMS_MESSAGES } from '../keccel-otp/otp-messages';
 import { provisionAdminAccount } from '../admin/admin-account.provisioning';
 import { normalizeLegalName } from '../users/legal-identity.util';
+import { RedisService } from '../common/services/redis.service';
 
 const APPLE_ISSUER = 'https://appleid.apple.com';
 const APPLE_PUBLIC_KEYS_URL = 'https://appleid.apple.com/auth/keys';
 const APPLE_KEYS_CACHE_MS = 6 * 60 * 60 * 1000;
 const TOKEN_CLOCK_TOLERANCE_SECONDS = 300;
+const PIN_RESET_TOKEN_TTL_SECONDS = 5 * 60;
+const PIN_RESET_KEY_PREFIX = 'auth:pin-reset:';
+const PIN_RESET_OTP_KEY_PREFIX = 'auth:pin-reset-otp:';
+const PIN_RESET_OTP_PENDING_VALUE = 'pending';
+const PIN_RESET_GENERIC_MESSAGE =
+  'Si ce compte peut être réinitialisé, un code OTP a été envoyé.';
 
 interface MulterFile {
   fieldname: string;
@@ -126,6 +139,7 @@ export class AuthService {
     private vehiclesService: VehiclesService,
     private referralsService: ReferralsService,
     private keccelOtpService: KeccelOtpService,
+    private redisService: RedisService,
   ) {
     this.googleClient = new OAuth2Client();
   }
@@ -332,50 +346,12 @@ export class AuthService {
 
     this.assertUserCanAuthenticate(user);
 
-    // Handle PIN validation or reset
-    if (loginDto.newPin) {
-      if (isAdminRole(user.role)) {
-        throw new UnauthorizedException(
-          'La réinitialisation libre-service est indisponible pour ce compte',
-        );
-      }
+    const validatedUser = await this.validateUser(loginDto.phone, loginDto.pin);
 
-      // User wants to reset PIN (forgot old PIN)
-      this.logger.log(`PIN reset requested during login for user ${user.id}`);
-
-      // Hash the new PIN
-      const saltRounds = 10;
-      const hashedNewPin = await bcrypt.hash(loginDto.newPin, saltRounds);
-
-      // Update user password with new hashed PIN
-      user.password = hashedNewPin;
-      await this.userRepository.save(user);
-
-      this.logger.log(
-        `PIN reset successfully during login for user ${user.id}`,
-      );
-    } else if (loginDto.pin) {
-      // Normal login with PIN validation
-      const validatedUser = await this.validateUser(
-        loginDto.phone,
-        loginDto.pin,
-      );
-
-      if (!validatedUser) {
-        this.logger.warn(
-          `Login failed: Invalid PIN for phone: ${loginDto.phone}`,
-        );
-        throw new UnauthorizedException(
-          'Numéro de téléphone ou code PIN invalide. Si vous avez oublié votre code PIN, fournissez un newPin pour le réinitialiser.',
-        );
-      }
-    } else {
-      // No PIN provided and no newPin provided
-      this.logger.warn(
-        `Login failed: No PIN provided for phone: ${loginDto.phone}`,
-      );
+    if (!validatedUser) {
+      this.logger.warn(`Login failed: Invalid PIN for user ${user.id}`);
       throw new UnauthorizedException(
-        'Le code PIN est requis. Si vous avez oublié votre code PIN, fournissez un newPin pour le réinitialiser.',
+        'Numéro de téléphone ou code PIN invalide',
       );
     }
 
@@ -396,6 +372,161 @@ export class AuthService {
       //   role: user.role,
       // },
     };
+  }
+
+  async requestPinResetOtp(
+    dto: PinResetRequestDto,
+  ): Promise<{ message: string }> {
+    const user = await this.userRepository.findOne({
+      where: { phone: dto.phone },
+    });
+
+    // Return the same response for unknown or ineligible accounts to avoid
+    // exposing which phone numbers are registered.
+    if (!this.canUseSelfServicePinReset(user)) {
+      return { message: PIN_RESET_GENERIC_MESSAGE };
+    }
+
+    await this.keccelOtpService.sendOtp(
+      dto.phone,
+      OTP_SMS_MESSAGES.pinReset,
+      6,
+      PIN_RESET_TOKEN_TTL_SECONDS,
+    );
+    await this.redisService.set(
+      this.getPinResetOtpKey(user.id),
+      PIN_RESET_OTP_PENDING_VALUE,
+      PIN_RESET_TOKEN_TTL_SECONDS,
+    );
+
+    return { message: PIN_RESET_GENERIC_MESSAGE };
+  }
+
+  async verifyPinResetOtp(dto: PinResetVerifyOtpDto): Promise<{
+    resetToken: string;
+    expiresInSeconds: number;
+  }> {
+    const user = await this.userRepository.findOne({
+      where: { phone: dto.phone },
+    });
+
+    if (!this.canUseSelfServicePinReset(user)) {
+      throw new BadRequestException('Code OTP invalide ou expiré');
+    }
+
+    const pendingOtp = await this.redisService.get<string>(
+      this.getPinResetOtpKey(user.id),
+    );
+    if (pendingOtp !== PIN_RESET_OTP_PENDING_VALUE) {
+      throw new BadRequestException('Code OTP invalide ou expiré');
+    }
+
+    const verification = await this.keccelOtpService.verifyOtp(
+      dto.phone,
+      dto.otp,
+    );
+
+    if (!verification.valid) {
+      throw new BadRequestException('Code OTP invalide ou expiré');
+    }
+
+    const otpConsumed = await this.redisService.consumeIfValueMatches(
+      this.getPinResetOtpKey(user.id),
+      PIN_RESET_OTP_PENDING_VALUE,
+    );
+    if (!otpConsumed) {
+      throw new BadRequestException('Code OTP invalide ou expiré');
+    }
+
+    const resetToken = `${user.id}.${randomBytes(32).toString('base64url')}`;
+    await this.redisService.set(
+      this.getPinResetKey(user.id),
+      this.hashPinResetToken(resetToken),
+      PIN_RESET_TOKEN_TTL_SECONDS,
+    );
+
+    this.logger.log(`PIN reset OTP verified for user ${user.id}`);
+
+    return {
+      resetToken,
+      expiresInSeconds: PIN_RESET_TOKEN_TTL_SECONDS,
+    };
+  }
+
+  async resetPin(dto: PinResetConfirmDto): Promise<{ message: string }> {
+    const userId = this.getUserIdFromPinResetToken(dto.resetToken);
+    if (!userId) {
+      throw new BadRequestException(
+        'Jeton de réinitialisation invalide ou expiré',
+      );
+    }
+
+    const consumed = await this.redisService.consumeIfValueMatches(
+      this.getPinResetKey(userId),
+      this.hashPinResetToken(dto.resetToken),
+    );
+
+    if (!consumed) {
+      throw new BadRequestException(
+        'Jeton de réinitialisation invalide ou expiré',
+      );
+    }
+
+    const user = await this.userRepository.findOne({ where: { id: userId } });
+    if (!this.canUseSelfServicePinReset(user)) {
+      throw new BadRequestException(
+        'Jeton de réinitialisation invalide ou expiré',
+      );
+    }
+
+    user.password = await bcrypt.hash(dto.newPin, 10);
+    user.refreshToken = null;
+    user.accessToken = null;
+    await this.userRepository.save(user);
+
+    this.logger.log(`PIN reset completed for user ${user.id}`);
+
+    return {
+      message:
+        'Code PIN réinitialisé. Les jetons de rafraîchissement ont été invalidés.',
+    };
+  }
+
+  private canUseSelfServicePinReset(user: User | null): user is User {
+    return Boolean(
+      user &&
+      !isAdminRole(user.role) &&
+      user.isActive &&
+      user.status !== UserStatus.SUSPENDED &&
+      user.status !== UserStatus.INACTIVE,
+    );
+  }
+
+  private getPinResetKey(userId: string): string {
+    return `${PIN_RESET_KEY_PREFIX}${userId}`;
+  }
+
+  private getPinResetOtpKey(userId: string): string {
+    return `${PIN_RESET_OTP_KEY_PREFIX}${userId}`;
+  }
+
+  private hashPinResetToken(token: string): string {
+    return createHash('sha256').update(token).digest('hex');
+  }
+
+  private getUserIdFromPinResetToken(token: string): string | null {
+    const parts = token.split('.');
+    if (
+      parts.length !== 2 ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+        parts[0],
+      ) ||
+      !/^[A-Za-z0-9_-]{43}$/.test(parts[1])
+    ) {
+      return null;
+    }
+
+    return parts[0];
   }
 
   async adminLogin(loginDto: AdminLoginDto): Promise<AuthResponseDto> {
@@ -505,7 +636,7 @@ export class AuthService {
 
     await this.keccelOtpService.sendOtp(
       this.getConfiguredAdminBootstrapPhone(),
-      'Votre code de validation super administrateur Zwanga est : %OTP%',
+      OTP_SMS_MESSAGES.adminBootstrap,
       6,
       300,
     );

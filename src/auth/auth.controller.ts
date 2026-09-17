@@ -4,6 +4,7 @@ import {
   Get,
   Body,
   Headers,
+  Header,
   HttpCode,
   HttpStatus,
   UseInterceptors,
@@ -37,12 +38,17 @@ import {
   AuthResponseDto,
   GoogleMobileAuthDto,
   AppleMobileAuthDto,
+  PinResetConfirmDto,
+  PinResetRequestDto,
+  PinResetVerifyOtpDto,
+  OAuthExchangeDto,
 } from './dto/auth.dto';
 import { Public } from '../common/decorators/public.decorator';
 import { UserGender, UserRole } from '../users/entities/user.entity';
 import { VehicleType } from '../vehicles/entities/vehicle.entity';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
 import { SELF_SERVICE_USER_ROLES } from '../users/user-role.policy';
+import { OAuthExchangeService } from './oauth-exchange.service';
 
 interface MulterFile {
   fieldname: string;
@@ -59,7 +65,10 @@ interface MulterFile {
 @ApiTags('Auth')
 @Controller('auth')
 export class AuthController {
-  constructor(private readonly authService: AuthService) {}
+  constructor(
+    private readonly authService: AuthService,
+    private readonly oauthExchangeService: OAuthExchangeService,
+  ) {}
 
   @Post('register')
   @Public()
@@ -197,6 +206,41 @@ export class AuthController {
     return this.authService.login(loginDto);
   }
 
+  @Post('pin/reset/request-otp')
+  @Public()
+  @SensitiveThrottle(3, 60000)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Send an OTP to reset a forgotten PIN' })
+  @ApiResponse({
+    status: 200,
+    description: 'Generic response whether or not the account exists',
+  })
+  async requestPinResetOtp(@Body() dto: PinResetRequestDto) {
+    return this.authService.requestPinResetOtp(dto);
+  }
+
+  @Post('pin/reset/verify-otp')
+  @Public()
+  @SensitiveThrottle(5, 60000)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Verify the OTP and issue a one-time reset token' })
+  @ApiResponse({ status: 200, description: 'Reset token issued for 5 minutes' })
+  @ApiResponse({ status: 400, description: 'Invalid or expired OTP' })
+  async verifyPinResetOtp(@Body() dto: PinResetVerifyOtpDto) {
+    return this.authService.verifyPinResetOtp(dto);
+  }
+
+  @Post('pin/reset')
+  @Public()
+  @SensitiveThrottle(5, 60000)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Set a new PIN with a one-time reset token' })
+  @ApiResponse({ status: 200, description: 'PIN reset successfully' })
+  @ApiResponse({ status: 400, description: 'Invalid or expired reset token' })
+  async resetPin(@Body() dto: PinResetConfirmDto) {
+    return this.authService.resetPin(dto);
+  }
+
   @Post('admin/login')
   @Public()
   @SensitiveThrottle(5, 60000)
@@ -315,8 +359,14 @@ export class AuthController {
   @Get('google/callback')
   @Public()
   @UseGuards(AuthGuard('google'))
+  @Header('Cache-Control', 'no-store')
+  @Header('Pragma', 'no-cache')
+  @Header('Referrer-Policy', 'no-referrer')
   @ApiOperation({ summary: 'Google OAuth callback' })
-  @ApiResponse({ status: 200, type: AuthResponseDto })
+  @ApiResponse({
+    status: 302,
+    description: 'Redirects with a one-time exchange code, never JWTs',
+  })
   @ApiResponse({ status: 401, description: "La connexion a échoué. Veuillez réessayer." })
   async googleAuthCallback(@Req() req: Request, @Res() res: Response) {
     if (!req.user) {
@@ -324,14 +374,29 @@ export class AuthController {
     }
 
     const googleProfile = req.user as unknown as GoogleAuthProfile;
+    const callbackUrl = this.oauthExchangeService.getFrontendCallbackUrl();
     const authResponse =
       await this.authService.validateGoogleUser(googleProfile);
+    const code = await this.oauthExchangeService.createCode(authResponse);
+    // Fragments are not sent to the frontend server or in the Referer header.
+    callbackUrl.hash = new URLSearchParams({ code }).toString();
+    res.redirect(callbackUrl.toString());
+  }
 
-    // Redirect to frontend with tokens in query params or return JSON
-    // You can customize this based on your frontend needs
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
-    res.redirect(
-      `${frontendUrl}/auth/callback?accessToken=${authResponse.accessToken}&refreshToken=${authResponse.refreshToken}`,
-    );
+  @Post('exchange')
+  @Public()
+  @SensitiveThrottle(10, 60000)
+  @HttpCode(HttpStatus.OK)
+  @Header('Cache-Control', 'no-store')
+  @Header('Pragma', 'no-cache')
+  @Header('Referrer-Policy', 'no-referrer')
+  @ApiOperation({ summary: 'Exchange a one-time OAuth code for JWT tokens' })
+  @ApiResponse({ status: 200, type: AuthResponseDto })
+  @ApiResponse({
+    status: 401,
+    description: 'Invalid, expired or already consumed code',
+  })
+  async exchange(@Body() dto: OAuthExchangeDto): Promise<AuthResponseDto> {
+    return this.oauthExchangeService.exchange(dto.code);
   }
 }

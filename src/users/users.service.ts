@@ -38,6 +38,7 @@ import { Vehicle } from '../vehicles/entities/vehicle.entity';
 import { FileUploadService } from '../common/services/file-upload.service';
 import { KycValidationService } from '../common/services/kyc-validation.service';
 import { KeccelOtpService } from '../keccel-otp/keccel-otp.service';
+import { OTP_SMS_MESSAGES } from '../keccel-otp/otp-messages';
 import { Express } from 'express';
 import { UserRole } from './entities/user.entity';
 import { SubscriptionsService } from '../subscriptions/subscriptions.service';
@@ -907,8 +908,10 @@ export class UsersService {
     }
 
     // Send OTP using Keccel service
-    const message = 'Votre code de vérification Zwanga est : %OTP%';
-    await this.keccelOtpService.sendOtp(sendOtpDto.phone.trim(), message);
+    await this.keccelOtpService.sendOtp(
+      sendOtpDto.phone.trim(),
+      OTP_SMS_MESSAGES.verification,
+    );
 
     this.logger.log(
       `Phone verification OTP sent successfully to ${sendOtpDto.phone} (context: ${sendOtpDto.context})`,
@@ -952,9 +955,7 @@ export class UsersService {
   // ==================== PIN Management Methods ====================
 
   async changePin(userId: string, changePinDto: ChangePinDto): Promise<void> {
-    this.logger.log(
-      `Changing PIN for user ${userId}${changePinDto.oldPin ? ' (with old PIN verification)' : ' (old PIN not provided - reset mode)'}`,
-    );
+    this.logger.log(`Changing PIN for user ${userId}`);
 
     const user = await this.findOne(userId);
 
@@ -964,59 +965,48 @@ export class UsersService {
       );
     }
 
-    // If old PIN is provided, verify it
-    if (changePinDto.oldPin) {
-      // Check if user has a PIN set
-      if (!user.password) {
-        this.logger.warn(
-          `PIN change failed: User ${userId} does not have a PIN set but provided old PIN`,
-        );
-        throw new BadRequestException(
-          "Aucun code PIN défini pour ce compte. Veuillez d'abord définir un code PIN.",
-        );
-      }
-
-      // Verify old PIN
-      const isOldPinValid = await bcrypt.compare(
-        changePinDto.oldPin,
-        user.password,
+    // Keep a defensive runtime check in addition to DTO validation.
+    if (!changePinDto.oldPin) {
+      throw new BadRequestException(
+        "L'ancien code PIN est requis. Utilisez la réinitialisation par OTP si vous l'avez oublié.",
       );
-
-      if (!isOldPinValid) {
-        this.logger.warn(
-          `PIN change failed: Invalid old PIN for user ${userId}`,
-        );
-        throw new UnauthorizedException('Ancien code PIN invalide');
-      }
-
-      // Check if new PIN is different from old PIN
-      if (changePinDto.oldPin === changePinDto.newPin) {
-        this.logger.warn(
-          `PIN change failed: New PIN is the same as old PIN for user ${userId}`,
-        );
-        throw new BadRequestException(
-          "Le nouveau code PIN doit être différent de l'ancien",
-        );
-      }
-    } else {
-      // Old PIN not provided - allow PIN reset (user forgot their PIN)
-      this.logger.log(
-        `PIN reset requested for user ${userId} (old PIN not provided)`,
-      );
-      // No verification needed, proceed with PIN reset
     }
 
-    // Hash the new PIN
+    if (!user.password) {
+      this.logger.warn(`PIN change failed: User ${userId} has no PIN set`);
+      throw new BadRequestException(
+        'Aucun code PIN défini pour ce compte. Utilisez la réinitialisation par OTP.',
+      );
+    }
+
+    const isOldPinValid = await bcrypt.compare(
+      changePinDto.oldPin,
+      user.password,
+    );
+
+    if (!isOldPinValid) {
+      this.logger.warn(`PIN change failed: Invalid old PIN for user ${userId}`);
+      throw new UnauthorizedException('Ancien code PIN invalide');
+    }
+
+    if (changePinDto.oldPin === changePinDto.newPin) {
+      this.logger.warn(
+        `PIN change failed: New PIN is the same as old PIN for user ${userId}`,
+      );
+      throw new BadRequestException(
+        "Le nouveau code PIN doit être différent de l'ancien",
+      );
+    }
+
     const saltRounds = 10;
     const hashedNewPin = await bcrypt.hash(changePinDto.newPin, saltRounds);
 
-    // Update user password with new hashed PIN
     user.password = hashedNewPin;
+    user.refreshToken = null;
+    user.accessToken = null;
     await this.userRepository.save(user);
 
-    this.logger.log(
-      `PIN ${changePinDto.oldPin ? 'changed' : 'reset'} successfully for user ${userId}`,
-    );
+    this.logger.log(`PIN changed successfully for user ${userId}`);
   }
 
   // ==================== Favorite Locations Methods ====================

@@ -24,6 +24,7 @@ import {
   SendOtpResponse,
   VerifyOtpResponse,
 } from './dto/keccel-otp.dto';
+import { OTP_SMS_MESSAGES } from './otp-messages';
 
 @Injectable()
 export class KeccelOtpService {
@@ -32,7 +33,7 @@ export class KeccelOtpService {
   private readonly from: string;
   private readonly generateUrl: string;
   private readonly validateUrl: string;
-  private readonly defaultMessage = 'Votre code est : %OTP%';
+  private readonly defaultMessage = OTP_SMS_MESSAGES.default;
   private readonly defaultLength = 5;
   private readonly defaultLifetime = 300; // 5 minutes
 
@@ -139,7 +140,7 @@ export class KeccelOtpService {
         this.httpService
           .post<KeccelOtpGenerateResponse>(this.generateUrl, requestBody, {
             headers: {
-              'Content-Type': 'application/json',
+              'Content-Type': 'application/json; charset=utf-8',
             },
           })
           .pipe(

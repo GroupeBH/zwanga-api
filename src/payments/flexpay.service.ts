@@ -11,7 +11,7 @@ import { firstValueFrom } from 'rxjs';
 import { isAxiosError, type AxiosError } from 'axios';
 import { PaymentMethod } from './entities/payment-transaction.entity';
 import { formatPaymentLogPayload } from './payment-log.util';
-import { assertPayoutUrl, getPayoutHttpRejection, normalizePayoutPhone, PAYOUT_MESSAGES } from './payout-policy';
+import { FlexPayPayoutClient } from './flexpay-payout.client';
 
 export interface FlexPayInitiatePaymentInput {
   method: PaymentMethod;
@@ -39,7 +39,13 @@ export interface FlexPayInitiatePayoutInput {
   phone: string;
   amount: number;
   currency: string;
+  description: string;
   callbackUrl: string;
+}
+
+export interface FlexPayInitiatePayoutResult extends FlexPayInitiatePaymentResult {
+  status: string | null;
+  pending: boolean;
 }
 
 export interface FlexPayTransactionStatus {
@@ -51,6 +57,7 @@ export interface FlexPayTransactionStatus {
   amountCustomer: string | null;
   currency: string | null;
   createdAt: string | null;
+  providerReference?: string | null;
 }
 
 export interface FlexPayCheckTransactionResult {
@@ -68,11 +75,14 @@ export class FlexPayService {
   private readonly defaultCardBaseUrl = 'https://beta-cardpayment.flexpay.cd';
   private readonly defaultCardPaymentPath = 'v1.1/pay';
   private readonly defaultRequestTimeoutMs = 30000;
+  private readonly payoutClient: FlexPayPayoutClient;
 
   constructor(
     private readonly httpService: HttpService,
     private readonly configService: ConfigService,
-  ) {}
+  ) {
+    this.payoutClient = new FlexPayPayoutClient(httpService, configService);
+  }
 
   async initiatePayment(
     input: FlexPayInitiatePaymentInput,
@@ -86,58 +96,18 @@ export class FlexPayService {
 
   async initiatePayout(
     input: FlexPayInitiatePayoutInput,
-  ): Promise<FlexPayInitiatePaymentResult> {
-    if (!input.phone?.trim()) {
-      throw new BadRequestException(
-        'Le numéro de téléphone est requis pour un paiement chauffeur',
-      );
-    }
+  ): Promise<FlexPayInitiatePayoutResult> {
+    return this.payoutClient.initiate(input);
+  }
 
-    const body = {
-      merchant: this.getMerchantCode(),
-      type: '1',
-      phone: normalizePayoutPhone(input.phone).slice(1),
-      reference: input.reference,
-      amount: this.formatAmount(input.amount),
-      currency: input.currency,
-      callbackUrl: assertPayoutUrl(input.callbackUrl, this.getOptionalConfig('NODE_ENV') === 'production'),
-    };
-    const url = this.getMerchantPayoutUrl();
+  async checkPayoutTransaction(
+    orderNumber: string,
+  ): Promise<FlexPayCheckTransactionResult> {
+    return this.payoutClient.checkTransaction(orderNumber);
+  }
 
-    this.logger.log(
-      `FlexPay merchant payout request: url=${url}, merchant=${body.merchant}, reference=${body.reference}, phone=${this.maskPhone(body.phone)}, amount=${body.amount} ${body.currency}`,
-    );
-
-    try {
-      const response = await firstValueFrom(
-        this.httpService.post<Record<string, unknown>>(url, body, {
-          headers: {
-            Authorization: this.getBearerToken(),
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-          },
-          timeout: this.getRequestTimeoutMs(),
-        }),
-      );
-
-      const normalizedResponse = this.normalizeInitiateResponse(response.data);
-      // A missing/unknown acknowledgement is not proof that no money was sent.
-      if (!['0', '1'].includes(normalizedResponse.code)) {
-        throw new BadGatewayException(PAYOUT_MESSAGES.pending);
-      }
-      this.logger.log(
-        `FlexPay merchant payout response: reference=${input.reference}, code=${normalizedResponse.code}, orderNumber=${normalizedResponse.orderNumber ?? 'none'}, message=${normalizedResponse.message ?? 'none'}, response=${formatPaymentLogPayload(normalizedResponse.raw)}`,
-      );
-
-      return normalizedResponse;
-    } catch (error) {
-      const rejection = getPayoutHttpRejection(error);
-      if (rejection) {
-        this.logger.error(`FlexPay payout rejected: reference=${input.reference}, status=${(error as AxiosError).response?.status}`);
-        throw rejection;
-      }
-      this.handleHttpError(error, 'Paiement chauffeur FlexPay');
-    }
+  async checkPayoutBalance() {
+    return this.payoutClient.checkBalance();
   }
 
   async checkTransaction(
@@ -348,7 +318,7 @@ export class FlexPayService {
   ): string | null {
     for (const key of keys) {
       const value = data[key];
-      if (value !== undefined && value !== null) {
+      if (typeof value === 'string' || typeof value === 'number') {
         return String(value);
       }
     }
@@ -384,19 +354,6 @@ export class FlexPayService {
         this.defaultMobileBaseUrl,
       'api/rest/v1/paymentService',
     );
-  }
-
-  private getMerchantPayoutUrl(): string {
-    const explicitUrl = this.getOptionalConfig('FLEXPAY_PAYOUT_SERVICE_URL');
-    const baseUrl = this.getOptionalConfig('FLEXPAY_MOBILE_BASE_URL');
-    const production = this.getOptionalConfig('NODE_ENV') === 'production';
-    if (production && !explicitUrl && !baseUrl) {
-      throw new BadRequestException({ code: 'PAYOUT_SERVICE_UNAVAILABLE', message: PAYOUT_MESSAGES.configuration });
-    }
-    return assertPayoutUrl(explicitUrl || this.joinUrl(
-      baseUrl || this.defaultMobileBaseUrl,
-      'api/rest/v1/merchantPayOutService',
-    ), production, true);
   }
 
   private getCardPaymentUrl(): string {
@@ -515,9 +472,7 @@ export class FlexPayService {
       throw error;
     }
 
-    const axiosError = isAxiosError(error)
-      ? error
-      : (error as AxiosError);
+    const axiosError = isAxiosError(error) ? error : (error as AxiosError);
     const responseData = formatPaymentLogPayload(
       axiosError.response?.data ?? axiosError.message,
     );

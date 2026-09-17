@@ -1,5 +1,13 @@
 # INFRA-2026-08-26-001 — Paramètres runtime du versement conducteur
 
+> Contrat remplacé le 17 septembre 2026 : ce compte rendu historique mentionne
+> l'ancienne API. Pour le prochain déploiement, utiliser Payout v1.03 :
+> `FLEXPAY_PAYOUT_SERVICE_URL` (URL HTTPS `/pay`), `FLEXPAY_PAYOUT_USERNAME`,
+> `FLEXPAY_PAYOUT_PASSWORD` et les surcharges décrites dans
+> [FLEXPAY_SETUP.md](../../FLEXPAY_SETUP.md#driver-earnings-payouts-flexpaie-payout-v103).
+> Les identifiants payout doivent être provisionnés comme secrets serveur.
+> Aucun import SSM, changement AWS ou versement réel n'a été effectué par ce correctif.
+
 ## Métadonnées
 
 | Champ | Valeur |

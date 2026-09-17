@@ -2,6 +2,117 @@
 
 Les entrées sont classées de la plus récente à la plus ancienne. Elles décrivent le code versionné et les opérations réellement exécutées sur AWS, sans inclure de valeur secrète.
 
+## INFRA-2026-09-17-001 — Runtime FlexPaie payout v1.03 et déploiement des correctifs de sécurité
+
+### Métadonnées
+
+| Champ | Valeur |
+| --- | --- |
+| Date | 17 septembre 2026 |
+| Auteur / opérateur | équipe de développement backend |
+| Environnement | développement local ; production ECS Fargate / SSM visée |
+| Statut | code versionné, complément documentaire local ; état AWS non vérifié lors de cette mise à jour |
+| Type | documentation CI/CD, configuration runtime et sécurité applicative |
+| Référence | commit `5991c8d` — `add jwt for socket gateway auth` |
+
+### Contexte, état initial et cause vérifiée
+
+Le commit remplace l'ancien exemple `merchantPayOutService` par la configuration
+FlexPaie Payout v1.03 et complète le guide de versement conducteur. Il contient
+également les correctifs OAuth et d'autorisation du chat REST/WebSocket.
+
+Le contrôle `check-infra-documentation.sh` classe `.env.docker.example` parmi les
+fichiers d'infrastructure. La comparaison `HEAD^ HEAD` échoue localement parce
+que cet exemple a changé sans entrée correspondante dans ce journal. Le présent
+complément documente le changement ; il ne désactive ni ne contourne le contrôle.
+
+### Modifications du lot documenté
+
+| Fichier | Modification | Objectif |
+| --- | --- | --- |
+| `.env.docker.example`, `.env.example`, `.env.production.example` | ajout des identifiants et URL payout dédiés, retrait de l'ancienne URL de repli dans l'exemple Docker | configurer le contrat Payout v1.03 |
+| `infra-aws/docs/driver-payout-runtime.md` | avertissement sur l'ancien contrat et lien vers `FLEXPAY_SETUP.md` | éviter d'appliquer la configuration historique au nouveau client |
+| `docs/oauth-exchange.md` | contrat du code d'échange Redis et configuration `FRONTEND_URL` | coordonner le frontend web et le backend |
+| `docs/chat-websocket-security.md` | contrôle d'accès, validation des événements et politique `CORS_ORIGINS` commune | sécuriser le chat et conserver les payloads mobiles valides |
+| `infra-aws/docs/CHANGELOG.md` | ajout de cette entrée | satisfaire la traçabilité exigée par la CI/CD |
+
+### Variables et paramètres runtime
+
+Les noms ci-dessous sont documentés sans aucune valeur sensible. Les paramètres
+importés sont stockés sous `/zwanga-api/<environment>/env/*` dans SSM
+`SecureString`, puis référencés par la définition de tâche ECS.
+
+| Nom | Usage |
+| --- | --- |
+| `FLEXPAY_PAYOUT_SERVICE_URL` | URL HTTPS `/pay` fournie pour ce compte FlexPaie |
+| `FLEXPAY_PAYOUT_USERNAME` | identifiant d'authentification payout dédié |
+| `FLEXPAY_PAYOUT_PASSWORD` | secret d'authentification payout dédié ; ne pas utiliser `FLEXPAY_TOKEN` |
+| `FLEXPAY_PAYOUT_MERCHANT_CODE` | surcharge du marchand ; repli applicatif sur le marchand FlexPay existant |
+| `FLEXPAY_PAYOUT_AUTH_URL` | surcharge facultative de l'URL d'authentification |
+| `FLEXPAY_PAYOUT_CHECK_TRANSACTION_URL` | surcharge facultative de l'URL de vérification d'une transaction |
+| `FLEXPAY_PAYOUT_BALANCE_URL` | surcharge facultative de l'URL de consultation du solde |
+| `FRONTEND_URL` | URL HTTPS explicite du frontend pour le callback OAuth web en production |
+| `CORS_ORIGINS` | origines web autorisées pour HTTP et Socket.IO en production |
+
+### Impacts et ressources AWS
+
+- Cette mise à jour ne modifie que le journal : aucun import SSM, plan/apply
+  Terraform, changement IAM, redémarrage ECS ou versement réel n'est exécuté.
+- L'injection de nouveaux paramètres nécessite une définition de tâche ECS qui
+  les référence ; la seule modification d'un fichier `.env` local ne suffit pas.
+- Le déploiement du lot backend doit remplacer toutes les anciennes instances
+  pour fermer leurs connexions WebSocket et leurs anciens abonnements aux rooms.
+- Le callback OAuth web doit être déployé avec son frontend adapté à
+  `POST /auth/exchange`. Les endpoints Google/Apple natifs restent inchangés.
+- Le lot inclut aussi la migration `AddRideHistoryIndexes1780000036000` : deux
+  index d'historique, sans suppression de données. Prévoir sa durée et les
+  éventuels verrous de création d'index lors de la tâche de migration ECS.
+- Aucun nouveau service AWS ni nouvelle permission IAM n'est prévu par ce
+  complément ; l'ajout de paramètres et les tâches de déploiement peuvent
+  utiliser les ressources facturables existantes. Aucun coût AWS n'est engagé ici.
+
+### Procédure de déploiement et surveillance
+
+1. Commiter et pousser ce journal avec le lot à livrer. Relancer uniquement
+   l'ancien workflow sur le SHA `5991c8d` ne lui ajouterait pas ce document.
+2. Vérifier les paramètres réellement présents dans SSM et les références ECS,
+   sans afficher les valeurs. Si des paramètres manquent, préparer l'import
+   ciblé avec `-IncludeNames` et `-DryRun` avant toute application autorisée.
+3. Si l'injection runtime doit évoluer, contrôler un nouveau plan Terraform,
+   refuser toute destruction inattendue et appliquer après validation.
+4. Déployer le frontend OAuth compatible et le backend via le workflow existant,
+   qui exécute les migrations avant de forcer le déploiement du service ECS.
+5. Vérifier la stabilité ECS et `/health`, puis surveiller les logs applicatifs :
+   connexion Redis, autorisations du chat, échanges OAuth et traitement payout.
+   Valider la réception du suivi sur les deux clients d'un trajet de test ; une
+   connexion conducteur seule ne prouve pas la réception côté passager.
+
+Les procédures détaillées restent dans [FLEXPAY_SETUP.md](../../FLEXPAY_SETUP.md),
+[oauth-exchange.md](../../docs/oauth-exchange.md) et
+[chat-websocket-security.md](../../docs/chat-websocket-security.md).
+
+### Validation locale de ce complément
+
+| Contrôle | Résultat |
+| --- | --- |
+| `bash infra-aws/scripts/check-infra-documentation.sh HEAD^ HEAD` avant modification | échec reproduit : `.env.docker.example` sans changelog |
+| `bash infra-aws/scripts/check-infra-documentation.sh HEAD^ WORKTREE` après modification | réussi : changement d'infrastructure accompagné du journal |
+| `git diff --check` | réussi |
+| Terraform, migration et déploiement AWS | non exécutés ; modification documentaire uniquement |
+
+### Retour arrière et reste à faire
+
+Ce complément documentaire n'a pas de rollback de données ou de ressources.
+Pour le lot applicatif, ne pas réactiver les anciens accès non autorisés du chat
+ni remettre des tokens OAuth dans une URL afin de contourner un échec de
+déploiement. Préférer une correction ciblée ou une version de repli conservant
+les protections. Ne supprimer aucun paramètre SSM tant qu'une tâche le référence.
+La migration d'index peut rester en place lors d'un retour applicatif compatible.
+
+Le contrôle local ne vaut pas validation de toute la CI/CD ni de la production :
+le commit/push, le workflow sur le nouveau SHA et les vérifications AWS restent
+à effectuer.
+
 ## INFRA-2026-09-02-001 — Retrait de DIDIT_API_BASE_URL du runtime ECS
 
 ### Métadonnées

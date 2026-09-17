@@ -20,6 +20,7 @@ describe('PaymentsService', () => {
     initiatePayment: jest.Mock;
     initiatePayout: jest.Mock;
     checkTransaction: jest.Mock;
+    checkPayoutTransaction: jest.Mock;
     isSuccessfulCode: jest.Mock;
     isSuccessfulTransaction: jest.Mock;
   };
@@ -63,6 +64,7 @@ describe('PaymentsService', () => {
         raw: {},
       }),
       checkTransaction: jest.fn(),
+      checkPayoutTransaction: jest.fn(),
       isSuccessfulCode: jest.fn().mockReturnValue(true),
       isSuccessfulTransaction: jest.fn().mockReturnValue(false),
     };

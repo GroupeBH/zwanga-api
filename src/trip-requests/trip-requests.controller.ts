@@ -7,9 +7,9 @@ import {
   Param,
   Delete,
   Request,
-  UseGuards,
+  Header,
 } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
+import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { TripRequestsService } from './trip-requests.service';
 import {
   CreateTripRequestDto,
@@ -21,7 +21,8 @@ import {
   TripRequestVehicleOptionsDto,
 } from './dto/trip-request.dto';
 import { Auth } from '../auth/decorators/auth.decorator';
-import { Public } from '../common/decorators/public.decorator';
+import { Roles } from '../common/decorators/roles.decorator';
+import { UserRole } from '../users/entities/user.entity';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
 
 @ApiTags('Trip Requests')
@@ -49,17 +50,21 @@ export class TripRequestsController {
   }
 
   @Get()
-  @Public()
+  @Header('Cache-Control', 'private, no-store')
+  @Auth()
+  @Roles(UserRole.DRIVER)
   @SensitiveThrottle(30, 60000)
   @ApiOperation({
     summary: 'Get all pending trip requests',
-    description: "Récupère toutes les demandes de trajet en attente d'offres",
+    description:
+      'Conducteurs authentifiés uniquement. Adresses et coordonnées exactes visibles ; aucun téléphone avant acceptation.',
   })
-  async findAll() {
-    return this.tripRequestsService.findAll();
+  async findAll(@Request() req: { user: { userId: string } }) {
+    return this.tripRequestsService.findAll(req.user.userId);
   }
 
   @Get('my-requests')
+  @Header('Cache-Control', 'private, no-store')
   @Auth()
   @ApiOperation({
     summary: 'Get my trip requests',
@@ -72,7 +77,9 @@ export class TripRequestsController {
   }
 
   @Get('my-offers')
+  @Header('Cache-Control', 'private, no-store')
   @Auth()
+  @Roles(UserRole.DRIVER)
   @ApiOperation({
     summary: 'Get my driver offers',
     description:
@@ -108,6 +115,7 @@ export class TripRequestsController {
   }
 
   @Get(':id')
+  @Header('Cache-Control', 'private, no-store')
   @Auth()
   @SensitiveThrottle(30, 60000)
   @ApiOperation({
@@ -120,6 +128,7 @@ export class TripRequestsController {
   }
 
   @Get(':id/offers')
+  @Header('Cache-Control', 'private, no-store')
   @Auth()
   @SensitiveThrottle(30, 60000)
   @ApiOperation({
@@ -137,6 +146,7 @@ export class TripRequestsController {
 
   @Post(':id/offers')
   @Auth()
+  @Roles(UserRole.DRIVER)
   @SensitiveThrottle(10, 60000)
   @ApiOperation({
     summary: 'Create a driver offer for a trip request',
@@ -179,6 +189,7 @@ export class TripRequestsController {
 
   @Post(':id/accept')
   @Auth()
+  @Roles(UserRole.DRIVER)
   @SensitiveThrottle(5, 60000)
   @ApiOperation({
     summary: 'Accept a trip request directly (Uber/Bolt/Yango style)',
@@ -200,6 +211,7 @@ export class TripRequestsController {
 
   @Put(':id/start-trip')
   @Auth()
+  @Roles(UserRole.DRIVER)
   @SensitiveThrottle(5, 60000)
   @ApiOperation({
     summary: 'Start a trip from an accepted trip request',

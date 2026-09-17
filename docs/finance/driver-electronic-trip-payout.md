@@ -85,7 +85,7 @@ Les retraits `failed` et `cancelled` ne sont plus bloqués et leur montant redev
 | `failed`    | échec final confirmé                                        | montant libéré et retirable à nouveau   |
 | `cancelled` | annulation finale confirmée                                 | montant libéré et retirable à nouveau   |
 
-La réponse initiale `code = 0` de `merchantPayOutService` signifie seulement « demande reçue ». Elle ne doit jamais être interprétée comme un transfert final réussi.
+La réponse initiale `code = 0`, `status = 0XX0` et `orderNumber` de Payout v1.03 signifie seulement « demande reçue ». Elle ne doit jamais être interprétée comme un transfert final réussi. Le callback est toujours vérifié via l'API payout dédiée, même si la vérification générique est désactivée.
 
 ## 7. Flux complet
 
@@ -95,7 +95,7 @@ paiement passager confirmé après arrivée
   -> conducteur ouvre Revenus conducteur
   -> confirmation du montant et du téléphone masqué
   -> réservation atomique du solde
-  -> POST FlexPay merchantPayOutService
+  -> authentification FlexPaie Payout puis POST /<version>/pay
   -> pending/initiated
   -> callback FlexPay + vérification du statut
        -> succeeded : montant payé
@@ -213,13 +213,18 @@ La migration ne crée, ne débite, ne crédite et ne recalcule aucun montant. El
 | `ZWANGA_COMMISSION_RATE`             | décimal                | taux de commission, `0.05`                             |
 | `TRIP_PAYMENT_CURRENCY`              | texte                  | devise des courses et revenus, `CDF`                   |
 | `DRIVER_PAYOUT_MIN_AMOUNT_CDF`       | décimal positif        | minimum d'un retrait conducteur                        |
-| `FLEXPAY_PAYOUT_SERVICE_URL`         | URL                    | endpoint `merchantPayOutService`                       |
-| `FLEXPAY_CHECK_TRANSACTION_URL`      | URL                    | vérification par `orderNumber`                         |
+| `FLEXPAY_PAYOUT_SERVICE_URL`         | URL HTTPS              | endpoint payout `/pay` fourni par FlexPaie             |
+| `FLEXPAY_PAYOUT_USERNAME`            | secret                 | identifiant du module payout                          |
+| `FLEXPAY_PAYOUT_PASSWORD`            | secret                 | mot de passe du module payout                         |
+| `FLEXPAY_PAYOUT_AUTH_URL`            | URL HTTPS              | surcharge facultative de l'URL d'authentification       |
+| `FLEXPAY_PAYOUT_CHECK_TRANSACTION_URL` | URL HTTPS            | surcharge facultative de vérification par `orderNumber` |
+| `FLEXPAY_PAYOUT_BALANCE_URL`         | URL HTTPS              | surcharge facultative du diagnostic de solde marchand  |
 | `FLEXPAY_DRIVER_PAYOUT_CALLBACK_URL` | URL                    | callback dédié, facultatif si base publique configurée |
 | `FLEXPAY_CALLBACK_BASE_URL`          | URL                    | base publique de repli                                 |
-| `FLEXPAY_TOKEN`                      | secret                 | jeton Bearer FlexPay                                   |
 | `FLEXPAY_MERCHANT_CODE`              | configuration sensible | code marchand                                          |
-| `FLEXPAY_VERIFY_CALLBACKS`           | booléen                | vérification serveur ; conserver `true` en production  |
+| `FLEXPAY_PAYOUT_MERCHANT_CODE`       | configuration sensible | surcharge facultative du code marchand payout         |
+
+Le token d'encaissement n'est pas réutilisé. L'hôte et la version ne figurent pas dans le PDF : les obtenir auprès de FlexPaie. Les défauts des URL facultatives et les statuts sont détaillés dans [FLEXPAY_SETUP.md](../../FLEXPAY_SETUP.md#driver-earnings-payouts-flexpaie-payout-v103).
 
 Sur AWS, ces variables sont importées depuis `.env.production` vers le préfixe SSM avec `infra-aws/scripts/import-env-to-ssm.ps1`. Aucune valeur secrète ne doit être copiée dans la documentation ou les logs.
 
