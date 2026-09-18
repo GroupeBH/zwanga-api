@@ -8,9 +8,32 @@ import {
   IsString,
   IsUUID,
   MaxLength,
+  Max,
+  Matches,
   Min,
 } from 'class-validator';
 import { PaymentMethod } from '../../payments/entities/payment-transaction.entity';
+
+export class RequestWalletWithdrawalDto {
+  @ApiProperty({ minimum: 1, example: 50 })
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(1)
+  @Max(1_000_000)
+  tokens: number;
+
+  @ApiProperty({ example: '243891234567' })
+  @IsString()
+  @Matches(/^\+?243\d{9}$/)
+  phone: string;
+
+  @ApiProperty({
+    description:
+      'UUID stable pour une seule demande de retrait, y compris ses retries.',
+  })
+  @IsUUID('4')
+  idempotencyKey: string;
+}
 
 export class InitiateWalletTopUpDto {
   @ApiProperty({

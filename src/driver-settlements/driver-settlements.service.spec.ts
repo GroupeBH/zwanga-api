@@ -61,7 +61,7 @@ describe('DriverSettlementsService', () => {
       findOne: jest.fn(),
       create: jest.fn((payload) => payload),
       save: jest.fn(async (payload) => ({ id: 'earning-1', ...payload })),
-      find: jest.fn(),
+      find: jest.fn().mockResolvedValue([]),
       createQueryBuilder: jest.fn(),
     };
     payoutRepository = {
@@ -193,7 +193,7 @@ describe('DriverSettlementsService', () => {
   it('records the Zwanga subsidy as a withdrawable driver earning for a first cash trip', async () => {
     earningRepository.findOne.mockResolvedValue(null);
 
-    const result = await service.recordCompletedBookingEarning({
+    const result = await service.recordCompletedBookingEarningWithManager(manager as any, {
       id: 'booking-first-cash',
       tripId: 'trip-1',
       passengerId: 'passenger-1',
@@ -257,6 +257,9 @@ describe('DriverSettlementsService', () => {
   });
 
   it('separates confirmed, cash and pending electronic revenue at trip end', async () => {
+    earningRepository.find.mockResolvedValue([{
+      bookingId: 'booking-electronic-paid', status: DriverEarningStatus.AVAILABLE, netAmount: 9500,
+    }]);
     tripRepository.findOne.mockResolvedValue({
       id: 'trip-1',
       driverId: 'driver-1',

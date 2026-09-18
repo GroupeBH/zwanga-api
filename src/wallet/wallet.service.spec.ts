@@ -13,7 +13,12 @@ import {
   WalletLedgerEntryType,
 } from './entities/wallet-ledger-entry.entity';
 import { WalletService } from './wallet.service';
-import { UserRole } from '../users/entities/user.entity';
+import { User, UserRole } from '../users/entities/user.entity';
+import {
+  BookingPaymentStatus,
+  BookingStatus,
+} from '../bookings/entities/booking.entity';
+import { TripPaymentMode } from '../payments/enums/trip-payment-mode.enum';
 
 describe('WalletService', () => {
   let accountRepository: {
@@ -29,9 +34,11 @@ describe('WalletService', () => {
     findOne: jest.Mock;
   };
   let manager: {
+    find: jest.Mock;
     findOne: jest.Mock;
     create: jest.Mock;
     save: jest.Mock;
+    createQueryBuilder: jest.Mock;
   };
   let dataSource: { transaction: jest.Mock };
   let configService: { get: jest.Mock };
@@ -90,9 +97,24 @@ describe('WalletService', () => {
       }),
     };
     manager = {
-      findOne: jest.fn().mockResolvedValue({ ...account }),
+      find: jest.fn().mockResolvedValue([]),
+      findOne: jest.fn(async (entity) =>
+        entity === WalletLedgerEntry ? null : { ...account },
+      ),
       create: jest.fn((_entity: unknown, payload: unknown) => payload),
       save: jest.fn((payload: unknown) => Promise.resolve(payload)),
+      createQueryBuilder: jest.fn(() => {
+        const query = {
+          innerJoin: jest.fn(),
+          where: jest.fn(),
+          andWhere: jest.fn(),
+          getOne: jest.fn().mockResolvedValue(null),
+        };
+        query.innerJoin.mockReturnValue(query);
+        query.where.mockReturnValue(query);
+        query.andWhere.mockReturnValue(query);
+        return query;
+      }),
     };
     dataSource = {
       transaction: jest.fn(
@@ -418,7 +440,13 @@ describe('WalletService', () => {
         type: WalletLedgerEntryType.BOOKING_PAYMENT,
       })
       .mockResolvedValueOnce(null);
-    manager.findOne.mockResolvedValue({ ...account, balance: 1000 });
+    manager.findOne.mockImplementation(async (entity, options) =>
+      entity === WalletLedgerEntry
+        ? options.where.type === WalletLedgerEntryType.BOOKING_PAYMENT
+          ? { amount: -25, withdrawableAmount: -20 }
+          : null
+        : { ...account, balance: 1000 },
+    );
 
     const refunded = await service.refundBookingPayment({
       id: 'booking-1',
@@ -439,7 +467,9 @@ describe('WalletService', () => {
   });
 
   it('credits an interrupted-trip fare difference as reusable points', async () => {
-    manager.findOne.mockImplementation(async (entity) => entity === WalletLedgerEntry ? null : { ...account, balance: 1000 });
+    manager.findOne.mockImplementation(async (entity) =>
+      entity === WalletLedgerEntry ? null : { ...account, balance: 1000 },
+    );
 
     await service.creditBookingFareAdjustment(
       {
@@ -489,14 +519,21 @@ describe('WalletService', () => {
   it('rechecks interruption refunds under a lock when concurrent retries passed the first check', async () => {
     const existing = { id: 'refund', amount: 15 };
     ledgerRepository.findOne.mockResolvedValue(null);
-    manager.findOne.mockImplementation(async (entity) => entity === WalletLedgerEntry ? existing : { id: 'booking-1' });
-    const result = await service.creditBookingFareAdjustment({ id: 'booking-1', passengerId: 'passenger-1' } as any, 1500);
+    manager.findOne.mockImplementation(async (entity) =>
+      entity === WalletLedgerEntry ? existing : { id: 'booking-1' },
+    );
+    const result = await service.creditBookingFareAdjustment(
+      { id: 'booking-1', passengerId: 'passenger-1' } as any,
+      1500,
+    );
     expect(result).toBe(existing);
     expect(manager.save).not.toHaveBeenCalled();
   });
 
   it('pays a subscription with points once', async () => {
-    manager.findOne.mockResolvedValue({ ...account, balance: 60 });
+    manager.findOne.mockImplementation(async (entity) =>
+      entity === WalletLedgerEntry ? null : { ...account, balance: 60 },
+    );
 
     const entry = await service.payForSubscription(
       {
@@ -606,12 +643,21 @@ describe('WalletService', () => {
   });
 
   it('awards the base loyalty point even when the completed trip is free', async () => {
-    manager.findOne.mockResolvedValue({ ...account, balance: 1000 });
+    manager.findOne.mockImplementation(async (entity) =>
+      entity === User
+        ? { id: 'passenger-1' }
+        : entity === WalletAccount
+          ? { ...account }
+          : null,
+    );
 
     await service.awardLoyaltyForBooking(
       {
         id: 'booking-1',
         passengerId: 'passenger-1',
+        tripId: 'trip-1',
+        status: BookingStatus.COMPLETED,
+        pickedUp: true,
         paymentCurrency: 'CDF',
       } as any,
       0,
@@ -627,7 +673,9 @@ describe('WalletService', () => {
   });
 
   it('credits exactly 25 tokens for a paid subscription', async () => {
-    manager.findOne.mockResolvedValue({ ...account, balance: 1000 });
+    manager.findOne.mockImplementation(async (entity) =>
+      entity === WalletLedgerEntry ? null : { ...account, balance: 1000 },
+    );
 
     const entry = await service.awardSubscriptionPaymentTokens(
       {
@@ -678,12 +726,23 @@ describe('WalletService', () => {
   });
 
   it('adds 0.5 point per travelled kilometer on top of the base point', async () => {
-    manager.findOne.mockResolvedValue({ ...account, balance: 1000 });
+    manager.findOne.mockImplementation(async (entity) =>
+      entity === User
+        ? { id: 'passenger-1' }
+        : entity === WalletAccount
+          ? { ...account }
+          : null,
+    );
 
     await service.awardLoyaltyForBooking(
       {
         id: 'booking-1',
         passengerId: 'passenger-1',
+        tripId: 'trip-1',
+        status: BookingStatus.COMPLETED,
+        pickedUp: true,
+        paymentMode: TripPaymentMode.ELECTRONIC,
+        paymentStatus: BookingPaymentStatus.SUCCEEDED,
         travelledDistanceMeters: 4500,
         paymentCurrency: 'CDF',
       } as any,
@@ -693,19 +752,31 @@ describe('WalletService', () => {
     expect(manager.save).toHaveBeenCalledWith(
       expect.objectContaining({
         type: WalletLedgerEntryType.LOYALTY_REWARD,
-        amount: 3.25,
+        amount: 2.25,
+        relatedEntityType: 'trip_loyalty_bonus',
         balanceAfter: 1003.25,
       }),
     );
   });
 
   it('converts the price-based loyalty bonus from CDF to points', async () => {
-    manager.findOne.mockResolvedValue({ ...account, balance: 1000 });
+    manager.findOne.mockImplementation(async (entity) =>
+      entity === User
+        ? { id: 'passenger-1' }
+        : entity === WalletAccount
+          ? { ...account }
+          : null,
+    );
 
     await service.awardLoyaltyForBooking(
       {
         id: 'booking-1',
         passengerId: 'passenger-1',
+        tripId: 'trip-1',
+        status: BookingStatus.COMPLETED,
+        pickedUp: true,
+        paymentMode: TripPaymentMode.POINTS,
+        paymentStatus: BookingPaymentStatus.SUCCEEDED,
         paymentCurrency: 'CDF',
       } as any,
       5000,
@@ -714,7 +785,8 @@ describe('WalletService', () => {
     expect(manager.save).toHaveBeenCalledWith(
       expect.objectContaining({
         type: WalletLedgerEntryType.LOYALTY_REWARD,
-        amount: 1.5,
+        amount: 0.5,
+        relatedEntityType: 'trip_loyalty_bonus',
         balanceAfter: 1001.5,
       }),
     );

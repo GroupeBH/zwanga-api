@@ -23,7 +23,13 @@ import {
 } from '../payments/entities/payment-transaction.entity';
 import { FlexPayCallbackDto } from '../payments/dto/payment.dto';
 import { PaymentsService } from '../payments/payments.service';
-import { Booking } from '../bookings/entities/booking.entity';
+import {
+  Booking,
+  BookingPaymentStatus,
+  BookingStatus,
+} from '../bookings/entities/booking.entity';
+import { Trip, TripStatus } from '../trips/entities/trip.entity';
+import { TripPaymentMode } from '../payments/enums/trip-payment-mode.enum';
 import {
   WalletAccount,
   WalletAccountType,
@@ -38,10 +44,20 @@ import {
 } from './dto/wallet.dto';
 import { User } from '../users/entities/user.entity';
 import { isSuperAdminRole } from '../users/user-role.policy';
+import { applyTokenMovement, refundablePurchasedTokens } from './wallet-origin';
 
 export interface WalletSummary {
   account: WalletAccount;
   recentEntries: WalletLedgerEntry[];
+  withdrawal: {
+    enabled: boolean;
+    currency: string;
+    moneyPerToken: number;
+    minimumTokens: number;
+    availableMoney: number;
+    nonWithdrawableTokens: number;
+    blocked: boolean;
+  };
 }
 
 export interface WalletPaymentResponse {
@@ -89,7 +105,7 @@ export class WalletService {
   private readonly DEFAULT_LOYALTY_RATE = 0.01;
   private readonly DEFAULT_LOYALTY_POINTS_PER_KM = 0.5;
   private readonly DEFAULT_LOYALTY_MIN_REWARD = 1;
-  private readonly DEFAULT_LOYALTY_BASE_REWARD = 1;
+  private readonly TRIP_LOYALTY_BASE_REWARD = 1;
   private readonly SUBSCRIPTION_PAYMENT_REWARD_TOKENS = 25;
 
   constructor(
@@ -112,7 +128,27 @@ export class WalletService {
       take: 30,
     });
 
-    return { account, recentEntries };
+    const currency = this.getPointValueCurrency();
+    return {
+      account,
+      recentEntries,
+      withdrawal: {
+        enabled:
+          this.configService.get<string>('WALLET_WITHDRAWALS_ENABLED') ===
+          'true',
+        currency,
+        moneyPerToken: this.convertPointsToMoney(1, currency),
+        minimumTokens: 1,
+        availableMoney: this.convertPointsToMoney(
+          Number(account.withdrawableBalance ?? 0),
+          currency,
+        ),
+        nonWithdrawableTokens: this.roundMoney(
+          Number(account.balance) - Number(account.withdrawableBalance ?? 0),
+        ),
+        blocked: Boolean(account.withdrawalsBlocked),
+      },
+    };
   }
 
   async getLedger(userId: string): Promise<WalletLedgerEntry[]> {
@@ -188,7 +224,7 @@ export class WalletService {
         throw new BadRequestException('Solde de jetons insuffisant');
       }
 
-      account.balance = nextBalance;
+      const withdrawableAmount = applyTokenMovement(account, amount);
       await manager.save(account);
       await this.createLedgerEntryWithManager(manager, {
         account,
@@ -196,6 +232,7 @@ export class WalletService {
         amount,
         balanceAfter: nextBalance,
         type: WalletLedgerEntryType.ADMIN_ADJUSTMENT,
+        withdrawableAmount,
         relatedEntityType: 'admin_wallet_adjustment',
         relatedEntityId: requestId,
         description: `Ajustement par admin ${adminId}: ${reason}`,
@@ -336,7 +373,7 @@ export class WalletService {
       throw new BadRequestException('Solde de jetons insuffisant');
     }
 
-    account.balance = nextBalance;
+    const withdrawableAmount = applyTokenMovement(account, -pointsAmount);
     await manager.save(account);
 
     const entry = await this.createLedgerEntryWithManager(manager, {
@@ -345,6 +382,7 @@ export class WalletService {
       amount: -pointsAmount,
       balanceAfter: nextBalance,
       type: WalletLedgerEntryType.BOOKING_PAYMENT,
+      withdrawableAmount,
       relatedEntityType: this.BOOKING_RELATED_ENTITY_TYPE,
       relatedEntityId: booking.id,
       description: `Paiement par jetons pour la réservation ${booking.id} (${amount} ${booking.paymentCurrency ?? this.getPointValueCurrency()})`,
@@ -499,7 +537,10 @@ export class WalletService {
         );
       }
 
-      senderAccount.balance = senderNextBalance;
+      const senderWithdrawableAmount = applyTokenMovement(
+        senderAccount,
+        -amount,
+      );
       await manager.save(senderAccount);
       const senderEntry = await this.createLedgerEntryWithManager(manager, {
         account: senderAccount,
@@ -507,6 +548,7 @@ export class WalletService {
         amount: -amount,
         balanceAfter: senderNextBalance,
         type: WalletLedgerEntryType.TRANSFER_OUT,
+        withdrawableAmount: senderWithdrawableAmount,
         relatedEntityType: this.TRANSFER_RELATED_ENTITY_TYPE,
         relatedEntityId: transferId,
         description: note
@@ -517,7 +559,7 @@ export class WalletService {
       const recipientNextBalance = this.roundMoney(
         Number(recipientAccount.balance) + amount,
       );
-      recipientAccount.balance = recipientNextBalance;
+      applyTokenMovement(recipientAccount, amount, -senderWithdrawableAmount);
       await manager.save(recipientAccount);
       const recipientEntry = await this.createLedgerEntryWithManager(manager, {
         account: recipientAccount,
@@ -525,6 +567,7 @@ export class WalletService {
         amount,
         balanceAfter: recipientNextBalance,
         type: WalletLedgerEntryType.TRANSFER_IN,
+        withdrawableAmount: -senderWithdrawableAmount,
         relatedEntityType: this.TRANSFER_RELATED_ENTITY_TYPE,
         relatedEntityId: transferId,
         description: note
@@ -559,28 +602,143 @@ export class WalletService {
     booking: Booking,
     grossAmount: number,
   ): Promise<WalletLedgerEntry | null> {
-    const reward = this.calculateLoyaltyReward(booking, grossAmount);
-    if (reward <= 0) {
-      return null;
-    }
-
-    const existingEntry = await this.findBookingEntry(
+    if (!this.isCompletedPassengerRide(booking)) return null;
+    return this.creditTripLoyalty(
       booking.passengerId,
-      booking.id,
-      WalletLedgerEntryType.LOYALTY_REWARD,
+      booking.tripId,
+      this.calculateLoyaltyBonus(booking, grossAmount),
+      true,
     );
-    if (existingEntry) {
-      return existingEntry;
-    }
+  }
 
-    return this.changeBalance({
-      userId: booking.passengerId,
-      amount: reward,
-      type: WalletLedgerEntryType.LOYALTY_REWARD,
-      relatedEntityType: this.BOOKING_RELATED_ENTITY_TYPE,
-      relatedEntityId: booking.id,
-      description: `Jetons de fidélité pour la réservation ${booking.id}`,
+  async awardBaseLoyaltyForBooking(
+    booking: Booking,
+  ): Promise<WalletLedgerEntry | null> {
+    if (!this.isCompletedPassengerRide(booking)) return null;
+    return this.creditTripLoyalty(booking.passengerId, booking.tripId, 0, true);
+  }
+
+  async awardLoyaltyForCompletedTrip(
+    trip: Trip,
+  ): Promise<WalletLedgerEntry | null> {
+    // Expired, never-started trips are also marked COMPLETED by the scheduler.
+    if (
+      trip.status !== TripStatus.COMPLETED ||
+      !trip.startedAt ||
+      !trip.completedAt
+    )
+      return null;
+    const startedAt = new Date(trip.startedAt).getTime();
+    const completedAt = new Date(trip.completedAt).getTime();
+    if (
+      !Number.isFinite(startedAt) ||
+      !Number.isFinite(completedAt) ||
+      completedAt < startedAt
+    )
+      return null;
+    return this.creditTripLoyalty(trip.driverId, trip.id, 0, false);
+  }
+
+  private isCompletedPassengerRide(booking: Booking): boolean {
+    return (
+      booking.status === BookingStatus.COMPLETED &&
+      !!booking.tripId &&
+      Boolean(
+        booking.pickedUp ||
+        booking.pickedUpAt ||
+        booking.pickedUpConfirmedByPassenger ||
+        booking.pickedUpConfirmedAt,
+      )
+    );
+  }
+
+  private async creditTripLoyalty(
+    userId: string,
+    tripId: string,
+    bonus: number,
+    passenger: boolean,
+  ): Promise<WalletLedgerEntry | null> {
+    const credits: WalletLedgerEntry[] = [];
+    const result = await this.dataSource.transaction(async (manager) => {
+      // Lock an existing row even for the first wallet creation. All loyalty
+      // retries for this user serialize before checking the immutable ledger.
+      const user = await manager.findOne(User, {
+        where: { id: userId },
+        select: ['id'],
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!user) throw new NotFoundException('Utilisateur introuvable');
+
+      if (passenger) {
+        // Old versions combined base and bonus in a booking-linked entry.
+        // Preserve these credits; a callback/retry must not credit them again,
+        // even if the passenger has another booking on the same trip.
+        const legacy = await manager
+          .createQueryBuilder(WalletLedgerEntry, 'entry')
+          .innerJoin(Booking, 'booking', 'booking.id = entry.relatedEntityId')
+          .where('entry.userId = :userId', { userId })
+          .andWhere('entry.type = :type', {
+            type: WalletLedgerEntryType.LOYALTY_REWARD,
+          })
+          .andWhere('entry.relatedEntityType = :entityType', {
+            entityType: 'booking',
+          })
+          .andWhere('booking.tripId = :tripId', { tripId })
+          .getOne();
+        if (legacy) return legacy;
+      }
+
+      const rewards = [
+        {
+          relatedEntityType: 'trip_loyalty_base',
+          amount: this.TRIP_LOYALTY_BASE_REWARD,
+        },
+      ];
+      if (bonus > 0)
+        rewards.push({
+          relatedEntityType: 'trip_loyalty_bonus',
+          amount: bonus,
+        });
+      let account: WalletAccount | null = null;
+      let result: WalletLedgerEntry | null = null;
+      for (const reward of rewards) {
+        const criteria = {
+          userId,
+          type: WalletLedgerEntryType.LOYALTY_REWARD,
+          relatedEntityType: reward.relatedEntityType,
+          relatedEntityId: tripId,
+        };
+        const existing = await manager.findOne(WalletLedgerEntry, {
+          where: criteria,
+        });
+        if (existing) {
+          result = existing;
+          continue;
+        }
+
+        account ??= await this.getOrCreateAccountWithManager(manager, userId);
+        applyTokenMovement(account, reward.amount);
+        await manager.save(account);
+        result = await this.createLedgerEntryWithManager(manager, {
+          account,
+          ...criteria,
+          amount: reward.amount,
+          balanceAfter: account.balance,
+          description:
+            reward.relatedEntityType === 'trip_loyalty_base'
+              ? `Jeton de fidélité pour le trajet ${tripId}`
+              : `Bonus de fidélité pour le trajet ${tripId}`,
+        });
+        credits.push(result);
+      }
+      return result;
     });
+    for (const entry of credits) {
+      this.logger.warn(
+        `TRIP_LOYALTY_COMMITTED userId=${userId} tripId=${tripId} component=${entry.relatedEntityType} amount=${entry.amount}`,
+      );
+    }
+    return result;
   }
 
   async ensureSufficientPoints(userId: string, amount: number): Promise<void> {
@@ -849,6 +1007,7 @@ export class WalletService {
       account: WalletAccount;
       userId: string;
       amount: number;
+      withdrawableAmount?: number;
       balanceAfter: number;
       type: WalletLedgerEntryType;
       relatedEntityType?: string | null;
@@ -863,6 +1022,7 @@ export class WalletService {
       accountType: WalletAccountType.POINTS,
       type: input.type,
       amount: this.roundMoney(input.amount),
+      withdrawableAmount: input.withdrawableAmount ?? 0,
       balanceAfter: this.roundMoney(input.balanceAfter),
       currency: input.account.currency,
       relatedEntityType: input.relatedEntityType ?? null,
@@ -883,7 +1043,7 @@ export class WalletService {
     paymentTransactionId?: string | null;
     description?: string | null;
   }): Promise<WalletLedgerEntry> {
-    const amount = this.roundMoney(input.amount);
+    let amount = this.roundMoney(input.amount);
     if (!amount) {
       throw new BadRequestException('Le montant de jetons est invalide');
     }
@@ -891,10 +1051,21 @@ export class WalletService {
     return this.dataSource.transaction(async (manager) => {
       // Serialize fare-adjustment retries even when this passenger has no wallet yet.
       // All callers lock the booking before the wallet, and recheck the ledger inside the transaction.
-      if (input.type === WalletLedgerEntryType.BOOKING_FARE_ADJUSTMENT && input.relatedEntityId) {
-        await manager.findOne(Booking, { where: { id: input.relatedEntityId }, lock: { mode: 'pessimistic_write' } });
+      if (
+        input.type === WalletLedgerEntryType.BOOKING_FARE_ADJUSTMENT &&
+        input.relatedEntityId
+      ) {
+        await manager.findOne(Booking, {
+          where: { id: input.relatedEntityId },
+          lock: { mode: 'pessimistic_write' },
+        });
         const existing = await manager.findOne(WalletLedgerEntry, {
-          where: { userId: input.userId, type: input.type, relatedEntityType: input.relatedEntityType!, relatedEntityId: input.relatedEntityId },
+          where: {
+            userId: input.userId,
+            type: input.type,
+            relatedEntityType: input.relatedEntityType!,
+            relatedEntityId: input.relatedEntityId,
+          },
         });
         if (existing) return existing;
       }
@@ -913,12 +1084,77 @@ export class WalletService {
         account = await manager.save(account);
       }
 
+      // Every balance writer serializes on the account before checking retries.
+      const duplicate = await manager.findOne(WalletLedgerEntry, {
+        where:
+          input.type === WalletLedgerEntryType.TOP_UP
+            ? {
+                type: input.type,
+                paymentTransactionId: input.paymentTransactionId!,
+              }
+            : {
+                userId: input.userId,
+                type: input.type,
+                relatedEntityType: input.relatedEntityType!,
+                relatedEntityId: input.relatedEntityId!,
+              },
+      });
+      if (duplicate) return duplicate;
+
+      let purchasedCredit =
+        input.type === WalletLedgerEntryType.TOP_UP ? amount : 0;
+      if (
+        [
+          WalletLedgerEntryType.BOOKING_REFUND,
+          WalletLedgerEntryType.BOOKING_FARE_ADJUSTMENT,
+        ].includes(input.type)
+      ) {
+        const debit = await manager.findOne(WalletLedgerEntry, {
+          where: {
+            userId: input.userId,
+            type: WalletLedgerEntryType.BOOKING_PAYMENT,
+            relatedEntityType: 'booking',
+            relatedEntityId: input.relatedEntityId!,
+          },
+        });
+        if (debit) {
+          const refunds = await manager.find(WalletLedgerEntry, {
+            where: {
+              userId: input.userId,
+              relatedEntityType: 'booking',
+              relatedEntityId: input.relatedEntityId!,
+              type: In([
+                WalletLedgerEntryType.BOOKING_REFUND,
+                WalletLedgerEntryType.BOOKING_FARE_ADJUSTMENT,
+              ]),
+            },
+          });
+          if (input.type === WalletLedgerEntryType.BOOKING_REFUND) {
+            amount = this.roundMoney(
+              Math.abs(Number(debit.amount)) -
+                refunds.reduce((sum, entry) => sum + Number(entry.amount), 0),
+            );
+            if (amount <= 0)
+              throw new BadRequestException(
+                'Cette réservation est déjà entièrement remboursée',
+              );
+          }
+          purchasedCredit = refundablePurchasedTokens(debit, refunds, amount);
+        }
+        // Legacy allocations and electronic fare credits without a token debit
+        // remain non-withdrawable: no guessed provenance.
+      }
+
       const nextBalance = this.roundMoney(Number(account.balance) + amount);
       if (nextBalance < 0) {
         throw new BadRequestException('Solde de jetons insuffisant');
       }
 
-      account.balance = nextBalance;
+      const withdrawableAmount = applyTokenMovement(
+        account,
+        amount,
+        purchasedCredit,
+      );
       await manager.save(account);
 
       const entry = manager.create(WalletLedgerEntry, {
@@ -927,6 +1163,7 @@ export class WalletService {
         accountType: WalletAccountType.POINTS,
         type: input.type,
         amount,
+        withdrawableAmount,
         balanceAfter: nextBalance,
         currency: account.currency,
         relatedEntityType: input.relatedEntityType ?? null,
@@ -959,38 +1196,42 @@ export class WalletService {
     });
   }
 
-  private calculateLoyaltyReward(
-    booking: Booking,
-    grossAmount: number,
-  ): number {
-    const baseReward = this.getLoyaltyBaseReward();
+  private calculateLoyaltyBonus(booking: Booking, grossAmount: number): number {
+    if (
+      ![TripPaymentMode.POINTS, TripPaymentMode.ELECTRONIC].includes(
+        booking.paymentMode,
+      ) ||
+      booking.paymentStatus !== BookingPaymentStatus.SUCCEEDED ||
+      !Number.isFinite(Number(grossAmount)) ||
+      Number(grossAmount) <= 0
+    )
+      return 0;
     const distanceReward = this.calculateDistanceLoyaltyReward(booking);
     if (distanceReward > 0) {
-      return this.roundMoney(baseReward + distanceReward);
+      return distanceReward;
     }
 
     const amount = Number(grossAmount);
     if (!Number.isFinite(amount) || amount <= 0) {
-      return baseReward;
+      return 0;
     }
 
     const loyaltyMoneyValue = this.roundMoney(amount * this.getLoyaltyRate());
     if (loyaltyMoneyValue <= 0) {
-      return baseReward;
+      return 0;
     }
 
     return this.roundMoney(
-      baseReward +
-        this.convertMoneyToPoints(loyaltyMoneyValue, booking.paymentCurrency),
+      this.convertMoneyToPoints(loyaltyMoneyValue, booking.paymentCurrency),
     );
   }
 
   private isUniqueConstraintViolation(error: unknown): boolean {
     return Boolean(
       error &&
-        typeof error === 'object' &&
-        'code' in error &&
-        (error as { code?: string }).code === '23505',
+      typeof error === 'object' &&
+      'code' in error &&
+      (error as { code?: string }).code === '23505',
     );
   }
 
@@ -1047,18 +1288,6 @@ export class WalletService {
     return minReward;
   }
 
-  private getLoyaltyBaseReward(): number {
-    const raw =
-      this.configService.get<string | number>('ZWANGA_LOYALTY_BASE_REWARD') ??
-      this.DEFAULT_LOYALTY_BASE_REWARD;
-    const baseReward = Number(raw);
-    if (!Number.isFinite(baseReward) || baseReward < 0) {
-      return this.DEFAULT_LOYALTY_BASE_REWARD;
-    }
-
-    return this.roundMoney(baseReward);
-  }
-
   private getPointValueCurrency(): string {
     return (
       this.configService.get<string>('ZWANGA_POINT_VALUE_CURRENCY')?.trim() ||
@@ -1069,17 +1298,14 @@ export class WalletService {
 
   private getPointValueForCurrency(currency?: string | null): number {
     const normalizedCurrency = (
-      currency?.trim() ||
-      this.getPointValueCurrency()
+      currency?.trim() || this.getPointValueCurrency()
     ).toUpperCase();
     const raw =
       this.configService.get<string | number>(
         `ZWANGA_POINT_VALUE_${normalizedCurrency}`,
       ) ??
       this.configService.get<string | number>('ZWANGA_POINT_VALUE') ??
-      (normalizedCurrency === 'CDF'
-        ? this.DEFAULT_POINT_VALUE_CDF
-        : undefined);
+      (normalizedCurrency === 'CDF' ? this.DEFAULT_POINT_VALUE_CDF : undefined);
     const pointValue = Number(raw);
     if (!Number.isFinite(pointValue) || pointValue <= 0) {
       throw new BadRequestException(

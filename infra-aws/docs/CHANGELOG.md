@@ -2,6 +2,98 @@
 
 Les entrées sont classées de la plus récente à la plus ancienne. Elles décrivent le code versionné et les opérations réellement exécutées sur AWS, sans inclure de valeur secrète.
 
+## INFRA-2026-09-18-001 — Retrait des jetons achetés, activation contrôlée
+
+### Métadonnées et contexte
+
+- Date : 18 septembre 2026 ; opérateur : développement backend/mobile.
+- Référence : `FIN-WALLET-005` ; cible : ECS/RDS/SSM production ; statut : code local, déploiement planifié, non exécuté.
+- Avant : achats et fidélité mélangés dans un solde sans ventilation ; pas de retrait d'achats. Revenus conducteur et parrainage déjà séparés.
+- Objectif : retirer les achats prouvés, jamais la fidélité, en conservant l'origine après usage/transfert/remboursement.
+
+### Code, configuration et ressources
+
+- Migration `1780000038000` : ventilation disponible/réservée, origine des écritures, table des retraits, contraintes et clés uniques. Backfill conservateur des achats vérifiés ; soldes totaux inchangés.
+- API de retrait authentifiée avec KYC, réservation et réconciliation ; client FlexPaie payout existant. Callback de recharge toujours vérifié.
+- Nouvelle variable dans les exemples : `WALLET_WITHDRAWALS_ENABLED=false`. Import SSM et référence dans la définition ECS nécessaires avant activation à `true` après validation.
+- Réutilisation des sept `FLEXPAY_PAYOUT_*` et de la base HTTPS `FLEXPAY_CALLBACK_BASE_URL` ou `PUBLIC_API_BASE_URL`, incluant le préfixe API. Pas de nouvel identifiant prestataire.
+- Aucune ressource AWS, permission IAM, secret, solde ou transaction réelle modifié par ce travail. Pas de nouveau service facturable ; requêtes RDS et appels de vérification supplémentaires.
+
+### Déploiement et disponibilité
+
+1. Sauvegarder RDS et tester sur copie/staging, commutateur désactivé ; auditer les soldes hérités.
+2. Suspendre les écrivains portefeuille anciens (instances, cron et callbacks) : ne pas faire de rolling deployment mélangeant ancien et nouveau code.
+3. Appliquer les migrations en transaction, puis démarrer seulement les nouvelles instances. Prévoir une fenêtre de maintenance pour les écritures ; verrou limité à cinq secondes.
+4. Valider les vrais contrats et callbacks FlexPaie, publier le mobile, importer le paramètre SSM et vérifier le plan/diff ECS avant activation explicite.
+
+### Validation et surveillance
+
+Tests locaux de ventilation, KYC, concurrence, reprises réseau, statuts et migration PostgreSQL isolée ; aucune connexion RDS ni payout réel utilisé. Validation prestataire/staging et appareils encore requise.
+Surveiller réservations sans commande, `WALLET_WITHDRAWAL_RECONCILIATION_PENDING` et `WALLET_WITHDRAWAL_LATE_SUCCESS_REVIEW`. Une réponse incertaine ne déclenche pas de second paiement.
+
+### Retour arrière et limites
+
+Désactiver les nouvelles demandes avec le commutateur à `false`, en laissant tourner la réconciliation. Ne pas revenir à l'ancien écrivain de solde. Le down refuse après toute nouvelle écriture ventilée ou tout retrait ; correction en avant requise, aucune suppression de journal.
+Les anciens achats sans preuve et transferts non ventilés restent utilisables, mais non retirables automatiquement. Voir [le guide opérationnel](../../docs/finance/purchased-token-withdrawals.md).
+
+## INFRA-2026-09-17-002 — Fidélité par trajet et correction des gains cash subventionnés
+
+### Métadonnées et périmètre
+
+- Date : 17 septembre 2026 ; opérateur : développement backend.
+- Environnement : code local destiné à ECS/RDS production.
+- Statut : migration et déploiement non exécutés ; aucune modification de solde, SSM, ECS ou transfert FlexPaie.
+- Référence : `FIN-LOYALTY-001`.
+
+### Contexte et cause
+
+La finalisation d'un trajet a échoué sur `CHK_driver_earnings_payment_mode` :
+le schéma n'autorisait pas les gains `cash` alors que le service prend en charge
+la subvention Zwanga de ces trajets. Ce blocage précédait la fidélité passager.
+La nouvelle règle fixe une base de 1 jeton pour chaque conducteur/passager
+éligible, y compris en cash ; seul le passager payé en jetons/électronique reçoit
+le bonus distance/prix.
+
+### Changements et variables
+
+- Migration `1780000037000` : autoriser `cash` dans les gains et ajouter l'unicité
+  des crédits de fidélité par utilisateur/trajet/composante, sans reprise de soldes.
+- Backend : base distincte du règlement et du bonus, fins manuelles/automatiques
+  prises en charge, crédits historiques conservés, logs `TRIP_LOYALTY_COMMITTED`.
+- `.env.docker.example`, `.env.example`, `FLEXPAY_SETUP.md` : retrait de
+  `ZWANGA_LOYALTY_BASE_REWARD`. Une ancienne valeur SSM est ignorée par le nouveau
+  code ; aucune suppression SSM n'est nécessaire pour ce déploiement.
+- Aucun nouvel identifiant FlexPaie ni aucune nouvelle variable obligatoire.
+- [Guide fidélité](../../docs/finance/trip-loyalty.md) et
+  [guide payout](../../docs/finance/flexpaie-payout-configuration.md) ajoutés.
+
+### Validation, déploiement et surveillance
+
+Valider les tests unitaires et le build, puis tester la migration sur staging.
+Appliquer la migration via la tâche prévue avant l'activation du nouveau backend.
+Contrôler les trajets cash, gratuits, non cash payés tardivement et les reprises
+du même événement : un crédit de base et au plus un bonus par utilisateur/trajet.
+Le contrôle CI de documentation reste actif ; cet ajout accompagne le changement
+de `.env.docker.example`.
+
+Validation locale effectuée : 58 suites / 659 tests Jest réussis, compilation
+`npm run build`, `git diff --check` et contrôle de documentation
+`check-infra-documentation.sh HEAD WORKTREE` réussis. La migration n'a pas été
+exécutée sur une base PostgreSQL ; sa validation staging reste requise.
+
+Surveiller `TRIP_LOYALTY_COMMITTED` et l'absence de nouvelle violation
+`CHK_driver_earnings_payment_mode`. Aucun rattrapage historique automatique.
+Les secrets payout doivent être confirmés avec FlexPaie avant toute correction
+SSM : HTTP 200 à l'authentification ne garantit pas un succès métier.
+
+### Impacts et retour arrière
+
+Pas de nouvelle ressource AWS ; index supplémentaire et transactions de crédit
+uniquement. Aucun encaissement cash direct n'est ajouté aux gains retirables.
+Le rollback SQL refuse les suppressions de contraintes si de nouvelles écritures
+cash/fidélité existent : conserver le schéma et préparer un correctif compatible,
+sans effacer les crédits. Aucun secret n'est inclus dans ce journal.
+
 ## INFRA-2026-09-17-001 — Runtime FlexPaie payout v1.03 et déploiement des correctifs de sécurité
 
 ### Métadonnées

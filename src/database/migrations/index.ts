@@ -34,6 +34,8 @@ import { AddPassengerKycRequirements1780000033000 } from './1780000033000-AddPas
 import { AddInterruptionPassengerDecisions1780000034000 } from './1780000034000-AddInterruptionPassengerDecisions';
 import { AddRideDeclarations1780000035000 } from './1780000035000-AddRideDeclarations';
 import { AddRideHistoryIndexes1780000036000 } from './1780000036000-AddRideHistoryIndexes';
+import { AddTripLoyaltyAndCashSubsidyEarnings1780000037000 } from './1780000037000-AddTripLoyaltyAndCashSubsidyEarnings';
+import { AddPurchasedTokenWithdrawals1780000038000 } from './1780000038000-AddPurchasedTokenWithdrawals';
 
 export const databaseMigrations = [
   FillTotalSeats1780000000000,
@@ -72,4 +74,6 @@ export const databaseMigrations = [
   AddInterruptionPassengerDecisions1780000034000,
   AddRideDeclarations1780000035000,
   AddRideHistoryIndexes1780000036000,
+  AddTripLoyaltyAndCashSubsidyEarnings1780000037000,
+  AddPurchasedTokenWithdrawals1780000038000,
 ];

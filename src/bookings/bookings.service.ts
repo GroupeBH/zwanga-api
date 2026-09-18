@@ -11,7 +11,7 @@ import { Cron } from '@nestjs/schedule';
 import { NO_RIDE_DISPUTE_SQL } from '../ride-declarations/ride-declaration.policy';
 import type { RideStage } from '../ride-declarations/ride-declaration.model';
 import { hasRideDispute } from '../ride-declarations/ride-declaration.model';
-import { canPayNearArrival } from './near-arrival-payment';
+import { canPayNearArrival, EARLY_PAYMENT_DISTANCE_METERS } from './near-arrival-payment';
 import { activeBookingWhere } from '../common/activity-read-policy';
 import { selectBookingHistory } from './booking-history';
 import { orderHistory, type HistoryPageQuery } from '../common/history-page';
@@ -2457,6 +2457,9 @@ export class BookingsService {
         paymentMode === TripPaymentMode.POINTS
       ) {
         const paidBooking = await this.capturePointsPaymentForBooking(booking, booking.trip);
+        if (paidBooking.status === BookingStatus.COMPLETED) {
+          await this.finalizeCompletedBooking(paidBooking);
+        }
         await this.invalidateBookingCaches(paidBooking);
         return paidBooking;
       }
@@ -2601,7 +2604,7 @@ export class BookingsService {
       !canPayNearArrival(booking)
     ) {
       throw new BadRequestException(
-        "Le paiement est disponible à moins de 150 mètres de votre destination ou après l’arrivée, lorsque votre position est confirmée.",
+        `Le paiement est disponible à ${EARLY_PAYMENT_DISTANCE_METERS} mètres ou moins de votre destination ou après l’arrivée, lorsque votre position est confirmée.`,
       );
     }
 
@@ -2638,7 +2641,7 @@ export class BookingsService {
       !canPayNearArrival(booking)
     ) {
       throw new BadRequestException(
-        "Le paiement en jetons est disponible à moins de 150 mètres de votre destination ou après l’arrivée.",
+        `Le paiement en jetons est disponible à ${EARLY_PAYMENT_DISTANCE_METERS} mètres ou moins de votre destination ou après l’arrivée.`,
       );
     }
 
@@ -2671,7 +2674,7 @@ export class BookingsService {
         !canPayNearArrival(lockedBooking)
       ) {
         throw new BadRequestException(
-          'Votre position doit être confirmée à moins de 150 mètres de votre destination pour payer avant l’arrivée.',
+          `Votre position doit être confirmée à ${EARLY_PAYMENT_DISTANCE_METERS} mètres ou moins de votre destination pour payer avant l’arrivée.`,
         );
       }
 
@@ -2720,6 +2723,8 @@ export class BookingsService {
 
   private async settlePaymentAfterArrival(booking: Booking): Promise<Booking> {
     let completedBooking = booking;
+    // Transport earns the base token independently of payment/driver settlement.
+    await this.walletService.awardBaseLoyaltyForBooking(completedBooking);
     const trip =
       completedBooking.trip ??
       (await this.tripRepository.findOne({
@@ -2764,13 +2769,7 @@ export class BookingsService {
       }
     }
 
-    if (
-      amount <= 0 ||
-      completedBooking.paymentMode === TripPaymentMode.CASH ||
-      completedBooking.paymentStatus === BookingPaymentStatus.SUCCEEDED
-    ) {
-      await this.finalizeCompletedBooking(completedBooking);
-    }
+    await this.finalizeCompletedBooking(completedBooking);
 
     return completedBooking;
   }
@@ -2808,6 +2807,8 @@ export class BookingsService {
     if (!completedBooking?.trip) {
       return;
     }
+
+    await this.walletService.awardBaseLoyaltyForBooking(completedBooking);
 
     const grossAmount = this.resolveBookingGrossPaymentAmount(
       completedBooking,
@@ -4396,6 +4397,7 @@ export class BookingsService {
       trip.status = TripStatus.COMPLETED;
       trip.completedAt = trip.completedAt ?? now;
       await this.tripRepository.save(trip);
+      await this.walletService.awardLoyaltyForCompletedTrip(trip);
       await this.cacheService.del(CacheService.getTripKey(trip.id));
       await this.cacheService.del(CacheService.getTripsListKey());
       await this.cacheService.del(CacheService.getTripsListKey('all'));
@@ -4460,6 +4462,7 @@ export class BookingsService {
       trip.status = TripStatus.COMPLETED;
       trip.completedAt = completedAt;
       await this.tripRepository.save(trip);
+      await this.walletService.awardLoyaltyForCompletedTrip(trip);
       await this.cacheService.del(CacheService.getTripKey(trip.id));
       await this.cacheService.del(CacheService.getTripsListKey());
       await this.cacheService.del(CacheService.getTripsListKey('all'));

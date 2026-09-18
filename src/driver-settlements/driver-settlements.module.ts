@@ -10,6 +10,7 @@ import { DriverSettlementsController } from './driver-settlements.controller';
 import { DriverSettlementsService } from './driver-settlements.service';
 import { DriverEarning } from './entities/driver-earning.entity';
 import { DriverPayout } from './entities/driver-payout.entity';
+import { CashSubsidyRecoveryService } from './cash-subsidy-recovery.service';
 
 @Module({
   imports: [
@@ -25,7 +26,7 @@ import { DriverPayout } from './entities/driver-payout.entity';
     NotificationsModule,
   ],
   controllers: [DriverSettlementsController],
-  providers: [DriverSettlementsService],
+  providers: [DriverSettlementsService, CashSubsidyRecoveryService],
   exports: [DriverSettlementsService],
 })
 export class DriverSettlementsModule {}

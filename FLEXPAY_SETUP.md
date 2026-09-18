@@ -177,6 +177,9 @@ await paymentsService.initiatePayment({
 
 ## Driver earnings payouts (FlexPaie Payout v1.03)
 
+Guide en français, variable par variable et diagnostic de l'authentification :
+[Configuration FlexPaie payout](docs/finance/flexpaie-payout-configuration.md).
+
 The payout adapter follows `FlexPay_API_Documentation_Payout_v1_03.pdf`
 (revision 22 April 2024), pages 3 and 5-13 in the document's printed numbering.
 This is a separate API from Mobile Money collections: do not use
@@ -293,7 +296,8 @@ TRIP_PAYMENT_CURRENCY=CDF
 # Points wallet. 1 point = 100 CDF by default.
 ZWANGA_POINTS_CURRENCY=PTS
 ZWANGA_POINT_VALUE_CDF=100
-ZWANGA_LOYALTY_BASE_REWARD=1
+# Base fixed at 1 token per completed ride, including cash (driver and passenger).
+# The following bonus settings apply only to successfully paid points/electronic passenger rides.
 ZWANGA_LOYALTY_POINTS_PER_KM=0.5
 # 0.01 grants 1% of the completed trip price, converted back to points.
 ZWANGA_LOYALTY_RATE=0.01

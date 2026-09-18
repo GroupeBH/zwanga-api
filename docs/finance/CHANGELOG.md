@@ -2,7 +2,58 @@
 
 Ce fichier répertorie les changements qui influencent un prix, un paiement, un solde, une commission, une récompense ou un retrait.
 
+## 18 septembre 2026
+
+### FIN-WALLET-005 — Jetons achetés retirables, fidélité non retirable
+
+Statut : implémentation locale backend/mobile ; migration et activation explicite requises, aucun virement réel ni changement en production.
+
+- Origine conservée, consommation de la fidélité en premier, transferts et remboursements ventilés.
+- Retrait Mobile Money des seuls jetons achetés, KYC, idempotence et réservation sans renvoi automatique.
+- Soldes et parcours achat/retrait/fidélité/conducteur/parrainage explicités dans le mobile ; reprise après coupure réseau.
+- Migration historique conservatrice, preuves FlexPaie requises ; callbacks de recharge toujours vérifiés.
+- `WALLET_WITHDRAWALS_ENABLED=false` par défaut. Déploiement sans anciens écrivains et audit des soldes requis.
+
+Voir [Retrait des jetons achetés](purchased-token-withdrawals.md).
+
+### FIN-CASH-001 — Crédit réel des subventions et reprise automatique autorisée
+
+Statut : implémenté localement ; migration et déploiement requis. Aucun solde modifié en production par cette intervention.
+
+- Répartition inchangée : sur 5 000 CDF, 2 000 cash passager et 3 000 de participation Zwanga.
+- Crédit cash relu sous verrou, idempotent ; notification seulement après validation de la transaction.
+- Reprise autorisée des crédits manquants, 50 réservations au maximum toutes les cinq minutes, sans débit passager ni transfert FlexPay.
+- Résumé basé sur les écritures réelles ; crédit en attente distinct du gain confirmé.
+- Mobile : plus de confirmation cash déduite de l'arrivée ; cache revenus invalidé après événement financier.
+
+Voir [Crédit des subventions cash](cash-subsidy-credit-reliability.md).
+
+### FIN-BOOKING-004 — Paiement à l'approche de l'arrivée à 500 mètres
+
+Statut : implémenté localement dans le backend et l'application mobile ; déployer le backend avant la mise à jour mobile. Aucune migration ni nouvelle variable d'environnement.
+
+- Seuil du modal et de l'autorisation serveur porté de 150 à 500 mètres inclus de la destination personnelle du passager.
+- Réservé aux passagers embarqués ayant choisi le paiement électronique ou les jetons ; pas de modal anticipé pour le cash, les trajets gratuits ou déjà payés.
+- Les contrôles de fraîcheur GPS, d'embarquement et de contestation sont conservés. La proximité est revérifiée sous verrou avant un débit en jetons.
+- L'ouverture du modal ne débite rien et ne termine pas le trajet ; montant, gains conducteur, fidélité et seuils de dépose/non-présentation inchangés.
+- Tests des bornes 500/501 mètres côté mobile et backend, des deux modes de paiement et du maintien du modal malgré les fluctuations GPS.
+
+Voir [Paiement à proximité de la destination](near-arrival-payment.md).
+
 ## 17 septembre 2026
+
+### FIN-LOYALTY-001 — Base fixe par trajet, bonus réservé aux paiements non cash
+
+Statut : implémenté localement ; migration `1780000037000` et déploiement requis, aucune modification de production.
+
+- 1 jeton par trajet conducteur réellement démarré/terminé et par trajet passager transporté, quel que soit le paiement.
+- Base passager indépendante de la finalisation financière ; bonus distance/prix seulement après paiement jetons/électronique réussi.
+- Écritures séparées, verrou transactionnel et index unique contre les doublons ; anciens crédits conservés sans recalcul.
+- Correction de la contrainte des gains cash subventionnés ; aucune conversion de cash encaissé en solde retirable.
+- Suppression de l'exemple `ZWANGA_LOYALTY_BASE_REWARD`, désormais ignoré au profit de la base fixe de 1.
+- Explication des identifiants, URL et champs FlexPaie à partir du PDF, sans modification des secrets ou du client payout.
+
+Voir [Fidélité des trajets](trip-loyalty.md) et [Configuration FlexPaie](flexpaie-payout-configuration.md).
 
 ### FIN-DRIVER-002 — Alignement du retrait sur FlexPaie Payout v1.03
 
