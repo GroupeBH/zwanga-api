@@ -20,6 +20,10 @@ export enum DriverEarningStatus {
 @Unique('UQ_driver_earnings_booking', ['bookingId'])
 @Index(['driverId', 'status'])
 @Index(['tripId'])
+@Check(
+  'CHK_driver_earnings_payment_mode',
+  `"paymentMode" IN ('electronic', 'points', 'cash')`,
+)
 @Check('CHK_driver_earnings_gross_positive', '"grossAmount" > 0')
 @Check(
   'CHK_driver_earnings_commission_rate_range',

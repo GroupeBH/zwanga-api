@@ -340,7 +340,8 @@ export class PaymentsService {
     );
     const previousStatus = transaction.status;
     if (
-      this.isPayoutTransaction(transaction) &&
+      (this.isPayoutTransaction(transaction) ||
+        transaction.purpose === PaymentPurpose.WALLET_TOP_UP) &&
       (callback.reference !== transaction.reference ||
         (transaction.orderNumber &&
           callback.orderNumber &&
@@ -353,6 +354,15 @@ export class PaymentsService {
     const callbackSucceeded = this.flexPayService.isSuccessfulCode(
       callback.code,
     );
+
+    if (
+      transaction.purpose === PaymentPurpose.WALLET_TOP_UP &&
+      !transaction.orderNumber
+    ) {
+      throw new BadRequestException(
+        'La recharge doit posséder un numéro de commande confirmé par FlexPay',
+      );
+    }
 
     this.logger.warn(
       `FlexPay callback matched payment: paymentId=${transaction.id}, reference=${transaction.reference}, previousStatus=${previousStatus}, orderNumber=${transaction.orderNumber ?? 'none'}`,
@@ -375,7 +385,10 @@ export class PaymentsService {
     transaction.orderNumber = callback.orderNumber ?? transaction.orderNumber;
     transaction.rawCallbackPayload = callback.raw;
 
-    if (this.shouldVerifyFlexPayCallbacks()) {
+    if (
+      transaction.purpose === PaymentPurpose.WALLET_TOP_UP ||
+      this.shouldVerifyFlexPayCallbacks()
+    ) {
       if (!transaction.orderNumber) {
         transaction.providerMessage =
           'Notification de paiement reçue, mais le numéro de commande FlexPay est manquant';
@@ -718,6 +731,19 @@ export class PaymentsService {
       return savedTransaction;
     }
 
+    if (
+      transaction.purpose === PaymentPurpose.WALLET_TOP_UP &&
+      (!providerTransaction.reference?.trim() ||
+        !providerTransaction.orderNumber?.trim() ||
+        providerTransaction.orderNumber.trim() !== transaction.orderNumber ||
+        providerTransaction.amount == null ||
+        !providerTransaction.currency?.trim())
+    ) {
+      throw new BadRequestException(
+        'La recharge nécessite une confirmation FlexPay complète du montant et de la devise',
+      );
+    }
+
     const normalizedProviderReference = providerTransaction.reference?.trim();
     const normalizedTransactionReference = transaction.reference?.trim();
     const normalizedOrderNumber =
@@ -789,6 +815,7 @@ export class PaymentsService {
   private isPayoutTransaction(transaction: { purpose?: string }): boolean {
     return (
       transaction.purpose === PaymentPurpose.DRIVER_PAYOUT ||
+      transaction.purpose === PaymentPurpose.WALLET_PAYOUT ||
       transaction.purpose === PaymentPurpose.REFERRAL_PAYOUT
     );
   }

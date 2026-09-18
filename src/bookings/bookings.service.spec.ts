@@ -55,6 +55,8 @@ describe('BookingsService trip payments', () => {
     refundBookingPayment: jest.Mock;
     creditBookingFareAdjustment: jest.Mock;
     awardLoyaltyForBooking: jest.Mock;
+    awardBaseLoyaltyForBooking: jest.Mock;
+    awardLoyaltyForCompletedTrip: jest.Mock;
   };
   let googleMapsService: { getDirections: jest.Mock };
   let driverSettlementsService: {
@@ -172,6 +174,8 @@ describe('BookingsService trip payments', () => {
       refundBookingPayment: jest.fn(),
       creditBookingFareAdjustment: jest.fn(),
       awardLoyaltyForBooking: jest.fn(),
+      awardBaseLoyaltyForBooking: jest.fn(),
+      awardLoyaltyForCompletedTrip: jest.fn(),
     };
     googleMapsService = {
       getDirections: jest.fn(),
@@ -781,7 +785,7 @@ describe('BookingsService trip payments', () => {
         method: PaymentMethod.MOBILE_MONEY,
         phone: '+243891234567',
       }),
-    ).rejects.toThrow('150 mètres');
+    ).rejects.toThrow('500 mètres');
 
     expect(paymentsService.initiatePayment).not.toHaveBeenCalled();
   });
@@ -1289,6 +1293,47 @@ describe('BookingsService trip payments', () => {
     expect(
       driverSettlementsService.recordCompletedBookingEarning,
     ).toHaveBeenCalledWith(expect.objectContaining({ id: 'booking-1' }));
+  });
+
+  it('awards the base token before a cash subsidy settlement failure', async () => {
+    driverSettlementsService.recordCompletedBookingEarning.mockRejectedValue(
+      new Error('CHK_driver_earnings_payment_mode'),
+    );
+    await expect((service as any).finalizeCompletedBooking({
+      ...booking, status: BookingStatus.COMPLETED, pickedUp: true,
+      paymentMode: TripPaymentMode.CASH, paymentStatus: BookingPaymentStatus.NOT_REQUIRED,
+      trip: { ...booking.trip, driverId: 'driver-1' },
+    })).rejects.toThrow('CHK_driver_earnings_payment_mode');
+    expect(walletService.awardBaseLoyaltyForBooking).toHaveBeenCalledTimes(1);
+    expect(walletService.awardBaseLoyaltyForBooking.mock.invocationCallOrder[0]).toBeLessThan(
+      driverSettlementsService.recordCompletedBookingEarning.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('awards the base token for a completed unpaid electronic ride without releasing earnings or bonus', async () => {
+    await (service as any).settlePaymentAfterArrival({
+      ...booking, status: BookingStatus.COMPLETED, pickedUp: true,
+      trip: { ...booking.trip, driverId: 'driver-1' },
+    });
+    expect(walletService.awardBaseLoyaltyForBooking).toHaveBeenCalled();
+    expect(walletService.awardLoyaltyForBooking).not.toHaveBeenCalled();
+    expect(driverSettlementsService.recordCompletedBookingEarning).not.toHaveBeenCalled();
+  });
+
+  it('finalizes loyalty after a delayed points payment even when the payment mode was already points', async () => {
+    const unpaid = {
+      ...booking, status: BookingStatus.COMPLETED, pickedUp: true,
+      paymentMode: TripPaymentMode.POINTS,
+      trip: { ...booking.trip, driverId: 'driver-1' },
+    };
+    bookingRepository.findOne.mockResolvedValue(unpaid);
+    jest.spyOn(service as any, 'capturePointsPaymentForBooking').mockResolvedValue({
+      ...unpaid, paymentStatus: BookingPaymentStatus.SUCCEEDED,
+    });
+    await service.updatePaymentMode('booking-1', 'passenger-1', TripPaymentMode.POINTS);
+    expect(walletService.awardLoyaltyForBooking).toHaveBeenCalledWith(
+      expect.objectContaining({ paymentStatus: BookingPaymentStatus.SUCCEEDED }), 5000,
+    );
   });
 
   it('lets the driver complete dropoff without waiting for a passenger button', async () => {
@@ -2319,6 +2364,12 @@ describe('BookingsService trip payments', () => {
     expect(
       driverSettlementsService.notifyDriverTripRevenue,
     ).toHaveBeenCalledWith('driver-1', 'trip-1');
+    expect(walletService.awardLoyaltyForCompletedTrip).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'trip-1', status: TripStatus.COMPLETED }),
+    );
+    expect(walletService.awardBaseLoyaltyForBooking).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'booking-1', status: BookingStatus.COMPLETED, paymentMode: TripPaymentMode.CASH }),
+    );
     expect(bookingRepository.save).toHaveBeenCalledWith(
       expect.objectContaining({
         droppedOff: true,

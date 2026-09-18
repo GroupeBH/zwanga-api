@@ -7,7 +7,7 @@ import { canPayNearArrival } from './near-arrival-payment';
 const now = Date.parse('2026-09-16T10:00:00Z');
 const destination = { type: 'Point' as const, coordinates: [15.3, -4.32] };
 const position = (meters: number) => ({ type: 'Point' as const, coordinates: [15.3, -4.32 + meters / 6_371_000 * 180 / Math.PI] });
-function fixture(distance = 150): Booking {
+function fixture(distance = 500): Booking {
   return {
     id: 'booking', tripId: 'trip', passengerId: 'passenger',
     status: BookingStatus.ACCEPTED, pickedUp: true, droppedOff: false,
@@ -23,7 +23,7 @@ describe('Near-arrival payment permission', () => {
   beforeEach(() => { jest.useFakeTimers().setSystemTime(now); });
   afterEach(() => jest.useRealTimers());
 
-  it.each([0, 20, 149, 150])('allows digital payment at %i metres without completing the booking', distance => {
+  it.each([0, 20, 149, 150, 151, 300, 499, 500])('allows digital payment at %i metres without completing the booking', distance => {
     const booking = fixture(distance);
     expect(canPayNearArrival(booking)).toBe(true);
     expect(booking.status).toBe('accepted');
@@ -31,8 +31,8 @@ describe('Near-arrival payment permission', () => {
     booking.paymentMode = TripPaymentMode.POINTS;
     expect(canPayNearArrival(booking)).toBe(true);
   });
-  it('rejects 151 metres, missing boarding evidence, cash, cancelled trips and disputes', () => {
-    expect(canPayNearArrival(fixture(151))).toBe(false);
+  it('rejects 501 metres, missing boarding evidence, cash, cancelled trips and disputes', () => {
+    expect(canPayNearArrival(fixture(501))).toBe(false);
     for (const patch of [
       { pickedUp: false, pickedUpConfirmedByPassenger: true },
       { paymentMode: TripPaymentMode.CASH }, { status: BookingStatus.CANCELLED },
@@ -55,14 +55,14 @@ describe('Near-arrival payment permission', () => {
     booking.passengerLastLocationUpdateAt = new Date(now + 10_000);
     expect(canPayNearArrival(booking)).toBe(false);
     booking.passengerCurrentLocation = position(NaN);
-    booking.trip.currentLocation = position(140);
+    booking.trip.currentLocation = position(500);
     booking.trip.lastLocationUpdateAt = new Date(now);
     expect(canPayNearArrival(booking)).toBe(true);
   });
   it('the existing electronic-payment gate keeps arrivals payable and accepts the new radius', () => {
     const service = Object.create(BookingsService.prototype) as any;
     expect(() => service.ensureBookingCanBePaid(fixture())).not.toThrow();
-    expect(() => service.ensureBookingCanBePaid(fixture(151))).toThrow('150 mètres');
+    expect(() => service.ensureBookingCanBePaid(fixture(501))).toThrow('500 mètres');
     expect(() => service.ensureBookingCanBePaid({ ...fixture(5000), status: 'completed' })).not.toThrow();
   });
 });
@@ -71,7 +71,7 @@ describe('Early points settlement', () => {
   beforeEach(() => { jest.useFakeTimers().setSystemTime(now); });
   afterEach(() => jest.useRealTimers());
   function serviceFixture() {
-    const booking = { ...fixture(100), paymentMode: TripPaymentMode.POINTS };
+    const booking = { ...fixture(500), paymentMode: TripPaymentMode.POINTS };
     const manager = {
       findOne: jest.fn(async (entity) => entity === Booking ? booking : booking.trip),
       save: jest.fn(async value => value),
@@ -100,8 +100,8 @@ describe('Early points settlement', () => {
   });
   it('rechecks proximity under the booking lock before spending tokens', async () => {
     const { service, booking, manager } = serviceFixture();
-    manager.findOne.mockImplementation(async entity => entity === Booking ? { ...booking, passengerCurrentLocation: position(5000) } : booking.trip as Trip);
-    await expect(service.capturePointsPaymentForBooking(booking, booking.trip)).rejects.toThrow('150 mètres');
+    manager.findOne.mockImplementation(async entity => entity === Booking ? { ...booking, passengerCurrentLocation: position(501) } : booking.trip as Trip);
+    await expect(service.capturePointsPaymentForBooking(booking, booking.trip)).rejects.toThrow('500 mètres');
     expect(service.walletService.payForBookingWithManager).not.toHaveBeenCalled();
   });
 });

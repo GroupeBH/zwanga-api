@@ -102,6 +102,125 @@ describe('PaymentsService', () => {
     );
   });
 
+  it('verifies cash-redeemable topups even when optional callback verification is disabled', async () => {
+    paymentTransactionRepository.findOne.mockResolvedValue({
+      id: 'topup',
+      purpose: 'wallet_top_up',
+      reference: 'WAL123',
+      orderNumber: 'ORDER',
+      status: PaymentStatus.INITIATED,
+      amount: 5000,
+      currency: 'CDF',
+    });
+    flexPayService.checkTransaction.mockResolvedValue({
+      code: '0',
+      transaction: {
+        reference: 'WAL123',
+        orderNumber: 'ORDER',
+        amount: '5000',
+        currency: 'CDF',
+        status: '0',
+      },
+      raw: {},
+    });
+    flexPayService.isSuccessfulTransaction.mockReturnValue(true);
+    const result = await service.handleFlexPayCallback({
+      code: '0',
+      reference: 'WAL123',
+      orderNumber: 'ORDER',
+    });
+    expect(flexPayService.checkTransaction).toHaveBeenCalledWith('ORDER');
+    expect(result.status).toBe(PaymentStatus.SUCCEEDED);
+  });
+
+  it.each([{ orderNumber: 'OTHER' }, { reference: 'OTHER' }])(
+    'rejects a forged topup identifier %p before provider verification',
+    async (patch) => {
+      paymentTransactionRepository.findOne.mockResolvedValue({
+        id: 'topup',
+        purpose: 'wallet_top_up',
+        reference: 'WAL123',
+        orderNumber: 'ORDER',
+        status: PaymentStatus.INITIATED,
+      });
+      await expect(
+        service.handleFlexPayCallback({
+          code: '0',
+          reference: 'WAL123',
+          orderNumber: 'ORDER',
+          ...patch,
+        }),
+      ).rejects.toThrow('correspond pas');
+      expect(flexPayService.checkTransaction).not.toHaveBeenCalled();
+    },
+  );
+
+  it('does not credit a topup from incomplete provider proof', async () => {
+    paymentTransactionRepository.findOne.mockResolvedValue({
+      id: 'topup',
+      purpose: 'wallet_top_up',
+      reference: 'WAL123',
+      orderNumber: 'ORDER',
+      status: PaymentStatus.INITIATED,
+      amount: 5000,
+      currency: 'CDF',
+    });
+    flexPayService.checkTransaction.mockResolvedValue({
+      code: '0',
+      transaction: {
+        reference: 'WAL123',
+        orderNumber: 'ORDER',
+        amount: null,
+        currency: null,
+        status: '0',
+      },
+      raw: {},
+    });
+    flexPayService.isSuccessfulTransaction.mockReturnValue(true);
+    const result = await service.handleFlexPayCallback({
+      code: '0',
+      reference: 'WAL123',
+      orderNumber: 'ORDER',
+    });
+    expect(result.status).toBe(PaymentStatus.INITIATED);
+  });
+
+  it.each(['wallet_payout', 'driver_payout', 'referral_payout'])(
+    'uses mandatory payout verification for %s callbacks',
+    async (purpose) => {
+      paymentTransactionRepository.findOne.mockResolvedValue({
+        id: 'payout',
+        purpose,
+        reference: 'PAY123',
+        orderNumber: 'ORDER',
+        status: PaymentStatus.INITIATED,
+        amount: 5000,
+        currency: 'CDF',
+      });
+      flexPayService.checkPayoutTransaction.mockResolvedValue({
+        code: '0',
+        transaction: {
+          reference: 'PAY123',
+          orderNumber: 'ORDER',
+          amount: null,
+          currency: null,
+          status: '0',
+        },
+        raw: {},
+      });
+      const result = await service.handleFlexPayCallback({
+        code: '0',
+        reference: 'PAY123',
+        orderNumber: 'ORDER',
+      });
+      expect(flexPayService.checkPayoutTransaction).toHaveBeenCalledWith(
+        'ORDER',
+      );
+      expect(flexPayService.checkTransaction).not.toHaveBeenCalled();
+      expect(result.status).toBe(PaymentStatus.SUCCEEDED);
+    },
+  );
+
   it('returns the current user payment transactions from newest to oldest', async () => {
     const transactions = [
       {
@@ -467,6 +586,8 @@ describe('PaymentsService', () => {
     });
 
     expect(payout.status).toBe(PaymentStatus.PENDING);
-    expect(payout.providerMessage).toContain('Aucun paiement ne vous est demandé');
+    expect(payout.providerMessage).toContain(
+      'Aucun paiement ne vous est demandé',
+    );
   });
 });

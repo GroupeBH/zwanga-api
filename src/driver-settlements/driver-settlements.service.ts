@@ -36,6 +36,7 @@ import {
 } from './entities/driver-payout.entity';
 import { RequestDriverPayoutDto } from './dto/driver-settlement.dto';
 import { getPayoutFailureMessage, normalizePayoutPhone, PAYOUT_MESSAGES } from '../payments/payout-policy';
+import { settleCashSubsidy } from './cash-subsidy-settlement';
 
 export interface DriverSettlementSummary {
   availableBalance: number;
@@ -54,6 +55,8 @@ export interface DriverTripRevenueSummary {
   commissionRate: number;
   grossTripAmount: number;
   confirmedAmount: number;
+  creditPendingAmount: number;
+  ledgerVerified: true;
   cashToCollectAmount: number;
   electronicPendingAmount: number;
   zwangaSubsidyAmount: number;
@@ -161,11 +164,11 @@ export class DriverSettlementsService {
       );
     }
 
-    const bookings = await this.bookingRepository.find({
-      where: { tripId },
-      relations: ['trip'],
-    });
-    return this.buildTripRevenueSummary(trip, bookings);
+    const [bookings, earnings] = await Promise.all([
+      this.bookingRepository.find({ where: { tripId } }),
+      this.earningRepository.find({ where: { tripId, driverId } }),
+    ]);
+    return this.buildTripRevenueSummary(trip, bookings, earnings);
   }
 
   async notifyDriverTripRevenue(
@@ -188,6 +191,8 @@ export class DriverSettlementsService {
           currency: summary.currency,
           grossTripAmount: summary.grossTripAmount,
           confirmedAmount: summary.confirmedAmount,
+          creditPendingAmount: summary.creditPendingAmount,
+          ledgerVerified: summary.ledgerVerified,
           cashToCollectAmount: summary.cashToCollectAmount,
           electronicPendingAmount: summary.electronicPendingAmount,
           zwangaSubsidyAmount: summary.zwangaSubsidyAmount,
@@ -208,11 +213,14 @@ export class DriverSettlementsService {
   private buildTripRevenueSummary(
     trip: Trip,
     bookings: Booking[],
+    earnings: DriverEarning[],
   ): DriverTripRevenueSummary {
     const commissionRate = this.getCommissionRate();
     const currency = this.getCurrency();
     let grossTripAmount = 0;
     let confirmedAmount = 0;
+    let creditPendingAmount = 0;
+    const earningsByBooking = new Map(earnings.map((earning) => [earning.bookingId, earning]));
     let cashToCollectAmount = 0;
     let electronicPendingAmount = 0;
     let zwangaSubsidyAmount = 0;
@@ -231,25 +239,30 @@ export class DriverSettlementsService {
       completedBookings += 1;
       grossTripAmount += grossAmount;
       zwangaSubsidyAmount += this.resolveBookingSubsidyAmount(booking);
+      const earning = earningsByBooking.get(booking.id);
+      if (earning && [DriverEarningStatus.AVAILABLE, DriverEarningStatus.PAID].includes(earning.status)) {
+        confirmedAmount += this.roundMoney(Number(earning.netAmount));
+      }
       if (booking.paymentMode === TripPaymentMode.CASH) {
         cashToCollectAmount += this.resolveTripBookingPassengerAmount(
           booking,
           trip,
         );
-        confirmedAmount += this.resolveCashSubsidyEarningAmount(booking);
+        if (!earning) creditPendingAmount += this.resolveCashSubsidyEarningAmount(booking);
         continue;
       }
 
       const netAmount = this.roundMoney(grossAmount * (1 - commissionRate));
-      if (booking.paymentStatus === BookingPaymentStatus.SUCCEEDED) {
-        confirmedAmount += netAmount;
-      } else if (booking.paymentMode === TripPaymentMode.ELECTRONIC) {
+      if (!earning && booking.paymentStatus === BookingPaymentStatus.SUCCEEDED) {
+        creditPendingAmount += netAmount;
+      } else if (!earning && booking.paymentMode === TripPaymentMode.ELECTRONIC) {
         electronicPendingAmount += netAmount;
       }
     }
 
     grossTripAmount = this.roundMoney(grossTripAmount);
     confirmedAmount = this.roundMoney(confirmedAmount);
+    creditPendingAmount = this.roundMoney(creditPendingAmount);
     cashToCollectAmount = this.roundMoney(cashToCollectAmount);
     electronicPendingAmount = this.roundMoney(electronicPendingAmount);
     zwangaSubsidyAmount = this.roundMoney(zwangaSubsidyAmount);
@@ -260,11 +273,13 @@ export class DriverSettlementsService {
       commissionRate,
       grossTripAmount,
       confirmedAmount,
+      creditPendingAmount,
+      ledgerVerified: true,
       cashToCollectAmount,
       electronicPendingAmount,
       zwangaSubsidyAmount,
       totalExpectedAmount: this.roundMoney(
-        confirmedAmount + cashToCollectAmount + electronicPendingAmount,
+        confirmedAmount + creditPendingAmount + cashToCollectAmount + electronicPendingAmount,
       ),
       completedBookings,
       generatedAt: new Date().toISOString(),
@@ -272,6 +287,7 @@ export class DriverSettlementsService {
   }
 
   private hasCompletedRide(booking: Booking): boolean {
+    if (![BookingStatus.ACCEPTED, BookingStatus.COMPLETED].includes(booking.status)) return false;
     return Boolean(
       booking.status === BookingStatus.COMPLETED ||
       booking.droppedOff ||
@@ -357,12 +373,12 @@ export class DriverSettlementsService {
     const parts: string[] = [];
     if (summary.confirmedAmount > 0) {
       parts.push(
-        `${this.formatMoney(summary.confirmedAmount)} ${summary.currency} ajoutes a vos gains`,
+        `${this.formatMoney(summary.confirmedAmount)} ${summary.currency} crédités dans vos gains`,
       );
     }
     if (summary.cashToCollectAmount > 0) {
       parts.push(
-        `${this.formatMoney(summary.cashToCollectAmount)} ${summary.currency} a encaisser en liquide`,
+        `${this.formatMoney(summary.cashToCollectAmount)} ${summary.currency} à recevoir du passager en cash`,
       );
     }
     if (summary.electronicPendingAmount > 0) {
@@ -372,13 +388,16 @@ export class DriverSettlementsService {
     }
     if (summary.zwangaSubsidyAmount > 0) {
       parts.push(
-        `${this.formatMoney(summary.zwangaSubsidyAmount)} ${summary.currency} subventionnes par Zwanga`,
+        `${this.formatMoney(summary.zwangaSubsidyAmount)} ${summary.currency} pris en charge par Zwanga`,
       );
     }
 
+    if (summary.creditPendingAmount > 0) {
+      parts.push(`${this.formatMoney(summary.creditPendingAmount)} ${summary.currency} en attente de crédit dans vos gains`);
+    }
     return parts.length > 0
       ? `${parts.join('. ')}.`
-      : `Aucun montant a encaisser pour ce trajet (0 ${summary.currency}).`;
+      : `Aucun montant à encaisser pour ce trajet (0 ${summary.currency}).`;
   }
 
   private formatMoney(value: number): string {
@@ -391,6 +410,19 @@ export class DriverSettlementsService {
   async recordCompletedBookingEarning(
     booking: Booking,
   ): Promise<DriverEarning | null> {
+    if (booking.paymentMode === TripPaymentMode.CASH) {
+      const result = await settleCashSubsidy(this.dataSource, booking.id, (manager, currentBooking) =>
+        this.recordCompletedBookingEarningWithManager(manager, currentBooking),
+      );
+      if (result.created && result.earning) {
+        // Notify only after COMMIT, never while holding the booking lock.
+        this.logger.warn(`CASH_SUBSIDY_COMMITTED bookingId=${result.earning.bookingId} net=${Number(result.earning.netAmount)}`);
+        if (result.tripStatus === TripStatus.COMPLETED) {
+          await this.notifyDriverBookingEarningAvailable(result.earning);
+        }
+      }
+      return result.earning;
+    }
     return this.recordCompletedBookingEarningUsingRepository(booking);
   }
 

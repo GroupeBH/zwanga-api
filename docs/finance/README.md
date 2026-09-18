@@ -1,6 +1,6 @@
 # Documentation financière de Zwanga
 
-Dernière mise à jour : 4 septembre 2026
+Dernière mise à jour : 17 septembre 2026
 
 ## Objectif
 
@@ -31,6 +31,8 @@ Les jetons sont une unité interne du portefeuille `POINTS`. Les identifiants `p
 
 La configuration livrée indique `1 jeton = 100 CDF`. La configuration effective de chaque environnement doit tout de même être vérifiée avant un déploiement financier.
 
+Les [jetons achetés sont retirables](./purchased-token-withdrawals.md) après migration et activation ; fidélité et bonus ne le sont pas. L'origine est conservée lors des paiements, transferts et remboursements. Les revenus conducteur et gains de parrainage gardent leurs comptes séparés.
+
 ### Gains de parrainage
 
 Les gains de parrainage sont séparés des jetons d'usage. Ils représentent une créance retirable en CDF, répartie entre les compartiments `pending`, `available`, `reserved` et `withdrawn`. Le taux, la valeur du jeton et les montants utilisés sont figés sur chaque opération financière.
@@ -52,6 +54,9 @@ Toute évolution financière doit respecter les règles suivantes :
 
 ## Registre des documents
 
+- [Crédit fiable des subventions cash et reprise autorisée](./cash-subsidy-credit-reliability.md)
+- [Fidélité des trajets terminés](./trip-loyalty.md)
+- [Configuration FlexPaie payout, variable par variable](./flexpaie-payout-configuration.md)
 - [Choix du véhicule et tarification d'une demande de trajet](./trip-request-vehicle-pricing.md)
 - [Type obligatoire à la création d'un véhicule](./vehicle-type-registration.md)
 - [Expiration douze heures après la fin de la plage de départ](./trip-request-response-expiration.md)

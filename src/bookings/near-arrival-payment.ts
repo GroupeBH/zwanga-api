@@ -2,7 +2,7 @@ import type { Point } from 'typeorm';
 import type { Booking } from './entities/booking.entity';
 import { hasRideDispute } from '../ride-declarations/ride-declaration.model';
 
-export const EARLY_PAYMENT_DISTANCE_METERS = 150;
+export const EARLY_PAYMENT_DISTANCE_METERS = 500;
 export const EARLY_PAYMENT_LOCATION_MAX_AGE_MS = 30_000;
 
 function validPoint(point?: Point | null): point is Point {

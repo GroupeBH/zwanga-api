@@ -81,6 +81,7 @@ describe('TripsService daily trip publication quota', () => {
       { recordDriverLocation: jest.fn().mockResolvedValue(undefined) } as any,
       {} as any,
       driverSettlementsService as any,
+      { awardLoyaltyForCompletedTrip: jest.fn().mockResolvedValue(null) } as any,
     );
 
     jest.spyOn(service, 'findOne').mockResolvedValue({ id: 'trip-1' });
@@ -319,6 +320,7 @@ describe('TripsService trip deletion rules', () => {
       { recordDriverLocation: jest.fn().mockResolvedValue(undefined) } as any,
       {} as any,
       { notifyDriverTripRevenue: jest.fn().mockResolvedValue(null) } as any,
+      { awardLoyaltyForCompletedTrip: jest.fn().mockResolvedValue(null) } as any,
     );
   });
 
@@ -584,6 +586,9 @@ describe('TripsService trip deletion rules', () => {
 
     await service.completeTrip(trip.id, trip.driverId);
 
+    expect(service.walletService.awardLoyaltyForCompletedTrip).toHaveBeenCalledWith(
+      expect.objectContaining({ id: trip.id, status: TripStatus.COMPLETED }),
+    );
     expect(tripRepository.update).toHaveBeenCalledWith(
       { id: trip.id, driverId: trip.driverId, status: TripStatus.ACTIVE },
       expect.objectContaining({ status: TripStatus.COMPLETED }),
@@ -591,6 +596,19 @@ describe('TripsService trip deletion rules', () => {
     expect(
       service.driverSettlementsService.notifyDriverTripRevenue,
     ).toHaveBeenCalledWith(trip.driverId, trip.id);
+  });
+
+  it('rechecks missing loyalty on a completed-trip retry without repeating revenue notifications', async () => {
+    const trip = {
+      id: 'trip-retry', driverId: 'driver-1', status: TripStatus.COMPLETED,
+      startedAt: new Date(Date.now() - 3600000), completedAt: new Date(),
+    };
+    tripRepository.findOne.mockResolvedValue(trip);
+    jest.spyOn(service, 'findOne').mockResolvedValue(trip);
+    await service.completeTrip(trip.id, trip.driverId);
+    expect(service.walletService.awardLoyaltyForCompletedTrip).toHaveBeenCalledWith(trip);
+    expect(service.driverSettlementsService.notifyDriverTripRevenue).not.toHaveBeenCalled();
+    expect(tripRepository.update).not.toHaveBeenCalled();
   });
 });
 
@@ -670,6 +688,7 @@ describe('TripsService started trip ETA expiration', () => {
       { recordDriverLocation: jest.fn().mockResolvedValue(undefined) } as any,
       {} as any,
       { notifyDriverTripRevenue: jest.fn().mockResolvedValue(null) } as any,
+      { awardLoyaltyForCompletedTrip: jest.fn().mockResolvedValue(null) } as any,
     );
   });
 

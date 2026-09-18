@@ -1,4 +1,12 @@
-import { Body, Controller, Get, Param, Post, Request } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  ParseUUIDPipe,
+  Post,
+  Request,
+} from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Auth } from '../auth/decorators/auth.decorator';
 import { Public } from '../common/decorators/public.decorator';
@@ -7,13 +15,52 @@ import { FlexPayCallbackDto } from '../payments/dto/payment.dto';
 import {
   InitiateWalletTopUpDto,
   TransferWalletPointsDto,
+  RequestWalletWithdrawalDto,
 } from './dto/wallet.dto';
 import { WalletService } from './wallet.service';
+import { WalletWithdrawalsService } from './wallet-withdrawals.service';
 
 @ApiTags('Wallet')
 @Controller('wallet')
 export class WalletController {
-  constructor(private readonly walletService: WalletService) {}
+  constructor(
+    private readonly walletService: WalletService,
+    private readonly withdrawals: WalletWithdrawalsService,
+  ) {}
+
+  @Post('withdrawals')
+  @Auth()
+  @SensitiveThrottle(5, 60000)
+  @ApiOperation({
+    summary: 'Withdraw purchased tokens to Mobile Money (KYC required)',
+  })
+  requestWithdrawal(@Request() req, @Body() dto: RequestWalletWithdrawalDto) {
+    return this.withdrawals.request(req.user.userId, dto);
+  }
+
+  @Get('withdrawals')
+  @Auth()
+  @SensitiveThrottle(30, 60000)
+  listWithdrawals(@Request() req) {
+    return this.withdrawals.list(req.user.userId);
+  }
+
+  @Get('withdrawals/:id/status')
+  @Auth()
+  @SensitiveThrottle(20, 60000)
+  withdrawalStatus(
+    @Request() req,
+    @Param('id', new ParseUUIDPipe()) id: string,
+  ) {
+    return this.withdrawals.get(req.user.userId, id);
+  }
+
+  @Post('withdrawals/flexpay/callback')
+  @Public()
+  @SensitiveThrottle(120, 60000)
+  withdrawalCallback(@Body() dto: FlexPayCallbackDto) {
+    return this.withdrawals.callback(dto);
+  }
 
   @Get('me')
   @Auth()

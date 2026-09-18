@@ -77,6 +77,7 @@ import {
 } from '../subscriptions/subscriptions.service';
 import { WeatherAwarenessService } from '../weather/weather-awareness.service';
 import { DriverSettlementsService } from '../driver-settlements/driver-settlements.service';
+import { WalletService } from '../wallet/wallet.service';
 import { normalizeUserDriverFlags } from '../users/user-role.policy';
 import {
   buildPointFromCoordinate,
@@ -215,6 +216,7 @@ export class TripsService {
     private locationHistoryService: LocationHistoryService,
     private bookingsService: BookingsService,
     private driverSettlementsService: DriverSettlementsService,
+    private walletService: WalletService,
   ) {}
 
   async create(
@@ -1255,6 +1257,7 @@ export class TripsService {
     }
 
     if (trip.status === TripStatus.COMPLETED) {
+      await this.walletService.awardLoyaltyForCompletedTrip(trip);
       return this.findOne(tripId);
     }
 
@@ -1290,6 +1293,7 @@ export class TripsService {
     }
     trip.status = TripStatus.COMPLETED;
     trip.completedAt = completedAt;
+    await this.walletService.awardLoyaltyForCompletedTrip(trip);
     this.logTripStateChange({
       tripId,
       driverId,
