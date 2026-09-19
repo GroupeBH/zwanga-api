@@ -51,6 +51,20 @@ export class CreateAdminAccountDto {
   defaultPassword: string;
 }
 
+export class ResetAdminAccountPasswordDto {
+  @ApiProperty({
+    example: 'Temporaire-2026!',
+    description:
+      "Nouveau mot de passe temporaire. L'administrateur devra le changer à la prochaine connexion.",
+  })
+  @Transform(toTrimmedString)
+  @IsString()
+  @IsNotEmpty()
+  @MinLength(8)
+  @MaxLength(128)
+  newPassword: string;
+}
+
 export class AdminAccountResponseDto {
   @ApiProperty()
   id: string;

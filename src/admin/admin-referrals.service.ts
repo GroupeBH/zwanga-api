@@ -20,6 +20,12 @@ import {
 } from '../referrals/entities/referral-withdrawal.entity';
 import { User } from '../users/entities/user.entity';
 import { isSuperAdminRole } from '../users/user-role.policy';
+import {
+  buildReferralAccountsSpreadsheet,
+  buildReferralRewardsSpreadsheet,
+  buildReferralWithdrawalsSpreadsheet,
+} from './admin-spreadsheets';
+import type { SpreadsheetFile } from './spreadsheet';
 
 type AdminReferralAccount = ReferralAccount & {
   user?: User | null;
@@ -46,40 +52,7 @@ export class AdminReferralsService {
 
   async getAccounts(page: number = 1, limit: number = 25, search?: string) {
     const { pageNumber, pageSize } = this.normalizePagination(page, limit);
-    const query = this.accountRepository
-      .createQueryBuilder('account')
-      .leftJoinAndMapOne(
-        'account.user',
-        User,
-        'referrerUser',
-        'referrerUser.id = account.userId',
-      )
-      .addSelect(this.userSelect('referrerUser'))
-      .leftJoinAndMapOne(
-        'account.profile',
-        ReferralProfile,
-        'profile',
-        'profile.userId = account.userId',
-      )
-      .addSelect([
-        'profile.id',
-        'profile.userId',
-        'profile.code',
-        'profile.shareLinkUrl',
-        'profile.referredByUserId',
-        'profile.attributionProvider',
-        'profile.qualifiedAt',
-        'profile.rewardWindowEndsAt',
-      ]);
-
-    this.applySearch(query, search, [
-      'account.userId',
-      'referrerUser.firstName',
-      'referrerUser.lastName',
-      'referrerUser.phone',
-      'referrerUser.email',
-      'profile.code',
-    ]);
+    const query = this.createAccountsQuery(search);
 
     const [accounts, total] = await query
       .orderBy('account.updatedAt', 'DESC')
@@ -88,28 +61,9 @@ export class AdminReferralsService {
       .take(pageSize)
       .getManyAndCount();
 
-    const referrerIds = accounts.map((account) => account.userId);
-    const referralCounts = new Map<string, number>();
-    if (referrerIds.length > 0) {
-      const countRows = await this.profileRepository
-        .createQueryBuilder('profile')
-        .select('profile.referredByUserId', 'referrerUserId')
-        .addSelect('COUNT(profile.id)', 'directReferralsCount')
-        .where('profile.referredByUserId IN (:...referrerIds)', {
-          referrerIds,
-        })
-        .groupBy('profile.referredByUserId')
-        .getRawMany<{
-          referrerUserId: string;
-          directReferralsCount: string;
-        }>();
-      for (const row of countRows) {
-        referralCounts.set(
-          row.referrerUserId,
-          Number(row.directReferralsCount),
-        );
-      }
-    }
+    const referralCounts = await this.loadReferralCounts(
+      accounts.map((account) => account.userId),
+    );
 
     const [accountSummary, referredUsers, pendingWithdrawals] =
       await Promise.all([
@@ -179,39 +133,7 @@ export class AdminReferralsService {
     requestedStatus?: string,
   ) {
     const { pageNumber, pageSize } = this.normalizePagination(page, limit);
-    const status = this.normalizeRewardStatus(requestedStatus);
-    const query = this.rewardRepository
-      .createQueryBuilder('reward')
-      .leftJoinAndMapOne(
-        'reward.referrerUser',
-        User,
-        'referrerUser',
-        'referrerUser.id = reward.referrerUserId',
-      )
-      .addSelect(this.userSelect('referrerUser'))
-      .leftJoinAndMapOne(
-        'reward.referredUser',
-        User,
-        'referredUser',
-        'referredUser.id = reward.referredUserId',
-      )
-      .addSelect(this.userSelect('referredUser'));
-
-    if (status) {
-      query.andWhere('reward.status = :status', { status });
-    }
-    this.applySearch(query, search, [
-      'reward.referrerUserId',
-      'reward.referredUserId',
-      'reward.sourceEntityId',
-      'reward.paymentTransactionId',
-      'referrerUser.firstName',
-      'referrerUser.lastName',
-      'referrerUser.phone',
-      'referredUser.firstName',
-      'referredUser.lastName',
-      'referredUser.phone',
-    ]);
+    const query = this.createRewardsQuery(search, requestedStatus);
 
     const [rewards, total] = await query
       .orderBy('reward.createdAt', 'DESC')
@@ -235,30 +157,7 @@ export class AdminReferralsService {
     requestedStatus?: string,
   ) {
     const { pageNumber, pageSize } = this.normalizePagination(page, limit);
-    const status = this.normalizeWithdrawalStatus(requestedStatus);
-    const query = this.withdrawalRepository
-      .createQueryBuilder('withdrawal')
-      .leftJoinAndMapOne(
-        'withdrawal.user',
-        User,
-        'withdrawalUser',
-        'withdrawalUser.id = withdrawal.userId',
-      )
-      .addSelect(this.userSelect('withdrawalUser'));
-
-    if (status) {
-      query.andWhere('withdrawal.status = :status', { status });
-    }
-    this.applySearch(query, search, [
-      'withdrawal.userId',
-      'withdrawal.id',
-      'withdrawal.paymentTransactionId',
-      'withdrawal.phone',
-      'withdrawalUser.firstName',
-      'withdrawalUser.lastName',
-      'withdrawalUser.phone',
-      'withdrawalUser.email',
-    ]);
+    const query = this.createWithdrawalsQuery(search, requestedStatus);
 
     const [withdrawals, total] = await query
       .orderBy('withdrawal.requestedAt', 'DESC')
@@ -311,6 +210,52 @@ export class AdminReferralsService {
     return this.serializeWithdrawal(reconciled);
   }
 
+  async exportAccounts(search?: string): Promise<SpreadsheetFile> {
+    const accounts = await this.createAccountsQuery(search)
+      .orderBy('account.updatedAt', 'DESC')
+      .addOrderBy('account.id', 'DESC')
+      .getMany();
+    const referralCounts = await this.loadReferralCounts(
+      accounts.map((account) => account.userId),
+    );
+
+    return buildReferralAccountsSpreadsheet(
+      (accounts as AdminReferralAccount[]).map((account) => ({
+        ...this.serializeAccount(account),
+        directReferralsCount: referralCounts.get(account.userId) ?? 0,
+      })),
+    );
+  }
+
+  async exportRewards(
+    search?: string,
+    requestedStatus?: string,
+  ): Promise<SpreadsheetFile> {
+    const rewards = await this.createRewardsQuery(search, requestedStatus)
+      .orderBy('reward.createdAt', 'DESC')
+      .addOrderBy('reward.id', 'DESC')
+      .getMany();
+    return buildReferralRewardsSpreadsheet(
+      rewards.map((reward) => this.serializeReward(reward)),
+    );
+  }
+
+  async exportWithdrawals(
+    search?: string,
+    requestedStatus?: string,
+  ): Promise<SpreadsheetFile> {
+    const withdrawals = await this.createWithdrawalsQuery(
+      search,
+      requestedStatus,
+    )
+      .orderBy('withdrawal.requestedAt', 'DESC')
+      .addOrderBy('withdrawal.id', 'DESC')
+      .getMany();
+    return buildReferralWithdrawalsSpreadsheet(
+      withdrawals.map((withdrawal) => this.serializeWithdrawal(withdrawal)),
+    );
+  }
+
   private normalizePagination(page: number, limit: number) {
     const pageNumber = Math.max(Number(page) || 1, 1);
     const pageSize = Math.min(
@@ -318,6 +263,132 @@ export class AdminReferralsService {
       this.maxPageLimit,
     );
     return { pageNumber, pageSize };
+  }
+
+  private createAccountsQuery(search?: string) {
+    const query = this.accountRepository
+      .createQueryBuilder('account')
+      .leftJoinAndMapOne(
+        'account.user',
+        User,
+        'referrerUser',
+        'referrerUser.id = account.userId',
+      )
+      .addSelect(this.userSelect('referrerUser'))
+      .leftJoinAndMapOne(
+        'account.profile',
+        ReferralProfile,
+        'profile',
+        'profile.userId = account.userId',
+      )
+      .addSelect([
+        'profile.id',
+        'profile.userId',
+        'profile.code',
+        'profile.shareLinkUrl',
+        'profile.referredByUserId',
+        'profile.attributionProvider',
+        'profile.qualifiedAt',
+        'profile.rewardWindowEndsAt',
+      ]);
+
+    this.applySearch(query, search, [
+      'account.userId',
+      'referrerUser.firstName',
+      'referrerUser.lastName',
+      'referrerUser.phone',
+      'referrerUser.email',
+      'profile.code',
+    ]);
+    return query;
+  }
+
+  private createRewardsQuery(search?: string, requestedStatus?: string) {
+    const status = this.normalizeRewardStatus(requestedStatus);
+    const query = this.rewardRepository
+      .createQueryBuilder('reward')
+      .leftJoinAndMapOne(
+        'reward.referrerUser',
+        User,
+        'referrerUser',
+        'referrerUser.id = reward.referrerUserId',
+      )
+      .addSelect(this.userSelect('referrerUser'))
+      .leftJoinAndMapOne(
+        'reward.referredUser',
+        User,
+        'referredUser',
+        'referredUser.id = reward.referredUserId',
+      )
+      .addSelect(this.userSelect('referredUser'));
+
+    if (status) {
+      query.andWhere('reward.status = :status', { status });
+    }
+    this.applySearch(query, search, [
+      'reward.referrerUserId',
+      'reward.referredUserId',
+      'reward.sourceEntityId',
+      'reward.paymentTransactionId',
+      'referrerUser.firstName',
+      'referrerUser.lastName',
+      'referrerUser.phone',
+      'referredUser.firstName',
+      'referredUser.lastName',
+      'referredUser.phone',
+    ]);
+    return query;
+  }
+
+  private createWithdrawalsQuery(search?: string, requestedStatus?: string) {
+    const status = this.normalizeWithdrawalStatus(requestedStatus);
+    const query = this.withdrawalRepository
+      .createQueryBuilder('withdrawal')
+      .leftJoinAndMapOne(
+        'withdrawal.user',
+        User,
+        'withdrawalUser',
+        'withdrawalUser.id = withdrawal.userId',
+      )
+      .addSelect(this.userSelect('withdrawalUser'));
+
+    if (status) {
+      query.andWhere('withdrawal.status = :status', { status });
+    }
+    this.applySearch(query, search, [
+      'withdrawal.userId',
+      'withdrawal.id',
+      'withdrawal.paymentTransactionId',
+      'withdrawal.phone',
+      'withdrawalUser.firstName',
+      'withdrawalUser.lastName',
+      'withdrawalUser.phone',
+      'withdrawalUser.email',
+    ]);
+    return query;
+  }
+
+  private async loadReferralCounts(referrerIds: string[]) {
+    const referralCounts = new Map<string, number>();
+    if (referrerIds.length === 0) {
+      return referralCounts;
+    }
+
+    const countRows = await this.profileRepository
+      .createQueryBuilder('profile')
+      .select('profile.referredByUserId', 'referrerUserId')
+      .addSelect('COUNT(profile.id)', 'directReferralsCount')
+      .where('profile.referredByUserId IN (:...referrerIds)', { referrerIds })
+      .groupBy('profile.referredByUserId')
+      .getRawMany<{
+        referrerUserId: string;
+        directReferralsCount: string;
+      }>();
+
+    for (const row of countRows) {
+      referralCounts.set(row.referrerUserId, Number(row.directReferralsCount));
+    }
+    return referralCounts;
   }
 
   private normalizeRewardStatus(

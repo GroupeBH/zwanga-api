@@ -16,6 +16,10 @@ function createQueryBuilderMock() {
     select: jest.fn(),
     getManyAndCount: jest.fn(),
     getRawOne: jest.fn(),
+    getMany: jest.fn(),
+    groupBy: jest.fn(),
+    addGroupBy: jest.fn(),
+    getRawMany: jest.fn(),
   };
   for (const method of [
     'leftJoinAndMapOne',
@@ -26,6 +30,8 @@ function createQueryBuilderMock() {
     'skip',
     'take',
     'select',
+    'groupBy',
+    'addGroupBy',
   ] as const) {
     query[method].mockReturnValue(query);
   }
