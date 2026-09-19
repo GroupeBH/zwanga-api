@@ -7,9 +7,14 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Point, Repository, SelectQueryBuilder } from 'typeorm';
+import * as bcrypt from 'bcrypt';
 import { Booking, BookingStatus } from '../bookings/entities/booking.entity';
 import { BookingsService } from '../bookings/bookings.service';
-import { PaymentTransaction } from '../payments/entities/payment-transaction.entity';
+import {
+  PaymentPurpose,
+  PaymentStatus,
+  PaymentTransaction,
+} from '../payments/entities/payment-transaction.entity';
 import { DriverOffer, DriverOfferStatus } from '../trip-requests/entities/driver-offer.entity';
 import {
   TripRequest,
@@ -22,6 +27,7 @@ import { UpdateTripDto } from '../trips/dto/trip.dto';
 import { TripsService } from '../trips/trips.service';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { KycDocument, KycStatus } from '../users/entities/kyc-document.entity';
+import { Vehicle } from '../vehicles/entities/vehicle.entity';
 import {
   ADMIN_USER_ROLES,
   assertSuperAdminRole,
@@ -39,10 +45,34 @@ import {
 import { WalletService } from '../wallet/wallet.service';
 import { CreateAdminAccountDto } from './dto/admin-account.dto';
 import { provisionAdminAccount } from './admin-account.provisioning';
+import {
+  AdminUserSegment,
+  parseAdminUserSegment,
+} from './dto/admin-users.dto';
+import {
+  buildUsersSpreadsheet,
+  usersSpreadsheetFilename,
+} from './users-spreadsheet';
+import {
+  applyAdminUserSegmentFilter,
+  DriverQualification,
+  resolveDriverQualification,
+} from './qualified-driver';
+import { parseKycStatus } from './dto/admin-kyc.dto';
+import {
+  buildBookingsSpreadsheet,
+  buildPaymentsSpreadsheet,
+  buildTripRequestsSpreadsheet,
+  buildTripsSpreadsheet,
+  buildWalletAccountsSpreadsheet,
+  buildWalletLedgerSpreadsheet,
+} from './admin-spreadsheets';
+import type { SpreadsheetFile } from './spreadsheet';
 
 type Coordinates = [number, number] | null;
 type WalletAccountWithUser = WalletAccount & { user?: User | null };
 type WalletLedgerEntryWithUser = WalletLedgerEntry & { user?: User | null };
+type PaymentWithUser = PaymentTransaction & { user?: User | null };
 
 @Injectable()
 export class AdminService {
@@ -132,29 +162,93 @@ export class AdminService {
     });
 
     this.logger.debug(`Found ${pendingKycs.length} pending KYC documents`);
-    return pendingKycs.map((kycDocument) => ({
-      ...kycDocument,
-      user: this.sanitizeUser(kycDocument.user),
-    })) as KycDocument[];
+    return pendingKycs.map((kycDocument) =>
+      this.sanitizeKycDocument(kycDocument),
+    ) as KycDocument[];
+  }
+
+  async getKycDocuments(
+    page: number = 1,
+    limit: number = 25,
+    status?: string,
+    search?: string,
+  ) {
+    const { pageNumber, pageSize } = this.normalizePagination(page, limit);
+    const statusFilter = parseKycStatus(status);
+    this.logger.debug(
+      `Fetching KYC history - Page: ${pageNumber}, Limit: ${pageSize}, Status: ${statusFilter ?? 'all'}`,
+    );
+
+    const query = this.createKycListQuery(statusFilter, search);
+    const [documents, total] = await query
+      .orderBy('kyc.createdAt', 'DESC')
+      .skip((pageNumber - 1) * pageSize)
+      .take(pageSize)
+      .getManyAndCount();
+
+    return {
+      documents: documents.map((document) => this.sanitizeKycDocument(document)),
+      total,
+      page: pageNumber,
+      limit: pageSize,
+    };
+  }
+
+  async getKycDocument(kycId: string) {
+    const kycDocument = await this.kycDocumentRepository.findOne({
+      where: { id: kycId },
+      relations: ['user'],
+    });
+    if (!kycDocument) {
+      throw new NotFoundException("Document de vérification d’identité introuvable.");
+    }
+    return this.sanitizeKycDocument(kycDocument);
   }
 
   async getAllUsers(
     page: number = 1,
     limit: number = 10,
+    role?: string,
   ): Promise<{ users: Array<Record<string, unknown>>; total: number }> {
     const { pageNumber, pageSize } = this.normalizePagination(page, limit);
+    const roleFilter = parseAdminUserSegment(role);
     this.logger.debug(
-      `Fetching all users - Page: ${pageNumber}, Limit: ${pageSize}`,
+      `Fetching all users - Page: ${pageNumber}, Limit: ${pageSize}, Role: ${roleFilter ?? 'all'}`,
     );
 
-    const [users, total] = await this.userRepository.findAndCount({
-      skip: (pageNumber - 1) * pageSize,
-      take: pageSize,
-      order: { createdAt: 'DESC' },
-    });
+    const query = this.createUsersListQuery(roleFilter)
+      .orderBy('user.createdAt', 'DESC')
+      .skip((pageNumber - 1) * pageSize)
+      .take(pageSize);
 
+    const [users, total] = await query.getManyAndCount();
     this.logger.debug(`Fetched ${users.length} users (total: ${total})`);
-    return { users: users.map((user) => this.sanitizeUser(user)!), total };
+    return {
+      users: await this.serializeUsersWithDriverQualification(users),
+      total,
+    };
+  }
+
+  async exportUsersXls(role?: string): Promise<{
+    buffer: Buffer;
+    filename: string;
+    contentType: string;
+  }> {
+    const roleFilter = parseAdminUserSegment(role);
+    this.logger.debug(
+      `Exporting users spreadsheet - Role: ${roleFilter ?? 'all'}`,
+    );
+
+    const users = await this.createUsersListQuery(roleFilter)
+      .orderBy('user.createdAt', 'DESC')
+      .getMany();
+    const serialized = await this.serializeUsersWithDriverQualification(users);
+
+    return {
+      buffer: buildUsersSpreadsheet(serialized),
+      filename: usersSpreadsheetFilename(roleFilter),
+      contentType: 'application/vnd.ms-excel; charset=utf-8',
+    };
   }
 
   async getUserStats(): Promise<{
@@ -162,15 +256,23 @@ export class AdminService {
     drivers: number;
     passengers: number;
   }> {
-    const [drivers, passengers] = await Promise.all([
-      this.userRepository.count({ where: { role: UserRole.DRIVER } }),
-      this.userRepository.count({ where: { role: UserRole.PASSENGER } }),
+    const [totalUsers, drivers] = await Promise.all([
+      this.userRepository
+        .createQueryBuilder('user')
+        .where('user.role NOT IN (:...adminRoles)', {
+          adminRoles: [...ADMIN_USER_ROLES],
+        })
+        .getCount(),
+      applyAdminUserSegmentFilter(
+        this.userRepository.createQueryBuilder('user'),
+        'driver',
+      ).getCount(),
     ]);
 
     return {
-      totalUsers: drivers + passengers,
+      totalUsers,
       drivers,
-      passengers,
+      passengers: Math.max(totalUsers - drivers, 0),
     };
   }
 
@@ -238,36 +340,68 @@ export class AdminService {
     }
   }
 
+  async deactivateAdminAccount(actorId: string, userId: string) {
+    const account = await this.findManagedAdminAccount(actorId, userId);
+
+    account.status = UserStatus.SUSPENDED;
+    account.isActive = false;
+    account.accessToken = null;
+    account.refreshToken = null;
+    account.fcmToken = null;
+    const saved = await this.userRepository.save(account);
+
+    this.logger.warn(
+      `Super admin ${actorId} deactivated admin account ${userId}`,
+    );
+    return this.serializeAdminAccount(saved);
+  }
+
+  async activateAdminAccount(actorId: string, userId: string) {
+    const account = await this.findManagedAdminAccount(actorId, userId);
+
+    account.status = UserStatus.ACTIVE;
+    account.isActive = true;
+    const saved = await this.userRepository.save(account);
+
+    this.logger.warn(
+      `Super admin ${actorId} reactivated admin account ${userId}`,
+    );
+    return this.serializeAdminAccount(saved);
+  }
+
+  async resetAdminAccountPassword(
+    actorId: string,
+    userId: string,
+    newPassword: string,
+  ) {
+    const account = await this.findManagedAdminAccount(actorId, userId);
+    const password = newPassword.trim();
+    if (password.length < 8 || password.length > 128) {
+      throw new BadRequestException(
+        'Le mot de passe doit contenir entre 8 et 128 caractères',
+      );
+    }
+
+    account.password = await bcrypt.hash(password, 12);
+    account.passwordChangeRequired = true;
+    account.accessToken = null;
+    account.refreshToken = null;
+    account.fcmToken = null;
+    const saved = await this.userRepository.save(account);
+
+    this.logger.warn(
+      `Super admin ${actorId} reset password for admin account ${userId}`,
+    );
+    return this.serializeAdminAccount(saved);
+  }
+
   async getWalletAccounts(
     page: number = 1,
     limit: number = 25,
     search?: string,
   ) {
     const { pageNumber, pageSize } = this.normalizePagination(page, limit);
-    const query = this.walletAccountRepository
-      .createQueryBuilder('account')
-      .leftJoinAndMapOne(
-        'account.user',
-        User,
-        'walletUser',
-        'walletUser.id = account.userId',
-      )
-      .addSelect([
-        'walletUser.id',
-        'walletUser.firstName',
-        'walletUser.lastName',
-        'walletUser.phone',
-        'walletUser.email',
-        'walletUser.role',
-        'walletUser.status',
-        'walletUser.isDriver',
-        'walletUser.isActive',
-      ])
-      .where('account.type = :accountType', {
-        accountType: WalletAccountType.POINTS,
-      });
-
-    this.applyWalletUserSearch(query, search, 'account', 'walletUser');
+    const query = this.createWalletAccountsQuery(search);
 
     const [accounts, total] = await query
       .orderBy('account.updatedAt', 'DESC')
@@ -321,34 +455,7 @@ export class AdminService {
     requestedType?: string,
   ) {
     const { pageNumber, pageSize } = this.normalizePagination(page, limit);
-    const entryType = this.normalizeWalletEntryType(requestedType);
-    const query = this.walletLedgerRepository
-      .createQueryBuilder('entry')
-      .leftJoinAndMapOne(
-        'entry.user',
-        User,
-        'walletUser',
-        'walletUser.id = entry.userId',
-      )
-      .addSelect([
-        'walletUser.id',
-        'walletUser.firstName',
-        'walletUser.lastName',
-        'walletUser.phone',
-        'walletUser.email',
-        'walletUser.role',
-        'walletUser.status',
-        'walletUser.isDriver',
-        'walletUser.isActive',
-      ])
-      .where('entry.accountType = :accountType', {
-        accountType: WalletAccountType.POINTS,
-      });
-
-    if (entryType) {
-      query.andWhere('entry.type = :entryType', { entryType });
-    }
-    this.applyWalletUserSearch(query, search, 'entry', 'walletUser');
+    const query = this.createWalletLedgerQuery(search, requestedType);
 
     const [entries, total] = await query
       .orderBy('entry.createdAt', 'DESC')
@@ -364,6 +471,73 @@ export class AdminService {
       page: pageNumber,
       limit: pageSize,
     };
+  }
+
+  async exportWalletAccountsXls(search?: string): Promise<SpreadsheetFile> {
+    const accounts = await this.createWalletAccountsQuery(search)
+      .orderBy('account.updatedAt', 'DESC')
+      .getMany();
+    return buildWalletAccountsSpreadsheet(
+      (accounts as WalletAccountWithUser[]).map((account) =>
+        this.serializeWalletAccount(account),
+      ),
+    );
+  }
+
+  async exportWalletLedgerXls(
+    search?: string,
+    requestedType?: string,
+  ): Promise<SpreadsheetFile> {
+    const entries = await this.createWalletLedgerQuery(search, requestedType)
+      .orderBy('entry.createdAt', 'DESC')
+      .getMany();
+    return buildWalletLedgerSpreadsheet(
+      (entries as WalletLedgerEntryWithUser[]).map((entry) =>
+        this.serializeWalletLedgerEntry(entry),
+      ),
+    );
+  }
+
+  async getAllPayments(
+    page: number = 1,
+    limit: number = 25,
+    status?: string,
+    purpose?: string,
+    search?: string,
+  ) {
+    const { pageNumber, pageSize } = this.normalizePagination(page, limit);
+    const query = this.createPaymentsQuery(status, purpose, search);
+    const [payments, total] = await query
+      .orderBy('payment.createdAt', 'DESC')
+      .skip((pageNumber - 1) * pageSize)
+      .take(pageSize)
+      .getManyAndCount();
+
+    return {
+      payments: (payments as PaymentWithUser[]).map((payment) =>
+        this.serializeAdminPayment(payment),
+      ),
+      total,
+      page: pageNumber,
+      limit: pageSize,
+      summary: await this.summarizePayments(status, purpose, search),
+      source: 'admin-api',
+    };
+  }
+
+  async exportPaymentsXls(
+    status?: string,
+    purpose?: string,
+    search?: string,
+  ): Promise<SpreadsheetFile> {
+    const payments = await this.createPaymentsQuery(status, purpose, search)
+      .orderBy('payment.createdAt', 'DESC')
+      .getMany();
+    return buildPaymentsSpreadsheet(
+      (payments as PaymentWithUser[]).map((payment) =>
+        this.serializeAdminPayment(payment),
+      ),
+    );
   }
 
   async adjustWallet(
@@ -439,7 +613,7 @@ export class AdminService {
     );
 
     return {
-      user: this.sanitizeUser(user),
+      user: (await this.serializeUsersWithDriverQualification([user]))[0],
       trips: trips.map((trip) => this.sanitizeTrip(trip, true)),
       bookingsAsPassenger: bookingsAsPassenger.map((booking) =>
         this.sanitizeBooking(booking),
@@ -538,6 +712,16 @@ export class AdminService {
     return { trips: trips.map((trip) => this.sanitizeTrip(trip, true)), total };
   }
 
+  async exportTripsXls(): Promise<SpreadsheetFile> {
+    const trips = await this.tripRepository.find({
+      relations: ['driver', 'vehicle'],
+      order: { createdAt: 'DESC' },
+    });
+    return buildTripsSpreadsheet(
+      trips.map((trip) => this.sanitizeTrip(trip, false)!),
+    );
+  }
+
   async updateTrip(tripId: string, adminId: string, updateTripDto: UpdateTripDto) {
     await this.ensureAdmin(adminId, 'Only admins can update trips');
     const trip = await this.findTripOrFail(tripId);
@@ -582,6 +766,18 @@ export class AdminService {
       page: pageNumber,
       limit: pageSize,
     };
+  }
+
+  async exportBookingsXls(status?: BookingStatus | string): Promise<SpreadsheetFile> {
+    const statusFilter = this.normalizeBookingStatus(status);
+    const bookings = await this.bookingRepository.find({
+      where: statusFilter ? { status: statusFilter } : {},
+      relations: ['passenger', 'trip', 'trip.driver', 'paymentTransaction'],
+      order: { createdAt: 'DESC' },
+    });
+    return buildBookingsSpreadsheet(
+      bookings.map((booking) => this.sanitizeBooking(booking)),
+    );
   }
 
   async acceptBooking(bookingId: string, adminId: string) {
@@ -655,6 +851,32 @@ export class AdminService {
       page: pageNumber,
       limit: pageSize,
     };
+  }
+
+  async exportTripRequestsXls(status?: string): Promise<SpreadsheetFile> {
+    const statusFilter = this.normalizeTripRequestStatus(status);
+    const tripRequests = await this.tripRequestRepository.find({
+      where: statusFilter ? { status: statusFilter } : {},
+      relations: ['passenger', 'driverOffers'],
+      order: { createdAt: 'DESC' },
+    });
+
+    return buildTripRequestsSpreadsheet(
+      tripRequests.map((tripRequest) => ({
+        id: tripRequest.id,
+        departureLocation: tripRequest.departureLocation,
+        arrivalLocation: tripRequest.arrivalLocation,
+        departureDateMin: tripRequest.departureDateMin,
+        departureDateMax: tripRequest.departureDateMax,
+        numberOfSeats: tripRequest.numberOfSeats,
+        maxPricePerSeat: tripRequest.maxPricePerSeat,
+        paymentMode: tripRequest.paymentMode,
+        status: tripRequest.status,
+        createdAt: tripRequest.createdAt,
+        passenger: this.sanitizeUser(tripRequest.passenger),
+        driverOffersCount: tripRequest.driverOffers?.length ?? 0,
+      })),
+    );
   }
 
   async getTripRequest(tripRequestId: string) {
@@ -749,6 +971,306 @@ export class AdminService {
       throw new NotFoundException("Demande de trajet introuvable.");
     }
     return tripRequest;
+  }
+
+  private async findManagedAdminAccount(actorId: string, userId: string) {
+    await this.ensureSuperAdmin(
+      actorId,
+      'Only super admins can manage back-office accounts',
+    );
+
+    if (actorId === userId) {
+      throw new BadRequestException(
+        'Un super administrateur ne peut pas modifier son propre compte ici',
+      );
+    }
+
+    const account = await this.userRepository.findOne({ where: { id: userId } });
+    if (!account || !isAdminRole(account.role)) {
+      throw new NotFoundException('Compte administrateur introuvable.');
+    }
+    if (isSuperAdminRole(account.role)) {
+      throw new ForbiddenException(
+        'Un compte super administrateur ne peut pas être modifié depuis cette liste',
+      );
+    }
+
+    return account;
+  }
+
+  private createUsersListQuery(roleFilter?: AdminUserSegment) {
+    const query = this.userRepository.createQueryBuilder('user');
+    if (!roleFilter) {
+      return query;
+    }
+
+    return applyAdminUserSegmentFilter(query, roleFilter);
+  }
+
+  private createKycListQuery(status?: KycStatus, search?: string) {
+    const query = this.kycDocumentRepository
+      .createQueryBuilder('kyc')
+      .leftJoinAndSelect('kyc.user', 'user');
+
+    if (status) {
+      query.andWhere('kyc.status = :status', { status });
+    }
+
+    const term = search?.trim().slice(0, 160);
+    if (term) {
+      query.andWhere(
+        `(
+          user.firstName ILIKE :kycSearch
+          OR user.lastName ILIKE :kycSearch
+          OR user.phone ILIKE :kycSearch
+          OR user.email ILIKE :kycSearch
+        )`,
+        { kycSearch: `%${term}%` },
+      );
+    }
+
+    return query;
+  }
+
+  private createWalletAccountsQuery(search?: string) {
+    const query = this.walletAccountRepository
+      .createQueryBuilder('account')
+      .leftJoinAndMapOne(
+        'account.user',
+        User,
+        'walletUser',
+        'walletUser.id = account.userId',
+      )
+      .addSelect(this.adminUserSelect('walletUser'))
+      .where('account.type = :accountType', {
+        accountType: WalletAccountType.POINTS,
+      });
+    this.applyWalletUserSearch(query, search, 'account', 'walletUser');
+    return query;
+  }
+
+  private createWalletLedgerQuery(search?: string, requestedType?: string) {
+    const entryType = this.normalizeWalletEntryType(requestedType);
+    const query = this.walletLedgerRepository
+      .createQueryBuilder('entry')
+      .leftJoinAndMapOne(
+        'entry.user',
+        User,
+        'walletUser',
+        'walletUser.id = entry.userId',
+      )
+      .addSelect(this.adminUserSelect('walletUser'))
+      .where('entry.accountType = :accountType', {
+        accountType: WalletAccountType.POINTS,
+      });
+
+    if (entryType) {
+      query.andWhere('entry.type = :entryType', { entryType });
+    }
+    this.applyWalletUserSearch(query, search, 'entry', 'walletUser');
+    return query;
+  }
+
+  private createPaymentsQuery(
+    status?: string,
+    purpose?: string,
+    search?: string,
+  ) {
+    const query = this.paymentRepository
+      .createQueryBuilder('payment')
+      .leftJoinAndMapOne(
+        'payment.user',
+        User,
+        'paymentUser',
+        'paymentUser.id = payment.userId',
+      )
+      .addSelect(this.adminUserSelect('paymentUser'));
+
+    const statusFilter = this.normalizePaymentStatus(status);
+    if (statusFilter) {
+      query.andWhere('payment.status = :status', { status: statusFilter });
+    }
+
+    const purposeFilter = this.normalizePaymentPurpose(purpose);
+    if (purposeFilter) {
+      query.andWhere('payment.purpose = :purpose', { purpose: purposeFilter });
+    }
+
+    const term = search?.trim().slice(0, 160);
+    if (term) {
+      query.andWhere(
+        `(
+          payment.reference ILIKE :paymentSearch
+          OR payment.orderNumber ILIKE :paymentSearch
+          OR payment.providerReference ILIKE :paymentSearch
+          OR payment.phone ILIKE :paymentSearch
+          OR payment.description ILIKE :paymentSearch
+          OR paymentUser.firstName ILIKE :paymentSearch
+          OR paymentUser.lastName ILIKE :paymentSearch
+          OR paymentUser.phone ILIKE :paymentSearch
+          OR paymentUser.email ILIKE :paymentSearch
+        )`,
+        { paymentSearch: `%${term}%` },
+      );
+    }
+
+    return query;
+  }
+
+  private async summarizePayments(
+    status?: string,
+    purpose?: string,
+    search?: string,
+  ) {
+    const rows = await this.createPaymentsQuery(status, purpose, search)
+      .select('payment.status', 'status')
+      .addSelect('payment.currency', 'currency')
+      .addSelect('COUNT(payment.id)', 'count')
+      .addSelect('COALESCE(SUM(payment.amount), 0)', 'volume')
+      .groupBy('payment.status')
+      .addGroupBy('payment.currency')
+      .getRawMany<{
+        status: string;
+        currency: string;
+        count: string;
+        volume: string;
+      }>();
+
+    const volume = new Map<string, number>();
+    let total = 0;
+    let pending = 0;
+    let succeeded = 0;
+    let failed = 0;
+
+    for (const row of rows) {
+      const count = Number(row.count ?? 0);
+      total += count;
+      if (row.status === PaymentStatus.SUCCEEDED) {
+        succeeded += count;
+        volume.set(
+          row.currency,
+          (volume.get(row.currency) ?? 0) + Number(row.volume ?? 0),
+        );
+      } else if (
+        row.status === PaymentStatus.PENDING ||
+        row.status === PaymentStatus.INITIATED
+      ) {
+        pending += count;
+      } else if (
+        row.status === PaymentStatus.FAILED ||
+        row.status === PaymentStatus.CANCELLED
+      ) {
+        failed += count;
+      }
+    }
+
+    return {
+      total,
+      pending,
+      succeeded,
+      failed,
+      succeededVolume: Array.from(volume, ([currency, amount]) => ({
+        currency,
+        amount,
+      })),
+    };
+  }
+
+  private adminUserSelect(alias: string): string[] {
+    return [
+      `${alias}.id`,
+      `${alias}.firstName`,
+      `${alias}.lastName`,
+      `${alias}.phone`,
+      `${alias}.email`,
+      `${alias}.role`,
+      `${alias}.status`,
+      `${alias}.isDriver`,
+      `${alias}.isActive`,
+    ];
+  }
+
+  private serializeAdminPayment(payment: PaymentWithUser) {
+    const sanitized = this.sanitizePayment(payment)!;
+    return {
+      ...sanitized,
+      id: sanitized.id,
+      user: this.sanitizeUser(payment.user),
+    };
+  }
+
+  private sanitizeKycDocument(kycDocument: KycDocument) {
+    return {
+      ...kycDocument,
+      user: this.sanitizeUser(kycDocument.user),
+    };
+  }
+
+  private async serializeUsersWithDriverQualification(users: User[]) {
+    const qualifications = await this.loadDriverQualifications(users);
+    return users.map((user) => ({
+      ...this.sanitizeUser(user)!,
+      ...qualifications.get(user.id),
+    }));
+  }
+
+  private async loadDriverQualifications(
+    users: Array<Pick<User, 'id' | 'role' | 'isDriver'>>,
+  ): Promise<Map<string, DriverQualification>> {
+    const qualifications = new Map<string, DriverQualification>();
+    const userIds = [
+      ...new Set(users.map((user) => user.id).filter(Boolean)),
+    ];
+
+    for (const user of users) {
+      qualifications.set(
+        user.id,
+        resolveDriverQualification({
+          role: user.role,
+          isDriver: user.isDriver,
+          hasApprovedKyc: false,
+          hasActiveVehicle: false,
+        }),
+      );
+    }
+
+    if (userIds.length === 0) {
+      return qualifications;
+    }
+
+    const [approvedKycs, activeVehicles] = await Promise.all([
+      this.kycDocumentRepository.find({
+        where: { userId: In(userIds), status: KycStatus.APPROVED },
+        select: ['id', 'userId'],
+      }),
+      this.userRepository.manager.find(Vehicle, {
+        where: { ownerId: In(userIds), isActive: true },
+        select: ['id', 'ownerId'],
+      }),
+    ]);
+
+    const approvedKycUserIds = new Set(
+      approvedKycs
+        .map((document) => document.userId)
+        .filter((userId): userId is string => Boolean(userId)),
+    );
+    const activeVehicleOwnerIds = new Set(
+      activeVehicles.map((vehicle) => vehicle.ownerId),
+    );
+
+    for (const user of users) {
+      qualifications.set(
+        user.id,
+        resolveDriverQualification({
+          role: user.role,
+          isDriver: user.isDriver,
+          hasApprovedKyc: approvedKycUserIds.has(user.id),
+          hasActiveVehicle: activeVehicleOwnerIds.has(user.id),
+        }),
+      );
+    }
+
+    return qualifications;
   }
 
   private normalizePagination(page: number, limit: number) {
@@ -847,6 +1369,24 @@ export class AdminService {
     return Object.values(TripRequestStatus).includes(status as TripRequestStatus)
       ? (status as TripRequestStatus)
       : undefined;
+  }
+
+  private normalizePaymentStatus(status?: string) {
+    if (!status || status === 'all') {
+      return undefined;
+    }
+    return Object.values(PaymentStatus).includes(status as PaymentStatus)
+      ? (status as PaymentStatus)
+      : undefined;
+  }
+
+  private normalizePaymentPurpose(purpose?: string) {
+    if (!purpose || purpose === 'all') {
+      return undefined;
+    }
+    return Object.values(PaymentPurpose).includes(purpose as PaymentPurpose)
+      ? purpose
+      : purpose.trim() || undefined;
   }
 
   private sanitizeUser(user?: User | null) {

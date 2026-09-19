@@ -24,6 +24,7 @@ function createQueryBuilderMock() {
     select: jest.fn(),
     groupBy: jest.fn(),
     getManyAndCount: jest.fn(),
+    getMany: jest.fn(),
     getRawMany: jest.fn(),
     getRawOne: jest.fn(),
     getCount: jest.fn(),
