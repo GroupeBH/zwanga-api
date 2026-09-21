@@ -77,3 +77,7 @@ Désactivation : commutateur à `false`, conserver callbacks et réconciliation.
 Tests d'origine, transferts en chaîne, remboursements, KYC, double clic, concurrence, statuts, isolation utilisateur, cohérence paiement/retrait et reprise mobile après erreur réseau/stockage.
 Test PostgreSQL isolé : `src/database/wallet-withdrawals-postgres.spec.ts`, activé par `WALLET_TEST_POSTGRES_BIN` (dossier des exécutables). Il crée un cluster temporaire sans jamais lire `.env` ni une URL de base existante.
 Aucun transfert FlexPaie réel dans les tests. Validation staging et sur appareils requise avant activation.
+
+Validation complétée le 19 septembre : 743 tests backend et 54 tests mobiles ciblés réussis, vérifications TypeScript backend/mobile réussies. Les 3 tests PostgreSQL ont réussi séparément dans un cluster local temporaire ; son arrêt et son nettoyage sont automatiques. Aucune base applicative n'a été utilisée.
+
+Le crédit effectif d'une recharge vérifie aussi sa preuve de paiement, et pas seulement son statut local. Une ancienne transaction réussie sans preuve complète est revérifiée auprès du prestataire lors de la consultation de statut ; sans preuve, elle ne crée aucun nouveau crédit retirable. Une recharge déjà créditée n'est jamais créditée à nouveau.

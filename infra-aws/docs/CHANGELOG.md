@@ -2,6 +2,28 @@
 
 Les entrées sont classées de la plus récente à la plus ancienne. Elles décrivent le code versionné et les opérations réellement exécutées sur AWS, sans inclure de valeur secrète.
 
+## INFRA-2026-09-21-001 — Rotation du mot de passe FlexPaie payout en production
+
+- Opération autorisée par l'utilisateur le 21 septembre 2026 ; région `eu-central-1`, compte `046374119247` ; statut : secret mis à jour, rolling deployment terminé et service sain.
+- Source : uniquement `FLEXPAY_PAYOUT_PASSWORD` du fichier local `.env.production`, renseigné par l'utilisateur. Aucun autre paramètre de ce fichier importé ; aucune valeur secrète affichée, placée en argument de commande ou enregistrée dans ce journal.
+- Authentification préalable auprès de l'URL payout de production référencée dans SSM : HTTP 200, succès métier et jeton avec durée de validité positive. Aucun appel `/pay` ni retrait de test déclenché.
+- SSM : `/zwanga-api/production/env/FLEXPAY_PAYOUT_PASSWORD` passé de la version `1` à `2`, type `SecureString`, clé `alias/zwanga-api-production-application` conservée ; relecture comparée en mémoire à la valeur locale avec succès.
+- ECS : `force-new-deployment` de `zwanga-api-production-api` dans `zwanga-api-production-cluster` à 12 h 00 min 56 s, heure de Kinshasa ; déploiement `ecs-svc/0817787192160772986`. Définition `zwanga-api-production-api:11` conservée ; digest applicatif vérifié identique avant relance : `sha256:7ace0e733127e9bb63d594676360b325ea2ed09ec233fe489e66aef4973c1f06`.
+- Disponibilité : stratégie rolling, minimum sain 100 %, maximum 200 % ; l'ancienne tâche reste disponible pendant le démarrage de la nouvelle. Les connexions persistantes peuvent se reconnecter lors du retrait de l'ancienne tâche.
+- Aucun changement de code applicatif, IAM, réseau, Terraform ou schéma de base ; aucun solde modifié par cette opération. Coût temporaire du chevauchement des tâches ECS, sans nouvelle ressource permanente.
+- Validation finale : déploiement ECS `COMPLETED` et service stable à 12 h 03 min 26 s, heure de Kinshasa ; une tâche `RUNNING`, zéro tâche en attente. Nouvelle tâche `fa178d95b2fb4368b71e05df715dcef1` démarrée à 12 h 01 min 44 s, conteneur API `HEALTHY`, digest conservé ; ancienne tâche retirée du trafic. Cible ALB `healthy` et `https://compute-api.zwanga-app.com/health` en HTTP 200 avec API, base et Redis `ok`.
+- Contrôle des logs de démarrage : aucune erreur d'authentification payout ni erreur fatale détectée. Une erreur `ECONNREFUSED 127.0.0.1:2000` du collecteur de traces a été relevée au démarrage ; elle n'a pas bloqué la santé API ni la stabilisation ECS. Ne pas assimiler le contrôle d'authentification préalable à un retrait de bout en bout : aucun transfert de test réalisé.
+- Validation locale de la documentation : `git diff --check` réussi et contrôle `check-infra-documentation.sh HEAD WORKTREE` réussi (aucune modification de configuration d'infrastructure versionnée, hors documentation).
+- Retour arrière : ne pas supprimer le paramètre ; ne rétablir une ancienne valeur que si elle reste acceptée par FlexPaie, puis relancer ECS. Le retour à une ancienne définition de tâche ne restaure pas la valeur SSM ; aucune restauration automatique de l'ancien mot de passe.
+
+## INFRA-2026-09-19-001 — Validation locale des retraits de jetons achetés
+
+- Référence : `FIN-WALLET-005`, suite de `INFRA-2026-09-18-001` ; opérateur : développement backend/mobile ; statut : validation locale, aucune action AWS exécutée.
+- Durcissement des anciennes recharges : une réussite locale sans preuve de vérification complète ne crée pas de nouveaux jetons retirables ; recontrôle prestataire lors d'une vérification de statut.
+- Validation : 743 tests backend et 54 tests mobiles ciblés réussis, TypeScript backend/mobile sans erreur ; 3 tests de migration réussis séparément sur PostgreSQL local temporaire. Aucun secret de production ni RDS utilisé dans ces tests.
+- Aucun changement IAM, Terraform ou ressource AWS, ni nouvelle variable au-delà du commutateur documenté le 18 septembre. Coûts AWS inchangés par cette intervention.
+- Déploiement et retour arrière : suivre la procédure coordonnée de l'entrée précédente ; arrêter les écrivains anciens avant migration, garder `WALLET_WITHDRAWALS_ENABLED=false` jusqu'à validation prestataire/staging. Pour désactiver, fermer les nouvelles demandes sans arrêter les callbacks et la réconciliation. Ne pas supprimer l'historique financier ni revenir à un backend ignorant la ventilation.
+
 ## INFRA-2026-09-18-001 — Retrait des jetons achetés, activation contrôlée
 
 ### Métadonnées et contexte

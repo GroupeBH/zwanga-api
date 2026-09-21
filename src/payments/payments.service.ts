@@ -24,6 +24,7 @@ import {
 } from './flexpay.service';
 import { formatPaymentLogPayload } from './payment-log.util';
 import { getPayoutFailureMessage, PAYOUT_MESSAGES } from './payout-policy';
+import { hasVerifiedWalletTopUpProof } from './wallet-topup-proof';
 
 export interface InitiatePaymentInput {
   userId?: string | null;
@@ -459,7 +460,14 @@ export class PaymentsService {
       `Payment status check matched payment: paymentId=${transaction.id}, reference=${transaction.reference}, currentStatus=${transaction.status}`,
     );
 
-    if (this.isTerminalPaymentStatus(transaction.status)) {
+    const unverifiedLegacyTopUp =
+      transaction.purpose === PaymentPurpose.WALLET_TOP_UP &&
+      transaction.status === PaymentStatus.SUCCEEDED &&
+      !hasVerifiedWalletTopUpProof(transaction);
+    if (
+      this.isTerminalPaymentStatus(transaction.status) &&
+      !unverifiedLegacyTopUp
+    ) {
       this.logger.warn(
         `Payment status check served from local terminal state: paymentId=${transaction.id}, status=${transaction.status}, response=${formatPaymentLogPayload(this.formatPaymentLogResponse(transaction))}`,
       );

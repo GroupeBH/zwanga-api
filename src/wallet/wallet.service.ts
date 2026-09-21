@@ -45,6 +45,7 @@ import {
 import { User } from '../users/entities/user.entity';
 import { isSuperAdminRole } from '../users/user-role.policy';
 import { applyTokenMovement, refundablePurchasedTokens } from './wallet-origin';
+import { hasVerifiedWalletTopUpProof } from '../payments/wallet-topup-proof';
 
 export interface WalletSummary {
   account: WalletAccount;
@@ -943,6 +944,14 @@ export class WalletService {
     });
     if (existingEntry) {
       return this.getOrCreateAccount(payment.userId);
+    }
+
+    // Old succeeded payments could have been marked from unverified callbacks.
+    // Never grant a new cash-redeemable credit from that local status alone.
+    if (!hasVerifiedWalletTopUpProof(payment)) {
+      throw new BadRequestException(
+        'La recharge doit être confirmée par FlexPay avant de créditer des jetons retirables',
+      );
     }
 
     await this.changeBalance({

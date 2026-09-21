@@ -10,6 +10,7 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { BookingsService } from './bookings.service';
+import { PassengerInterruptionPreviewDto } from './dto/interruption-preview.dto';
 import { HistoryPageQuery } from '../common/history-page';
 import { randomUUID } from 'crypto';
 import { RideDeclarationsService } from '../ride-declarations/ride-declarations.service';
@@ -187,6 +188,18 @@ export class BookingsController {
   async cancel(@Request() req, @Param('id') id: string) {
     await this.bookingsService.cancel(id, req.user.userId);
     return { message: "Réservation annulée avec succès." };
+  }
+
+  @Post(':id/interruption-request/preview')
+  @Auth()
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({ summary: 'Estimer le montant d’une descente anticipée sans la demander' })
+  async previewTripInterruption(
+    @Request() req,
+    @Param('id') id: string,
+    @Body() dto: PassengerInterruptionPreviewDto,
+  ) {
+    return this.bookingsService.previewPassengerInterruptionFare(id, req.user.userId, dto.coordinates);
   }
 
   @Post(':id/interruption-request')

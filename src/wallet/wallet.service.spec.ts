@@ -74,6 +74,16 @@ describe('WalletService', () => {
     paymentUrl: null,
     amount: 5000,
     currency: 'CDF',
+    rawCheckResponse: {
+      code: '0',
+      transaction: {
+        status: '0',
+        reference: 'WALLET123',
+        orderNumber: 'ORDER123',
+        amount: '5000',
+        currency: 'CDF',
+      },
+    },
   };
 
   beforeEach(() => {
@@ -304,6 +314,121 @@ describe('WalletService', () => {
     await service.checkTopUpPaymentStatus('passenger-1', 'ORDER123');
 
     expect(dataSource.transaction).not.toHaveBeenCalled();
+  });
+
+  it('never credits a legacy succeeded topup without verified purchase proof', async () => {
+    paymentsService.checkPaymentStatus.mockResolvedValue({
+      ...topUpPayment,
+      status: PaymentStatus.SUCCEEDED,
+      rawCheckResponse: null,
+    });
+    await expect(
+      service.checkTopUpPaymentStatus('passenger-1', 'ORDER123'),
+    ).rejects.toThrow('confirmée par FlexPay');
+    expect(manager.save).not.toHaveBeenCalled();
+  });
+
+  it('records the purchased allocation of a verified recharge', async () => {
+    paymentsService.checkPaymentStatus.mockResolvedValue({
+      ...topUpPayment,
+      status: PaymentStatus.SUCCEEDED,
+    });
+    await service.checkTopUpPaymentStatus('passenger-1', 'ORDER123');
+    expect(manager.save).toHaveBeenCalledWith(
+      expect.objectContaining({ balance: 1050, withdrawableBalance: 50 }),
+    );
+    expect(manager.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: WalletLedgerEntryType.TOP_UP,
+        amount: 50,
+        withdrawableAmount: 50,
+      }),
+    );
+  });
+
+  it('persists reward-first allocation for booking and subscription payments', async () => {
+    manager.findOne.mockImplementation(async (entity) =>
+      entity === WalletAccount
+        ? { ...account, balance: 100, withdrawableBalance: 80 }
+        : null,
+    );
+    const booking = await service.payForBooking(
+      {
+        id: 'booking',
+        passengerId: 'passenger-1',
+        paymentCurrency: 'CDF',
+      } as any,
+      3000,
+    );
+    expect(booking).toMatchObject({ amount: -30, withdrawableAmount: -10 });
+    const subscription = await service.payForSubscription(
+      { id: 'subscription', userId: 'passenger-1' },
+      30,
+    );
+    expect(subscription).toMatchObject({
+      amount: -30,
+      withdrawableAmount: -10,
+    });
+    expect(manager.save).toHaveBeenCalledWith(
+      expect.objectContaining({ balance: 70, withdrawableBalance: 70 }),
+    );
+  });
+
+  it('persists the same purchased allocation on both sides of a transfer', async () => {
+    manager.findOne.mockImplementation(async (entity, options) =>
+      entity === WalletAccount
+        ? {
+            ...account,
+            userId: options.where.userId,
+            balance: 100,
+            withdrawableBalance:
+              options.where.userId === 'passenger-1' ? 80 : 0,
+          }
+        : null,
+    );
+    const result = await service.transferPoints('passenger-1', {
+      amount: 30,
+      recipientUserId: 'recipient-1',
+    });
+    expect(result.senderAccount).toMatchObject({
+      balance: 70,
+      withdrawableBalance: 70,
+    });
+    expect(result.recipientAccount).toMatchObject({
+      balance: 130,
+      withdrawableBalance: 10,
+    });
+    expect(result.senderEntry.withdrawableAmount).toBe(-10);
+    expect(result.recipientEntry.withdrawableAmount).toBe(10);
+  });
+
+  it('only refunds the remaining booking debit and purchased allocation after a fare adjustment', async () => {
+    const debit = { amount: -100, withdrawableAmount: -60 };
+    ledgerRepository.findOne
+      .mockResolvedValueOnce(debit)
+      .mockResolvedValueOnce(null);
+    manager.findOne.mockImplementation(async (entity, options) =>
+      entity === WalletLedgerEntry
+        ? options.where.type === WalletLedgerEntryType.BOOKING_PAYMENT
+          ? debit
+          : null
+        : { ...account, balance: 50, withdrawableBalance: 50 },
+    );
+    manager.find.mockResolvedValue([{ amount: 50, withdrawableAmount: 50 }]);
+    await service.refundBookingPayment({
+      id: 'booking',
+      passengerId: 'passenger-1',
+    } as any);
+    expect(manager.save).toHaveBeenCalledWith(
+      expect.objectContaining({ balance: 100, withdrawableBalance: 60 }),
+    );
+    expect(manager.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: WalletLedgerEntryType.BOOKING_REFUND,
+        amount: 50,
+        withdrawableAmount: 10,
+      }),
+    );
   });
 
   it('rejects a trip payment when the points balance is insufficient', async () => {
