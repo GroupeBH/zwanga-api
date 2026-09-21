@@ -88,6 +88,14 @@ export class WalletWithdrawalsService {
           select: { id: true, isActive: true, status: true },
           lock: { mode: 'pessimistic_write' },
         });
+        const account = await this.lockAccount(manager, userId);
+        const duplicate = await manager.findOne(WalletWithdrawal, {
+          where: { userId, idempotencyKey: dto.idempotencyKey },
+        });
+        if (duplicate) {
+          this.assertSameRequest(duplicate, dto.tokens, phone);
+          return { withdrawal: duplicate, created: false };
+        }
         if (
           !user?.isActive ||
           [UserStatus.INACTIVE, UserStatus.SUSPENDED].includes(user.status)
@@ -102,14 +110,6 @@ export class WalletWithdrawalsService {
           throw new BadRequestException(
             'Votre identité doit être vérifiée avant tout retrait',
           );
-        }
-        const account = await this.lockAccount(manager, userId);
-        const duplicate = await manager.findOne(WalletWithdrawal, {
-          where: { userId, idempotencyKey: dto.idempotencyKey },
-        });
-        if (duplicate) {
-          this.assertSameRequest(duplicate, dto.tokens, phone);
-          return { withdrawal: duplicate, created: false };
         }
         applyTokenMovement(account, -dto.tokens, 0, true);
         account.reservedWithdrawalBalance =

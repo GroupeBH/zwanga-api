@@ -185,6 +185,37 @@ describe('PaymentsService', () => {
     expect(result.status).toBe(PaymentStatus.INITIATED);
   });
 
+  it('rechecks an old succeeded topup lacking verification instead of trusting its terminal status', async () => {
+    paymentTransactionRepository.findOne.mockResolvedValue({
+      id: 'topup',
+      userId: 'user',
+      purpose: 'wallet_top_up',
+      relatedEntityType: 'wallet_top_up',
+      relatedEntityId: 'user',
+      reference: 'WAL123',
+      orderNumber: 'ORDER',
+      status: PaymentStatus.SUCCEEDED,
+      amount: 5000,
+      currency: 'CDF',
+      rawCheckResponse: null,
+    });
+    const proof = {
+      code: '0',
+      transaction: {
+        reference: 'WAL123',
+        orderNumber: 'ORDER',
+        amount: '5000',
+        currency: 'CDF',
+        status: '0',
+      },
+    };
+    flexPayService.checkTransaction.mockResolvedValue({ ...proof, raw: proof });
+    flexPayService.isSuccessfulTransaction.mockReturnValue(true);
+    const result = await service.checkPaymentStatus('ORDER', 'user');
+    expect(flexPayService.checkTransaction).toHaveBeenCalledWith('ORDER');
+    expect(result.rawCheckResponse).toEqual(proof);
+  });
+
   it.each(['wallet_payout', 'driver_payout', 'referral_payout'])(
     'uses mandatory payout verification for %s callbacks',
     async (purpose) => {

@@ -2,6 +2,16 @@
 
 Ce fichier répertorie les changements qui influencent un prix, un paiement, un solde, une commission, une récompense ou un retrait.
 
+## 19 septembre 2026
+
+### FIN-WALLET-005 — Vérifications finales du retrait de jetons achetés
+
+- Une recharge historique `succeeded` sans preuve prestataire complète est revérifiée avant tout nouveau crédit retirable. Le statut local seul ne suffit jamais.
+- Une demande de retrait déjà réservée est reconnue avant les contrôles métier d'une nouvelle demande, pour préserver son idempotence même si l'état KYC change.
+- Tests de ventilation persistée sur recharges, trajets, abonnements, transferts et remboursements successifs ; reprise mobile après passage en arrière-plan et modal hors du contenu masqué.
+- Validation locale : 743 tests backend réussis, 54 tests mobiles ciblés réussis, compilations TypeScript backend/mobile réussies. Les 3 tests de migration PostgreSQL, désactivés par défaut dans la suite unitaire, ont été exécutés séparément avec succès sur un cluster local jetable.
+- Aucun déploiement ou virement réel réalisé par cette intervention. Activation toujours conditionnée à la migration coordonnée et à une validation FlexPaie/staging.
+
 ## 18 septembre 2026
 
 ### FIN-WALLET-005 — Jetons achetés retirables, fidélité non retirable

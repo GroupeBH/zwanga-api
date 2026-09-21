@@ -1716,6 +1716,32 @@ export class BookingsService {
     return this.findOne(booking.id);
   }
 
+  async previewPassengerInterruptionFare(
+    bookingId: string,
+    passengerId: string,
+    coordinates?: RequestTripInterruptionDto['coordinates'],
+  ) {
+    const booking = await this.bookingRepository.findOne({
+      where: { id: bookingId, passengerId }, relations: ['trip'],
+    });
+    if (!booking) throw new NotFoundException('Réservation non trouvée');
+    if (booking.trip.status !== TripStatus.ACTIVE || booking.status !== BookingStatus.ACCEPTED ||
+        !this.hasBookingBeenPickedUpForRideProgress(booking) || this.hasBookingBeenDroppedOffForTripEnd(booking)) {
+      throw new BadRequestException('Le montant peut être estimé uniquement pendant votre trajet, après embarquement.');
+    }
+    const location = this.buildInterruptionPoint(coordinates, booking.trip) ??
+      booking.trip.currentLocation ?? booking.passengerCurrentLocation ?? null;
+    // Same inputs and policy as the actual passenger-requested interruption.
+    // In particular, old bookings must not be repriced using a subsequently edited trip.
+    const fare = await this.calculateDistanceBasedFareAdjustment(booking, location);
+    if (!fare) throw new BadRequestException('Le montant ne peut pas encore être calculé. La position ou la distance est indisponible.');
+    const quote = calculateInterruptionFare(fare.originalAmount,
+      Number(booking.paymentAmount ?? this.resolveBookingPaymentAmount(booking, booking.trip)),
+      fare.plannedDistanceMeters, fare.travelledDistanceMeters);
+    return { ...quote, bookingId, isEstimate: true,
+      prepaidAmount: booking.paymentStatus === BookingPaymentStatus.SUCCEEDED ? quote.originalPassengerAmount : 0 };
+  }
+
   async quoteDriverInterruptionFare(bookingId: string, location: Point | null) {
     const booking = await this.bookingRepository.findOne({ where: { id: bookingId }, relations: ['trip'] });
     if (!booking || booking.status !== BookingStatus.ACCEPTED || !this.hasBookingBeenPickedUpForRideProgress(booking)) {
@@ -1806,6 +1832,10 @@ export class BookingsService {
       );
     }
 
+    if (booking.paymentTransactionId && [BookingPaymentStatus.PENDING, BookingPaymentStatus.INITIATED].includes(booking.paymentStatus)) {
+      throw new BadRequestException('Un paiement est déjà en cours. Attendez sa confirmation avant de terminer cette réservation.');
+    }
+
     const fareAdjustment = await this.calculateDistanceBasedFareAdjustment(
       booking,
       interruptionLocation ??
@@ -1824,7 +1854,12 @@ export class BookingsService {
       booking.pricePerKilometer = fareAdjustment.pricePerKilometer;
       booking.fareAdjustmentAmount = fareAdjustment.adjustmentAmount;
       booking.fareAdjustedAt = booking.fareAdjustedAt ?? new Date();
-      booking.paymentAmount = fareAdjustment.finalAmount;
+      booking.paymentAmount = fareAdjustment.passengerAmount;
+      booking.zwangaSubsidyAmount = this.roundMoney(fareAdjustment.finalAmount - fareAdjustment.passengerAmount);
+      booking.passengerPaymentRate = fareAdjustment.finalAmount > 0
+        ? fareAdjustment.passengerAmount / fareAdjustment.finalAmount : null;
+      // Keep the agreed passenger fare: do not apply the subsidy a second time.
+      booking.interruptionFareLocked = true;
       booking.paymentCurrency =
         booking.paymentCurrency || this.getTripPaymentCurrency();
 
@@ -1881,6 +1916,7 @@ export class BookingsService {
   ): Promise<{
     originalAmount: number;
     finalAmount: number;
+    passengerAmount: number;
     adjustmentAmount: number;
     plannedDistanceMeters: number;
     travelledDistanceMeters: number;
@@ -1892,7 +1928,7 @@ export class BookingsService {
         booking.paymentAmount,
     );
     const originalAmount =
-      Number.isFinite(storedOriginalAmount) && storedOriginalAmount > 0
+      Number.isFinite(storedOriginalAmount) && storedOriginalAmount >= 0
         ? storedOriginalAmount
         : this.calculateBookingPaymentAmount(
             booking.trip,
@@ -1915,6 +1951,7 @@ export class BookingsService {
         finalAmount: Number(
           booking.grossPaymentAmount ?? booking.paymentAmount ?? originalAmount,
         ),
+        passengerAmount: Number(booking.paymentAmount ?? originalAmount),
         adjustmentAmount: Number(booking.fareAdjustmentAmount),
         plannedDistanceMeters: booking.plannedDistanceMeters,
         travelledDistanceMeters: booking.travelledDistanceMeters,
@@ -1936,16 +1973,10 @@ export class BookingsService {
       return null;
     }
 
-    const plannedDistanceMeters = await this.calculateRouteDistanceMeters(
-      origin,
-      destination,
-      `booking ${booking.id} planned route`,
-    );
-    const rawTravelledDistanceMeters = await this.calculateRouteDistanceMeters(
-      origin,
-      interruptionLocation,
-      `booking ${booking.id} travelled route`,
-    );
+    const [plannedDistanceMeters, rawTravelledDistanceMeters] = await Promise.all([
+      this.calculateRouteDistanceMeters(origin, destination, `booking ${booking.id} planned route`),
+      this.calculateRouteDistanceMeters(origin, interruptionLocation, `booking ${booking.id} travelled route`),
+    ]);
 
     if (
       plannedDistanceMeters === null ||
@@ -1963,16 +1994,17 @@ export class BookingsService {
     const pricePerKilometer = this.roundMoney(
       originalAmount / (plannedDistanceMeters / 1000),
     );
-    const finalAmount = Math.min(
+    const { finalAmount, passengerAmount } = calculateInterruptionFare(
       originalAmount,
-      this.roundMoney(
-        originalAmount * (travelledDistanceMeters / plannedDistanceMeters),
-      ),
+      Number(booking.paymentAmount ?? this.resolveBookingPaymentAmount(booking, booking.trip)),
+      plannedDistanceMeters,
+      travelledDistanceMeters,
     );
 
     return {
       originalAmount,
       finalAmount,
+      passengerAmount,
       adjustmentAmount: this.roundMoney(originalAmount - finalAmount),
       plannedDistanceMeters,
       travelledDistanceMeters,
