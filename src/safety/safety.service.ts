@@ -4,13 +4,17 @@ import { Repository, MoreThan, LessThan, IsNull } from 'typeorm';
 import { EmergencyContact } from './entities/emergency-contact.entity';
 import { SafetyAlert, SafetyAlertType, SafetyAlertStatus } from './entities/safety-alert.entity';
 import { UserReport, ReportReason, ReportStatus } from './entities/user-report.entity';
-import { User, UserRole } from '../users/entities/user.entity';
+import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { isAdminRole } from '../users/user-role.policy';
 import { Trip, TripStatus } from '../trips/entities/trip.entity';
 import { Booking, BookingStatus } from '../bookings/entities/booking.entity';
 import { CreateEmergencyContactDto, UpdateEmergencyContactDto } from './dto/emergency-contact.dto';
 import { CreateSafetyAlertDto, UpdateSafetyAlertStatusDto, UpdateLocationDto } from './dto/safety-alert.dto';
-import { CreateUserReportDto, UpdateReportStatusDto } from './dto/user-report.dto';
+import {
+  CreateUserReportDto,
+  ListAdminUserReportsQueryDto,
+  UpdateReportStatusDto,
+} from './dto/user-report.dto';
 import { NotificationService } from '../notifications/notifications.service';
 import { Cron, CronExpression } from '@nestjs/schedule';
 
@@ -51,6 +55,35 @@ export interface SanitizedUserReport {
   bookingId: string | null;
   createdAt: Date;
   reviewedAt: Date | null;
+}
+
+/**
+ * Le back-office doit nommer les personnes concernees: la version utilisateur
+ * d'un signalement ne transporte que des identifiants.
+ */
+export interface AdminUserReportParty {
+  id: string;
+  firstName: string;
+  lastName: string;
+  phone: string;
+  role: UserRole;
+  status: UserStatus;
+}
+
+export interface AdminUserReport extends SanitizedUserReport {
+  reporter: AdminUserReportParty | null;
+  reportedUser: AdminUserReportParty | null;
+  tripRoute: string | null;
+  adminNotes: string | null;
+  reviewedBy: string | null;
+  updatedAt: Date;
+}
+
+export interface AdminUserReportsPage {
+  reports: AdminUserReport[];
+  total: number;
+  page: number;
+  limit: number;
 }
 
 @Injectable()
@@ -619,6 +652,58 @@ export class SafetyService {
     return reports.map((report) => this.sanitizeUserReport(report));
   }
 
+  /**
+   * Liste destinee au back-office: tous les signalements, filtres et pagines,
+   * avec l'identite des personnes concernees.
+   */
+  async listAdminUserReports(
+    query: ListAdminUserReportsQueryDto = {},
+  ): Promise<AdminUserReportsPage> {
+    const page = Math.max(1, Number(query.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(query.limit) || 20));
+
+    const builder = this.userReportRepository
+      .createQueryBuilder('report')
+      .leftJoinAndSelect('report.reporter', 'reporter')
+      .leftJoinAndSelect('report.reportedUser', 'reportedUser')
+      .leftJoinAndSelect('report.trip', 'trip')
+      .orderBy('report.createdAt', 'DESC')
+      .skip((page - 1) * limit)
+      .take(limit);
+
+    if (query.status) {
+      builder.andWhere('report.status = :status', { status: query.status });
+    }
+
+    if (query.reason) {
+      builder.andWhere('report.reason = :reason', { reason: query.reason });
+    }
+
+    const search = query.search?.trim();
+    if (search) {
+      builder.andWhere(
+        `(
+          reporter."firstName" ILIKE :search
+          OR reporter."lastName" ILIKE :search
+          OR reporter.phone ILIKE :search
+          OR "reportedUser"."firstName" ILIKE :search
+          OR "reportedUser"."lastName" ILIKE :search
+          OR "reportedUser".phone ILIKE :search
+        )`,
+        { search: `%${search}%` },
+      );
+    }
+
+    const [reports, total] = await builder.getManyAndCount();
+
+    return {
+      reports: reports.map((report) => this.sanitizeAdminUserReport(report)),
+      total,
+      page,
+      limit,
+    };
+  }
+
   async findOneUserReport(reportId: string, userId?: string): Promise<SanitizedUserReport> {
     this.logger.debug(`Fetching user report ${reportId}`);
 
@@ -771,6 +856,39 @@ export class SafetyService {
       bookingId: report.bookingId,
       createdAt: report.createdAt,
       reviewedAt: report.reviewedAt,
+    };
+  }
+
+  private sanitizeAdminUserReportParty(
+    user: User | null | undefined,
+  ): AdminUserReportParty | null {
+    if (!user) {
+      return null;
+    }
+
+    return {
+      id: user.id,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      phone: user.phone,
+      role: user.role,
+      status: user.status,
+    };
+  }
+
+  private sanitizeAdminUserReport(report: UserReport): AdminUserReport {
+    const trip = report.trip;
+
+    return {
+      ...this.sanitizeUserReport(report),
+      reporter: this.sanitizeAdminUserReportParty(report.reporter),
+      reportedUser: this.sanitizeAdminUserReportParty(report.reportedUser),
+      tripRoute: trip
+        ? `${trip.departureLocation} → ${trip.arrivalLocation}`
+        : null,
+      adminNotes: report.adminNotes,
+      reviewedBy: report.reviewedBy,
+      updatedAt: report.updatedAt,
     };
   }
 }

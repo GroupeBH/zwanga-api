@@ -146,6 +146,38 @@ interface RecurringTripFutureMeta {
   upcomingGeneratedTripsCount: number;
 }
 
+type TripUpdateSnapshot = {
+  departureLocation: string | null;
+  departureReference: string | null;
+  departurePoint: Coordinates;
+  arrivalLocation: string | null;
+  arrivalReference: string | null;
+  arrivalPoint: Coordinates;
+  departureDate: number | null;
+  totalSeats: number | null;
+  pricePerSeat: number | null;
+  isFree: boolean;
+  requiresPassengerKyc: boolean;
+  description: string | null;
+  vehicleId: string | null;
+};
+
+const TRIP_UPDATE_LABELS: Record<keyof TripUpdateSnapshot, string> = {
+  departureLocation: 'lieu de départ',
+  departureReference: 'repère de départ',
+  departurePoint: 'point GPS de départ',
+  arrivalLocation: 'lieu d’arrivée',
+  arrivalReference: 'repère d’arrivée',
+  arrivalPoint: 'point GPS d’arrivée',
+  departureDate: 'date ou heure de départ',
+  totalSeats: 'nombre de places',
+  pricePerSeat: 'prix',
+  isFree: 'tarification',
+  requiresPassengerKyc: 'exigence de vérification d’identité',
+  description: 'description',
+  vehicleId: 'véhicule',
+};
+
 export type SanitizedRecurringTripTemplate = Omit<
   RecurringTripTemplate,
   'departurePoint' | 'arrivalPoint' | 'vehicle' | 'departureTimeMinutes'
@@ -938,6 +970,8 @@ export class TripsService {
       );
       throw new NotFoundException('Trajet non trouvé');
     }
+    const updateSnapshot = this.getTripUpdateSnapshot(trip);
+
     // For request-linked trips the passenger has already confirmed the fare.
     // Reject changes before geocoding, status transitions or any other writes.
     if (
@@ -977,6 +1011,20 @@ export class TripsService {
         driverId,
         'driver_cancelled_trip',
       );
+    }
+
+    const hasPassengerOnBoard = (trip.bookings ?? []).some(
+      (booking) =>
+        this.hasBookingEmbarked(booking) &&
+        !this.hasBookingBeenDroppedOff(booking),
+    );
+    if (hasPassengerOnBoard) {
+      throw new BadRequestException({
+        error: 'Modification du trajet impossible',
+        code: 'TRIP_UPDATE_BLOCKED_PASSENGER_ON_BOARD',
+        message:
+          'Vous ne pouvez plus modifier les informations du trajet tant qu’un passager est à bord.',
+      });
     }
 
     const {
@@ -1117,7 +1165,7 @@ export class TripsService {
     }
 
     Object.assign(trip, restPayload);
-    const updatedTrip = await this.tripRepository.save(trip);
+    await this.tripRepository.save(trip);
 
     // Invalidate cache
     await this.cacheService.del(CacheService.getTripKey(id));
@@ -1125,8 +1173,112 @@ export class TripsService {
     await this.cacheService.del(CacheService.getTripsListKey('all'));
     await this.cacheService.del(CacheService.getTripsListKey('allTrips'));
 
+    const changedFields = this.getChangedTripFields(updateSnapshot, trip);
+    if (changedFields.length > 0) {
+      await this.notifyAcceptedPassengersAboutTripUpdate(
+        trip,
+        trip.bookings ?? [],
+        changedFields,
+      );
+    }
+
     this.logger.log(`Trip ${id} updated successfully`);
     return this.findOne(id);
+  }
+
+  private getTripUpdateSnapshot(trip: Trip): TripUpdateSnapshot {
+    const departureDate = trip.departureDate
+      ? new Date(trip.departureDate).getTime()
+      : null;
+
+    return {
+      departureLocation: trip.departureLocation ?? null,
+      departureReference: trip.departureReference ?? null,
+      departurePoint: toSafeCoordinates(trip.departurePoint),
+      arrivalLocation: trip.arrivalLocation ?? null,
+      arrivalReference: trip.arrivalReference ?? null,
+      arrivalPoint: toSafeCoordinates(trip.arrivalPoint),
+      departureDate:
+        departureDate !== null && Number.isFinite(departureDate)
+          ? departureDate
+          : null,
+      totalSeats:
+        trip.totalSeats === null || trip.totalSeats === undefined
+          ? null
+          : Number(trip.totalSeats),
+      pricePerSeat:
+        trip.pricePerSeat === null || trip.pricePerSeat === undefined
+          ? null
+          : Number(trip.pricePerSeat),
+      isFree: Boolean(trip.isFree),
+      requiresPassengerKyc: Boolean(trip.requiresPassengerKyc),
+      description: trip.description ?? null,
+      vehicleId: trip.vehicleId ?? null,
+    };
+  }
+
+  private getChangedTripFields(
+    before: TripUpdateSnapshot,
+    trip: Trip,
+  ): Array<keyof TripUpdateSnapshot> {
+    const after = this.getTripUpdateSnapshot(trip);
+    return (Object.keys(before) as Array<keyof TripUpdateSnapshot>).filter(
+      (field) => JSON.stringify(before[field]) !== JSON.stringify(after[field]),
+    );
+  }
+
+  private async notifyAcceptedPassengersAboutTripUpdate(
+    trip: Trip,
+    bookings: Booking[],
+    changedFields: Array<keyof TripUpdateSnapshot>,
+  ): Promise<void> {
+    const acceptedBookingsByPassenger = new Map<string, Booking>();
+    for (const booking of bookings) {
+      if (booking.status === BookingStatus.ACCEPTED) {
+        acceptedBookingsByPassenger.set(booking.passengerId, booking);
+      }
+    }
+    if (acceptedBookingsByPassenger.size === 0) {
+      return;
+    }
+
+    const labels = [
+      ...new Set(changedFields.map((field) => TRIP_UPDATE_LABELS[field])),
+    ];
+    const visibleLabels = labels.slice(0, 3);
+    const remainingCount = labels.length - visibleLabels.length;
+    const changeSummary = `${visibleLabels.join(', ')}${
+      remainingCount > 0
+        ? ` et ${remainingCount} autre${remainingCount > 1 ? 's' : ''} information${remainingCount > 1 ? 's' : ''}`
+        : ''
+    }`;
+    const title = '🚗 Votre trajet a été modifié';
+    const body = `Le conducteur a modifié les informations suivantes : ${changeSummary}. Consultez le trajet ${trip.departureLocation} → ${trip.arrivalLocation}.`;
+
+    const results = await Promise.allSettled(
+      [...acceptedBookingsByPassenger.entries()].map(([passengerId, booking]) =>
+        this.notificationService.sendNotificationToUser(
+          passengerId,
+          title,
+          body,
+          {
+            type: 'trip_updated',
+            role: 'passenger',
+            tripId: trip.id,
+            bookingId: booking.id,
+            changedFields: changedFields.join(','),
+          },
+        ),
+      ),
+    );
+    const failedCount = results.filter(
+      (result) => result.status === 'rejected',
+    ).length;
+    if (failedCount > 0) {
+      this.logger.error(
+        `Failed to notify ${failedCount}/${acceptedBookingsByPassenger.size} passengers about trip ${trip.id} update`,
+      );
+    }
   }
 
   private async cancelTripAfterDriverAbandonment(

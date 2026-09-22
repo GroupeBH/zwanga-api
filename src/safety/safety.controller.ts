@@ -6,6 +6,7 @@ import {
   Delete,
   Body,
   Param,
+  Query,
   UseGuards,
   Request,
   HttpCode,
@@ -16,7 +17,13 @@ import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { SafetyService } from './safety.service';
 import { CreateEmergencyContactDto, UpdateEmergencyContactDto, CreateMultipleEmergencyContactsDto } from './dto/emergency-contact.dto';
 import { CreateSafetyAlertDto, UpdateSafetyAlertStatusDto, UpdateLocationDto } from './dto/safety-alert.dto';
-import { CreateUserReportDto, UpdateReportStatusDto } from './dto/user-report.dto';
+import {
+  CreateUserReportDto,
+  ListAdminUserReportsQueryDto,
+  UpdateReportStatusDto,
+} from './dto/user-report.dto';
+import { Roles } from '../common/decorators/roles.decorator';
+import { UserRole } from '../users/entities/user.entity';
 
 @ApiTags('Safety')
 @Controller('safety')
@@ -129,6 +136,18 @@ export class SafetyController {
   @ApiResponse({ status: 200, description: 'Liste des signalements' })
   async findAllUserReports(@Request() req) {
     return this.safetyService.findAllUserReports(req.user.userId);
+  }
+
+  /* La route utilisateur ne renvoie que ses propres signalements: le
+     back-office a besoin de la vue complete, donc d'une route dediee. */
+  @Get('admin/reports')
+  @Roles(UserRole.ADMIN)
+  @ApiOperation({
+    summary: 'Lister tous les signalements de la plateforme (Admin)',
+  })
+  @ApiResponse({ status: 200, description: 'Liste paginée des signalements' })
+  async listAdminUserReports(@Query() query: ListAdminUserReportsQueryDto) {
+    return this.safetyService.listAdminUserReports(query);
   }
 
   @Get('reports/:id')

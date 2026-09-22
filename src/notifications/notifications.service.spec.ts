@@ -277,3 +277,68 @@ describe('NotificationService critical push reliability', () => {
     );
   });
 });
+
+describe('NotificationService inbox scopes', () => {
+  const buildService = () => {
+    const queryBuilder = {
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      orderBy: jest.fn().mockReturnThis(),
+      take: jest.fn().mockReturnThis(),
+      skip: jest.fn().mockReturnThis(),
+      getManyAndCount: jest.fn().mockResolvedValue([[], 0]),
+      getCount: jest.fn().mockResolvedValue(0),
+    };
+    const notificationRepository = {
+      createQueryBuilder: jest.fn().mockReturnValue(queryBuilder),
+    };
+    const service = new NotificationService(
+      { get: jest.fn() } as any,
+      notificationRepository as any,
+      {} as any,
+      {} as any,
+    );
+
+    return { service, queryBuilder };
+  };
+
+  const conditions = (queryBuilder: { andWhere: jest.Mock }) =>
+    queryBuilder.andWhere.mock.calls.map((call) => String(call[0])).join(' | ');
+
+  it('keeps every active notification when no scope is requested', async () => {
+    const { service, queryBuilder } = buildService();
+
+    await service.findAllByUser('admin-1');
+
+    expect(conditions(queryBuilder)).not.toContain('routineTypes');
+  });
+
+  it('hides routine trip and conversation notifications for the back-office', async () => {
+    const { service, queryBuilder } = buildService();
+
+    await service.findAllByUser('admin-1', { scope: 'critical', limit: 20 });
+
+    const applied = conditions(queryBuilder);
+    expect(applied).toContain('routineTypes');
+    expect(applied).toContain("data ->> 'conversationId' IS NULL");
+
+    const routineTypes = queryBuilder.andWhere.mock.calls
+      .map((call) => call[1] as { routineTypes?: string[] } | undefined)
+      .find((parameters) => parameters?.routineTypes)?.routineTypes;
+    expect(routineTypes).toContain('trip_request');
+    expect(routineTypes).toContain('pickup_confirmed');
+    expect(routineTypes).not.toContain('driver_trip_revenue');
+  });
+
+  it('counts unread notifications within the same scope', async () => {
+    const { service, queryBuilder } = buildService();
+    queryBuilder.getCount.mockResolvedValue(3);
+
+    const result = await service.findAllByUser('admin-1', {
+      scope: 'critical',
+    });
+
+    expect(result.unreadCount).toBe(3);
+    expect(conditions(queryBuilder)).toContain('notification.isRead = false');
+  });
+});

@@ -18,6 +18,7 @@ describe('TripsService daily trip publication quota', () => {
   let vehicleRepository: { findOne: jest.Mock };
   let subscriptionsService: { getPremiumOverview: jest.Mock };
   let cacheService: { del: jest.Mock };
+  let notificationService: { sendNotificationToUser: jest.Mock };
   let driverSettlementsService: { notifyDriverTripRevenue: jest.Mock };
 
   const baseCreateTripDto = {
@@ -55,6 +56,9 @@ describe('TripsService daily trip publication quota', () => {
     cacheService = {
       del: jest.fn().mockResolvedValue(undefined),
     };
+    notificationService = {
+      sendNotificationToUser: jest.fn().mockResolvedValue(true),
+    };
     driverSettlementsService = {
       notifyDriverTripRevenue: jest.fn().mockResolvedValue(null),
     };
@@ -73,7 +77,7 @@ describe('TripsService daily trip publication quota', () => {
       {} as any,
       cacheService as any,
       {} as any,
-      {} as any,
+      notificationService as any,
       {} as any,
       {} as any,
       subscriptionsService as any,
@@ -139,6 +143,173 @@ describe('TripsService daily trip publication quota', () => {
     await service.update(trip.id, trip.driverId, { pricePerSeat: 3500 });
     expect(trip.pricePerSeat).toBe(3500);
     expect(tripRepository.save).toHaveBeenCalledWith(trip);
+  });
+
+  it('blocks trip detail changes while an accepted passenger is on board', async () => {
+    const trip = {
+      id: 'trip-1',
+      driverId: 'driver-1',
+      tripRequestId: null,
+      status: TripStatus.ACTIVE,
+      bookings: [
+        {
+          id: 'booking-on-board',
+          passengerId: 'passenger-1',
+          status: BookingStatus.ACCEPTED,
+          pickedUp: true,
+          droppedOff: false,
+        },
+      ],
+    };
+    tripRepository.findOne.mockResolvedValue(trip);
+
+    await expect(
+      service.update(trip.id, trip.driverId, {
+        description: 'Nouvelle description',
+      }),
+    ).rejects.toMatchObject({
+      response: expect.objectContaining({
+        code: 'TRIP_UPDATE_BLOCKED_PASSENGER_ON_BOARD',
+      }),
+    });
+
+    expect(tripRepository.save).not.toHaveBeenCalled();
+    expect(cacheService.del).not.toHaveBeenCalled();
+    expect(notificationService.sendNotificationToUser).not.toHaveBeenCalled();
+  });
+
+  it('notifies only passengers with an accepted booking when trip details change', async () => {
+    const trip = {
+      id: 'trip-1',
+      driverId: 'driver-1',
+      tripRequestId: null,
+      departureLocation: 'Gombe',
+      departureReference: null,
+      departurePoint: { type: 'Point', coordinates: [15.2663, -4.325] },
+      arrivalLocation: 'Limete',
+      arrivalReference: null,
+      arrivalPoint: { type: 'Point', coordinates: [15.3222, -4.4419] },
+      departureDate: new Date('2026-09-22T08:00:00.000Z'),
+      totalSeats: 3,
+      availableSeats: 1,
+      pricePerSeat: 2000,
+      isFree: false,
+      requiresPassengerKyc: false,
+      description: 'Rendez-vous initial',
+      vehicleId: null,
+      vehicle: null,
+      status: TripStatus.PENDING,
+      bookings: [
+        {
+          id: 'booking-accepted',
+          passengerId: 'passenger-accepted',
+          status: BookingStatus.ACCEPTED,
+        },
+        {
+          id: 'booking-pending',
+          passengerId: 'passenger-pending',
+          status: BookingStatus.PENDING,
+        },
+      ],
+    };
+    tripRepository.findOne.mockResolvedValue(trip);
+
+    await service.update(trip.id, trip.driverId, {
+      departureDate: '2026-09-22T09:00:00.000Z',
+      description: 'Nouveau point de rendez-vous',
+    });
+
+    expect(notificationService.sendNotificationToUser).toHaveBeenCalledTimes(1);
+    expect(notificationService.sendNotificationToUser).toHaveBeenCalledWith(
+      'passenger-accepted',
+      '🚗 Votre trajet a été modifié',
+      expect.stringMatching(/date ou heure de départ.*description/),
+      expect.objectContaining({
+        type: 'trip_updated',
+        role: 'passenger',
+        tripId: 'trip-1',
+        bookingId: 'booking-accepted',
+        changedFields: expect.stringContaining('departureDate'),
+      }),
+    );
+  });
+
+  it('does not notify accepted passengers when submitted values are unchanged', async () => {
+    const trip = {
+      id: 'trip-1',
+      driverId: 'driver-1',
+      tripRequestId: null,
+      departureLocation: 'Gombe',
+      arrivalLocation: 'Limete',
+      departureDate: new Date('2026-09-22T08:00:00.000Z'),
+      totalSeats: 3,
+      availableSeats: 1,
+      pricePerSeat: 2000,
+      isFree: false,
+      requiresPassengerKyc: false,
+      description: 'Rendez-vous initial',
+      vehicleId: null,
+      vehicle: null,
+      status: TripStatus.PENDING,
+      bookings: [
+        {
+          id: 'booking-accepted',
+          passengerId: 'passenger-accepted',
+          status: BookingStatus.ACCEPTED,
+        },
+      ],
+    };
+    tripRepository.findOne.mockResolvedValue(trip);
+
+    await service.update(trip.id, trip.driverId, {
+      departureDate: '2026-09-22T08:00:00.000Z',
+      pricePerSeat: 2000,
+      description: 'Rendez-vous initial',
+    });
+
+    expect(notificationService.sendNotificationToUser).not.toHaveBeenCalled();
+  });
+
+  it('keeps the trip update successful when a passenger notification fails', async () => {
+    notificationService.sendNotificationToUser.mockRejectedValueOnce(
+      new Error('Push provider unavailable'),
+    );
+    const trip = {
+      id: 'trip-1',
+      driverId: 'driver-1',
+      tripRequestId: null,
+      departureLocation: 'Gombe',
+      arrivalLocation: 'Limete',
+      departureDate: new Date('2026-09-22T08:00:00.000Z'),
+      totalSeats: 3,
+      availableSeats: 1,
+      pricePerSeat: 2000,
+      isFree: false,
+      requiresPassengerKyc: false,
+      description: 'Rendez-vous initial',
+      vehicleId: null,
+      vehicle: null,
+      status: TripStatus.PENDING,
+      bookings: [
+        {
+          id: 'booking-accepted',
+          passengerId: 'passenger-accepted',
+          status: BookingStatus.ACCEPTED,
+        },
+      ],
+    };
+    tripRepository.findOne.mockResolvedValue(trip);
+
+    await expect(
+      service.update(trip.id, trip.driverId, {
+        description: 'Nouveau point de rendez-vous',
+      }),
+    ).resolves.toEqual({ id: 'trip-1' });
+    expect(tripRepository.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        description: 'Nouveau point de rendez-vous',
+      }),
+    );
   });
 
   it('persists driver samples with a timestamp compare-and-set shared by REST and Socket.IO', async () => {

@@ -43,6 +43,14 @@ export class DriverSettlementsController {
     );
   }
 
+  @Get('bookings/:bookingId/revenue-summary')
+  @Auth()
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'Afficher le gain du conducteur pour une réservation après dépose' })
+  async getBookingRevenueSummary(@Request() req, @Param('bookingId') bookingId: string) {
+    return this.driverSettlementsService.getBookingRevenueSummary(req.user.userId, bookingId);
+  }
+
   @Get('payouts')
   @Auth()
   @SensitiveThrottle(30, 60000)

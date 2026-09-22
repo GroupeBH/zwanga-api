@@ -59,10 +59,16 @@ export interface DriverTripRevenueSummary {
   ledgerVerified: true;
   cashToCollectAmount: number;
   electronicPendingAmount: number;
+  pointsPendingAmount: number;
   zwangaSubsidyAmount: number;
   totalExpectedAmount: number;
   completedBookings: number;
   generatedAt: string;
+}
+
+export interface DriverBookingRevenueSummary extends DriverTripRevenueSummary {
+  bookingId: string;
+  dropoffConfirmed: boolean;
 }
 
 export type DriverPayoutResponse = DriverPayout & {
@@ -171,6 +177,25 @@ export class DriverSettlementsService {
     return this.buildTripRevenueSummary(trip, bookings, earnings);
   }
 
+  async getBookingRevenueSummary(driverId: string, bookingId: string): Promise<DriverBookingRevenueSummary> {
+    const booking = await this.bookingRepository.findOne({
+      where: { id: bookingId, trip: { driverId } },
+      relations: ['trip'],
+    });
+    if (!booking || booking.trip?.driverId !== driverId) {
+      throw new NotFoundException('Réservation introuvable pour ce conducteur');
+    }
+    // Read only this booking and its persisted ledger, never the whole trip total.
+    const earnings = await this.earningRepository.find({
+      where: { bookingId, driverId, tripId: booking.tripId },
+    });
+    return {
+      ...this.buildTripRevenueSummary(booking.trip, [booking], earnings),
+      bookingId: booking.id,
+      dropoffConfirmed: this.hasCompletedRide(booking),
+    };
+  }
+
   async notifyDriverTripRevenue(
     driverId: string,
     tripId: string,
@@ -195,6 +220,7 @@ export class DriverSettlementsService {
           ledgerVerified: summary.ledgerVerified,
           cashToCollectAmount: summary.cashToCollectAmount,
           electronicPendingAmount: summary.electronicPendingAmount,
+          pointsPendingAmount: summary.pointsPendingAmount,
           zwangaSubsidyAmount: summary.zwangaSubsidyAmount,
           totalExpectedAmount: summary.totalExpectedAmount,
         },
@@ -223,6 +249,7 @@ export class DriverSettlementsService {
     const earningsByBooking = new Map(earnings.map((earning) => [earning.bookingId, earning]));
     let cashToCollectAmount = 0;
     let electronicPendingAmount = 0;
+    let pointsPendingAmount = 0;
     let zwangaSubsidyAmount = 0;
     let completedBookings = 0;
 
@@ -257,6 +284,8 @@ export class DriverSettlementsService {
         creditPendingAmount += netAmount;
       } else if (!earning && booking.paymentMode === TripPaymentMode.ELECTRONIC) {
         electronicPendingAmount += netAmount;
+      } else if (!earning && booking.paymentMode === TripPaymentMode.POINTS) {
+        pointsPendingAmount += netAmount;
       }
     }
 
@@ -265,6 +294,7 @@ export class DriverSettlementsService {
     creditPendingAmount = this.roundMoney(creditPendingAmount);
     cashToCollectAmount = this.roundMoney(cashToCollectAmount);
     electronicPendingAmount = this.roundMoney(electronicPendingAmount);
+    pointsPendingAmount = this.roundMoney(pointsPendingAmount);
     zwangaSubsidyAmount = this.roundMoney(zwangaSubsidyAmount);
 
     return {
@@ -277,9 +307,10 @@ export class DriverSettlementsService {
       ledgerVerified: true,
       cashToCollectAmount,
       electronicPendingAmount,
+      pointsPendingAmount,
       zwangaSubsidyAmount,
       totalExpectedAmount: this.roundMoney(
-        confirmedAmount + creditPendingAmount + cashToCollectAmount + electronicPendingAmount,
+        confirmedAmount + creditPendingAmount + cashToCollectAmount + electronicPendingAmount + pointsPendingAmount,
       ),
       completedBookings,
       generatedAt: new Date().toISOString(),
@@ -303,13 +334,14 @@ export class DriverSettlementsService {
       booking.grossPaymentAmount !== null &&
       booking.grossPaymentAmount !== undefined &&
       Number.isFinite(persistedGrossAmount) &&
-      persistedGrossAmount > 0
+      persistedGrossAmount >= 0
     ) {
       return this.roundMoney(persistedGrossAmount);
     }
 
     const persistedAmount = Number(booking.paymentAmount);
-    if (Number.isFinite(persistedAmount) && persistedAmount > 0) {
+    if (booking.paymentAmount !== null && booking.paymentAmount !== undefined &&
+        Number.isFinite(persistedAmount) && persistedAmount >= 0) {
       return this.roundMoney(persistedAmount);
     }
 
@@ -385,6 +417,9 @@ export class DriverSettlementsService {
       parts.push(
         `${this.formatMoney(summary.electronicPendingAmount)} ${summary.currency} en attente du paiement électronique`,
       );
+    }
+    if (summary.pointsPendingAmount > 0) {
+      parts.push(`${this.formatMoney(summary.pointsPendingAmount)} ${summary.currency} en attente du paiement en jetons`);
     }
     if (summary.zwangaSubsidyAmount > 0) {
       parts.push(
