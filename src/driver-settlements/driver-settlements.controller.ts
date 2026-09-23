@@ -1,4 +1,5 @@
-import { Body, Controller, Get, Param, Post, Request } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query, Request } from '@nestjs/common';
+import { HistoryPageDto } from '../common/pagination/history-page';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Auth } from '../auth/decorators/auth.decorator';
 import { Public } from '../common/decorators/public.decorator';
@@ -28,6 +29,20 @@ export class DriverSettlementsController {
   @ApiOperation({ summary: 'Get current driver earnings' })
   async getMyEarnings(@Request() req) {
     return this.driverSettlementsService.findDriverEarnings(req.user.userId);
+  }
+
+  @Get('earnings/page')
+  @Auth()
+  @SensitiveThrottle(60, 60000)
+  getMyEarningsPage(@Request() req, @Query() options: HistoryPageDto) {
+    return this.driverSettlementsService.findDriverEarningsPage(req.user.userId, options);
+  }
+
+  @Get('payouts/page')
+  @Auth()
+  @SensitiveThrottle(60, 60000)
+  getMyPayoutsPage(@Request() req, @Query() options: HistoryPageDto) {
+    return this.driverSettlementsService.findDriverPayoutsPage(req.user.userId, options);
   }
 
   @Get('trips/:tripId/revenue-summary')

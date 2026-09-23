@@ -44,7 +44,7 @@ describe('cursor-based conversation history', () => {
 
   it('returns an empty final page and bounds the limit defensively', async () => {
     const app = fixture(0);
-    expect(await loadMessagePage(app.repo, 'conversation', { limit: 10000 })).toEqual({ data: [], nextCursor: null });
+    expect(await loadMessagePage(app.repo, 'conversation', { limit: 10000 })).toEqual({ data: [], nextCursor: null, previousCursor: null, newestCursor: null });
     expect(app.query.take).toHaveBeenCalledWith(101);
   });
 
@@ -63,6 +63,26 @@ describe('cursor-based conversation history', () => {
       ensureUserInConversation: jest.fn().mockRejectedValue(new ForbiddenException()),
     });
     await expect(service.getConversationMessagePage('conversation', 'stranger', {})).rejects.toBeInstanceOf(ForbiddenException);
+    expect(app.repository.createQueryBuilder).not.toHaveBeenCalled();
+  });
+
+  it('allows bounded backwards navigation after eviction, using the exact timestamp boundary', async () => {
+    const app = fixture(51);
+    // The database returns ASC when reading towards newer messages.
+    app.entities.reverse();
+    const after = Buffer.from(JSON.stringify({ at, id: id(1) })).toString('base64url');
+    const page = await loadMessagePage(app.repo, 'conversation', { after });
+    expect(app.query.orderBy).toHaveBeenCalledWith('message.createdAt', 'ASC');
+    expect(app.query.andWhere).toHaveBeenCalledWith('(message.createdAt, message.id) > (:at::timestamp, :id::uuid)', { at, id: id(1) });
+    expect(page.data).toHaveLength(50);
+    expect(page.data[0].id).toBe(id(50));
+    expect(page.previousCursor).toBe(page.newestCursor);
+    expect(page.nextCursor).toBeTruthy();
+  });
+
+  it('rejects ambiguous paging directions before reading messages', async () => {
+    const app = fixture(0);
+    await expect(loadMessagePage(app.repo, 'conversation', { before: 'x', after: 'y' })).rejects.toBeInstanceOf(BadRequestException);
     expect(app.repository.createQueryBuilder).not.toHaveBeenCalled();
   });
 });

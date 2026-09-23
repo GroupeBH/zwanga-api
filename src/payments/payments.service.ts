@@ -26,6 +26,9 @@ import { formatPaymentLogPayload } from './payment-log.util';
 import { getPayoutFailureMessage, PAYOUT_MESSAGES } from './payout-policy';
 import { hasVerifiedWalletTopUpProof } from './wallet-topup-proof';
 import { assertWalletTopUpCheckEvidence } from './wallet-topup-check-evidence';
+import { loadPaymentHistoryPage, loadPaymentHistorySummary } from './payment-history-page';
+import { loadPaymentContext, PaymentContextDto } from './payment-context';
+import type { PaymentHistoryPageDto } from '../common/pagination/history-page';
 
 export interface InitiatePaymentInput {
   userId?: string | null;
@@ -485,6 +488,20 @@ export class PaymentsService {
       where: { userId },
       order: { createdAt: 'DESC' },
     });
+  }
+
+  async findUserTransactionPage(userId: string, options: PaymentHistoryPageDto) {
+    const page = await loadPaymentHistoryPage(this.paymentTransactionRepository, userId, options);
+    return { ...page, data: page.data.map(transaction => this.formatPaymentHistoryForClient(transaction)) };
+  }
+
+  async findUserPaymentContext(userId: string, context: PaymentContextDto) {
+    const transactions = await loadPaymentContext(this.paymentTransactionRepository, userId, context);
+    return transactions.map(transaction => this.formatPaymentHistoryForClient(transaction));
+  }
+
+  getUserTransactionSummary(userId: string) {
+    return loadPaymentHistorySummary(this.paymentTransactionRepository, userId);
   }
 
   async findTransactionById(

@@ -37,6 +37,7 @@ import {
 import { RequestDriverPayoutDto } from './dto/driver-settlement.dto';
 import { getPayoutFailureMessage, normalizePayoutPhone, PAYOUT_MESSAGES } from '../payments/payout-policy';
 import { settleCashSubsidy } from './cash-subsidy-settlement';
+import { loadHistoryPage, type HistoryPageDto } from '../common/pagination/history-page';
 
 export interface DriverSettlementSummary {
   availableBalance: number;
@@ -145,6 +146,18 @@ export class DriverSettlementsService {
       where: { driverId },
       order: { createdAt: 'DESC' },
     });
+  }
+
+  findDriverEarningsPage(driverId: string, options: HistoryPageDto) {
+    return loadHistoryPage(this.earningRepository.createQueryBuilder('entry')
+      .where('entry.driverId = :driverId', { driverId }), options, 'COALESCE(entry.availableAt, entry.createdAt)');
+  }
+
+  async findDriverPayoutsPage(driverId: string, options: HistoryPageDto) {
+    const page = await loadHistoryPage(this.payoutRepository.createQueryBuilder('entry')
+      .leftJoinAndSelect('entry.paymentTransaction', 'paymentTransaction')
+      .where('entry.driverId = :driverId', { driverId }), options);
+    return { ...page, data: page.data.map(payout => this.formatPayoutForClient(payout)) };
   }
 
   async findDriverPayouts(driverId: string): Promise<DriverPayoutResponse[]> {

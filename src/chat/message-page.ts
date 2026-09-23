@@ -16,19 +16,24 @@ export function decodeMessageCursor(value?: string) {
 
 export async function loadMessagePage(repository: Repository<Message>, conversationId: string, options: MessagePageDto) {
   const limit = Math.min(100, Math.max(1, options.limit ?? 50));
-  const cursor = decodeMessageCursor(options.before);
+  if (options.before && options.after) throw new BadRequestException('Choisissez une seule direction de pagination.');
+  const newer = Boolean(options.after);
+  const cursor = decodeMessageCursor(options.before ?? options.after);
   const query = repository.createQueryBuilder('message')
     .where('message.conversationId = :conversationId', { conversationId })
     // Preserve PostgreSQL microseconds in the cursor; JS Date only preserves milliseconds.
     .addSelect(`to_char(message.createdAt, 'YYYY-MM-DD"T"HH24:MI:SS.US')`, 'cursorTime')
-    .orderBy('message.createdAt', 'DESC').addOrderBy('message.id', 'DESC').take(limit + 1);
-  if (cursor) query.andWhere('(message.createdAt, message.id) < (:at::timestamp, :id::uuid)', cursor);
+    .orderBy('message.createdAt', newer ? 'ASC' : 'DESC').addOrderBy('message.id', newer ? 'ASC' : 'DESC').take(limit + 1);
+  if (cursor) query.andWhere(`(message.createdAt, message.id) ${newer ? '>' : '<'} (:at::timestamp, :id::uuid)`, cursor);
   const { entities, raw } = await query.getRawAndEntities();
-  const data = entities.slice(0, limit);
-  const last = data.at(-1);
+  const rows = entities.slice(0, limit).map((message, index) => ({ message,
+    cursor: Buffer.from(JSON.stringify({ at: raw[index].cursorTime, id: message.id })).toString('base64url') }));
+  if (newer) rows.reverse();
+  const data = rows.map(row => row.message);
   return {
     data,
-    nextCursor: entities.length > limit && last
-      ? Buffer.from(JSON.stringify({ at: raw[limit - 1].cursorTime, id: last.id })).toString('base64url') : null,
+    newestCursor: rows[0]?.cursor ?? null,
+    nextCursor: (newer || entities.length > limit) ? rows.at(-1)?.cursor ?? null : null,
+    previousCursor: (options.before || (newer && entities.length > limit)) ? rows[0]?.cursor ?? null : null,
   };
 }

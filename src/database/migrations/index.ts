@@ -1,4 +1,5 @@
 import { FillTotalSeats1780000000000 } from './1780000000000-FillTotalSeats';
+import { AddFinancialHistoryIndexes1780000040000 } from './1780000040000-AddFinancialHistoryIndexes';
 import { PreventMultipleActiveDriverTrips1780000001000 } from './1780000001000-PreventMultipleActiveDriverTrips';
 import { AddAppleIdToUsers1780000002000 } from './1780000002000-AddAppleIdToUsers';
 import { AddBookingPayments1780000003000 } from './1780000003000-AddBookingPayments';
@@ -79,4 +80,5 @@ export const databaseMigrations = [
   AddTripLoyaltyAndCashSubsidyEarnings1780000037000,
   AddPurchasedTokenWithdrawals1780000038000,
   AddCashReceipts1780000039000,
+  AddFinancialHistoryIndexes1780000040000,
 ];
