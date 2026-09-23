@@ -1359,7 +1359,9 @@ export class BookingsService {
     const cacheKey = activityOnly
       ? CacheService.getBookingsByPassengerActivityKey(passengerId)
       : CacheService.getBookingsByPassengerKey(passengerId);
-    const cached = await this.cacheService.get<Booking[]>(cacheKey);
+    // The activity revision is read directly from the DB. Never acknowledge that
+    // revision with an older Redis list (which would otherwise remain stale forever).
+    const cached = activityOnly ? undefined : await this.cacheService.get<Booking[]>(cacheKey);
 
     if (cached) {
       this.logger.debug(
@@ -1376,7 +1378,7 @@ export class BookingsService {
 
     await this.attachActiveInterruptionRequestsToBookings(bookings);
     await attachBookingRoutePreviews(this.cacheService, bookings);
-    await this.cacheService.set(cacheKey, bookings, this.CACHE_TTL);
+    if (!activityOnly) await this.cacheService.set(cacheKey, bookings, this.CACHE_TTL);
     this.logger.debug(
       `Fetched ${bookings.length} bookings from database for passenger ${passengerId}`,
     );
@@ -2477,7 +2479,7 @@ export class BookingsService {
       );
     }
 
-    if (booking.paymentStatus === BookingPaymentStatus.SUCCEEDED) {
+    if (booking.cashReceivedAt || booking.paymentStatus === BookingPaymentStatus.SUCCEEDED) {
       throw new BadRequestException(
         'Impossible de changer un paiement déjà confirmé',
       );

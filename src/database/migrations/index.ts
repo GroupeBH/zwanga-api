@@ -37,6 +37,8 @@ import { AddRideHistoryIndexes1780000036000 } from './1780000036000-AddRideHisto
 import { AddTripLoyaltyAndCashSubsidyEarnings1780000037000 } from './1780000037000-AddTripLoyaltyAndCashSubsidyEarnings';
 import { AddPurchasedTokenWithdrawals1780000038000 } from './1780000038000-AddPurchasedTokenWithdrawals';
 
+import { AddCashReceipts1780000039000 } from './1780000039000-AddCashReceipts';
+
 export const databaseMigrations = [
   FillTotalSeats1780000000000,
   PreventMultipleActiveDriverTrips1780000001000,
@@ -76,4 +78,5 @@ export const databaseMigrations = [
   AddRideHistoryIndexes1780000036000,
   AddTripLoyaltyAndCashSubsidyEarnings1780000037000,
   AddPurchasedTokenWithdrawals1780000038000,
+  AddCashReceipts1780000039000,
 ];

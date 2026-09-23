@@ -4,6 +4,8 @@ import { RideDeclarationsService } from '../ride-declarations/ride-declarations.
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { BookingsService } from './bookings.service';
 import { BookingsController } from './bookings.controller';
+import { CashReceiptsController } from './cash-receipts.controller';
+import { CashReceiptsService } from './cash-receipts.service';
 import { Booking } from './entities/booking.entity';
 import { Trip } from '../trips/entities/trip.entity';
 import { User } from '../users/entities/user.entity';
@@ -40,8 +42,8 @@ import {
     DriverSettlementsModule,
     ReferralsModule,
   ],
-  controllers: [BookingsController, RideDeclarationsController],
-  providers: [BookingsService, RideDeclarationsService],
+  controllers: [BookingsController, RideDeclarationsController, CashReceiptsController],
+  providers: [BookingsService, RideDeclarationsService, CashReceiptsService],
   exports: [BookingsService],
 })
 export class BookingsModule {}
