@@ -1,9 +1,9 @@
-name: Deploy NestJS to AWS App Runner
+name: Deploy NestJS to AWS ECS Fargate
 
 on:
   push:
     branches:
-      - main
+      - release
   workflow_dispatch:
 
 permissions:
@@ -11,24 +11,37 @@ permissions:
   contents: read
 
 concurrency:
-  group: aws-apprunner-production
+  group: aws-ecs-fargate-production
   cancel-in-progress: false
 
 env:
   AWS_REGION: ${{ vars.AWS_REGION }}
   AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
   ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
-  APP_RUNNER_SERVICE_ARN: ${{ vars.APP_RUNNER_SERVICE_ARN }}
+  ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
+  ECS_SERVICE: ${{ vars.ECS_SERVICE }}
+  ECS_APP_CONTAINER: api
+  DEPLOY_BRANCH: release
 
 jobs:
   test-build-deploy:
     name: Test, publish and deploy
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Native ARM64 runner: avoids QEMU emulation crashes while building
+    # the linux/arm64 image used by the ECS Fargate Graviton task.
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
 
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate infrastructure documentation
+        env:
+          BASE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: bash infra-aws/scripts/check-infra-documentation.sh "${BASE_SHA}" "${HEAD_SHA}"
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -49,17 +62,25 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          if [[ "${GITHUB_REF}" != "refs/heads/${DEPLOY_BRANCH}" ]]; then
+            echo "This production workflow must run from refs/heads/${DEPLOY_BRANCH}, but got ${GITHUB_REF}."
+            echo "Run it from the ${DEPLOY_BRANCH} branch or update Terraform github_branch and DEPLOY_BRANCH together."
+            exit 1
+          fi
           : "${AWS_REGION:?Configure the AWS_REGION repository variable}"
           : "${AWS_ROLE_ARN:?Configure the AWS_ROLE_ARN repository variable}"
           : "${ECR_REPOSITORY:?Configure the ECR_REPOSITORY repository variable}"
-          : "${APP_RUNNER_SERVICE_ARN:?Configure the APP_RUNNER_SERVICE_ARN repository variable}"
+          : "${ECS_CLUSTER:?Configure the ECS_CLUSTER repository variable}"
+          : "${ECS_SERVICE:?Configure the ECS_SERVICE repository variable}"
 
       - name: Configure temporary AWS credentials through OIDC
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6.2.3
         with:
           role-to-assume: ${{ env.AWS_ROLE_ARN }}
           role-session-name: GitHubActions-${{ github.run_id }}
           aws-region: ${{ env.AWS_REGION }}
+          audience: sts.amazonaws.com
+          allowed-account-ids: "046374119247"
 
       - name: Log in to Amazon ECR
         id: ecr-login
@@ -76,63 +97,154 @@ jobs:
           file: ./Dockerfile
           target: production
           push: true
-          platforms: linux/amd64
+          platforms: linux/arm64
           tags: |
             ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}
             ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
-          # Keep a single-image manifest: App Runner does not need BuildKit
-          # attestation manifests to deploy this linux/amd64 image.
           provenance: false
           sbom: false
 
-      - name: Start App Runner deployment
+      - name: Run TypeORM migrations on ECS
+        id: migrations
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          service_json="$(aws ecs describe-services \
+            --cluster "${ECS_CLUSTER}" \
+            --services "${ECS_SERVICE}" \
+            --query 'services[0]' \
+            --output json)"
+
+          task_definition="$(jq -r '.taskDefinition' <<< "${service_json}")"
+          assign_public_ip="$(jq -r '.networkConfiguration.awsvpcConfiguration.assignPublicIp' <<< "${service_json}")"
+          subnets="$(jq -r '.networkConfiguration.awsvpcConfiguration.subnets | join(",")' <<< "${service_json}")"
+          security_groups="$(jq -r '.networkConfiguration.awsvpcConfiguration.securityGroups | join(",")' <<< "${service_json}")"
+
+          if [[ -z "${task_definition}" || "${task_definition}" == "null" ]]; then
+            echo "Unable to resolve ECS task definition from service ${ECS_SERVICE}."
+            exit 1
+          fi
+
+          network_configuration="awsvpcConfiguration={subnets=[${subnets}],securityGroups=[${security_groups}],assignPublicIp=${assign_public_ip}}"
+          overrides="$(jq -nc \
+            --arg container "${ECS_APP_CONTAINER}" \
+            '{containerOverrides:[{name:$container,command:["sh","-c","npm run database:assert-bootstrap:prod && npm run migration:run:prod"]}]}')"
+
+          run_task_output="$(aws ecs run-task \
+            --cluster "${ECS_CLUSTER}" \
+            --launch-type FARGATE \
+            --task-definition "${task_definition}" \
+            --network-configuration "${network_configuration}" \
+            --overrides "${overrides}" \
+            --output json)"
+
+          migration_task_arn="$(jq -r '.tasks[0].taskArn // empty' <<< "${run_task_output}")"
+          if [[ -z "${migration_task_arn}" ]]; then
+            echo "Failed to start migration task:"
+            echo "${run_task_output}"
+            exit 1
+          fi
+
+          echo "migration_task_arn=${migration_task_arn}" >> "${GITHUB_OUTPUT}"
+          echo "Started migration task: ${migration_task_arn}"
+
+          print_migration_logs() {
+            local task_id="${migration_task_arn##*/}"
+            local name_prefix="${ECS_CLUSTER%-cluster}"
+            local log_group="/ecs/${name_prefix}/${ECS_APP_CONTAINER}"
+            local log_stream_prefix="${ECS_APP_CONTAINER}/${ECS_APP_CONTAINER}/${task_id}"
+
+            echo "::group::CloudWatch logs for migration task"
+            echo "Log group: ${log_group}"
+            echo "Log stream prefix: ${log_stream_prefix}"
+
+            if ! log_events="$(aws logs get-log-events \
+              --log-group-name "${log_group}" \
+              --log-stream-name "${log_stream_prefix}" \
+              --limit 100 \
+              --output json 2>&1)"; then
+              echo "Unable to fetch CloudWatch logs:"
+              echo "${log_events}"
+              echo "::endgroup::"
+              return 0
+            fi
+
+            if ! jq -e '.events | length > 0' <<< "${log_events}" >/dev/null; then
+              echo "No CloudWatch log event found for this migration task yet."
+              echo "::endgroup::"
+              return 0
+            fi
+
+            jq -r '.events[] | .message' <<< "${log_events}"
+            echo "::endgroup::"
+          }
+
+          aws ecs wait tasks-stopped \
+            --cluster "${ECS_CLUSTER}" \
+            --tasks "${migration_task_arn}"
+
+          task_result="$(aws ecs describe-tasks \
+            --cluster "${ECS_CLUSTER}" \
+            --tasks "${migration_task_arn}" \
+            --output json)"
+
+          exit_code="$(jq -r \
+            --arg container "${ECS_APP_CONTAINER}" \
+            '.tasks[0].containers[] | select(.name == $container) | .exitCode // empty' \
+            <<< "${task_result}")"
+          stopped_reason="$(jq -r '.tasks[0].stoppedReason // ""' <<< "${task_result}")"
+
+          if [[ "${exit_code}" != "0" ]]; then
+            echo "Migration task failed with exit code: ${exit_code:-unknown}"
+            echo "Stopped reason: ${stopped_reason}"
+            print_migration_logs
+            echo "${task_result}"
+            exit 1
+          fi
+
+          echo "Migrations completed successfully."
+
+      - name: Force ECS deployment
         id: deploy
         shell: bash
         run: |
           set -euo pipefail
-          operation_id="$(aws apprunner start-deployment \
-            --service-arn "${APP_RUNNER_SERVICE_ARN}" \
-            --query 'OperationId' \
-            --output text)"
-          echo "operation_id=${operation_id}" >> "${GITHUB_OUTPUT}"
 
-      - name: Wait for App Runner
+          deployment_id="$(aws ecs update-service \
+            --cluster "${ECS_CLUSTER}" \
+            --service "${ECS_SERVICE}" \
+            --force-new-deployment \
+            --query 'service.deployments[?status==`PRIMARY`].id | [0]' \
+            --output text)"
+
+          echo "deployment_id=${deployment_id}" >> "${GITHUB_OUTPUT}"
+
+      - name: Wait for ECS stability
         shell: bash
         run: |
           set -euo pipefail
 
-          for attempt in $(seq 1 60); do
-            status="$(aws apprunner describe-service \
-              --service-arn "${APP_RUNNER_SERVICE_ARN}" \
-              --query 'Service.Status' \
-              --output text)"
+          aws ecs wait services-stable \
+            --cluster "${ECS_CLUSTER}" \
+            --services "${ECS_SERVICE}"
 
-            echo "App Runner status: ${status} (attempt ${attempt}/60)"
-            case "${status}" in
-              RUNNING)
-                exit 0
-                ;;
-              OPERATION_IN_PROGRESS)
-                sleep 10
-                ;;
-              *)
-                echo "Unexpected App Runner status: ${status}"
-                exit 1
-                ;;
-            esac
-          done
-
-          echo "App Runner deployment did not finish within 10 minutes"
-          exit 1
+          aws ecs describe-services \
+            --cluster "${ECS_CLUSTER}" \
+            --services "${ECS_SERVICE}" \
+            --query 'services[0].{status:status,running:runningCount,desired:desiredCount,deployments:deployments[*].{id:id,status:status,rolloutState:rolloutState}}'
 
       - name: Publish deployment summary
         shell: bash
         run: |
           {
-            echo "### AWS App Runner deployment"
+            echo "### AWS ECS Fargate deployment"
             echo "- Image digest: \`${{ steps.docker-build.outputs.digest }}\`"
             echo "- Commit tag: \`${GITHUB_SHA}\`"
-            echo "- Operation: \`${{ steps.deploy.outputs.operation_id }}\`"
+            echo "- Migration task: \`${{ steps.migrations.outputs.migration_task_arn }}\`"
+            echo "- ECS cluster: \`${ECS_CLUSTER}\`"
+            echo "- ECS service: \`${ECS_SERVICE}\`"
+            echo "- Deployment: \`${{ steps.deploy.outputs.deployment_id }}\`"
           } >> "${GITHUB_STEP_SUMMARY}"

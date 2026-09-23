@@ -12,6 +12,8 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { TripsService } from './trips.service';
+import { HistoryPageQuery } from '../common/history-page';
+import { BookingsService } from '../bookings/bookings.service';
 import {
   CreateTripDto,
   CreateRecurringTripDto,
@@ -23,6 +25,8 @@ import {
 } from './dto/trip.dto';
 import {
   ConfirmDriverTripInterruptionDto,
+  DriverInterruptionFareQueryDto,
+  DriverInterruptionDecisionDto,
   RejectTripInterruptionDto,
   RequestTripInterruptionDto,
 } from './dto/trip-interruption.dto';
@@ -33,7 +37,10 @@ import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decor
 @ApiTags('Trips')
 @Controller('trips')
 export class TripsController {
-  constructor(private readonly tripsService: TripsService) {}
+  constructor(
+    private readonly tripsService: TripsService,
+    private readonly bookingsService: BookingsService,
+  ) {}
 
   @Post()
   @Auth()
@@ -105,8 +112,15 @@ export class TripsController {
   @Auth()
   @SensitiveThrottle(20, 6000)
   @ApiOperation({ summary: 'Get trips created by current user' })
-  async findMyTrips(@Request() req) {
-    return this.tripsService.findByDriver(req.user.userId);
+  async findMyTrips(@Request() req, @Query('scope') scope?: string) {
+    return this.tripsService.findByDriver(req.user.userId, scope === 'activity');
+  }
+
+  @Get('my-trips/history')
+  @Auth()
+  @SensitiveThrottle(60, 60000)
+  async history(@Request() req, @Query() query: HistoryPageQuery) {
+    return this.tripsService.findDriverHistory(req.user.userId, query);
   }
 
   @Post('recurring')
@@ -115,7 +129,7 @@ export class TripsController {
   @ApiOperation({
     summary: 'Create a recurring trip template',
     description:
-      'Permet a un conducteur de creer un schema recurrent et de generer automatiquement les prochaines occurrences.',
+      'Permet à un conducteur de créer un schéma récurrent et de générer automatiquement les prochaines occurrences.',
   })
   async createRecurring(
     @Request() req,
@@ -169,7 +183,7 @@ export class TripsController {
     @Param('id') id: string,
     @Body() dto: UpdateDriverLocationDto,
   ) {
-    return this.tripsService.updateDriverLocation(
+    const location = await this.tripsService.updateDriverLocation(
       req.user.userId,
       id,
       dto.coordinates,
@@ -180,6 +194,9 @@ export class TripsController {
         recordedAt: dto.recordedAt,
       },
     );
+    const autoProgress =
+      await this.bookingsService.evaluateAutomaticRideProgressForTrip(id);
+    return { ...location, autoProgress };
   }
 
   @Get(':id/driver-location')
@@ -203,7 +220,7 @@ export class TripsController {
   @ApiOperation({
     summary: 'Update a trip',
     description:
-      "Permet de modifier un trajet existant, y compris l'adresse de depart et/ou d'arrivee.",
+      "Permet de modifier un trajet existant, y compris l'adresse de départ et/ou d'arrivée.",
   })
   async update(
     @Request() req,
@@ -248,6 +265,20 @@ export class TripsController {
     return this.tripsService.pauseTrip(id, req.user.userId);
   }
 
+  @Get(':id/interruption-request/fare')
+  @Auth()
+  @SensitiveThrottle(20, 60000)
+  async interruptionFare(@Param('id') id: string, @Request() req, @Query() dto: DriverInterruptionFareQueryDto) {
+    return this.tripsService.getDriverInterruptionFare(id, req.user.userId, dto);
+  }
+
+  @Put(':id/interruption-request/decision')
+  @Auth()
+  @SensitiveThrottle(20, 60000)
+  async interruptionDecision(@Param('id') id: string, @Request() req, @Body() dto: DriverInterruptionDecisionDto) {
+    return this.tripsService.decideDriverInterruption(id, req.user.userId, dto);
+  }
+
   @Post(':id/interruption-request')
   @Auth()
   @SensitiveThrottle(10, 6000)
@@ -272,10 +303,7 @@ export class TripsController {
   @SensitiveThrottle(10, 6000)
   @ApiOperation({ summary: 'Cancel a pending driver interruption request' })
   async cancelTripInterruption(@Request() req, @Param('id') id: string) {
-    return this.tripsService.cancelDriverTripInterruption(
-      id,
-      req.user.userId,
-    );
+    return this.tripsService.cancelDriverTripInterruption(id, req.user.userId);
   }
 
   @Put(':id/interruption-request/confirm')
@@ -319,6 +347,7 @@ export class TripsController {
   @SensitiveThrottle(10, 6000)
   @ApiOperation({ summary: 'Complete/end an active trip (driver only)' })
   async completeTrip(@Request() req, @Param('id') id: string) {
+    await this.bookingsService.evaluateAutomaticRideProgressForTrip(id);
     return this.tripsService.completeTrip(id, req.user.userId);
   }
 

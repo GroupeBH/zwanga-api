@@ -1,4 +1,5 @@
 import type { Point } from 'typeorm';
+import type { InterruptionFareQuote } from '../../bookings/interruption-fare';
 import {
   Column,
   CreateDateColumn,
@@ -289,6 +290,19 @@ export class DriverTripInterruptionConfirmation {
 
   @Column({ type: 'text', nullable: true })
   rejectionReason: string | null;
+
+  @Column({ type: 'text', nullable: true })
+  decision: 'wait' | 'stop' | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  decisionAt: Date | null;
+
+  // Immutable server quote for this passenger at this particular interruption.
+  @Column({ type: 'jsonb', nullable: true, select: false })
+  fareQuote: InterruptionFareQuote | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  settledAt: Date | null;
 
   @CreateDateColumn()
   createdAt: Date;

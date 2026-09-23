@@ -38,6 +38,9 @@ import { ChatbotModule } from './chatbot/chatbot.module';
 import { buildTypeOrmModuleOptions } from './database/typeorm-options';
 import { WalletModule } from './wallet/wallet.module';
 import { DriverSettlementsModule } from './driver-settlements/driver-settlements.module';
+import { HealthModule } from './health/health.module';
+import { createRedisCacheStore } from './common/utils/redis-cache-store';
+import { ReferralsModule } from './referrals/referrals.module';
 
 @Module({
   imports: [
@@ -49,9 +52,14 @@ import { DriverSettlementsModule } from './driver-settlements/driver-settlements
         buildTypeOrmModuleOptions(configService),
       inject: [ConfigService],
     }),
-    CacheModule.register({
+    CacheModule.registerAsync({
       isGlobal: true,
-      ttl: 300, // 5 minutes default TTL
+      imports: [ConfigModule],
+      useFactory: async (configService: ConfigService) => ({
+        store: await createRedisCacheStore(configService),
+        ttl: 300,
+      }),
+      inject: [ConfigService],
     }),
     ScheduleModule.forRoot(),
     CommonModule,
@@ -90,17 +98,19 @@ import { DriverSettlementsModule } from './driver-settlements/driver-settlements
     ChatbotModule,
     WalletModule,
     DriverSettlementsModule,
+    HealthModule,
+    ReferralsModule,
   ],
   controllers: [AppController],
   providers: [
     AppService,
     {
       provide: APP_GUARD,
-      useClass: IpThrottlerGuard,
+      useClass: JwtAuthGuard,
     },
     {
       provide: APP_GUARD,
-      useClass: JwtAuthGuard,
+      useClass: IpThrottlerGuard,
     },
     {
       provide: APP_GUARD,

@@ -7,11 +7,17 @@ FROM node:${NODE_VERSION}-alpine AS base
 WORKDIR /app
 
 # dumb-init forwards Unix signals correctly when Node runs as PID 1.
-RUN apk add --no-cache dumb-init
+# The AWS RDS global CA bundle is added to Node's trusted CAs so PostgreSQL
+# TLS can keep certificate verification enabled in ECS production tasks.
+RUN apk add --no-cache ca-certificates dumb-init wget \
+    && wget -q -O /usr/local/share/ca-certificates/aws-rds-global-bundle.crt https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem \
+    && update-ca-certificates
+
+ENV NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/aws-rds-global-bundle.crt
 
 FROM base AS dependencies
 COPY package.json package-lock.json ./
-RUN --mount=type=cache,target=/root/.npm \
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
     npm ci --legacy-peer-deps
 
 FROM dependencies AS builder
@@ -22,15 +28,10 @@ RUN npm run build
 FROM base AS production-dependencies
 ENV NODE_ENV=production
 COPY package.json package-lock.json ./
-RUN --mount=type=cache,target=/root/.npm \
-    npm ci --omit=dev --legacy-peer-deps \
-    && npm cache clean --force
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
+    npm ci --omit=dev --legacy-peer-deps
 
 FROM base AS production
-ENV NODE_ENV=production \
-    HOST=0.0.0.0 \
-    PORT=5200
-
 COPY --chown=node:node package.json package-lock.json ./
 COPY --chown=node:node --from=production-dependencies /app/node_modules ./node_modules
 COPY --chown=node:node --from=builder /app/dist ./dist
@@ -41,7 +42,7 @@ USER node
 EXPOSE 5200
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-  CMD wget -q -O - http://127.0.0.1:5200/api/v1/health >/dev/null || exit 1
+  CMD wget -q -O - http://127.0.0.1:5200/health >/dev/null || exit 1
 
 ENTRYPOINT ["dumb-init", "--"]
 CMD ["node", "dist/main.js"]

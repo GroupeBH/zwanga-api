@@ -1,14 +1,19 @@
 import {
+  Body,
   Controller,
   Delete,
   Get,
-  Put,
   Param,
-  Body,
+  ParseUUIDPipe,
+  Post,
+  Put,
   Query,
   Request,
+  Res,
+  StreamableFile,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
+import type { Response } from 'express';
 import { AdminService } from './admin.service';
 import { Auth } from '../auth/decorators/auth.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -17,11 +22,27 @@ import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decor
 import { UpdateTripDto } from '../trips/dto/trip.dto';
 import { UpdateTripRequestDto } from '../trip-requests/dto/trip-request.dto';
 import { BookingStatus } from '../bookings/entities/booking.entity';
+import { AdminWalletAdjustmentDto } from './dto/admin-wallet.dto';
+import { AdminReferralsService } from './admin-referrals.service';
+import { CreateAdminAccountDto, ResetAdminAccountPasswordDto } from './dto/admin-account.dto';
+import { spreadsheetHeaders, type SpreadsheetFile } from './spreadsheet';
+
+interface AuthenticatedAdminRequest {
+  user: { userId: string };
+}
 
 @ApiTags('Admin')
 @Controller('admin')
 export class AdminController {
-  constructor(private readonly adminService: AdminService) {}
+  constructor(
+    private readonly adminService: AdminService,
+    private readonly adminReferralsService: AdminReferralsService,
+  ) {}
+
+  private sendSpreadsheet(res: Response, file: SpreadsheetFile) {
+    res.set(spreadsheetHeaders(file));
+    return new StreamableFile(file.buffer);
+  }
 
   @Get('kyc/pending')
   @Auth()
@@ -32,18 +53,57 @@ export class AdminController {
     return this.adminService.getPendingKycs();
   }
 
+  @Get('kyc')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({
+    summary: 'List all KYC documents as consultable history, optionally filtered by status',
+  })
+  async getKycDocuments(
+    @Query('page') page: number = 1,
+    @Query('limit') limit: number = 25,
+    @Query('status') status?: string,
+    @Query('search') search?: string,
+  ) {
+    return this.adminService.getKycDocuments(page, limit, status, search);
+  }
+
+  @Get('kyc/:kycId')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'Get one KYC document with user details' })
+  async getKycDocument(@Param('kycId', new ParseUUIDPipe()) kycId: string) {
+    return this.adminService.getKycDocument(kycId);
+  }
+
   @Put('kyc/:kycId/verify')
   @Auth()
   @Roles(UserRole.ADMIN)
   @SensitiveThrottle(20, 60000) // 20 requests per minute per IP
   @ApiOperation({ summary: 'Verify or reject KYC document' })
   async verifyKyc(
-    @Request() req,
+    @Request() req: AuthenticatedAdminRequest,
     @Param('kycId') kycId: string,
     @Body('approved') approved: boolean,
     @Body('reason') reason?: string,
   ) {
-    return this.adminService.verifyKyc(kycId, req.user.userId, approved, reason);
+    return this.adminService.verifyKyc(
+      kycId,
+      req.user.userId,
+      approved,
+      reason,
+    );
+  }
+
+  @Get('users/stats')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'Get platform user counts by role' })
+  async getUserStats() {
+    return this.adminService.getUserStats();
   }
 
   @Get('users')
@@ -54,8 +114,301 @@ export class AdminController {
   async getAllUsers(
     @Query('page') page: number = 1,
     @Query('limit') limit: number = 10,
+    @Query('role') role?: string,
   ) {
-    return this.adminService.getAllUsers(page, limit);
+    return this.adminService.getAllUsers(page, limit, role);
+  }
+
+  @Get('users/export')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({
+    summary:
+      'Export users as an Excel .xls spreadsheet, optionally filtered by driver role',
+  })
+  async exportUsers(
+    @Res({ passthrough: true }) res: Response,
+    @Query('role') role?: string,
+  ) {
+    const file = await this.adminService.exportUsersXls(role);
+    return this.sendSpreadsheet(res, file);
+  }
+
+  @Get('accounts')
+  @Auth()
+  @Roles(UserRole.SUPER_ADMIN)
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'List back-office administrator accounts' })
+  async getAdminAccounts(
+    @Request() req: AuthenticatedAdminRequest,
+    @Query('page') page: number = 1,
+    @Query('limit') limit: number = 25,
+  ) {
+    return this.adminService.getAdminAccounts(req.user.userId, page, limit);
+  }
+
+  @Post('accounts')
+  @Auth()
+  @Roles(UserRole.SUPER_ADMIN)
+  @SensitiveThrottle(5, 60000)
+  @ApiOperation({ summary: 'Create a back-office administrator account' })
+  async createAdminAccount(
+    @Request() req: AuthenticatedAdminRequest,
+    @Body() dto: CreateAdminAccountDto,
+  ) {
+    return this.adminService.createAdminAccount(req.user.userId, dto);
+  }
+
+  @Put('accounts/:userId/deactivate')
+  @Auth()
+  @Roles(UserRole.SUPER_ADMIN)
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({ summary: 'Deactivate a back-office administrator account' })
+  async deactivateAdminAccount(
+    @Request() req: AuthenticatedAdminRequest,
+    @Param('userId', new ParseUUIDPipe()) userId: string,
+  ) {
+    return this.adminService.deactivateAdminAccount(req.user.userId, userId);
+  }
+
+  @Put('accounts/:userId/activate')
+  @Auth()
+  @Roles(UserRole.SUPER_ADMIN)
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({ summary: 'Reactivate a back-office administrator account' })
+  async activateAdminAccount(
+    @Request() req: AuthenticatedAdminRequest,
+    @Param('userId', new ParseUUIDPipe()) userId: string,
+  ) {
+    return this.adminService.activateAdminAccount(req.user.userId, userId);
+  }
+
+  @Put('accounts/:userId/password')
+  @Auth()
+  @Roles(UserRole.SUPER_ADMIN)
+  @SensitiveThrottle(5, 60000)
+  @ApiOperation({
+    summary: 'Set a temporary password for a back-office administrator account',
+  })
+  async resetAdminAccountPassword(
+    @Request() req: AuthenticatedAdminRequest,
+    @Param('userId', new ParseUUIDPipe()) userId: string,
+    @Body() dto: ResetAdminAccountPasswordDto,
+  ) {
+    return this.adminService.resetAdminAccountPassword(
+      req.user.userId,
+      userId,
+      dto.newPassword,
+    );
+  }
+
+  @Get('wallets')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'List token wallets and their global summary' })
+  async getWalletAccounts(
+    @Query('page') page: number = 1,
+    @Query('limit') limit: number = 25,
+    @Query('search') search?: string,
+  ) {
+    return this.adminService.getWalletAccounts(page, limit, search);
+  }
+
+  @Get('wallets/export')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({ summary: 'Export token wallet balances as Excel .xls' })
+  async exportWalletAccounts(
+    @Res({ passthrough: true }) res: Response,
+    @Query('search') search?: string,
+  ) {
+    const file = await this.adminService.exportWalletAccountsXls(search);
+    return this.sendSpreadsheet(res, file);
+  }
+
+  @Get('wallets/ledger')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'List the immutable token ledger' })
+  async getWalletLedger(
+    @Query('page') page: number = 1,
+    @Query('limit') limit: number = 25,
+    @Query('search') search?: string,
+    @Query('type') type?: string,
+  ) {
+    return this.adminService.getWalletLedger(page, limit, search, type);
+  }
+
+  @Get('wallets/ledger/export')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({ summary: 'Export the token ledger as Excel .xls' })
+  async exportWalletLedger(
+    @Res({ passthrough: true }) res: Response,
+    @Query('search') search?: string,
+    @Query('type') type?: string,
+  ) {
+    const file = await this.adminService.exportWalletLedgerXls(search, type);
+    return this.sendSpreadsheet(res, file);
+  }
+
+  @Get('payments')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'List payment transactions' })
+  async getAllPayments(
+    @Query('page') page: number = 1,
+    @Query('limit') limit: number = 25,
+    @Query('status') status?: string,
+    @Query('purpose') purpose?: string,
+    @Query('search') search?: string,
+  ) {
+    return this.adminService.getAllPayments(page, limit, status, purpose, search);
+  }
+
+  @Get('payments/export')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({ summary: 'Export payment transactions as Excel .xls' })
+  async exportPayments(
+    @Res({ passthrough: true }) res: Response,
+    @Query('status') status?: string,
+    @Query('purpose') purpose?: string,
+    @Query('search') search?: string,
+  ) {
+    const file = await this.adminService.exportPaymentsXls(status, purpose, search);
+    return this.sendSpreadsheet(res, file);
+  }
+
+  @Post('wallets/:userId/adjustments')
+  @Auth()
+  @Roles(UserRole.SUPER_ADMIN)
+  @SensitiveThrottle(5, 60000)
+  @ApiOperation({ summary: 'Apply an audited token balance adjustment' })
+  async adjustWallet(
+    @Request() req: AuthenticatedAdminRequest,
+    @Param('userId') userId: string,
+    @Body() dto: AdminWalletAdjustmentDto,
+  ) {
+    return this.adminService.adjustWallet(
+      req.user.userId,
+      userId,
+      dto.amount,
+      dto.reason,
+      dto.requestId,
+    );
+  }
+
+  @Get('referrals/accounts')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'List referral accounts and global balances' })
+  getReferralAccounts(
+    @Query('page') page: number = 1,
+    @Query('limit') limit: number = 25,
+    @Query('search') search?: string,
+  ) {
+    return this.adminReferralsService.getAccounts(page, limit, search);
+  }
+
+  @Get('referrals/accounts/export')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({ summary: 'Export referral accounts as Excel .xls' })
+  async exportReferralAccounts(
+    @Res({ passthrough: true }) res: Response,
+    @Query('search') search?: string,
+  ) {
+    const file = await this.adminReferralsService.exportAccounts(search);
+    return this.sendSpreadsheet(res, file);
+  }
+
+  @Get('referrals/rewards')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'List referral rewards and commissions' })
+  getReferralRewards(
+    @Query('page') page: number = 1,
+    @Query('limit') limit: number = 25,
+    @Query('search') search?: string,
+    @Query('status') status?: string,
+  ) {
+    return this.adminReferralsService.getRewards(page, limit, search, status);
+  }
+
+  @Get('referrals/rewards/export')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({ summary: 'Export referral rewards as Excel .xls' })
+  async exportReferralRewards(
+    @Res({ passthrough: true }) res: Response,
+    @Query('search') search?: string,
+    @Query('status') status?: string,
+  ) {
+    const file = await this.adminReferralsService.exportRewards(search, status);
+    return this.sendSpreadsheet(res, file);
+  }
+
+  @Get('referrals/withdrawals')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'List referral withdrawal requests' })
+  getReferralWithdrawals(
+    @Query('page') page: number = 1,
+    @Query('limit') limit: number = 25,
+    @Query('search') search?: string,
+    @Query('status') status?: string,
+  ) {
+    return this.adminReferralsService.getWithdrawals(
+      page,
+      limit,
+      search,
+      status,
+    );
+  }
+
+  @Get('referrals/withdrawals/export')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({ summary: 'Export referral withdrawals as Excel .xls' })
+  async exportReferralWithdrawals(
+    @Res({ passthrough: true }) res: Response,
+    @Query('search') search?: string,
+    @Query('status') status?: string,
+  ) {
+    const file = await this.adminReferralsService.exportWithdrawals(
+      search,
+      status,
+    );
+    return this.sendSpreadsheet(res, file);
+  }
+
+  @Post('referrals/withdrawals/:withdrawalId/reconcile')
+  @Auth()
+  @Roles(UserRole.SUPER_ADMIN)
+  @SensitiveThrottle(5, 60000)
+  @ApiOperation({ summary: 'Reconcile a referral withdrawal with FlexPay' })
+  reconcileReferralWithdrawal(
+    @Request() req: AuthenticatedAdminRequest,
+    @Param('withdrawalId') withdrawalId: string,
+  ) {
+    return this.adminReferralsService.reconcileWithdrawal(
+      req.user.userId,
+      withdrawalId,
+    );
   }
 
   @Get('users/:userId/details')
@@ -109,6 +462,16 @@ export class AdminController {
     return this.adminService.getAllTrips(page, limit);
   }
 
+  @Get('trips/export')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({ summary: 'Export trips as Excel .xls' })
+  async exportTrips(@Res({ passthrough: true }) res: Response) {
+    const file = await this.adminService.exportTripsXls();
+    return this.sendSpreadsheet(res, file);
+  }
+
   @Put('trips/:tripId')
   @Auth()
   @Roles(UserRole.ADMIN)
@@ -138,7 +501,7 @@ export class AdminController {
   @ApiOperation({ summary: 'Delete a trip as admin' })
   async deleteTrip(@Request() req, @Param('tripId') tripId: string) {
     await this.adminService.deleteTrip(tripId, req.user.userId);
-    return { message: 'Trip deleted successfully' };
+    return { message: "Trajet supprimé avec succès." };
   }
 
   @Get('bookings')
@@ -152,6 +515,19 @@ export class AdminController {
     @Query('status') status?: BookingStatus,
   ) {
     return this.adminService.getAllBookings(page, limit, status);
+  }
+
+  @Get('bookings/export')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({ summary: 'Export bookings as Excel .xls' })
+  async exportBookings(
+    @Res({ passthrough: true }) res: Response,
+    @Query('status') status?: BookingStatus,
+  ) {
+    const file = await this.adminService.exportBookingsXls(status);
+    return this.sendSpreadsheet(res, file);
   }
 
   @Put('bookings/:bookingId/accept')
@@ -196,6 +572,19 @@ export class AdminController {
     @Query('status') status?: string,
   ) {
     return this.adminService.getAllTripRequests(page, limit, status);
+  }
+
+  @Get('trip-requests/export')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({ summary: 'Export trip requests as Excel .xls' })
+  async exportTripRequests(
+    @Res({ passthrough: true }) res: Response,
+    @Query('status') status?: string,
+  ) {
+    const file = await this.adminService.exportTripRequestsXls(status);
+    return this.sendSpreadsheet(res, file);
   }
 
   @Get('trip-requests/:tripRequestId')
@@ -249,7 +638,6 @@ export class AdminController {
     @Param('tripRequestId') tripRequestId: string,
   ) {
     await this.adminService.deleteTripRequest(tripRequestId, req.user.userId);
-    return { message: 'Trip request deleted successfully' };
+    return { message: "Demande de trajet supprimée avec succès." };
   }
 }
-

@@ -20,6 +20,7 @@ import {
   UpdateFaqEntryDto,
 } from '../faq/dto/faq.dto';
 import { User, UserRole } from '../users/entities/user.entity';
+import { isAdminRole } from '../users/user-role.policy';
 import {
   SupportTicket,
   SupportTicketStatus,
@@ -165,7 +166,7 @@ export class SupportService {
         'Une aide simple pour tous',
       subtitle:
         this.configService.get<string>('SUPPORT_SUBTITLE') ||
-        'Cherchez une reponse ou laissez-nous un message si quelque chose vous bloque.',
+        'Cherchez une réponse ou laissez-nous un message si quelque chose vous bloque.',
       contact: {
         phone,
         whatsapp,
@@ -214,7 +215,7 @@ export class SupportService {
 
   async removeFaq(id: string) {
     await this.faqService.remove(id);
-    return { message: 'FAQ entry removed' };
+    return { message: "Question d’aide supprimée." };
   }
 
   /* -------------------------------------------------------------------------- */
@@ -287,7 +288,7 @@ export class SupportService {
     const ticket = await this.findTicketWithDetails(ticketId);
 
     if (ticket.userId !== userId) {
-      throw new ForbiddenException('Vous n avez pas accès à ce ticket');
+      throw new ForbiddenException('Vous n’avez pas accès à ce ticket');
     }
 
     return this.sanitizeTicketDetails(ticket, false);
@@ -308,7 +309,7 @@ export class SupportService {
     const ticket = await this.findTicketById(ticketId);
 
     if (ticket.userId !== userId) {
-      throw new ForbiddenException('Vous n avez pas accès à ce ticket');
+      throw new ForbiddenException('Vous n’avez pas accès à ce ticket');
     }
 
     if (ticket.status === SupportTicketStatus.CLOSED) {
@@ -330,7 +331,7 @@ export class SupportService {
     const ticket = await this.findTicketById(ticketId);
 
     if (ticket.userId !== userId) {
-      throw new ForbiddenException('Vous n avez pas accès à ce ticket');
+      throw new ForbiddenException('Vous n’avez pas accès à ce ticket');
     }
 
     if (
@@ -505,7 +506,7 @@ export class SupportService {
     const ticket = await this.findTicketById(ticketId);
 
     if (!isAdmin && ticket.userId !== senderId) {
-      throw new ForbiddenException('Vous n avez pas accès à ce ticket');
+      throw new ForbiddenException('Vous n’avez pas accès à ce ticket');
     }
 
     if (!isAdmin && dto.isInternal) {
@@ -606,7 +607,7 @@ export class SupportService {
       throw new NotFoundException('Utilisateur admin non trouvé');
     }
 
-    if (user.role !== UserRole.ADMIN) {
+    if (!isAdminRole(user.role)) {
       throw new ForbiddenException('Action réservée aux administrateurs');
     }
   }

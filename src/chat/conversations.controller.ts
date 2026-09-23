@@ -19,6 +19,7 @@ import {
 } from './dto/conversation.dto';
 import { Auth } from '../auth/decorators/auth.decorator';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
+import { MessagePageDto } from './dto/message-page.dto';
 
 @ApiTags('Conversations')
 @Controller('conversations')
@@ -50,6 +51,14 @@ export class ConversationsController {
   @ApiOperation({ summary: 'Récupérer une conversation' })
   async getConversation(@Request() req, @Param('id') id: string) {
     return this.chatService.getConversation(req.user.userId, id);
+  }
+
+  @Get(':id/messages/page')
+  @Auth()
+  @SensitiveThrottle(60, 60000)
+  @ApiOperation({ summary: 'Messages paginés, du plus récent au plus ancien' })
+  async getMessagePage(@Request() req, @Param('id') id: string, @Query() query: MessagePageDto) {
+    return this.chatService.getConversationMessagePage(id, req.user.userId, query);
   }
 
   @Get(':id/messages')

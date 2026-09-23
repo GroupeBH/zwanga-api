@@ -7,11 +7,15 @@ import { Trip } from '../trips/entities/trip.entity';
 import { Booking } from '../bookings/entities/booking.entity';
 import { User } from '../users/entities/user.entity';
 import { Notification } from './entities/notification.entity';
+import { TripRequest } from '../trip-requests/entities/trip-request.entity';
 import { TripAvailabilityNotificationService } from './trip-availability-notification.service';
 import { DailyEngagementNotificationService } from './daily-engagement-notification.service';
 
 @Module({
-  imports: [ConfigModule, TypeOrmModule.forFeature([Trip, Booking, User, Notification])],
+  imports: [
+    ConfigModule,
+    TypeOrmModule.forFeature([Trip, Booking, User, Notification, TripRequest]),
+  ],
   controllers: [NotificationsController],
   providers: [
     NotificationService,

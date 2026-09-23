@@ -56,7 +56,7 @@ export class SubscriptionsController {
   @Post('subscribe/points')
   @Auth()
   @SensitiveThrottle(5, 60000)
-  @ApiOperation({ summary: 'Pay a premium subscription with Zwanga points' })
+  @ApiOperation({ summary: 'Pay a premium subscription with Zwanga tokens' })
   async subscribeWithPoints(
     @Request() req,
     @Body() dto: SubscribeWithPointsDto,

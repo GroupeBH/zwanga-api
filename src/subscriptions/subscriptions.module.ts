@@ -7,11 +7,13 @@ import { DocumentFundingRequest } from './entities/document-funding-request.enti
 import { User } from '../users/entities/user.entity';
 import { PaymentsModule } from '../payments/payments.module';
 import { WalletModule } from '../wallet/wallet.module';
+import { ReferralsModule } from '../referrals/referrals.module';
 
 @Module({
   imports: [
     PaymentsModule,
     WalletModule,
+    ReferralsModule,
     TypeOrmModule.forFeature([Subscription, DocumentFundingRequest, User]),
   ],
   controllers: [SubscriptionsController],

@@ -102,8 +102,8 @@ AWS_REKOGNITION_MIN_CONFIDENCE=50
 AWS_REKOGNITION_KYC_ENABLED=false
 # Minimum similarity score for face matching (0-100, default: 40)
 AWS_REKOGNITION_KYC_MIN_SIMILARITY=40
-# Minimum face quality threshold (0-100, default: 50)
-AWS_REKOGNITION_KYC_MIN_FACE_QUALITY=50
+# Minimum face quality threshold (0-100, default: 35)
+AWS_REKOGNITION_KYC_MIN_FACE_QUALITY=35
 
 # ============================================
 # Rate Limiting

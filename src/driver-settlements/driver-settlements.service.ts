@@ -5,13 +5,26 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { Cron } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
-import { Booking, BookingPaymentStatus } from '../bookings/entities/booking.entity';
-import { PaymentMethod, PaymentPurpose, PaymentStatus, PaymentTransaction } from '../payments/entities/payment-transaction.entity';
+import { randomUUID } from 'crypto';
+import { DataSource, EntityManager, In, Repository } from 'typeorm';
+import {
+  Booking,
+  BookingPaymentStatus,
+  BookingStatus,
+} from '../bookings/entities/booking.entity';
+import { NotificationService } from '../notifications/notifications.service';
+import {
+  PaymentPurpose,
+  PaymentStatus,
+  PaymentTransaction,
+} from '../payments/entities/payment-transaction.entity';
 import { FlexPayCallbackDto } from '../payments/dto/payment.dto';
 import { PaymentsService } from '../payments/payments.service';
 import { TripPaymentMode } from '../payments/enums/trip-payment-mode.enum';
+import { Trip, TripStatus } from '../trips/entities/trip.entity';
+import { KycDocument, KycStatus } from '../users/entities/kyc-document.entity';
 import { User } from '../users/entities/user.entity';
 import {
   DriverEarning,
@@ -22,6 +35,8 @@ import {
   DriverPayoutStatus,
 } from './entities/driver-payout.entity';
 import { RequestDriverPayoutDto } from './dto/driver-settlement.dto';
+import { getPayoutFailureMessage, normalizePayoutPhone, PAYOUT_MESSAGES } from '../payments/payout-policy';
+import { settleCashSubsidy } from './cash-subsidy-settlement';
 
 export interface DriverSettlementSummary {
   availableBalance: number;
@@ -29,7 +44,33 @@ export interface DriverSettlementSummary {
   paidBalance: number;
   currency: string;
   commissionRate: number;
+  kycApproved: boolean;
+  payoutPhone: string | null;
+  minimumPayoutAmount: number;
 }
+
+export interface DriverTripRevenueSummary {
+  tripId: string;
+  currency: string;
+  commissionRate: number;
+  grossTripAmount: number;
+  confirmedAmount: number;
+  creditPendingAmount: number;
+  ledgerVerified: true;
+  cashToCollectAmount: number;
+  electronicPendingAmount: number;
+  zwangaSubsidyAmount: number;
+  totalExpectedAmount: number;
+  completedBookings: number;
+  generatedAt: string;
+}
+
+export type DriverPayoutResponse = DriverPayout & {
+  orderNumber: string | null;
+  paymentMessage: string | null;
+  reference: string | null;
+  requiresReview: boolean;
+};
 
 @Injectable()
 export class DriverSettlementsService {
@@ -37,6 +78,9 @@ export class DriverSettlementsService {
   private readonly PAYOUT_RELATED_ENTITY_TYPE = 'driver_payout';
   private readonly DEFAULT_COMMISSION_RATE = 0.05;
   private readonly DEFAULT_CURRENCY = 'CDF';
+  private readonly DEFAULT_MINIMUM_PAYOUT_AMOUNT = 1;
+  private readonly ORPHAN_PAYOUT_GRACE_MS = 15 * 60 * 1000;
+  private payoutReconciliationRunning = false;
 
   constructor(
     @InjectRepository(DriverEarning)
@@ -45,23 +89,48 @@ export class DriverSettlementsService {
     private readonly payoutRepository: Repository<DriverPayout>,
     @InjectRepository(User)
     private readonly userRepository: Repository<User>,
+    @InjectRepository(KycDocument)
+    private readonly kycRepository: Repository<KycDocument>,
+    @InjectRepository(Booking)
+    private readonly bookingRepository: Repository<Booking>,
+    @InjectRepository(Trip)
+    private readonly tripRepository: Repository<Trip>,
     private readonly configService: ConfigService,
     private readonly paymentsService: PaymentsService,
+    private readonly dataSource: DataSource,
+    private readonly notificationService: NotificationService,
   ) {}
 
   async getSummary(driverId: string): Promise<DriverSettlementSummary> {
     const currency = this.getCurrency();
-    return {
-      availableBalance: await this.getAvailableBalance(driverId),
-      pendingPayoutBalance: await this.sumPayouts(driverId, [
+    const [
+      availableBalance,
+      pendingPayoutBalance,
+      paidBalance,
+      kycApproved,
+      driver,
+    ] = await Promise.all([
+      this.getAvailableBalance(driverId),
+      this.sumPayouts(driverId, [
         DriverPayoutStatus.PENDING,
         DriverPayoutStatus.INITIATED,
       ]),
-      paidBalance: await this.sumPayouts(driverId, [
-        DriverPayoutStatus.SUCCEEDED,
-      ]),
+      this.sumPayouts(driverId, [DriverPayoutStatus.SUCCEEDED]),
+      this.kycRepository.exists({
+        where: { userId: driverId, status: KycStatus.APPROVED },
+      }),
+      this.userRepository.findOne({ where: { id: driverId } }),
+    ]);
+
+    return {
+      availableBalance,
+      pendingPayoutBalance,
+      paidBalance,
       currency,
       commissionRate: this.getCommissionRate(),
+      kycApproved,
+      payoutPhone: driver?.phone ?? null,
+      minimumPayoutAmount: this.getMinimumPayoutAmount(),
     };
   }
 
@@ -72,25 +141,327 @@ export class DriverSettlementsService {
     });
   }
 
-  async findDriverPayouts(driverId: string): Promise<DriverPayout[]> {
-    return this.payoutRepository.find({
+  async findDriverPayouts(driverId: string): Promise<DriverPayoutResponse[]> {
+    const payouts = await this.payoutRepository.find({
       where: { driverId },
       relations: ['paymentTransaction'],
       order: { createdAt: 'DESC' },
+    });
+    return payouts.map((payout) => this.formatPayoutForClient(payout));
+  }
+
+  async getTripRevenueSummary(
+    driverId: string,
+    tripId: string,
+  ): Promise<DriverTripRevenueSummary> {
+    const trip = await this.tripRepository.findOne({
+      where: { id: tripId, driverId },
+      select: ['id', 'driverId', 'pricePerSeat', 'isFree'],
+    });
+    if (!trip) {
+      throw new NotFoundException(
+        "Trajet introuvable ou vous n'en êtes pas le conducteur",
+      );
+    }
+
+    const [bookings, earnings] = await Promise.all([
+      this.bookingRepository.find({ where: { tripId } }),
+      this.earningRepository.find({ where: { tripId, driverId } }),
+    ]);
+    return this.buildTripRevenueSummary(trip, bookings, earnings);
+  }
+
+  async notifyDriverTripRevenue(
+    driverId: string,
+    tripId: string,
+  ): Promise<DriverTripRevenueSummary | null> {
+    try {
+      const summary = await this.getTripRevenueSummary(driverId, tripId);
+      const title = 'Votre gain du trajet';
+      const body = this.buildTripRevenueNotificationBody(summary);
+      await this.notificationService.sendNotificationToUser(
+        driverId,
+        title,
+        body,
+        {
+          type: 'driver_trip_revenue',
+          role: 'driver',
+          driverId,
+          tripId,
+          currency: summary.currency,
+          grossTripAmount: summary.grossTripAmount,
+          confirmedAmount: summary.confirmedAmount,
+          creditPendingAmount: summary.creditPendingAmount,
+          ledgerVerified: summary.ledgerVerified,
+          cashToCollectAmount: summary.cashToCollectAmount,
+          electronicPendingAmount: summary.electronicPendingAmount,
+          zwangaSubsidyAmount: summary.zwangaSubsidyAmount,
+          totalExpectedAmount: summary.totalExpectedAmount,
+        },
+      );
+      return summary;
+    } catch (error) {
+      this.logger.error(
+        `DRIVER_TRIP_REVENUE_NOTIFICATION_FAILED tripId=${tripId} driverId=${driverId} reason=${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return null;
+    }
+  }
+
+  private buildTripRevenueSummary(
+    trip: Trip,
+    bookings: Booking[],
+    earnings: DriverEarning[],
+  ): DriverTripRevenueSummary {
+    const commissionRate = this.getCommissionRate();
+    const currency = this.getCurrency();
+    let grossTripAmount = 0;
+    let confirmedAmount = 0;
+    let creditPendingAmount = 0;
+    const earningsByBooking = new Map(earnings.map((earning) => [earning.bookingId, earning]));
+    let cashToCollectAmount = 0;
+    let electronicPendingAmount = 0;
+    let zwangaSubsidyAmount = 0;
+    let completedBookings = 0;
+
+    for (const booking of bookings) {
+      if (!this.hasCompletedRide(booking)) {
+        continue;
+      }
+
+      const grossAmount = this.resolveTripBookingGrossAmount(booking, trip);
+      if (grossAmount <= 0) {
+        continue;
+      }
+
+      completedBookings += 1;
+      grossTripAmount += grossAmount;
+      zwangaSubsidyAmount += this.resolveBookingSubsidyAmount(booking);
+      const earning = earningsByBooking.get(booking.id);
+      if (earning && [DriverEarningStatus.AVAILABLE, DriverEarningStatus.PAID].includes(earning.status)) {
+        confirmedAmount += this.roundMoney(Number(earning.netAmount));
+      }
+      if (booking.paymentMode === TripPaymentMode.CASH) {
+        cashToCollectAmount += this.resolveTripBookingPassengerAmount(
+          booking,
+          trip,
+        );
+        if (!earning) creditPendingAmount += this.resolveCashSubsidyEarningAmount(booking);
+        continue;
+      }
+
+      const netAmount = this.roundMoney(grossAmount * (1 - commissionRate));
+      if (!earning && booking.paymentStatus === BookingPaymentStatus.SUCCEEDED) {
+        creditPendingAmount += netAmount;
+      } else if (!earning && booking.paymentMode === TripPaymentMode.ELECTRONIC) {
+        electronicPendingAmount += netAmount;
+      }
+    }
+
+    grossTripAmount = this.roundMoney(grossTripAmount);
+    confirmedAmount = this.roundMoney(confirmedAmount);
+    creditPendingAmount = this.roundMoney(creditPendingAmount);
+    cashToCollectAmount = this.roundMoney(cashToCollectAmount);
+    electronicPendingAmount = this.roundMoney(electronicPendingAmount);
+    zwangaSubsidyAmount = this.roundMoney(zwangaSubsidyAmount);
+
+    return {
+      tripId: trip.id,
+      currency,
+      commissionRate,
+      grossTripAmount,
+      confirmedAmount,
+      creditPendingAmount,
+      ledgerVerified: true,
+      cashToCollectAmount,
+      electronicPendingAmount,
+      zwangaSubsidyAmount,
+      totalExpectedAmount: this.roundMoney(
+        confirmedAmount + creditPendingAmount + cashToCollectAmount + electronicPendingAmount,
+      ),
+      completedBookings,
+      generatedAt: new Date().toISOString(),
+    };
+  }
+
+  private hasCompletedRide(booking: Booking): boolean {
+    if (![BookingStatus.ACCEPTED, BookingStatus.COMPLETED].includes(booking.status)) return false;
+    return Boolean(
+      booking.status === BookingStatus.COMPLETED ||
+      booking.droppedOff ||
+      booking.droppedOffConfirmedByPassenger ||
+      booking.droppedOffAt ||
+      booking.droppedOffConfirmedAt,
+    );
+  }
+
+  private resolveTripBookingGrossAmount(booking: Booking, trip: Trip): number {
+    const persistedGrossAmount = Number(booking.grossPaymentAmount);
+    if (
+      booking.grossPaymentAmount !== null &&
+      booking.grossPaymentAmount !== undefined &&
+      Number.isFinite(persistedGrossAmount) &&
+      persistedGrossAmount > 0
+    ) {
+      return this.roundMoney(persistedGrossAmount);
+    }
+
+    const persistedAmount = Number(booking.paymentAmount);
+    if (Number.isFinite(persistedAmount) && persistedAmount > 0) {
+      return this.roundMoney(persistedAmount);
+    }
+
+    if (trip.isFree) {
+      return 0;
+    }
+
+    const pricePerSeat = Number(
+      trip.pricePerSeat ?? booking.trip?.pricePerSeat,
+    );
+    const seats = Math.max(1, Number(booking.numberOfSeats) || 1);
+    return Number.isFinite(pricePerSeat) && pricePerSeat > 0
+      ? this.roundMoney(pricePerSeat * seats)
+      : 0;
+  }
+
+  private resolveTripBookingPassengerAmount(
+    booking: Booking,
+    trip: Trip,
+  ): number {
+    const persistedAmount = Number(booking.paymentAmount);
+    if (Number.isFinite(persistedAmount) && persistedAmount >= 0) {
+      return this.roundMoney(persistedAmount);
+    }
+
+    return this.resolveTripBookingGrossAmount(booking, trip);
+  }
+
+  private resolveBookingSubsidyAmount(booking: Booking): number {
+    if (!booking.firstTripSubsidyApplied) {
+      return 0;
+    }
+
+    const persistedSubsidyAmount = Number(booking.zwangaSubsidyAmount);
+    if (Number.isFinite(persistedSubsidyAmount) && persistedSubsidyAmount > 0) {
+      return this.roundMoney(persistedSubsidyAmount);
+    }
+
+    const grossAmount = Number(booking.grossPaymentAmount ?? 0);
+    const passengerAmount = Number(booking.paymentAmount ?? 0);
+    if (
+      Number.isFinite(grossAmount) &&
+      Number.isFinite(passengerAmount) &&
+      grossAmount > passengerAmount
+    ) {
+      return this.roundMoney(grossAmount - passengerAmount);
+    }
+
+    return 0;
+  }
+
+  private resolveCashSubsidyEarningAmount(booking: Booking): number {
+    return booking.paymentMode === TripPaymentMode.CASH
+      ? this.resolveBookingSubsidyAmount(booking)
+      : 0;
+  }
+
+  private buildTripRevenueNotificationBody(
+    summary: DriverTripRevenueSummary,
+  ): string {
+    const parts: string[] = [];
+    if (summary.confirmedAmount > 0) {
+      parts.push(
+        `${this.formatMoney(summary.confirmedAmount)} ${summary.currency} crédités dans vos gains`,
+      );
+    }
+    if (summary.cashToCollectAmount > 0) {
+      parts.push(
+        `${this.formatMoney(summary.cashToCollectAmount)} ${summary.currency} à recevoir du passager en cash`,
+      );
+    }
+    if (summary.electronicPendingAmount > 0) {
+      parts.push(
+        `${this.formatMoney(summary.electronicPendingAmount)} ${summary.currency} en attente du paiement électronique`,
+      );
+    }
+    if (summary.zwangaSubsidyAmount > 0) {
+      parts.push(
+        `${this.formatMoney(summary.zwangaSubsidyAmount)} ${summary.currency} pris en charge par Zwanga`,
+      );
+    }
+
+    if (summary.creditPendingAmount > 0) {
+      parts.push(`${this.formatMoney(summary.creditPendingAmount)} ${summary.currency} en attente de crédit dans vos gains`);
+    }
+    return parts.length > 0
+      ? `${parts.join('. ')}.`
+      : `Aucun montant à encaisser pour ce trajet (0 ${summary.currency}).`;
+  }
+
+  private formatMoney(value: number): string {
+    return this.roundMoney(value).toLocaleString('fr-FR', {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 2,
     });
   }
 
   async recordCompletedBookingEarning(
     booking: Booking,
   ): Promise<DriverEarning | null> {
-    if (![TripPaymentMode.ELECTRONIC, TripPaymentMode.POINTS].includes(booking.paymentMode)) {
+    if (booking.paymentMode === TripPaymentMode.CASH) {
+      const result = await settleCashSubsidy(this.dataSource, booking.id, (manager, currentBooking) =>
+        this.recordCompletedBookingEarningWithManager(manager, currentBooking),
+      );
+      if (result.created && result.earning) {
+        // Notify only after COMMIT, never while holding the booking lock.
+        this.logger.warn(`CASH_SUBSIDY_COMMITTED bookingId=${result.earning.bookingId} net=${Number(result.earning.netAmount)}`);
+        if (result.tripStatus === TripStatus.COMPLETED) {
+          await this.notifyDriverBookingEarningAvailable(result.earning);
+        }
+      }
+      return result.earning;
+    }
+    return this.recordCompletedBookingEarningUsingRepository(booking);
+  }
+
+  /**
+   * Record the driver's receivable in an existing transaction. Booking
+   * payment code uses this variant so passenger debit and driver credit are
+   * committed or rolled back together.
+   */
+  async recordCompletedBookingEarningWithManager(
+    manager: EntityManager,
+    booking: Booking,
+  ): Promise<DriverEarning | null> {
+    if (!this.canRecordDriverEarning(booking)) {
       return null;
     }
 
-    if (booking.paymentStatus !== BookingPaymentStatus.SUCCEEDED) {
-      this.logger.warn(
-        `Driver earning skipped for booking ${booking.id}: booking is not paid`,
-      );
+    const existing = await manager.findOne(DriverEarning, {
+      where: { bookingId: booking.id },
+    });
+    if (existing) {
+      this.assertEarningMatchesBooking(existing, booking);
+      return existing;
+    }
+
+    const earningData = this.buildEarningData(booking);
+    if (!earningData) {
+      return null;
+    }
+
+    const earning = manager.create(DriverEarning, earningData);
+    const saved = await manager.save(earning);
+    this.logRecordedEarning(saved);
+    return saved;
+  }
+
+  private async recordCompletedBookingEarningUsingRepository(
+    booking: Booking,
+  ): Promise<DriverEarning | null> {
+    if (!this.canRecordDriverEarning(booking)) {
       return null;
     }
 
@@ -98,21 +469,71 @@ export class DriverSettlementsService {
       where: { bookingId: booking.id },
     });
     if (existing) {
+      this.assertEarningMatchesBooking(existing, booking);
       return existing;
     }
 
-    const grossAmount = this.normalizeAmount(
-      Number(booking.paymentAmount ?? 0),
-    );
+    const earningData = this.buildEarningData(booking);
+    if (!earningData) {
+      return null;
+    }
+
+    const earning = this.earningRepository.create(earningData);
+    const saved = await this.earningRepository.save(earning);
+    this.logRecordedEarning(saved);
+    if (booking.trip?.status === TripStatus.COMPLETED) {
+      await this.notifyDriverBookingEarningAvailable(saved);
+    }
+    return saved;
+  }
+
+  private async notifyDriverBookingEarningAvailable(
+    earning: DriverEarning,
+  ): Promise<void> {
+    try {
+      const netAmount = this.roundMoney(Number(earning.netAmount));
+      await this.notificationService.sendNotificationToUser(
+        earning.driverId,
+        'Gain du trajet disponible',
+        `${this.formatMoney(netAmount)} ${earning.currency} sont maintenant disponibles dans vos gains.`,
+        {
+          type: 'driver_booking_earning_confirmed',
+          role: 'driver',
+          driverId: earning.driverId,
+          tripId: earning.tripId,
+          bookingId: earning.bookingId,
+          amount: netAmount,
+          currency: earning.currency,
+        },
+      );
+    } catch (error) {
+      this.logger.error(
+        `DRIVER_EARNING_NOTIFICATION_FAILED earningId=${earning.id} reason=${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  private buildEarningData(
+    booking: Booking,
+  ): Omit<DriverEarning, 'id' | 'createdAt' | 'updatedAt'> | null {
+    const grossAmount = this.resolveDriverEarningGrossAmount(booking);
     if (grossAmount <= 0) {
       return null;
     }
 
-    const commissionRate = this.getCommissionRate();
+    const commissionRate = this.resolveDriverEarningCommissionRate(booking);
     const commissionAmount = this.roundMoney(grossAmount * commissionRate);
     const netAmount = this.roundMoney(grossAmount - commissionAmount);
 
-    const earning = this.earningRepository.create({
+    if (!booking.trip?.driverId) {
+      throw new BadRequestException(
+        `Conducteur introuvable pour la réservation ${booking.id}`,
+      );
+    }
+
+    return {
       bookingId: booking.id,
       tripId: booking.tripId,
       driverId: booking.trip.driverId,
@@ -126,57 +547,131 @@ export class DriverSettlementsService {
       status: DriverEarningStatus.AVAILABLE,
       availableAt: new Date(),
       paidAt: null,
-    });
+    };
+  }
 
-    const saved = await this.earningRepository.save(earning);
+  private assertEarningMatchesBooking(
+    earning: DriverEarning,
+    booking: Booking,
+  ): void {
+    const expectedEarning = this.buildEarningData(booking);
+    if (!expectedEarning) {
+      throw new BadRequestException(
+        `Aucun gain conducteur attendu pour la réservation ${booking.id}`,
+      );
+    }
+
+    const expectedDriverId = booking.trip?.driverId;
+    if (
+      this.roundMoney(Number(earning.grossAmount)) !==
+        this.roundMoney(Number(expectedEarning.grossAmount)) ||
+      this.roundMoney(Number(earning.commissionRate)) !==
+        this.roundMoney(Number(expectedEarning.commissionRate)) ||
+      this.roundMoney(Number(earning.commissionAmount)) !==
+        this.roundMoney(Number(expectedEarning.commissionAmount)) ||
+      this.roundMoney(Number(earning.netAmount)) !==
+        this.roundMoney(Number(expectedEarning.netAmount)) ||
+      earning.tripId !== booking.tripId ||
+      earning.passengerId !== booking.passengerId ||
+      (expectedDriverId && earning.driverId !== expectedDriverId)
+    ) {
+      throw new BadRequestException(
+        `Le gain conducteur existant est incohérent pour la réservation ${booking.id}`,
+      );
+    }
+  }
+
+  private logRecordedEarning(earning: DriverEarning): void {
     this.logger.log(
-      `Driver earning recorded: bookingId=${booking.id}, driverId=${booking.trip.driverId}, gross=${grossAmount}, commission=${commissionAmount}, net=${netAmount}`,
+      `DRIVER_EARNING_COMMITTED bookingId=${earning.bookingId} gross=${Number(earning.grossAmount)} commission=${Number(earning.commissionAmount)} net=${Number(earning.netAmount)}`,
     );
-    return saved;
+  }
+
+  private canRecordDriverEarning(booking: Booking): boolean {
+    if (
+      [TripPaymentMode.ELECTRONIC, TripPaymentMode.POINTS].includes(
+        booking.paymentMode,
+      )
+    ) {
+      if (booking.paymentStatus !== BookingPaymentStatus.SUCCEEDED) {
+        this.logger.warn(
+          `Driver earning skipped for booking ${booking.id}: booking is not paid`,
+        );
+        return false;
+      }
+      return true;
+    }
+
+    if (booking.paymentMode === TripPaymentMode.CASH) {
+      return this.resolveBookingSubsidyAmount(booking) > 0;
+    }
+
+    return false;
+  }
+
+  private resolveDriverEarningGrossAmount(booking: Booking): number {
+    if (booking.paymentMode === TripPaymentMode.CASH) {
+      return this.resolveBookingSubsidyAmount(booking);
+    }
+
+    const persistedGrossAmount = Number(booking.grossPaymentAmount);
+    if (
+      booking.grossPaymentAmount !== null &&
+      booking.grossPaymentAmount !== undefined &&
+      Number.isFinite(persistedGrossAmount) &&
+      persistedGrossAmount > 0
+    ) {
+      return this.roundMoney(persistedGrossAmount);
+    }
+
+    return this.normalizeAmount(Number(booking.paymentAmount ?? 0));
+  }
+
+  private resolveDriverEarningCommissionRate(booking: Booking): number {
+    return booking.paymentMode === TripPaymentMode.CASH
+      ? 0
+      : this.getCommissionRate();
   }
 
   async requestPayout(
     driverId: string,
     dto: RequestDriverPayoutDto,
-  ): Promise<DriverPayout> {
+  ): Promise<DriverPayoutResponse> {
     const amount = this.normalizeAmount(dto.amount);
-    if (amount <= 0) {
-      throw new BadRequestException('Le montant du retrait est invalide');
-    }
-
-    const availableBalance = await this.getAvailableBalance(driverId);
-    if (amount > availableBalance) {
+    if (amount < this.getMinimumPayoutAmount()) {
       throw new BadRequestException(
-        'Solde chauffeur insuffisant pour ce retrait',
+        `Le retrait minimum est de ${this.getMinimumPayoutAmount()} ${this.getCurrency()}`,
       );
     }
 
-    const driver = await this.userRepository.findOne({
-      where: { id: driverId },
-    });
-    if (!driver) {
-      throw new NotFoundException('Chauffeur introuvable');
-    }
-
-    const phone = dto.phone?.trim() || driver.phone;
-    if (!phone) {
-      throw new BadRequestException(
-        'Un numero Mobile Money est requis pour le paiement chauffeur',
-      );
-    }
-
-    let payout = this.payoutRepository.create({
+    const payout = await this.reservePayout(
       driverId,
       amount,
-      currency: this.getCurrency(),
-      phone,
-      status: DriverPayoutStatus.PENDING,
-      paymentTransactionId: null,
-      requestedAt: new Date(),
-      processedAt: null,
-      failureReason: null,
-    });
-    payout = await this.payoutRepository.save(payout);
+      dto.phone,
+      dto.idempotencyKey?.trim() || randomUUID(),
+    );
+
+    if (
+      [
+        DriverPayoutStatus.SUCCEEDED,
+        DriverPayoutStatus.FAILED,
+        DriverPayoutStatus.CANCELLED,
+      ].includes(payout.status)
+    ) {
+      return this.formatPayoutForClient(payout);
+    }
+
+    const existingPayment =
+      payout.paymentTransaction ??
+      (await this.paymentsService.findLatestTransactionForRelatedEntity(
+        this.PAYOUT_RELATED_ENTITY_TYPE,
+        payout.id,
+        driverId,
+      ));
+
+    if (existingPayment) {
+      return this.applyPaymentToPayout(existingPayment, driverId);
+    }
 
     try {
       const payment = await this.paymentsService.initiatePayout({
@@ -184,7 +679,7 @@ export class DriverSettlementsService {
         purpose: PaymentPurpose.DRIVER_PAYOUT,
         relatedEntityType: this.PAYOUT_RELATED_ENTITY_TYPE,
         relatedEntityId: payout.id,
-        phone,
+        phone: payout.phone,
         amount,
         currency: payout.currency,
         description: `Paiement chauffeur Zwanga ${payout.id}`,
@@ -192,15 +687,7 @@ export class DriverSettlementsService {
         referencePrefix: 'DRV',
       });
 
-      payout.paymentTransactionId = payment.id;
-      payout.status = this.mapPaymentStatus(payment.status);
-      payout.failureReason =
-        payment.status === PaymentStatus.FAILED
-          ? payment.providerMessage
-          : null;
-      payout.processedAt =
-        payment.status === PaymentStatus.SUCCEEDED ? payment.paidAt : null;
-      const savedPayout = await this.payoutRepository.save(payout);
+      const savedPayout = await this.applyPaymentToPayout(payment, driverId);
       this.logDriverPayoutResponse(
         'Driver payout initialized',
         savedPayout,
@@ -208,15 +695,34 @@ export class DriverSettlementsService {
       );
       return savedPayout;
     } catch (error) {
-      payout.status = DriverPayoutStatus.FAILED;
-      payout.failureReason =
-        error instanceof Error ? error.message : String(error);
-      await this.payoutRepository.save(payout);
+      const payment =
+        await this.paymentsService.findLatestTransactionForRelatedEntity(
+          this.PAYOUT_RELATED_ENTITY_TYPE,
+          payout.id,
+          driverId,
+        );
+      if (payment) {
+        const reconciled = await this.applyPaymentToPayout(payment, driverId);
+        if (
+          [DriverPayoutStatus.PENDING, DriverPayoutStatus.INITIATED].includes(
+            reconciled.status,
+          )
+        ) {
+          return reconciled;
+        }
+      } else {
+        await this.markUnsentPayoutFailed(
+          payout.id,
+          error instanceof Error ? error.message : String(error),
+        );
+      }
       throw error;
     }
   }
 
-  async handlePayoutCallback(dto: FlexPayCallbackDto): Promise<DriverPayout> {
+  async handlePayoutCallback(
+    dto: FlexPayCallbackDto,
+  ): Promise<DriverPayoutResponse> {
     const payment = await this.paymentsService.handleFlexPayCallback(dto);
     const payout = await this.applyPaymentToPayout(payment);
     this.logDriverPayoutResponse(
@@ -230,65 +736,283 @@ export class DriverSettlementsService {
   async checkPayoutStatus(
     driverId: string,
     orderNumber: string,
-  ): Promise<DriverPayout> {
+  ): Promise<DriverPayoutResponse> {
     const payment = await this.paymentsService.checkPaymentStatus(
       orderNumber,
       driverId,
     );
     const payout = await this.applyPaymentToPayout(payment, driverId);
-    this.logDriverPayoutResponse(
-      'Driver payout status check',
-      payout,
-      payment,
-    );
+    this.logDriverPayoutResponse('Driver payout status check', payout, payment);
     return payout;
   }
 
   private async applyPaymentToPayout(
     payment: PaymentTransaction,
     driverId?: string,
-  ): Promise<DriverPayout> {
+  ): Promise<DriverPayoutResponse> {
     if (
-      payment.purpose !== PaymentPurpose.DRIVER_PAYOUT ||
+      payment.purpose !== String(PaymentPurpose.DRIVER_PAYOUT) ||
       payment.relatedEntityType !== this.PAYOUT_RELATED_ENTITY_TYPE
     ) {
       throw new BadRequestException(
-        'Cette transaction ne correspond pas a un paiement chauffeur',
+        'Cette transaction ne correspond pas à un paiement chauffeur',
       );
     }
 
-    const payout = await this.payoutRepository.findOne({
-      where: [
-        ...(payment.relatedEntityId
-          ? [
-              {
-                id: payment.relatedEntityId,
-                ...(driverId ? { driverId } : {}),
-              },
-            ]
-          : []),
-        {
-          paymentTransactionId: payment.id,
-          ...(driverId ? { driverId } : {}),
-        },
-      ],
+    const payout = await this.dataSource.transaction(async (manager) => {
+      const foundPayout = await manager.findOne(DriverPayout, {
+        where: [
+          ...(payment.relatedEntityId
+            ? [
+                {
+                  id: payment.relatedEntityId,
+                  ...(driverId ? { driverId } : {}),
+                },
+              ]
+            : []),
+          {
+            paymentTransactionId: payment.id,
+            ...(driverId ? { driverId } : {}),
+          },
+        ],
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!foundPayout) {
+        throw new NotFoundException('Paiement chauffeur introuvable');
+      }
+
+      if (
+        foundPayout.status === DriverPayoutStatus.SUCCEEDED &&
+        payment.status !== PaymentStatus.SUCCEEDED
+      ) {
+        return foundPayout;
+      }
+
+      foundPayout.paymentTransactionId = payment.id;
+      foundPayout.status = this.mapPaymentStatus(payment.status);
+      foundPayout.failureReason = [
+        PaymentStatus.FAILED,
+        PaymentStatus.CANCELLED,
+      ].includes(payment.status)
+        ? payment.providerMessage
+        : null;
+      foundPayout.processedAt =
+        payment.status === PaymentStatus.SUCCEEDED
+          ? (payment.paidAt ?? new Date())
+          : [PaymentStatus.FAILED, PaymentStatus.CANCELLED].includes(
+                payment.status,
+              )
+            ? (foundPayout.processedAt ?? new Date())
+            : null;
+
+      return manager.save(foundPayout);
     });
-    if (!payout) {
-      throw new NotFoundException('Paiement chauffeur introuvable');
+
+    return this.formatPayoutForClient(payout, payment);
+  }
+
+  @Cron('*/5 * * * *')
+  async reconcilePendingPayouts(): Promise<void> {
+    if (this.payoutReconciliationRunning) {
+      return;
     }
 
-    payout.paymentTransactionId = payment.id;
-    payout.status = this.mapPaymentStatus(payment.status);
-    payout.failureReason =
-      payment.status === PaymentStatus.FAILED
-        ? payment.providerMessage
-        : payout.failureReason;
-    payout.processedAt =
-      payment.status === PaymentStatus.SUCCEEDED
-        ? payment.paidAt ?? new Date()
-        : payout.processedAt;
+    this.payoutReconciliationRunning = true;
+    try {
+      const payouts = await this.payoutRepository.find({
+        where: {
+          status: In([
+            DriverPayoutStatus.PENDING,
+            DriverPayoutStatus.INITIATED,
+          ]),
+        },
+        relations: ['paymentTransaction'],
+        order: { requestedAt: 'ASC' },
+        take: 50,
+      });
 
-    return this.payoutRepository.save(payout);
+      for (const payout of payouts) {
+        try {
+          const payment =
+            payout.paymentTransaction ??
+            (await this.paymentsService.findLatestTransactionForRelatedEntity(
+              this.PAYOUT_RELATED_ENTITY_TYPE,
+              payout.id,
+              payout.driverId,
+            ));
+          if (!payment) {
+            const requestedAt = payout.requestedAt ?? payout.createdAt;
+            if (
+              requestedAt &&
+              Date.now() - new Date(requestedAt).getTime() >=
+                this.ORPHAN_PAYOUT_GRACE_MS
+            ) {
+              await this.markUnsentPayoutFailed(
+                payout.id,
+                'Aucune transaction FlexPay créée après réservation du retrait',
+              );
+            }
+            continue;
+          }
+          if (!payment.orderNumber) {
+            await this.applyPaymentToPayout(payment, payout.driverId);
+            continue;
+          }
+          const checkedPayment = await this.paymentsService.checkPaymentStatus(
+            payment.orderNumber,
+            payout.driverId,
+          );
+          await this.applyPaymentToPayout(checkedPayment, payout.driverId);
+        } catch (error) {
+          this.logger.error(
+            `DRIVER_PAYOUT_RECONCILIATION_FAILED payoutId=${payout.id} reason=${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+      }
+    } finally {
+      this.payoutReconciliationRunning = false;
+    }
+  }
+
+  private async reservePayout(
+    driverId: string,
+    amount: number,
+    requestedPhone: string | undefined,
+    idempotencyKey: string,
+  ): Promise<DriverPayout> {
+    return this.dataSource.transaction(async (manager) => {
+      // Le verrou du compte conducteur serialise tous ses retraits. Deux cles
+      // differentes envoyees simultanement ne peuvent donc pas depenser le
+      // meme solde disponible.
+      const driver = await manager.findOne(User, {
+        where: { id: driverId },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!driver) {
+        throw new NotFoundException('Chauffeur introuvable');
+      }
+
+      const rawPhone = requestedPhone?.trim() || driver.phone?.trim();
+      if (!rawPhone) {
+        throw new BadRequestException(
+          'Un numéro Mobile Money est requis pour le paiement chauffeur',
+        );
+      }
+      const phone = normalizePayoutPhone(rawPhone);
+
+      const existing = await manager.findOne(DriverPayout, {
+        where: { driverId, idempotencyKey },
+        relations: ['paymentTransaction'],
+      });
+      if (existing) {
+        this.assertIdempotentPayoutMatches(existing, amount, phone);
+        return existing;
+      }
+
+      const kycApproved = await manager.exists(KycDocument, {
+        where: { userId: driverId, status: KycStatus.APPROVED },
+      });
+      if (!kycApproved) {
+        throw new BadRequestException(
+          'Votre identité doit être vérifiée avant le versement de vos gains',
+        );
+      }
+
+      const availableBalance = await this.getAvailableBalanceWithManager(
+        manager,
+        driverId,
+      );
+      if (amount > availableBalance) {
+        throw new BadRequestException(
+          'Solde chauffeur insuffisant pour ce retrait',
+        );
+      }
+
+      const payout = manager.create(DriverPayout, {
+        driverId,
+        idempotencyKey,
+        amount,
+        currency: this.getCurrency(),
+        phone,
+        status: DriverPayoutStatus.PENDING,
+        paymentTransactionId: null,
+        requestedAt: new Date(),
+        processedAt: null,
+        failureReason: null,
+      });
+      return manager.save(payout);
+    });
+  }
+
+  private assertIdempotentPayoutMatches(
+    payout: DriverPayout,
+    amount: number,
+    phone: string,
+  ): void {
+    if (
+      this.roundMoney(Number(payout.amount)) !== amount ||
+      normalizePayoutPhone(payout.phone) !== normalizePayoutPhone(phone)
+    ) {
+      throw new BadRequestException(
+        "La clé d'idempotence a déjà été utilisée pour un autre retrait",
+      );
+    }
+  }
+
+  private async markUnsentPayoutFailed(
+    payoutId: string,
+    reason: string,
+  ): Promise<void> {
+    await this.dataSource.transaction(async (manager) => {
+      const payout = await manager.findOne(DriverPayout, {
+        where: { id: payoutId },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!payout || payout.status !== DriverPayoutStatus.PENDING) {
+        return;
+      }
+      const payment = await manager.findOne(PaymentTransaction, {
+        where: {
+          relatedEntityType: this.PAYOUT_RELATED_ENTITY_TYPE,
+          relatedEntityId: payout.id,
+          userId: payout.driverId,
+        },
+        order: { createdAt: 'DESC' },
+      });
+      if (payment) {
+        return;
+      }
+      payout.status = DriverPayoutStatus.FAILED;
+      payout.failureReason = reason.slice(0, 500);
+      payout.processedAt = new Date();
+      await manager.save(payout);
+    });
+  }
+
+  private formatPayoutForClient(
+    payout: DriverPayout,
+    payment: PaymentTransaction | null = payout.paymentTransaction ?? null,
+  ): DriverPayoutResponse {
+    const awaiting = [DriverPayoutStatus.PENDING, DriverPayoutStatus.INITIATED].includes(payout.status);
+    const requiresReview = awaiting && Boolean(payment) && !payment?.orderNumber;
+    const paymentMessage = payout.status === DriverPayoutStatus.SUCCEEDED
+      ? 'Zwanga a versé vos gains sur votre compte Mobile Money.'
+      : payout.status === DriverPayoutStatus.CANCELLED
+        ? 'Le versement a été annulé. Le montant est à nouveau disponible dans vos revenus.'
+        : awaiting ? (requiresReview ? PAYOUT_MESSAGES.review : PAYOUT_MESSAGES.pending)
+          : getPayoutFailureMessage(payment?.providerMessage ?? payout.failureReason);
+    return {
+      ...payout,
+      amount: Number(payout.amount),
+      paymentTransaction: payment,
+      orderNumber: payment?.orderNumber ?? null,
+      paymentMessage,
+      failureReason: payout.failureReason ? getPayoutFailureMessage(payout.failureReason) : null,
+      reference: payment?.reference ?? null,
+      requiresReview,
+    };
   }
 
   private logDriverPayoutResponse(
@@ -296,7 +1020,7 @@ export class DriverSettlementsService {
     payout: DriverPayout,
     payment: PaymentTransaction | null,
   ): void {
-    this.logger.log(
+    this.logger.warn(
       `${step}: response=${this.paymentsService.formatLogPayload({
         payoutId: payout.id,
         driverId: payout.driverId,
@@ -321,6 +1045,36 @@ export class DriverSettlementsService {
     ]);
 
     return this.roundMoney(Math.max(0, earnings - lockedPayouts));
+  }
+
+  private async getAvailableBalanceWithManager(
+    manager: EntityManager,
+    driverId: string,
+  ): Promise<number> {
+    const earningResult = await manager
+      .createQueryBuilder(DriverEarning, 'earning')
+      .select('COALESCE(SUM(earning.netAmount), 0)', 'sum')
+      .where('earning.driverId = :driverId', { driverId })
+      .andWhere('earning.status = :status', {
+        status: DriverEarningStatus.AVAILABLE,
+      })
+      .getRawOne<{ sum: string }>();
+    const payoutResult = await manager
+      .createQueryBuilder(DriverPayout, 'payout')
+      .select('COALESCE(SUM(payout.amount), 0)', 'sum')
+      .where('payout.driverId = :driverId', { driverId })
+      .andWhere('payout.status IN (:...statuses)', {
+        statuses: [
+          DriverPayoutStatus.PENDING,
+          DriverPayoutStatus.INITIATED,
+          DriverPayoutStatus.SUCCEEDED,
+        ],
+      })
+      .getRawOne<{ sum: string }>();
+
+    const available =
+      Number(earningResult?.sum ?? 0) - Number(payoutResult?.sum ?? 0);
+    return this.roundMoney(Math.max(0, available));
   }
 
   private async sumEarnings(
@@ -384,6 +1138,15 @@ export class DriverSettlementsService {
       this.configService.get<string>('TRIP_PAYMENT_CURRENCY')?.trim() ||
       this.DEFAULT_CURRENCY
     ).toUpperCase();
+  }
+
+  private getMinimumPayoutAmount(): number {
+    const configured = Number(
+      this.configService.get<string | number>('DRIVER_PAYOUT_MIN_AMOUNT_CDF'),
+    );
+    return Number.isFinite(configured) && configured > 0
+      ? this.roundMoney(configured)
+      : this.DEFAULT_MINIMUM_PAYOUT_AMOUNT;
   }
 
   private getPayoutFlexPayCallbackUrl(): string {

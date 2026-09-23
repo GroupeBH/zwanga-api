@@ -1,4 +1,5 @@
 import type { Point } from 'typeorm';
+import type { RideDeclarations, RideStage } from '../../ride-declarations/ride-declaration.model';
 import {
   Entity,
   PrimaryGeneratedColumn,
@@ -26,6 +27,8 @@ export enum BookingStatus {
   ACCEPTED = 'accepted',
   REJECTED = 'rejected',
   CANCELLED = 'cancelled',
+  NO_SHOW = 'no_show',
+  BOARDING_UNCERTAIN = 'boarding_uncertain',
   COMPLETED = 'completed',
   EXPIRED = 'expired',
 }
@@ -40,10 +43,25 @@ export enum BookingPaymentStatus {
 }
 
 @Entity('bookings')
+@Index('IDX_bookings_passenger_history', ['passengerId', 'tripId', 'id'])
 @Index(['tripId', 'passengerId'])
 export class Booking {
   @PrimaryGeneratedColumn('uuid')
   id: string;
+
+  // Explicitly selected only by the declarations service. Existing GPS/payment
+  // saves must never write an old copy of these concurrent receipts.
+  @Column({ type: 'jsonb', default: () => "'{}'::jsonb", select: false })
+  rideDeclarations: RideDeclarations;
+
+  @Column({ type: 'jsonb', default: () => "'[]'::jsonb", select: false })
+  rideEffectsPending: RideStage[];
+
+  @Column({ type: 'int', default: 0, select: false })
+  rideEffectsVersion: number;
+
+  @Column({ type: 'timestamptz', nullable: true, select: false })
+  rideEffectsRetryAt: Date | null;
 
   @Column()
   tripId: string;
@@ -132,7 +150,19 @@ export class Booking {
   paymentAmount: number | null;
 
   @Column({ type: 'decimal', precision: 10, scale: 2, nullable: true })
+  grossPaymentAmount: number | null;
+
+  @Column({ type: 'decimal', precision: 10, scale: 2, nullable: true })
   originalPaymentAmount: number | null;
+
+  @Column({ type: 'boolean', default: false })
+  firstTripSubsidyApplied: boolean;
+
+  @Column({ type: 'decimal', precision: 7, scale: 6, nullable: true })
+  passengerPaymentRate: number | null;
+
+  @Column({ type: 'decimal', precision: 10, scale: 2, default: 0 })
+  zwangaSubsidyAmount: number;
 
   @Column({ type: 'int', nullable: true })
   plannedDistanceMeters: number | null;
@@ -148,6 +178,9 @@ export class Booking {
 
   @Column({ type: 'timestamp', nullable: true })
   fareAdjustedAt: Date | null;
+
+  @Column({ type: 'boolean', default: false })
+  interruptionFareLocked: boolean;
 
   @Column({ type: 'varchar', length: 8, default: 'CDF' })
   paymentCurrency: string;
@@ -179,11 +212,32 @@ export class Booking {
   @Column({ type: 'timestamp', nullable: true })
   cancelledAt: Date | null;
 
-  @Column({ type: 'boolean', default: false })
-  pickedUp: boolean; // Driver a confirmé la récupération
+  @Column({ type: 'timestamp', nullable: true })
+  noShowDetectedAt: Date | null;
+
+  @Column({ type: 'varchar', length: 80, nullable: true })
+  noShowReason: string | null;
+
+  @Column({ type: 'int', nullable: true })
+  noShowDriverDistanceMeters: number | null;
 
   @Column({ type: 'timestamp', nullable: true })
-  pickedUpAt: Date | null; // Date de récupération confirmée par le driver
+  boardingUncertainDetectedAt: Date | null;
+
+  @Column({ type: 'varchar', length: 80, nullable: true })
+  boardingUncertainReason: string | null;
+
+  @Column({ type: 'int', nullable: true })
+  boardingUncertainDriverDistanceMeters: number | null;
+
+  @Column({ type: 'varchar', length: 50, nullable: true })
+  pickupDetectionMethod: string | null;
+
+  @Column({ type: 'boolean', default: false })
+  pickedUp: boolean; // Embarquement persiste, automatique ou de reprise
+
+  @Column({ type: 'timestamp', nullable: true })
+  pickedUpAt: Date | null; // Date serveur de l'embarquement persiste
 
   @Column({ type: 'boolean', default: false })
   pickedUpConfirmedByPassenger: boolean; // Passager a confirmé la récupération
@@ -192,16 +246,19 @@ export class Booking {
   pickedUpConfirmedAt: Date | null; // Date de confirmation par le passager
 
   @Column({ type: 'boolean', default: false })
-  droppedOff: boolean; // Conducteur a confirmé l'arrivée
+  droppedOff: boolean; // Depose persistee, automatique ou de reprise
 
   @Column({ type: 'timestamp', nullable: true })
-  droppedOffAt: Date | null; // Date d'arrivée confirmée par le conducteur
+  droppedOffAt: Date | null; // Date serveur de la depose persistee
 
   @Column({ type: 'boolean', default: false })
   droppedOffConfirmedByPassenger: boolean; // Passager a signalé son arrivée
 
   @Column({ type: 'timestamp', nullable: true })
   droppedOffConfirmedAt: Date | null; // Date du signalement d'arrivée par le passager
+
+  @Column({ type: 'varchar', length: 50, nullable: true })
+  dropoffDetectionMethod: string | null;
 
   @Column({ type: 'jsonb', default: () => "'[]'" })
   safetyEmergencyContactIds: string[]; // Contacts d'urgence choisis pour les notifications WhatsApp

@@ -24,6 +24,7 @@ import {
   SendOtpResponse,
   VerifyOtpResponse,
 } from './dto/keccel-otp.dto';
+import { OTP_SMS_MESSAGES } from './otp-messages';
 
 @Injectable()
 export class KeccelOtpService {
@@ -32,7 +33,7 @@ export class KeccelOtpService {
   private readonly from: string;
   private readonly generateUrl: string;
   private readonly validateUrl: string;
-  private readonly defaultMessage = 'Votre code est : %OTP%';
+  private readonly defaultMessage = OTP_SMS_MESSAGES.default;
   private readonly defaultLength = 5;
   private readonly defaultLifetime = 300; // 5 minutes
 
@@ -116,7 +117,7 @@ export class KeccelOtpService {
 
     if (otpLifetime > 600) {
       throw new BadRequestException(
-        'La duree de vie du code OTP doit etre inferieure ou egale a 600 secondes',
+        'La durée de vie du code OTP doit être inférieure ou égale à 600 secondes',
       );
     }
 
@@ -139,7 +140,7 @@ export class KeccelOtpService {
         this.httpService
           .post<KeccelOtpGenerateResponse>(this.generateUrl, requestBody, {
             headers: {
-              'Content-Type': 'application/json',
+              'Content-Type': 'application/json; charset=utf-8',
             },
           })
           .pipe(
@@ -353,7 +354,7 @@ export class KeccelOtpService {
 
     if (!/^\d{8,15}$/.test(normalized)) {
       throw new BadRequestException(
-        'Le numero de telephone doit etre au format international, par exemple +243900000000',
+        'Le numéro de téléphone doit être au format international, par exemple +243900000000',
       );
     }
 

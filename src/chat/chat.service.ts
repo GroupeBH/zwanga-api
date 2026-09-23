@@ -12,6 +12,7 @@ import { Booking } from '../bookings/entities/booking.entity';
 import { Conversation, ConversationType } from './entities/conversation.entity';
 import { ConversationParticipant } from './entities/conversation-participant.entity';
 import { User, UserRole } from '../users/entities/user.entity';
+import { ADMIN_USER_ROLES } from '../users/user-role.policy';
 import {
   CreateConversationDto,
   ListConversationsQueryDto,
@@ -20,6 +21,8 @@ import {
 } from './dto/conversation.dto';
 import { NotificationService } from '../notifications/notifications.service';
 import { FileUploadService } from '../common/services/file-upload.service';
+import { loadMessagePage } from './message-page';
+import type { MessagePageDto } from './dto/message-page.dto';
 
 @Injectable()
 export class ChatService {
@@ -55,8 +58,14 @@ export class ChatService {
     let conversation: Conversation | null = null;
 
     if (dto.bookingId) {
+      const booking = await this.ensureUserCanAccessBookingChat(
+        dto.bookingId,
+        creatorId,
+      );
+      this.assertBookingParticipants(booking, participantIds);
       conversation = await this.findOrCreateConversationForBooking(
         dto.bookingId,
+        booking,
       );
       await this.ensureParticipants(conversation.id, participantIds);
     } else {
@@ -99,6 +108,18 @@ export class ChatService {
       )
       .leftJoinAndSelect('conversation.participants', 'participants')
       .leftJoinAndSelect('participants.user', 'participantUser')
+      // Conversation.bookingId is varchar, whereas Booking.id is uuid.
+      .leftJoin(
+        Booking,
+        'conversationBooking',
+        'CAST(conversationBooking.id AS text) = conversation.bookingId',
+      )
+      .leftJoin('conversationBooking.trip', 'conversationTrip')
+      // Filter before pagination/counting; stale memberships never grant booking access.
+      .andWhere(
+        '(conversation.bookingId IS NULL OR conversationBooking.passengerId = :viewerId OR conversationTrip.driverId = :viewerId)',
+        { viewerId: userId },
+      )
       .orderBy('conversation.updatedAt', 'DESC')
       .skip(skip)
       .take(limit);
@@ -136,13 +157,18 @@ export class ChatService {
     });
 
     if (!conversation) {
-      throw new NotFoundException('Conversation not found');
+      throw new NotFoundException("Conversation introuvable.");
     }
 
-    this.ensureMembership(conversation.participants, userId);
+    await this.ensureConversationAccess(conversation, userId);
     this.ensureConversationType(conversation, expectedType);
 
     return this.enrichConversation(conversation, userId);
+  }
+
+  async getConversationMessagePage(conversationId: string, userId: string, options: MessagePageDto) {
+    await this.ensureUserInConversation(conversationId, userId);
+    return loadMessagePage(this.messageRepository, conversationId, options);
   }
 
   async getConversationMessages(
@@ -156,10 +182,10 @@ export class ChatService {
     });
 
     if (!conversation) {
-      throw new NotFoundException('Conversation not found');
+      throw new NotFoundException("Conversation introuvable.");
     }
 
-    this.ensureMembership(conversation.participants, userId);
+    await this.ensureConversationAccess(conversation, userId);
     this.ensureConversationType(conversation, expectedType);
 
     const messages = await this.messageRepository.find({
@@ -182,10 +208,10 @@ export class ChatService {
     });
 
     if (!conversation) {
-      throw new NotFoundException('Conversation not found');
+      throw new NotFoundException("Conversation introuvable.");
     }
 
-    this.ensureMembership(conversation.participants, senderId);
+    await this.ensureConversationAccess(conversation, senderId);
 
     const message = this.messageRepository.create({
       conversationId,
@@ -222,7 +248,17 @@ export class ChatService {
     requestUserId: string,
     userIds: string[],
   ) {
-    await this.ensureUserInConversation(conversationId, requestUserId);
+    const conversation = await this.ensureUserInConversation(
+      conversationId,
+      requestUserId,
+    );
+    if (conversation.bookingId) {
+      const booking = await this.ensureUserCanAccessBookingChat(
+        conversation.bookingId,
+        requestUserId,
+      );
+      this.assertBookingParticipants(booking, userIds);
+    }
     await this.ensureUsersExist(userIds);
     await this.ensureParticipants(conversationId, userIds);
     return this.getConversation(requestUserId, conversationId);
@@ -240,13 +276,14 @@ export class ChatService {
     });
 
     if (!participant) {
-      throw new NotFoundException('Participant not found');
+      throw new NotFoundException("Participant introuvable.");
     }
 
     await this.participantRepository.remove(participant);
   }
 
   async markConversationRead(conversationId: string, userId: string) {
+    await this.ensureUserInConversation(conversationId, userId);
     await this.participantRepository.update(
       { conversationId, userId },
       { lastReadAt: new Date() },
@@ -268,11 +305,11 @@ export class ChatService {
     });
 
     if (!conversation) {
-      throw new NotFoundException('Conversation not found');
+      throw new NotFoundException("Conversation introuvable.");
     }
 
     // Ensure the user is part of this conversation
-    this.ensureMembership(conversation.participants, userId);
+    await this.ensureConversationAccess(conversation, userId);
 
     // Remove the participant (soft delete for this user)
     const participant = conversation.participants.find(
@@ -292,6 +329,36 @@ export class ChatService {
   /*                          Booking-specific helpers                          */
   /* -------------------------------------------------------------------------- */
 
+  async ensureUserCanAccessBookingChat(
+    bookingId: string,
+    userId: string,
+  ): Promise<Booking> {
+    // Never pass an absent identity to TypeORM: undefined predicates can be ignored.
+    if (!bookingId || !userId) {
+      throw new ForbiddenException('Accès à cette conversation refusé.');
+    }
+    const booking = await this.bookingRepository.findOne({
+      where: { id: bookingId },
+      relations: ['trip'],
+    });
+    if (
+      !booking ||
+      (booking.passengerId !== userId && booking.trip?.driverId !== userId)
+    ) {
+      throw new ForbiddenException('Accès à cette conversation refusé.');
+    }
+    return booking;
+  }
+
+  private assertBookingParticipants(booking: Booking, userIds: string[]): void {
+    const allowedIds = new Set([booking.passengerId, booking.trip?.driverId]);
+    if (userIds.some((id) => !allowedIds.has(id))) {
+      throw new ForbiddenException(
+        'Seuls le passager et le conducteur peuvent participer à cette conversation.',
+      );
+    }
+  }
+
   async ensureConversationForBooking(bookingId: string) {
     const booking = await this.bookingRepository.findOne({
       where: { id: bookingId },
@@ -299,7 +366,7 @@ export class ChatService {
     });
 
     if (!booking) {
-      throw new NotFoundException('Booking not found');
+      throw new NotFoundException("Réservation introuvable.");
     }
 
     return this.findOrCreateConversationForBooking(booking.id, booking);
@@ -310,12 +377,14 @@ export class ChatService {
     senderId: string,
     content: string,
   ): Promise<Message | null> {
+    await this.ensureUserCanAccessBookingChat(bookingId, senderId);
     const conversation = await this.ensureConversationForBooking(bookingId);
 
     return this.sendConversationMessage(conversation.id, senderId, content);
   }
 
   async getMessages(bookingId: string, userId: string): Promise<Message[]> {
+    await this.ensureUserCanAccessBookingChat(bookingId, userId);
     const conversation = await this.ensureConversationForBooking(bookingId);
     return this.getConversationMessages(conversation.id, userId);
   }
@@ -326,7 +395,7 @@ export class ChatService {
     });
 
     if (!message) {
-      throw new NotFoundException('Message not found');
+      throw new NotFoundException("Message introuvable.");
     }
 
     await this.markConversationRead(message.conversationId, userId);
@@ -343,12 +412,14 @@ export class ChatService {
     });
 
     if (!message) {
-      throw new NotFoundException('Message not found');
+      throw new NotFoundException("Message introuvable.");
     }
 
     if (message.senderId !== userId) {
       throw new ForbiddenException('Vous ne pouvez modifier que vos propres messages');
     }
+
+    await this.ensureUserInConversation(message.conversationId, userId);
 
     if (!newContent || newContent.trim().length === 0) {
       throw new BadRequestException('Le contenu du message ne peut pas être vide');
@@ -369,12 +440,14 @@ export class ChatService {
     });
 
     if (!message) {
-      throw new NotFoundException('Message not found');
+      throw new NotFoundException("Message introuvable.");
     }
 
     if (message.senderId !== userId) {
       throw new ForbiddenException('Vous ne pouvez supprimer que vos propres messages');
     }
+
+    await this.ensureUserInConversation(message.conversationId, userId);
 
     await this.messageRepository.delete(messageId);
   }
@@ -518,7 +591,7 @@ export class ChatService {
     });
 
     if (!conversation) {
-      throw new NotFoundException('Conversation not found');
+      throw new NotFoundException("Conversation introuvable.");
     }
 
     this.ensureConversationType(conversation, ConversationType.SUPPORT);
@@ -568,7 +641,7 @@ export class ChatService {
     });
 
     if (found.length !== unique.length) {
-      throw new NotFoundException('One or more users not found');
+      throw new NotFoundException("Un ou plusieurs utilisateurs sont introuvables.");
     }
   }
 
@@ -576,8 +649,21 @@ export class ChatService {
     participants: ConversationParticipant[],
     userId: string,
   ) {
-    if (!participants.some((participant) => participant.userId === userId)) {
-      throw new ForbiddenException('User not part of this conversation');
+    if (
+      !userId ||
+      !participants.some((participant) => participant.userId === userId)
+    ) {
+      throw new ForbiddenException("Vous ne faites pas partie de cette conversation.");
+    }
+  }
+
+  private async ensureConversationAccess(
+    conversation: Conversation,
+    userId: string,
+  ): Promise<void> {
+    this.ensureMembership(conversation.participants, userId);
+    if (conversation.bookingId) {
+      await this.ensureUserCanAccessBookingChat(conversation.bookingId, userId);
     }
   }
 
@@ -585,13 +671,19 @@ export class ChatService {
     conversationId: string,
     userId: string,
   ) {
-    const participant = await this.participantRepository.findOne({
-      where: { conversationId, userId },
+    if (!conversationId || !userId) {
+      throw new ForbiddenException('Accès à cette conversation refusé.');
+    }
+    const conversation = await this.conversationRepository.findOne({
+      where: { id: conversationId },
+      relations: ['participants'],
     });
 
-    if (!participant) {
-      throw new ForbiddenException('User not part of this conversation');
+    if (!conversation) {
+      throw new ForbiddenException("Vous ne faites pas partie de cette conversation.");
     }
+    await this.ensureConversationAccess(conversation, userId);
+    return conversation;
   }
 
   private async findOrCreateConversationForBooking(
@@ -611,7 +703,7 @@ export class ChatService {
       }));
 
     if (!booking) {
-      throw new NotFoundException('Booking not found');
+      throw new NotFoundException("Réservation introuvable.");
     }
 
     if (!conversation) {
@@ -635,7 +727,7 @@ export class ChatService {
 
   private async getSupportAgents(): Promise<User[]> {
     return this.userRepository.find({
-      where: { role: UserRole.ADMIN },
+      where: { role: In([...ADMIN_USER_ROLES]) },
       select: ['id', 'firstName', 'lastName', 'fcmToken'],
     });
   }
@@ -645,7 +737,7 @@ export class ChatService {
     expectedType?: ConversationType,
   ) {
     if (expectedType && conversation.type !== expectedType) {
-      throw new BadRequestException('Invalid conversation type');
+      throw new BadRequestException("Ce type de conversation ne permet pas cette action.");
     }
   }
 
@@ -654,10 +746,21 @@ export class ChatService {
     message: Message,
   ) {
     try {
-      const participants = await this.participantRepository.find({
+      let participants = await this.participantRepository.find({
         where: { conversationId: conversation.id },
         relations: ['user'],
       });
+
+      if (conversation.bookingId) {
+        const booking = await this.ensureUserCanAccessBookingChat(
+          conversation.bookingId,
+          message.senderId,
+        );
+        const allowedIds = new Set([booking.passengerId, booking.trip?.driverId]);
+        participants = participants.filter((participant) =>
+          allowedIds.has(participant.userId),
+        );
+      }
 
       const tokens = Array.from(
         new Set(

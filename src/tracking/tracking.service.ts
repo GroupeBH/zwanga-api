@@ -50,7 +50,7 @@ export class TrackingService {
     });
 
     if (!trip) {
-      throw new NotFoundException('Trajet non trouve');
+      throw new NotFoundException('Trajet non trouvé');
     }
 
     const booking = await this.resolveShareBooking(trip, userId, dto.bookingId);
@@ -112,11 +112,11 @@ export class TrackingService {
     }
 
     if (shareLink.revokedAt) {
-      throw new GoneException('Ce lien de suivi a ete revoque');
+      throw new GoneException('Ce lien de suivi a été révoqué');
     }
 
     if (shareLink.expiresAt.getTime() <= Date.now()) {
-      throw new GoneException('Ce lien de suivi a expire');
+      throw new GoneException('Ce lien de suivi a expiré');
     }
 
     const { trip, booking } = shareLink;
@@ -220,7 +220,7 @@ export class TrackingService {
     if (isDriver) {
       if (requestedBookingId) {
         throw new BadRequestException(
-          'Le conducteur peut partager le suivi global du trajet, pas une reservation passager',
+          'Le conducteur peut partager le suivi global du trajet, pas une réservation passager',
         );
       }
       return null;
@@ -241,18 +241,18 @@ export class TrackingService {
         });
 
     if (requestedBookingId && !booking) {
-      throw new NotFoundException('Reservation introuvable pour ce trajet');
+      throw new NotFoundException('Réservation introuvable pour ce trajet');
     }
 
     if (!booking) {
       throw new ForbiddenException(
-        'Vous devez etre conducteur du trajet ou avoir une reservation acceptee pour partager ce suivi',
+        'Vous devez être conducteur du trajet ou avoir une réservation acceptée pour partager ce suivi',
       );
     }
 
     if (!isDriver && booking.passengerId !== userId) {
       throw new ForbiddenException(
-        'Vous ne pouvez partager que votre propre reservation',
+        'Vous ne pouvez partager que votre propre réservation',
       );
     }
 
@@ -261,7 +261,7 @@ export class TrackingService {
       booking.status !== BookingStatus.COMPLETED
     ) {
       throw new BadRequestException(
-        'Le suivi public est disponible uniquement pour une reservation acceptee',
+        'Le suivi public est disponible uniquement pour une réservation acceptée',
       );
     }
 
@@ -295,7 +295,7 @@ export class TrackingService {
       '',
       params.customMessage || 'Je vous partage mon trajet Zwanga.',
       '',
-      `Depart: ${params.trip.departureLocation}`,
+      `Départ : ${params.trip.departureLocation}`,
       `Arrivee: ${params.trip.arrivalLocation}`,
       `Lien de suivi: ${params.publicUrl}`,
       '',
@@ -331,7 +331,7 @@ export class TrackingService {
       }
     }
 
-    throw new BadRequestException('Impossible de generer un lien de suivi');
+    throw new BadRequestException('Impossible de générer un lien de suivi');
   }
 
   private buildTripLocation(

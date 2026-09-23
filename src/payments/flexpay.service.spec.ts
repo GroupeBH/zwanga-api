@@ -25,9 +25,12 @@ describe('FlexPayService', () => {
       FLEX_PAIE_TOKEN: 'test-token',
     };
 
-    service = new FlexPayService(httpService as any, {
-      get: jest.fn((key: string) => config[key]),
-    } as any);
+    service = new FlexPayService(
+      httpService as any,
+      {
+        get: jest.fn((key: string) => config[key]),
+      } as any,
+    );
   });
 
   it('sends Mobile Money payments to the FlexPay paymentService endpoint', async () => {
@@ -92,7 +95,7 @@ describe('FlexPayService', () => {
         phone: '+243 891 234 567',
       }),
     ).rejects.toThrow(
-      'Initialisation paiement Mobile Money FlexPay indisponible (delai depasse apres 30000ms)',
+      'Initialisation paiement Mobile Money FlexPay indisponible (délai dépassé après 30000ms)',
     );
   });
 
@@ -163,9 +166,7 @@ describe('FlexPayService', () => {
       }),
     );
 
-    const result = await service.checkTransaction(
-      '9bsTX7qXdpQe243891234567',
-    );
+    const result = await service.checkTransaction('9bsTX7qXdpQe243891234567');
 
     expect(httpService.get).toHaveBeenCalledWith(
       'https://beta-backend.flexpay.cd/api/rest/v1/check/9bsTX7qXdpQe243891234567',
@@ -198,20 +199,29 @@ describe('FlexPayService', () => {
       }),
     );
 
-    const result = await service.checkTransaction(
-      '9bsTX7qXdpQe243891234567',
-    );
+    const result = await service.checkTransaction('9bsTX7qXdpQe243891234567');
 
     expect(result.transaction?.status).toBeNull();
     expect(result.transaction?.code).toBe('1');
     expect(service.isSuccessfulTransaction(result.transaction)).toBe(false);
   });
 
-  it('sends merchant payouts to the FlexPay merchantPayOutService endpoint', async () => {
+  it('authenticates and sends payouts using the dedicated v1.03 contract', async () => {
+    Object.assign(config, {
+      FLEXPAY_PAYOUT_SERVICE_URL: 'https://payout.example.invalid/v1/pay',
+      FLEXPAY_PAYOUT_USERNAME: 'payout-user',
+      FLEXPAY_PAYOUT_PASSWORD: 'payout-password',
+    });
+    httpService.post.mockReturnValueOnce(
+      of({
+        data: { code: '0', token: 'Bearer payout-token', expire_in: 1234 },
+      }),
+    );
     httpService.post.mockReturnValue(
       of({
         data: {
           code: '0',
+          status: '0XX0',
           message: 'Payout envoye avec succes',
           orderNumber: '9bsTX7qXdpQe243891234568',
         },
@@ -223,30 +233,39 @@ describe('FlexPayService', () => {
       phone: '+243 891 234 568',
       amount: 9500,
       currency: 'CDF',
+      description: 'Versement des gains',
       callbackUrl:
         'https://api.zwanga.cd/api/v1/driver-settlements/payouts/flexpay/callback',
     });
 
     expect(httpService.post).toHaveBeenCalledWith(
-      'https://beta-backend.flexpay.cd/api/rest/v1/merchantPayOutService',
+      'https://payout.example.invalid/v1/pay',
       {
         merchant: 'ZANDO',
         type: '1',
-        phone: '243891234568',
+        customer: '243891234568',
         reference: 'DRV0014521',
         amount: '9500',
         currency: 'CDF',
-        callbackUrl:
+        description: 'Versement des gains',
+        callback_url:
           'https://api.zwanga.cd/api/v1/driver-settlements/payouts/flexpay/callback',
       },
       expect.objectContaining({
         headers: expect.objectContaining({
-          Authorization: 'Bearer test-token',
+          Authorization: 'Bearer payout-token',
           'Content-Type': 'application/json',
         }),
         timeout: 30000,
       }),
     );
     expect(result.orderNumber).toBe('9bsTX7qXdpQe243891234568');
+    expect(result.pending).toBe(false);
+    expect(httpService.post).toHaveBeenNthCalledWith(
+      1,
+      'https://payout.example.invalid/api/v1/auth/authenticate',
+      { username: 'payout-user', password: 'payout-password' },
+      expect.anything(),
+    );
   });
 });

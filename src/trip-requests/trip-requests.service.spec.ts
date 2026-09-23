@@ -1,7 +1,15 @@
+import { BadRequestException } from '@nestjs/common';
+import { VehicleType } from '../vehicles/entities/vehicle.entity';
+import { DriverOfferStatus } from './entities/driver-offer.entity';
+import { TripRequestStatus } from './entities/trip-request.entity';
+import { BookingStatus } from '../bookings/entities/booking.entity';
+import { TripStatus } from '../trips/entities/trip.entity';
 import { TripRequestsService } from './trip-requests.service';
+import { KycStatus } from '../users/entities/kyc-document.entity';
+import { UserRole } from '../users/entities/user.entity';
 
-describe('TripRequestsService weather-aware recommended price', () => {
-  it('applies the heavy-rain coefficient after the distance pricing tiers', async () => {
+describe('TripRequestsService recommended price', () => {
+  it('recommends 500 FC per kilometer for cars and applies the heavy-rain coefficient', async () => {
     const weatherAwarenessService = {
       getRouteImpact: jest.fn().mockResolvedValue({
         heavyRain: true,
@@ -24,6 +32,7 @@ describe('TripRequestsService weather-aware recommended price', () => {
       {} as any,
       {} as any,
       weatherAwarenessService as any,
+      {} as any,
     );
     jest
       .spyOn(service as any, 'resolvePointFromCoordinatesOrAddress')
@@ -43,10 +52,1201 @@ describe('TripRequestsService weather-aware recommended price', () => {
       departureLocation: 'Gombe',
       arrivalLocation: "N'djili",
       numberOfSeats: 2,
+      vehicleType: VehicleType.CAR,
     });
 
-    expect(recommendation.recommendedPricePerSeat).toBe(19500);
-    expect(recommendation.recommendedTotalPrice).toBe(39000);
+    expect(recommendation.vehicleType).toBe(VehicleType.CAR);
+    expect(recommendation.pricePerKmPerPassenger).toBe(500);
+    expect(recommendation.recommendedPricePerSeat).toBe(3250);
+    expect(recommendation.recommendedTotalPrice).toBe(6500);
     expect(recommendation.weatherImpact.priceMultiplier).toBe(1.3);
+  });
+
+  it('recommends 1000 FC per kilometer for motorcycles', async () => {
+    const weatherAwarenessService = {
+      getRouteImpact: jest.fn().mockResolvedValue({
+        heavyRain: false,
+        dataAvailable: true,
+        priceMultiplier: 1,
+        etaMultiplier: 1,
+        evaluatedZoneIds: [],
+        affectedZoneIds: [],
+      }),
+    };
+    const service = new TripRequestsService(
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      weatherAwarenessService as any,
+      {} as any,
+    );
+    jest
+      .spyOn(service as any, 'resolvePointFromCoordinatesOrAddress')
+      .mockResolvedValueOnce({
+        type: 'Point',
+        coordinates: [15.3136, -4.3073],
+      })
+      .mockResolvedValueOnce({
+        type: 'Point',
+        coordinates: [15.403, -4.4075],
+      });
+    jest
+      .spyOn(service as any, 'calculateRouteDistanceMeters')
+      .mockResolvedValue(5000);
+
+    const recommendation = await service.recommendPrice({
+      departureLocation: 'Gombe',
+      arrivalLocation: "N'djili",
+      numberOfSeats: 1,
+      vehicleType: VehicleType.MOTORCYCLE_TWO_WHEELS,
+    });
+
+    expect(recommendation.vehicleType).toBe(VehicleType.MOTORCYCLE_TWO_WHEELS);
+    expect(recommendation.pricePerKmPerPassenger).toBe(1000);
+    expect(recommendation.recommendedPricePerSeat).toBe(5000);
+    expect(recommendation.recommendedTotalPrice).toBe(5000);
+  });
+
+  it('returns every vehicle choice with its respective price', async () => {
+    const weatherAwarenessService = {
+      getRouteImpact: jest.fn().mockResolvedValue({
+        heavyRain: false,
+        dataAvailable: true,
+        priceMultiplier: 1,
+        etaMultiplier: 1,
+        evaluatedZoneIds: [],
+        affectedZoneIds: [],
+      }),
+    };
+    const service = new TripRequestsService(
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      weatherAwarenessService as any,
+      {} as any,
+    );
+    jest
+      .spyOn(service as any, 'resolvePointFromCoordinatesOrAddress')
+      .mockResolvedValue({
+        type: 'Point',
+        coordinates: [15.3136, -4.3073],
+      });
+    jest
+      .spyOn(service as any, 'calculateRouteDistanceMeters')
+      .mockResolvedValue(5000);
+
+    const result = await service.getVehicleOptions({
+      departureLocation: 'Gombe',
+      arrivalLocation: "N'djili",
+      numberOfSeats: 2,
+    });
+
+    expect(result.options).toEqual([
+      expect.objectContaining({
+        vehicleType: VehicleType.CAR,
+        recommendedPricePerSeat: 2500,
+        recommendedTotalPrice: 5000,
+      }),
+      expect.objectContaining({
+        vehicleType: VehicleType.MOTORCYCLE_TWO_WHEELS,
+        recommendedPricePerSeat: 5000,
+        recommendedTotalPrice: 10000,
+      }),
+      expect.objectContaining({
+        vehicleType: VehicleType.MOTORCYCLE_THREE_WHEELS,
+        recommendedPricePerSeat: 5000,
+        recommendedTotalPrice: 10000,
+      }),
+    ]);
+  });
+});
+
+describe('TripRequestsService optional seat count', () => {
+  it.each([undefined, 0, 1945, 2000, 6000])('stores one seat and preserves the confirmed price %s', async (confirmedPrice) => {
+    const tripRequestRepository = {
+      create: jest.fn().mockImplementation((request) => request),
+      save: jest.fn().mockImplementation(async (request) => ({
+        ...request,
+        id: 'request-1',
+      })),
+    };
+    const service = new TripRequestsService(
+      tripRequestRepository as any,
+      {} as any,
+      {
+        findOne: jest.fn().mockResolvedValue({ id: 'passenger-1' }),
+      } as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+    );
+
+    jest
+      .spyOn(service as any, 'resolvePointFromCoordinatesOrAddress')
+      .mockResolvedValue({
+        type: 'Point',
+        coordinates: [15.3136, -4.3073],
+      });
+    const calculatePrice = jest
+      .spyOn(service as any, 'calculateRecommendedPricePerSeat')
+      .mockResolvedValue(2500);
+    jest
+      .spyOn(service as any, 'notifyDriversAboutTripRequest')
+      .mockResolvedValue(undefined);
+    jest
+      .spyOn(service, 'findOne')
+      .mockResolvedValue({ id: 'request-1' } as any);
+
+    const now = Date.now();
+    await service.create('passenger-1', {
+      departureLocation: 'Gombe',
+      arrivalLocation: 'Limete',
+      departureDateMin: new Date(now + 30 * 60 * 1000).toISOString(),
+      departureDateMax: new Date(now + 90 * 60 * 1000).toISOString(),
+      vehicleType: VehicleType.CAR,
+      ...(confirmedPrice !== undefined ? { maxPricePerSeat: confirmedPrice } : {}),
+    });
+
+    expect(tripRequestRepository.create).toHaveBeenCalledWith(
+      expect.objectContaining({ numberOfSeats: 1, maxPricePerSeat: confirmedPrice ?? 2500 }),
+    );
+    expect(calculatePrice).toHaveBeenCalledTimes(confirmedPrice === undefined ? 1 : 0);
+  });
+});
+
+describe('TripRequestsService KYC seat limit', () => {
+  const buildCreateService = (kycStatus: KycStatus) => {
+    const tripRequestRepository = {
+      findOne: jest.fn(),
+      create: jest.fn().mockImplementation((request) => request),
+      save: jest.fn().mockImplementation(async (request) => ({
+        ...request,
+        id: 'request-extra-seats',
+      })),
+    };
+    const userRepository = {
+      findOne: jest.fn().mockResolvedValue({
+        id: 'passenger-1',
+        kycDocuments: [{ status: kycStatus }],
+      }),
+    };
+    const service = new TripRequestsService(
+      tripRequestRepository as any,
+      {} as any,
+      userRepository as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+    );
+
+    return { service, tripRequestRepository };
+  };
+
+  it('allows an approved passenger to request three seats', async () => {
+    const { service, tripRequestRepository } = buildCreateService(
+      KycStatus.APPROVED,
+    );
+    jest
+      .spyOn(service as any, 'resolvePointFromCoordinatesOrAddress')
+      .mockResolvedValue({ type: 'Point', coordinates: [15.3, -4.3] });
+    jest
+      .spyOn(service as any, 'calculateRecommendedPricePerSeat')
+      .mockResolvedValue(2500);
+    jest
+      .spyOn(service as any, 'notifyDriversAboutTripRequest')
+      .mockResolvedValue(undefined);
+    jest
+      .spyOn(service, 'findOne')
+      .mockResolvedValue({ id: 'request-extra-seats' } as any);
+    const now = Date.now();
+
+    await service.create('passenger-1', {
+      departureLocation: 'Gombe',
+      arrivalLocation: 'Limete',
+      departureDateMin: new Date(now + 30 * 60 * 1000).toISOString(),
+      departureDateMax: new Date(now + 90 * 60 * 1000).toISOString(),
+      vehicleType: VehicleType.MOTORCYCLE_THREE_WHEELS,
+      numberOfSeats: 3,
+    });
+
+    expect(tripRequestRepository.create).toHaveBeenCalledWith(
+      expect.objectContaining({ numberOfSeats: 3 }),
+    );
+  });
+
+  it('allows an approved passenger to update a request to three seats', async () => {
+    const { service, tripRequestRepository } = buildCreateService(
+      KycStatus.APPROVED,
+    );
+    const tripRequest = {
+      id: 'request-to-update',
+      passengerId: 'passenger-1',
+      departureLocation: 'Gombe',
+      arrivalLocation: 'Limete',
+      departurePoint: null,
+      arrivalPoint: null,
+      departureDateMin: new Date(Date.now() + 30 * 60 * 1000),
+      departureDateMax: new Date(Date.now() + 90 * 60 * 1000),
+      numberOfSeats: 1,
+      vehicleType: VehicleType.CAR,
+      status: TripRequestStatus.PENDING,
+      driverOffers: [],
+    };
+    tripRequestRepository.findOne.mockResolvedValue(tripRequest);
+    jest
+      .spyOn(service, 'findOne')
+      .mockResolvedValue({ id: tripRequest.id, numberOfSeats: 3 } as any);
+
+    await service.update('passenger-1', tripRequest.id, {
+      numberOfSeats: 3,
+    });
+
+    expect(tripRequest.numberOfSeats).toBe(3);
+    expect(tripRequestRepository.save).toHaveBeenCalledWith(
+      expect.objectContaining({ id: tripRequest.id, numberOfSeats: 3 }),
+    );
+  });
+
+  it('requires an approved KYC to request more than two seats', async () => {
+    const { service, tripRequestRepository } = buildCreateService(
+      KycStatus.PENDING,
+    );
+    const now = Date.now();
+
+    await expect(
+      service.create('passenger-1', {
+        departureLocation: 'Gombe',
+        arrivalLocation: 'Limete',
+        departureDateMin: new Date(now + 30 * 60 * 1000).toISOString(),
+        departureDateMax: new Date(now + 90 * 60 * 1000).toISOString(),
+        vehicleType: VehicleType.CAR,
+        numberOfSeats: 3,
+      }),
+    ).rejects.toMatchObject({
+      response: expect.objectContaining({
+        code: 'PASSENGER_KYC_REQUIRED',
+        action: 'complete_kyc',
+        reason: 'extra_seats',
+        maximumSeatsWithoutKyc: 2,
+      }),
+    });
+
+    expect(tripRequestRepository.create).not.toHaveBeenCalled();
+  });
+});
+
+describe('TripRequestsService vehicle type update', () => {
+  const buildService = () => {
+    const tripRequest = {
+      id: 'request-1',
+      passengerId: 'passenger-1',
+      departureLocation: 'Gombe',
+      arrivalLocation: 'Limete',
+      departurePoint: {
+        type: 'Point',
+        coordinates: [15.3136, -4.3073],
+      },
+      arrivalPoint: {
+        type: 'Point',
+        coordinates: [15.403, -4.4075],
+      },
+      numberOfSeats: 1,
+      maxPricePerSeat: 2500,
+      vehicleType: VehicleType.CAR,
+      status: TripRequestStatus.PENDING,
+      driverOffers: [],
+    };
+    const tripRequestRepository = {
+      findOne: jest.fn().mockResolvedValue(tripRequest),
+      save: jest.fn().mockImplementation(async (request) => request),
+    };
+    const service = new TripRequestsService(
+      tripRequestRepository as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+    );
+    jest
+      .spyOn(service, 'findOne')
+      .mockResolvedValue({ id: tripRequest.id } as any);
+
+    return { service, tripRequest, tripRequestRepository };
+  };
+
+  it('changes the vehicle type without recalculating the confirmed price when no new price is sent', async () => {
+    const { service, tripRequest, tripRequestRepository } = buildService();
+    const calculateRecommendedPricePerSeat = jest
+      .spyOn(service as any, 'calculateRecommendedPricePerSeat')
+      .mockResolvedValue(5000);
+
+    await service.update('passenger-1', 'request-1', {
+      vehicleType: VehicleType.MOTORCYCLE_TWO_WHEELS,
+    });
+
+    expect(calculateRecommendedPricePerSeat).not.toHaveBeenCalled();
+    expect(tripRequest.vehicleType).toBe(VehicleType.MOTORCYCLE_TWO_WHEELS);
+    expect(tripRequest.maxPricePerSeat).toBe(2500);
+    expect(tripRequestRepository.save).toHaveBeenCalledWith(tripRequest);
+  });
+
+  it.each([
+    { departureReference: 'Gare centrale' },
+    { arrivalLocation: 'Lemba' },
+    { departureCoordinates: [15.32, -4.32] },
+    { maxPricePerSeat: null },
+  ])('preserves the confirmed price for a non-price change: %j', async (payload) => {
+    const { service, tripRequest } = buildService();
+    jest.spyOn(service as any, 'resolvePointFromCoordinatesOrAddress')
+      .mockResolvedValue(tripRequest.departurePoint);
+    const calculatePrice = jest.spyOn(service as any, 'calculateRecommendedPricePerSeat');
+
+    await service.update('passenger-1', 'request-1', payload as any);
+
+    expect(tripRequest.maxPricePerSeat).toBe(2500);
+    expect(calculatePrice).not.toHaveBeenCalled();
+  });
+
+  it('keeps the passenger custom ceiling when it is sent with the new vehicle type', async () => {
+    const { service, tripRequest } = buildService();
+    const calculateRecommendedPricePerSeat = jest.spyOn(
+      service as any,
+      'calculateRecommendedPricePerSeat',
+    );
+
+    await service.update('passenger-1', 'request-1', {
+      vehicleType: VehicleType.MOTORCYCLE_THREE_WHEELS,
+      maxPricePerSeat: 6500,
+    });
+
+    expect(calculateRecommendedPricePerSeat).not.toHaveBeenCalled();
+    expect(tripRequest.vehicleType).toBe(VehicleType.MOTORCYCLE_THREE_WHEELS);
+    expect(tripRequest.maxPricePerSeat).toBe(6500);
+  });
+});
+
+describe('TripRequestsService motorcycle capacity', () => {
+  it.each([
+    [VehicleType.MOTORCYCLE_TWO_WHEELS, 3],
+    [VehicleType.MOTORCYCLE_THREE_WHEELS, 4],
+  ])('rejects an oversized offer for %s', async (type, availableSeats) => {
+    const now = Date.now();
+    const tripRequestRepository = {
+      findOne: jest.fn().mockResolvedValue({
+        id: 'request-1',
+        passengerId: 'passenger-1',
+        departureLocation: 'Gombe',
+        arrivalLocation: 'Limete',
+        departureDateMin: new Date(now + 30 * 60 * 1000),
+        departureDateMax: new Date(now + 90 * 60 * 1000),
+        maxPricePerSeat: null,
+        numberOfSeats: 1,
+        status: TripRequestStatus.PENDING,
+        driverOffers: [],
+      }),
+    };
+    const driverOfferRepository = {
+      findOne: jest.fn().mockResolvedValue(null),
+      create: jest.fn(),
+    };
+    const vehicleRepository = {
+      findOne: jest.fn().mockResolvedValue({
+        id: 'vehicle-1',
+        ownerId: 'driver-1',
+        type,
+        isActive: true,
+      }),
+    };
+    const service = new TripRequestsService(
+      tripRequestRepository as any,
+      driverOfferRepository as any,
+      { findOne: jest.fn().mockResolvedValue({ id: 'driver-1' }) } as any,
+      vehicleRepository as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+    );
+
+    await expect(
+      service.createDriverOffer('driver-1', 'request-1', {
+        proposedDepartureDate: new Date(now + 60 * 60 * 1000).toISOString(),
+        pricePerSeat: 1000,
+        availableSeats,
+        vehicleId: 'vehicle-1',
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    expect(driverOfferRepository.create).not.toHaveBeenCalled();
+  });
+
+  it('rejects a driver vehicle that differs from the passenger choice', async () => {
+    const now = Date.now();
+    const tripRequestRepository = {
+      findOne: jest.fn().mockResolvedValue({
+        id: 'request-1',
+        passengerId: 'passenger-1',
+        departureLocation: 'Gombe',
+        arrivalLocation: 'Limete',
+        departureDateMin: new Date(now + 30 * 60 * 1000),
+        departureDateMax: new Date(now + 90 * 60 * 1000),
+        maxPricePerSeat: null,
+        numberOfSeats: 1,
+        vehicleType: VehicleType.CAR,
+        status: TripRequestStatus.PENDING,
+        driverOffers: [],
+      }),
+    };
+    const driverOfferRepository = {
+      findOne: jest.fn().mockResolvedValue(null),
+      create: jest.fn(),
+    };
+    const vehicleRepository = {
+      findOne: jest.fn().mockResolvedValue({
+        id: 'vehicle-1',
+        ownerId: 'driver-1',
+        type: VehicleType.MOTORCYCLE_TWO_WHEELS,
+        isActive: true,
+      }),
+    };
+    const service = new TripRequestsService(
+      tripRequestRepository as any,
+      driverOfferRepository as any,
+      { findOne: jest.fn().mockResolvedValue({ id: 'driver-1' }) } as any,
+      vehicleRepository as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+    );
+
+    await expect(
+      service.createDriverOffer('driver-1', 'request-1', {
+        proposedDepartureDate: new Date(now + 60 * 60 * 1000).toISOString(),
+        pricePerSeat: 1000,
+        availableSeats: 1,
+        vehicleId: 'vehicle-1',
+      }),
+    ).rejects.toMatchObject({
+      response: expect.objectContaining({
+        code: 'TRIP_REQUEST_VEHICLE_TYPE_MISMATCH',
+        message:
+          'Cette demande nécessite le type Voiture. Sélectionnez un véhicule actif correspondant.',
+      }),
+    });
+
+    expect(driverOfferRepository.create).not.toHaveBeenCalled();
+  });
+});
+
+describe('TripRequestsService unaccepted request expiration', () => {
+  const buildService = (
+    tripRequestRepository: Record<string, jest.Mock>,
+    notificationService: Record<string, jest.Mock> = {},
+  ) =>
+    new TripRequestsService(
+      tripRequestRepository as any,
+      {} as any,
+      {
+        findOne: jest.fn().mockResolvedValue({ id: 'driver-1', role: UserRole.DRIVER }),
+      } as any,
+      {} as any,
+      {} as any,
+      notificationService as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+    );
+
+  it('keeps an old unaccepted request visible until thirty seconds after its departure window', async () => {
+    const now = Date.now();
+    const request = {
+      id: 'request-recent',
+      status: TripRequestStatus.PENDING,
+      createdAt: new Date(now - 30 * 24 * 60 * 60 * 1000),
+      departureDateMin: new Date(now - 13 * 60 * 60 * 1000),
+      departureDateMax: new Date(now + 10_000),
+      driverOffers: [],
+    };
+    const tripRequestRepository = {
+      find: jest.fn().mockResolvedValue([request]),
+      update: jest.fn(),
+    };
+    const service = buildService(tripRequestRepository);
+    jest
+      .spyOn(service as any, 'sanitizeTripRequest')
+      .mockImplementation(async (tripRequest: any) => ({
+        id: tripRequest.id,
+        status: tripRequest.status,
+      }));
+
+    const result = await service.findAll('driver-1');
+
+    expect(result).toEqual([
+      expect.objectContaining({
+        id: 'request-recent',
+        status: TripRequestStatus.PENDING,
+      }),
+    ]);
+    expect(tripRequestRepository.update).not.toHaveBeenCalled();
+    expect(
+      tripRequestRepository.find.mock.calls[0][0].where,
+    ).not.toHaveProperty('createdAt');
+  });
+
+  it('sends a push-only expiration notification when no driver was accepted', async () => {
+    const now = Date.now();
+    const request = {
+      id: 'request-unanswered',
+      passengerId: 'passenger-1',
+      departureLocation: 'Gombe',
+      arrivalLocation: 'Limete',
+      status: TripRequestStatus.PENDING,
+      departureDateMax: new Date(now - 12 * 60 * 60 * 1000 - 1),
+      driverOffers: [],
+    };
+    const tripRequestRepository = {
+      find: jest.fn().mockResolvedValue([request]),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
+    };
+    const notificationService = {
+      sendNotificationToUser: jest.fn().mockResolvedValue(true),
+    };
+    const service = buildService(tripRequestRepository, notificationService);
+    jest.spyOn(service as any, 'sanitizeTripRequest').mockResolvedValue({
+      id: request.id,
+      status: TripRequestStatus.EXPIRED,
+    });
+
+    await service.findByPassenger(request.passengerId);
+
+    expect(notificationService.sendNotificationToUser).toHaveBeenCalledTimes(1);
+    expect(notificationService.sendNotificationToUser).toHaveBeenCalledWith(
+      request.passengerId,
+      'Demande de trajet expirée',
+      expect.stringContaining("aucun conducteur ne l'a acceptée"),
+      expect.objectContaining({
+        type: 'trip_request_expired',
+        presentation: 'push_only',
+        tripRequestId: request.id,
+        status: TripRequestStatus.EXPIRED,
+        reason: 'no_driver_accepted',
+      }),
+    );
+    expect(notificationService.sendNotificationToUser).not.toHaveBeenCalledWith(
+      expect.anything(),
+      expect.anything(),
+      expect.anything(),
+      expect.objectContaining({ type: 'trip_request_driver_overdue' }),
+    );
+  });
+
+  it('expires unaccepted requests after thirty seconds and keeps accepted requests for two hours', async () => {
+    const now = Date.now();
+    const unansweredRequest = {
+      id: 'request-unanswered',
+      status: TripRequestStatus.PENDING,
+      createdAt: new Date(now - 30 * 24 * 60 * 60 * 1000),
+      departureDateMin: new Date(now - 13 * 60 * 60 * 1000 - 1),
+      departureDateMax: new Date(now - 12 * 60 * 60 * 1000 - 1),
+      driverOffers: [],
+    };
+    const unacceptedOfferRequest = {
+      id: 'request-offer-not-accepted',
+      status: TripRequestStatus.OFFERS_RECEIVED,
+      createdAt: new Date(now - 30 * 24 * 60 * 60 * 1000),
+      departureDateMin: new Date(now - 30 * 24 * 60 * 60 * 1000),
+      departureDateMax: new Date(now - 29 * 24 * 60 * 60 * 1000),
+      driverOffers: [{ id: 'offer-1', status: DriverOfferStatus.PENDING }],
+    };
+    const acceptedRequest = {
+      id: 'request-accepted',
+      status: TripRequestStatus.OFFERS_RECEIVED,
+      createdAt: new Date(now - 30 * 24 * 60 * 60 * 1000),
+      departureDateMin: new Date(now - 30 * 24 * 60 * 60 * 1000),
+      departureDateMax: new Date(now - 60 * 60 * 1000),
+      driverOffers: [{ id: 'offer-2', status: DriverOfferStatus.ACCEPTED }],
+    };
+    const freshOfferRequest = {
+      id: 'request-fresh-offer',
+      status: TripRequestStatus.OFFERS_RECEIVED,
+      createdAt: new Date(now - 30 * 24 * 60 * 60 * 1000),
+      departureDateMin: new Date(now - 2 * 60 * 60 * 1000),
+      departureDateMax: new Date(now + 10_000),
+      driverOffers: [{ id: 'offer-3', status: DriverOfferStatus.PENDING }],
+    };
+    const tripRequestRepository = {
+      find: jest
+        .fn()
+        .mockResolvedValue([
+          unansweredRequest,
+          unacceptedOfferRequest,
+          acceptedRequest,
+          freshOfferRequest,
+        ]),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
+    };
+    const service = buildService(tripRequestRepository);
+    jest
+      .spyOn(service as any, 'sanitizeTripRequest')
+      .mockImplementation(async (tripRequest: any) => ({
+        id: tripRequest.id,
+        status: tripRequest.status,
+      }));
+
+    const result = await service.findAll('driver-1');
+
+    expect(unansweredRequest.status).toBe(TripRequestStatus.EXPIRED);
+    expect(unacceptedOfferRequest.status).toBe(TripRequestStatus.EXPIRED);
+    expect(acceptedRequest.status).toBe(TripRequestStatus.OFFERS_RECEIVED);
+    expect(freshOfferRequest.status).toBe(TripRequestStatus.OFFERS_RECEIVED);
+    expect(result).toEqual([
+      expect.objectContaining({
+        id: 'request-fresh-offer',
+        status: TripRequestStatus.OFFERS_RECEIVED,
+      }),
+    ]);
+    expect(tripRequestRepository.update).toHaveBeenCalledTimes(2);
+    expect(tripRequestRepository.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'request-unanswered',
+      }),
+      { status: TripRequestStatus.EXPIRED },
+    );
+    expect(tripRequestRepository.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'request-offer-not-accepted',
+      }),
+      { status: TripRequestStatus.EXPIRED },
+    );
+  });
+
+  it('rejects a driver response once the thirty-second deadline has passed', async () => {
+    const now = Date.now();
+    const tripRequest = {
+      id: 'request-expired',
+      passengerId: 'passenger-1',
+      status: TripRequestStatus.PENDING,
+      createdAt: new Date(now - 30 * 24 * 60 * 60 * 1000),
+      departureDateMin: new Date(now - 13 * 60 * 60 * 1000 - 1),
+      departureDateMax: new Date(now - 12 * 60 * 60 * 1000 - 1),
+      driverOffers: [],
+    };
+    const tripRequestRepository = {
+      findOne: jest.fn().mockResolvedValue(tripRequest),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
+    };
+    const driverOfferRepository = {
+      findOne: jest.fn(),
+      create: jest.fn(),
+    };
+    const service = new TripRequestsService(
+      tripRequestRepository as any,
+      driverOfferRepository as any,
+      { findOne: jest.fn().mockResolvedValue({ id: 'driver-1' }) } as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+    );
+
+    await expect(
+      service.createDriverOffer('driver-1', tripRequest.id, {
+        proposedDepartureDate: new Date(now + 60 * 60 * 1000).toISOString(),
+        pricePerSeat: 1000,
+        availableSeats: 1,
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    expect(tripRequest.status).toBe(TripRequestStatus.EXPIRED);
+    expect(driverOfferRepository.create).not.toHaveBeenCalled();
+  });
+});
+
+describe('TripRequestsService passenger KYC requirements', () => {
+  it('rejects direct driver acceptance when KYC is required and the passenger is not approved', async () => {
+    const now = Date.now();
+    const tripRequest = {
+      id: 'request-kyc',
+      passengerId: 'passenger-1',
+      passenger: { id: 'passenger-1' },
+      departureLocation: 'Gombe',
+      arrivalLocation: 'Limete',
+      departureDateMin: new Date(now + 30 * 60 * 1000),
+      departureDateMax: new Date(now + 90 * 60 * 1000),
+      maxPricePerSeat: 5000,
+      numberOfSeats: 1,
+      vehicleType: VehicleType.CAR,
+      paymentMode: 'cash',
+      status: TripRequestStatus.PENDING,
+      tripId: null,
+      driverOffers: [],
+    };
+    const tripRequestRepository = {
+      findOne: jest.fn().mockResolvedValue(tripRequest),
+      save: jest.fn(),
+    };
+    const userRepository = {
+      findOne: jest.fn(async ({ where }: any) => {
+        if (where.id === 'driver-1') {
+          return { id: 'driver-1' };
+        }
+        if (where.id === 'passenger-1') {
+          return {
+            id: 'passenger-1',
+            kycDocuments: [{ status: KycStatus.PENDING }],
+          };
+        }
+        return null;
+      }),
+    };
+    const tripsService = {
+      create: jest.fn(),
+    };
+    const service = new TripRequestsService(
+      tripRequestRepository as any,
+      { update: jest.fn() } as any,
+      userRepository as any,
+      { findOne: jest.fn() } as any,
+      {} as any,
+      {} as any,
+      tripsService as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+    );
+
+    await expect(
+      service.acceptTripRequest('driver-1', tripRequest.id, {
+        requiresPassengerKyc: true,
+      }),
+    ).rejects.toMatchObject({
+      response: expect.objectContaining({
+        code: 'PASSENGER_KYC_REQUIRED',
+        action: 'complete_kyc',
+        tripRequestId: tripRequest.id,
+        driverId: 'driver-1',
+      }),
+    });
+
+    expect(tripsService.create).not.toHaveBeenCalled();
+    expect(tripRequestRepository.save).not.toHaveBeenCalled();
+  });
+
+  it('rejects passenger acceptance of a driver offer that requires KYC when the passenger is not approved', async () => {
+    const now = Date.now();
+    const offer = {
+      id: 'offer-kyc',
+      driverId: 'driver-1',
+      vehicleId: 'vehicle-1',
+      vehicle: {
+        id: 'vehicle-1',
+        type: VehicleType.CAR,
+        isActive: true,
+      },
+      status: DriverOfferStatus.PENDING,
+      requiresPassengerKyc: true,
+      pricePerSeat: 5000,
+      proposedDepartureDate: new Date(now + 60 * 60 * 1000),
+    };
+    const tripRequest = {
+      id: 'request-offer-kyc',
+      passengerId: 'passenger-1',
+      passenger: { id: 'passenger-1' },
+      departureLocation: 'Gombe',
+      arrivalLocation: 'Limete',
+      departureDateMin: new Date(now + 30 * 60 * 1000),
+      departureDateMax: new Date(now + 90 * 60 * 1000),
+      numberOfSeats: 1,
+      vehicleType: VehicleType.CAR,
+      status: TripRequestStatus.OFFERS_RECEIVED,
+      driverOffers: [offer],
+    };
+    const tripRequestRepository = {
+      findOne: jest.fn().mockResolvedValue(tripRequest),
+      save: jest.fn(),
+    };
+    const driverOfferRepository = {
+      save: jest.fn(),
+    };
+    const userRepository = {
+      findOne: jest.fn().mockResolvedValue({
+        id: 'passenger-1',
+        kycDocuments: [{ status: KycStatus.REJECTED }],
+      }),
+    };
+    const service = new TripRequestsService(
+      tripRequestRepository as any,
+      driverOfferRepository as any,
+      userRepository as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+    );
+
+    await expect(
+      service.acceptDriverOffer('passenger-1', tripRequest.id, {
+        offerId: offer.id,
+      }),
+    ).rejects.toMatchObject({
+      response: expect.objectContaining({
+        code: 'PASSENGER_KYC_REQUIRED',
+        action: 'complete_kyc',
+        tripRequestId: tripRequest.id,
+        offerId: offer.id,
+        driverId: 'driver-1',
+      }),
+    });
+
+    expect(driverOfferRepository.save).not.toHaveBeenCalled();
+    expect(tripRequestRepository.save).not.toHaveBeenCalled();
+  });
+});
+
+describe('TripRequestsService cancellation after driver acceptance', () => {
+  const buildService = (tripRequest: Record<string, unknown>, trip?: any) => {
+    const tripRequestRepository = {
+      findOne: jest.fn().mockResolvedValue(tripRequest),
+      save: jest.fn((payload: unknown) => Promise.resolve(payload)),
+    };
+    const driverOfferRepository = {
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
+    };
+    const tripsService = {
+      findOne: jest.fn().mockResolvedValue(trip),
+    };
+    const bookingsService = {
+      cancel: jest.fn().mockResolvedValue(undefined),
+    };
+    const service = new TripRequestsService(
+      tripRequestRepository as any,
+      driverOfferRepository as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      tripsService as any,
+      bookingsService as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+    );
+
+    return {
+      service,
+      tripRequestRepository,
+      driverOfferRepository,
+      tripsService,
+      bookingsService,
+    };
+  };
+
+  it('allows cancellation after an offer was accepted and before a trip exists', async () => {
+    const tripRequest = {
+      id: 'request-accepted-offer',
+      passengerId: 'passenger-1',
+      status: TripRequestStatus.DRIVER_SELECTED,
+      tripId: null,
+    };
+    const dependencies = buildService(tripRequest);
+
+    await dependencies.service.cancel('passenger-1', tripRequest.id);
+
+    expect(tripRequest.status).toBe(TripRequestStatus.CANCELLED);
+    expect(dependencies.tripRequestRepository.save).toHaveBeenCalledWith(
+      tripRequest,
+    );
+    expect(dependencies.tripsService.findOne).not.toHaveBeenCalled();
+    expect(dependencies.bookingsService.cancel).not.toHaveBeenCalled();
+    expect(dependencies.driverOfferRepository.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tripRequestId: tripRequest.id,
+        status: expect.anything(),
+      }),
+      { status: DriverOfferStatus.CANCELLED },
+    );
+  });
+
+  it('cancels the accepted booking when the generated trip has not started', async () => {
+    const tripRequest = {
+      id: 'request-with-trip',
+      passengerId: 'passenger-1',
+      status: TripRequestStatus.DRIVER_SELECTED,
+      tripId: 'trip-1',
+    };
+    const dependencies = buildService(tripRequest, {
+      id: 'trip-1',
+      status: TripStatus.PENDING,
+      startedAt: null,
+      bookings: [
+        {
+          id: 'booking-1',
+          passengerId: 'passenger-1',
+          status: BookingStatus.ACCEPTED,
+        },
+      ],
+    });
+
+    await dependencies.service.cancel('passenger-1', tripRequest.id);
+
+    expect(dependencies.bookingsService.cancel).toHaveBeenCalledWith(
+      'booking-1',
+      'passenger-1',
+    );
+    expect(tripRequest.status).toBe(TripRequestStatus.CANCELLED);
+  });
+
+  it('rejects cancellation once the generated trip has started', async () => {
+    const tripRequest = {
+      id: 'request-started',
+      passengerId: 'passenger-1',
+      status: TripRequestStatus.DRIVER_SELECTED,
+      tripId: 'trip-active',
+    };
+    const dependencies = buildService(tripRequest, {
+      id: 'trip-active',
+      status: TripStatus.ACTIVE,
+      startedAt: new Date(),
+      bookings: [],
+    });
+
+    await expect(
+      dependencies.service.cancel('passenger-1', tripRequest.id),
+    ).rejects.toThrow('le trajet a déjà démarré');
+
+    expect(dependencies.bookingsService.cancel).not.toHaveBeenCalled();
+    expect(dependencies.tripRequestRepository.save).not.toHaveBeenCalled();
+    expect(dependencies.driverOfferRepository.update).not.toHaveBeenCalled();
+  });
+});
+
+describe('TripRequestsService overdue selected driver recovery', () => {
+  const createService = (overrides?: {
+    tripRequestRepository?: Record<string, unknown>;
+    notificationService?: Record<string, unknown>;
+    tripsService?: Record<string, unknown>;
+    bookingsService?: Record<string, unknown>;
+    recoveryService?: Record<string, unknown>;
+  }) =>
+    new TripRequestsService(
+      (overrides?.tripRequestRepository ?? {}) as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      (overrides?.notificationService ?? {}) as any,
+      (overrides?.tripsService ?? {}) as any,
+      (overrides?.bookingsService ?? {}) as any,
+      {} as any,
+      {} as any,
+      {} as any,
+      (overrides?.recoveryService ?? {}) as any,
+    );
+
+  it('claims an overdue request once and sends the passenger notification used by the modal', async () => {
+    const now = new Date('2026-09-08T15:14:25.000Z');
+    const request = {
+      id: 'request-overdue',
+      passengerId: 'passenger-1',
+      selectedDriverId: 'driver-1',
+      tripId: 'trip-1',
+      status: TripRequestStatus.DRIVER_SELECTED,
+      departureDateMax: new Date('2026-09-08T15:00:00.000Z'),
+    };
+    const queryBuilder = {
+      where: jest.fn(),
+      andWhere: jest.fn(),
+      orderBy: jest.fn(),
+      take: jest.fn(),
+      getMany: jest.fn().mockResolvedValue([request]),
+    };
+    Object.values(queryBuilder)
+      .filter((value) => value !== queryBuilder.getMany)
+      .forEach((mock) => mock.mockReturnValue(queryBuilder));
+    const tripRequestRepository = {
+      createQueryBuilder: jest.fn().mockReturnValue(queryBuilder),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
+    };
+    const notificationService = {
+      sendNotificationToUser: jest.fn().mockResolvedValue(true),
+    };
+    const service = createService({
+      tripRequestRepository,
+      notificationService,
+    });
+
+    await service.notifyPassengersAboutOverdueDriverPickup(now);
+
+    const overdueCandidatePredicates = queryBuilder.andWhere.mock.calls.map(
+      ([predicate]) => String(predicate),
+    );
+    expect(overdueCandidatePredicates).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('"linkedTrip"."id" = request."tripId"::uuid'),
+        expect.stringContaining(
+          '"passengerBooking"."tripId" = request."tripId"::uuid',
+        ),
+      ]),
+    );
+    expect(tripRequestRepository.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: request.id,
+        status: TripRequestStatus.DRIVER_SELECTED,
+        selectedDriverId: request.selectedDriverId,
+      }),
+      { driverPickupOverdueNotifiedAt: expect.any(Date) },
+    );
+    expect(notificationService.sendNotificationToUser).toHaveBeenCalledWith(
+      request.passengerId,
+      expect.any(String),
+      expect.stringContaining("l'heure"),
+      expect.objectContaining({
+        type: 'trip_request_driver_overdue',
+        recipientUserId: request.passengerId,
+        tripRequestId: request.id,
+      }),
+    );
+  });
+
+  it('lets the passenger release an overdue driver and returns the reopened request', async () => {
+    const selectedRequest = {
+      id: 'request-overdue',
+      passengerId: 'passenger-1',
+      selectedDriverId: 'driver-1',
+      tripId: null,
+      status: TripRequestStatus.DRIVER_SELECTED,
+      departureDateMax: new Date(Date.now() - 60_000),
+    };
+    const tripRequestRepository = {
+      findOne: jest.fn().mockResolvedValue(selectedRequest),
+    };
+    const recoveryService = {
+      reopenAfterPassengerReleasesOverdueDriver: jest.fn().mockResolvedValue({
+        ...selectedRequest,
+        selectedDriverId: null,
+        status: TripRequestStatus.PENDING,
+      }),
+    };
+    const service = createService({
+      tripRequestRepository,
+      recoveryService,
+    });
+    jest.spyOn(service, 'findOne').mockResolvedValue({
+      id: selectedRequest.id,
+      status: TripRequestStatus.PENDING,
+    } as any);
+
+    await expect(
+      service.releaseOverdueSelectedDriver(
+        selectedRequest.passengerId,
+        selectedRequest.id,
+      ),
+    ).resolves.toEqual(
+      expect.objectContaining({ status: TripRequestStatus.PENDING }),
+    );
+    expect(
+      recoveryService.reopenAfterPassengerReleasesOverdueDriver,
+    ).toHaveBeenCalledWith(selectedRequest.id, selectedRequest.passengerId);
+  });
+
+  it('refuses to release the driver after the passenger was picked up', async () => {
+    const selectedRequest = {
+      id: 'request-picked-up',
+      passengerId: 'passenger-1',
+      selectedDriverId: 'driver-1',
+      tripId: 'trip-1',
+      status: TripRequestStatus.DRIVER_SELECTED,
+      departureDateMax: new Date(Date.now() - 60_000),
+    };
+    const recoveryService = {
+      reopenAfterPassengerReleasesOverdueDriver: jest.fn(),
+    };
+    const service = createService({
+      tripRequestRepository: {
+        findOne: jest.fn().mockResolvedValue(selectedRequest),
+      },
+      tripsService: {
+        findOne: jest.fn().mockResolvedValue({
+          id: selectedRequest.tripId,
+          bookings: [
+            {
+              id: 'booking-1',
+              passengerId: selectedRequest.passengerId,
+              status: BookingStatus.ACCEPTED,
+              pickedUp: true,
+            },
+          ],
+        }),
+      },
+      recoveryService,
+    });
+
+    await expect(
+      service.releaseOverdueSelectedDriver(
+        selectedRequest.passengerId,
+        selectedRequest.id,
+      ),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(
+      recoveryService.reopenAfterPassengerReleasesOverdueDriver,
+    ).not.toHaveBeenCalled();
   });
 });

@@ -1,6 +1,10 @@
 import { createClient } from 'redis';
 import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import {
+  buildRedisClientOptions,
+  redisOptionsUseTls,
+} from '../utils/redis-options';
 
 @Injectable()
 export class RedisService implements OnModuleInit, OnModuleDestroy {
@@ -10,30 +14,8 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
   constructor(private configService: ConfigService) {}
 
   async onModuleInit() {
-    const redisUrl = this.configService.get<string>('REDIS_URL');
-    const host = this.configService.get<string>('REDIS_HOST') || 'localhost';
-    const port = this.configService.get<number>('REDIS_PORT') || 6379;
-    const password = this.configService.get<string>('REDIS_PASSWORD') || undefined;
-
-    if (redisUrl) {
-      this.logger.log(`Connecting to Redis via URL (${redisUrl.includes('upstash') ? 'Upstash' : 'custom'}).`);
-      this.client = createClient({
-        url: redisUrl,
-        socket: redisUrl.startsWith('rediss://')
-          ? {
-              tls: true,
-            }
-          : undefined,
-      });
-    } else {
-      this.client = createClient({
-        socket: {
-          host,
-          port,
-        },
-        password,
-      });
-    }
+    const redisOptions = buildRedisClientOptions(this.configService);
+    this.client = createClient(redisOptions);
 
     this.client.on('error', (err) => {
       this.logger.error('Redis Client Error:', err);
@@ -43,16 +25,16 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     });
 
     await this.client.connect();
-    if (redisUrl) {
-      this.logger.log(`Redis connected via URL (${redisUrl}).`);
-    } else {
-      this.logger.log(`Redis connected to ${host}:${port}`);
-    }
+    this.logger.log(
+      `Redis connected${redisOptionsUseTls(redisOptions) ? ' with TLS' : ''}`,
+    );
   }
 
   async onModuleDestroy() {
     this.logger.log('Disconnecting Redis client');
-    await this.client.quit();
+    if (this.client?.isOpen) {
+      await this.client.quit();
+    }
     this.logger.log('Redis client disconnected');
   }
 
@@ -63,6 +45,12 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
   async get<T>(key: string): Promise<T | null> {
     const value = await this.client.get(key);
     return value ? JSON.parse(value) : null;
+  }
+
+  /** Read and delete in one Redis command: a one-time value cannot be replayed. */
+  async consume<T>(key: string): Promise<T | null> {
+    const value = await this.client.getDel(key);
+    return value === null ? null : (JSON.parse(value) as T);
   }
 
   async set(key: string, value: any, ttl?: number): Promise<void> {
@@ -78,6 +66,29 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     await this.client.del(key);
   }
 
+  /** Atomically consumes a JSON value when it matches the expected value. */
+  async consumeIfValueMatches<T>(
+    key: string,
+    expectedValue: T,
+  ): Promise<boolean> {
+    const result = await this.client.eval(
+      `
+        local current = redis.call('GET', KEYS[1])
+        if current and current == ARGV[1] then
+          redis.call('DEL', KEYS[1])
+          return 1
+        end
+        return 0
+      `,
+      {
+        keys: [key],
+        arguments: [JSON.stringify(expectedValue)],
+      },
+    );
+
+    return result === 1;
+  }
+
   async delPattern(pattern: string): Promise<void> {
     const keys = await this.client.keys(pattern);
     if (keys.length > 0) {
@@ -90,4 +101,3 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     return result === 1;
   }
 }
-

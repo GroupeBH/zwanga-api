@@ -10,12 +10,20 @@ import { Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { OAuth2Client } from 'google-auth-library';
 import {
+  createHash,
   createPublicKey,
+  randomBytes,
+  timingSafeEqual,
   verify as verifySignature,
   type JsonWebKey,
 } from 'crypto';
 import * as bcrypt from 'bcrypt';
-import { User, UserRole, UserStatus } from '../users/entities/user.entity';
+import {
+  User,
+  UserGender,
+  UserRole,
+  UserStatus,
+} from '../users/entities/user.entity';
 import { KycDocument, KycStatus } from '../users/entities/kyc-document.entity';
 import {
   RegisterDto,
@@ -23,14 +31,39 @@ import {
   RefreshTokenDto,
   AuthResponseDto,
   AppleMobileAuthDto,
+  AdminBootstrapConfirmDto,
+  AdminBootstrapSendOtpDto,
+  AdminChangePasswordDto,
+  AdminLoginDto,
+  GoogleMobileAuthDto,
+  PinResetConfirmDto,
+  PinResetRequestDto,
+  PinResetVerifyOtpDto,
 } from './dto/auth.dto';
 import { FileUploadService } from '../common/services/file-upload.service';
 import { VehiclesService } from '../vehicles/vehicles.service';
+import { ReferralsService } from '../referrals/referrals.service';
+import {
+  assertSelfServiceUserRole,
+  isAdminRole,
+  resolveSelfServiceDriverState,
+} from '../users/user-role.policy';
+import { KeccelOtpService } from '../keccel-otp/keccel-otp.service';
+import { OTP_SMS_MESSAGES } from '../keccel-otp/otp-messages';
+import { provisionAdminAccount } from '../admin/admin-account.provisioning';
+import { normalizeLegalName } from '../users/legal-identity.util';
+import { RedisService } from '../common/services/redis.service';
 
 const APPLE_ISSUER = 'https://appleid.apple.com';
 const APPLE_PUBLIC_KEYS_URL = 'https://appleid.apple.com/auth/keys';
 const APPLE_KEYS_CACHE_MS = 6 * 60 * 60 * 1000;
 const TOKEN_CLOCK_TOLERANCE_SECONDS = 300;
+const PIN_RESET_TOKEN_TTL_SECONDS = 5 * 60;
+const PIN_RESET_KEY_PREFIX = 'auth:pin-reset:';
+const PIN_RESET_OTP_KEY_PREFIX = 'auth:pin-reset-otp:';
+const PIN_RESET_OTP_PENDING_VALUE = 'pending';
+const PIN_RESET_GENERIC_MESSAGE =
+  'Si ce compte peut être réinitialisé, un code OTP a été envoyé.';
 
 interface MulterFile {
   fieldname: string;
@@ -80,6 +113,14 @@ interface AppleAuthProfile {
   emailVerified: boolean;
 }
 
+export interface GoogleAuthProfile {
+  googleId: string;
+  email: string;
+  firstName: string;
+  lastName: string;
+  profilePicture: string | null;
+}
+
 @Injectable()
 export class AuthService {
   private readonly logger = new Logger(AuthService.name);
@@ -96,6 +137,9 @@ export class AuthService {
     private configService: ConfigService,
     private fileUploadService: FileUploadService,
     private vehiclesService: VehiclesService,
+    private referralsService: ReferralsService,
+    private keccelOtpService: KeccelOtpService,
+    private redisService: RedisService,
   ) {
     this.googleClient = new OAuth2Client();
   }
@@ -108,11 +152,37 @@ export class AuthService {
       selfieImage?: Array<MulterFile>;
     },
   ): Promise<AuthResponseDto> {
-    console.log('registerDto', registerDto);
-    console.log('files', files);
-    const { phone, pin, firstName, lastName, role, isDriver, vehicle } =
-      registerDto;
-    const resolvedIsDriver = isDriver ?? role === UserRole.DRIVER;
+    const {
+      phone,
+      pin,
+      firstName,
+      lastName,
+      gender,
+      role,
+      isDriver,
+      vehicle,
+      referralCode,
+      referralToken,
+      referralProvider,
+      referralReferringLink,
+      referralCapturedAt,
+    } = registerDto;
+    assertSelfServiceUserRole(role);
+    const legalFirstName = normalizeLegalName(firstName);
+    const legalLastName = normalizeLegalName(lastName);
+
+    const referralAttribution = {
+      referralCode,
+      referralToken,
+      referralProvider,
+      referralReferringLink,
+      referralCapturedAt,
+    };
+    const driverState = resolveSelfServiceDriverState({
+      role,
+      isDriver,
+      hasVehicle: Boolean(vehicle),
+    });
 
     // Check if user already exists
     const existingUser = await this.userRepository.findOne({
@@ -122,6 +192,8 @@ export class AuthService {
     if (existingUser) {
       throw new UnauthorizedException('Ce numéro de téléphone existe déjà');
     }
+
+    await this.referralsService.assertReferralAttribution(referralAttribution);
 
     // Hash the PIN
     const saltRounds = 10;
@@ -162,10 +234,11 @@ export class AuthService {
     const userData: Partial<User> = {
       phone,
       password: hashedPin, // Store hashed PIN
-      firstName,
-      lastName,
-      role,
-      isDriver: resolvedIsDriver,
+      firstName: legalFirstName,
+      lastName: legalLastName,
+      gender: gender ?? null,
+      role: driverState.role,
+      isDriver: driverState.isDriver,
       status: UserStatus.PENDING_KYC,
     };
 
@@ -175,14 +248,15 @@ export class AuthService {
 
     const user = this.userRepository.create(userData);
     const savedUser = await this.userRepository.save(user);
+    await this.referralsService.registerUser(savedUser.id, referralAttribution);
 
-    if (vehicle && !resolvedIsDriver) {
+    if (vehicle && !driverState.isDriver) {
       throw new BadRequestException(
         'Les informations du véhicule sont uniquement autorisées pour les conducteurs',
       );
     }
 
-    if (vehicle && resolvedIsDriver) {
+    if (vehicle && driverState.isDriver) {
       await this.vehiclesService.create(savedUser.id, vehicle);
     }
 
@@ -272,44 +346,12 @@ export class AuthService {
 
     this.assertUserCanAuthenticate(user);
 
-    // Handle PIN validation or reset
-    if (loginDto.newPin) {
-      // User wants to reset PIN (forgot old PIN)
-      this.logger.log(`PIN reset requested during login for user ${user.id}`);
+    const validatedUser = await this.validateUser(loginDto.phone, loginDto.pin);
 
-      // Hash the new PIN
-      const saltRounds = 10;
-      const hashedNewPin = await bcrypt.hash(loginDto.newPin, saltRounds);
-
-      // Update user password with new hashed PIN
-      user.password = hashedNewPin;
-      await this.userRepository.save(user);
-
-      this.logger.log(
-        `PIN reset successfully during login for user ${user.id}`,
-      );
-    } else if (loginDto.pin) {
-      // Normal login with PIN validation
-      const validatedUser = await this.validateUser(
-        loginDto.phone,
-        loginDto.pin,
-      );
-
-      if (!validatedUser) {
-        this.logger.warn(
-          `Login failed: Invalid PIN for phone: ${loginDto.phone}`,
-        );
-        throw new UnauthorizedException(
-          'Numéro de téléphone ou code PIN invalide. Si vous avez oublié votre code PIN, fournissez un newPin pour le réinitialiser.',
-        );
-      }
-    } else {
-      // No PIN provided and no newPin provided
-      this.logger.warn(
-        `Login failed: No PIN provided for phone: ${loginDto.phone}`,
-      );
+    if (!validatedUser) {
+      this.logger.warn(`Login failed: Invalid PIN for user ${user.id}`);
       throw new UnauthorizedException(
-        'Le code PIN est requis. Si vous avez oublié votre code PIN, fournissez un newPin pour le réinitialiser.',
+        'Numéro de téléphone ou code PIN invalide',
       );
     }
 
@@ -318,8 +360,6 @@ export class AuthService {
     await this.userRepository.save(user);
 
     const tokens = await this.generateTokens(user);
-
-    console.log('user status is', user.status);
 
     return {
       accessToken: tokens.accessToken,
@@ -334,6 +374,366 @@ export class AuthService {
     };
   }
 
+  async requestPinResetOtp(
+    dto: PinResetRequestDto,
+  ): Promise<{ message: string }> {
+    const user = await this.userRepository.findOne({
+      where: { phone: dto.phone },
+    });
+
+    // Return the same response for unknown or ineligible accounts to avoid
+    // exposing which phone numbers are registered.
+    if (!this.canUseSelfServicePinReset(user)) {
+      return { message: PIN_RESET_GENERIC_MESSAGE };
+    }
+
+    await this.keccelOtpService.sendOtp(
+      dto.phone,
+      OTP_SMS_MESSAGES.pinReset,
+      6,
+      PIN_RESET_TOKEN_TTL_SECONDS,
+    );
+    await this.redisService.set(
+      this.getPinResetOtpKey(user.id),
+      PIN_RESET_OTP_PENDING_VALUE,
+      PIN_RESET_TOKEN_TTL_SECONDS,
+    );
+
+    return { message: PIN_RESET_GENERIC_MESSAGE };
+  }
+
+  async verifyPinResetOtp(dto: PinResetVerifyOtpDto): Promise<{
+    resetToken: string;
+    expiresInSeconds: number;
+  }> {
+    const user = await this.userRepository.findOne({
+      where: { phone: dto.phone },
+    });
+
+    if (!this.canUseSelfServicePinReset(user)) {
+      throw new BadRequestException('Code OTP invalide ou expiré');
+    }
+
+    const pendingOtp = await this.redisService.get<string>(
+      this.getPinResetOtpKey(user.id),
+    );
+    if (pendingOtp !== PIN_RESET_OTP_PENDING_VALUE) {
+      throw new BadRequestException('Code OTP invalide ou expiré');
+    }
+
+    const verification = await this.keccelOtpService.verifyOtp(
+      dto.phone,
+      dto.otp,
+    );
+
+    if (!verification.valid) {
+      throw new BadRequestException('Code OTP invalide ou expiré');
+    }
+
+    const otpConsumed = await this.redisService.consumeIfValueMatches(
+      this.getPinResetOtpKey(user.id),
+      PIN_RESET_OTP_PENDING_VALUE,
+    );
+    if (!otpConsumed) {
+      throw new BadRequestException('Code OTP invalide ou expiré');
+    }
+
+    const resetToken = `${user.id}.${randomBytes(32).toString('base64url')}`;
+    await this.redisService.set(
+      this.getPinResetKey(user.id),
+      this.hashPinResetToken(resetToken),
+      PIN_RESET_TOKEN_TTL_SECONDS,
+    );
+
+    this.logger.log(`PIN reset OTP verified for user ${user.id}`);
+
+    return {
+      resetToken,
+      expiresInSeconds: PIN_RESET_TOKEN_TTL_SECONDS,
+    };
+  }
+
+  async resetPin(dto: PinResetConfirmDto): Promise<{ message: string }> {
+    const userId = this.getUserIdFromPinResetToken(dto.resetToken);
+    if (!userId) {
+      throw new BadRequestException(
+        'Jeton de réinitialisation invalide ou expiré',
+      );
+    }
+
+    const consumed = await this.redisService.consumeIfValueMatches(
+      this.getPinResetKey(userId),
+      this.hashPinResetToken(dto.resetToken),
+    );
+
+    if (!consumed) {
+      throw new BadRequestException(
+        'Jeton de réinitialisation invalide ou expiré',
+      );
+    }
+
+    const user = await this.userRepository.findOne({ where: { id: userId } });
+    if (!this.canUseSelfServicePinReset(user)) {
+      throw new BadRequestException(
+        'Jeton de réinitialisation invalide ou expiré',
+      );
+    }
+
+    user.password = await bcrypt.hash(dto.newPin, 10);
+    user.refreshToken = null;
+    user.accessToken = null;
+    await this.userRepository.save(user);
+
+    this.logger.log(`PIN reset completed for user ${user.id}`);
+
+    return {
+      message:
+        'Code PIN réinitialisé. Les jetons de rafraîchissement ont été invalidés.',
+    };
+  }
+
+  private canUseSelfServicePinReset(user: User | null): user is User {
+    return Boolean(
+      user &&
+      !isAdminRole(user.role) &&
+      user.isActive &&
+      user.status !== UserStatus.SUSPENDED &&
+      user.status !== UserStatus.INACTIVE,
+    );
+  }
+
+  private getPinResetKey(userId: string): string {
+    return `${PIN_RESET_KEY_PREFIX}${userId}`;
+  }
+
+  private getPinResetOtpKey(userId: string): string {
+    return `${PIN_RESET_OTP_KEY_PREFIX}${userId}`;
+  }
+
+  private hashPinResetToken(token: string): string {
+    return createHash('sha256').update(token).digest('hex');
+  }
+
+  private getUserIdFromPinResetToken(token: string): string | null {
+    const parts = token.split('.');
+    if (
+      parts.length !== 2 ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+        parts[0],
+      ) ||
+      !/^[A-Za-z0-9_-]{43}$/.test(parts[1])
+    ) {
+      return null;
+    }
+
+    return parts[0];
+  }
+
+  async adminLogin(loginDto: AdminLoginDto): Promise<AuthResponseDto> {
+    const user = await this.userRepository.findOne({
+      where: { phone: loginDto.phone },
+    });
+
+    if (!user) {
+      this.logger.warn(
+        `Admin login failed: User not found for phone: ${loginDto.phone}`,
+      );
+      throw new UnauthorizedException(
+        'Numéro de téléphone ou mot de passe invalide',
+      );
+    }
+
+    this.assertUserCanAuthenticate(user);
+
+    if (!isAdminRole(user.role)) {
+      this.logger.warn(`Admin login rejected for non-admin user ${user.id}`);
+      throw new UnauthorizedException(
+        "Ce compte n'a pas accès à l'interface admin",
+      );
+    }
+
+    const password = loginDto.password ?? loginDto.pin;
+    if (!password) {
+      throw new UnauthorizedException('Le mot de passe admin est requis');
+    }
+
+    const validatedUser = await this.validateUser(loginDto.phone, password);
+    if (!validatedUser) {
+      this.logger.warn(
+        `Admin login failed: Invalid password for phone: ${loginDto.phone}`,
+      );
+      throw new UnauthorizedException(
+        'Numéro de téléphone ou mot de passe invalide',
+      );
+    }
+
+    user.lastLoginAt = new Date();
+    await this.userRepository.save(user);
+
+    const tokens = await this.generateTokens(user);
+    return {
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+      passwordChangeRequired: user.passwordChangeRequired,
+    };
+  }
+
+  async changeAdminPassword(
+    userId: string,
+    dto: AdminChangePasswordDto,
+  ): Promise<{ message: string; passwordChangeRequired: boolean }> {
+    const user = await this.userRepository.findOne({ where: { id: userId } });
+    if (!user) {
+      throw new UnauthorizedException('Utilisateur non trouvé');
+    }
+
+    this.assertUserCanAuthenticate(user);
+
+    if (!isAdminRole(user.role)) {
+      throw new UnauthorizedException(
+        "Ce compte n'a pas accès à l'interface admin",
+      );
+    }
+
+    if (!user.password) {
+      throw new BadRequestException(
+        'Aucun mot de passe administrateur défini pour ce compte',
+      );
+    }
+
+    const currentPasswordIsValid = await bcrypt.compare(
+      dto.currentPassword,
+      user.password,
+    );
+    if (!currentPasswordIsValid) {
+      throw new UnauthorizedException('Mot de passe actuel invalide');
+    }
+
+    const samePassword = await bcrypt.compare(dto.newPassword, user.password);
+    if (samePassword) {
+      throw new BadRequestException(
+        "Le nouveau mot de passe doit être différent de l'ancien",
+      );
+    }
+
+    user.password = await bcrypt.hash(dto.newPassword, 12);
+    user.passwordChangeRequired = false;
+    await this.userRepository.save(user);
+
+    return {
+      message: 'Mot de passe administrateur modifié avec succès',
+      passwordChangeRequired: false,
+    };
+  }
+
+  async sendAdminBootstrapOtp(
+    dto: AdminBootstrapSendOtpDto,
+    bootstrapSecret?: string,
+  ): Promise<{ message: string }> {
+    this.assertAdminBootstrapSecret(bootstrapSecret);
+    await this.assertAdminBootstrapIsAvailable();
+    this.assertAdminBootstrapPhone(dto.phone);
+
+    await this.keccelOtpService.sendOtp(
+      this.getConfiguredAdminBootstrapPhone(),
+      OTP_SMS_MESSAGES.adminBootstrap,
+      6,
+      300,
+    );
+
+    return {
+      message: 'Code OTP de bootstrap envoyé au numéro super administrateur',
+    };
+  }
+
+  async confirmAdminBootstrap(
+    dto: AdminBootstrapConfirmDto,
+    bootstrapSecret?: string,
+  ): Promise<{
+    message: string;
+    admin: {
+      id: string;
+      phone: string;
+      firstName: string;
+      lastName: string;
+      role: UserRole;
+      passwordChangeRequired: boolean;
+      isPhoneVerified: boolean;
+    };
+  }> {
+    this.assertAdminBootstrapSecret(bootstrapSecret);
+    await this.assertAdminBootstrapIsAvailable();
+    this.assertAdminBootstrapPhone(dto.phone);
+
+    const phone = this.getConfiguredAdminBootstrapPhone();
+    const verificationResult = await this.keccelOtpService.verifyOtp(
+      phone,
+      dto.otp,
+    );
+
+    if (!verificationResult.valid) {
+      throw new BadRequestException('Code OTP invalide ou expiré');
+    }
+
+    const configuredPassword = this.configService.get<string>(
+      'ADMIN_BOOTSTRAP_DEFAULT_PASSWORD',
+    );
+    const password = dto.password ?? configuredPassword;
+    if (!password || password.length < 8 || password.length > 128) {
+      throw new BadRequestException(
+        'Mot de passe de bootstrap absent ou invalide',
+      );
+    }
+
+    const admin = await this.userRepository.manager.transaction(
+      async (manager) => {
+        await manager.query(
+          `SELECT pg_advisory_xact_lock(hashtext('zwanga_admin_bootstrap'))`,
+        );
+
+        const existingSuperAdmins = await manager.getRepository(User).count({
+          where: { role: UserRole.SUPER_ADMIN },
+        });
+        if (existingSuperAdmins > 0) {
+          throw new BadRequestException(
+            'Le super administrateur initial existe déjà',
+          );
+        }
+
+        return provisionAdminAccount(manager.getRepository(User), {
+          phone,
+          firstName:
+            dto.firstName ||
+            this.configService.get<string>('ADMIN_BOOTSTRAP_FIRST_NAME') ||
+            'Buania',
+          lastName:
+            dto.lastName ||
+            this.configService.get<string>('ADMIN_BOOTSTRAP_LAST_NAME') ||
+            'Superadmin',
+          password,
+          role: UserRole.SUPER_ADMIN,
+          isPhoneVerified: true,
+          passwordChangeRequired: true,
+          existingAccountStrategy: 'promote_self_service',
+          lockExistingAccount: true,
+        });
+      },
+    );
+
+    return {
+      message: 'Super administrateur initial créé avec succès',
+      admin: {
+        id: admin.id,
+        phone: admin.phone,
+        firstName: admin.firstName,
+        lastName: admin.lastName,
+        role: admin.role,
+        passwordChangeRequired: admin.passwordChangeRequired,
+        isPhoneVerified: admin.isPhoneVerified,
+      },
+    };
+  }
+
   async refreshToken(refreshTokenDto: RefreshTokenDto) {
     try {
       const payload = await this.jwtService.verifyAsync(
@@ -343,14 +743,9 @@ export class AuthService {
         },
       );
 
-      console.log('jwt payload:', payload);
-
       const user = await this.userRepository.findOne({
         where: { id: payload.sub },
       });
-
-      console.log('user refresh token', user?.refreshToken);
-      console.log('refresh token dto', refreshTokenDto.refreshToken);
 
       if (!user || user.refreshToken !== refreshTokenDto.refreshToken) {
         throw new UnauthorizedException('Token de rafraîchissement invalide');
@@ -390,6 +785,91 @@ export class AuthService {
     return { message: 'Déconnexion réussie' };
   }
 
+  private async assertAdminBootstrapIsAvailable(): Promise<void> {
+    const existingSuperAdmins = await this.userRepository.count({
+      where: { role: UserRole.SUPER_ADMIN },
+    });
+
+    if (existingSuperAdmins > 0) {
+      throw new BadRequestException(
+        'Le super administrateur initial existe déjà',
+      );
+    }
+  }
+
+  private assertAdminBootstrapSecret(receivedSecret?: string): void {
+    const configuredSecret = this.configService
+      .get<string>('ADMIN_BOOTSTRAP_SECRET')
+      ?.trim();
+
+    if (!configuredSecret) {
+      throw new UnauthorizedException(
+        "Le bootstrap super administrateur n'est pas configuré",
+      );
+    }
+
+    if (!this.safeEquals(configuredSecret, receivedSecret?.trim() ?? '')) {
+      throw new UnauthorizedException('Clé de bootstrap invalide');
+    }
+  }
+
+  private safeEquals(left: string, right: string): boolean {
+    const leftBuffer = Buffer.from(left);
+    const rightBuffer = Buffer.from(right);
+
+    if (leftBuffer.length !== rightBuffer.length) {
+      return false;
+    }
+
+    return timingSafeEqual(leftBuffer, rightBuffer);
+  }
+
+  private assertAdminBootstrapPhone(phone: string): void {
+    if (
+      this.normalizePhoneForIdentity(phone) !==
+      this.getConfiguredAdminBootstrapPhone()
+    ) {
+      throw new UnauthorizedException(
+        'Numéro non autorisé pour le bootstrap super administrateur',
+      );
+    }
+  }
+
+  private getConfiguredAdminBootstrapPhone(): string {
+    const configuredPhone = this.configService
+      .get<string>('ADMIN_BOOTSTRAP_PHONE')
+      ?.trim();
+
+    if (!configuredPhone) {
+      throw new UnauthorizedException(
+        "Le numéro de bootstrap super administrateur n'est pas configuré",
+      );
+    }
+
+    return this.normalizePhoneForIdentity(configuredPhone);
+  }
+
+  private normalizePhoneForIdentity(phone: string): string {
+    const defaultCountryCode = (
+      this.configService.get<string>('DEFAULT_COUNTRY_CODE') || '+243'
+    ).replace(/\D/g, '');
+    let normalized = phone.trim().replace(/[\s().-]/g, '');
+
+    if (normalized.startsWith('00')) {
+      normalized = `+${normalized.slice(2)}`;
+    }
+
+    if (normalized.startsWith('0')) {
+      normalized = `+${defaultCountryCode}${normalized.slice(1)}`;
+    }
+
+    if (!normalized.startsWith('+')) {
+      normalized = `+${normalized}`;
+    }
+
+    return normalized;
+  }
+
   private getGoogleAudiences(): string[] {
     const raw =
       this.configService.get<string>('GOOGLE_MOBILE_CLIENT_IDS') ||
@@ -406,7 +886,7 @@ export class AuthService {
     const audience = this.getGoogleAudiences();
     if (audience.length === 0) {
       this.logger.error('Missing GOOGLE_MOBILE_CLIENT_IDS / GOOGLE_CLIENT_ID');
-      throw new UnauthorizedException('Google OAuth is not configured');
+      throw new UnauthorizedException("La connexion avec Google est temporairement indisponible.");
     }
 
     try {
@@ -416,7 +896,7 @@ export class AuthService {
       });
       const payload = ticket.getPayload();
       if (!payload || !payload.sub || !payload.email) {
-        throw new UnauthorizedException('Invalid Google token payload');
+        throw new UnauthorizedException("La réponse de connexion Google est invalide. Relancez la connexion.");
       }
 
       return {
@@ -428,13 +908,27 @@ export class AuthService {
         emailVerified: payload.email_verified ?? false,
       };
     } catch (e) {
-      throw new UnauthorizedException('Invalid Google token');
+      throw new UnauthorizedException("La connexion avec Google n’a pas pu être vérifiée. Réessayez.");
     }
   }
 
   async googleMobileLogin(
     idToken: string,
     phone?: string,
+    gender?: UserGender | null,
+    signupOptions?: Pick<
+      GoogleMobileAuthDto,
+      | 'role'
+      | 'isDriver'
+      | 'vehicle'
+      | 'firstName'
+      | 'lastName'
+      | 'referralCode'
+      | 'referralToken'
+      | 'referralProvider'
+      | 'referralReferringLink'
+      | 'referralCapturedAt'
+    >,
   ): Promise<AuthResponseDto> {
     const googleProfile = await this.verifyGoogleIdToken(idToken);
     // Reuse existing linking/creation logic
@@ -447,12 +941,28 @@ export class AuthService {
         profilePicture: googleProfile.profilePicture,
       },
       phone,
+      gender,
+      signupOptions,
     );
   }
 
   async validateGoogleUser(
-    googleProfile: any,
+    googleProfile: GoogleAuthProfile,
     phone?: string,
+    gender?: UserGender | null,
+    signupOptions?: Pick<
+      GoogleMobileAuthDto,
+      | 'role'
+      | 'isDriver'
+      | 'vehicle'
+      | 'firstName'
+      | 'lastName'
+      | 'referralCode'
+      | 'referralToken'
+      | 'referralProvider'
+      | 'referralReferringLink'
+      | 'referralCapturedAt'
+    >,
   ): Promise<AuthResponseDto> {
     const { googleId, email, firstName, lastName, profilePicture } =
       googleProfile;
@@ -524,21 +1034,65 @@ export class AuthService {
           );
         }
 
+        const role = signupOptions?.role ?? UserRole.PASSENGER;
+        assertSelfServiceUserRole(role);
+
+        const vehicle = signupOptions?.vehicle;
+        const driverState = resolveSelfServiceDriverState({
+          role,
+          isDriver: signupOptions?.isDriver,
+          hasVehicle: Boolean(vehicle),
+        });
+        const legalFirstName = normalizeLegalName(
+          signupOptions?.firstName || firstName,
+        );
+        const legalLastName = normalizeLegalName(
+          signupOptions?.lastName || lastName,
+        );
+
+        if (driverState.isDriver && (!legalFirstName || !legalLastName)) {
+          throw new BadRequestException(
+            'Vos prénom(s) et votre nom exacts sont requis avant la vérification KYC. Le post-nom est facultatif.',
+          );
+        }
+        const referralAttribution = {
+          referralCode: signupOptions?.referralCode,
+          referralToken: signupOptions?.referralToken,
+          referralProvider: signupOptions?.referralProvider,
+          referralReferringLink: signupOptions?.referralReferringLink,
+          referralCapturedAt: signupOptions?.referralCapturedAt,
+        };
+
+        await this.referralsService.assertReferralAttribution(
+          referralAttribution,
+        );
+
+        if (vehicle && !driverState.isDriver) {
+          throw new BadRequestException(
+            'Les informations du véhicule sont uniquement autorisées pour les conducteurs',
+          );
+        }
+
         user = this.userRepository.create({
           googleId,
           email,
           phone,
-          firstName,
-          lastName,
-          profilePicture,
-          role: UserRole.PASSENGER,
-          isDriver: false,
+          firstName: legalFirstName,
+          lastName: legalLastName,
+          gender: gender ?? null,
+          profilePicture: profilePicture ?? undefined,
+          role: driverState.role,
+          isDriver: driverState.isDriver,
           status: UserStatus.PENDING_KYC,
           isEmailVerified: true,
           isPhoneVerified: false,
         });
 
         user = await this.userRepository.save(user);
+        await this.referralsService.registerUser(user.id, referralAttribution);
+        if (vehicle && driverState.isDriver) {
+          await this.vehiclesService.create(user.id, vehicle);
+        }
         this.logger.log(`New user created via Google OAuth: ${user.id}`);
       }
     }
@@ -606,7 +1160,7 @@ export class AuthService {
       return this.applePublicKeys;
     } catch (error) {
       this.logger.error('Unable to fetch Apple public keys', error);
-      throw new UnauthorizedException('Apple OAuth is currently unavailable');
+      throw new UnauthorizedException("La connexion avec Apple est temporairement indisponible. Réessayez plus tard.");
     }
   }
 
@@ -632,28 +1186,28 @@ export class AuthService {
     expectedNonce?: string,
   ): void {
     if (!payload.sub) {
-      throw new UnauthorizedException('Invalid Apple token payload');
+      throw new UnauthorizedException("La réponse de connexion Apple est invalide. Relancez la connexion.");
     }
 
     if (payload.iss !== APPLE_ISSUER) {
-      throw new UnauthorizedException('Invalid Apple token issuer');
+      throw new UnauthorizedException("L’origine de la réponse de connexion Apple n’a pas pu être vérifiée. Réessayez.");
     }
 
     if (!this.isAppleAudienceAllowed(payload.aud, allowedAudiences)) {
-      throw new UnauthorizedException('Invalid Apple token audience');
+      throw new UnauthorizedException("Cette connexion Apple n’est pas destinée à cette application. Relancez la connexion.");
     }
 
     const now = Math.floor(Date.now() / 1000);
     if (!payload.exp || payload.exp + TOKEN_CLOCK_TOLERANCE_SECONDS < now) {
-      throw new UnauthorizedException('Apple token has expired');
+      throw new UnauthorizedException("Votre connexion Apple a expiré. Reconnectez-vous.");
     }
 
     if (payload.iat && payload.iat - TOKEN_CLOCK_TOLERANCE_SECONDS > now) {
-      throw new UnauthorizedException('Invalid Apple token issued-at time');
+      throw new UnauthorizedException("L’heure de la réponse de connexion Apple est invalide. Relancez la connexion.");
     }
 
     if (expectedNonce && payload.nonce !== expectedNonce) {
-      throw new UnauthorizedException('Invalid Apple token nonce');
+      throw new UnauthorizedException("La réponse Apple ne correspond pas à cette tentative de connexion. Réessayez.");
     }
   }
 
@@ -664,26 +1218,26 @@ export class AuthService {
     const allowedAudiences = this.getAppleAudiences();
     if (allowedAudiences.length === 0) {
       this.logger.error('Missing APPLE_CLIENT_IDS / APPLE_CLIENT_ID');
-      throw new UnauthorizedException('Apple OAuth is not configured');
+      throw new UnauthorizedException("La connexion avec Apple est temporairement indisponible.");
     }
 
     const tokenParts = idToken.split('.');
     if (tokenParts.length !== 3) {
-      throw new UnauthorizedException('Invalid Apple token');
+      throw new UnauthorizedException("La connexion avec Apple n’a pas pu être vérifiée. Réessayez.");
     }
 
     const [encodedHeader, encodedPayload, encodedSignature] = tokenParts;
     const header = this.decodeJwtPart<AppleJwtHeader>(
       encodedHeader,
-      'Invalid Apple token header',
+      "La réponse de connexion Apple est invalide. Relancez la connexion.",
     );
     const payload = this.decodeJwtPart<AppleIdTokenPayload>(
       encodedPayload,
-      'Invalid Apple token payload',
+      "La réponse de connexion Apple est invalide. Relancez la connexion.",
     );
 
     if (header.alg !== 'RS256' || !header.kid) {
-      throw new UnauthorizedException('Invalid Apple token header');
+      throw new UnauthorizedException("La réponse de connexion Apple est invalide. Relancez la connexion.");
     }
 
     let appleKeys = await this.getApplePublicKeys();
@@ -695,7 +1249,7 @@ export class AuthService {
     }
 
     if (!appleKey) {
-      throw new UnauthorizedException('Invalid Apple token key');
+      throw new UnauthorizedException("La connexion avec Apple n’a pas pu être vérifiée. Réessayez.");
     }
 
     const signingInput = `${encodedHeader}.${encodedPayload}`;
@@ -709,13 +1263,13 @@ export class AuthService {
     );
 
     if (!isSignatureValid) {
-      throw new UnauthorizedException('Invalid Apple token signature');
+      throw new UnauthorizedException("L’authenticité de la réponse Apple n’a pas pu être vérifiée. Relancez la connexion.");
     }
 
     this.validateAppleClaims(payload, allowedAudiences, expectedNonce);
     const appleId = payload.sub;
     if (!appleId) {
-      throw new UnauthorizedException('Invalid Apple token payload');
+      throw new UnauthorizedException("La réponse de connexion Apple est invalide. Relancez la connexion.");
     }
 
     return {
@@ -742,7 +1296,18 @@ export class AuthService {
   async validateAppleUser(
     appleProfile: AppleAuthProfile,
     phone?: string,
-    signupOptions?: Pick<AppleMobileAuthDto, 'role' | 'isDriver' | 'vehicle'>,
+    signupOptions?: Pick<
+      AppleMobileAuthDto,
+      | 'gender'
+      | 'role'
+      | 'isDriver'
+      | 'vehicle'
+      | 'referralCode'
+      | 'referralToken'
+      | 'referralProvider'
+      | 'referralReferringLink'
+      | 'referralCapturedAt'
+    >,
   ): Promise<AuthResponseDto> {
     const { appleId, email, firstName, lastName, emailVerified } = appleProfile;
 
@@ -813,12 +1378,37 @@ export class AuthService {
       }
 
       const role = signupOptions?.role ?? UserRole.PASSENGER;
-      const isDriver = signupOptions?.isDriver ?? role === UserRole.DRIVER;
-      const vehicle = signupOptions?.vehicle;
+      assertSelfServiceUserRole(role);
 
-      if (vehicle && !isDriver) {
+      const vehicle = signupOptions?.vehicle;
+      const driverState = resolveSelfServiceDriverState({
+        role,
+        isDriver: signupOptions?.isDriver,
+        hasVehicle: Boolean(vehicle),
+      });
+      const legalFirstName = normalizeLegalName(firstName);
+      const legalLastName = normalizeLegalName(lastName);
+
+      if (driverState.isDriver && (!legalFirstName || !legalLastName)) {
         throw new BadRequestException(
-          'Les informations du vehicule sont uniquement autorisees pour les conducteurs',
+          'Vos prénom(s) et votre nom exacts sont requis avant la vérification KYC. Le post-nom est facultatif.',
+        );
+      }
+      const referralAttribution = {
+        referralCode: signupOptions?.referralCode,
+        referralToken: signupOptions?.referralToken,
+        referralProvider: signupOptions?.referralProvider,
+        referralReferringLink: signupOptions?.referralReferringLink,
+        referralCapturedAt: signupOptions?.referralCapturedAt,
+      };
+
+      await this.referralsService.assertReferralAttribution(
+        referralAttribution,
+      );
+
+      if (vehicle && !driverState.isDriver) {
+        throw new BadRequestException(
+          'Les informations du véhicule sont uniquement autorisées pour les conducteurs',
         );
       }
 
@@ -826,17 +1416,19 @@ export class AuthService {
         appleId,
         email,
         phone,
-        firstName: firstName ?? '',
-        lastName: lastName ?? '',
-        role,
-        isDriver,
+        firstName: legalFirstName,
+        lastName: legalLastName,
+        gender: signupOptions?.gender ?? null,
+        role: driverState.role,
+        isDriver: driverState.isDriver,
         status: UserStatus.PENDING_KYC,
         isEmailVerified: emailVerified,
         isPhoneVerified: false,
       });
 
       user = await this.userRepository.save(user);
-      if (vehicle && isDriver) {
+      await this.referralsService.registerUser(user.id, referralAttribution);
+      if (vehicle && driverState.isDriver) {
         await this.vehiclesService.create(user.id, vehicle);
       }
       this.logger.log(`New user created via Apple OAuth: ${user.id}`);

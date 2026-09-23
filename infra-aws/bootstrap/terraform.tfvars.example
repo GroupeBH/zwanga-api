@@ -1,0 +1,3 @@
+aws_region        = "eu-west-1"
+state_bucket_name = "replace-with-a-globally-unique-zwanga-tfstate-name"
+project_name      = "zwanga"

@@ -21,7 +21,7 @@ export class RatingsService {
     
     if (raterId === createRatingDto.ratedUserId) {
       this.logger.warn(`Rating creation failed: User ${raterId} tried to rate themselves`);
-      throw new BadRequestException('Cannot rate yourself');
+      throw new BadRequestException("Vous ne pouvez pas vous attribuer une note.");
     }
 
     const ratedUser = await this.userRepository.findOne({
@@ -30,7 +30,7 @@ export class RatingsService {
 
     if (!ratedUser) {
       this.logger.warn(`Rating creation failed: User ${createRatingDto.ratedUserId} not found`);
-      throw new NotFoundException('User to rate not found');
+      throw new NotFoundException("La personne à évaluer est introuvable.");
     }
 
     // Check if user already rated this user for the same trip
@@ -45,7 +45,7 @@ export class RatingsService {
 
       if (existingRating) {
         this.logger.warn(`Rating creation failed: User ${raterId} already rated user ${createRatingDto.ratedUserId} for trip ${createRatingDto.tripId}`);
-        throw new BadRequestException('You have already rated this user for this trip');
+        throw new BadRequestException("Vous avez déjà évalué cette personne pour ce trajet.");
       }
     }
 

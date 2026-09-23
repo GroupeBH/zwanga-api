@@ -5,12 +5,15 @@ import { PassportModule } from '@nestjs/passport';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { AuthService } from './auth.service';
 import { AuthController } from './auth.controller';
+import { OAuthExchangeService } from './oauth-exchange.service';
 import { User } from '../users/entities/user.entity';
 import { KycDocument } from '../users/entities/kyc-document.entity';
 import { UsersModule } from '../users/users.module';
 import { JwtStrategy } from './strategies/jwt.strategy';
 import { GoogleStrategy } from './strategies/google.strategy';
 import { VehiclesModule } from '../vehicles/vehicles.module';
+import { ReferralsModule } from '../referrals/referrals.module';
+import { KeccelOtpModule } from '../keccel-otp/keccel-otp.module';
 
 @Module({
   imports: [
@@ -28,10 +31,11 @@ import { VehiclesModule } from '../vehicles/vehicles.module';
       inject: [ConfigService],
     }),
     VehiclesModule,
+    ReferralsModule,
+    KeccelOtpModule,
   ],
   controllers: [AuthController],
-  providers: [AuthService, JwtStrategy, GoogleStrategy],
+  providers: [AuthService, JwtStrategy, GoogleStrategy, OAuthExchangeService],
   exports: [AuthService],
 })
 export class AuthModule {}
-

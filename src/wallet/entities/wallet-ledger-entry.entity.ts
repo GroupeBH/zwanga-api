@@ -1,4 +1,5 @@
 import {
+  Check,
   Column,
   CreateDateColumn,
   Entity,
@@ -17,14 +18,33 @@ export enum WalletLedgerEntryType {
   BOOKING_REFUND = 'booking_refund',
   BOOKING_FARE_ADJUSTMENT = 'booking_fare_adjustment',
   SUBSCRIPTION_PAYMENT = 'subscription_payment',
+  SUBSCRIPTION_REWARD = 'subscription_reward',
   TRANSFER_OUT = 'transfer_out',
   TRANSFER_IN = 'transfer_in',
+  ADMIN_ADJUSTMENT = 'admin_adjustment',
+  WITHDRAWAL = 'withdrawal',
+  WITHDRAWAL_REFUND = 'withdrawal_refund',
 }
 
 @Entity('wallet_ledger_entries')
 @Index(['userId', 'createdAt'])
+@Index('IDX_wallet_ledger_entries_account_created', ['accountId', 'createdAt'])
 @Index(['relatedEntityType', 'relatedEntityId'])
 @Index(['paymentTransactionId'])
+@Index(
+  'UQ_wallet_ledger_trip_loyalty',
+  ['userId', 'relatedEntityType', 'relatedEntityId'],
+  {
+    unique: true,
+    where: `type = 'loyalty_reward' AND "relatedEntityType" IN ('trip_loyalty_base', 'trip_loyalty_bonus')`,
+  },
+)
+@Check('CHK_wallet_ledger_balance_after_non_negative', '"balanceAfter" >= 0')
+@Check('CHK_wallet_ledger_amount_not_zero', '"amount" <> 0')
+@Check(
+  'CHK_wallet_ledger_withdrawable_amount',
+  '"withdrawableAmount" IS NULL OR (ABS("withdrawableAmount") <= ABS(amount) AND "withdrawableAmount" * amount >= 0)',
+)
 export class WalletLedgerEntry {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -47,6 +67,10 @@ export class WalletLedgerEntry {
 
   @Column({ type: 'decimal', precision: 12, scale: 2 })
   amount: number;
+
+  // NULL means legacy allocation is unknown; never infer cash eligibility from it.
+  @Column({ type: 'decimal', precision: 12, scale: 2, nullable: true })
+  withdrawableAmount: number | null;
 
   @Column({ type: 'decimal', precision: 12, scale: 2 })
   balanceAfter: number;

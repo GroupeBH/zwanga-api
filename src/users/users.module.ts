@@ -12,6 +12,7 @@ import { FavoriteLocation } from './entities/favorite-location.entity';
 import { Rating } from '../ratings/entities/rating.entity';
 import { Vehicle } from '../vehicles/entities/vehicle.entity';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
+import { DiditKycService } from './didit-kyc.service';
 
 @Module({
   imports: [
@@ -20,8 +21,8 @@ import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
     SubscriptionsModule,
   ],
   controllers: [UsersController],
-  providers: [UsersService],
-  exports: [UsersService],
+  providers: [UsersService, DiditKycService],
+  exports: [UsersService, DiditKycService],
 })
 export class UsersModule {}
 

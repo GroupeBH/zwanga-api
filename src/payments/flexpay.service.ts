@@ -11,6 +11,7 @@ import { firstValueFrom } from 'rxjs';
 import { isAxiosError, type AxiosError } from 'axios';
 import { PaymentMethod } from './entities/payment-transaction.entity';
 import { formatPaymentLogPayload } from './payment-log.util';
+import { FlexPayPayoutClient } from './flexpay-payout.client';
 
 export interface FlexPayInitiatePaymentInput {
   method: PaymentMethod;
@@ -38,7 +39,13 @@ export interface FlexPayInitiatePayoutInput {
   phone: string;
   amount: number;
   currency: string;
+  description: string;
   callbackUrl: string;
+}
+
+export interface FlexPayInitiatePayoutResult extends FlexPayInitiatePaymentResult {
+  status: string | null;
+  pending: boolean;
 }
 
 export interface FlexPayTransactionStatus {
@@ -50,6 +57,7 @@ export interface FlexPayTransactionStatus {
   amountCustomer: string | null;
   currency: string | null;
   createdAt: string | null;
+  providerReference?: string | null;
 }
 
 export interface FlexPayCheckTransactionResult {
@@ -67,11 +75,14 @@ export class FlexPayService {
   private readonly defaultCardBaseUrl = 'https://beta-cardpayment.flexpay.cd';
   private readonly defaultCardPaymentPath = 'v1.1/pay';
   private readonly defaultRequestTimeoutMs = 30000;
+  private readonly payoutClient: FlexPayPayoutClient;
 
   constructor(
     private readonly httpService: HttpService,
     private readonly configService: ConfigService,
-  ) {}
+  ) {
+    this.payoutClient = new FlexPayPayoutClient(httpService, configService);
+  }
 
   async initiatePayment(
     input: FlexPayInitiatePaymentInput,
@@ -85,56 +96,25 @@ export class FlexPayService {
 
   async initiatePayout(
     input: FlexPayInitiatePayoutInput,
-  ): Promise<FlexPayInitiatePaymentResult> {
-    if (!input.phone?.trim()) {
-      throw new BadRequestException(
-        'Le numero de telephone est requis pour un paiement chauffeur',
-      );
-    }
+  ): Promise<FlexPayInitiatePayoutResult> {
+    return this.payoutClient.initiate(input);
+  }
 
-    const body = {
-      merchant: this.getMerchantCode(),
-      type: '1',
-      phone: this.normalizePhone(input.phone),
-      reference: input.reference,
-      amount: this.formatAmount(input.amount),
-      currency: input.currency,
-      callbackUrl: input.callbackUrl,
-    };
-    const url = this.getMerchantPayoutUrl();
+  async checkPayoutTransaction(
+    orderNumber: string,
+  ): Promise<FlexPayCheckTransactionResult> {
+    return this.payoutClient.checkTransaction(orderNumber);
+  }
 
-    this.logger.log(
-      `FlexPay merchant payout request: url=${url}, merchant=${body.merchant}, reference=${body.reference}, phone=${this.maskPhone(body.phone)}, amount=${body.amount} ${body.currency}`,
-    );
-
-    try {
-      const response = await firstValueFrom(
-        this.httpService.post<Record<string, unknown>>(url, body, {
-          headers: {
-            Authorization: this.getBearerToken(),
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-          },
-          timeout: this.getRequestTimeoutMs(),
-        }),
-      );
-
-      const normalizedResponse = this.normalizeInitiateResponse(response.data);
-      this.logger.log(
-        `FlexPay merchant payout response: reference=${input.reference}, code=${normalizedResponse.code}, orderNumber=${normalizedResponse.orderNumber ?? 'none'}, message=${normalizedResponse.message ?? 'none'}, response=${formatPaymentLogPayload(normalizedResponse.raw)}`,
-      );
-
-      return normalizedResponse;
-    } catch (error) {
-      this.handleHttpError(error, 'Paiement chauffeur FlexPay');
-    }
+  async checkPayoutBalance() {
+    return this.payoutClient.checkBalance();
   }
 
   async checkTransaction(
     orderNumber: string,
   ): Promise<FlexPayCheckTransactionResult> {
     if (!orderNumber?.trim()) {
-      throw new BadRequestException('Le numero de commande FlexPay est requis');
+      throw new BadRequestException('Le numéro de commande FlexPay est requis');
     }
 
     const normalizedOrderNumber = orderNumber.trim();
@@ -162,7 +142,7 @@ export class FlexPayService {
 
       return normalizedResponse;
     } catch (error) {
-      this.handleHttpError(error, 'Verification FlexPay');
+      this.handleHttpError(error, 'Vérification FlexPay');
     }
   }
 
@@ -181,7 +161,7 @@ export class FlexPayService {
   ): Promise<FlexPayInitiatePaymentResult> {
     if (!input.phone?.trim()) {
       throw new BadRequestException(
-        'Le numero de telephone est requis pour un paiement Mobile Money',
+        'Le numéro de téléphone est requis pour un paiement Mobile Money',
       );
     }
 
@@ -338,7 +318,7 @@ export class FlexPayService {
   ): string | null {
     for (const key of keys) {
       const value = data[key];
-      if (value !== undefined && value !== null) {
+      if (typeof value === 'string' || typeof value === 'number') {
         return String(value);
       }
     }
@@ -373,19 +353,6 @@ export class FlexPayService {
       this.getOptionalConfig('FLEXPAY_MOBILE_BASE_URL') ||
         this.defaultMobileBaseUrl,
       'api/rest/v1/paymentService',
-    );
-  }
-
-  private getMerchantPayoutUrl(): string {
-    const explicitUrl = this.getOptionalConfig('FLEXPAY_PAYOUT_SERVICE_URL');
-    if (explicitUrl) {
-      return explicitUrl;
-    }
-
-    return this.joinUrl(
-      this.getOptionalConfig('FLEXPAY_MOBILE_BASE_URL') ||
-        this.defaultMobileBaseUrl,
-      'api/rest/v1/merchantPayOutService',
     );
   }
 
@@ -435,7 +402,7 @@ export class FlexPayService {
     const url = value?.trim() || this.getOptionalConfig(configKey);
     if (!url) {
       throw new BadRequestException(
-        `${configKey} doit etre configure pour un paiement par carte`,
+        `${configKey} doit être configuré pour un paiement par carte`,
       );
     }
 
@@ -450,7 +417,7 @@ export class FlexPayService {
       }
     }
 
-    throw new BadRequestException(`${keys.join(' ou ')} n'est pas configure`);
+    throw new BadRequestException(`${keys.join(' ou ')} n'est pas configuré`);
   }
 
   private getOptionalConfig(key: string): string | null {
@@ -485,7 +452,7 @@ export class FlexPayService {
     const normalized = phone.trim().replace(/[\s()-]/g, '');
     if (!/^\+243\d{9}$/.test(normalized)) {
       throw new BadRequestException(
-        'Le numero de telephone doit commencer par +243, par exemple +243891234567',
+        'Le numéro de téléphone doit commencer par +243, par exemple +243891234567',
       );
     }
 
@@ -505,9 +472,7 @@ export class FlexPayService {
       throw error;
     }
 
-    const axiosError = isAxiosError(error)
-      ? error
-      : (error as AxiosError);
+    const axiosError = isAxiosError(error) ? error : (error as AxiosError);
     const responseData = formatPaymentLogPayload(
       axiosError.response?.data ?? axiosError.message,
     );
@@ -535,7 +500,7 @@ export class FlexPayService {
         : null;
 
     if (error.code === 'ECONNABORTED' || message.includes('timeout')) {
-      return timeout ? `delai depasse apres ${timeout}` : 'delai depasse';
+      return timeout ? `délai dépassé après ${timeout}` : 'délai dépassé';
     }
 
     if (error.code === 'ENOTFOUND') {

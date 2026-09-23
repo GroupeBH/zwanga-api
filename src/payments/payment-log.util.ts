@@ -38,7 +38,7 @@ function sanitizePaymentLogValue(value: unknown): unknown {
       continue;
     }
 
-    if (normalizedKey.includes('phone')) {
+    if (normalizedKey.includes('phone') || normalizedKey === 'customer') {
       sanitized[key] = maskPaymentLogPhone(nestedValue);
       continue;
     }

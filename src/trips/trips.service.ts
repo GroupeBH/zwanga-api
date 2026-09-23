@@ -16,9 +16,14 @@ import {
   Brackets,
   Not,
   IsNull,
+  Raw,
 } from 'typeorm';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { Trip, TripStatus } from './entities/trip.entity';
+import { activeTripWhere } from '../common/activity-read-policy';
+import { selectTripHistory } from './trip-history';
+import { orderHistory, type HistoryPageQuery } from '../common/history-page';
+import { getTripRoutePreview } from '../common/route-preview';
 import {
   DriverTripInterruptionConfirmation,
   DriverTripInterruptionRequest,
@@ -32,7 +37,11 @@ import {
 } from './entities/recurring-trip-template.entity';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { Booking, BookingStatus } from '../bookings/entities/booking.entity';
-import { Vehicle } from '../vehicles/entities/vehicle.entity';
+import {
+  getVehicleMaxSeats,
+  Vehicle,
+  VehicleType,
+} from '../vehicles/entities/vehicle.entity';
 import { TripRequest } from '../trip-requests/entities/trip-request.entity';
 import { KycDocument, KycStatus } from '../users/entities/kyc-document.entity';
 import {
@@ -48,6 +57,8 @@ import {
   RequestTripInterruptionDto,
 } from './dto/trip-interruption.dto';
 import { BookingsService } from '../bookings/bookings.service';
+import { DriverInterruptionWorkflow } from './driver-interruption.workflow';
+import { DriverInterruptionDecisionDto, DriverInterruptionFareQueryDto } from './dto/trip-interruption.dto';
 import { CacheService } from '../common/services/cache.service';
 import {
   LocationHistoryService,
@@ -65,6 +76,9 @@ import {
   SubscriptionsService,
 } from '../subscriptions/subscriptions.service';
 import { WeatherAwarenessService } from '../weather/weather-awareness.service';
+import { DriverSettlementsService } from '../driver-settlements/driver-settlements.service';
+import { WalletService } from '../wallet/wallet.service';
+import { normalizeUserDriverFlags } from '../users/user-role.policy';
 import {
   buildPointFromCoordinate,
   isCoordinateAllowedForTrip,
@@ -107,6 +121,7 @@ export type SanitizedBooking = Omit<
 
 export interface SanitizedVehicle {
   id: string;
+  type: VehicleType;
   brand: string;
   model: string;
   color: string;
@@ -151,6 +166,23 @@ export class TripsService {
   private readonly DAILY_FREE_TRIP_PUBLICATION_LIMIT = 5;
   private readonly DEFAULT_ESTIMATED_TRIP_DURATION_MS = 6 * 60 * 60 * 1000;
 
+  private logTripStateChange(payload: {
+    tripId: string;
+    driverId?: string;
+    from: TripStatus;
+    to: TripStatus;
+    reason: string;
+    acceptedBookings?: number;
+    availableSeats?: number;
+  }): void {
+    this.logger.warn(
+      JSON.stringify({
+        event: 'trip_state_change',
+        ...payload,
+      }),
+    );
+  }
+
   constructor(
     @InjectRepository(Trip)
     private tripRepository: Repository<Trip>,
@@ -183,6 +215,8 @@ export class TripsService {
     private weatherAwarenessService: WeatherAwarenessService,
     private locationHistoryService: LocationHistoryService,
     private bookingsService: BookingsService,
+    private driverSettlementsService: DriverSettlementsService,
+    private walletService: WalletService,
   ) {}
 
   async create(
@@ -210,6 +244,7 @@ export class TripsService {
       driverId,
       vehicleId || null,
     );
+    this.assertVehicleSeatCapacity(vehicle, baseTripData.totalSeats);
     await this.ensureDailyTripPublicationQuota(driverId);
     const departurePoint = await this.resolvePointFromCoordinatesOrAddress(
       departureCoordinates,
@@ -235,6 +270,7 @@ export class TripsService {
       pricePerSeat,
       totalSeats: baseTripData.totalSeats,
       availableSeats: baseTripData.totalSeats,
+      requiresPassengerKyc: createTripDto.requiresPassengerKyc ?? false,
       isPrivate: options?.isPrivate ?? false,
       tripRequestId: options?.tripRequestId || null,
       recurringTemplateId: null,
@@ -550,7 +586,11 @@ export class TripsService {
 
     if (!trip) {
       this.logger.warn(`Trip not found: ${id}`);
-      throw new NotFoundException('Trajet non trouve');
+      throw new NotFoundException({
+        error: 'Trajet introuvable',
+        code: 'TRIP_NOT_FOUND',
+        message: "Ce trajet n'existe pas ou a déjà été supprimé.",
+      });
     }
 
     trip.interruptionRequest =
@@ -569,11 +609,23 @@ export class TripsService {
     return sanitized;
   }
 
-  async findByDriver(driverId: string): Promise<SanitizedTrip[]> {
+  async findDriverHistory(driverId: string, options: HistoryPageQuery) {
+    const page = await selectTripHistory(this.tripRepository, driverId, options);
+    if (!page.ids.length) return { data: [], nextCursor: page.nextCursor };
+    const trips = await this.tripRepository.find({ where: { driverId, id: In(page.ids) },
+      relations: ['vehicle', 'bookings', 'bookings.passenger', 'driver'] });
+    const userIds = this.collectTripUserIds(trips);
+    const [ratings, premium] = await Promise.all([this.buildUserRatingsMap(userIds),
+      this.subscriptionsService.getPremiumFeaturesForUsers(userIds)]);
+    const data = await Promise.all(orderHistory(page.ids, trips).map(trip => this.sanitizeTrip(trip, ratings, premium)));
+    return { data, nextCursor: page.nextCursor };
+  }
+
+  async findByDriver(driverId: string, activityOnly = false): Promise<SanitizedTrip[]> {
     this.logger.debug(`Fetching trips for driver: ${driverId}`);
 
     const trips = await this.tripRepository.find({
-      where: { driverId },
+      where: activityOnly ? activeTripWhere(driverId) : { driverId },
       relations: ['vehicle', 'bookings', 'bookings.passenger', 'driver'],
       order: { departureDate: 'DESC' },
     });
@@ -606,9 +658,10 @@ export class TripsService {
 
     if (!vehicle) {
       throw new BadRequestException(
-        'Un vehicule actif est requis pour creer un trajet recurrent',
+        'Un véhicule actif est requis pour créer un trajet récurrent',
       );
     }
+    this.assertVehicleSeatCapacity(vehicle, createRecurringTripDto.totalSeats);
 
     const startDate = this.parseDateOnly(createRecurringTripDto.startDate);
     const endDate = createRecurringTripDto.endDate
@@ -617,7 +670,7 @@ export class TripsService {
 
     if (endDate && endDate < startDate) {
       throw new BadRequestException(
-        'La date de fin doit etre posterieure a la date de debut',
+        'La date de fin doit être postérieure à la date de début',
       );
     }
 
@@ -659,6 +712,8 @@ export class TripsService {
       totalSeats: createRecurringTripDto.totalSeats,
       pricePerSeat,
       isFree,
+      requiresPassengerKyc:
+        createRecurringTripDto.requiresPassengerKyc ?? false,
       description: createRecurringTripDto.description?.trim() || null,
       status: RecurringTripTemplateStatus.ACTIVE,
       lastGeneratedDate: null,
@@ -750,17 +805,29 @@ export class TripsService {
     });
 
     if (!trip) {
-      throw new NotFoundException('Trajet non trouve');
+      throw new NotFoundException({
+        error: 'Trajet introuvable',
+        code: 'TRIP_NOT_FOUND',
+        message: "Ce trajet n'existe pas ou a déjà été supprimé.",
+      });
     }
 
     if (!trip.isPrivate) {
-      throw new BadRequestException('Ce trajet est déjà public');
+      throw new BadRequestException({
+        error: 'Trajet déjà public',
+        code: 'TRIP_ALREADY_PUBLIC',
+        message:
+          'Ce trajet est déjà public. Aucune nouvelle publication nécessaire.',
+      });
     }
 
     if (!trip.tripRequestId) {
-      throw new BadRequestException(
-        "Ce trajet n'a pas été créé à partir d'une demande de trajet",
-      );
+      throw new BadRequestException({
+        error: 'Publication non applicable',
+        code: 'TRIP_NOT_CREATED_FROM_REQUEST',
+        message:
+          "Ce trajet n'a pas été créé à partir d'une demande de trajet et ne peut pas être publié avec cette action.",
+      });
     }
 
     // Vérifier que l'utilisateur est le passager qui a créé la demande de trajet
@@ -770,14 +837,22 @@ export class TripsService {
     });
 
     if (!tripRequest) {
-      throw new NotFoundException('Demande de Trajet non trouvee');
+      throw new NotFoundException({
+        error: 'Demande de trajet introuvable',
+        code: 'TRIP_REQUEST_NOT_FOUND',
+        message:
+          "La demande à l'origine de ce trajet n'existe pas ou a été supprimée.",
+      });
     }
 
     // Seul le passager qui a créé la demande peut autoriser la publication
     if (tripRequest.passengerId !== userId) {
-      throw new ForbiddenException(
-        "Seul le passager qui a créé la demande de trajet peut autoriser que le trajet devienne public. Vous n'êtes pas autorisé à effectuer cette action.",
-      );
+      throw new ForbiddenException({
+        error: 'Publication non autorisée',
+        code: 'TRIP_PUBLICATION_NOT_ALLOWED',
+        message:
+          'Seul le passager ayant créé la demande peut rendre ce trajet public.',
+      });
     }
 
     // Vérifier que le conducteur du trajet a les prérequis (KYC + véhicules)
@@ -788,14 +863,21 @@ export class TripsService {
     });
 
     if (!driver) {
-      throw new NotFoundException('Conducteur du Trajet non trouve');
+      throw new NotFoundException({
+        error: 'Conducteur introuvable',
+        code: 'TRIP_DRIVER_NOT_FOUND',
+        message: "Le conducteur associé à ce trajet n'existe plus.",
+      });
     }
 
     // Vérifier que le conducteur a passé le KYC (status ACTIVE)
     if (driver.status !== UserStatus.ACTIVE) {
-      throw new BadRequestException(
-        'Le conducteur du trajet doit avoir passé la vérification KYC (compte actif) pour que le trajet puisse être rendu public.',
-      );
+      throw new BadRequestException({
+        error: 'Compte conducteur inactif',
+        code: 'DRIVER_ACCOUNT_NOT_ACTIVE',
+        message:
+          'Le compte du conducteur doit être actif avant de rendre ce trajet public.',
+      });
     }
 
     // Vérifier que le KYC est approuvé
@@ -805,17 +887,23 @@ export class TripsService {
     });
 
     if (!kycDocument || kycDocument.status !== KycStatus.APPROVED) {
-      throw new BadRequestException(
-        'Le conducteur du trajet doit avoir un KYC approuvé pour que le trajet puisse être rendu public.',
-      );
+      throw new BadRequestException({
+        error: "Vérification d’identité du conducteur requise",
+        code: 'DRIVER_KYC_NOT_APPROVED',
+        message:
+          "L’identité du conducteur n’a pas encore été vérifiée. La publication sera possible après vérification.",
+      });
     }
 
     // Vérifier que le conducteur a au moins un véhicule actif
     const activeVehicles = driver.vehicles?.filter((v) => v.isActive) || [];
     if (activeVehicles.length === 0) {
-      throw new BadRequestException(
-        'Le conducteur du trajet doit avoir au moins un véhicule actif pour que le trajet puisse être rendu public.',
-      );
+      throw new BadRequestException({
+        error: 'Véhicule conducteur requis',
+        code: 'DRIVER_ACTIVE_VEHICLE_REQUIRED',
+        message:
+          'Le conducteur doit enregistrer et activer au moins un véhicule avant la publication du trajet.',
+      });
     }
 
     // Rendre le trajet public
@@ -841,13 +929,30 @@ export class TripsService {
 
     const trip = await this.tripRepository.findOne({
       where: { id, driverId },
+      relations: ['vehicle', 'bookings'],
     });
 
     if (!trip) {
       this.logger.warn(
         `Trip update failed: Trip ${id} not found for driver ${driverId}`,
       );
-      throw new NotFoundException('Trajet non trouve');
+      throw new NotFoundException('Trajet non trouvé');
+    }
+    // For request-linked trips the passenger has already confirmed the fare.
+    // Reject changes before geocoding, status transitions or any other writes.
+    if (
+      trip.tripRequestId &&
+      ((updateTripDto.pricePerSeat !== undefined &&
+        (updateTripDto.pricePerSeat === null ||
+          Number(updateTripDto.pricePerSeat) !== Number(trip.pricePerSeat))) ||
+        (updateTripDto.isFree !== undefined &&
+          updateTripDto.isFree !== (Number(trip.pricePerSeat) === 0)))
+    ) {
+      throw new BadRequestException({
+        code: 'TRIP_REQUEST_PRICE_LOCKED',
+        message:
+          'Le prix de ce trajet a déjà été validé par le passager et ne peut plus être modifié.',
+      });
     }
     if (
       updateTripDto.status === TripStatus.COMPLETED &&
@@ -860,6 +965,18 @@ export class TripsService {
       trip.status !== TripStatus.ACTIVE
     ) {
       return this.startTrip(id, driverId);
+    }
+    if (updateTripDto.status === TripStatus.CANCELLED) {
+      if (trip.tripRequestId) {
+        throw new BadRequestException(
+          "Un trajet issu d'une demande ne peut pas être annulé par le conducteur. Utilisez l'arrêt du trajet.",
+        );
+      }
+      return this.cancelTripAfterDriverAbandonment(
+        trip,
+        driverId,
+        'driver_cancelled_trip',
+      );
     }
 
     const {
@@ -924,10 +1041,12 @@ export class TripsService {
     }
 
     // Validate and update vehicle if provided
+    let resultingVehicle = trip.vehicle ?? null;
     if (vehicleId !== undefined) {
       if (vehicleId === null) {
         // Allow removing vehicle association
         trip.vehicleId = null;
+        resultingVehicle = null;
       } else {
         const vehicle = await this.vehicleRepository.findOne({
           where: { id: vehicleId, ownerId: driverId },
@@ -952,7 +1071,29 @@ export class TripsService {
         }
 
         trip.vehicleId = vehicleId;
+        resultingVehicle = vehicle;
       }
+    }
+
+    this.assertVehicleSeatCapacity(
+      resultingVehicle,
+      totalSeats ?? trip.totalSeats ?? trip.availableSeats,
+    );
+
+    if (
+      restPayload.requiresPassengerKyc === true &&
+      !trip.requiresPassengerKyc
+    ) {
+      await this.ensurePassengerKycApprovedForBookings(
+        (trip.bookings ?? []).filter((booking) =>
+          this.isBookingSubjectToPassengerKycRequirement(booking),
+        ),
+        {
+          tripId: trip.id,
+          message:
+            "Vous ne pouvez pas activer cette exigence : certains passagers ayant une réservation active n’ont pas encore fait vérifier leur identité.",
+        },
+      );
     }
 
     // Gérer totalSeats et recalculer availableSeats si nécessaire
@@ -988,6 +1129,70 @@ export class TripsService {
     return this.findOne(id);
   }
 
+  private async cancelTripAfterDriverAbandonment(
+    trip: Trip,
+    driverId: string,
+    reason: string,
+  ): Promise<SanitizedTrip> {
+    const bookings = trip.bookings ?? [];
+    const hasPassengerOnBoard = bookings.some(
+      (booking) =>
+        this.hasBookingEmbarked(booking) &&
+        !this.hasBookingBeenDroppedOff(booking),
+    );
+
+    if (hasPassengerOnBoard) {
+      throw new BadRequestException(
+        "Vous ne pouvez pas annuler ce trajet tant qu'un passager est à bord",
+      );
+    }
+
+    if (trip.status === TripStatus.COMPLETED) {
+      throw new BadRequestException(
+        'Vous ne pouvez pas annuler un trajet déjà terminé',
+      );
+    }
+
+    const acceptedBookings = bookings.filter(
+      (booking) => booking.status === BookingStatus.ACCEPTED,
+    );
+    for (const booking of acceptedBookings) {
+      await this.bookingsService.cancel(booking.id, driverId);
+    }
+
+    const pendingBookingIds = bookings
+      .filter((booking) => booking.status === BookingStatus.PENDING)
+      .map((booking) => booking.id);
+    if (pendingBookingIds.length > 0) {
+      await this.bookingRepository.update(pendingBookingIds, {
+        status: BookingStatus.CANCELLED,
+        cancelledAt: new Date(),
+      });
+    }
+
+    const previousStatus = trip.status;
+    if (trip.status !== TripStatus.CANCELLED) {
+      trip.status = TripStatus.CANCELLED;
+      await this.tripRepository.save(trip);
+      this.logTripStateChange({
+        tripId: trip.id,
+        driverId,
+        from: previousStatus,
+        to: TripStatus.CANCELLED,
+        reason,
+        acceptedBookings: acceptedBookings.length,
+        availableSeats: trip.availableSeats,
+      });
+    }
+
+    await this.cacheService.del(CacheService.getTripKey(trip.id));
+    await this.cacheService.del(CacheService.getTripsListKey());
+    await this.cacheService.del(CacheService.getTripsListKey('all'));
+    await this.cacheService.del(CacheService.getTripsListKey('allTrips'));
+
+    return this.findOne(trip.id);
+  }
+
   async setDriverEmergencyContacts(
     tripId: string,
     driverId: string,
@@ -1002,7 +1207,7 @@ export class TripsService {
     });
 
     if (!trip) {
-      throw new NotFoundException('Trajet non trouve');
+      throw new NotFoundException('Trajet non trouvé');
     }
 
     const selectedContacts = await this.emergencyContactRepository.find({
@@ -1047,8 +1252,13 @@ export class TripsService {
 
     if (!trip) {
       throw new NotFoundException(
-        "Trajet non trouve ou vous n'etes pas le conducteur",
+        "Trajet non trouvé ou vous n'êtes pas le conducteur",
       );
+    }
+
+    if (trip.status === TripStatus.COMPLETED) {
+      await this.walletService.awardLoyaltyForCompletedTrip(trip);
+      return this.findOne(tripId);
     }
 
     if (trip.status !== TripStatus.ACTIVE) {
@@ -1068,19 +1278,41 @@ export class TripsService {
         `Trip completion failed: Trip ${tripId} still has ${unfinishedBookings.length} accepted booking(s) not dropped off`,
       );
       throw new BadRequestException(
-        "Impossible de terminer le trajet tant que tous les passagers acceptes n'ont pas ete deposes",
+        "Impossible de terminer le trajet tant que tous les passagers acceptés n'ont pas été déposés",
       );
     }
 
+    const previousStatus = trip.status;
+    const completedAt = new Date();
+    const completionResult = await this.tripRepository.update(
+      { id: tripId, driverId, status: TripStatus.ACTIVE },
+      { status: TripStatus.COMPLETED, completedAt },
+    );
+    if (completionResult.affected !== 1) {
+      return this.findOne(tripId);
+    }
     trip.status = TripStatus.COMPLETED;
-    trip.completedAt = new Date();
-    await this.tripRepository.save(trip);
+    trip.completedAt = completedAt;
+    await this.walletService.awardLoyaltyForCompletedTrip(trip);
+    this.logTripStateChange({
+      tripId,
+      driverId,
+      from: previousStatus,
+      to: TripStatus.COMPLETED,
+      reason: 'driver_completed_trip',
+      acceptedBookings: trip.bookings?.length ?? 0,
+      availableSeats: trip.availableSeats,
+    });
 
     await this.cacheService.del(CacheService.getTripKey(tripId));
     await this.cacheService.del(CacheService.getTripsListKey());
     await this.cacheService.del(CacheService.getTripsListKey('all'));
 
     await this.notifyDriverEmergencyContacts(trip, 'trip_completed');
+    await this.driverSettlementsService.notifyDriverTripRevenue(
+      driverId,
+      tripId,
+    );
 
     return this.findOne(tripId);
   }
@@ -1097,8 +1329,15 @@ export class TripsService {
       this.logger.warn(
         `Trip deletion failed: Trip ${id} not found for driver ${driverId}`,
       );
-      throw new NotFoundException('Trajet non trouve');
+      throw new NotFoundException('Trajet non trouvé');
     }
+
+    if (trip.tripRequestId) {
+      throw new BadRequestException(
+        "Un trajet issu d'une demande ne peut pas être supprimé par le conducteur. Utilisez l'arrêt du trajet.",
+      );
+    }
+
     const bookings = trip.bookings ?? [];
     const hasPassengerOnBoard = bookings.some(
       (booking) =>
@@ -1111,7 +1350,7 @@ export class TripsService {
         `Trip deletion failed: Trip ${id} still has at least one passenger on board`,
       );
       throw new BadRequestException(
-        'Vous ne pouvez pas supprimer ce trajet car un passager a embarque et son arrivee n a pas encore ete confirmee',
+        'Vous ne pouvez pas supprimer ce trajet car un passager a embarqué et son arrivée n’a pas encore été confirmée',
       );
     }
 
@@ -1164,19 +1403,19 @@ export class TripsService {
   private hasBookingEmbarked(booking: Booking): boolean {
     return Boolean(
       booking.pickedUp ||
-        booking.pickedUpConfirmedByPassenger ||
-        booking.pickedUpAt ||
-        booking.pickedUpConfirmedAt,
+      booking.pickedUpConfirmedByPassenger ||
+      booking.pickedUpAt ||
+      booking.pickedUpConfirmedAt,
     );
   }
 
   private hasBookingBeenDroppedOff(booking: Booking): boolean {
     return Boolean(
       booking.status === BookingStatus.COMPLETED ||
-        booking.droppedOff ||
-        booking.droppedOffConfirmedByPassenger ||
-        booking.droppedOffAt ||
-        booking.droppedOffConfirmedAt,
+      booking.droppedOff ||
+      booking.droppedOffConfirmedByPassenger ||
+      booking.droppedOffAt ||
+      booking.droppedOffConfirmedAt,
     );
   }
 
@@ -1200,7 +1439,7 @@ export class TripsService {
         `Trip start failed: Trip ${tripId} not found for driver ${driverId}`,
       );
       throw new NotFoundException(
-        "Trajet non trouve ou vous n'êtes pas le conducteur",
+        "Trajet non trouvé ou vous n'êtes pas le conducteur",
       );
     }
 
@@ -1220,6 +1459,22 @@ export class TripsService {
       trip.bookings?.filter(
         (booking) => booking.status === BookingStatus.ACCEPTED,
       ) || [];
+
+    if (trip.requiresPassengerKyc) {
+      await this.ensurePassengerKycApprovedForBookings(acceptedBookings, {
+        tripId: trip.id,
+        message:
+          "Ce trajet exige une vérification d’identité. Tous les passagers acceptés doivent avoir fait vérifier leur identité avant le démarrage.",
+      });
+    }
+
+    if (trip.startedAt && await this.driverInterruptionWorkflow.resume(tripId, driverId)) {
+      await this.invalidateDriverInterruptionCaches(tripId);
+      const resumedBookings = await this.bookingRepository.find({ where: { tripId, status: BookingStatus.ACCEPTED }, relations: ['passenger'] });
+      await this.notifyBookedPassengersAboutTripStart(trip, resumedBookings);
+      return this.findOne(tripId);
+    }
+
     const totalAcceptedSeats = acceptedBookings.reduce(
       (sum, booking) => sum + booking.numberOfSeats,
       0,
@@ -1227,6 +1482,7 @@ export class TripsService {
     const hasAvailableSeats = trip.availableSeats > 0;
 
     // Update trip status to ACTIVE and set startedAt
+    const previousStatus = trip.status;
     const startedAt = new Date();
     trip.status = TripStatus.ACTIVE;
     trip.startedAt = startedAt;
@@ -1239,6 +1495,15 @@ export class TripsService {
       startedAt,
     );
     await this.tripRepository.save(trip);
+    this.logTripStateChange({
+      tripId,
+      driverId,
+      from: previousStatus,
+      to: TripStatus.ACTIVE,
+      reason: 'driver_started_trip',
+      acceptedBookings: acceptedBookings.length,
+      availableSeats: trip.availableSeats,
+    });
 
     // Invalidate cache
     await this.cacheService.del(CacheService.getTripKey(tripId));
@@ -1275,7 +1540,7 @@ export class TripsService {
         `Trip pause failed: Trip ${tripId} not found for driver ${driverId}`,
       );
       throw new NotFoundException(
-        "Trajet non trouve ou vous n'êtes pas le conducteur",
+        "Trajet non trouvé ou vous n'êtes pas le conducteur",
       );
     }
 
@@ -1309,8 +1574,18 @@ export class TripsService {
     }
 
     // Update trip status to PENDING (interrupted) when there are no picked-up passengers
+    const previousStatus = trip.status;
     trip.status = TripStatus.PENDING;
     await this.tripRepository.save(trip);
+    this.logTripStateChange({
+      tripId,
+      driverId,
+      from: previousStatus,
+      to: TripStatus.PENDING,
+      reason: 'driver_paused_before_pickup',
+      acceptedBookings: acceptedBookings.length,
+      availableSeats: trip.availableSeats,
+    });
 
     // Invalidate cache
     await this.cacheService.del(CacheService.getTripKey(tripId));
@@ -1339,7 +1614,7 @@ export class TripsService {
 
     if (!trip) {
       throw new NotFoundException(
-        "Trajet non trouve ou vous n'etes pas le conducteur",
+        "Trajet non trouvé ou vous n'êtes pas le conducteur",
       );
     }
 
@@ -1411,22 +1686,12 @@ export class TripsService {
     tripId: string,
     driverId: string,
   ): Promise<SanitizedTrip> {
-    const request = await this.driverTripInterruptionRepository.findOne({
-      where: {
-        tripId,
-        requestedByDriverId: driverId,
-        status: TripInterruptionStatus.PENDING,
-      },
+    const cancelled = await this.driverInterruptionWorkflow.cancel(tripId, driverId);
+    const request = await this.driverTripInterruptionRepository.findOneOrFail({
+      where: { id: cancelled.id },
       relations: ['confirmations', 'confirmations.passenger', 'trip'],
     });
 
-    if (!request) {
-      throw new NotFoundException("Aucune demande d'interruption en attente");
-    }
-
-    request.status = TripInterruptionStatus.CANCELLED;
-    request.cancelledAt = new Date();
-    await this.driverTripInterruptionRepository.save(request);
     await this.invalidateDriverInterruptionCaches(tripId);
     await this.notifyPassengersAboutDriverInterruptionCancelled(request);
 
@@ -1438,49 +1703,21 @@ export class TripsService {
     passengerId: string,
     dto: ConfirmDriverTripInterruptionDto = {},
   ): Promise<SanitizedTrip> {
-    const request = await this.getPendingDriverInterruptionRequest(tripId);
-    const confirmation =
-      await this.getDriverInterruptionConfirmationForPassenger(
-        request.id,
-        passengerId,
-        dto.bookingId,
-      );
-
-    if (confirmation.status === TripInterruptionConfirmationStatus.REJECTED) {
-      throw new BadRequestException(
-        "Vous avez deja refuse cette demande d'interruption",
-      );
-    }
-
-    if (confirmation.status !== TripInterruptionConfirmationStatus.CONFIRMED) {
-      confirmation.status = TripInterruptionConfirmationStatus.CONFIRMED;
-      confirmation.confirmedAt = new Date();
-      confirmation.rejectedAt = null;
-      confirmation.rejectionReason = null;
-      await this.driverTripInterruptionConfirmationRepository.save(
-        confirmation,
-      );
-    }
-
-    const refreshedRequest =
-      await this.refreshDriverInterruptionRequestCounts(request.id);
-
-    if (
-      refreshedRequest.confirmedPassengerCount >=
-        refreshedRequest.requiredPassengerCount &&
-      refreshedRequest.rejectedPassengerCount === 0
-    ) {
-      await this.finalizeDriverTripInterruption(refreshedRequest);
+    const result = await this.driverInterruptionWorkflow.respond(tripId, passengerId, dto.bookingId, true);
+    await this.invalidateDriverInterruptionCaches(tripId);
+    const request = await this.driverTripInterruptionRepository.findOneOrFail({
+      where: { id: result.request.id }, relations: ['trip', 'trip.driver', 'confirmations', 'confirmations.passenger'],
+    });
+    if (result.paused) {
+      await this.notifyDriverAboutDriverInterruptionCompleted(request.trip, request);
+      await this.notifyPassengersAboutDriverInterruptionCompleted(request.trip, request);
     } else {
-      await this.driverTripInterruptionRepository.save(refreshedRequest);
-      await this.invalidateDriverInterruptionCaches(tripId);
       await this.notifyDriverAboutDriverInterruptionResponse(
-        refreshedRequest,
-        confirmation,
+        request,
+        result.confirmation,
         true,
       );
     }
-
     return this.findOne(tripId);
   }
 
@@ -1489,38 +1726,12 @@ export class TripsService {
     passengerId: string,
     dto: RejectTripInterruptionDto = {},
   ): Promise<SanitizedTrip> {
-    const request = await this.getPendingDriverInterruptionRequest(tripId);
-    const confirmation =
-      await this.getDriverInterruptionConfirmationForPassenger(
-        request.id,
-        passengerId,
-        dto.bookingId,
-      );
-
-    if (confirmation.status === TripInterruptionConfirmationStatus.CONFIRMED) {
-      throw new BadRequestException(
-        "Vous avez deja confirme cette demande d'interruption",
-      );
-    }
-
-    if (confirmation.status !== TripInterruptionConfirmationStatus.REJECTED) {
-      confirmation.status = TripInterruptionConfirmationStatus.REJECTED;
-      confirmation.rejectedAt = new Date();
-      confirmation.rejectionReason = dto.reason ?? null;
-      await this.driverTripInterruptionConfirmationRepository.save(
-        confirmation,
-      );
-    }
-
-    const refreshedRequest =
-      await this.refreshDriverInterruptionRequestCounts(request.id);
-    refreshedRequest.status = TripInterruptionStatus.REJECTED;
-    refreshedRequest.rejectedAt = refreshedRequest.rejectedAt ?? new Date();
-    await this.driverTripInterruptionRepository.save(refreshedRequest);
+    const result = await this.driverInterruptionWorkflow.respond(tripId, passengerId, dto.bookingId, false, dto.reason);
+    const refreshedRequest = await this.driverTripInterruptionRepository.findOneOrFail({ where: { id: result.request.id }, relations: ['trip', 'confirmations', 'confirmations.passenger'] });
     await this.invalidateDriverInterruptionCaches(tripId);
     await this.notifyDriverAboutDriverInterruptionResponse(
       refreshedRequest,
-      confirmation,
+      result.confirmation,
       false,
     );
 
@@ -1533,141 +1744,32 @@ export class TripsService {
     return this.driverTripInterruptionRepository.findOne({
       where: {
         tripId,
-        status: TripInterruptionStatus.PENDING,
+        status: In([TripInterruptionStatus.PENDING, TripInterruptionStatus.CONFIRMED]),
       },
       relations: ['confirmations', 'confirmations.passenger'],
       order: { createdAt: 'DESC' },
     });
   }
 
-  private async getPendingDriverInterruptionRequest(
-    tripId: string,
-  ): Promise<DriverTripInterruptionRequest> {
-    const request = await this.findActiveDriverInterruptionRequest(tripId);
-    if (!request) {
-      throw new NotFoundException("Aucune demande d'interruption en attente");
-    }
-    return request;
+  private get driverInterruptionWorkflow() {
+    return new DriverInterruptionWorkflow(this.tripRepository.manager, this.bookingsService);
   }
 
-  private async getDriverInterruptionConfirmationForPassenger(
-    requestId: string,
-    passengerId: string,
-    bookingId?: string,
-  ): Promise<DriverTripInterruptionConfirmation> {
-    const confirmation =
-      await this.driverTripInterruptionConfirmationRepository.findOne({
-        where: bookingId
-          ? { requestId, passengerId, bookingId }
-          : { requestId, passengerId },
-        relations: ['booking', 'passenger'],
-      });
-
-    if (!confirmation) {
-      throw new ForbiddenException(
-        "Vous ne faites pas partie des passagers devant confirmer cette interruption",
-      );
-    }
-
-    return confirmation;
-  }
-
-  private async refreshDriverInterruptionRequestCounts(
-    requestId: string,
-  ): Promise<DriverTripInterruptionRequest> {
-    const request = await this.driverTripInterruptionRepository.findOne({
-      where: { id: requestId },
-      relations: ['confirmations', 'confirmations.passenger'],
+  @Cron(CronExpression.EVERY_MINUTE)
+  async retryInterruptionSettlements() {
+    await this.driverInterruptionWorkflow.retryPendingSettlements((error) => {
+      this.logger.warn(`Interruption settlement will be retried: ${error instanceof Error ? error.message : 'temporary failure'}`);
     });
-
-    if (!request) {
-      throw new NotFoundException("Demande d'interruption introuvable");
-    }
-
-    const confirmations = request.confirmations ?? [];
-    request.requiredPassengerCount =
-      request.requiredPassengerCount || confirmations.length;
-    request.confirmedPassengerCount = confirmations.filter(
-      (confirmation) =>
-        confirmation.status === TripInterruptionConfirmationStatus.CONFIRMED,
-    ).length;
-    request.rejectedPassengerCount = confirmations.filter(
-      (confirmation) =>
-        confirmation.status === TripInterruptionConfirmationStatus.REJECTED,
-    ).length;
-
-    return request;
   }
 
-  private async finalizeDriverTripInterruption(
-    request: DriverTripInterruptionRequest,
-  ): Promise<void> {
-    const requestWithRelations =
-      await this.driverTripInterruptionRepository.findOne({
-        where: { id: request.id },
-        relations: [
-          'confirmations',
-          'confirmations.passenger',
-          'trip',
-          'trip.driver',
-        ],
-      });
+  async getDriverInterruptionFare(tripId: string, passengerId: string, dto: DriverInterruptionFareQueryDto) {
+    return this.driverInterruptionWorkflow.quote(tripId, passengerId, dto);
+  }
 
-    if (!requestWithRelations) {
-      throw new NotFoundException("Demande d'interruption introuvable");
-    }
-
-    const confirmations = requestWithRelations.confirmations ?? [];
-    const hasMissingConfirmation = confirmations.some(
-      (confirmation) =>
-        confirmation.status !== TripInterruptionConfirmationStatus.CONFIRMED,
-    );
-
-    if (hasMissingConfirmation) {
-      throw new BadRequestException(
-        'Tous les passagers doivent confirmer avant interruption du trajet',
-      );
-    }
-
-    for (const confirmation of confirmations) {
-      await this.bookingsService.completeBookingByTripInterruption(
-        confirmation.bookingId,
-        requestWithRelations.requestedLocation ??
-          requestWithRelations.trip.currentLocation,
-      );
-    }
-
-    const trip = await this.tripRepository.findOne({
-      where: { id: requestWithRelations.tripId },
-      relations: ['bookings', 'bookings.passenger', 'driver'],
-    });
-
-    if (!trip) {
-      throw new NotFoundException('Trajet non trouve');
-    }
-
-    trip.status = TripStatus.PENDING;
-    trip.availableSeats = this.calculateAvailableSeatsAfterInterruption(trip);
-    await this.tripRepository.save(trip);
-
-    const now = new Date();
-    requestWithRelations.status = TripInterruptionStatus.COMPLETED;
-    requestWithRelations.confirmedAt = now;
-    requestWithRelations.completedAt = now;
-    requestWithRelations.requiredPassengerCount = confirmations.length;
-    requestWithRelations.confirmedPassengerCount = confirmations.length;
-    requestWithRelations.rejectedPassengerCount = 0;
-    await this.driverTripInterruptionRepository.save(requestWithRelations);
-
-    await this.invalidateDriverInterruptionCaches(trip.id);
-    await this.notifyDriverAboutDriverInterruptionCompleted(
-      trip,
-      requestWithRelations,
-    );
-    await this.notifyPassengersAboutDriverInterruptionCompleted(
-      trip,
-      requestWithRelations,
-    );
+  async decideDriverInterruption(tripId: string, passengerId: string, dto: DriverInterruptionDecisionDto) {
+    const result = await this.driverInterruptionWorkflow.decide(tripId, passengerId, dto);
+    await this.invalidateDriverInterruptionCaches(tripId);
+    return result;
   }
 
   private getOnboardBookings(bookings: Booking[]): Booking[] {
@@ -1677,22 +1779,6 @@ export class TripsService {
         this.hasBookingEmbarked(booking) &&
         !this.hasBookingBeenDroppedOff(booking),
     );
-  }
-
-  private calculateAvailableSeatsAfterInterruption(trip: Trip): number {
-    if (!trip.totalSeats) {
-      return Math.max(0, trip.availableSeats ?? 0);
-    }
-
-    const activeAcceptedSeats = (trip.bookings ?? [])
-      .filter(
-        (booking) =>
-          booking.status === BookingStatus.ACCEPTED &&
-          !this.hasBookingBeenDroppedOff(booking),
-      )
-      .reduce((sum, booking) => sum + booking.numberOfSeats, 0);
-
-    return Math.max(0, trip.totalSeats - activeAcceptedSeats);
   }
 
   private buildDriverInterruptionPoint(
@@ -1711,19 +1797,24 @@ export class TripsService {
 
     if (!coordinate) {
       throw new BadRequestException(
-        "Position d'interruption invalide ou incoherente avec le trajet",
+        "Position d'interruption invalide ou incohérente avec le trajet",
       );
     }
 
     return buildPointFromCoordinate(coordinate);
   }
 
-  private async invalidateDriverInterruptionCaches(tripId: string): Promise<void> {
-    await this.cacheService.del(CacheService.getTripKey(tripId));
-    await this.cacheService.del(CacheService.getBookingsByTripKey(tripId));
-    await this.cacheService.del(CacheService.getTripsListKey());
-    await this.cacheService.del(CacheService.getTripsListKey('all'));
-    await this.cacheService.del(CacheService.getTripsListKey('allTrips'));
+  private async invalidateDriverInterruptionCaches(
+    tripId: string,
+  ): Promise<void> {
+    // Booking responses embed the interruption; invalidate those snapshots too, in one batch.
+    const bookings = await this.bookingRepository.find({ where: { tripId }, select: ['id', 'passengerId'] });
+    const keys = new Set([
+      CacheService.getTripKey(tripId), CacheService.getBookingsByTripKey(tripId),
+      CacheService.getTripsListKey(), CacheService.getTripsListKey('all'), CacheService.getTripsListKey('allTrips'),
+      ...bookings.flatMap((booking) => [CacheService.getBookingKey(booking.id), CacheService.getBookingsByPassengerKey(booking.passengerId)]),
+    ]);
+    await Promise.all([...keys].map((key) => this.cacheService.del(key)));
   }
 
   private async notifyPassengersAboutDriverInterruptionRequest(
@@ -1792,8 +1883,8 @@ export class TripsService {
           .map((passenger) =>
             this.notificationService.sendNotification(
               passenger.fcmToken!,
-              'Demande annulee',
-              "Le conducteur a annule sa demande d'interruption du trajet.",
+              'Demande annulée',
+              "Le conducteur a annulé sa demande d'interruption du trajet.",
               {
                 type: 'driver_trip_interruption_cancelled',
                 tripId: request.tripId,
@@ -1835,8 +1926,8 @@ export class TripsService {
         driver.fcmToken,
         confirmed ? 'Interruption confirmee' : 'Interruption refusee',
         confirmed
-          ? `${passengerName} a confirme votre demande d'interruption.`
-          : `${passengerName} a refuse votre demande d'interruption.`,
+          ? `${passengerName} a confirmé votre demande d'interruption.`
+          : `${passengerName} a refusé votre demande d'interruption.`,
         {
           type: confirmed
             ? 'driver_trip_interruption_passenger_confirmed'
@@ -1874,7 +1965,7 @@ export class TripsService {
       await this.notificationService.sendNotification(
         driver.fcmToken,
         'Trajet interrompu',
-        'Tous les passagers ont confirme. Le trajet est maintenant interrompu.',
+        'Tous les passagers ont confirmé. Le trajet est maintenant interrompu.',
         {
           type: 'driver_trip_interruption_completed',
           tripId: trip.id,
@@ -1911,7 +2002,7 @@ export class TripsService {
             this.notificationService.sendNotification(
               passenger.fcmToken!,
               'Trajet interrompu',
-              'Le trajet a ete interrompu apres confirmation des passagers.',
+              "Le trajet est en pause. Choisissez d'attendre le redémarrage ou de vous arrêter ici et régler la distance parcourue.",
               {
                 type: 'driver_trip_interruption_completed',
                 tripId: trip.id,
@@ -2165,7 +2256,11 @@ export class TripsService {
     const user = await this.userRepository.findOne({ where: { id: driverId } });
     if (!user) {
       this.logger.warn(`Trip publication failed: User not found - ${driverId}`);
-      throw new NotFoundException('Utilisateur non trouve');
+      throw new NotFoundException({
+        error: 'Utilisateur introuvable',
+        code: 'USER_NOT_FOUND',
+        message: "Votre compte utilisateur n'existe pas ou plus.",
+      });
     }
 
     let vehicle: Vehicle | null = null;
@@ -2179,46 +2274,131 @@ export class TripsService {
         this.logger.warn(
           `Trip publication failed: Vehicle ${vehicleId} not found or does not belong to user ${driverId}`,
         );
-        throw new BadRequestException(
-          'Vehicule non trouve ou ne vous appartient pas',
-        );
+        throw new BadRequestException({
+          error: 'Véhicule invalide',
+          code: 'TRIP_VEHICLE_NOT_OWNED',
+          message:
+            "Le véhicule sélectionné n'existe pas ou ne vous appartient pas. Sélectionnez un véhicule de votre liste.",
+        });
       }
 
       if (!vehicle.isActive) {
         this.logger.warn(
           `Trip publication failed: Vehicle ${vehicleId} is not active`,
         );
-        throw new BadRequestException(
-          'Le vehicule selectionne n est pas actif',
-        );
+        throw new BadRequestException({
+          error: 'Véhicule inactif',
+          code: 'TRIP_VEHICLE_INACTIVE',
+          message:
+            'Le véhicule sélectionné est inactif. Réactivez-le ou choisissez un autre véhicule avant de publier le trajet.',
+        });
       }
 
-      if (!this.isDriverRole(user.role)) {
+      if (normalizeUserDriverFlags(user, { hasActiveVehicle: true })) {
         this.logger.log(
-          `Promoting user ${driverId} to driver for trip publication`,
+          `Aligning user ${driverId} as driver for trip publication`,
         );
-        user.role = UserRole.DRIVER;
-        user.isDriver = true;
         await this.userRepository.save(user);
       }
     } else {
       if (requireVehicle) {
-        throw new BadRequestException(
-          'Veuillez selectionner un vehicule actif',
-        );
+        throw new BadRequestException({
+          error: 'Véhicule requis',
+          code: 'TRIP_ACTIVE_VEHICLE_REQUIRED',
+          message: 'Sélectionnez un véhicule actif avant de publier le trajet.',
+        });
+      }
+
+      if (normalizeUserDriverFlags(user)) {
+        await this.userRepository.save(user);
       }
 
       if (!this.isDriverRole(user.role)) {
         this.logger.warn(
           `Trip publication failed: User ${driverId} is not a driver`,
         );
-        throw new BadRequestException(
-          'Vous devez etre conducteur ou fournir un vehicule pour creer un trajet',
-        );
+        throw new BadRequestException({
+          error: 'Profil conducteur requis',
+          code: 'DRIVER_PROFILE_REQUIRED',
+          message:
+            'Votre profil doit être conducteur, ou vous devez sélectionner un véhicule vous appartenant, avant de publier un trajet.',
+        });
       }
     }
 
     return { user, vehicle };
+  }
+
+  private assertVehicleSeatCapacity(
+    vehicle: Vehicle | null | undefined,
+    totalSeats: number,
+  ): void {
+    const maxSeats = getVehicleMaxSeats(vehicle?.type);
+    if (maxSeats !== null && totalSeats > maxSeats) {
+      throw new BadRequestException({
+        error: 'Nombre de places invalide',
+        code: 'VEHICLE_SEAT_CAPACITY_EXCEEDED',
+        message: `Ce véhicule accepte au maximum ${maxSeats} place(s). Réduisez le nombre de places proposées.`,
+      });
+    }
+  }
+
+  private isBookingSubjectToPassengerKycRequirement(
+    booking: Pick<Booking, 'status'>,
+  ): boolean {
+    return [
+      BookingStatus.PENDING,
+      BookingStatus.ACCEPTED,
+      BookingStatus.NO_SHOW,
+    ].includes(booking.status);
+  }
+
+  private async ensurePassengerKycApprovedForBookings(
+    bookings: Array<Pick<Booking, 'id' | 'passengerId' | 'status'>>,
+    context: { tripId: string; message: string },
+  ): Promise<void> {
+    const passengerIds = [
+      ...new Set(
+        bookings
+          .filter((booking) =>
+            this.isBookingSubjectToPassengerKycRequirement(booking),
+          )
+          .map((booking) => booking.passengerId)
+          .filter(Boolean),
+      ),
+    ];
+
+    if (passengerIds.length === 0) {
+      return;
+    }
+
+    const approvedDocuments = await this.kycDocumentRepository.find({
+      where: {
+        userId: In(passengerIds),
+        status: KycStatus.APPROVED,
+      },
+      select: ['userId'],
+    });
+    const approvedPassengerIds = new Set(
+      approvedDocuments
+        .map((document) => document.userId)
+        .filter((userId): userId is string => Boolean(userId)),
+    );
+
+    const hasUnverifiedPassenger = passengerIds.some(
+      (passengerId) => !approvedPassengerIds.has(passengerId),
+    );
+    if (!hasUnverifiedPassenger) {
+      return;
+    }
+
+    throw new BadRequestException({
+      error: "Vérification d’identité du passager requise",
+      code: 'PASSENGER_KYC_REQUIRED',
+      message: context.message,
+      action: 'complete_kyc',
+      tripId: context.tripId,
+    });
   }
 
   private isDriverRole(role?: User['role'] | null): boolean {
@@ -2235,7 +2415,7 @@ export class TripsService {
     });
 
     if (!template) {
-      throw new NotFoundException('Trajet recurrent non trouve');
+      throw new NotFoundException('Trajet récurrent non trouvé');
     }
 
     return template;
@@ -2262,6 +2442,18 @@ export class TripsService {
     if (template.status !== RecurringTripTemplateStatus.ACTIVE) {
       return 0;
     }
+
+    const vehicle =
+      template.vehicle ??
+      (await this.vehicleRepository.findOne({
+        where: { id: template.vehicleId, ownerId: template.driverId },
+      }));
+    if (!vehicle || !vehicle.isActive) {
+      throw new BadRequestException(
+        'Le véhicule du trajet récurrent est introuvable ou inactif',
+      );
+    }
+    this.assertVehicleSeatCapacity(vehicle, template.totalSeats);
 
     const now = new Date();
     const today = this.startOfDay(now);
@@ -2346,6 +2538,7 @@ export class TripsService {
           availableSeats: template.totalSeats,
           pricePerSeat: template.isFree ? 0 : template.pricePerSeat,
           isFree: template.isFree,
+          requiresPassengerKyc: template.requiresPassengerKyc,
           description: template.description ?? undefined,
           status: TripStatus.PENDING,
           isPrivate: false,
@@ -2462,6 +2655,7 @@ export class TripsService {
 
       sanitizedVehicle = {
         id: vehicle.id,
+        type: vehicle.type,
         brand: vehicle.brand,
         model: vehicle.model,
         color: vehicle.color,
@@ -2511,7 +2705,7 @@ export class TripsService {
       `Trip start failed: driver ${driverId} already has active trip ${activeTrip.id}`,
     );
     throw new BadRequestException(
-      'Vous avez deja un trajet en cours. Terminez ou interrompez ce trajet avant d en demarrer un autre.',
+      'Vous avez déjà un trajet en cours. Terminez ou interrompez ce trajet avant d’en démarrer un autre.',
     );
   }
 
@@ -2543,7 +2737,7 @@ export class TripsService {
       `Trip publication blocked: driver ${driverId} reached the daily free limit`,
     );
     throw new BadRequestException(
-      `Les conducteurs sans abonnement ne peuvent publier que ${this.DAILY_FREE_TRIP_PUBLICATION_LIMIT} trajets par jour. Vous avez deja atteint cette limite aujourd hui.`,
+      `Les conducteurs sans abonnement ne peuvent publier que ${this.DAILY_FREE_TRIP_PUBLICATION_LIMIT} trajets par jour. Vous avez déjà atteint cette limite aujourd’hui.`,
     );
   }
 
@@ -2943,6 +3137,7 @@ export class TripsService {
       }
       sanitizedVehicle = {
         id: vehicle.id,
+        type: vehicle.type,
         brand: vehicle.brand,
         model: vehicle.model,
         color: vehicle.color,
@@ -2982,6 +3177,7 @@ export class TripsService {
       bookings: sanitizedBookings,
       vehicle: sanitizedVehicle,
       isFeatured: driverPremium.featuredTripsEnabled,
+      ...await getTripRoutePreview(this.cacheService, trip),
     } as SanitizedTrip;
   }
 
@@ -3018,7 +3214,10 @@ export class TripsService {
     }
 
     const coordinate = pointToCoordinate(booking.passengerCurrentLocation);
-    if (!coordinate || (trip && !isCoordinateAllowedForTrip(coordinate, trip))) {
+    if (
+      !coordinate ||
+      (trip && !isCoordinateAllowedForTrip(coordinate, trip))
+    ) {
       return null;
     }
 
@@ -3211,7 +3410,7 @@ export class TripsService {
     });
 
     if (!trip) {
-      throw new NotFoundException('Trajet non trouve');
+      throw new NotFoundException('Trajet non trouvé');
     }
 
     const isDriver = trip.driverId === userId;
@@ -3272,14 +3471,14 @@ export class TripsService {
 
     const normalizedCoordinates = normalizeLngLatCoordinates(coordinates);
     if (!normalizedCoordinates) {
-      throw new BadRequestException('Coordonnees conducteur invalides');
+      throw new BadRequestException('Coordonnées conducteur invalides');
     }
 
     const [longitude, latitude] = normalizedCoordinates;
     const currentCoordinate = { latitude, longitude };
     if (!isCoordinateAllowedForTrip(currentCoordinate, trip)) {
       throw new BadRequestException(
-        'Position conducteur incoherente avec le trajet',
+        'Position conducteur incohérente avec le trajet',
       );
     }
 
@@ -3294,10 +3493,39 @@ export class TripsService {
       };
     }
 
-    trip.currentLocation = buildPointFromCoordinate(currentCoordinate);
-    trip.lastLocationUpdateAt = observedAt;
+    const currentLocation = buildPointFromCoordinate(currentCoordinate);
+    const updateResult = await this.tripRepository.update(
+      {
+        id: trip.id,
+        driverId,
+        status: TripStatus.ACTIVE,
+        lastLocationUpdateAt: Raw(
+          (alias) => `(${alias} IS NULL OR ${alias} < :observedAt)`,
+          { observedAt },
+        ),
+      },
+      {
+        currentLocation,
+        lastLocationUpdateAt: observedAt,
+      },
+    );
+    if (updateResult.affected !== 1) {
+      const latestTrip = await this.tripRepository.findOne({
+        where: { id: trip.id },
+      });
+      return {
+        tripId: trip.id,
+        coordinates: this.pointToCoordinates(
+          latestTrip?.currentLocation ?? trip.currentLocation,
+        ),
+        updatedAt:
+          latestTrip?.lastLocationUpdateAt ?? trip.lastLocationUpdateAt,
+        ignoredAsOutOfOrder: true,
+      };
+    }
 
-    await this.tripRepository.save(trip);
+    trip.currentLocation = currentLocation;
+    trip.lastLocationUpdateAt = observedAt;
     await this.locationHistoryService.recordDriverLocation(
       trip.id,
       currentCoordinate.latitude,
@@ -3390,9 +3618,19 @@ export class TripsService {
 
     for (const trip of tripsToExpire) {
       // Mark trip as completed
+      const previousStatus = trip.status;
       await this.tripRepository.update(trip.id, {
         status: TripStatus.COMPLETED,
         completedAt: now,
+      });
+      this.logTripStateChange({
+        tripId: trip.id,
+        driverId: trip.driverId,
+        from: previousStatus,
+        to: TripStatus.COMPLETED,
+        reason: 'auto_expired_trip',
+        acceptedBookings: trip.bookings?.length ?? 0,
+        availableSeats: trip.availableSeats,
       });
 
       // Mark all pending and accepted bookings as expired
@@ -3814,22 +4052,22 @@ export class TripsService {
       const passengersLabel =
         passengerNames.length > 0
           ? passengerNames.join(', ')
-          : 'aucun passager confirme';
+          : 'aucun passager confirmé';
       const message =
         eventType === 'trip_started'
           ? [
-              'ZWANGA - Mise a jour securite conducteur',
-              `${driverName} vient de demarrer son trajet.`,
-              `Depart: ${trip.departureLocation}.`,
+              'ZWANGA - Mise à jour sécurité conducteur',
+              `${driverName} vient de démarrer son trajet.`,
+              `Départ : ${trip.departureLocation}.`,
               `Arrivee: ${trip.arrivalLocation}.`,
               `Conducteur: ${driverName}.`,
               `Vehicule: ${vehicleDetails}.`,
               `Passagers: ${passengersLabel}.`,
             ].join('\n')
           : [
-              'ZWANGA - Mise a jour securite conducteur',
-              `${driverName} a termine son trajet.`,
-              `Depart: ${trip.departureLocation}.`,
+              'ZWANGA - Mise à jour sécurité conducteur',
+              `${driverName} a terminé son trajet.`,
+              `Départ : ${trip.departureLocation}.`,
               `Arrivee: ${trip.arrivalLocation}.`,
               `Conducteur: ${driverName}.`,
               `Vehicule: ${vehicleDetails}.`,
@@ -3927,12 +4165,12 @@ export class TripsService {
         const otherPassengersLabel =
           otherPassengers.length > 0
             ? otherPassengers.join(', ')
-            : 'aucun autre passager confirme';
+            : 'aucun autre passager confirmé';
 
         const message = [
-          'ZWANGA - Alerte securite',
-          `Le trajet est termine mais l'arrivee de ${passengerName} n'a pas ete confirmee.`,
-          `Depart: ${trip.departureLocation}.`,
+          'ZWANGA - Alerte sécurité',
+          `Le trajet est terminé mais l'arrivée de ${passengerName} n'a pas été confirmée.`,
+          `Départ : ${trip.departureLocation}.`,
           `Arrivee: ${booking.passengerDestination || trip.arrivalLocation}.`,
           `Conducteur: ${driverPhone ? `${driverName} (${driverPhone})` : driverName}.`,
           `Vehicule: ${vehicleDetails}.`,

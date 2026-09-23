@@ -7,8 +7,16 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, In } from 'typeorm';
-import { Vehicle } from './entities/vehicle.entity';
+import {
+  getVehicleMaxSeats,
+  Vehicle,
+  VehicleType,
+} from './entities/vehicle.entity';
 import { User } from '../users/entities/user.entity';
+import {
+  isAdminRole,
+  normalizeUserDriverFlags,
+} from '../users/user-role.policy';
 import { Trip, TripStatus } from '../trips/entities/trip.entity';
 import { CacheService } from '../common/services/cache.service';
 import { FileUploadService } from '../common/services/file-upload.service';
@@ -29,7 +37,9 @@ export class VehiclesService {
     private fileUploadService: FileUploadService,
   ) {}
 
-  private normalizeVehiclePayload(vehicleData: Partial<Vehicle>): Partial<Vehicle> {
+  private normalizeVehiclePayload(
+    vehicleData: Partial<Vehicle>,
+  ): Partial<Vehicle> {
     return {
       ...vehicleData,
       brand: vehicleData.brand?.trim(),
@@ -43,11 +53,16 @@ export class VehiclesService {
     try {
       await this.cacheService.del(CacheService.getVehiclesByOwnerKey(ownerId));
     } catch (cacheError: any) {
-      this.logger.warn(`Failed to invalidate cache for owner ${ownerId}: ${cacheError.message}`);
+      this.logger.warn(
+        `Failed to invalidate cache for owner ${ownerId}: ${cacheError.message}`,
+      );
     }
   }
 
-  async create(ownerId: string, vehicleData: Partial<Vehicle>): Promise<Vehicle> {
+  async create(
+    ownerId: string,
+    vehicleData: Partial<Vehicle>,
+  ): Promise<Vehicle> {
     this.logger.log(
       `Creating vehicle for owner: ${ownerId} (${vehicleData.brand} ${vehicleData.model})`,
     );
@@ -57,12 +72,14 @@ export class VehiclesService {
 
     try {
       if (
+        !sanitizedVehicleData.type ||
         !sanitizedVehicleData.brand ||
         !sanitizedVehicleData.model ||
         !sanitizedVehicleData.color ||
         !normalizedLicensePlate
       ) {
         const missingFields: string[] = [];
+        if (!sanitizedVehicleData.type) missingFields.push('type');
         if (!sanitizedVehicleData.brand) missingFields.push('brand');
         if (!sanitizedVehicleData.model) missingFields.push('model');
         if (!sanitizedVehicleData.color) missingFields.push('color');
@@ -76,11 +93,14 @@ export class VehiclesService {
         );
       }
 
-      const owner = await this.userRepository.findOne({ where: { id: ownerId } });
+      const owner = await this.userRepository.findOne({
+        where: { id: ownerId },
+      });
       if (!owner) {
         this.logger.warn(`Vehicle creation failed: Owner ${ownerId} not found`);
         throw new NotFoundException('Proprietaire non trouve');
       }
+      this.assertPublicOwnerCanRegisterVehicle(owner);
 
       const existingVehicle = await this.findByNormalizedLicensePlate(
         normalizedLicensePlate,
@@ -88,6 +108,7 @@ export class VehiclesService {
 
       if (existingVehicle) {
         if (existingVehicle.ownerId === ownerId) {
+          await this.ensureOwnerDriverProfile(owner);
           return this.reactivateOrUpdateExistingVehicle(
             existingVehicle,
             ownerId,
@@ -100,19 +121,21 @@ export class VehiclesService {
           `Vehicle creation failed: License plate ${normalizedLicensePlate} already exists (vehicle ID: ${existingVehicle.id}, owner: ${existingVehicle.ownerId})`,
         );
         throw new BadRequestException(
-          `Cette plaque d'immatriculation (${normalizedLicensePlate}) est deja utilisee par un autre vehicule`,
+          `Cette plaque d'immatriculation (${normalizedLicensePlate}) est déjà utilisée par un autre véhicule`,
         );
       }
 
       const vehicle = this.vehicleRepository.create({
         ...sanitizedVehicleData,
         ownerId,
+        type: sanitizedVehicleData.type,
         isActive:
           sanitizedVehicleData.isActive !== undefined
             ? sanitizedVehicleData.isActive
             : true,
       });
 
+      await this.ensureOwnerDriverProfile(owner);
       const savedVehicle = await this.vehicleRepository.save(vehicle);
       await this.invalidateVehicleCaches(ownerId);
 
@@ -121,7 +144,10 @@ export class VehiclesService {
       );
       return savedVehicle;
     } catch (error) {
-      if (error instanceof BadRequestException || error instanceof NotFoundException) {
+      if (
+        error instanceof BadRequestException ||
+        error instanceof NotFoundException
+      ) {
         throw error;
       }
 
@@ -143,7 +169,7 @@ export class VehiclesService {
           error instanceof Error ? error.stack : undefined,
         );
         throw new BadRequestException(
-          `Cette plaque d'immatriculation (${normalizedLicensePlate}) est deja utilisee par un autre vehicule`,
+          `Cette plaque d'immatriculation (${normalizedLicensePlate}) est déjà utilisée par un autre véhicule`,
         );
       }
 
@@ -152,7 +178,7 @@ export class VehiclesService {
         error instanceof Error ? error.stack : undefined,
       );
       throw new InternalServerErrorException(
-        "Une erreur inattendue s'est produite lors de la creation du vehicule",
+        "Une erreur inattendue s'est produite lors de la création du véhicule",
       );
     }
   }
@@ -167,7 +193,9 @@ export class VehiclesService {
       this.logger.debug(
         `Returning ${cached.length} vehicles from cache for owner ${ownerId}`,
       );
-      return Promise.all(cached.map((vehicle) => this.enrichVehiclePhotoUrl(vehicle)));
+      return Promise.all(
+        cached.map((vehicle) => this.enrichVehiclePhotoUrl(vehicle)),
+      );
     }
 
     const vehicles = await this.vehicleRepository.find({
@@ -219,7 +247,9 @@ export class VehiclesService {
     if (updateData.licensePlate !== undefined) {
       const normalizedLicensePlate = sanitizedUpdateData.licensePlate;
       if (!normalizedLicensePlate) {
-        throw new BadRequestException("La plaque d'immatriculation est requise");
+        throw new BadRequestException(
+          "La plaque d'immatriculation est requise",
+        );
       }
 
       const existingVehicle = await this.findByNormalizedLicensePlate(
@@ -227,12 +257,18 @@ export class VehiclesService {
       );
       if (existingVehicle && existingVehicle.id !== id) {
         throw new BadRequestException(
-          `Cette plaque d'immatriculation (${normalizedLicensePlate}) est deja utilisee par un autre vehicule`,
+          `Cette plaque d'immatriculation (${normalizedLicensePlate}) est déjà utilisée par un autre véhicule`,
         );
       }
     }
 
-    Object.assign(vehicle, sanitizedUpdateData);
+    const nextType =
+      sanitizedUpdateData.type ?? vehicle.type ?? VehicleType.CAR;
+    if (nextType !== (vehicle.type ?? VehicleType.CAR)) {
+      await this.ensureTypeSupportsActiveTrips(id, nextType);
+    }
+
+    Object.assign(vehicle, sanitizedUpdateData, { type: nextType });
 
     let updatedVehicle: Vehicle;
     try {
@@ -240,7 +276,7 @@ export class VehiclesService {
     } catch (error) {
       if (this.isUniqueConstraintError(error)) {
         throw new BadRequestException(
-          `Cette plaque d'immatriculation (${vehicle.licensePlate}) est deja utilisee par un autre vehicule`,
+          `Cette plaque d'immatriculation (${vehicle.licensePlate}) est déjà utilisée par un autre véhicule`,
         );
       }
       throw error;
@@ -268,9 +304,11 @@ export class VehiclesService {
       this.logger.warn(
         `Vehicle deactivation failed: Vehicle ${id} is associated with ${activeTrips.length} active or pending trip(s)`,
       );
-      throw new BadRequestException(
-        `Impossible de desactiver ce vehicule. Il est associe a ${activeTrips.length} trajet(s) en cours ou en attente.`,
-      );
+      throw new BadRequestException({
+        error: 'Véhicule utilisé par un trajet',
+        code: 'VEHICLE_HAS_ACTIVE_TRIPS',
+        message: `Impossible de supprimer ce véhicule : ${activeTrips.length} trajet(s) en cours ou en attente l'utilisent encore. Annulez ou terminez ces trajets, puis réessayez.`,
+      });
     }
 
     vehicle.isActive = false;
@@ -281,14 +319,22 @@ export class VehiclesService {
     this.logger.log(`Vehicle ${id} deactivated successfully`);
   }
 
-  private async findOwnedVehicleEntity(id: string, ownerId: string): Promise<Vehicle> {
+  private async findOwnedVehicleEntity(
+    id: string,
+    ownerId: string,
+  ): Promise<Vehicle> {
     const vehicle = await this.vehicleRepository.findOne({
       where: { id, ownerId },
     });
 
     if (!vehicle) {
       this.logger.warn(`Vehicle not found: ${id} for owner ${ownerId}`);
-      throw new NotFoundException('Vehicle not found');
+      throw new NotFoundException({
+        error: 'Véhicule introuvable',
+        code: 'VEHICLE_NOT_FOUND',
+        message:
+          "Ce véhicule n'existe pas, a déjà été supprimé ou ne vous appartient pas.",
+      });
     }
 
     return vehicle;
@@ -298,8 +344,9 @@ export class VehiclesService {
     const enriched = { ...vehicle };
     if (enriched.photoUrl) {
       enriched.photoUrl =
-        (await this.fileUploadService.getPresignedUrlIfS3Key(enriched.photoUrl)) ||
-        enriched.photoUrl;
+        (await this.fileUploadService.getPresignedUrlIfS3Key(
+          enriched.photoUrl,
+        )) || enriched.photoUrl;
     }
     return enriched as Vehicle;
   }
@@ -317,7 +364,9 @@ export class VehiclesService {
       sanitized.color = vehicleData.color.trim();
     }
     if (vehicleData.licensePlate !== undefined) {
-      sanitized.licensePlate = this.normalizeLicensePlate(vehicleData.licensePlate);
+      sanitized.licensePlate = this.normalizeLicensePlate(
+        vehicleData.licensePlate,
+      );
     }
     if (vehicleData.photoUrl !== undefined) {
       const photoUrl = vehicleData.photoUrl.trim();
@@ -328,7 +377,10 @@ export class VehiclesService {
   }
 
   private normalizeLicensePlate(licensePlate?: string | null): string {
-    return (licensePlate ?? '').trim().toUpperCase().replace(/[\s-]+/g, '');
+    return (licensePlate ?? '')
+      .trim()
+      .toUpperCase()
+      .replace(/[\s-]+/g, '');
   }
 
   private async findByNormalizedLicensePlate(
@@ -348,6 +400,24 @@ export class VehiclesService {
       .getOne();
   }
 
+  private assertPublicOwnerCanRegisterVehicle(owner: User): void {
+    if (isAdminRole(owner.role)) {
+      throw new BadRequestException(
+        'Les comptes administrateurs ne peuvent pas enregistrer de véhicule conducteur',
+      );
+    }
+  }
+
+  private async ensureOwnerDriverProfile(owner: User): Promise<void> {
+    const changed = normalizeUserDriverFlags(owner, {
+      hasActiveVehicle: true,
+    });
+
+    if (changed) {
+      await this.userRepository.save(owner);
+    }
+  }
+
   private async reactivateOrUpdateExistingVehicle(
     vehicle: Vehicle,
     ownerId: string,
@@ -358,9 +428,15 @@ export class VehiclesService {
       `Vehicle with license plate ${normalizedLicensePlate} already belongs to owner ${ownerId}; reactivating/updating vehicle ${vehicle.id}`,
     );
 
+    const nextType = vehicleData.type ?? vehicle.type ?? VehicleType.CAR;
+    if (nextType !== (vehicle.type ?? VehicleType.CAR)) {
+      await this.ensureTypeSupportsActiveTrips(vehicle.id, nextType);
+    }
+
     vehicle.brand = vehicleData.brand ?? vehicle.brand;
     vehicle.model = vehicleData.model ?? vehicle.model;
     vehicle.color = vehicleData.color ?? vehicle.color;
+    vehicle.type = nextType;
     vehicle.licensePlate = normalizedLicensePlate;
     vehicle.photoUrl = vehicleData.photoUrl ?? vehicle.photoUrl;
     vehicle.isActive = true;
@@ -368,6 +444,32 @@ export class VehiclesService {
     const savedVehicle = await this.vehicleRepository.save(vehicle);
     await this.invalidateVehicleCaches(ownerId, vehicle.id);
     return savedVehicle;
+  }
+
+  private async ensureTypeSupportsActiveTrips(
+    vehicleId: string,
+    vehicleType: VehicleType,
+  ): Promise<void> {
+    const maxSeats = getVehicleMaxSeats(vehicleType);
+    if (maxSeats === null) {
+      return;
+    }
+
+    const activeTrips = await this.tripRepository.find({
+      where: {
+        vehicleId,
+        status: In([TripStatus.ACTIVE, TripStatus.PENDING]),
+      },
+    });
+    const incompatibleTrip = (activeTrips ?? []).find(
+      (trip) => (trip.totalSeats ?? trip.availableSeats) > maxSeats,
+    );
+
+    if (incompatibleTrip) {
+      throw new BadRequestException(
+        `Impossible de changer le type du véhicule : le trajet ${incompatibleTrip.id} dépasse la limite de ${maxSeats} places`,
+      );
+    }
   }
 
   private async invalidateVehicleCaches(

@@ -3,6 +3,8 @@ import {
   Post,
   Get,
   Body,
+  Headers,
+  Header,
   HttpCode,
   HttpStatus,
   UseInterceptors,
@@ -10,6 +12,7 @@ import {
   UseGuards,
   Req,
   Res,
+  UnauthorizedException,
 } from '@nestjs/common';
 import { FileFieldsInterceptor } from '@nestjs/platform-express';
 import {
@@ -22,18 +25,30 @@ import {
 } from '@nestjs/swagger';
 import { AuthGuard } from '@nestjs/passport';
 import type { Request, Response } from 'express';
-import { AuthService } from './auth.service';
+import { AuthService, type GoogleAuthProfile } from './auth.service';
+import { Auth } from './decorators/auth.decorator';
 import {
   RegisterDto,
   LoginDto,
+  AdminBootstrapConfirmDto,
+  AdminBootstrapSendOtpDto,
+  AdminChangePasswordDto,
+  AdminLoginDto,
   RefreshTokenDto,
   AuthResponseDto,
   GoogleMobileAuthDto,
   AppleMobileAuthDto,
+  PinResetConfirmDto,
+  PinResetRequestDto,
+  PinResetVerifyOtpDto,
+  OAuthExchangeDto,
 } from './dto/auth.dto';
 import { Public } from '../common/decorators/public.decorator';
-import { UserRole } from '../users/entities/user.entity';
+import { UserGender, UserRole } from '../users/entities/user.entity';
+import { VehicleType } from '../vehicles/entities/vehicle.entity';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
+import { SELF_SERVICE_USER_ROLES } from '../users/user-role.policy';
+import { OAuthExchangeService } from './oauth-exchange.service';
 
 interface MulterFile {
   fieldname: string;
@@ -50,7 +65,10 @@ interface MulterFile {
 @ApiTags('Auth')
 @Controller('auth')
 export class AuthController {
-  constructor(private readonly authService: AuthService) {}
+  constructor(
+    private readonly authService: AuthService,
+    private readonly oauthExchangeService: OAuthExchangeService,
+  ) {}
 
   @Post('register')
   @Public()
@@ -74,6 +92,33 @@ export class AuthController {
       type: 'object',
       properties: {
         phone: { type: 'string', example: '+243900000000' },
+        referralCode: {
+          type: 'string',
+          example: 'ZW7K9M2P4Q',
+          description: 'Ancien code de parrainage, conserve pour compatibilite',
+        },
+        referralToken: {
+          type: 'string',
+          example: 'Z5MJkPNEXwlUzvLTWajEGIzXq3u5PF9W',
+          description:
+            'Jeton opaque capture automatiquement depuis le lien ChottuLink',
+        },
+        referralProvider: {
+          type: 'string',
+          enum: ['chottulink', 'branch'],
+          example: 'chottulink',
+          description: 'Fournisseur ayant resolu le lien',
+        },
+        referralReferringLink: {
+          type: 'string',
+          example: 'https://zwanga.chottu.link/AbCdEf',
+          description: "Lien ChottuLink d'origine, conserve pour audit",
+        },
+        referralCapturedAt: {
+          type: 'string',
+          format: 'date-time',
+          description: "Date de capture de l'attribution ChottuLink",
+        },
         pin: {
           type: 'string',
           example: '1234',
@@ -81,11 +126,18 @@ export class AuthController {
         },
         firstName: { type: 'string', example: 'John' },
         lastName: { type: 'string', example: 'Doe' },
+        gender: {
+          type: 'string',
+          enum: Object.values(UserGender),
+          example: UserGender.FEMALE,
+          nullable: true,
+          description: "Sexe choisi par l'utilisateur (optionnel)",
+        },
         role: {
           type: 'string',
-          enum: Object.values(UserRole),
+          enum: [...SELF_SERVICE_USER_ROLES],
           example: UserRole.DRIVER,
-          description: 'Rôle de l\’utilisateur (driver, passenger, admin)',
+          description: "Rôle public de l'utilisateur (driver ou passenger)",
         },
         isDriver: {
           type: 'boolean',
@@ -94,9 +146,15 @@ export class AuthController {
         },
         vehicle: {
           type: 'object',
+          required: ['type', 'brand', 'model', 'color', 'licensePlate'],
           description:
             'Informations du véhicule (optionnel, conducteurs uniquement)',
           properties: {
+            type: {
+              type: 'string',
+              enum: Object.values(VehicleType),
+              example: VehicleType.MOTORCYCLE_TWO_WHEELS,
+            },
             brand: { type: 'string', example: 'Toyota' },
             model: { type: 'string', example: 'Corolla' },
             color: { type: 'string', example: 'Noir' },
@@ -148,6 +206,94 @@ export class AuthController {
     return this.authService.login(loginDto);
   }
 
+  @Post('pin/reset/request-otp')
+  @Public()
+  @SensitiveThrottle(3, 60000)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Send an OTP to reset a forgotten PIN' })
+  @ApiResponse({
+    status: 200,
+    description: 'Generic response whether or not the account exists',
+  })
+  async requestPinResetOtp(@Body() dto: PinResetRequestDto) {
+    return this.authService.requestPinResetOtp(dto);
+  }
+
+  @Post('pin/reset/verify-otp')
+  @Public()
+  @SensitiveThrottle(5, 60000)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Verify the OTP and issue a one-time reset token' })
+  @ApiResponse({ status: 200, description: 'Reset token issued for 5 minutes' })
+  @ApiResponse({ status: 400, description: 'Invalid or expired OTP' })
+  async verifyPinResetOtp(@Body() dto: PinResetVerifyOtpDto) {
+    return this.authService.verifyPinResetOtp(dto);
+  }
+
+  @Post('pin/reset')
+  @Public()
+  @SensitiveThrottle(5, 60000)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Set a new PIN with a one-time reset token' })
+  @ApiResponse({ status: 200, description: 'PIN reset successfully' })
+  @ApiResponse({ status: 400, description: 'Invalid or expired reset token' })
+  async resetPin(@Body() dto: PinResetConfirmDto) {
+    return this.authService.resetPin(dto);
+  }
+
+  @Post('admin/login')
+  @Public()
+  @SensitiveThrottle(5, 60000)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({
+    summary: 'Login administrator with phone number and password',
+  })
+  @ApiResponse({ status: 200, type: AuthResponseDto })
+  @ApiResponse({
+    status: 401,
+    description: 'Invalid admin phone number or password',
+  })
+  async adminLogin(@Body() loginDto: AdminLoginDto) {
+    return this.authService.adminLogin(loginDto);
+  }
+
+  @Post('admin/password/change')
+  @Auth()
+  @SensitiveThrottle(5, 60000)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Change administrator password' })
+  async changeAdminPassword(
+    @Req() req: Request,
+    @Body() dto: AdminChangePasswordDto,
+  ) {
+    const user = req.user as { userId: string };
+    return this.authService.changeAdminPassword(user.userId, dto);
+  }
+
+  @Post('admin/bootstrap/send-otp')
+  @Public()
+  @SensitiveThrottle(3, 60000)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Send OTP for the initial super administrator' })
+  async sendAdminBootstrapOtp(
+    @Body() dto: AdminBootstrapSendOtpDto,
+    @Headers('x-admin-bootstrap-secret') bootstrapSecret?: string,
+  ) {
+    return this.authService.sendAdminBootstrapOtp(dto, bootstrapSecret);
+  }
+
+  @Post('admin/bootstrap/confirm')
+  @Public()
+  @SensitiveThrottle(3, 60000)
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Create the initial super administrator with OTP' })
+  async confirmAdminBootstrap(
+    @Body() dto: AdminBootstrapConfirmDto,
+    @Headers('x-admin-bootstrap-secret') bootstrapSecret?: string,
+  ) {
+    return this.authService.confirmAdminBootstrap(dto, bootstrapSecret);
+  }
+
   @Post('refresh')
   @Public()
   @SensitiveThrottle(20, 60000) // 20 requests per minute per IP
@@ -178,9 +324,14 @@ export class AuthController {
     summary: 'Google Sign-In (mobile): idToken + phone -> JWT tokens',
   })
   @ApiResponse({ status: 200, type: AuthResponseDto })
-  @ApiResponse({ status: 401, description: 'Invalid Google token' })
+  @ApiResponse({ status: 401, description: "La connexion avec Google n’a pas pu être vérifiée. Réessayez." })
   async googleMobile(@Body() dto: GoogleMobileAuthDto) {
-    return this.authService.googleMobileLogin(dto.idToken, dto.phone);
+    return this.authService.googleMobileLogin(
+      dto.idToken,
+      dto.phone,
+      dto.gender,
+      dto,
+    );
   }
 
   @Post('apple/mobile')
@@ -191,7 +342,7 @@ export class AuthController {
     summary: 'Apple Sign-In (mobile): identityToken + phone -> JWT tokens',
   })
   @ApiResponse({ status: 200, type: AuthResponseDto })
-  @ApiResponse({ status: 401, description: 'Invalid Apple token' })
+  @ApiResponse({ status: 401, description: "La connexion avec Apple n’a pas pu être vérifiée. Réessayez." })
   async appleMobile(@Body() dto: AppleMobileAuthDto) {
     return this.authService.appleMobileLogin(dto);
   }
@@ -208,19 +359,44 @@ export class AuthController {
   @Get('google/callback')
   @Public()
   @UseGuards(AuthGuard('google'))
+  @Header('Cache-Control', 'no-store')
+  @Header('Pragma', 'no-cache')
+  @Header('Referrer-Policy', 'no-referrer')
   @ApiOperation({ summary: 'Google OAuth callback' })
-  @ApiResponse({ status: 200, type: AuthResponseDto })
-  @ApiResponse({ status: 401, description: 'Authentication failed' })
+  @ApiResponse({
+    status: 302,
+    description: 'Redirects with a one-time exchange code, never JWTs',
+  })
+  @ApiResponse({ status: 401, description: "La connexion a échoué. Veuillez réessayer." })
   async googleAuthCallback(@Req() req: Request, @Res() res: Response) {
-    const googleProfile = req.user;
+    if (!req.user) {
+      throw new UnauthorizedException("La connexion a échoué. Veuillez réessayer.");
+    }
+
+    const googleProfile = req.user as unknown as GoogleAuthProfile;
+    const callbackUrl = this.oauthExchangeService.getFrontendCallbackUrl();
     const authResponse =
       await this.authService.validateGoogleUser(googleProfile);
+    const code = await this.oauthExchangeService.createCode(authResponse);
+    // Fragments are not sent to the frontend server or in the Referer header.
+    callbackUrl.hash = new URLSearchParams({ code }).toString();
+    res.redirect(callbackUrl.toString());
+  }
 
-    // Redirect to frontend with tokens in query params or return JSON
-    // You can customize this based on your frontend needs
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
-    res.redirect(
-      `${frontendUrl}/auth/callback?accessToken=${authResponse.accessToken}&refreshToken=${authResponse.refreshToken}`,
-    );
+  @Post('exchange')
+  @Public()
+  @SensitiveThrottle(10, 60000)
+  @HttpCode(HttpStatus.OK)
+  @Header('Cache-Control', 'no-store')
+  @Header('Pragma', 'no-cache')
+  @Header('Referrer-Policy', 'no-referrer')
+  @ApiOperation({ summary: 'Exchange a one-time OAuth code for JWT tokens' })
+  @ApiResponse({ status: 200, type: AuthResponseDto })
+  @ApiResponse({
+    status: 401,
+    description: 'Invalid, expired or already consumed code',
+  })
+  async exchange(@Body() dto: OAuthExchangeDto): Promise<AuthResponseDto> {
+    return this.oauthExchangeService.exchange(dto.code);
   }
 }

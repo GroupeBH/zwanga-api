@@ -12,9 +12,12 @@ import { join } from 'path';
       useFactory: (configService: ConfigService) => {
         const nodeEnv = configService.get<string>('NODE_ENV') || 'development';
         const logDir = configService.get<string>('LOG_DIR') || './logs';
+        const logLevel =
+          configService.get<string>('LOG_LEVEL') ||
+          (nodeEnv === 'production' ? 'warn' : 'debug');
 
         return {
-          level: nodeEnv === 'production' ? 'info' : 'debug',
+          level: logLevel,
           format: winston.format.combine(
             winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss' }),
             winston.format.errors({ stack: true }),
@@ -25,6 +28,7 @@ import { join } from 'path';
           transports: [
             // Console transport
             new winston.transports.Console({
+              level: logLevel,
               format: winston.format.combine(
                 winston.format.colorize(),
                 winston.format.printf(
@@ -46,6 +50,7 @@ import { join } from 'path';
             // File transport for all logs
             new winston.transports.File({
               filename: join(logDir, 'combined.log'),
+              level: logLevel,
               maxsize: 5242880, // 5MB
               maxFiles: 5,
             }),

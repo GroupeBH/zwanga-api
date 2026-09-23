@@ -4,9 +4,21 @@ import {
   PaymentPurpose,
   PaymentStatus,
 } from '../payments/entities/payment-transaction.entity';
-import { WalletAccountType } from './entities/wallet-account.entity';
-import { WalletLedgerEntryType } from './entities/wallet-ledger-entry.entity';
+import {
+  WalletAccount,
+  WalletAccountType,
+} from './entities/wallet-account.entity';
+import {
+  WalletLedgerEntry,
+  WalletLedgerEntryType,
+} from './entities/wallet-ledger-entry.entity';
 import { WalletService } from './wallet.service';
+import { User, UserRole } from '../users/entities/user.entity';
+import {
+  BookingPaymentStatus,
+  BookingStatus,
+} from '../bookings/entities/booking.entity';
+import { TripPaymentMode } from '../payments/enums/trip-payment-mode.enum';
 
 describe('WalletService', () => {
   let accountRepository: {
@@ -22,9 +34,11 @@ describe('WalletService', () => {
     findOne: jest.Mock;
   };
   let manager: {
+    find: jest.Mock;
     findOne: jest.Mock;
     create: jest.Mock;
     save: jest.Mock;
+    createQueryBuilder: jest.Mock;
   };
   let dataSource: { transaction: jest.Mock };
   let configService: { get: jest.Mock };
@@ -42,7 +56,7 @@ describe('WalletService', () => {
     userId: 'passenger-1',
     type: WalletAccountType.POINTS,
     balance: 1000,
-    currency: 'CDF',
+    currency: 'PTS',
   };
 
   const topUpPayment = {
@@ -60,6 +74,16 @@ describe('WalletService', () => {
     paymentUrl: null,
     amount: 5000,
     currency: 'CDF',
+    rawCheckResponse: {
+      code: '0',
+      transaction: {
+        status: '0',
+        reference: 'WALLET123',
+        orderNumber: 'ORDER123',
+        amount: '5000',
+        currency: 'CDF',
+      },
+    },
   };
 
   beforeEach(() => {
@@ -83,9 +107,24 @@ describe('WalletService', () => {
       }),
     };
     manager = {
-      findOne: jest.fn().mockResolvedValue({ ...account }),
+      find: jest.fn().mockResolvedValue([]),
+      findOne: jest.fn(async (entity) =>
+        entity === WalletLedgerEntry ? null : { ...account },
+      ),
       create: jest.fn((_entity: unknown, payload: unknown) => payload),
       save: jest.fn((payload: unknown) => Promise.resolve(payload)),
+      createQueryBuilder: jest.fn(() => {
+        const query = {
+          innerJoin: jest.fn(),
+          where: jest.fn(),
+          andWhere: jest.fn(),
+          getOne: jest.fn().mockResolvedValue(null),
+        };
+        query.innerJoin.mockReturnValue(query);
+        query.where.mockReturnValue(query);
+        query.andWhere.mockReturnValue(query);
+        return query;
+      }),
     };
     dataSource = {
       transaction: jest.fn(
@@ -96,7 +135,10 @@ describe('WalletService', () => {
     configService = {
       get: jest.fn((key: string) => {
         if (key === 'ZWANGA_POINTS_CURRENCY') {
-          return 'CDF';
+          return 'PTS';
+        }
+        if (key === 'ZWANGA_POINT_VALUE_CDF') {
+          return 100;
         }
         if (key === 'FLEXPAY_CALLBACK_BASE_URL') {
           return 'https://api.zwanga.cd/api/v1';
@@ -122,11 +164,11 @@ describe('WalletService', () => {
     );
   });
 
-  it('initiates a FlexPay purchase where one CDF buys one point', async () => {
+  it('initiates a FlexPay purchase where one point costs 100 CDF', async () => {
     paymentsService.initiatePayment.mockResolvedValue(topUpPayment);
 
     const result = await service.initiateTopUp('passenger-1', {
-      amount: 5000,
+      amount: 50,
       method: PaymentMethod.MOBILE_MONEY,
       phone: '243891234567',
     });
@@ -139,12 +181,90 @@ describe('WalletService', () => {
         relatedEntityId: 'passenger-1',
         amount: 5000,
         currency: 'CDF',
+        description: 'Achat de 50 jetons Zwanga',
         callbackUrl:
           'https://api.zwanga.cd/api/v1/wallet/topups/flexpay/callback',
       }),
     );
     expect(result.account.balance).toBe(1000);
     expect(result.payment.orderNumber).toBe('ORDER123');
+  });
+
+  it('applies an admin adjustment and its ledger entry atomically', async () => {
+    userRepository.findOne.mockImplementation(
+      ({ where }: { where: { id: string } }) =>
+        Promise.resolve(
+          where.id === 'admin-1'
+            ? { id: 'admin-1', role: UserRole.SUPER_ADMIN }
+            : { id: 'passenger-1', role: UserRole.PASSENGER },
+        ),
+    );
+    manager.findOne.mockImplementation((entity: unknown) => {
+      if (entity === WalletAccount) {
+        return Promise.resolve({ ...account });
+      }
+      return Promise.resolve(null);
+    });
+
+    const result = await service.applyAdminAdjustment(
+      'admin-1',
+      'passenger-1',
+      25,
+      'Regularisation ticket SUP-1042',
+      '123e4567-e89b-12d3-a456-426614174000',
+    );
+
+    expect(result.balance).toBe(1025);
+    expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+    expect(manager.save).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'wallet-1', balance: 1025 }),
+    );
+    expect(manager.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: WalletLedgerEntryType.ADMIN_ADJUSTMENT,
+        amount: 25,
+        balanceAfter: 1025,
+        relatedEntityType: 'admin_wallet_adjustment',
+        relatedEntityId: '123e4567-e89b-12d3-a456-426614174000',
+        description:
+          'Ajustement par admin admin-1: Regularisation ticket SUP-1042',
+      }),
+    );
+  });
+
+  it('does not apply the same admin adjustment request twice', async () => {
+    userRepository.findOne.mockImplementation(
+      ({ where }: { where: { id: string } }) =>
+        Promise.resolve(
+          where.id === 'admin-1'
+            ? { id: 'admin-1', role: UserRole.SUPER_ADMIN }
+            : { id: 'passenger-1', role: UserRole.PASSENGER },
+        ),
+    );
+    manager.findOne.mockImplementation((entity: unknown) => {
+      if (entity === WalletAccount) {
+        return Promise.resolve({ ...account, balance: 1025 });
+      }
+      if (entity === WalletLedgerEntry) {
+        return Promise.resolve({
+          id: 'adjustment-1',
+          userId: 'passenger-1',
+          type: WalletLedgerEntryType.ADMIN_ADJUSTMENT,
+        });
+      }
+      return Promise.resolve(null);
+    });
+
+    const result = await service.applyAdminAdjustment(
+      'admin-1',
+      'passenger-1',
+      25,
+      'Regularisation ticket SUP-1042',
+      '123e4567-e89b-12d3-a456-426614174000',
+    );
+
+    expect(result.balance).toBe(1025);
+    expect(manager.save).not.toHaveBeenCalled();
   });
 
   it('credits points only after FlexPay confirms the purchase', async () => {
@@ -156,7 +276,7 @@ describe('WalletService', () => {
     paymentsService.handleFlexPayCallback.mockResolvedValue(succeededPayment);
     accountRepository.findOne.mockResolvedValue({
       ...account,
-      balance: 6000,
+      balance: 1050,
     });
 
     const result = await service.handleTopUpCallback({
@@ -167,17 +287,17 @@ describe('WalletService', () => {
 
     expect(dataSource.transaction).toHaveBeenCalledTimes(1);
     expect(manager.save).toHaveBeenCalledWith(
-      expect.objectContaining({ balance: 6000 }),
+      expect.objectContaining({ balance: 1050 }),
     );
     expect(manager.save).toHaveBeenCalledWith(
       expect.objectContaining({
         type: WalletLedgerEntryType.TOP_UP,
-        amount: 5000,
-        balanceAfter: 6000,
+        amount: 50,
+        balanceAfter: 1050,
         paymentTransactionId: 'payment-1',
       }),
     );
-    expect(result.account.balance).toBe(6000);
+    expect(result.account.balance).toBe(1050);
   });
 
   it('does not credit the same successful top-up twice', async () => {
@@ -196,8 +316,131 @@ describe('WalletService', () => {
     expect(dataSource.transaction).not.toHaveBeenCalled();
   });
 
+  it('never credits a legacy succeeded topup without verified purchase proof', async () => {
+    paymentsService.checkPaymentStatus.mockResolvedValue({
+      ...topUpPayment,
+      status: PaymentStatus.SUCCEEDED,
+      rawCheckResponse: null,
+    });
+    await expect(
+      service.checkTopUpPaymentStatus('passenger-1', 'ORDER123'),
+    ).rejects.toThrow('confirmée par FlexPay');
+    expect(manager.save).not.toHaveBeenCalled();
+  });
+
+  it('records the purchased allocation of a verified recharge', async () => {
+    paymentsService.checkPaymentStatus.mockResolvedValue({
+      ...topUpPayment,
+      status: PaymentStatus.SUCCEEDED,
+    });
+    await service.checkTopUpPaymentStatus('passenger-1', 'ORDER123');
+    expect(manager.save).toHaveBeenCalledWith(
+      expect.objectContaining({ balance: 1050, withdrawableBalance: 50 }),
+    );
+    expect(manager.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: WalletLedgerEntryType.TOP_UP,
+        amount: 50,
+        withdrawableAmount: 50,
+      }),
+    );
+  });
+
+  it('persists reward-first allocation for booking and subscription payments', async () => {
+    manager.findOne.mockImplementation(async (entity) =>
+      entity === WalletAccount
+        ? { ...account, balance: 100, withdrawableBalance: 80 }
+        : null,
+    );
+    const booking = await service.payForBooking(
+      {
+        id: 'booking',
+        passengerId: 'passenger-1',
+        paymentCurrency: 'CDF',
+      } as any,
+      3000,
+    );
+    expect(booking).toMatchObject({ amount: -30, withdrawableAmount: -10 });
+    const subscription = await service.payForSubscription(
+      { id: 'subscription', userId: 'passenger-1' },
+      30,
+    );
+    expect(subscription).toMatchObject({
+      amount: -30,
+      withdrawableAmount: -10,
+    });
+    expect(manager.save).toHaveBeenCalledWith(
+      expect.objectContaining({ balance: 70, withdrawableBalance: 70 }),
+    );
+  });
+
+  it('persists the same purchased allocation on both sides of a transfer', async () => {
+    manager.findOne.mockImplementation(async (entity, options) =>
+      entity === WalletAccount
+        ? {
+            ...account,
+            userId: options.where.userId,
+            balance: 100,
+            withdrawableBalance:
+              options.where.userId === 'passenger-1' ? 80 : 0,
+          }
+        : null,
+    );
+    const result = await service.transferPoints('passenger-1', {
+      amount: 30,
+      recipientUserId: 'recipient-1',
+    });
+    expect(result.senderAccount).toMatchObject({
+      balance: 70,
+      withdrawableBalance: 70,
+    });
+    expect(result.recipientAccount).toMatchObject({
+      balance: 130,
+      withdrawableBalance: 10,
+    });
+    expect(result.senderEntry.withdrawableAmount).toBe(-10);
+    expect(result.recipientEntry.withdrawableAmount).toBe(10);
+  });
+
+  it('only refunds the remaining booking debit and purchased allocation after a fare adjustment', async () => {
+    const debit = { amount: -100, withdrawableAmount: -60 };
+    ledgerRepository.findOne
+      .mockResolvedValueOnce(debit)
+      .mockResolvedValueOnce(null);
+    manager.findOne.mockImplementation(async (entity, options) =>
+      entity === WalletLedgerEntry
+        ? options.where.type === WalletLedgerEntryType.BOOKING_PAYMENT
+          ? debit
+          : null
+        : { ...account, balance: 50, withdrawableBalance: 50 },
+    );
+    manager.find.mockResolvedValue([{ amount: 50, withdrawableAmount: 50 }]);
+    await service.refundBookingPayment({
+      id: 'booking',
+      passengerId: 'passenger-1',
+    } as any);
+    expect(manager.save).toHaveBeenCalledWith(
+      expect.objectContaining({ balance: 100, withdrawableBalance: 60 }),
+    );
+    expect(manager.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: WalletLedgerEntryType.BOOKING_REFUND,
+        amount: 50,
+        withdrawableAmount: 10,
+      }),
+    );
+  });
+
   it('rejects a trip payment when the points balance is insufficient', async () => {
-    manager.findOne.mockResolvedValue({ ...account, balance: 1000 });
+    manager.findOne.mockImplementation((entity: unknown) => {
+      if (entity === WalletAccount) {
+        return Promise.resolve({ ...account, balance: 10 });
+      }
+      if (entity === WalletLedgerEntry) {
+        return Promise.resolve(null);
+      }
+      return Promise.resolve(null);
+    });
 
     await expect(
       service.payForBooking(
@@ -212,15 +455,123 @@ describe('WalletService', () => {
     expect(manager.save).not.toHaveBeenCalled();
   });
 
+  it('writes the token debit and its immutable ledger entry in one transaction', async () => {
+    manager.findOne.mockImplementation((entity: unknown) => {
+      if (entity === WalletAccount) {
+        return Promise.resolve({ ...account, balance: 100 });
+      }
+      if (entity === WalletLedgerEntry) {
+        return Promise.resolve(null);
+      }
+      return Promise.resolve(null);
+    });
+
+    const entry = await service.payForBooking(
+      {
+        id: 'booking-atomic',
+        passengerId: 'passenger-1',
+        paymentCurrency: 'CDF',
+      } as any,
+      2500,
+    );
+
+    expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+    expect(manager.save).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'wallet-1', balance: 75 }),
+    );
+    expect(manager.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: WalletLedgerEntryType.BOOKING_PAYMENT,
+        amount: -25,
+        balanceAfter: 75,
+        relatedEntityId: 'booking-atomic',
+      }),
+    );
+    expect(entry).toEqual(
+      expect.objectContaining({
+        type: WalletLedgerEntryType.BOOKING_PAYMENT,
+        amount: -25,
+      }),
+    );
+  });
+
+  it('does not debit a booking twice when the request is retried', async () => {
+    const existingDebit = {
+      id: 'entry-existing',
+      amount: -25,
+      type: WalletLedgerEntryType.BOOKING_PAYMENT,
+      relatedEntityType: 'booking',
+      relatedEntityId: 'booking-retry',
+    };
+    let ledgerLookup = 0;
+    manager.findOne.mockImplementation((entity: unknown) => {
+      if (entity === WalletAccount) {
+        return Promise.resolve({ ...account, balance: 75 });
+      }
+      if (entity === WalletLedgerEntry) {
+        ledgerLookup += 1;
+        return Promise.resolve(ledgerLookup === 1 ? null : existingDebit);
+      }
+      return Promise.resolve(null);
+    });
+
+    const entry = await service.payForBooking(
+      {
+        id: 'booking-retry',
+        passengerId: 'passenger-1',
+        paymentCurrency: 'CDF',
+      } as any,
+      2500,
+    );
+
+    expect(entry).toBe(existingDebit);
+    expect(manager.save).not.toHaveBeenCalled();
+  });
+
+  it('never captures a booking again after an immutable refund', async () => {
+    manager.findOne.mockImplementation((entity: unknown) => {
+      if (entity === WalletAccount) {
+        return Promise.resolve({ ...account, balance: 100 });
+      }
+      if (entity === WalletLedgerEntry) {
+        return Promise.resolve({
+          id: 'refund-existing',
+          type: WalletLedgerEntryType.BOOKING_REFUND,
+          amount: 25,
+        });
+      }
+      return Promise.resolve(null);
+    });
+
+    await expect(
+      service.payForBooking(
+        {
+          id: 'booking-refunded',
+          passengerId: 'passenger-1',
+          paymentCurrency: 'CDF',
+        } as any,
+        2500,
+      ),
+    ).rejects.toThrow('déjà été remboursée');
+
+    expect(manager.save).not.toHaveBeenCalled();
+  });
+
   it('refunds a points trip payment once', async () => {
     ledgerRepository.findOne
       .mockResolvedValueOnce({
         id: 'entry-payment',
-        amount: -2500,
+        amount: -25,
         type: WalletLedgerEntryType.BOOKING_PAYMENT,
       })
       .mockResolvedValueOnce(null);
-    manager.findOne.mockResolvedValue({ ...account, balance: 1000 });
+    manager.findOne.mockImplementation(async (entity, options) =>
+      entity === WalletLedgerEntry
+        ? options.where.type === WalletLedgerEntryType.BOOKING_PAYMENT
+          ? { amount: -25, withdrawableAmount: -20 }
+          : null
+        : { ...account, balance: 1000 },
+    );
 
     const refunded = await service.refundBookingPayment({
       id: 'booking-1',
@@ -229,19 +580,21 @@ describe('WalletService', () => {
 
     expect(refunded).toBe(true);
     expect(manager.save).toHaveBeenCalledWith(
-      expect.objectContaining({ balance: 3500 }),
+      expect.objectContaining({ balance: 1025 }),
     );
     expect(manager.save).toHaveBeenCalledWith(
       expect.objectContaining({
         type: WalletLedgerEntryType.BOOKING_REFUND,
-        amount: 2500,
-        balanceAfter: 3500,
+        amount: 25,
+        balanceAfter: 1025,
       }),
     );
   });
 
   it('credits an interrupted-trip fare difference as reusable points', async () => {
-    manager.findOne.mockResolvedValue({ ...account, balance: 1000 });
+    manager.findOne.mockImplementation(async (entity) =>
+      entity === WalletLedgerEntry ? null : { ...account, balance: 1000 },
+    );
 
     await service.creditBookingFareAdjustment(
       {
@@ -253,13 +606,13 @@ describe('WalletService', () => {
     );
 
     expect(manager.save).toHaveBeenCalledWith(
-      expect.objectContaining({ balance: 2500 }),
+      expect.objectContaining({ balance: 1015 }),
     );
     expect(manager.save).toHaveBeenCalledWith(
       expect.objectContaining({
         type: WalletLedgerEntryType.BOOKING_FARE_ADJUSTMENT,
-        amount: 1500,
-        balanceAfter: 2500,
+        amount: 15,
+        balanceAfter: 1015,
         relatedEntityType: 'booking',
         relatedEntityId: 'booking-1',
         paymentTransactionId: 'payment-1',
@@ -271,7 +624,7 @@ describe('WalletService', () => {
     const existingAdjustment = {
       id: 'entry-adjustment',
       type: WalletLedgerEntryType.BOOKING_FARE_ADJUSTMENT,
-      amount: 1500,
+      amount: 15,
     };
     ledgerRepository.findOne.mockResolvedValue(existingAdjustment);
 
@@ -288,25 +641,41 @@ describe('WalletService', () => {
     expect(dataSource.transaction).not.toHaveBeenCalled();
   });
 
+  it('rechecks interruption refunds under a lock when concurrent retries passed the first check', async () => {
+    const existing = { id: 'refund', amount: 15 };
+    ledgerRepository.findOne.mockResolvedValue(null);
+    manager.findOne.mockImplementation(async (entity) =>
+      entity === WalletLedgerEntry ? existing : { id: 'booking-1' },
+    );
+    const result = await service.creditBookingFareAdjustment(
+      { id: 'booking-1', passengerId: 'passenger-1' } as any,
+      1500,
+    );
+    expect(result).toBe(existing);
+    expect(manager.save).not.toHaveBeenCalled();
+  });
+
   it('pays a subscription with points once', async () => {
-    manager.findOne.mockResolvedValue({ ...account, balance: 6000 });
+    manager.findOne.mockImplementation(async (entity) =>
+      entity === WalletLedgerEntry ? null : { ...account, balance: 60 },
+    );
 
     const entry = await service.payForSubscription(
       {
         id: '123e4567-e89b-12d3-a456-426614174000',
         userId: 'passenger-1',
       },
-      5000,
+      50,
     );
 
     expect(manager.save).toHaveBeenCalledWith(
-      expect.objectContaining({ balance: 1000 }),
+      expect.objectContaining({ balance: 10 }),
     );
     expect(manager.save).toHaveBeenCalledWith(
       expect.objectContaining({
         type: WalletLedgerEntryType.SUBSCRIPTION_PAYMENT,
-        amount: -5000,
-        balanceAfter: 1000,
+        amount: -50,
+        balanceAfter: 10,
         relatedEntityType: 'subscription',
         relatedEntityId: '123e4567-e89b-12d3-a456-426614174000',
       }),
@@ -338,9 +707,19 @@ describe('WalletService', () => {
       note: 'Pour ton trajet',
     });
 
-    expect(userRepository.findOne).toHaveBeenCalledWith({
-      where: [{ phone: '+243899999999' }],
-    });
+    const transferRecipientLookup = userRepository.findOne.mock.calls[0][0];
+    const transferPhoneLookup = transferRecipientLookup.where[0];
+    expect(transferPhoneLookup).toEqual(
+      expect.objectContaining({ isActive: true }),
+    );
+    expect(transferPhoneLookup.phone.value).toEqual(
+      expect.arrayContaining([
+        '+243899999999',
+        '243899999999',
+        '899999999',
+        '0899999999',
+      ]),
+    );
     expect(result.amount).toBe(2500);
     expect(result.recipient.id).toBe('recipient-1');
     expect(manager.save).toHaveBeenCalledWith(
@@ -371,14 +750,126 @@ describe('WalletService', () => {
     );
   });
 
-  it('awards loyalty points from travelled kilometers first', async () => {
-    manager.findOne.mockResolvedValue({ ...account, balance: 1000 });
+  it('matches common Congolese phone formats when sharing points', () => {
+    const candidates = (
+      service as unknown as {
+        buildPhoneSearchCandidates: (phone: string) => string[];
+      }
+    ).buildPhoneSearchCandidates('0998877600');
+
+    expect(candidates).toEqual(
+      expect.arrayContaining([
+        '0998877600',
+        '+243998877600',
+        '243998877600',
+        '998877600',
+      ]),
+    );
+  });
+
+  it('awards the base loyalty point even when the completed trip is free', async () => {
+    manager.findOne.mockImplementation(async (entity) =>
+      entity === User
+        ? { id: 'passenger-1' }
+        : entity === WalletAccount
+          ? { ...account }
+          : null,
+    );
 
     await service.awardLoyaltyForBooking(
       {
         id: 'booking-1',
         passengerId: 'passenger-1',
+        tripId: 'trip-1',
+        status: BookingStatus.COMPLETED,
+        pickedUp: true,
+        paymentCurrency: 'CDF',
+      } as any,
+      0,
+    );
+
+    expect(manager.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: WalletLedgerEntryType.LOYALTY_REWARD,
+        amount: 1,
+        balanceAfter: 1001,
+      }),
+    );
+  });
+
+  it('credits exactly 25 tokens for a paid subscription', async () => {
+    manager.findOne.mockImplementation(async (entity) =>
+      entity === WalletLedgerEntry ? null : { ...account, balance: 1000 },
+    );
+
+    const entry = await service.awardSubscriptionPaymentTokens(
+      {
+        id: '123e4567-e89b-12d3-a456-426614174000',
+        userId: 'passenger-1',
+      },
+      'payment-1',
+    );
+
+    expect(manager.save).toHaveBeenCalledWith(
+      expect.objectContaining({ balance: 1025 }),
+    );
+    expect(manager.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: WalletLedgerEntryType.SUBSCRIPTION_REWARD,
+        amount: 25,
+        balanceAfter: 1025,
+        relatedEntityType: 'subscription',
+        relatedEntityId: '123e4567-e89b-12d3-a456-426614174000',
+        paymentTransactionId: 'payment-1',
+        description:
+          'Bonus de 25 jetons pour l’abonnement 123e4567-e89b-12d3-a456-426614174000',
+      }),
+    );
+    expect(entry).toEqual(
+      expect.objectContaining({
+        type: WalletLedgerEntryType.SUBSCRIPTION_REWARD,
+        amount: 25,
+      }),
+    );
+  });
+
+  it('does not credit the subscription reward twice', async () => {
+    const existingReward = {
+      id: 'reward-entry-1',
+      type: WalletLedgerEntryType.SUBSCRIPTION_REWARD,
+      amount: 25,
+    };
+    ledgerRepository.findOne.mockResolvedValue(existingReward);
+
+    const result = await service.awardSubscriptionPaymentTokens({
+      id: '123e4567-e89b-12d3-a456-426614174000',
+      userId: 'passenger-1',
+    });
+
+    expect(result).toBe(existingReward);
+    expect(dataSource.transaction).not.toHaveBeenCalled();
+  });
+
+  it('adds 0.5 point per travelled kilometer on top of the base point', async () => {
+    manager.findOne.mockImplementation(async (entity) =>
+      entity === User
+        ? { id: 'passenger-1' }
+        : entity === WalletAccount
+          ? { ...account }
+          : null,
+    );
+
+    await service.awardLoyaltyForBooking(
+      {
+        id: 'booking-1',
+        passengerId: 'passenger-1',
+        tripId: 'trip-1',
+        status: BookingStatus.COMPLETED,
+        pickedUp: true,
+        paymentMode: TripPaymentMode.ELECTRONIC,
+        paymentStatus: BookingPaymentStatus.SUCCEEDED,
         travelledDistanceMeters: 4500,
+        paymentCurrency: 'CDF',
       } as any,
       10000,
     );
@@ -386,8 +877,42 @@ describe('WalletService', () => {
     expect(manager.save).toHaveBeenCalledWith(
       expect.objectContaining({
         type: WalletLedgerEntryType.LOYALTY_REWARD,
-        amount: 4.5,
-        balanceAfter: 1004.5,
+        amount: 2.25,
+        relatedEntityType: 'trip_loyalty_bonus',
+        balanceAfter: 1003.25,
+      }),
+    );
+  });
+
+  it('converts the price-based loyalty bonus from CDF to points', async () => {
+    manager.findOne.mockImplementation(async (entity) =>
+      entity === User
+        ? { id: 'passenger-1' }
+        : entity === WalletAccount
+          ? { ...account }
+          : null,
+    );
+
+    await service.awardLoyaltyForBooking(
+      {
+        id: 'booking-1',
+        passengerId: 'passenger-1',
+        tripId: 'trip-1',
+        status: BookingStatus.COMPLETED,
+        pickedUp: true,
+        paymentMode: TripPaymentMode.POINTS,
+        paymentStatus: BookingPaymentStatus.SUCCEEDED,
+        paymentCurrency: 'CDF',
+      } as any,
+      5000,
+    );
+
+    expect(manager.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: WalletLedgerEntryType.LOYALTY_REWARD,
+        amount: 0.5,
+        relatedEntityType: 'trip_loyalty_bonus',
+        balanceAfter: 1001.5,
       }),
     );
   });

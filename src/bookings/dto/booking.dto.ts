@@ -68,16 +68,11 @@ export class CreateBookingDto {
 
   @ApiProperty({
     minimum: 1,
-    maximum: 2,
     description:
-      'Nombre de places à réserver. Maximum 2 places par réservation pour des raisons de sécurité du conducteur.',
+      'Nombre de places à réserver. Jusqu’à 2 sans KYC ; au-delà, le KYC du passager doit être approuvé et les places doivent être disponibles.',
   })
   @IsNumber()
   @Min(1, { message: 'Le nombre de places doit être au moins 1' })
-  @Max(2, {
-    message:
-      'Pour des raisons de sécurité du conducteur, vous ne pouvez pas réserver plus de 2 places par trajet',
-  })
   @IsNotEmpty()
   numberOfSeats: number;
 
@@ -93,7 +88,7 @@ export class CreateBookingDto {
 
   @ApiProperty({
     description:
-      'Reference ou repere connu pour faciliter la prise en charge du passager',
+      'Référence ou repère connu pour faciliter la prise en charge du passager',
     required: false,
     example: 'Devant la pharmacie, portail bleu',
   })
@@ -124,9 +119,9 @@ export class CreateBookingDto {
 
   @ApiProperty({
     description:
-      "Reference ou repere connu pour faciliter l'arrivee du passager",
+      "Référence ou repère connu pour faciliter l'arrivée du passager",
     required: false,
-    example: 'Entree principale, pres du rond-point',
+    example: 'Entrée principale, près du rond-point',
   })
   @IsString()
   @IsOptional()
@@ -148,11 +143,11 @@ export class CreateBookingDto {
     enum: TripPaymentMode,
     enumName: 'TripPaymentMode',
     description:
-      'Mode de reglement du trajet: paiement electronique via FlexPay, points Zwanga ou paiement physique a l arrivee',
+      "Mode choisi à la réservation. Aucun débit n'est effectué avant l'arrivée du passager.",
     example: TripPaymentMode.ELECTRONIC,
   })
   @IsEnum(TripPaymentMode, {
-    message: 'Le mode de paiement selectionne est invalide',
+    message: 'Le mode de paiement sélectionné est invalide',
   })
   @IsOptional()
   paymentMode?: TripPaymentMode;
@@ -198,11 +193,11 @@ export class ConfirmDropoffDto {
     enum: TripPaymentMode,
     enumName: 'TripPaymentMode',
     description:
-      "Mode de reglement choisi par le passager au moment de signaler son arrivee: paiement electronique, points Zwanga ou paiement physique",
+      "Mode de règlement choisi par le passager au moment de signaler son arrivée : paiement électronique, jetons Zwanga ou paiement physique",
     example: TripPaymentMode.CASH,
   })
   @IsEnum(TripPaymentMode, {
-    message: 'Le mode de paiement selectionne est invalide',
+    message: 'Le mode de paiement sélectionné est invalide',
   })
   @IsOptional()
   paymentMode?: TripPaymentMode;
@@ -213,11 +208,11 @@ export class UpdateBookingPaymentModeDto {
     enum: TripPaymentMode,
     enumName: 'TripPaymentMode',
     description:
-      'Nouveau mode de reglement du trajet: paiement electronique via FlexPay, points Zwanga ou paiement physique',
+      "Nouveau mode de règlement. Avant l'arrivée, ce choix n'effectue aucun débit.",
     example: TripPaymentMode.CASH,
   })
   @IsEnum(TripPaymentMode, {
-    message: 'Le mode de paiement selectionne est invalide',
+    message: 'Le mode de paiement sélectionné est invalide',
   })
   @IsNotEmpty()
   paymentMode: TripPaymentMode;

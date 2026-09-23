@@ -1,5 +1,12 @@
-import { IsString, IsNotEmpty, IsOptional, IsBoolean } from 'class-validator';
+import {
+  IsString,
+  IsNotEmpty,
+  IsOptional,
+  IsBoolean,
+  IsEnum,
+} from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
+import { VehicleType } from '../entities/vehicle.entity';
 
 export class CreateVehicleDto {
   @ApiProperty()
@@ -16,6 +23,16 @@ export class CreateVehicleDto {
   @IsString()
   @IsNotEmpty()
   color: string;
+
+  @ApiProperty({
+    enum: VehicleType,
+    enumName: 'VehicleType',
+    example: VehicleType.CAR,
+    description:
+      'Type du véhicule. Une moto à 2 roues accepte au maximum 2 places, une moto à 3 roues 3 places.',
+  })
+  @IsEnum(VehicleType)
+  type: VehicleType;
 
   @ApiProperty()
   @IsString()
@@ -44,6 +61,17 @@ export class UpdateVehicleDto {
   @IsOptional()
   color?: string;
 
+  @ApiProperty({
+    enum: VehicleType,
+    enumName: 'VehicleType',
+    required: false,
+    description:
+      'Type du véhicule. Une moto à 2 roues accepte au maximum 2 places, une moto à 3 roues 3 places.',
+  })
+  @IsEnum(VehicleType)
+  @IsOptional()
+  type?: VehicleType;
+
   @ApiProperty({ required: false })
   @IsString()
   @IsOptional()
@@ -59,4 +87,3 @@ export class UpdateVehicleDto {
   @IsOptional()
   isActive?: boolean;
 }
-

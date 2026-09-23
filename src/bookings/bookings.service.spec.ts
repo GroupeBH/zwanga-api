@@ -1,10 +1,12 @@
+import { BadRequestException } from '@nestjs/common';
 import {
   Booking,
   BookingPaymentStatus,
   BookingStatus,
 } from './entities/booking.entity';
 import { BookingsService } from './bookings.service';
-import { TripStatus } from '../trips/entities/trip.entity';
+import { Trip, TripStatus } from '../trips/entities/trip.entity';
+import { KycStatus } from '../users/entities/kyc-document.entity';
 import {
   PaymentMethod,
   PaymentPurpose,
@@ -16,15 +18,21 @@ describe('BookingsService trip payments', () => {
   let bookingRepository: {
     find: jest.Mock;
     findOne: jest.Mock;
+    count: jest.Mock;
+    create: jest.Mock;
     save: jest.Mock;
     update: jest.Mock;
+    remove: jest.Mock;
     manager?: unknown;
   };
   let tripRepository: {
     findOne: jest.Mock;
     save: jest.Mock;
+    update: jest.Mock;
   };
+  let userRepository: { findOne: jest.Mock };
   let cacheService: { del: jest.Mock };
+  let notificationService: { sendNotification: jest.Mock };
   let locationHistoryService: {
     recordPassengerLocation: jest.Mock;
     getDriverLocationHistory: jest.Mock;
@@ -43,16 +51,34 @@ describe('BookingsService trip payments', () => {
   };
   let walletService: {
     payForBooking: jest.Mock;
+    payForBookingWithManager: jest.Mock;
     refundBookingPayment: jest.Mock;
     creditBookingFareAdjustment: jest.Mock;
     awardLoyaltyForBooking: jest.Mock;
+    awardBaseLoyaltyForBooking: jest.Mock;
+    awardLoyaltyForCompletedTrip: jest.Mock;
   };
   let googleMapsService: { getDirections: jest.Mock };
   let driverSettlementsService: {
     recordCompletedBookingEarning: jest.Mock;
+    recordCompletedBookingEarningWithManager: jest.Mock;
+    notifyDriverTripRevenue: jest.Mock;
+  };
+  let referralsService: {
+    awardBookingReward: jest.Mock;
+    reverseBookingReward: jest.Mock;
   };
   let service: BookingsService;
   let boardingCandidates: Map<string, unknown>;
+  let financialManager: {
+    findOne: jest.Mock;
+    count: jest.Mock;
+    save: jest.Mock;
+  };
+  let dataSource: {
+    transaction: jest.Mock;
+    query: jest.Mock;
+  };
 
   const booking = {
     id: 'booking-1',
@@ -81,6 +107,8 @@ describe('BookingsService trip payments', () => {
     bookingRepository = {
       find: jest.fn(),
       findOne: jest.fn(),
+      count: jest.fn().mockResolvedValue(0),
+      create: jest.fn((payload: unknown) => payload),
       save: jest.fn((payload: unknown) => Promise.resolve(payload)),
       update: jest.fn().mockResolvedValue({ affected: 1 }),
       remove: jest.fn((payload: unknown) => Promise.resolve(payload)),
@@ -88,8 +116,15 @@ describe('BookingsService trip payments', () => {
     tripRepository = {
       findOne: jest.fn(),
       save: jest.fn((payload: unknown) => Promise.resolve(payload)),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
+    };
+    userRepository = {
+      findOne: jest.fn(),
     };
     cacheService = { del: jest.fn() };
+    notificationService = {
+      sendNotification: jest.fn().mockResolvedValue(true),
+    };
     boardingCandidates = new Map<string, unknown>();
     locationHistoryService = {
       recordPassengerLocation: jest.fn().mockResolvedValue(undefined),
@@ -97,7 +132,8 @@ describe('BookingsService trip payments', () => {
       getPassengerLocationHistory: jest.fn().mockResolvedValue(null),
       getBoardingCandidate: jest.fn(
         async (tripId: string, driverId: string, passengerId: string) =>
-          boardingCandidates.get(`${tripId}:${driverId}:${passengerId}`) ?? null,
+          boardingCandidates.get(`${tripId}:${driverId}:${passengerId}`) ??
+          null,
       ),
       saveBoardingCandidate: jest.fn(
         async (
@@ -118,6 +154,9 @@ describe('BookingsService trip payments', () => {
         if (key === 'FLEXPAY_CALLBACK_BASE_URL') {
           return 'https://api.zwanga.cd/api/v1';
         }
+        if (key === 'FIRST_TRIP_SUBSIDY_ENABLED') {
+          return 'false';
+        }
         return undefined;
       }),
     };
@@ -131,25 +170,65 @@ describe('BookingsService trip payments', () => {
     };
     walletService = {
       payForBooking: jest.fn(),
+      payForBookingWithManager: jest.fn(),
       refundBookingPayment: jest.fn(),
       creditBookingFareAdjustment: jest.fn(),
       awardLoyaltyForBooking: jest.fn(),
+      awardBaseLoyaltyForBooking: jest.fn(),
+      awardLoyaltyForCompletedTrip: jest.fn(),
     };
     googleMapsService = {
       getDirections: jest.fn(),
     };
     driverSettlementsService = {
       recordCompletedBookingEarning: jest.fn(),
+      recordCompletedBookingEarningWithManager: jest.fn(),
+      notifyDriverTripRevenue: jest.fn().mockResolvedValue(null),
+    };
+    referralsService = {
+      awardBookingReward: jest.fn().mockResolvedValue(null),
+      reverseBookingReward: jest.fn().mockResolvedValue(null),
     };
 
+    let lockedBooking: any = null;
+    financialManager = {
+      findOne: jest.fn(async (entity: unknown, options: unknown) => {
+        if (entity === Booking) {
+          lockedBooking = await bookingRepository.findOne(options);
+          return lockedBooking;
+        }
+        if (entity === Trip) {
+          return (
+            (await tripRepository.findOne(options)) ??
+            lockedBooking?.trip ??
+            booking.trip
+          );
+        }
+        return null;
+      }),
+      count: jest.fn(async (entity: unknown, options: unknown) => {
+        if (entity === Booking) {
+          return bookingRepository.count(options);
+        }
+        return 0;
+      }),
+      save: jest.fn((payload: unknown) => bookingRepository.save(payload)),
+    };
+    dataSource = {
+      transaction: jest.fn(
+        (callback: (manager: typeof financialManager) => unknown) =>
+          callback(financialManager),
+      ),
+      query: jest.fn().mockResolvedValue([]),
+    };
     service = new BookingsService(
       bookingRepository as any,
       tripRepository as any,
-      {} as any,
+      userRepository as any,
       {} as any,
       {} as any,
       cacheService as any,
-      {} as any,
+      notificationService as any,
       {} as any,
       {} as any,
       {} as any,
@@ -158,8 +237,134 @@ describe('BookingsService trip payments', () => {
       paymentsService as any,
       walletService as any,
       driverSettlementsService as any,
+      referralsService as any,
       locationHistoryService as any,
+      dataSource as any,
     );
+  });
+
+  it('marks a pending private trip as cancelled when its passenger cancels', async () => {
+    const privateTrip = {
+      id: 'private-trip-1',
+      driverId: 'driver-1',
+      driver: { id: 'driver-1', fcmToken: null },
+      status: TripStatus.PENDING,
+      startedAt: null,
+      completedAt: null,
+      isPrivate: true,
+      totalSeats: 1,
+      availableSeats: 0,
+      departureLocation: 'Gombe',
+      arrivalLocation: 'Limete',
+    };
+    const privateBooking = {
+      id: 'private-booking-1',
+      tripId: privateTrip.id,
+      trip: privateTrip,
+      passengerId: 'passenger-1',
+      passenger: { firstName: 'Alice', lastName: 'Test' },
+      numberOfSeats: 1,
+      status: BookingStatus.ACCEPTED,
+      paymentMode: TripPaymentMode.CASH,
+      paymentStatus: BookingPaymentStatus.NOT_REQUIRED,
+      pickedUp: false,
+      pickedUpConfirmedByPassenger: false,
+      cancelledAt: null,
+    };
+    bookingRepository.findOne.mockResolvedValue(privateBooking);
+    tripRepository.findOne.mockResolvedValue(privateTrip);
+    jest
+      .spyOn(service as any, 'recalculateAvailableSeatsForTrip')
+      .mockResolvedValue(1);
+
+    await service.cancel(privateBooking.id, privateBooking.passengerId);
+
+    expect(privateBooking.status).toBe(BookingStatus.CANCELLED);
+    expect(privateTrip.status).toBe(TripStatus.CANCELLED);
+    expect(privateTrip.completedAt).toBeNull();
+    expect(tripRepository.save).toHaveBeenCalledWith(privateTrip);
+  });
+
+  it('blocks cancellation by the selected driver for a request-linked booking', async () => {
+    const privateTrip = {
+      id: 'private-trip-2',
+      tripRequestId: 'request-1',
+      driverId: 'driver-1',
+      driver: { id: 'driver-1', fcmToken: null },
+      status: TripStatus.PENDING,
+      startedAt: null,
+      isPrivate: true,
+      totalSeats: 1,
+      availableSeats: 0,
+      departureLocation: 'Gombe',
+      arrivalLocation: 'Limete',
+    };
+    const privateBooking = {
+      id: 'private-booking-2',
+      tripId: privateTrip.id,
+      trip: privateTrip,
+      passengerId: 'passenger-1',
+      passenger: {
+        firstName: 'Alice',
+        lastName: 'Test',
+        fcmToken: null,
+      },
+      numberOfSeats: 1,
+      status: BookingStatus.ACCEPTED,
+      paymentMode: TripPaymentMode.CASH,
+      paymentStatus: BookingPaymentStatus.NOT_REQUIRED,
+      pickedUp: false,
+      pickedUpConfirmedByPassenger: false,
+      cancelledAt: null,
+    };
+    bookingRepository.findOne.mockResolvedValue(privateBooking);
+
+    await expect(
+      service.cancel(privateBooking.id, privateTrip.driverId),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    expect(privateBooking.status).toBe(BookingStatus.ACCEPTED);
+    expect(tripRepository.findOne).not.toHaveBeenCalled();
+    expect(bookingRepository.save).not.toHaveBeenCalled();
+  });
+
+  it('blocks rejection by the selected driver for a request-linked booking', async () => {
+    const linkedTrip = {
+      id: 'private-trip-3',
+      tripRequestId: 'request-1',
+      driverId: 'driver-1',
+      status: TripStatus.PENDING,
+    };
+    const linkedBooking = {
+      id: 'private-booking-3',
+      tripId: linkedTrip.id,
+      passengerId: 'passenger-1',
+      numberOfSeats: 1,
+      status: BookingStatus.ACCEPTED,
+    };
+    const transactionalManager = {
+      getRepository: jest.fn((entity: unknown) =>
+        entity === Booking ? bookingRepository : tripRepository,
+      ),
+    };
+    bookingRepository.manager = {
+      transaction: jest.fn(
+        (work: (manager: typeof transactionalManager) => Promise<unknown>) =>
+          work(transactionalManager),
+      ),
+    };
+    bookingRepository.findOne.mockResolvedValue(linkedBooking);
+    tripRepository.findOne.mockResolvedValue(linkedTrip);
+
+    await expect(
+      service.updateStatus(linkedBooking.id, linkedTrip.driverId, {
+        status: BookingStatus.REJECTED,
+        rejectionReason: 'Je ne peux plus assurer ce trajet',
+      }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+
+    expect(bookingRepository.save).not.toHaveBeenCalled();
+    expect(tripRepository.save).not.toHaveBeenCalled();
   });
 
   const buildLocationHistory = (
@@ -277,7 +482,11 @@ describe('BookingsService trip payments', () => {
   );
 
   it('calculates the booking amount on the backend when initiating payment', async () => {
-    bookingRepository.findOne.mockResolvedValue({ ...booking });
+    bookingRepository.findOne.mockResolvedValue({
+      ...booking,
+      status: BookingStatus.COMPLETED,
+      droppedOff: true,
+    });
     paymentsService.initiatePayment.mockResolvedValue({
       id: 'payment-1',
       method: PaymentMethod.MOBILE_MONEY,
@@ -317,9 +526,275 @@ describe('BookingsService trip payments', () => {
     expect(result.payment.amount).toBe(5000);
   });
 
+  it('applies a 40 percent first-trip subsidy to an eligible passenger booking', async () => {
+    configService.get.mockImplementation((key: string) => {
+      if (key === 'FLEXPAY_CALLBACK_BASE_URL') {
+        return 'https://api.zwanga.cd/api/v1';
+      }
+      if (key === 'FIRST_TRIP_SUBSIDY_ENABLED') {
+        return 'true';
+      }
+      if (key === 'FIRST_TRIP_PASSENGER_PAYMENT_RATE') {
+        return '0.40';
+      }
+      return undefined;
+    });
+    const point = {
+      type: 'Point' as const,
+      coordinates: [15.3663, -4.425],
+    };
+    tripRepository.findOne.mockResolvedValue({
+      id: 'trip-first',
+      driverId: 'driver-1',
+      driver: { id: 'driver-1', fcmToken: null },
+      status: TripStatus.PENDING,
+      isFree: false,
+      pricePerSeat: 10000,
+      totalSeats: 3,
+      availableSeats: 3,
+      bookings: [],
+      departureLocation: 'Gombe',
+      arrivalLocation: 'Limete',
+      departurePoint: point,
+      arrivalPoint: point,
+    });
+    bookingRepository.findOne.mockResolvedValue(null);
+    bookingRepository.count.mockResolvedValue(0);
+    jest
+      .spyOn(service as any, 'recalculateAvailableSeatsForTrip')
+      .mockResolvedValue(3);
+    jest
+      .spyOn(service as any, 'notifyDriverOfNewBooking')
+      .mockResolvedValue(undefined);
+
+    const result = await service.create('new-passenger', {
+      tripId: 'trip-first',
+      numberOfSeats: 1,
+      paymentMode: TripPaymentMode.ELECTRONIC,
+    });
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        paymentAmount: 4000,
+        grossPaymentAmount: 10000,
+        firstTripSubsidyApplied: true,
+        passengerPaymentRate: 0.4,
+        zwangaSubsidyAmount: 6000,
+      }),
+    );
+  });
+
+  it('rejects a booking when the trip requires passenger KYC and the passenger is not approved', async () => {
+    tripRepository.findOne.mockResolvedValue({
+      id: 'trip-kyc',
+      driverId: 'driver-1',
+      driver: { id: 'driver-1', fcmToken: null },
+      status: TripStatus.PENDING,
+      isFree: false,
+      requiresPassengerKyc: true,
+      pricePerSeat: 5000,
+      totalSeats: 2,
+      availableSeats: 2,
+      bookings: [],
+      departureLocation: 'Gombe',
+      arrivalLocation: 'Limete',
+      departurePoint: null,
+      arrivalPoint: null,
+    });
+    userRepository.findOne.mockResolvedValue({
+      id: 'passenger-1',
+      kycDocuments: [{ status: KycStatus.PENDING }],
+    });
+
+    await expect(
+      service.create('passenger-1', {
+        tripId: 'trip-kyc',
+        numberOfSeats: 1,
+      }),
+    ).rejects.toMatchObject({
+      response: expect.objectContaining({
+        code: 'PASSENGER_KYC_REQUIRED',
+        action: 'complete_kyc',
+        tripId: 'trip-kyc',
+      }),
+    });
+
+    expect(bookingRepository.create).not.toHaveBeenCalled();
+    expect(bookingRepository.save).not.toHaveBeenCalled();
+  });
+
+  it('allows an approved passenger to book more than two available seats', async () => {
+    tripRepository.findOne.mockResolvedValue({
+      id: 'trip-extra-seats',
+      driverId: 'driver-1',
+      driver: { id: 'driver-1', fcmToken: null },
+      status: TripStatus.PENDING,
+      isFree: false,
+      requiresPassengerKyc: false,
+      pricePerSeat: 2500,
+      totalSeats: 4,
+      availableSeats: 4,
+      bookings: [],
+      departureLocation: 'Gombe',
+      arrivalLocation: 'Limete',
+      departurePoint: null,
+      arrivalPoint: null,
+    });
+    userRepository.findOne.mockResolvedValue({
+      id: 'passenger-approved',
+      kycDocuments: [{ status: KycStatus.APPROVED }],
+    });
+    bookingRepository.findOne.mockResolvedValue(null);
+    jest
+      .spyOn(service as any, 'recalculateAvailableSeatsForTrip')
+      .mockResolvedValue(1);
+    jest
+      .spyOn(service as any, 'notifyDriverOfNewBooking')
+      .mockResolvedValue(undefined);
+
+    const result = await service.create('passenger-approved', {
+      tripId: 'trip-extra-seats',
+      numberOfSeats: 3,
+    });
+
+    expect(result).toEqual(expect.objectContaining({ numberOfSeats: 3 }));
+    expect(bookingRepository.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        passengerId: 'passenger-approved',
+        numberOfSeats: 3,
+      }),
+    );
+  });
+
+  it('requires an approved KYC to book more than two seats', async () => {
+    userRepository.findOne.mockResolvedValue({
+      id: 'passenger-unverified',
+      kycDocuments: [{ status: KycStatus.REJECTED }],
+    });
+
+    await expect(
+      service.create('passenger-unverified', {
+        tripId: 'trip-extra-seats',
+        numberOfSeats: 3,
+      }),
+    ).rejects.toMatchObject({
+      response: expect.objectContaining({
+        code: 'PASSENGER_KYC_REQUIRED',
+        action: 'complete_kyc',
+        reason: 'extra_seats',
+        maximumSeatsWithoutKyc: 2,
+      }),
+    });
+
+    expect(tripRepository.findOne).not.toHaveBeenCalled();
+    expect(bookingRepository.create).not.toHaveBeenCalled();
+  });
+
+  it('does not apply the first-trip subsidy when the passenger already completed a ride', async () => {
+    configService.get.mockImplementation((key: string) => {
+      if (key === 'FLEXPAY_CALLBACK_BASE_URL') {
+        return 'https://api.zwanga.cd/api/v1';
+      }
+      if (key === 'FIRST_TRIP_SUBSIDY_ENABLED') {
+        return 'true';
+      }
+      return undefined;
+    });
+    const point = {
+      type: 'Point' as const,
+      coordinates: [15.3663, -4.425],
+    };
+    tripRepository.findOne.mockResolvedValue({
+      id: 'trip-not-first',
+      driverId: 'driver-1',
+      driver: { id: 'driver-1', fcmToken: null },
+      status: TripStatus.PENDING,
+      isFree: false,
+      pricePerSeat: 10000,
+      totalSeats: 3,
+      availableSeats: 3,
+      bookings: [],
+      departureLocation: 'Gombe',
+      arrivalLocation: 'Limete',
+      departurePoint: point,
+      arrivalPoint: point,
+    });
+    bookingRepository.findOne.mockResolvedValue(null);
+    bookingRepository.count.mockResolvedValueOnce(1);
+    jest
+      .spyOn(service as any, 'recalculateAvailableSeatsForTrip')
+      .mockResolvedValue(3);
+    jest
+      .spyOn(service as any, 'notifyDriverOfNewBooking')
+      .mockResolvedValue(undefined);
+
+    const result = await service.create('existing-passenger', {
+      tripId: 'trip-not-first',
+      numberOfSeats: 1,
+      paymentMode: TripPaymentMode.ELECTRONIC,
+    });
+
+    expect(result).toEqual(
+      expect.objectContaining({
+        paymentAmount: 10000,
+        grossPaymentAmount: 10000,
+        firstTripSubsidyApplied: false,
+        passengerPaymentRate: null,
+        zwangaSubsidyAmount: 0,
+      }),
+    );
+  });
+
+  it('preserves a distance-adjusted fare when initiating payment after arrival', async () => {
+    bookingRepository.findOne.mockResolvedValue({
+      ...booking,
+      status: BookingStatus.COMPLETED,
+      droppedOff: true,
+      paymentAmount: 2000,
+      fareAdjustedAt: new Date('2026-08-21T10:00:00.000Z'),
+    });
+    paymentsService.initiatePayment.mockResolvedValue({
+      id: 'payment-adjusted',
+      method: PaymentMethod.MOBILE_MONEY,
+      status: PaymentStatus.INITIATED,
+      reference: 'TRIP-ADJUSTED',
+      orderNumber: 'ORDER-ADJUSTED',
+      providerStatusCode: '0',
+      providerMessage: 'Demande envoyee',
+      paymentUrl: null,
+      amount: 2000,
+      currency: 'CDF',
+      paidAt: null,
+    });
+
+    await service.initiateBookingPayment('booking-1', 'passenger-1', {
+      method: PaymentMethod.MOBILE_MONEY,
+      phone: '+243891234567',
+    });
+
+    expect(paymentsService.initiatePayment).toHaveBeenCalledWith(
+      expect.objectContaining({ amount: 2000 }),
+    );
+  });
+
+  it('rejects electronic payment before passenger arrival', async () => {
+    bookingRepository.findOne.mockResolvedValue({ ...booking });
+
+    await expect(
+      service.initiateBookingPayment('booking-1', 'passenger-1', {
+        method: PaymentMethod.MOBILE_MONEY,
+        phone: '+243891234567',
+      }),
+    ).rejects.toThrow('1000 mètres');
+
+    expect(paymentsService.initiatePayment).not.toHaveBeenCalled();
+  });
+
   it('lets a cash booking switch to mobile money payment', async () => {
     bookingRepository.findOne.mockResolvedValue({
       ...booking,
+      status: BookingStatus.COMPLETED,
+      droppedOff: true,
       paymentMode: TripPaymentMode.CASH,
       paymentStatus: BookingPaymentStatus.NOT_REQUIRED,
     });
@@ -383,12 +858,12 @@ describe('BookingsService trip payments', () => {
         method: PaymentMethod.MOBILE_MONEY,
         phone: '+243891234567',
       }),
-    ).rejects.toThrow('points Zwanga');
+    ).rejects.toThrow('jetons Zwanga');
 
     expect(paymentsService.initiatePayment).not.toHaveBeenCalled();
   });
 
-  it('lets the passenger pay an existing booking with points', async () => {
+  it('records points as the selected mode without debiting before arrival', async () => {
     bookingRepository.findOne.mockResolvedValue({
       ...booking,
       paymentMode: TripPaymentMode.CASH,
@@ -401,34 +876,93 @@ describe('BookingsService trip payments', () => {
       TripPaymentMode.POINTS,
     );
 
-    expect(walletService.payForBooking).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: 'booking-1',
-        passengerId: 'passenger-1',
-        paymentMode: TripPaymentMode.POINTS,
-      }),
-      5000,
-    );
+    expect(walletService.payForBooking).not.toHaveBeenCalled();
     expect(result).toEqual(
       expect.objectContaining({
         paymentMode: TripPaymentMode.POINTS,
         paymentAmount: 5000,
         paymentCurrency: 'CDF',
-        paymentStatus: BookingPaymentStatus.SUCCEEDED,
+        paymentStatus: BookingPaymentStatus.PENDING,
       }),
     );
-    expect(result.paidAt).toBeInstanceOf(Date);
+    expect(result.paidAt).toBeNull();
     expect(paymentsService.initiatePayment).not.toHaveBeenCalled();
   });
 
-  it('keeps the booking unpaid when the points balance is insufficient', async () => {
+  it('debits the selected points only after passenger arrival', async () => {
     bookingRepository.findOne.mockResolvedValue({
       ...booking,
-      paymentMode: TripPaymentMode.CASH,
-      paymentStatus: BookingPaymentStatus.NOT_REQUIRED,
+      status: BookingStatus.COMPLETED,
+      droppedOff: true,
+      paymentMode: TripPaymentMode.POINTS,
+      paymentStatus: BookingPaymentStatus.PENDING,
     });
-    walletService.payForBooking.mockRejectedValue(
-      new Error('Solde de points insuffisant pour payer ce trajet'),
+
+    const result = await service.updatePaymentMode(
+      'booking-1',
+      'passenger-1',
+      TripPaymentMode.POINTS,
+    );
+
+    expect(walletService.payForBookingWithManager).toHaveBeenCalledWith(
+      financialManager,
+      expect.objectContaining({ id: 'booking-1', passengerId: 'passenger-1' }),
+      5000,
+    );
+    expect(
+      driverSettlementsService.recordCompletedBookingEarningWithManager,
+    ).toHaveBeenCalledWith(
+      financialManager,
+      expect.objectContaining({ id: 'booking-1' }),
+    );
+    expect(result).toEqual(
+      expect.objectContaining({
+        paymentMode: TripPaymentMode.POINTS,
+        paymentStatus: BookingPaymentStatus.SUCCEEDED,
+        paidAt: expect.any(Date),
+      }),
+    );
+  });
+
+  it('debits only the distance-adjusted amount in points after arrival', async () => {
+    bookingRepository.findOne.mockResolvedValue({
+      ...booking,
+      status: BookingStatus.COMPLETED,
+      droppedOff: true,
+      paymentMode: TripPaymentMode.POINTS,
+      paymentStatus: BookingPaymentStatus.PENDING,
+      paymentAmount: 2000,
+      fareAdjustedAt: new Date('2026-08-21T10:00:00.000Z'),
+    });
+
+    const result = await service.updatePaymentMode(
+      'booking-1',
+      'passenger-1',
+      TripPaymentMode.POINTS,
+    );
+
+    expect(walletService.payForBookingWithManager).toHaveBeenCalledWith(
+      financialManager,
+      expect.objectContaining({ id: 'booking-1' }),
+      2000,
+    );
+    expect(result.paymentAmount).toBe(2000);
+  });
+
+  it('fails the whole token settlement when the driver earning cannot be written', async () => {
+    bookingRepository.findOne.mockResolvedValue({
+      ...booking,
+      status: BookingStatus.COMPLETED,
+      droppedOff: true,
+      paymentMode: TripPaymentMode.POINTS,
+      paymentStatus: BookingPaymentStatus.PENDING,
+      trip: {
+        ...booking.trip,
+        driverId: 'driver-1',
+      },
+    });
+    driverSettlementsService.recordCompletedBookingEarningWithManager.mockRejectedValue(
+      new Error('driver earning write failed'),
     );
 
     await expect(
@@ -437,9 +971,95 @@ describe('BookingsService trip payments', () => {
         'passenger-1',
         TripPaymentMode.POINTS,
       ),
-    ).rejects.toThrow('Solde de points insuffisant');
+    ).rejects.toThrow('driver earning write failed');
 
-    expect(bookingRepository.save).not.toHaveBeenCalled();
+    expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+    expect(walletService.payForBookingWithManager).toHaveBeenCalledWith(
+      financialManager,
+      expect.objectContaining({ id: 'booking-1' }),
+      5000,
+    );
+    expect(
+      driverSettlementsService.recordCompletedBookingEarning,
+    ).not.toHaveBeenCalled();
+  });
+
+  it('repairs a proven debit without creating a background debit', async () => {
+    const strandedBooking = {
+      ...booking,
+      status: BookingStatus.COMPLETED,
+      droppedOff: true,
+      paymentMode: TripPaymentMode.POINTS,
+      paymentStatus: BookingPaymentStatus.PENDING,
+      trip: {
+        ...booking.trip,
+        driverId: 'driver-1',
+      },
+    };
+    dataSource.query
+      .mockResolvedValueOnce([{ id: 'booking-1' }])
+      .mockResolvedValueOnce([{ count: 0 }])
+      .mockResolvedValueOnce([{ count: 0 }]);
+    bookingRepository.findOne.mockResolvedValue(strandedBooking);
+
+    const result = await service.reconcileTokenTripSettlements();
+
+    expect(result).toEqual({
+      inspected: 1,
+      repaired: 1,
+      failed: 0,
+      unsafeAnomalies: 0,
+      walletBalanceMismatches: 0,
+    });
+    expect(walletService.payForBookingWithManager).toHaveBeenCalledWith(
+      financialManager,
+      expect.objectContaining({ id: 'booking-1' }),
+      5000,
+    );
+    expect(walletService.payForBooking).not.toHaveBeenCalled();
+  });
+
+  it('reports a paid-without-ledger anomaly without debiting automatically', async () => {
+    dataSource.query
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ count: 2 }])
+      .mockResolvedValueOnce([{ count: 0 }]);
+
+    const result = await service.reconcileTokenTripSettlements();
+
+    expect(result.unsafeAnomalies).toBe(2);
+    expect(walletService.payForBookingWithManager).not.toHaveBeenCalled();
+    expect(walletService.payForBooking).not.toHaveBeenCalled();
+  });
+
+  it('keeps the booking unpaid when the points balance is insufficient', async () => {
+    bookingRepository.findOne.mockResolvedValue({
+      ...booking,
+      status: BookingStatus.COMPLETED,
+      droppedOff: true,
+      paymentMode: TripPaymentMode.POINTS,
+      paymentStatus: BookingPaymentStatus.PENDING,
+    });
+    walletService.payForBookingWithManager.mockRejectedValue(
+      new Error('Solde de jetons insuffisant pour payer ce trajet'),
+    );
+
+    await expect(
+      service.updatePaymentMode(
+        'booking-1',
+        'passenger-1',
+        TripPaymentMode.POINTS,
+      ),
+    ).rejects.toThrow('Solde de jetons insuffisant');
+
+    expect(bookingRepository.save).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        paymentStatus: BookingPaymentStatus.SUCCEEDED,
+      }),
+    );
+    expect(
+      driverSettlementsService.recordCompletedBookingEarningWithManager,
+    ).not.toHaveBeenCalled();
   });
 
   it('marks the booking paid after a successful FlexPay status check', async () => {
@@ -530,7 +1150,47 @@ describe('BookingsService trip payments', () => {
     );
   });
 
-  it('blocks pickup when an electronic booking has not been paid', async () => {
+  it('retries idempotent financial finalization for an already paid completed booking', async () => {
+    const payment = {
+      id: 'payment-1',
+      purpose: PaymentPurpose.TRIP_BOOKING,
+      relatedEntityType: 'booking',
+      relatedEntityId: 'booking-1',
+      method: PaymentMethod.MOBILE_MONEY,
+      status: PaymentStatus.SUCCEEDED,
+      reference: 'TRIP123',
+      orderNumber: 'ORDER123',
+      providerStatusCode: '0',
+      providerMessage: 'Paiement confirme',
+      paymentUrl: null,
+      amount: 5000,
+      currency: 'CDF',
+      paidAt: new Date('2026-06-29T10:00:00.000Z'),
+    };
+    paymentsService.checkPaymentStatus.mockResolvedValue(payment);
+    bookingRepository.findOne.mockResolvedValue({
+      ...booking,
+      status: BookingStatus.COMPLETED,
+      droppedOff: true,
+      paymentStatus: BookingPaymentStatus.SUCCEEDED,
+      paymentTransactionId: payment.id,
+      trip: {
+        ...booking.trip,
+        driverId: 'driver-1',
+      },
+    });
+
+    await service.checkBookingPaymentStatus('passenger-1', 'ORDER123');
+
+    expect(referralsService.awardBookingReward).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'booking-1',
+        paymentStatus: BookingPaymentStatus.SUCCEEDED,
+      }),
+    );
+  });
+
+  it('allows pickup while electronic payment remains pending until arrival', async () => {
     bookingRepository.findOne.mockResolvedValue({
       ...booking,
       paymentStatus: BookingPaymentStatus.PENDING,
@@ -540,11 +1200,17 @@ describe('BookingsService trip payments', () => {
       },
     });
 
-    await expect(
-      service.confirmPickup('booking-1', 'driver-1'),
-    ).rejects.toThrow('doit etre payee avant le demarrage');
+    const result = await service.confirmPickup('booking-1', 'driver-1');
 
-    expect(bookingRepository.save).not.toHaveBeenCalled();
+    expect(result).toEqual(
+      expect.objectContaining({
+        status: BookingStatus.ACCEPTED,
+        pickedUp: true,
+        pickedUpConfirmedByPassenger: true,
+        paymentStatus: BookingPaymentStatus.PENDING,
+      }),
+    );
+    expect(walletService.payForBooking).not.toHaveBeenCalled();
   });
 
   it('deducts seats when the driver accepts a pending booking', async () => {
@@ -627,6 +1293,47 @@ describe('BookingsService trip payments', () => {
     expect(
       driverSettlementsService.recordCompletedBookingEarning,
     ).toHaveBeenCalledWith(expect.objectContaining({ id: 'booking-1' }));
+  });
+
+  it('awards the base token before a cash subsidy settlement failure', async () => {
+    driverSettlementsService.recordCompletedBookingEarning.mockRejectedValue(
+      new Error('CHK_driver_earnings_payment_mode'),
+    );
+    await expect((service as any).finalizeCompletedBooking({
+      ...booking, status: BookingStatus.COMPLETED, pickedUp: true,
+      paymentMode: TripPaymentMode.CASH, paymentStatus: BookingPaymentStatus.NOT_REQUIRED,
+      trip: { ...booking.trip, driverId: 'driver-1' },
+    })).rejects.toThrow('CHK_driver_earnings_payment_mode');
+    expect(walletService.awardBaseLoyaltyForBooking).toHaveBeenCalledTimes(1);
+    expect(walletService.awardBaseLoyaltyForBooking.mock.invocationCallOrder[0]).toBeLessThan(
+      driverSettlementsService.recordCompletedBookingEarning.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('awards the base token for a completed unpaid electronic ride without releasing earnings or bonus', async () => {
+    await (service as any).settlePaymentAfterArrival({
+      ...booking, status: BookingStatus.COMPLETED, pickedUp: true,
+      trip: { ...booking.trip, driverId: 'driver-1' },
+    });
+    expect(walletService.awardBaseLoyaltyForBooking).toHaveBeenCalled();
+    expect(walletService.awardLoyaltyForBooking).not.toHaveBeenCalled();
+    expect(driverSettlementsService.recordCompletedBookingEarning).not.toHaveBeenCalled();
+  });
+
+  it('finalizes loyalty after a delayed points payment even when the payment mode was already points', async () => {
+    const unpaid = {
+      ...booking, status: BookingStatus.COMPLETED, pickedUp: true,
+      paymentMode: TripPaymentMode.POINTS,
+      trip: { ...booking.trip, driverId: 'driver-1' },
+    };
+    bookingRepository.findOne.mockResolvedValue(unpaid);
+    jest.spyOn(service as any, 'capturePointsPaymentForBooking').mockResolvedValue({
+      ...unpaid, paymentStatus: BookingPaymentStatus.SUCCEEDED,
+    });
+    await service.updatePaymentMode('booking-1', 'passenger-1', TripPaymentMode.POINTS);
+    expect(walletService.awardLoyaltyForBooking).toHaveBeenCalledWith(
+      expect.objectContaining({ paymentStatus: BookingPaymentStatus.SUCCEEDED }), 5000,
+    );
   });
 
   it('lets the driver complete dropoff without waiting for a passenger button', async () => {
@@ -865,9 +1572,10 @@ describe('BookingsService trip payments', () => {
       expect.objectContaining({ id: 'booking-1' }),
       expect.objectContaining({
         pickedUp: true,
-        pickedUpConfirmedByPassenger: true,
+        pickupDetectionMethod: 'automatic_shared_movement',
       }),
     );
+    expect(autoBooking.pickedUpConfirmedByPassenger).toBe(false);
   });
 
   it('emits the automatic pickup only once when a stale evaluation retries the same confirmation', async () => {
@@ -998,6 +1706,224 @@ describe('BookingsService trip payments', () => {
     expect(notifyDriver).toHaveBeenCalledTimes(1);
   });
 
+  it('restores a no-show booking when GPS resumes and proves shared movement during the trip', async () => {
+    jest
+      .spyOn(service as any, 'notifySelectedEmergencyContacts')
+      .mockResolvedValue(undefined);
+    jest
+      .spyOn(service as any, 'notifyDriverEmergencyContactsOnPickup')
+      .mockResolvedValue(undefined);
+    jest
+      .spyOn(service as any, 'notifyPassengerAboutAutomaticPickupConfirmation')
+      .mockResolvedValue(undefined);
+    jest
+      .spyOn(service as any, 'notifyDriverAboutAutomaticPickupConfirmation')
+      .mockResolvedValue(undefined);
+    jest
+      .spyOn(service as any, 'touchTripInteraction')
+      .mockResolvedValue(undefined);
+    const recalculateSeats = jest
+      .spyOn(service as any, 'recalculateAvailableSeatsForTrip')
+      .mockResolvedValue(0);
+
+    const now = new Date();
+    const driverSamples = Array.from({ length: 10 }, (_, index) => ({
+      longitude: 15.304 + index * 0.0001,
+      latitude: -4.3,
+      recordedAt: new Date(now.getTime() - (9 - index) * 3_500).toISOString(),
+      accuracyMeters: 5,
+      speedMetersPerSecond: 3.2,
+      headingDegrees: 90,
+    }));
+    const passengerSamples = driverSamples.map((sample) => ({
+      ...sample,
+      longitude: sample.longitude + 0.000005,
+    }));
+    const noShowBooking = {
+      ...booking,
+      status: BookingStatus.NO_SHOW,
+      paymentMode: TripPaymentMode.ELECTRONIC,
+      paymentStatus: BookingPaymentStatus.CANCELLED,
+      pickedUp: false,
+      pickedUpConfirmedByPassenger: false,
+      pickedUpAt: null,
+      noShowDetectedAt: new Date(now.getTime() - 60_000),
+      noShowReason: 'automatic_non_boarding',
+      noShowDriverDistanceMeters: 300,
+      rejectionReason: 'Passager non embarque detecte automatiquement',
+      passengerOriginPoint: { type: 'Point', coordinates: [15.3, -4.3] },
+      passengerCurrentLocation: {
+        type: 'Point',
+        coordinates: [passengerSamples.at(-1)!.longitude, -4.3],
+      },
+      passengerLastLocationUpdateAt: now,
+      trip: {
+        ...booking.trip,
+        status: TripStatus.ACTIVE,
+        driverId: 'driver-1',
+        currentLocation: {
+          type: 'Point',
+          coordinates: [driverSamples.at(-1)!.longitude, -4.3],
+        },
+        lastLocationUpdateAt: now,
+        departurePoint: { type: 'Point', coordinates: [15.3, -4.3] },
+      },
+    };
+    locationHistoryService.getDriverLocationHistory.mockResolvedValue({
+      previous: driverSamples.at(-2),
+      current: driverSamples.at(-1),
+      samples: driverSamples,
+    });
+    locationHistoryService.getPassengerLocationHistory.mockResolvedValue({
+      previous: passengerSamples.at(-2),
+      current: passengerSamples.at(-1),
+      samples: passengerSamples,
+    });
+    boardingCandidates.set('trip-1:driver-1:passenger-1', {
+      state: 'BOARDING_CANDIDATE',
+      previousState: 'DRIVER_APPROACHING',
+      createdAt: driverSamples[0].recordedAt,
+      updatedAt: driverSamples[0].recordedAt,
+      initialDriverLocation: {
+        latitude: driverSamples[0].latitude,
+        longitude: driverSamples[0].longitude,
+        recordedAt: driverSamples[0].recordedAt,
+        accuracyMeters: 5,
+        speedMetersPerSecond: 3.2,
+        headingDegrees: 90,
+      },
+      initialPassengerLocation: {
+        latitude: passengerSamples[0].latitude,
+        longitude: passengerSamples[0].longitude,
+        recordedAt: passengerSamples[0].recordedAt,
+        accuracyMeters: 5,
+        speedMetersPerSecond: 3.2,
+        headingDegrees: 90,
+      },
+      sharedMovementStartedAt: driverSamples[0].recordedAt,
+      separationStartedAt: null,
+      confirmedAt: null,
+      origin: 'in_trip_recovery',
+    });
+    bookingRepository.find.mockResolvedValue([noShowBooking]);
+
+    const result = await service.evaluateAutomaticRideProgressForTrip('trip-1');
+
+    expect(result.events).toEqual([
+      expect.objectContaining({
+        type: 'pickup_confirmed',
+        bookingId: 'booking-1',
+        detectionMethod: 'automatic_shared_movement_late_recovery',
+      }),
+    ]);
+    expect(noShowBooking).toEqual(
+      expect.objectContaining({
+        status: BookingStatus.ACCEPTED,
+        pickedUp: true,
+        paymentStatus: BookingPaymentStatus.PENDING,
+        rejectionReason: null,
+        noShowReason: 'automatic_non_boarding',
+      }),
+    );
+    expect(recalculateSeats).toHaveBeenCalledWith('trip-1');
+    expect(walletService.payForBooking).not.toHaveBeenCalled();
+  });
+
+  it('serializes automatic progression when REST and Socket.IO trigger it together', async () => {
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let activeEvaluations = 0;
+    let maximumConcurrentEvaluations = 0;
+    const unlocked = jest
+      .spyOn(service as any, 'evaluateAutomaticRideProgressForTripUnlocked')
+      .mockImplementation(async () => {
+        activeEvaluations += 1;
+        maximumConcurrentEvaluations = Math.max(
+          maximumConcurrentEvaluations,
+          activeEvaluations,
+        );
+        if (unlocked.mock.calls.length === 1) {
+          await firstGate;
+        }
+        activeEvaluations -= 1;
+        return { tripId: 'trip-1', events: [] };
+      });
+
+    const restEvaluation =
+      service.evaluateAutomaticRideProgressForTrip('trip-1');
+    const socketEvaluation =
+      service.evaluateAutomaticRideProgressForTrip('trip-1');
+    await Promise.resolve();
+
+    expect(unlocked).toHaveBeenCalledTimes(1);
+    releaseFirst();
+    await Promise.all([restEvaluation, socketEvaluation]);
+
+    expect(unlocked).toHaveBeenCalledTimes(2);
+    expect(maximumConcurrentEvaluations).toBe(1);
+  });
+
+  it('accepts a fresh passenger REST sample after no-show and persists it conditionally', async () => {
+    const activeTrip = {
+      ...booking.trip,
+      status: TripStatus.ACTIVE,
+      driverId: 'driver-1',
+      departurePoint: { type: 'Point', coordinates: [15.3, -4.3] },
+      arrivalPoint: { type: 'Point', coordinates: [15.4, -4.4] },
+    };
+    const recoverableBooking = {
+      ...booking,
+      status: BookingStatus.NO_SHOW,
+      passengerCurrentLocation: null,
+      passengerLastLocationUpdateAt: null,
+      trip: activeTrip,
+    };
+    bookingRepository.findOne.mockResolvedValue(recoverableBooking);
+    jest
+      .spyOn(service as any, 'touchTripInteraction')
+      .mockResolvedValue(undefined);
+    jest
+      .spyOn(service as any, 'checkAndNotifyDestinationProximity')
+      .mockResolvedValue(undefined);
+    jest
+      .spyOn(service, 'evaluateAutomaticRideProgressForTrip')
+      .mockResolvedValue({ tripId: 'trip-1', events: [] });
+
+    const recordedAt = new Date().toISOString();
+    const result = await service.updatePassengerLocation(
+      'passenger-1',
+      'booking-1',
+      {
+        latitude: -4.31,
+        longitude: 15.31,
+        accuracy: 5,
+        speed: 4,
+        heading: 90,
+        recordedAt,
+      },
+    );
+
+    expect(bookingRepository.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'booking-1',
+        passengerId: 'passenger-1',
+        status: expect.anything(),
+        passengerLastLocationUpdateAt: expect.anything(),
+      }),
+      expect.objectContaining({
+        passengerCurrentLocation: {
+          type: 'Point',
+          coordinates: [15.31, -4.31],
+        },
+        passengerLastLocationUpdateAt: new Date(recordedAt),
+      }),
+    );
+    expect(locationHistoryService.recordPassengerLocation).toHaveBeenCalled();
+    expect(result.coordinates).toEqual([15.31, -4.31]);
+  });
+
   it('automatically confirms pickup when both users start together and then move in small coherent samples', async () => {
     jest
       .spyOn(service as any, 'notifySelectedEmergencyContacts')
@@ -1094,18 +2020,22 @@ describe('BookingsService trip payments', () => {
           samples: passengerSamples.slice(-10),
         });
 
-        const result = await service.evaluateAutomaticRideProgressForTrip(
-          'trip-1',
-        );
+        const result =
+          await service.evaluateAutomaticRideProgressForTrip('trip-1');
         emittedEvents.push(...result.events);
       }
     } finally {
       jest.useRealTimers();
     }
 
-    expect(emittedEvents.filter((event) => event.type === 'pickup_confirmed')).toHaveLength(1);
+    expect(
+      emittedEvents.filter((event) => event.type === 'pickup_confirmed'),
+    ).toHaveLength(1);
     expect(autoBooking.pickedUp).toBe(true);
-    expect(autoBooking.pickedUpConfirmedByPassenger).toBe(true);
+    expect(autoBooking.pickedUpConfirmedByPassenger).toBe(false);
+    expect((autoBooking as any).pickupDetectionMethod).toBe(
+      'automatic_shared_movement',
+    );
   });
 
   it('does not automatically confirm pickup when the driver leaves pickup without a fresh passenger location', async () => {
@@ -1189,10 +2119,11 @@ describe('BookingsService trip payments', () => {
         pickupWaitSeconds: 600,
       }),
     ]);
-    expect(bookingRepository.save).toHaveBeenCalledWith(
-      expect.objectContaining({
+    expect(bookingRepository.update).toHaveBeenCalledWith(
+      expect.objectContaining({ id: autoBooking.id, status: BookingStatus.ACCEPTED }),
+      {
         driverPickupArrivedAt: expect.any(Date),
-      }),
+      },
     );
   });
 
@@ -1233,7 +2164,113 @@ describe('BookingsService trip payments', () => {
     expect(bookingRepository.save).not.toHaveBeenCalled();
   });
 
-  it('emits a passenger destination warning when the vehicle is within 20 meters', async () => {
+  it('automatically closes an unboarded booking after wait and driver departure', async () => {
+    const now = new Date();
+    const noShowBooking = {
+      ...booking,
+      pickedUp: false,
+      pickedUpConfirmedByPassenger: false,
+      droppedOff: false,
+      passenger: { id: 'passenger-1', fcmToken: 'passenger-fcm-token' },
+      driverPickupArrivedAt: new Date(now.getTime() - 11 * 60 * 1000),
+      passengerOriginPoint: { type: 'Point', coordinates: [15.3, -4.3] },
+      passengerCurrentLocation: { type: 'Point', coordinates: [15.3, -4.3] },
+      passengerLastLocationUpdateAt: now,
+      trip: {
+        ...booking.trip,
+        status: TripStatus.ACTIVE,
+        driverId: 'driver-1',
+        currentLocation: { type: 'Point', coordinates: [15.302, -4.3] },
+        lastLocationUpdateAt: now,
+        departurePoint: { type: 'Point', coordinates: [15.3, -4.3] },
+      },
+    };
+    bookingRepository.find.mockResolvedValue([noShowBooking]);
+    jest
+      .spyOn(service as any, 'recalculateAvailableSeatsForTrip')
+      .mockResolvedValue(1);
+    jest
+      .spyOn(service as any, 'touchTripInteraction')
+      .mockResolvedValue(undefined);
+    const result = await service.evaluateAutomaticRideProgressForTrip('trip-1');
+
+    expect(result.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'passenger_no_show',
+          bookingId: 'booking-1',
+          tripId: 'trip-1',
+          noShowReason: 'automatic_non_boarding',
+        }),
+      ]),
+    );
+    expect(noShowBooking).toEqual(
+      expect.objectContaining({
+        status: BookingStatus.NO_SHOW,
+        paymentStatus: BookingPaymentStatus.CANCELLED,
+        noShowDetectedAt: expect.any(Date),
+        noShowDriverDistanceMeters: expect.any(Number),
+      }),
+    );
+    expect(notificationService.sendNotification).toHaveBeenCalledTimes(1);
+    expect(notificationService.sendNotification).toHaveBeenCalledWith(
+      'passenger-fcm-token',
+      'Le conducteur est déjà parti',
+      expect.stringContaining("votre prise en charge n'a pas été détectée"),
+      expect.objectContaining({
+        type: 'passenger_no_show',
+        bookingId: 'booking-1',
+        tripId: 'trip-1',
+        role: 'passenger',
+        distanceMeters: expect.any(Number),
+        detectedAt: expect.any(String),
+        keepLocationActive: true,
+      }),
+      'passenger-1',
+    );
+    expect(walletService.payForBooking).not.toHaveBeenCalled();
+    expect(walletService.awardLoyaltyForBooking).not.toHaveBeenCalled();
+    expect(
+      driverSettlementsService.recordCompletedBookingEarning,
+    ).not.toHaveBeenCalled();
+  });
+
+  it('does not mark no-show when a fresh passenger position still follows the driver', async () => {
+    const now = new Date();
+    const protectedBooking = {
+      ...booking,
+      pickedUp: false,
+      pickedUpConfirmedByPassenger: false,
+      droppedOff: false,
+      driverPickupArrivedAt: new Date(now.getTime() - 11 * 60 * 1000),
+      passengerOriginPoint: { type: 'Point', coordinates: [15.3, -4.3] },
+      passengerCurrentLocation: {
+        type: 'Point',
+        coordinates: [15.30201, -4.3],
+      },
+      passengerLastLocationUpdateAt: now,
+      trip: {
+        ...booking.trip,
+        status: TripStatus.ACTIVE,
+        driverId: 'driver-1',
+        currentLocation: { type: 'Point', coordinates: [15.302, -4.3] },
+        lastLocationUpdateAt: now,
+        departurePoint: { type: 'Point', coordinates: [15.3, -4.3] },
+      },
+    };
+    bookingRepository.find.mockResolvedValue([protectedBooking]);
+
+    const result = await service.evaluateAutomaticRideProgressForTrip('trip-1');
+
+    expect(result.events).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'passenger_no_show' }),
+      ]),
+    );
+    expect(protectedBooking.status).toBe(BookingStatus.ACCEPTED);
+  });
+
+  it('emits a passenger destination warning before the direct dropoff zone', async () => {
     const now = new Date();
     const autoBooking = {
       ...booking,
@@ -1251,7 +2288,7 @@ describe('BookingsService trip payments', () => {
         ...booking.trip,
         status: TripStatus.ACTIVE,
         driverId: 'driver-1',
-        currentLocation: { type: 'Point', coordinates: [15.31015, -4.31] },
+        currentLocation: { type: 'Point', coordinates: [15.3103, -4.31] },
         lastLocationUpdateAt: now,
         arrivalPoint: { type: 'Point', coordinates: [15.31, -4.31] },
       },
@@ -1270,20 +2307,16 @@ describe('BookingsService trip payments', () => {
         detectedAt: expect.any(String),
       }),
     ]);
-    expect(bookingRepository.save).toHaveBeenCalledWith(
-      expect.objectContaining({
+    expect(bookingRepository.update).toHaveBeenCalledWith(
+      expect.objectContaining({ id: autoBooking.id, status: BookingStatus.ACCEPTED }),
+      {
         passengerDestinationApproachNotifiedAt: expect.any(Date),
-      }),
+      },
     );
-    expect(tripRepository.save).toHaveBeenCalledWith(
-      expect.objectContaining({
-        status: TripStatus.ACTIVE,
-        destinationApproachNotifiedAt: expect.any(Date),
-      }),
-    );
+    expect(autoBooking.trip.status).toBe(TripStatus.ACTIVE);
   });
 
-  it('does not automatically complete dropoff while driver and passenger remain together at the destination', async () => {
+  it('automatically completes dropoff at destination after boarding even when passenger GPS remains close', async () => {
     const now = new Date();
     const autoBooking = {
       ...booking,
@@ -1315,11 +2348,33 @@ describe('BookingsService trip payments', () => {
 
     const result = await service.evaluateAutomaticRideProgressForTrip('trip-1');
 
-    expect(result.events).toEqual([]);
-    expect(bookingRepository.save).not.toHaveBeenCalledWith(
+    expect(result.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'dropoff_confirmed',
+          bookingId: 'booking-1',
+          detectionMethod: 'automatic_driver_destination',
+        }),
+        expect.objectContaining({
+          type: 'driver_arrived_destination',
+          tripId: 'trip-1',
+        }),
+      ]),
+    );
+    expect(
+      driverSettlementsService.notifyDriverTripRevenue,
+    ).toHaveBeenCalledWith('driver-1', 'trip-1');
+    expect(walletService.awardLoyaltyForCompletedTrip).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'trip-1', status: TripStatus.COMPLETED }),
+    );
+    expect(walletService.awardBaseLoyaltyForBooking).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'booking-1', status: BookingStatus.COMPLETED, paymentMode: TripPaymentMode.CASH }),
+    );
+    expect(bookingRepository.save).toHaveBeenCalledWith(
       expect.objectContaining({
         droppedOff: true,
         status: BookingStatus.COMPLETED,
+        dropoffDetectionMethod: 'automatic_driver_destination',
       }),
     );
   });
@@ -1379,12 +2434,13 @@ describe('BookingsService trip payments', () => {
     const result = await service.evaluateAutomaticRideProgressForTrip('trip-1');
 
     expect(result.events).toEqual([
-      {
+      expect.objectContaining({
         type: 'dropoff_confirmed',
         bookingId: 'booking-1',
         tripId: 'trip-1',
         passengerId: 'passenger-1',
-      },
+        detectionMethod: 'automatic_passenger_separation',
+      }),
       expect.objectContaining({
         type: 'driver_arrived_destination',
         tripId: 'trip-1',
@@ -1395,9 +2451,8 @@ describe('BookingsService trip payments', () => {
     expect(bookingRepository.save).toHaveBeenCalledWith(
       expect.objectContaining({
         droppedOff: true,
-        pickedUpConfirmedByPassenger: true,
         passengerDestinationApproachNotifiedAt: expect.any(Date),
-        droppedOffConfirmedByPassenger: true,
+        dropoffDetectionMethod: 'automatic_passenger_separation',
         status: BookingStatus.COMPLETED,
       }),
     );
@@ -1594,7 +2649,7 @@ describe('BookingsService trip payments', () => {
     );
   });
 
-  it('does not emit a trip destination event while an accepted booking is not dropped off', async () => {
+  it('completes a boarded booking when the driver reaches the final trip destination', async () => {
     const now = new Date();
     const unfinishedBooking = {
       ...booking,
@@ -1625,12 +2680,105 @@ describe('BookingsService trip payments', () => {
 
     const result = await service.evaluateAutomaticRideProgressForTrip('trip-1');
 
-    expect(result.events).toEqual([]);
-    expect(bookingRepository.save).not.toHaveBeenCalled();
+    expect(result.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'dropoff_confirmed',
+          bookingId: 'booking-1',
+          detectionMethod: 'automatic_trip_destination',
+        }),
+        expect.objectContaining({
+          type: 'driver_arrived_destination',
+          tripId: 'trip-1',
+        }),
+      ]),
+    );
+    expect(bookingRepository.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: BookingStatus.COMPLETED,
+        droppedOff: true,
+        dropoffDetectionMethod: 'automatic_trip_destination',
+      }),
+    );
     expect(tripRepository.save).toHaveBeenCalledWith(
       expect.objectContaining({
+        status: TripStatus.COMPLETED,
+        completedAt: expect.any(Date),
+      }),
+    );
+  });
+
+  it('closes an unboarded booking as uncertain without payment at final destination', async () => {
+    const now = new Date();
+    const uncertainBooking = {
+      ...booking,
+      status: BookingStatus.ACCEPTED,
+      paymentMode: TripPaymentMode.ELECTRONIC,
+      paymentStatus: BookingPaymentStatus.PENDING,
+      pickedUp: false,
+      pickedUpConfirmedByPassenger: false,
+      pickedUpAt: null,
+      droppedOff: false,
+      droppedOffConfirmedByPassenger: false,
+      driverPickupArrivedAt: null,
+      passengerOriginPoint: { type: 'Point', coordinates: [15.2, -4.2] },
+      passengerCurrentLocation: null,
+      passengerLastLocationUpdateAt: null,
+      trip: {
+        ...booking.trip,
+        id: 'trip-1',
         status: TripStatus.ACTIVE,
-        destinationApproachNotifiedAt: expect.any(Date),
+        driverId: 'driver-1',
+        currentLocation: { type: 'Point', coordinates: [15.3101, -4.31] },
+        lastLocationUpdateAt: now,
+        arrivalPoint: { type: 'Point', coordinates: [15.31, -4.31] },
+      },
+    };
+    bookingRepository.find.mockResolvedValue([uncertainBooking]);
+    jest
+      .spyOn(service as any, 'recalculateAvailableSeatsForTrip')
+      .mockResolvedValue(2);
+    jest
+      .spyOn(service as any, 'touchTripInteraction')
+      .mockResolvedValue(undefined);
+    jest
+      .spyOn(service as any, 'notifyPassengerAboutAutomaticBoardingUncertain')
+      .mockResolvedValue(undefined);
+
+    const result = await service.evaluateAutomaticRideProgressForTrip('trip-1');
+
+    expect(result.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'passenger_boarding_uncertain',
+          bookingId: 'booking-1',
+          boardingUncertainReason:
+            'trip_destination_reached_without_boarding_evidence',
+        }),
+        expect.objectContaining({
+          type: 'driver_arrived_destination',
+          tripId: 'trip-1',
+        }),
+      ]),
+    );
+    expect(uncertainBooking).toEqual(
+      expect.objectContaining({
+        status: BookingStatus.BOARDING_UNCERTAIN,
+        paymentStatus: BookingPaymentStatus.CANCELLED,
+        boardingUncertainDetectedAt: expect.any(Date),
+        boardingUncertainReason:
+          'trip_destination_reached_without_boarding_evidence',
+      }),
+    );
+    expect(walletService.payForBooking).not.toHaveBeenCalled();
+    expect(walletService.awardLoyaltyForBooking).not.toHaveBeenCalled();
+    expect(
+      driverSettlementsService.recordCompletedBookingEarning,
+    ).not.toHaveBeenCalled();
+    expect(tripRepository.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: TripStatus.COMPLETED,
+        completedAt: expect.any(Date),
       }),
     );
   });

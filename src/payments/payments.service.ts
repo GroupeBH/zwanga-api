@@ -20,8 +20,11 @@ import {
   FlexPayCheckTransactionResult,
   FlexPayInitiatePaymentResult,
   FlexPayService,
+  FlexPayTransactionStatus,
 } from './flexpay.service';
 import { formatPaymentLogPayload } from './payment-log.util';
+import { getPayoutFailureMessage, PAYOUT_MESSAGES } from './payout-policy';
+import { hasVerifiedWalletTopUpProof } from './wallet-topup-proof';
 
 export interface InitiatePaymentInput {
   userId?: string | null;
@@ -136,10 +139,10 @@ export class PaymentsService {
       await this.paymentTransactionRepository.save(transaction);
     let flexPayResponse: FlexPayInitiatePaymentResult;
 
-    this.logger.log(
+    this.logger.warn(
       `Payment transaction created: id=${savedTransaction.id}, reference=${savedTransaction.reference}, userId=${savedTransaction.userId ?? 'anonymous'}, purpose=${savedTransaction.purpose}, method=${savedTransaction.method}, amount=${savedTransaction.amount} ${savedTransaction.currency}, related=${savedTransaction.relatedEntityType ?? 'none'}:${savedTransaction.relatedEntityId ?? 'none'}`,
     );
-    this.logger.log(
+    this.logger.warn(
       `Starting FlexPay initiation: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, method=${savedTransaction.method}`,
     );
 
@@ -169,7 +172,7 @@ export class PaymentsService {
       throw error;
     }
 
-    this.logger.log(
+    this.logger.warn(
       `FlexPay initiation received: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, code=${flexPayResponse.code}, orderNumber=${flexPayResponse.orderNumber ?? 'none'}, hasPaymentUrl=${Boolean(flexPayResponse.paymentUrl)}, message=${flexPayResponse.message ?? 'none'}, response=${formatPaymentLogPayload(flexPayResponse.raw)}`,
     );
 
@@ -204,7 +207,7 @@ export class PaymentsService {
     savedTransaction =
       await this.paymentTransactionRepository.save(savedTransaction);
 
-    this.logger.log(
+    this.logger.warn(
       `Payment initialized: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, orderNumber=${savedTransaction.orderNumber ?? 'none'}, status=${savedTransaction.status}, amount=${savedTransaction.amount} ${savedTransaction.currency}, response=${formatPaymentLogPayload(this.formatPaymentLogResponse(savedTransaction))}`,
     );
 
@@ -249,7 +252,7 @@ export class PaymentsService {
     let savedTransaction =
       await this.paymentTransactionRepository.save(transaction);
 
-    this.logger.log(
+    this.logger.warn(
       `Payout transaction created: id=${savedTransaction.id}, reference=${savedTransaction.reference}, userId=${savedTransaction.userId}, amount=${savedTransaction.amount} ${savedTransaction.currency}, related=${savedTransaction.relatedEntityType ?? 'none'}:${savedTransaction.relatedEntityId ?? 'none'}`,
     );
 
@@ -259,21 +262,29 @@ export class PaymentsService {
         phone: input.phone,
         amount: input.amount,
         currency: savedTransaction.currency,
+        description: input.description,
         callbackUrl,
       });
-      this.logger.log(
+      this.logger.warn(
         `FlexPay payout initiation received: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, code=${flexPayResponse.code}, orderNumber=${flexPayResponse.orderNumber ?? 'none'}, message=${flexPayResponse.message ?? 'none'}, response=${formatPaymentLogPayload(flexPayResponse.raw)}`,
       );
 
       savedTransaction.orderNumber = flexPayResponse.orderNumber;
-      savedTransaction.providerStatusCode = flexPayResponse.code;
+      savedTransaction.providerStatusCode =
+        flexPayResponse.status ?? flexPayResponse.code;
       savedTransaction.providerMessage =
-        flexPayResponse.message || 'Paiement chauffeur initialise';
+        flexPayResponse.message || 'Paiement chauffeur initialisé';
       savedTransaction.rawInitiationResponse = flexPayResponse.raw;
+
+      if (flexPayResponse.pending) {
+        savedTransaction.status = PaymentStatus.PENDING;
+        savedTransaction.providerMessage = PAYOUT_MESSAGES.pending;
+        return await this.paymentTransactionRepository.save(savedTransaction);
+      }
 
       if (!this.flexPayService.isSuccessfulCode(flexPayResponse.code)) {
         savedTransaction.status = PaymentStatus.FAILED;
-        savedTransaction.providerMessage = this.getInitiationFailureMessage(
+        savedTransaction.providerMessage = getPayoutFailureMessage(
           flexPayResponse.message,
         );
         await this.paymentTransactionRepository.save(savedTransaction);
@@ -283,20 +294,35 @@ export class PaymentsService {
       savedTransaction.status = PaymentStatus.INITIATED;
       savedTransaction =
         await this.paymentTransactionRepository.save(savedTransaction);
-      this.logger.log(
+      this.logger.warn(
         `Payout initialized: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, orderNumber=${savedTransaction.orderNumber ?? 'none'}, status=${savedTransaction.status}, response=${formatPaymentLogPayload(this.formatPaymentLogResponse(savedTransaction))}`,
       );
       return savedTransaction;
     } catch (error) {
       const errorMessage = this.getErrorMessage(error);
-      savedTransaction.status = PaymentStatus.FAILED;
-      savedTransaction.providerMessage =
-        this.translatePaymentMessage(errorMessage) ?? errorMessage;
+      const deliveryIsUncertain = !(error instanceof BadRequestException);
+      if (
+        deliveryIsUncertain &&
+        savedTransaction.status !== PaymentStatus.FAILED
+      ) {
+        // Un timeout ou une coupure peut arriver apres que FlexPay a recu la
+        // requete. Garder la transaction reservee evite un second decaissement
+        // pendant que le callback ou la reconciliation confirme le resultat.
+        savedTransaction.status = PaymentStatus.PENDING;
+        savedTransaction.providerMessage = PAYOUT_MESSAGES.pending;
+      } else {
+        savedTransaction.status = PaymentStatus.FAILED;
+        savedTransaction.providerMessage =
+          getPayoutFailureMessage(errorMessage);
+      }
       await this.paymentTransactionRepository.save(savedTransaction);
       this.logger.error(
         `Payout initiation failed: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, message=${errorMessage}`,
         this.getErrorStack(error),
       );
+      if (deliveryIsUncertain) {
+        return savedTransaction;
+      }
       throw error;
     }
   }
@@ -305,7 +331,7 @@ export class PaymentsService {
     dto: FlexPayCallbackDto,
   ): Promise<PaymentTransaction> {
     const callback = this.normalizeFlexPayCallback(dto);
-    this.logger.log(
+    this.logger.warn(
       `FlexPay callback received: reference=${callback.reference}, orderNumber=${callback.orderNumber ?? 'none'}, code=${callback.code}, providerReference=${callback.providerReference ?? 'none'}, payload=${formatPaymentLogPayload(callback.raw)}`,
     );
 
@@ -314,11 +340,32 @@ export class PaymentsService {
       callback.orderNumber ?? undefined,
     );
     const previousStatus = transaction.status;
+    if (
+      (this.isPayoutTransaction(transaction) ||
+        transaction.purpose === PaymentPurpose.WALLET_TOP_UP) &&
+      (callback.reference !== transaction.reference ||
+        (transaction.orderNumber &&
+          callback.orderNumber &&
+          transaction.orderNumber !== callback.orderNumber))
+    ) {
+      throw new BadRequestException(
+        'La notification FlexPay ne correspond pas à ce versement',
+      );
+    }
     const callbackSucceeded = this.flexPayService.isSuccessfulCode(
       callback.code,
     );
 
-    this.logger.log(
+    if (
+      transaction.purpose === PaymentPurpose.WALLET_TOP_UP &&
+      !transaction.orderNumber
+    ) {
+      throw new BadRequestException(
+        'La recharge doit posséder un numéro de commande confirmé par FlexPay',
+      );
+    }
+
+    this.logger.warn(
       `FlexPay callback matched payment: paymentId=${transaction.id}, reference=${transaction.reference}, previousStatus=${previousStatus}, orderNumber=${transaction.orderNumber ?? 'none'}`,
     );
 
@@ -329,31 +376,23 @@ export class PaymentsService {
       return transaction;
     }
 
+    if (this.isPayoutTransaction(transaction)) {
+      return this.handleVerifiedPayoutCallback(transaction, callback);
+    }
+
     transaction.providerStatusCode = callback.code;
     transaction.providerReference =
       callback.providerReference ?? transaction.providerReference;
     transaction.orderNumber = callback.orderNumber ?? transaction.orderNumber;
     transaction.rawCallbackPayload = callback.raw;
 
-    if (!callbackSucceeded) {
-      transaction.status = this.isCancellationMessage(callback.message)
-        ? PaymentStatus.CANCELLED
-        : PaymentStatus.FAILED;
-      transaction.providerMessage = this.getCallbackFailureMessage(
-        callback.message,
-      );
-      const savedTransaction =
-        await this.paymentTransactionRepository.save(transaction);
-      this.logger.warn(
-        `Payment marked failed from FlexPay callback: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, previousStatus=${previousStatus}, code=${callback.code}, response=${formatPaymentLogPayload(this.formatPaymentLogResponse(savedTransaction))}`,
-      );
-      return savedTransaction;
-    }
-
-    if (this.shouldVerifyFlexPayCallbacks()) {
+    if (
+      transaction.purpose === PaymentPurpose.WALLET_TOP_UP ||
+      this.shouldVerifyFlexPayCallbacks()
+    ) {
       if (!transaction.orderNumber) {
         transaction.providerMessage =
-          'Notification de paiement recue, mais le numero de commande FlexPay est manquant';
+          'Notification de paiement reçue, mais le numéro de commande FlexPay est manquant';
         const savedTransaction =
           await this.paymentTransactionRepository.save(transaction);
         this.logger.warn(
@@ -370,7 +409,7 @@ export class PaymentsService {
           `FlexPay callback verification failed: paymentId=${transaction.id}, reference=${transaction.reference}, orderNumber=${transaction.orderNumber}, message=${errorMessage}`,
         );
         transaction.providerMessage =
-          'Notification de paiement recue. Verification du paiement en cours';
+          'Notification de paiement reçue. Vérification du paiement en cours';
         const savedTransaction =
           await this.paymentTransactionRepository.save(transaction);
         this.logger.warn(
@@ -380,12 +419,27 @@ export class PaymentsService {
       }
     }
 
+    if (!callbackSucceeded) {
+      transaction.status = this.isCancellationMessage(callback.message)
+        ? PaymentStatus.CANCELLED
+        : PaymentStatus.FAILED;
+      transaction.providerMessage = this.getCallbackFailureMessage(
+        callback.message,
+      );
+      const savedTransaction =
+        await this.paymentTransactionRepository.save(transaction);
+      this.logger.warn(
+        `Payment marked failed from FlexPay callback: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, previousStatus=${previousStatus}, code=${callback.code}, response=${formatPaymentLogPayload(this.formatPaymentLogResponse(savedTransaction))}`,
+      );
+      return savedTransaction;
+    }
+
     transaction.status = PaymentStatus.SUCCEEDED;
-    transaction.providerMessage = 'Paiement confirme avec succes';
+    transaction.providerMessage = 'Paiement confirmé avec succès';
     transaction.paidAt = transaction.paidAt ?? new Date();
     const savedTransaction =
       await this.paymentTransactionRepository.save(transaction);
-    this.logger.log(
+    this.logger.warn(
       `Payment confirmed from FlexPay callback: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, previousStatus=${previousStatus}, status=${savedTransaction.status}, response=${formatPaymentLogPayload(this.formatPaymentLogResponse(savedTransaction))}`,
     );
     return savedTransaction;
@@ -395,19 +449,26 @@ export class PaymentsService {
     orderNumber: string,
     userId?: string,
   ): Promise<PaymentTransaction> {
-    this.logger.log(
+    this.logger.warn(
       `Payment status check requested: orderNumber=${orderNumber}, userId=${userId ?? 'none'}`,
     );
     const transaction = await this.findTransactionByOrderNumber(
       orderNumber,
       userId,
     );
-    this.logger.log(
+    this.logger.warn(
       `Payment status check matched payment: paymentId=${transaction.id}, reference=${transaction.reference}, currentStatus=${transaction.status}`,
     );
 
-    if (this.isTerminalPaymentStatus(transaction.status)) {
-      this.logger.log(
+    const unverifiedLegacyTopUp =
+      transaction.purpose === PaymentPurpose.WALLET_TOP_UP &&
+      transaction.status === PaymentStatus.SUCCEEDED &&
+      !hasVerifiedWalletTopUpProof(transaction);
+    if (
+      this.isTerminalPaymentStatus(transaction.status) &&
+      !unverifiedLegacyTopUp
+    ) {
+      this.logger.warn(
         `Payment status check served from local terminal state: paymentId=${transaction.id}, status=${transaction.status}, response=${formatPaymentLogPayload(this.formatPaymentLogResponse(transaction))}`,
       );
       return transaction;
@@ -463,13 +524,28 @@ export class PaymentsService {
   }
 
   getClientPaymentMessage(
-    transaction: Pick<
-      PaymentTransaction,
-      'status' | 'method' | 'paymentUrl' | 'providerMessage'
-    > | null,
+    transaction:
+      | (Pick<
+          PaymentTransaction,
+          'status' | 'method' | 'paymentUrl' | 'providerMessage'
+        > &
+          Partial<Pick<PaymentTransaction, 'purpose' | 'orderNumber'>>)
+      | null,
   ): string | null {
     if (!transaction) {
       return null;
+    }
+
+    if (this.isPayoutTransaction(transaction)) {
+      if (transaction.status === PaymentStatus.SUCCEEDED)
+        return 'Zwanga a versé vos gains sur votre compte Mobile Money.';
+      if (transaction.status === PaymentStatus.CANCELLED)
+        return 'Le versement a été annulé.';
+      if (transaction.status === PaymentStatus.FAILED)
+        return getPayoutFailureMessage(transaction.providerMessage);
+      return transaction.orderNumber
+        ? PAYOUT_MESSAGES.pending
+        : PAYOUT_MESSAGES.review;
     }
 
     const translatedProviderMessage = this.translatePaymentMessage(
@@ -481,19 +557,19 @@ export class PaymentsService {
 
     switch (transaction.status) {
       case PaymentStatus.SUCCEEDED:
-        return 'Paiement confirme avec succes';
+        return 'Paiement confirmé avec succès';
       case PaymentStatus.FAILED:
-        return 'Le paiement a echoue';
+        return 'Le paiement a échoué';
       case PaymentStatus.CANCELLED:
-        return 'Le paiement a ete annule';
+        return 'Le paiement a été annulé';
       case PaymentStatus.INITIATED:
         if (transaction.paymentUrl) {
           return 'Redirection vers la page de paiement en cours';
         }
         if (transaction.method === PaymentMethod.MOBILE_MONEY) {
-          return 'Demande de paiement envoyee. Veuillez valider sur votre telephone';
+          return 'Demande de paiement envoyée. Veuillez valider sur votre téléphone';
         }
-        return 'Paiement initialise. Verification en cours';
+        return 'Paiement initialisé. Vérification en cours';
       case PaymentStatus.PENDING:
       default:
         return 'Paiement en attente de confirmation';
@@ -587,7 +663,7 @@ export class PaymentsService {
 
     if (!code || !reference) {
       throw new BadRequestException(
-        'Le callback FlexPay doit contenir code et reference',
+        'Le callback FlexPay doit contenir code et référence',
       );
     }
 
@@ -605,17 +681,19 @@ export class PaymentsService {
     transaction: PaymentTransaction,
   ): Promise<PaymentTransaction> {
     if (!transaction.orderNumber) {
-      throw new BadRequestException('Le numero de commande FlexPay est requis');
+      throw new BadRequestException('Le numéro de commande FlexPay est requis');
     }
 
-    this.logger.log(
+    this.logger.warn(
       `Checking FlexPay transaction: paymentId=${transaction.id}, reference=${transaction.reference}, orderNumber=${transaction.orderNumber}, currentStatus=${transaction.status}`,
     );
 
-    const checkResult = await this.flexPayService.checkTransaction(
-      transaction.orderNumber,
-    );
-    this.logger.log(
+    const checkResult = this.isPayoutTransaction(transaction)
+      ? await this.flexPayService.checkPayoutTransaction(
+          transaction.orderNumber,
+        )
+      : await this.flexPayService.checkTransaction(transaction.orderNumber);
+    this.logger.warn(
       `FlexPay check result received: paymentId=${transaction.id}, reference=${transaction.reference}, orderNumber=${transaction.orderNumber}, response=${formatPaymentLogPayload(checkResult.raw)}`,
     );
 
@@ -626,6 +704,9 @@ export class PaymentsService {
     transaction: PaymentTransaction,
     checkResult: FlexPayCheckTransactionResult,
   ): Promise<PaymentTransaction> {
+    if (this.isPayoutTransaction(transaction)) {
+      return this.applyFlexPayPayoutCheckResult(transaction, checkResult);
+    }
     const previousStatus = transaction.status;
     transaction.providerStatusCode =
       checkResult.transaction?.status ??
@@ -658,6 +739,19 @@ export class PaymentsService {
       return savedTransaction;
     }
 
+    if (
+      transaction.purpose === PaymentPurpose.WALLET_TOP_UP &&
+      (!providerTransaction.reference?.trim() ||
+        !providerTransaction.orderNumber?.trim() ||
+        providerTransaction.orderNumber.trim() !== transaction.orderNumber ||
+        providerTransaction.amount == null ||
+        !providerTransaction.currency?.trim())
+    ) {
+      throw new BadRequestException(
+        'La recharge nécessite une confirmation FlexPay complète du montant et de la devise',
+      );
+    }
+
     const normalizedProviderReference = providerTransaction.reference?.trim();
     const normalizedTransactionReference = transaction.reference?.trim();
     const normalizedOrderNumber =
@@ -677,10 +771,12 @@ export class PaymentsService {
           `FlexPay check reference mismatch: paymentId=${transaction.id}, expectedReference=${transaction.reference}, providerReference=${providerTransaction.reference}, orderNumber=${providerTransaction.orderNumber ?? transaction.orderNumber ?? 'none'}`,
         );
         throw new BadRequestException(
-          'La reference FlexPay ne correspond pas a cette transaction',
+          'La référence FlexPay ne correspond pas à cette transaction',
         );
       }
     }
+
+    this.assertProviderTransactionMatches(transaction, providerTransaction);
 
     const providerTransactionStatus =
       providerTransaction.status ?? providerTransaction.code;
@@ -690,11 +786,11 @@ export class PaymentsService {
 
     if (this.flexPayService.isSuccessfulTransaction(providerTransaction)) {
       transaction.status = PaymentStatus.SUCCEEDED;
-      transaction.providerMessage = 'Paiement confirme avec succes';
+      transaction.providerMessage = 'Paiement confirmé avec succès';
       transaction.paidAt = transaction.paidAt ?? new Date();
       const savedTransaction =
         await this.paymentTransactionRepository.save(transaction);
-      this.logger.log(
+      this.logger.warn(
         `Payment confirmed from FlexPay check: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, previousStatus=${previousStatus}, status=${savedTransaction.status}, providerStatus=${providerTransactionStatus}, response=${formatPaymentLogPayload(this.formatPaymentLogResponse(savedTransaction))}`,
       );
       return savedTransaction;
@@ -718,10 +814,91 @@ export class PaymentsService {
 
     const savedTransaction =
       await this.paymentTransactionRepository.save(transaction);
-    this.logger.log(
+    this.logger.warn(
       `Payment updated from FlexPay check: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, previousStatus=${previousStatus}, status=${savedTransaction.status}, providerStatus=${providerTransactionStatus ?? 'none'}, response=${formatPaymentLogPayload(this.formatPaymentLogResponse(savedTransaction))}`,
     );
     return savedTransaction;
+  }
+
+  private isPayoutTransaction(transaction: { purpose?: string }): boolean {
+    return (
+      transaction.purpose === PaymentPurpose.DRIVER_PAYOUT ||
+      transaction.purpose === PaymentPurpose.WALLET_PAYOUT ||
+      transaction.purpose === PaymentPurpose.REFERRAL_PAYOUT
+    );
+  }
+
+  private async handleVerifiedPayoutCallback(
+    transaction: PaymentTransaction,
+    callback: NormalizedFlexPayCallback,
+  ): Promise<PaymentTransaction> {
+    if (transaction.status === PaymentStatus.SUCCEEDED) return transaction;
+    transaction.rawCallbackPayload = callback.raw;
+    transaction.providerMessage = PAYOUT_MESSAGES.pending;
+    const orderNumber = transaction.orderNumber ?? callback.orderNumber;
+    if (orderNumber) {
+      try {
+        const result =
+          await this.flexPayService.checkPayoutTransaction(orderNumber);
+        transaction.rawCheckResponse = result.raw;
+        if (result.transaction) {
+          // Do not persist an order number supplied only by an unverified webhook.
+          return await this.applyFlexPayPayoutCheckResult(
+            { ...transaction, orderNumber },
+            result,
+          );
+        }
+      } catch {
+        this.logger.warn(
+          `Payout callback verification pending: reference=${transaction.reference}`,
+        );
+      }
+    }
+    return this.paymentTransactionRepository.save(transaction);
+  }
+
+  private async applyFlexPayPayoutCheckResult(
+    transaction: PaymentTransaction,
+    checkResult: FlexPayCheckTransactionResult,
+  ): Promise<PaymentTransaction> {
+    if (transaction.status === PaymentStatus.SUCCEEDED) return transaction;
+    transaction.rawCheckResponse = checkResult.raw;
+    const provider = checkResult.transaction;
+    transaction.providerStatusCode = provider?.status ?? checkResult.code;
+    transaction.providerMessage = PAYOUT_MESSAGES.pending;
+    if (!provider) return this.paymentTransactionRepository.save(transaction);
+
+    // Payout checks omit amount/currency in v1.03, so both identifiers must match.
+    if (
+      !provider.reference?.trim() ||
+      provider.reference.trim() !== transaction.reference ||
+      !provider.orderNumber?.trim() ||
+      provider.orderNumber.trim() !== transaction.orderNumber
+    ) {
+      throw new BadRequestException(
+        'La référence FlexPay ne correspond pas à ce versement',
+      );
+    }
+    this.assertProviderTransactionMatches(transaction, provider);
+    if (checkResult.code === '0' && provider.status === '0') {
+      transaction.status = PaymentStatus.SUCCEEDED;
+      transaction.providerReference =
+        provider.providerReference ?? transaction.providerReference;
+      transaction.providerMessage = 'Versement confirmé avec succès';
+      transaction.paidAt = transaction.paidAt ?? new Date();
+    } else if (
+      ['0', '1'].includes(checkResult.code) &&
+      provider.status === '1'
+    ) {
+      transaction.status = this.isCancellationMessage(checkResult.message)
+        ? PaymentStatus.CANCELLED
+        : PaymentStatus.FAILED;
+      transaction.providerMessage = getPayoutFailureMessage(
+        checkResult.message,
+      );
+    }
+    // A missing transaction, unknown status or inconsistent result is not a rejection.
+    return this.paymentTransactionRepository.save(transaction);
   }
 
   private async findTransactionByReferenceOrOrderNumber(
@@ -774,7 +951,7 @@ export class PaymentsService {
   private ensurePaymentInputIsUsable(input: InitiatePaymentInput): void {
     if (input.method === PaymentMethod.MOBILE_MONEY && !input.phone?.trim()) {
       throw new BadRequestException(
-        'Le numero de telephone est requis pour payer par Mobile Money',
+        'Le numéro de téléphone est requis pour payer par Mobile Money',
       );
     }
 
@@ -794,7 +971,7 @@ export class PaymentsService {
 
     if (!input.phone?.trim()) {
       throw new BadRequestException(
-        'Le numero de telephone est requis pour le paiement chauffeur',
+        'Le numéro de téléphone est requis pour le paiement chauffeur',
       );
     }
 
@@ -804,6 +981,50 @@ export class PaymentsService {
 
     if (!input.currency?.trim()) {
       throw new BadRequestException('La devise du paiement est requise');
+    }
+  }
+
+  private assertProviderTransactionMatches(
+    transaction: PaymentTransaction,
+    providerTransaction: FlexPayTransactionStatus,
+  ): void {
+    const providerOrderNumber = providerTransaction.orderNumber?.trim();
+    if (
+      providerOrderNumber &&
+      transaction.orderNumber &&
+      providerOrderNumber !== transaction.orderNumber
+    ) {
+      throw new BadRequestException(
+        'Le numéro de commande FlexPay ne correspond pas à cette transaction',
+      );
+    }
+
+    const storedAmount = Number(transaction.amount);
+    if (
+      providerTransaction.amount !== null &&
+      Number.isFinite(storedAmount) &&
+      storedAmount > 0
+    ) {
+      const providerAmount = Number(providerTransaction.amount);
+      if (
+        !Number.isFinite(providerAmount) ||
+        Math.round(providerAmount * 100) !== Math.round(storedAmount * 100)
+      ) {
+        throw new BadRequestException(
+          'Le montant retourné par FlexPay ne correspond pas à cette transaction',
+        );
+      }
+    }
+
+    const providerCurrency = providerTransaction.currency?.trim().toUpperCase();
+    if (
+      providerCurrency &&
+      transaction.currency?.trim() &&
+      providerCurrency !== transaction.currency.trim().toUpperCase()
+    ) {
+      throw new BadRequestException(
+        'La devise retournée par FlexPay ne correspond pas à cette transaction',
+      );
     }
   }
 
@@ -864,7 +1085,10 @@ export class PaymentsService {
 
   private shouldVerifyFlexPayCallbacks(): boolean {
     const value = this.configService.get<string>('FLEXPAY_VERIFY_CALLBACKS');
-    return value?.toLowerCase() === 'true';
+    // Les callbacks transportent un statut, pas une preuve cryptographique.
+    // La verification cote FlexPay est donc active par defaut et ne peut etre
+    // desactivee que volontairement (tests/sandbox controles).
+    return value?.trim().toLowerCase() !== 'false';
   }
 
   private joinUrl(...parts: string[]): string {
@@ -916,30 +1140,30 @@ export class PaymentsService {
     }
 
     if (method === PaymentMethod.MOBILE_MONEY) {
-      return 'Demande de paiement envoyee. Veuillez valider sur votre telephone';
+      return 'Demande de paiement envoyée. Veuillez valider sur votre téléphone';
     }
 
     return (
       this.translatePaymentMessage(rawMessage) ??
-      'Paiement initialise avec succes'
+      'Paiement initialisé avec succès'
     );
   }
 
   private getInitiationFailureMessage(rawMessage?: string | null): string {
     if (this.looksLikeFlexPayTokenError(rawMessage)) {
-      return 'Le service de paiement est momentanement indisponible';
+      return 'Le service de paiement est momentanément indisponible';
     }
 
     return (
       this.translatePaymentMessage(rawMessage) ??
-      'La demande de paiement a ete refusee'
+      'La demande de paiement a été refusée'
     );
   }
 
   private getCheckFailureMessage(rawMessage?: string | null): string {
     return (
       this.translatePaymentMessage(rawMessage) ??
-      'Verification du paiement impossible pour le moment'
+      'Vérification du paiement impossible pour le moment'
     );
   }
 
@@ -949,13 +1173,13 @@ export class PaymentsService {
       return translatedMessage;
     }
 
-    return 'Le paiement a ete annule ou a echoue. Aucun montant confirme.';
+    return 'Le paiement a été annulé ou a échoué. Aucun montant confirmé.';
   }
 
   private getMissingTransactionMessage(rawMessage?: string | null): string {
     return (
       this.translatePaymentMessage(rawMessage) ??
-      "Aucune transaction de paiement n'a ete trouvee"
+      "Aucune transaction de paiement n'a été trouvée"
     );
   }
 
@@ -984,7 +1208,9 @@ export class PaymentsService {
     );
   }
 
-  private isDeclinedPaymentMessage(message: string | null | undefined): boolean {
+  private isDeclinedPaymentMessage(
+    message: string | null | undefined,
+  ): boolean {
     const normalizedMessage = this.normalizeMessage(message ?? '');
     return (
       normalizedMessage.includes('declined') ||
@@ -1021,11 +1247,11 @@ export class PaymentsService {
       normalizedMessage.includes('transaction envoyee avec succes') &&
       normalizedMessage.includes('push')
     ) {
-      return 'Demande de paiement envoyee. Veuillez valider sur votre telephone';
+      return 'Demande de paiement envoyée. Veuillez valider sur votre téléphone';
     }
 
     if (normalizedMessage.includes('transaction envoyee avec succes')) {
-      return 'Demande de paiement envoyee avec succes';
+      return 'Demande de paiement envoyée avec succès';
     }
 
     if (
@@ -1039,7 +1265,7 @@ export class PaymentsService {
       normalizedMessage.includes('aucune transaction trouvee') ||
       normalizedMessage.includes('no transaction found')
     ) {
-      return "Aucune transaction de paiement n'a ete trouvee";
+      return "Aucune transaction de paiement n'a été trouvée";
     }
 
     if (
@@ -1056,7 +1282,7 @@ export class PaymentsService {
       normalizedMessage.includes('rejetee par l operateur') ||
       normalizedMessage.includes('rejete par l operateur')
     ) {
-      return 'Paiement refuse par l operateur. Aucun montant confirme.';
+      return 'Paiement refusé par l’opérateur. Aucun montant confirmé.';
     }
 
     if (
@@ -1065,7 +1291,7 @@ export class PaymentsService {
       normalizedMessage.includes('insufisant') ||
       normalizedMessage.includes('insuffisant')
     ) {
-      return 'Paiement echoue: solde insuffisant.';
+      return 'Paiement échoué : solde insuffisant.';
     }
 
     if (
@@ -1074,7 +1300,7 @@ export class PaymentsService {
       normalizedMessage.includes('cancelled') ||
       normalizedMessage.includes('canceled')
     ) {
-      return 'Paiement annule. Aucun montant confirme.';
+      return 'Paiement annulé. Aucun montant confirmé.';
     }
 
     if (
@@ -1083,14 +1309,14 @@ export class PaymentsService {
       normalizedMessage.includes('payment failed') ||
       normalizedMessage.includes('transaction failed')
     ) {
-      return 'Le paiement a echoue';
+      return 'Le paiement a échoué';
     }
 
     if (
       normalizedMessage.includes('paiement flexpay confirme') ||
       normalizedMessage.includes('payment confirmed')
     ) {
-      return 'Paiement confirme avec succes';
+      return 'Paiement confirmé avec succès';
     }
 
     if (
@@ -1098,14 +1324,14 @@ export class PaymentsService {
         'callback recu verification flexpay en attente',
       )
     ) {
-      return 'Notification de paiement recue. Verification du paiement en cours';
+      return 'Notification de paiement reçue. Vérification du paiement en cours';
     }
 
     if (
       normalizedMessage.includes('callback flexpay recu sans ordernumber') ||
       normalizedMessage.includes('numero de commande flexpay est manquant')
     ) {
-      return 'Notification de paiement recue, mais le numero de commande FlexPay est manquant';
+      return 'Notification de paiement reçue, mais le numéro de commande FlexPay est manquant';
     }
 
     if (
@@ -1113,7 +1339,7 @@ export class PaymentsService {
       normalizedMessage.includes('payment refused') ||
       normalizedMessage.includes('request refused')
     ) {
-      return 'La demande de paiement a ete refusee';
+      return 'La demande de paiement a été refusée';
     }
 
     return trimmedMessage;

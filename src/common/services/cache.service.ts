@@ -26,6 +26,11 @@ export class CacheService {
   async del(key: string): Promise<void> {
     this.logger.debug(`Deleting cache: ${key}`);
     await this.cacheManager.del(key);
+    // Existing booking/payment mutations invalidate the canonical passenger key.
+    // Always evict its activity projection too, without changing other cache domains.
+    if (/^bookings:passenger:[^:]+$/.test(key)) {
+      await this.cacheManager.del(`${key}:activity`);
+    }
   }
 
   async reset(): Promise<void> {
@@ -60,6 +65,10 @@ export class CacheService {
 
   static getBookingsByPassengerKey(passengerId: string): string {
     return `bookings:passenger:${passengerId}`;
+  }
+
+  static getBookingsByPassengerActivityKey(passengerId: string): string {
+    return `${CacheService.getBookingsByPassengerKey(passengerId)}:activity`;
   }
 
   static getNotificationKey(userId: string): string {

@@ -8,15 +8,38 @@ import {
   IsString,
   IsUUID,
   MaxLength,
+  Max,
+  Matches,
   Min,
 } from 'class-validator';
 import { PaymentMethod } from '../../payments/entities/payment-transaction.entity';
 
+export class RequestWalletWithdrawalDto {
+  @ApiProperty({ minimum: 1, example: 50 })
+  @Type(() => Number)
+  @IsNumber({ maxDecimalPlaces: 2 })
+  @Min(1)
+  @Max(1_000_000)
+  tokens: number;
+
+  @ApiProperty({ example: '243891234567' })
+  @IsString()
+  @Matches(/^\+?243\d{9}$/)
+  phone: string;
+
+  @ApiProperty({
+    description:
+      'UUID stable pour une seule demande de retrait, y compris ses retries.',
+  })
+  @IsUUID('4')
+  idempotencyKey: string;
+}
+
 export class InitiateWalletTopUpDto {
   @ApiProperty({
     minimum: 1,
-    example: 5000,
-    description: 'Montant a convertir en points Zwanga. 1 point = 1 CDF.',
+    example: 50,
+    description: 'Nombre de jetons Zwanga a acheter. 1 jeton = 100 FC/CDF.',
   })
   @Type(() => Number)
   @IsNumber()
@@ -27,7 +50,7 @@ export class InitiateWalletTopUpDto {
     enum: PaymentMethod,
     enumName: 'PaymentMethod',
     example: PaymentMethod.MOBILE_MONEY,
-    description: 'Canal FlexPay utilise pour acheter les points.',
+    description: 'Canal FlexPay utilisé pour acheter les jetons.',
   })
   @IsEnum(PaymentMethod)
   method: PaymentMethod;
@@ -35,7 +58,7 @@ export class InitiateWalletTopUpDto {
   @ApiProperty({
     required: false,
     example: '+243891234567',
-    description: 'Numero Mobile Money du client.',
+    description: 'Numéro Mobile Money du client.',
   })
   @IsString()
   @IsOptional()
@@ -66,7 +89,7 @@ export class TransferWalletPointsDto {
     minimum: 1,
     example: 2500,
     description:
-      'Nombre de points Zwanga a partager avec un autre utilisateur.',
+      'Nombre de jetons Zwanga a partager avec un autre utilisateur.',
   })
   @Type(() => Number)
   @IsNumber()
@@ -84,7 +107,7 @@ export class TransferWalletPointsDto {
 
   @ApiProperty({
     required: false,
-    description: 'Telephone du destinataire deja inscrit sur Zwanga.',
+    description: 'Téléphone du destinataire déjà inscrit sur Zwanga.',
     example: '+243891234567',
   })
   @IsString()
@@ -94,7 +117,7 @@ export class TransferWalletPointsDto {
 
   @ApiProperty({
     required: false,
-    description: 'Email du destinataire deja inscrit sur Zwanga.',
+    description: 'Email du destinataire déjà inscrit sur Zwanga.',
     example: 'client@zwanga.cd',
   })
   @IsEmail()
@@ -104,7 +127,7 @@ export class TransferWalletPointsDto {
 
   @ApiProperty({
     required: false,
-    description: 'Petit message associe au partage de points.',
+    description: 'Petit message associé au partage de jetons.',
     example: 'Pour ton prochain trajet',
   })
   @IsString()

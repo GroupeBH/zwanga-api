@@ -36,6 +36,7 @@ import { User, UserRole } from '../users/entities/user.entity';
 import { CacheService } from '../common/services/cache.service';
 import { WalletLedgerEntry } from '../wallet/entities/wallet-ledger-entry.entity';
 import { WalletService } from '../wallet/wallet.service';
+import { ReferralsService } from '../referrals/referrals.service';
 
 export interface PremiumSubscriptionFeatures {
   isActive: boolean;
@@ -95,6 +96,7 @@ export class SubscriptionsService {
     private cacheService: CacheService,
     private paymentsService: PaymentsService,
     private walletService: WalletService,
+    private referralsService: ReferralsService,
   ) {}
 
   async createTrial(userId: string): Promise<Subscription> {
@@ -103,7 +105,7 @@ export class SubscriptionsService {
     const user = await this.getDriverUser(userId);
     await this.ensureNoActiveSubscription(
       userId,
-      'Vous avez deja un abonnement actif',
+      'Vous avez déjà un abonnement actif',
     );
 
     const trialPeriodDays = this.getNumberConfig('TRIAL_PERIOD_DAYS', 7);
@@ -138,6 +140,9 @@ export class SubscriptionsService {
   }
 
   getPlans() {
+    const tokensAmount = this.getSubscriptionPointsPriceForPlans();
+    const tokensCurrency = this.walletService.getPointsCurrency();
+
     return [
       {
         plan: SubscriptionPlan.PRO,
@@ -149,8 +154,12 @@ export class SubscriptionsService {
         documentFundingLimit: this.getDocumentFundingLimit(),
         documentFundingCurrency: this.getDocumentFundingCurrency(),
         paymentMethods: [...Object.values(PaymentMethod), 'points'],
-        pointsAmount: this.getSubscriptionPointsPriceForPlans(),
-        pointsCurrency: this.walletService.getPointsCurrency(),
+        pointsAmount: tokensAmount,
+        pointsCurrency: tokensCurrency,
+        tokensAmount,
+        tokensCurrency,
+        subscriptionRewardTokens:
+          this.walletService.getSubscriptionPaymentRewardTokens(),
         eligibleDocumentTypes: Object.values(AdministrativeDocumentType),
       },
     ];
@@ -287,7 +296,7 @@ export class SubscriptionsService {
     dto: SubscribeWithPointsDto,
   ): Promise<SubscriptionPaymentResponse> {
     this.logger.log(
-      `Creating subscription with points for user: ${userId} - Plan: ${dto.plan}`,
+      `Creating subscription with tokens for user: ${userId} - Plan: ${dto.plan}`,
     );
 
     const user = await this.getDriverUser(userId);
@@ -301,7 +310,7 @@ export class SubscriptionsService {
     if (activeSubscription) {
       const response = this.buildPaymentResponse(activeSubscription, null);
       this.logSubscriptionPaymentResponse(
-        'Subscription points payment skipped active subscription',
+        'Subscription token payment skipped active subscription',
         response,
       );
       return response;
@@ -355,7 +364,7 @@ export class SubscriptionsService {
       walletEntry,
     );
     this.logSubscriptionPaymentResponse(
-      'Subscription points payment completed',
+      'Subscription token payment completed',
       response,
     );
     return response;
@@ -525,7 +534,7 @@ export class SubscriptionsService {
       Number(dto.amountRequested) > Number(subscription.documentFundingLimit)
     ) {
       throw new BadRequestException(
-        `Le montant demande depasse le plafond de financement (${subscription.documentFundingLimit} ${subscription.documentFundingCurrency})`,
+        `Le montant demandé dépasse le plafond de financement (${subscription.documentFundingLimit} ${subscription.documentFundingCurrency})`,
       );
     }
 
@@ -596,7 +605,7 @@ export class SubscriptionsService {
       !dto.phone?.trim()
     ) {
       throw new BadRequestException(
-        'Le numero de telephone est requis pour payer par Mobile Money',
+        'Le numéro de téléphone est requis pour payer par Mobile Money',
       );
     }
 
@@ -604,7 +613,7 @@ export class SubscriptionsService {
       const normalizedPhone = dto.phone?.trim().replace(/[\s()-]/g, '');
       if (!normalizedPhone || !/^\+243\d{9}$/.test(normalizedPhone)) {
         throw new BadRequestException(
-          'Le numero Mobile Money doit commencer par +243, par exemple +243891234567',
+          'Le numéro Mobile Money doit commencer par +243, par exemple +243891234567',
         );
       }
     }
@@ -613,7 +622,7 @@ export class SubscriptionsService {
       dto.paymentMethod !== PaymentMethod.MOBILE_MONEY &&
       dto.paymentMethod !== PaymentMethod.CARD
     ) {
-      throw new BadRequestException('Methode de paiement non supportee');
+      throw new BadRequestException('Méthode de paiement non prise en charge');
     }
   }
 
@@ -724,7 +733,7 @@ export class SubscriptionsService {
   ): Promise<Subscription> {
     if (String(payment.purpose) !== 'subscription_pro') {
       throw new BadRequestException(
-        'Cette transaction ne correspond pas a un abonnement Pro',
+        'Cette transaction ne correspond pas à un abonnement Pro',
       );
     }
 
@@ -741,17 +750,31 @@ export class SubscriptionsService {
       return subscription;
     }
 
-    throw new NotFoundException('Abonnement lie au paiement introuvable');
+    throw new NotFoundException('Abonnement lié au paiement introuvable');
   }
 
   private async applyPaymentToSubscription(
     subscription: Subscription,
     payment: PaymentTransaction,
   ): Promise<Subscription> {
+    const alreadyActivatedForPayment =
+      subscription.status === SubscriptionStatus.ACTIVE &&
+      subscription.paymentTransactionId === payment.id;
     subscription.paymentReference = payment.reference;
     subscription.paymentTransactionId = payment.id;
 
     if (payment.status === PaymentStatus.SUCCEEDED) {
+      if (alreadyActivatedForPayment) {
+        await this.walletService.awardSubscriptionPaymentTokens(
+          subscription,
+          payment.id,
+        );
+        await this.referralsService.awardSubscriptionReward(
+          subscription,
+          payment,
+        );
+        return subscription;
+      }
       return this.activatePaidSubscription(subscription, payment);
     }
 
@@ -771,6 +794,15 @@ export class SubscriptionsService {
 
     const savedSubscription =
       await this.subscriptionRepository.save(subscription);
+    if (
+      payment.status === PaymentStatus.FAILED ||
+      payment.status === PaymentStatus.CANCELLED
+    ) {
+      await this.referralsService.reverseSubscriptionReward(
+        savedSubscription.id,
+        `Paiement FlexPay ${payment.status}`,
+      );
+    }
     this.logger.log(
       `Subscription payment state saved: subscriptionId=${savedSubscription.id}, paymentId=${payment.id}, paymentStatus=${payment.status}, subscriptionStatus=${savedSubscription.status}`,
     );
@@ -804,6 +836,14 @@ export class SubscriptionsService {
 
     const savedSubscription =
       await this.subscriptionRepository.save(subscription);
+    await this.walletService.awardSubscriptionPaymentTokens(
+      savedSubscription,
+      payment.id,
+    );
+    await this.referralsService.awardSubscriptionReward(
+      savedSubscription,
+      payment,
+    );
     await this.invalidatePremiumCaches();
 
     this.logger.log(
@@ -840,10 +880,11 @@ export class SubscriptionsService {
 
     const savedSubscription =
       await this.subscriptionRepository.save(subscription);
+    await this.walletService.awardSubscriptionPaymentTokens(savedSubscription);
     await this.invalidatePremiumCaches();
 
     this.logger.log(
-      `Points subscription activated: subscriptionId=${savedSubscription.id}, userId=${savedSubscription.userId}, walletEntryId=${walletEntry.id}, endDate=${savedSubscription.endDate.toISOString()}`,
+      `Token subscription activated: subscriptionId=${savedSubscription.id}, userId=${savedSubscription.userId}, walletEntryId=${walletEntry.id}, endDate=${savedSubscription.endDate.toISOString()}`,
     );
 
     return savedSubscription;
@@ -884,7 +925,7 @@ export class SubscriptionsService {
         orderNumber: null,
         status: PaymentStatus.SUCCEEDED,
         statusCode: null,
-        message: 'Abonnement paye avec points Zwanga',
+        message: 'Abonnement payé avec jetons Zwanga',
         paymentUrl: null,
         amount: Math.abs(Number(walletEntry.amount ?? subscription.amount)),
         currency: walletEntry.currency ?? subscription.currency,
@@ -972,7 +1013,7 @@ export class SubscriptionsService {
 
     if (!user.isDriver && user.role !== UserRole.DRIVER) {
       throw new BadRequestException(
-        'Les abonnements premium sont reserves aux conducteurs',
+        'Les abonnements premium sont réservés aux conducteurs',
       );
     }
 
@@ -1022,11 +1063,6 @@ export class SubscriptionsService {
 
     const subscriptionPrice = this.getSubscriptionPrice();
     const subscriptionCurrency = this.getSubscriptionCurrency();
-    const pointsCurrency = this.walletService.getPointsCurrency();
-    if (subscriptionCurrency === pointsCurrency) {
-      return this.roundMoney(subscriptionPrice);
-    }
-
     const pointsPerCurrencyUnit = this.getOptionalFirstNumberConfig([
       `SUBSCRIPTION_POINTS_PER_${subscriptionCurrency}`,
       `ZWANGA_POINTS_PER_${subscriptionCurrency}`,
@@ -1035,8 +1071,9 @@ export class SubscriptionsService {
       return this.roundMoney(subscriptionPrice * pointsPerCurrencyUnit);
     }
 
-    throw new BadRequestException(
-      `Prix en points non configure pour l abonnement ${subscriptionCurrency}/${pointsCurrency}`,
+    return this.walletService.convertMoneyToPoints(
+      subscriptionPrice,
+      subscriptionCurrency,
     );
   }
 
@@ -1074,7 +1111,7 @@ export class SubscriptionsService {
     );
     const hasExplicitProPrice = Boolean(
       this.configService.get<string | number>('SUBSCRIPTION_PRO_PRICE') ||
-        this.configService.get<string | number>('SUBSCRIPTION_PRO_PRICE_USD'),
+      this.configService.get<string | number>('SUBSCRIPTION_PRO_PRICE_USD'),
     );
 
     if (hasLegacyCdfPrice && !hasExplicitProPrice) {

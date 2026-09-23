@@ -6,9 +6,14 @@ import {
   Param,
   Body,
   Request,
+  Query,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { BookingsService } from './bookings.service';
+import { PassengerInterruptionPreviewDto } from './dto/interruption-preview.dto';
+import { HistoryPageQuery } from '../common/history-page';
+import { randomUUID } from 'crypto';
+import { RideDeclarationsService } from '../ride-declarations/ride-declarations.service';
 import { CreateBookingDto, UpdateBookingStatusDto, RejectBookingDto, ConfirmPickupDto, ConfirmDropoffDto, ReportBookingProblemDto, UpdatePassengerLocationDto, UpdateBookingPaymentModeDto } from './dto/booking.dto';
 import { SendWhatsAppNotificationDto } from './dto/send-whatsapp-notification.dto';
 import { Auth } from '../auth/decorators/auth.decorator';
@@ -23,7 +28,15 @@ import {
 @ApiTags('Bookings')
 @Controller('bookings')
 export class BookingsController {
-  constructor(private readonly bookingsService: BookingsService) { }
+  constructor(private readonly bookingsService: BookingsService, private readonly rideDeclarations: RideDeclarationsService) { }
+
+  // Older clients use these URLs. They must obey the same two-party rule.
+  private async declareLegacy(id: string, userId: string, stage: 'pickup' | 'dropoff', actor: 'driver' | 'passenger') {
+    await this.rideDeclarations.declare(id, userId, {
+      eventId: randomUUID(), actorUserId: userId, stage, decision: 'confirm', occurredAt: new Date().toISOString(),
+    }, actor);
+    return this.bookingsService.findOne(id);
+  }
 
   @Post('flexpay/callback')
   @Public()
@@ -40,7 +53,7 @@ export class BookingsController {
   @ApiOperation({
     summary: 'Create a new booking',
     description:
-      "La reservation d'un trajet par un passager ne requiert pas un KYC approuve. Seul un compte suspendu est bloque via l'authentification.",
+      "La réservation de 1 ou 2 places ne requiert pas de KYC approuvé, sauf si le conducteur l'exige. Au-delà de 2 places, le KYC du passager doit être approuvé.",
   })
   async create(@Request() req, @Body() createBookingDto: CreateBookingDto) {
     return this.bookingsService.create(req.user.userId, createBookingDto);
@@ -52,7 +65,7 @@ export class BookingsController {
   @ApiOperation({
     summary: 'Initiate electronic payment for a booking',
     description:
-      "Calcule le montant cote backend a partir du prix du trajet et du nombre de places, puis initialise le paiement FlexPay.",
+      "Disponible uniquement après l'arrivée du passager. Calcule le montant côté backend puis initialise le paiement FlexPay.",
   })
   async initiatePayment(
     @Request() req,
@@ -72,7 +85,7 @@ export class BookingsController {
   @ApiOperation({
     summary: 'Update payment mode for a booking',
     description:
-      'Permet au passager de changer entre paiement electronique, points Zwanga et paiement physique avant la cloture de la reservation.',
+      "Enregistre le moyen choisi sans débiter avant l'arrivée. Après l'arrivée, sélectionner les jetons déclenche le débit si nécessaire.",
   })
   async updatePaymentMode(
     @Request() req,
@@ -106,8 +119,15 @@ export class BookingsController {
   @Auth()
   @SensitiveThrottle(20, 60000)
   @ApiOperation({ summary: 'Get all bookings of the current user' })
-  async findMyBookings(@Request() req) {
-    return this.bookingsService.findAllByPassenger(req.user.userId);
+  async findMyBookings(@Request() req, @Query('scope') scope?: string) {
+    return this.bookingsService.findAllByPassenger(req.user.userId, scope === 'activity');
+  }
+
+  @Get('my-bookings/history')
+  @Auth()
+  @SensitiveThrottle(60, 60000)
+  async history(@Request() req, @Query() query: HistoryPageQuery) {
+    return this.bookingsService.findPassengerHistory(req.user.userId, query);
   }
 
   @Get('trip/:tripId')
@@ -167,7 +187,19 @@ export class BookingsController {
   @ApiOperation({ summary: 'Cancel a booking (passenger or driver before pickup)' })
   async cancel(@Request() req, @Param('id') id: string) {
     await this.bookingsService.cancel(id, req.user.userId);
-    return { message: 'Booking cancelled successfully' };
+    return { message: "Réservation annulée avec succès." };
+  }
+
+  @Post(':id/interruption-request/preview')
+  @Auth()
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({ summary: 'Estimer le montant d’une descente anticipée sans la demander' })
+  async previewTripInterruption(
+    @Request() req,
+    @Param('id') id: string,
+    @Body() dto: PassengerInterruptionPreviewDto,
+  ) {
+    return this.bookingsService.previewPassengerInterruptionFare(id, req.user.userId, dto.coordinates);
   }
 
   @Post(':id/interruption-request')
@@ -265,7 +297,7 @@ export class BookingsController {
   @SensitiveThrottle(20, 60000)
   @ApiOperation({ summary: 'Confirm passenger pickup (driver only)' })
   async confirmPickup(@Request() req, @Param('id') id: string, @Body() dto: ConfirmPickupDto) {
-    return this.bookingsService.confirmPickup(id, req.user.userId);
+    return this.declareLegacy(id, req.user.userId, 'pickup', 'driver');
   }
 
   @Put(':id/confirm-pickup-passenger')
@@ -273,7 +305,7 @@ export class BookingsController {
   @SensitiveThrottle(20, 60000)
   @ApiOperation({ summary: 'Confirm pickup by passenger' })
   async confirmPickupByPassenger(@Request() req, @Param('id') id: string, @Body() dto: ConfirmPickupDto) {
-    return this.bookingsService.confirmPickupByPassenger(id, req.user.userId);
+    return this.declareLegacy(id, req.user.userId, 'pickup', 'passenger');
   }
 
   @Put(':id/confirm-dropoff')
@@ -282,7 +314,7 @@ export class BookingsController {
   @SensitiveThrottle(20, 60000)
   @ApiOperation({ summary: 'Confirm passenger-requested dropoff (driver only)' })
   async confirmDropoff(@Request() req, @Param('id') id: string, @Body() dto: ConfirmDropoffDto) {
-    return this.bookingsService.confirmDropoff(id, req.user.userId);
+    return this.declareLegacy(id, req.user.userId, 'dropoff', 'driver');
   }
 
   @Put(':id/confirm-dropoff-passenger')
@@ -290,7 +322,7 @@ export class BookingsController {
   @SensitiveThrottle(20, 60000)
   @ApiOperation({ summary: 'Request dropoff by passenger' })
   async confirmDropoffByPassenger(@Request() req, @Param('id') id: string, @Body() dto: ConfirmDropoffDto) {
-    return this.bookingsService.confirmDropoffByPassenger(id, req.user.userId, dto);
+    return this.declareLegacy(id, req.user.userId, 'dropoff', 'passenger');
   }
 
   @Post(':id/report-problem')
@@ -325,4 +357,3 @@ export class BookingsController {
     return this.bookingsService.getPassengersLocations(tripId, req.user.userId);
   }
 }
-

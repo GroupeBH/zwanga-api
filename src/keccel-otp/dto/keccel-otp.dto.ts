@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsString, IsNotEmpty, IsOptional, IsNumber, Min, Max } from 'class-validator';
+import { OTP_SMS_MESSAGES } from '../otp-messages';
 
 /**
  * DTO for sending OTP
@@ -15,8 +16,8 @@ export class SendOtpDto {
 
   @ApiPropertyOptional({
     description: 'Custom message template. Use %OTP% placeholder for the OTP code',
-    example: 'Votre code de vérification est : %OTP%',
-    default: 'Votre code est : %OTP%',
+    example: OTP_SMS_MESSAGES.verification,
+    default: OTP_SMS_MESSAGES.default,
   })
   @IsString()
   @IsOptional()

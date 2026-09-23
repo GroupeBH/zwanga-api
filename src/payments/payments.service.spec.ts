@@ -1,4 +1,5 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-return, @typescript-eslint/require-await */
+import { BadGatewayException } from '@nestjs/common';
 import {
   PaymentMethod,
   PaymentStatus,
@@ -17,7 +18,9 @@ describe('PaymentsService', () => {
   };
   let flexPayService: {
     initiatePayment: jest.Mock;
+    initiatePayout: jest.Mock;
     checkTransaction: jest.Mock;
+    checkPayoutTransaction: jest.Mock;
     isSuccessfulCode: jest.Mock;
     isSuccessfulTransaction: jest.Mock;
   };
@@ -37,6 +40,9 @@ describe('PaymentsService', () => {
       get: jest.fn((key: string) => {
         if (key === 'FLEXPAY_CALLBACK_BASE_URL') {
           return 'https://api.zwanga.cd/api/v1';
+        }
+        if (key === 'FLEXPAY_VERIFY_CALLBACKS') {
+          return 'false';
         }
 
         return undefined;
@@ -58,6 +64,7 @@ describe('PaymentsService', () => {
         raw: {},
       }),
       checkTransaction: jest.fn(),
+      checkPayoutTransaction: jest.fn(),
       isSuccessfulCode: jest.fn().mockReturnValue(true),
       isSuccessfulTransaction: jest.fn().mockReturnValue(false),
     };
@@ -94,6 +101,156 @@ describe('PaymentsService', () => {
       'Redirection vers la page de paiement en cours',
     );
   });
+
+  it('verifies cash-redeemable topups even when optional callback verification is disabled', async () => {
+    paymentTransactionRepository.findOne.mockResolvedValue({
+      id: 'topup',
+      purpose: 'wallet_top_up',
+      reference: 'WAL123',
+      orderNumber: 'ORDER',
+      status: PaymentStatus.INITIATED,
+      amount: 5000,
+      currency: 'CDF',
+    });
+    flexPayService.checkTransaction.mockResolvedValue({
+      code: '0',
+      transaction: {
+        reference: 'WAL123',
+        orderNumber: 'ORDER',
+        amount: '5000',
+        currency: 'CDF',
+        status: '0',
+      },
+      raw: {},
+    });
+    flexPayService.isSuccessfulTransaction.mockReturnValue(true);
+    const result = await service.handleFlexPayCallback({
+      code: '0',
+      reference: 'WAL123',
+      orderNumber: 'ORDER',
+    });
+    expect(flexPayService.checkTransaction).toHaveBeenCalledWith('ORDER');
+    expect(result.status).toBe(PaymentStatus.SUCCEEDED);
+  });
+
+  it.each([{ orderNumber: 'OTHER' }, { reference: 'OTHER' }])(
+    'rejects a forged topup identifier %p before provider verification',
+    async (patch) => {
+      paymentTransactionRepository.findOne.mockResolvedValue({
+        id: 'topup',
+        purpose: 'wallet_top_up',
+        reference: 'WAL123',
+        orderNumber: 'ORDER',
+        status: PaymentStatus.INITIATED,
+      });
+      await expect(
+        service.handleFlexPayCallback({
+          code: '0',
+          reference: 'WAL123',
+          orderNumber: 'ORDER',
+          ...patch,
+        }),
+      ).rejects.toThrow('correspond pas');
+      expect(flexPayService.checkTransaction).not.toHaveBeenCalled();
+    },
+  );
+
+  it('does not credit a topup from incomplete provider proof', async () => {
+    paymentTransactionRepository.findOne.mockResolvedValue({
+      id: 'topup',
+      purpose: 'wallet_top_up',
+      reference: 'WAL123',
+      orderNumber: 'ORDER',
+      status: PaymentStatus.INITIATED,
+      amount: 5000,
+      currency: 'CDF',
+    });
+    flexPayService.checkTransaction.mockResolvedValue({
+      code: '0',
+      transaction: {
+        reference: 'WAL123',
+        orderNumber: 'ORDER',
+        amount: null,
+        currency: null,
+        status: '0',
+      },
+      raw: {},
+    });
+    flexPayService.isSuccessfulTransaction.mockReturnValue(true);
+    const result = await service.handleFlexPayCallback({
+      code: '0',
+      reference: 'WAL123',
+      orderNumber: 'ORDER',
+    });
+    expect(result.status).toBe(PaymentStatus.INITIATED);
+  });
+
+  it('rechecks an old succeeded topup lacking verification instead of trusting its terminal status', async () => {
+    paymentTransactionRepository.findOne.mockResolvedValue({
+      id: 'topup',
+      userId: 'user',
+      purpose: 'wallet_top_up',
+      relatedEntityType: 'wallet_top_up',
+      relatedEntityId: 'user',
+      reference: 'WAL123',
+      orderNumber: 'ORDER',
+      status: PaymentStatus.SUCCEEDED,
+      amount: 5000,
+      currency: 'CDF',
+      rawCheckResponse: null,
+    });
+    const proof = {
+      code: '0',
+      transaction: {
+        reference: 'WAL123',
+        orderNumber: 'ORDER',
+        amount: '5000',
+        currency: 'CDF',
+        status: '0',
+      },
+    };
+    flexPayService.checkTransaction.mockResolvedValue({ ...proof, raw: proof });
+    flexPayService.isSuccessfulTransaction.mockReturnValue(true);
+    const result = await service.checkPaymentStatus('ORDER', 'user');
+    expect(flexPayService.checkTransaction).toHaveBeenCalledWith('ORDER');
+    expect(result.rawCheckResponse).toEqual(proof);
+  });
+
+  it.each(['wallet_payout', 'driver_payout', 'referral_payout'])(
+    'uses mandatory payout verification for %s callbacks',
+    async (purpose) => {
+      paymentTransactionRepository.findOne.mockResolvedValue({
+        id: 'payout',
+        purpose,
+        reference: 'PAY123',
+        orderNumber: 'ORDER',
+        status: PaymentStatus.INITIATED,
+        amount: 5000,
+        currency: 'CDF',
+      });
+      flexPayService.checkPayoutTransaction.mockResolvedValue({
+        code: '0',
+        transaction: {
+          reference: 'PAY123',
+          orderNumber: 'ORDER',
+          amount: null,
+          currency: null,
+          status: '0',
+        },
+        raw: {},
+      });
+      const result = await service.handleFlexPayCallback({
+        code: '0',
+        reference: 'PAY123',
+        orderNumber: 'ORDER',
+      });
+      expect(flexPayService.checkPayoutTransaction).toHaveBeenCalledWith(
+        'ORDER',
+      );
+      expect(flexPayService.checkTransaction).not.toHaveBeenCalled();
+      expect(result.status).toBe(PaymentStatus.SUCCEEDED);
+    },
+  );
 
   it('returns the current user payment transactions from newest to oldest', async () => {
     const transactions = [
@@ -203,7 +360,7 @@ describe('PaymentsService', () => {
     expect(payment.status).toBe(PaymentStatus.FAILED);
     expect(payment.providerStatusCode).toBe('4');
     expect(payment.providerMessage).toBe(
-      'Paiement refuse par l operateur. Aucun montant confirme.',
+      'Paiement refusé par l’opérateur. Aucun montant confirmé.',
     );
   });
 
@@ -245,11 +402,11 @@ describe('PaymentsService', () => {
     );
 
     expect(payment.status).toBe(PaymentStatus.SUCCEEDED);
-    expect(payment.providerMessage).toBe('Paiement confirme avec succes');
+    expect(payment.providerMessage).toBe('Paiement confirmé avec succès');
     expect(payment.paidAt).toBeInstanceOf(Date);
   });
 
-  it('confirms a successful FlexPay callback locally without a status check by default', async () => {
+  it('confirms a successful callback locally when verification is explicitly disabled', async () => {
     paymentTransactionRepository.findOne.mockResolvedValue({
       id: 'payment-1',
       userId: 'user-1',
@@ -271,7 +428,7 @@ describe('PaymentsService', () => {
     });
 
     expect(payment.status).toBe(PaymentStatus.SUCCEEDED);
-    expect(payment.providerMessage).toBe('Paiement confirme avec succes');
+    expect(payment.providerMessage).toBe('Paiement confirmé avec succès');
     expect(payment.providerReference).toBe('7KI81020PHS');
     expect(payment.paidAt).toBeInstanceOf(Date);
     expect(flexPayService.checkTransaction).not.toHaveBeenCalled();
@@ -301,8 +458,57 @@ describe('PaymentsService', () => {
 
     expect(payment.status).toBe(PaymentStatus.CANCELLED);
     expect(payment.providerMessage).toBe(
-      'Paiement annule. Aucun montant confirme.',
+      'Paiement annulé. Aucun montant confirmé.',
     );
+  });
+
+  it('verifies a failed callback with FlexPay by default before releasing money', async () => {
+    configService.get.mockImplementation((key: string) => {
+      if (key === 'FLEXPAY_CALLBACK_BASE_URL') {
+        return 'https://api.zwanga.cd/api/v1';
+      }
+      return undefined;
+    });
+    flexPayService.isSuccessfulCode.mockImplementation((code) => code === '0');
+    paymentTransactionRepository.findOne.mockResolvedValue({
+      id: 'payment-1',
+      userId: 'driver-1',
+      status: PaymentStatus.INITIATED,
+      reference: 'DRV123',
+      orderNumber: 'PAYOUT123',
+      providerReference: null,
+      providerStatusCode: null,
+      providerMessage: null,
+      amount: 9500,
+      currency: 'CDF',
+      rawCallbackPayload: null,
+      rawCheckResponse: null,
+      paidAt: null,
+    });
+    flexPayService.checkTransaction.mockResolvedValue({
+      code: '0',
+      message: 'Operation annulee par le client',
+      transaction: {
+        orderNumber: 'PAYOUT123',
+        reference: 'DRV123',
+        status: '1',
+        amount: '9500',
+        amountCustomer: '9500',
+        currency: 'CDF',
+        createdAt: '2026-08-26 10:00:00',
+      },
+      raw: { Code: '0' },
+    });
+
+    const payment = await service.handleFlexPayCallback({
+      code: '1',
+      message: 'Operation annulee par le client',
+      reference: 'DRV123',
+      orderNumber: 'PAYOUT123',
+    });
+
+    expect(flexPayService.checkTransaction).toHaveBeenCalledWith('PAYOUT123');
+    expect(payment.status).toBe(PaymentStatus.CANCELLED);
   });
 
   it('returns terminal payment status locally without calling FlexPay again', async () => {
@@ -361,7 +567,7 @@ describe('PaymentsService', () => {
     await expect(
       service.checkPaymentStatus('r2npySEnChn6243831919710', 'user-1'),
     ).rejects.toThrow(
-      'La reference FlexPay ne correspond pas a cette transaction',
+      'La référence FlexPay ne correspond pas à cette transaction',
     );
   });
 
@@ -389,5 +595,30 @@ describe('PaymentsService', () => {
     );
     expect(payout.status).toBe(PaymentStatus.INITIATED);
     expect(payout.orderNumber).toBe('PAYOUT123');
+  });
+
+  it('keeps a payout pending when FlexPay delivery is uncertain', async () => {
+    flexPayService.initiatePayout.mockRejectedValue(
+      new BadGatewayException('Paiement chauffeur FlexPay indisponible'),
+    );
+
+    const payout = await service.initiatePayout({
+      userId: 'driver-1',
+      purpose: 'driver_payout',
+      relatedEntityType: 'driver_payout',
+      relatedEntityId: 'payout-1',
+      phone: '+243891234567',
+      amount: 9500,
+      currency: 'CDF',
+      description: 'Paiement chauffeur Zwanga payout-1',
+      callbackUrl:
+        'https://api.zwanga.cd/api/v1/driver-settlements/payouts/flexpay/callback',
+      referencePrefix: 'DRV',
+    });
+
+    expect(payout.status).toBe(PaymentStatus.PENDING);
+    expect(payout.providerMessage).toContain(
+      'Aucun paiement ne vous est demandé',
+    );
   });
 });

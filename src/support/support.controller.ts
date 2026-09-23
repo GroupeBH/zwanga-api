@@ -56,7 +56,7 @@ export class SupportController {
   @Get('config')
   @Public()
   @SensitiveThrottle(60, 60000)
-  @ApiOperation({ summary: 'Recuperer la configuration publique du support center' })
+  @ApiOperation({ summary: 'Récupérer la configuration publique du support center' })
   async getSupportConfig() {
     return this.supportService.getSupportConfig();
   }
@@ -64,7 +64,7 @@ export class SupportController {
   @Get('faq/:id')
   @Public()
   @SensitiveThrottle(60, 60000)
-  @ApiOperation({ summary: 'Recuperer une FAQ depuis le support center' })
+  @ApiOperation({ summary: 'Récupérer une FAQ depuis le support center' })
   async getFaq(@Param('id') id: string) {
     return this.supportService.getFaq(id);
   }
@@ -73,7 +73,7 @@ export class SupportController {
   @Auth()
   @Roles(UserRole.ADMIN)
   @SensitiveThrottle(20, 60000)
-  @ApiOperation({ summary: 'Creer une entree FAQ (Admin)' })
+  @ApiOperation({ summary: 'Créer une entrée FAQ (Admin)' })
   async createFaq(@Body() dto: CreateFaqEntryDto) {
     return this.supportService.createFaq(dto);
   }
@@ -82,7 +82,7 @@ export class SupportController {
   @Auth()
   @Roles(UserRole.ADMIN)
   @SensitiveThrottle(20, 60000)
-  @ApiOperation({ summary: 'Mettre a jour une entree FAQ (Admin)' })
+  @ApiOperation({ summary: 'Mettre à jour une entrée FAQ (Admin)' })
   async updateFaq(@Param('id') id: string, @Body() dto: UpdateFaqEntryDto) {
     return this.supportService.updateFaq(id, dto);
   }
@@ -91,7 +91,7 @@ export class SupportController {
   @Auth()
   @Roles(UserRole.ADMIN)
   @SensitiveThrottle(20, 60000)
-  @ApiOperation({ summary: 'Supprimer une entree FAQ (Admin)' })
+  @ApiOperation({ summary: 'Supprimer une entrée FAQ (Admin)' })
   async removeFaq(@Param('id') id: string) {
     return this.supportService.removeFaq(id);
   }
@@ -103,7 +103,7 @@ export class SupportController {
   @Post('conversations')
   @Auth()
   @SensitiveThrottle(10, 60000)
-  @ApiOperation({ summary: 'Creer une conversation avec le support' })
+  @ApiOperation({ summary: 'Créer une conversation avec le support' })
   async createConversation(
     @Request() req,
     @Body() dto: CreateSupportConversationDto,
@@ -133,7 +133,7 @@ export class SupportController {
   @Get('conversations/:id/messages')
   @Auth()
   @SensitiveThrottle(60, 60000)
-  @ApiOperation({ summary: 'Lister les messages d une conversation de support' })
+  @ApiOperation({ summary: 'Lister les messages d’une conversation de support' })
   async getMessages(@Request() req, @Param('id') id: string) {
     return this.supportService.getSupportConversationMessages(
       id,
@@ -160,7 +160,7 @@ export class SupportController {
   @Post('tickets')
   @Auth()
   @SensitiveThrottle(10, 60000)
-  @ApiOperation({ summary: 'Creer un ticket de support' })
+  @ApiOperation({ summary: 'Créer un ticket de support' })
   async createTicket(@Request() req, @Body() dto: CreateSupportTicketDto) {
     return this.supportService.createTicket(req.user.userId, dto);
   }
@@ -179,7 +179,7 @@ export class SupportController {
   @Get('tickets/:id')
   @Auth()
   @SensitiveThrottle(30, 60000)
-  @ApiOperation({ summary: 'Recuperer un ticket de support' })
+  @ApiOperation({ summary: 'Récupérer un ticket de support' })
   async getMyTicket(@Request() req, @Param('id') id: string) {
     return this.supportService.getUserTicket(req.user.userId, id);
   }
@@ -229,7 +229,7 @@ export class SupportController {
   @Auth()
   @Roles(UserRole.ADMIN)
   @SensitiveThrottle(60, 60000)
-  @ApiOperation({ summary: 'Recuperer un ticket (Admin)' })
+  @ApiOperation({ summary: 'Récupérer un ticket (Admin)' })
   async getAdminTicket(@Param('id') id: string) {
     return this.supportService.getAdminTicket(id);
   }
@@ -264,7 +264,7 @@ export class SupportController {
   @Auth()
   @Roles(UserRole.ADMIN)
   @SensitiveThrottle(30, 60000)
-  @ApiOperation({ summary: 'Mettre a jour le statut d un ticket (Admin)' })
+  @ApiOperation({ summary: 'Mettre à jour le statut d’un ticket (Admin)' })
   async updateTicketStatus(
     @Request() req,
     @Param('id') id: string,

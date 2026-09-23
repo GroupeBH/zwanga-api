@@ -27,21 +27,20 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   }
 
   async validate(payload: JwtPayload) {
-    console.log('this user payload is', payload);
     try {
       // Vérifier que l'utilisateur existe toujours et est actif
       const user = await this.usersService.findOne(payload.sub);
 
       if (!user) {
-        throw new UnauthorizedException('User not found');
+        throw new UnauthorizedException("Utilisateur introuvable.");
       }
 
       if (user.status === UserStatus.SUSPENDED) {
-        throw new UnauthorizedException('Account is suspended');
+        throw new UnauthorizedException("Votre compte est suspendu. Contactez l’assistance.");
       }
 
       if (user.status === UserStatus.INACTIVE || !user.isActive) {
-        throw new UnauthorizedException('Account is deactivated');
+        throw new UnauthorizedException("Votre compte est désactivé. Contactez l’assistance.");
       }
 
       // Retourner les informations qui seront attachées à req.user
@@ -50,9 +49,10 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
         email: user.email || user.phone,
         phone: user.phone,
         role: user.role,
+        passwordChangeRequired: user.passwordChangeRequired,
       };
     } catch (error) {
-      throw new UnauthorizedException('Invalid token');
+      throw new UnauthorizedException("Votre session est invalide ou a expiré. Reconnectez-vous.");
     }
   }
 }

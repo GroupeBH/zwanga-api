@@ -17,6 +17,8 @@ import { GoogleMapsModule } from '../google-maps/google-maps.module';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
 import { WeatherModule } from '../weather/weather.module';
 import { BookingsModule } from '../bookings/bookings.module';
+import { DriverSettlementsModule } from '../driver-settlements/driver-settlements.module';
+import { WalletModule } from '../wallet/wallet.module';
 import {
   DriverTripInterruptionConfirmation,
   DriverTripInterruptionRequest,
@@ -40,6 +42,8 @@ import {
       DriverTripInterruptionConfirmation,
     ]),
     BookingsModule,
+    DriverSettlementsModule,
+    WalletModule,
     NotificationsModule,
     MessagingModule,
     GoogleMapsModule,

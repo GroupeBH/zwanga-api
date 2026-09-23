@@ -10,6 +10,32 @@ import { RepairDriverPickupArrivedAt1780000009000 } from './1780000009000-Repair
 import { AddTripInterruptionRequests1780000010000 } from './1780000010000-AddTripInterruptionRequests';
 import { AddDistanceBasedBookingFares1780000011000 } from './1780000011000-AddDistanceBasedBookingFares';
 import { AddWalletTransfersAndSubscriptionPayments1780000012000 } from './1780000012000-AddWalletTransfersAndSubscriptionPayments';
+import { AddGenderToUsers1780000013000 } from './1780000013000-AddGenderToUsers';
+import { AddVehicleTypes1780000014000 } from './1780000014000-AddVehicleTypes';
+import { AddVehicleTypeToTripRequests1780000015000 } from './1780000015000-AddVehicleTypeToTripRequests';
+import { AddSubscriptionTokenRewards1780000016000 } from './1780000016000-AddSubscriptionTokenRewards';
+import { AddBookingNoShowState1780000017000 } from './1780000017000-AddBookingNoShowState';
+import { AddReferralProgram1780000018000 } from './1780000018000-AddReferralProgram';
+import { AddBranchReferralAttribution1780000019000 } from './1780000019000-AddBranchReferralAttribution';
+import { ReplaceBranchWithChottuLink1780000020000 } from './1780000020000-ReplaceBranchWithChottuLink';
+import { HardenTokenTripSettlements1780000021000 } from './1780000021000-HardenTokenTripSettlements';
+import { HardenDriverPayouts1780000022000 } from './1780000022000-HardenDriverPayouts';
+import { AddAdminWalletAdjustments1780000023000 } from './1780000023000-AddAdminWalletAdjustments';
+import { AddAdminReferralReadIndexes1780000024000 } from './1780000024000-AddAdminReferralReadIndexes';
+import { AddSuperAdminRole1780000025000 } from './1780000025000-AddSuperAdminRole';
+import { AddAdminPasswordChangeRequired1780000026000 } from './1780000026000-AddAdminPasswordChangeRequired';
+import { AddDiditKycFields1780000027000 } from './1780000027000-AddDiditKycFields';
+import { EnforceUserDriverRoleConsistency1780000028000 } from './1780000028000-EnforceUserDriverRoleConsistency';
+import { AddReferralAttributionBonus1780000029000 } from './1780000029000-AddReferralAttributionBonus';
+import { EnforceReferralBookingRewardRateCap1780000030000 } from './1780000030000-EnforceReferralBookingRewardRateCap';
+import { AddFirstTripSubsidyToBookings1780000031000 } from './1780000031000-AddFirstTripSubsidyToBookings';
+import { AddTripRequestDriverPickupOverdueNotification1780000032000 } from './1780000032000-AddTripRequestDriverPickupOverdueNotification';
+import { AddPassengerKycRequirements1780000033000 } from './1780000033000-AddPassengerKycRequirements';
+import { AddInterruptionPassengerDecisions1780000034000 } from './1780000034000-AddInterruptionPassengerDecisions';
+import { AddRideDeclarations1780000035000 } from './1780000035000-AddRideDeclarations';
+import { AddRideHistoryIndexes1780000036000 } from './1780000036000-AddRideHistoryIndexes';
+import { AddTripLoyaltyAndCashSubsidyEarnings1780000037000 } from './1780000037000-AddTripLoyaltyAndCashSubsidyEarnings';
+import { AddPurchasedTokenWithdrawals1780000038000 } from './1780000038000-AddPurchasedTokenWithdrawals';
 
 export const databaseMigrations = [
   FillTotalSeats1780000000000,
@@ -24,4 +50,30 @@ export const databaseMigrations = [
   AddTripInterruptionRequests1780000010000,
   AddDistanceBasedBookingFares1780000011000,
   AddWalletTransfersAndSubscriptionPayments1780000012000,
+  AddGenderToUsers1780000013000,
+  AddVehicleTypes1780000014000,
+  AddVehicleTypeToTripRequests1780000015000,
+  AddSubscriptionTokenRewards1780000016000,
+  AddBookingNoShowState1780000017000,
+  AddReferralProgram1780000018000,
+  AddBranchReferralAttribution1780000019000,
+  ReplaceBranchWithChottuLink1780000020000,
+  HardenTokenTripSettlements1780000021000,
+  HardenDriverPayouts1780000022000,
+  AddAdminWalletAdjustments1780000023000,
+  AddAdminReferralReadIndexes1780000024000,
+  AddSuperAdminRole1780000025000,
+  AddAdminPasswordChangeRequired1780000026000,
+  AddDiditKycFields1780000027000,
+  EnforceUserDriverRoleConsistency1780000028000,
+  AddReferralAttributionBonus1780000029000,
+  EnforceReferralBookingRewardRateCap1780000030000,
+  AddFirstTripSubsidyToBookings1780000031000,
+  AddTripRequestDriverPickupOverdueNotification1780000032000,
+  AddPassengerKycRequirements1780000033000,
+  AddInterruptionPassengerDecisions1780000034000,
+  AddRideDeclarations1780000035000,
+  AddRideHistoryIndexes1780000036000,
+  AddTripLoyaltyAndCashSubsidyEarnings1780000037000,
+  AddPurchasedTokenWithdrawals1780000038000,
 ];

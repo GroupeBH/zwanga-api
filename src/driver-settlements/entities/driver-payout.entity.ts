@@ -21,12 +21,20 @@ export enum DriverPayoutStatus {
 @Entity('driver_payouts')
 @Index(['driverId', 'status'])
 @Index(['paymentTransactionId'])
+@Index(['driverId', 'idempotencyKey'], { unique: true })
 export class DriverPayout {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
   @Column({ type: 'uuid' })
   driverId: string;
+
+  /**
+   * Identifiant stable fourni par le client pour qu'un double tap, un retry
+   * HTTP ou une reconnexion ne puisse jamais creer deux decaissements.
+   */
+  @Column({ type: 'varchar', length: 80 })
+  idempotencyKey: string;
 
   @Column({ type: 'decimal', precision: 12, scale: 2 })
   amount: number;

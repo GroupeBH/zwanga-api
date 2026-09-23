@@ -30,6 +30,19 @@ export class DriverSettlementsController {
     return this.driverSettlementsService.findDriverEarnings(req.user.userId);
   }
 
+  @Get('trips/:tripId/revenue-summary')
+  @Auth()
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({
+    summary: 'Get the authenticated driver trip revenue summary',
+  })
+  async getTripRevenueSummary(@Request() req, @Param('tripId') tripId: string) {
+    return this.driverSettlementsService.getTripRevenueSummary(
+      req.user.userId,
+      tripId,
+    );
+  }
+
   @Get('payouts')
   @Auth()
   @SensitiveThrottle(30, 60000)
@@ -42,10 +55,7 @@ export class DriverSettlementsController {
   @Auth()
   @SensitiveThrottle(5, 60000)
   @ApiOperation({ summary: 'Request a FlexPay Mobile Money driver payout' })
-  async requestPayout(
-    @Request() req,
-    @Body() dto: RequestDriverPayoutDto,
-  ) {
+  async requestPayout(@Request() req, @Body() dto: RequestDriverPayoutDto) {
     return this.driverSettlementsService.requestPayout(req.user.userId, dto);
   }
 

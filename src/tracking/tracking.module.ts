@@ -10,6 +10,7 @@ import { ConfigModule } from '@nestjs/config';
 import { TripShareLink } from './entities/trip-share-link.entity';
 import { TrackingController } from './tracking.controller';
 import { TrackingService } from './tracking.service';
+import { TrackingShutdownService } from './tracking-shutdown.service';
 
 @Module({
   imports: [
@@ -20,7 +21,7 @@ import { TrackingService } from './tracking.service';
     TypeOrmModule.forFeature([TripShareLink, Trip, Booking]),
   ],
   controllers: [TrackingController],
-  providers: [TrackingGateway, TrackingService],
+  providers: [TrackingGateway, TrackingService, TrackingShutdownService],
 })
 export class TrackingModule {}
 

@@ -28,10 +28,16 @@ import { FavoritePlace } from '../favorite-places/entities/favorite-place.entity
 import { SupportTicket } from '../support/entities/support-ticket.entity';
 import { SupportTicketMessage } from '../support/entities/support-ticket-message.entity';
 import { WalletAccount } from '../wallet/entities/wallet-account.entity';
+import { WalletWithdrawal } from '../wallet/entities/wallet-withdrawal.entity';
 import { WalletLedgerEntry } from '../wallet/entities/wallet-ledger-entry.entity';
 import { DriverEarning } from '../driver-settlements/entities/driver-earning.entity';
 import { DriverPayout } from '../driver-settlements/entities/driver-payout.entity';
 import { TripShareLink } from '../tracking/entities/trip-share-link.entity';
+import { ReferralProfile } from '../referrals/entities/referral-profile.entity';
+import { ReferralAccount } from '../referrals/entities/referral-account.entity';
+import { ReferralReward } from '../referrals/entities/referral-reward.entity';
+import { ReferralLedgerEntry } from '../referrals/entities/referral-ledger-entry.entity';
+import { ReferralWithdrawal } from '../referrals/entities/referral-withdrawal.entity';
 
 export const typeOrmEntities = [
   User,
@@ -62,8 +68,14 @@ export const typeOrmEntities = [
   SupportTicket,
   SupportTicketMessage,
   WalletAccount,
+  WalletWithdrawal,
   WalletLedgerEntry,
   DriverEarning,
   DriverPayout,
   TripShareLink,
+  ReferralProfile,
+  ReferralAccount,
+  ReferralReward,
+  ReferralLedgerEntry,
+  ReferralWithdrawal,
 ];

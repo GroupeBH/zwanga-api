@@ -38,9 +38,20 @@ import { Vehicle } from '../vehicles/entities/vehicle.entity';
 import { FileUploadService } from '../common/services/file-upload.service';
 import { KycValidationService } from '../common/services/kyc-validation.service';
 import { KeccelOtpService } from '../keccel-otp/keccel-otp.service';
+import { OTP_SMS_MESSAGES } from '../keccel-otp/otp-messages';
 import { Express } from 'express';
 import { UserRole } from './entities/user.entity';
 import { SubscriptionsService } from '../subscriptions/subscriptions.service';
+import {
+  assertSelfServiceUserRole,
+  isAdminRole,
+  normalizeUserDriverFlags,
+  resolveSelfServiceDriverState,
+} from './user-role.policy';
+import {
+  areLegalNamesEquivalent,
+  normalizeLegalName,
+} from './legal-identity.util';
 
 @Injectable()
 export class UsersService {
@@ -72,7 +83,15 @@ export class UsersService {
   ) {}
 
   private toSafeUser(user: User) {
-    const { password, refreshToken, ...safeUser } = user;
+    const {
+      password,
+      accessToken,
+      refreshToken,
+      googleId,
+      appleId,
+      fcmToken,
+      ...safeUser
+    } = user;
     return safeUser;
   }
 
@@ -181,7 +200,6 @@ export class UsersService {
 
   async getProfileSummary(userId: string) {
     const user = await this.findOne(userId);
-    console.log('this user:', user);
 
     const [tripsAsDriver, bookingsAsPassenger, bookingsAsDriver, messagesSent] =
       await Promise.all([
@@ -337,6 +355,7 @@ export class UsersService {
         password: () => 'NULL',
         firstName: 'Compte',
         lastName: 'supprimé',
+        gender: () => 'NULL',
         profilePicture: () => 'NULL',
         role: UserRole.PASSENGER,
         status: UserStatus.INACTIVE,
@@ -386,12 +405,39 @@ export class UsersService {
 
     const previousProfilePicture = user.profilePicture;
 
-    if (updateProfileDto.firstName !== undefined) {
-      user.firstName = updateProfileDto.firstName;
+    const normalizedFirstName =
+      updateProfileDto.firstName === undefined
+        ? undefined
+        : normalizeLegalName(updateProfileDto.firstName);
+    const normalizedLastName =
+      updateProfileDto.lastName === undefined
+        ? undefined
+        : normalizeLegalName(updateProfileDto.lastName);
+    const changesLegalIdentity =
+      (normalizedFirstName !== undefined &&
+        !areLegalNamesEquivalent(normalizedFirstName, user.firstName)) ||
+      (normalizedLastName !== undefined &&
+        !areLegalNamesEquivalent(normalizedLastName, user.lastName));
+    const hasApprovedKyc = user.kycDocuments?.some(
+      (document) => document.status === KycStatus.APPROVED,
+    );
+
+    if (changesLegalIdentity && hasApprovedKyc) {
+      throw new BadRequestException(
+        'Vos noms sont protégés après validation KYC. Contactez le support pour déclarer un changement légal et relancer la vérification.',
+      );
     }
 
-    if (updateProfileDto.lastName !== undefined) {
-      user.lastName = updateProfileDto.lastName;
+    if (normalizedFirstName !== undefined) {
+      user.firstName = normalizedFirstName;
+    }
+
+    if (normalizedLastName !== undefined) {
+      user.lastName = normalizedLastName;
+    }
+
+    if (updateProfileDto.gender !== undefined) {
+      user.gender = updateProfileDto.gender;
     }
 
     if (profilePictureFile) {
@@ -406,7 +452,12 @@ export class UsersService {
     }
 
     if (updateProfileDto.role) {
-      user.role = updateProfileDto.role;
+      assertSelfServiceUserRole(updateProfileDto.role);
+      const driverState = resolveSelfServiceDriverState({
+        role: updateProfileDto.role,
+      });
+      user.role = driverState.role;
+      user.isDriver = driverState.isDriver;
     }
 
     if (updateProfileDto.phone) {
@@ -666,33 +717,16 @@ export class UsersService {
       const kycEnabledConfig = this.configService.get<string>(
         'AWS_REKOGNITION_KYC_ENABLED',
       );
-      const accessKeyId = this.configService.get<string>('AWS_ACCESS_KEY_ID');
-      const secretAccessKey = this.configService.get<string>(
-        'AWS_SECRET_ACCESS_KEY',
-      );
 
       this.logger.warn(`[KYC Upload] ⚠️ KYC validation is DISABLED`);
       this.logger.warn(
         `[KYC Upload] Reason: AWS_REKOGNITION_KYC_ENABLED="${kycEnabledConfig || 'NOT SET'}" (must be "true" to enable)`,
       );
-
-      if (!accessKeyId || !secretAccessKey) {
-        this.logger.warn(
-          `[KYC Upload] Additional issue: AWS credentials not configured`,
-        );
-        this.logger.warn(
-          `[KYC Upload]   - AWS_ACCESS_KEY_ID: ${accessKeyId ? 'configured' : 'NOT SET'}`,
-        );
-        this.logger.warn(
-          `[KYC Upload]   - AWS_SECRET_ACCESS_KEY: ${secretAccessKey ? 'configured' : 'NOT SET'}`,
-        );
-      }
-
       this.logger.warn(
         `[KYC Upload] Action: Keeping status as PENDING for manual review`,
       );
       this.logger.warn(
-        `[KYC Upload] To enable AI validation, set AWS_REKOGNITION_KYC_ENABLED=true and configure AWS credentials`,
+        `[KYC Upload] To enable AI validation, set AWS_REKOGNITION_KYC_ENABLED=true and grant Rekognition permissions to the ECS task role`,
       );
 
       // When KYC validation is disabled, keep status as PENDING for manual review
@@ -736,13 +770,25 @@ export class UsersService {
 
       const savedKyc = await queryRunner.manager.save(kycDocument);
 
+      const hasActiveVehicle = await queryRunner.manager
+        .getRepository(Vehicle)
+        .exists({ where: { ownerId: userId, isActive: true } });
+      const driverProfileChanged = normalizeUserDriverFlags(user, {
+        hasActiveVehicle,
+      });
+
       // Update user status ONLY if approval is confirmed
       if (isApprovalConfirmed) {
         user.status = UserStatus.ACTIVE;
+      }
+
+      if (isApprovalConfirmed || driverProfileChanged) {
         await queryRunner.manager.save(user); // Transactional user save
-        this.logger.log(
-          `User ${userId} status updated to ACTIVE after KYC approval`,
-        );
+        if (isApprovalConfirmed) {
+          this.logger.log(
+            `User ${userId} status updated to ACTIVE after KYC approval`,
+          );
+        }
       }
 
       await queryRunner.commitTransaction();
@@ -766,7 +812,9 @@ export class UsersService {
         // Parallel deletion of all uploaded files
         await Promise.all([
           ...cniFrontUrls.map((url) => this.fileUploadService.deleteFile(url)),
-          ...(cniBackUrl ? [this.fileUploadService.deleteFile(cniBackUrl)] : []),
+          ...(cniBackUrl
+            ? [this.fileUploadService.deleteFile(cniBackUrl)]
+            : []),
           this.fileUploadService.deleteFile(selfieUrl),
         ]);
 
@@ -791,15 +839,11 @@ export class UsersService {
     });
 
     this.logger.log(`Fetching KYC status for user: ${kyc} ${userId}`);
-    console.log('kyc', kyc);
-
     if (!kyc) {
       return null;
     }
 
     const thisUserKyc = await this.enrichKycWithPresignedUrls(kyc);
-
-    console.log('thiskyc', thisUserKyc);
 
     // Convert S3 keys to presigned URLs before returning
     return thisUserKyc;
@@ -809,6 +853,11 @@ export class UsersService {
     this.logger.debug(`Updating FCM token for user: ${userId}`);
 
     const user = await this.findOne(userId);
+    if (user.fcmToken === fcmToken) {
+      this.logger.debug(`FCM token already up to date for user: ${userId}`);
+      return;
+    }
+
     user.fcmToken = fcmToken;
     await this.userRepository.save(user);
 
@@ -859,8 +908,10 @@ export class UsersService {
     }
 
     // Send OTP using Keccel service
-    const message = 'Votre code de vérification Zwanga est : %OTP%';
-    await this.keccelOtpService.sendOtp(sendOtpDto.phone.trim(), message);
+    await this.keccelOtpService.sendOtp(
+      sendOtpDto.phone.trim(),
+      OTP_SMS_MESSAGES.verification,
+    );
 
     this.logger.log(
       `Phone verification OTP sent successfully to ${sendOtpDto.phone} (context: ${sendOtpDto.context})`,
@@ -904,65 +955,58 @@ export class UsersService {
   // ==================== PIN Management Methods ====================
 
   async changePin(userId: string, changePinDto: ChangePinDto): Promise<void> {
-    this.logger.log(
-      `Changing PIN for user ${userId}${changePinDto.oldPin ? ' (with old PIN verification)' : ' (old PIN not provided - reset mode)'}`,
-    );
+    this.logger.log(`Changing PIN for user ${userId}`);
 
     const user = await this.findOne(userId);
 
-    // If old PIN is provided, verify it
-    if (changePinDto.oldPin) {
-      // Check if user has a PIN set
-      if (!user.password) {
-        this.logger.warn(
-          `PIN change failed: User ${userId} does not have a PIN set but provided old PIN`,
-        );
-        throw new BadRequestException(
-          "Aucun code PIN défini pour ce compte. Veuillez d'abord définir un code PIN.",
-        );
-      }
-
-      // Verify old PIN
-      const isOldPinValid = await bcrypt.compare(
-        changePinDto.oldPin,
-        user.password,
+    if (isAdminRole(user.role)) {
+      throw new BadRequestException(
+        'Utilisez le changement de mot de passe administrateur pour ce compte',
       );
-
-      if (!isOldPinValid) {
-        this.logger.warn(
-          `PIN change failed: Invalid old PIN for user ${userId}`,
-        );
-        throw new UnauthorizedException('Ancien code PIN invalide');
-      }
-
-      // Check if new PIN is different from old PIN
-      if (changePinDto.oldPin === changePinDto.newPin) {
-        this.logger.warn(
-          `PIN change failed: New PIN is the same as old PIN for user ${userId}`,
-        );
-        throw new BadRequestException(
-          "Le nouveau code PIN doit être différent de l'ancien",
-        );
-      }
-    } else {
-      // Old PIN not provided - allow PIN reset (user forgot their PIN)
-      this.logger.log(
-        `PIN reset requested for user ${userId} (old PIN not provided)`,
-      );
-      // No verification needed, proceed with PIN reset
     }
 
-    // Hash the new PIN
+    // Keep a defensive runtime check in addition to DTO validation.
+    if (!changePinDto.oldPin) {
+      throw new BadRequestException(
+        "L'ancien code PIN est requis. Utilisez la réinitialisation par OTP si vous l'avez oublié.",
+      );
+    }
+
+    if (!user.password) {
+      this.logger.warn(`PIN change failed: User ${userId} has no PIN set`);
+      throw new BadRequestException(
+        'Aucun code PIN défini pour ce compte. Utilisez la réinitialisation par OTP.',
+      );
+    }
+
+    const isOldPinValid = await bcrypt.compare(
+      changePinDto.oldPin,
+      user.password,
+    );
+
+    if (!isOldPinValid) {
+      this.logger.warn(`PIN change failed: Invalid old PIN for user ${userId}`);
+      throw new UnauthorizedException('Ancien code PIN invalide');
+    }
+
+    if (changePinDto.oldPin === changePinDto.newPin) {
+      this.logger.warn(
+        `PIN change failed: New PIN is the same as old PIN for user ${userId}`,
+      );
+      throw new BadRequestException(
+        "Le nouveau code PIN doit être différent de l'ancien",
+      );
+    }
+
     const saltRounds = 10;
     const hashedNewPin = await bcrypt.hash(changePinDto.newPin, saltRounds);
 
-    // Update user password with new hashed PIN
     user.password = hashedNewPin;
+    user.refreshToken = null;
+    user.accessToken = null;
     await this.userRepository.save(user);
 
-    this.logger.log(
-      `PIN ${changePinDto.oldPin ? 'changed' : 'reset'} successfully for user ${userId}`,
-    );
+    this.logger.log(`PIN changed successfully for user ${userId}`);
   }
 
   // ==================== Favorite Locations Methods ====================
@@ -1226,6 +1270,7 @@ export class UsersService {
                 }
                 return {
                   id: vehicle.id,
+                  type: vehicle.type,
                   brand: vehicle.brand,
                   model: vehicle.model,
                   color: vehicle.color,

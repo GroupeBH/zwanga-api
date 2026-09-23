@@ -183,6 +183,59 @@ describe('boarding detection', () => {
     );
   });
 
+  it('creates an in-trip recovery candidate when both devices reappear together away from pickup', () => {
+    const driverLocations = makePath().map((sample, index, samples) => ({
+      ...sample,
+      ...coordinateAt(500 + (100 * index) / (samples.length - 1)),
+    }));
+    const passengerLocations = makePath({ lateralMeters: 2 }).map(
+      (sample, index, samples) => ({
+        ...sample,
+        ...coordinateAt(500 + (100 * index) / (samples.length - 1), 2),
+      }),
+    );
+
+    const blockedWithoutRecovery = evaluateBoardingDetection({
+      now: new Date(driverLocations[0].recordedAt),
+      stateCompatible: true,
+      pickupLocation: origin,
+      driverLocations: [driverLocations[0]],
+      passengerLocations: [passengerLocations[0]],
+      candidate: null,
+      config: DEFAULT_BOARDING_DETECTION_CONFIG,
+    });
+    expect(blockedWithoutRecovery.candidate).toBeNull();
+
+    const firstRecoveryEvaluation = evaluateBoardingDetection({
+      now: new Date(driverLocations[0].recordedAt),
+      stateCompatible: true,
+      pickupLocation: origin,
+      driverLocations: [driverLocations[0]],
+      passengerLocations: [passengerLocations[0]],
+      candidate: null,
+      allowCandidateAwayFromPickup: true,
+      config: DEFAULT_BOARDING_DETECTION_CONFIG,
+    });
+    expect(firstRecoveryEvaluation.candidate).toEqual(
+      expect.objectContaining({
+        state: BoardingDetectionState.BOARDING_CANDIDATE,
+        origin: 'in_trip_recovery',
+      }),
+    );
+
+    const confirmed = evaluateBoardingDetection({
+      now,
+      stateCompatible: true,
+      pickupLocation: origin,
+      driverLocations,
+      passengerLocations,
+      candidate: firstRecoveryEvaluation.candidate,
+      allowCandidateAwayFromPickup: true,
+      config: DEFAULT_BOARDING_DETECTION_CONFIG,
+    });
+    expectConfirmed(confirmed);
+  });
+
   it('scores a stopped driver followed by a synchronized departure', () => {
     const result = evaluate();
     expectConfirmed(result);
