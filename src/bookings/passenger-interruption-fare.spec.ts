@@ -27,6 +27,26 @@ function fixture(original = 10000, passenger = original, travelled = 5000) {
 }
 
 describe('passenger emergency dropoff pricing', () => {
+  it.each([TripPaymentMode.CASH, TripPaymentMode.ELECTRONIC, TripPaymentMode.POINTS])('driver confirmation returns the reduced fare and preserves the chosen %s payment', async mode => {
+    const { service, booking } = fixture();
+    booking.trip.driverId = 'driver';
+    booking.paymentMode = mode;
+    booking.paymentStatus = mode === TripPaymentMode.CASH ? BookingPaymentStatus.NOT_REQUIRED : BookingPaymentStatus.PENDING;
+    service.passengerTripInterruptionRepository = {
+      findOne: jest.fn(async () => ({ requestedLocation: location, status: 'pending' })),
+      save: jest.fn(async value => value),
+    };
+    service.notifyPassengerAboutPassengerInterruptionDecision = jest.fn();
+    service.findOne = jest.fn(async () => booking);
+    const result = await service.confirmPassengerTripInterruption('booking', 'driver');
+    expect(result).toMatchObject({ paymentAmount: 2000, status: BookingStatus.COMPLETED,
+      interruptionFareLocked: true, plannedDistanceMeters: 25000, travelledDistanceMeters: 5000,
+      paymentMode: mode });
+    // An interrupted/completed booking is payable even away from the original destination.
+    if (mode === TripPaymentMode.ELECTRONIC) expect(() => service.ensureBookingCanBePaid(result)).not.toThrow();
+    expect(service.notifyPassengerAboutPassengerInterruptionDecision).toHaveBeenCalledWith(booking, true);
+  });
+
   it.each([
     [10000, 10000, 5000, 2000],
     [5000, 5000, 5000, 1500],

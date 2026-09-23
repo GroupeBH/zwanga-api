@@ -41,6 +41,7 @@ import { DriverSettlementsModule } from './driver-settlements/driver-settlements
 import { HealthModule } from './health/health.module';
 import { createRedisCacheStore } from './common/utils/redis-cache-store';
 import { ReferralsModule } from './referrals/referrals.module';
+import { ActivityModule } from './activity/activity.module';
 
 @Module({
   imports: [
@@ -100,6 +101,7 @@ import { ReferralsModule } from './referrals/referrals.module';
     DriverSettlementsModule,
     HealthModule,
     ReferralsModule,
+    ActivityModule,
   ],
   controllers: [AppController],
   providers: [

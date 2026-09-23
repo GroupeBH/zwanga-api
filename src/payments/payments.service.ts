@@ -25,6 +25,10 @@ import {
 import { formatPaymentLogPayload } from './payment-log.util';
 import { getPayoutFailureMessage, PAYOUT_MESSAGES } from './payout-policy';
 import { hasVerifiedWalletTopUpProof } from './wallet-topup-proof';
+import { assertWalletTopUpCheckEvidence } from './wallet-topup-check-evidence';
+import { loadPaymentHistoryPage, loadPaymentHistorySummary } from './payment-history-page';
+import { loadPaymentContext, PaymentContextDto } from './payment-context';
+import type { PaymentHistoryPageDto } from '../common/pagination/history-page';
 
 export interface InitiatePaymentInput {
   userId?: string | null;
@@ -486,6 +490,20 @@ export class PaymentsService {
     });
   }
 
+  async findUserTransactionPage(userId: string, options: PaymentHistoryPageDto) {
+    const page = await loadPaymentHistoryPage(this.paymentTransactionRepository, userId, options);
+    return { ...page, data: page.data.map(transaction => this.formatPaymentHistoryForClient(transaction)) };
+  }
+
+  async findUserPaymentContext(userId: string, context: PaymentContextDto) {
+    const transactions = await loadPaymentContext(this.paymentTransactionRepository, userId, context);
+    return transactions.map(transaction => this.formatPaymentHistoryForClient(transaction));
+  }
+
+  getUserTransactionSummary(userId: string) {
+    return loadPaymentHistorySummary(this.paymentTransactionRepository, userId);
+  }
+
   async findTransactionById(
     id: string,
     userId?: string,
@@ -739,18 +757,19 @@ export class PaymentsService {
       return savedTransaction;
     }
 
-    if (
-      transaction.purpose === PaymentPurpose.WALLET_TOP_UP &&
-      (!providerTransaction.reference?.trim() ||
-        !providerTransaction.orderNumber?.trim() ||
-        providerTransaction.orderNumber.trim() !== transaction.orderNumber ||
-        providerTransaction.amount == null ||
-        !providerTransaction.currency?.trim())
-    ) {
-      throw new BadRequestException(
-        'La recharge nécessite une confirmation FlexPay complète du montant et de la devise',
-      );
-    }
+    const providerTransactionStatus =
+      providerTransaction.status ?? providerTransaction.code;
+    const providerSucceeded =
+      this.flexPayService.isSuccessfulTransaction(providerTransaction);
+    const providerFailed =
+      !providerSucceeded &&
+      (providerTransactionStatus === '1' ||
+        this.isDeclinedPaymentMessage(checkResult.message));
+    assertWalletTopUpCheckEvidence(
+      transaction,
+      providerTransaction,
+      providerFailed,
+    );
 
     const normalizedProviderReference = providerTransaction.reference?.trim();
     const normalizedTransactionReference = transaction.reference?.trim();
@@ -778,13 +797,10 @@ export class PaymentsService {
 
     this.assertProviderTransactionMatches(transaction, providerTransaction);
 
-    const providerTransactionStatus =
-      providerTransaction.status ?? providerTransaction.code;
-
     transaction.orderNumber =
       providerTransaction.orderNumber ?? transaction.orderNumber;
 
-    if (this.flexPayService.isSuccessfulTransaction(providerTransaction)) {
+    if (providerSucceeded) {
       transaction.status = PaymentStatus.SUCCEEDED;
       transaction.providerMessage = 'Paiement confirmé avec succès';
       transaction.paidAt = transaction.paidAt ?? new Date();
@@ -796,10 +812,7 @@ export class PaymentsService {
       return savedTransaction;
     }
 
-    if (
-      providerTransactionStatus === '1' ||
-      this.isDeclinedPaymentMessage(checkResult.message)
-    ) {
+    if (providerFailed) {
       transaction.status = this.isCancellationMessage(checkResult.message)
         ? PaymentStatus.CANCELLED
         : PaymentStatus.FAILED;

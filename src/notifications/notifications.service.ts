@@ -40,6 +40,50 @@ const CRITICAL_NOTIFICATION_TYPES = [
   'trip_request_driver_overdue',
 ] as const;
 
+/**
+ * Suivi courant des trajets et des demandes de trajet: indispensable dans
+ * l'application mobile, mais ces notifications noieraient les alertes
+ * importantes dans une boite de reception de back-office.
+ */
+const ROUTINE_TRIP_NOTIFICATION_TYPES = [
+  'daily_engagement',
+  'destination_proximity',
+  'driver_arrived_destination',
+  'driver_near_destination',
+  'driver_near_pickup',
+  'driver_offer',
+  'dropoff_confirmed',
+  'dropoff_confirmed_automatically',
+  'dropoff_confirmed_by_driver',
+  'dropoff_requested_by_passenger',
+  'offer_accepted',
+  'parties_nearby',
+  'passenger_boarding_uncertain',
+  'passenger_destination_proximity',
+  'passenger_near_destination',
+  'passenger_no_show',
+  'passenger_ready_pickup',
+  'pickup_confirmed',
+  'pickup_confirmed_automatically',
+  'pickup_confirmed_by_driver',
+  'pickup_confirmed_by_passenger',
+  'private_trip_cancelled',
+  'ride_confirmation_required',
+  'trip_departure_reminder',
+  'trip_expired',
+  'trip_expiring_soon',
+  'trip_paused',
+  'trip_recommendation',
+  'trip_request',
+  'trip_request_accepted',
+  'trip_request_expired',
+  'trip_request_expiring',
+  'trip_request_reopened',
+  'trip_started',
+] as const;
+
+export type NotificationScope = 'all' | 'critical';
+
 interface ExpoPushTicket {
   status?: 'ok' | 'error';
   id?: string;
@@ -749,33 +793,55 @@ export class NotificationService implements OnModuleInit {
 
   async findAllByUser(
     userId: string,
-    options?: { limit?: number; offset?: number },
+    options?: { limit?: number; offset?: number; scope?: NotificationScope },
   ): Promise<{
     notifications: Notification[];
     total: number;
     unreadCount: number;
   }> {
-    this.logger.debug(`Fetching notifications for user ${userId}`);
+    const scope: NotificationScope = options?.scope ?? 'all';
+    this.logger.debug(
+      `Fetching notifications for user ${userId} (scope=${scope})`,
+    );
 
-    // Ne récupérer que les notifications actives (non désactivées)
-    const [notifications, total] =
-      await this.notificationRepository.findAndCount({
-        where: { userId, isActive: true },
-        order: { createdAt: 'DESC' },
-        take: options?.limit,
-        skip: options?.offset,
-      });
+    const [notifications, total] = await this.buildInboxQuery(userId, scope)
+      .orderBy('notification.createdAt', 'DESC')
+      .take(options?.limit)
+      .skip(options?.offset)
+      .getManyAndCount();
 
-    // Compter uniquement les notifications non lues et actives
-    const unreadCount = await this.notificationRepository.count({
-      where: { userId, isRead: false, isActive: true },
-    });
+    const unreadCount = await this.buildInboxQuery(userId, scope)
+      .andWhere('notification.isRead = false')
+      .getCount();
 
     return {
       notifications,
       total,
       unreadCount,
     };
+  }
+
+  /**
+   * Boite de reception d'un utilisateur, limitee aux notifications actives.
+   * Le scope `critical` retire le suivi courant des trajets, des demandes de
+   * trajet et des conversations pour ne garder que ce qui demande une action.
+   */
+  private buildInboxQuery(userId: string, scope: NotificationScope) {
+    const query = this.notificationRepository
+      .createQueryBuilder('notification')
+      .where('notification.userId = :userId', { userId })
+      .andWhere('notification.isActive = true');
+
+    if (scope === 'critical') {
+      query
+        .andWhere(
+          "COALESCE(notification.data ->> 'type', '') NOT IN (:...routineTypes)",
+          { routineTypes: [...ROUTINE_TRIP_NOTIFICATION_TYPES] },
+        )
+        .andWhere("notification.data ->> 'conversationId' IS NULL");
+    }
+
+    return query;
   }
 
   async markAsRead(

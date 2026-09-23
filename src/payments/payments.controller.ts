@@ -1,4 +1,6 @@
-import { Body, Controller, Get, Param, Post, Request } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query, Request } from '@nestjs/common';
+import { PaymentHistoryPageDto } from '../common/pagination/history-page';
+import { PaymentContextDto } from './payment-context';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Public } from '../common/decorators/public.decorator';
 import { Auth } from '../auth/decorators/auth.decorator';
@@ -49,6 +51,27 @@ export class PaymentsController {
     return transactions.map((transaction) =>
       this.paymentsService.formatPaymentHistoryForClient(transaction),
     );
+  }
+
+  @Get('history/page')
+  @Auth()
+  @SensitiveThrottle(60, 60000)
+  getPaymentHistoryPage(@Request() req, @Query() options: PaymentHistoryPageDto) {
+    return this.paymentsService.findUserTransactionPage(req.user.userId, options);
+  }
+
+  @Get('history/summary')
+  @Auth()
+  @SensitiveThrottle(30, 60000)
+  getPaymentHistorySummary(@Request() req) {
+    return this.paymentsService.getUserTransactionSummary(req.user.userId);
+  }
+
+  @Get('history/context')
+  @Auth()
+  @SensitiveThrottle(60, 60000)
+  getPaymentContext(@Request() req, @Query() context: PaymentContextDto) {
+    return this.paymentsService.findUserPaymentContext(req.user.userId, context);
   }
 
   @Get(':paymentId/details')

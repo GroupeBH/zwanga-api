@@ -7,7 +7,7 @@ import { canPayNearArrival } from './near-arrival-payment';
 const now = Date.parse('2026-09-16T10:00:00Z');
 const destination = { type: 'Point' as const, coordinates: [15.3, -4.32] };
 const position = (meters: number) => ({ type: 'Point' as const, coordinates: [15.3, -4.32 + meters / 6_371_000 * 180 / Math.PI] });
-function fixture(distance = 500): Booking {
+function fixture(distance = 1000): Booking {
   return {
     id: 'booking', tripId: 'trip', passengerId: 'passenger',
     status: BookingStatus.ACCEPTED, pickedUp: true, droppedOff: false,
@@ -23,7 +23,7 @@ describe('Near-arrival payment permission', () => {
   beforeEach(() => { jest.useFakeTimers().setSystemTime(now); });
   afterEach(() => jest.useRealTimers());
 
-  it.each([0, 20, 149, 150, 151, 300, 499, 500])('allows digital payment at %i metres without completing the booking', distance => {
+  it.each([0, 20, 149, 150, 151, 300, 499, 500, 800, 999, 1000])('allows digital payment at %i metres without completing the booking', distance => {
     const booking = fixture(distance);
     expect(canPayNearArrival(booking)).toBe(true);
     expect(booking.status).toBe('accepted');
@@ -71,7 +71,7 @@ describe('Early points settlement', () => {
   beforeEach(() => { jest.useFakeTimers().setSystemTime(now); });
   afterEach(() => jest.useRealTimers());
   function serviceFixture() {
-    const booking = { ...fixture(500), paymentMode: TripPaymentMode.POINTS };
+    const booking = { ...fixture(1000), paymentMode: TripPaymentMode.POINTS };
     const manager = {
       findOne: jest.fn(async (entity) => entity === Booking ? booking : booking.trip),
       save: jest.fn(async value => value),

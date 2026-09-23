@@ -1,4 +1,5 @@
-import { Body, Controller, Get, Param, Post, Request } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Query, Request } from '@nestjs/common';
+import { HistoryPageDto } from '../common/pagination/history-page';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Auth } from '../auth/decorators/auth.decorator';
 import { Public } from '../common/decorators/public.decorator';
@@ -30,6 +31,20 @@ export class DriverSettlementsController {
     return this.driverSettlementsService.findDriverEarnings(req.user.userId);
   }
 
+  @Get('earnings/page')
+  @Auth()
+  @SensitiveThrottle(60, 60000)
+  getMyEarningsPage(@Request() req, @Query() options: HistoryPageDto) {
+    return this.driverSettlementsService.findDriverEarningsPage(req.user.userId, options);
+  }
+
+  @Get('payouts/page')
+  @Auth()
+  @SensitiveThrottle(60, 60000)
+  getMyPayoutsPage(@Request() req, @Query() options: HistoryPageDto) {
+    return this.driverSettlementsService.findDriverPayoutsPage(req.user.userId, options);
+  }
+
   @Get('trips/:tripId/revenue-summary')
   @Auth()
   @SensitiveThrottle(30, 60000)
@@ -41,6 +56,14 @@ export class DriverSettlementsController {
       req.user.userId,
       tripId,
     );
+  }
+
+  @Get('bookings/:bookingId/revenue-summary')
+  @Auth()
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'Afficher le gain du conducteur pour une réservation après dépose' })
+  async getBookingRevenueSummary(@Request() req, @Param('bookingId') bookingId: string) {
+    return this.driverSettlementsService.getBookingRevenueSummary(req.user.userId, bookingId);
   }
 
   @Get('payouts')
