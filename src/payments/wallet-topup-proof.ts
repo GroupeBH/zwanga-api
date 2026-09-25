@@ -17,6 +17,9 @@ const scalar = (value: unknown): string =>
 export function hasVerifiedWalletTopUpProof(
   payment: PaymentTransaction,
 ): boolean {
+  if (payment.provider === 'pawapay') {
+    return hasVerifiedPawaPayTopUpProof(payment);
+  }
   const proof = record(payment.rawCheckResponse);
   const transaction = record(proof.transaction ?? proof.Transaction);
   const status = scalar(
@@ -47,5 +50,33 @@ export function hasVerifiedWalletTopUpProof(
     Boolean(payment.currency) &&
     scalar(transaction.currency).toUpperCase() ===
       payment.currency.trim().toUpperCase()
+  );
+}
+
+function hasVerifiedPawaPayTopUpProof(payment: PaymentTransaction): boolean {
+  const proof = record(payment.rawCheckResponse);
+  const nested = record(proof.data);
+  const data = scalar(nested.status) ? nested : proof;
+  const status = scalar(data.status).toUpperCase();
+  const depositId = scalar(data.depositId ?? data.paymentId);
+  const amount = scalar(data.amount);
+  const expectedAmount = Number(payment.amount);
+  return (
+    payment.purpose === PaymentPurpose.WALLET_TOP_UP &&
+    payment.status === PaymentStatus.SUCCEEDED &&
+    payment.relatedEntityType === 'wallet_top_up' &&
+    Boolean(payment.userId) &&
+    payment.relatedEntityId === payment.userId &&
+    scalar(proof.status) === 'FOUND' &&
+    (!scalar(data.clientReferenceId) || scalar(data.clientReferenceId) === payment.reference) &&
+    status === 'COMPLETED' &&
+    Boolean(payment.orderNumber) &&
+    depositId === payment.orderNumber &&
+    /^\d+(\.\d+)?$/.test(amount) &&
+    Number.isFinite(expectedAmount) &&
+    expectedAmount > 0 &&
+    Number(amount) === expectedAmount &&
+    Boolean(payment.currency) &&
+    scalar(data.currency).toUpperCase() === payment.currency.trim().toUpperCase()
   );
 }

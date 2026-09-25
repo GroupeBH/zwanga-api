@@ -3,6 +3,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  OnModuleInit,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Cron } from '@nestjs/schedule';
@@ -80,7 +81,7 @@ export type DriverPayoutResponse = DriverPayout & {
 };
 
 @Injectable()
-export class DriverSettlementsService {
+export class DriverSettlementsService implements OnModuleInit {
   private readonly logger = new Logger(DriverSettlementsService.name);
   private readonly PAYOUT_RELATED_ENTITY_TYPE = 'driver_payout';
   private readonly DEFAULT_COMMISSION_RATE = 0.05;
@@ -107,6 +108,15 @@ export class DriverSettlementsService {
     private readonly dataSource: DataSource,
     private readonly notificationService: NotificationService,
   ) {}
+
+  onModuleInit() {
+    this.paymentsService.registerSettlement?.(
+      PaymentPurpose.DRIVER_PAYOUT,
+      async (payment) => {
+        await this.applyPaymentToPayout(payment);
+      },
+    );
+  }
 
   async getSummary(driverId: string): Promise<DriverSettlementSummary> {
     const currency = this.getCurrency();

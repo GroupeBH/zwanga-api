@@ -4,6 +4,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  OnModuleInit,
 } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { ConfigService } from '@nestjs/config';
@@ -95,7 +96,7 @@ export interface WalletTransferResponse {
 }
 
 @Injectable()
-export class WalletService {
+export class WalletService implements OnModuleInit {
   private readonly logger = new Logger(WalletService.name);
   private readonly TOP_UP_RELATED_ENTITY_TYPE = 'wallet_top_up';
   private readonly BOOKING_RELATED_ENTITY_TYPE = 'booking';
@@ -120,6 +121,15 @@ export class WalletService {
     private readonly configService: ConfigService,
     private readonly paymentsService: PaymentsService,
   ) {}
+
+  onModuleInit() {
+    this.paymentsService.registerSettlement?.(
+      PaymentPurpose.WALLET_TOP_UP,
+      async (payment) => {
+        await this.applyTopUpPayment(payment);
+      },
+    );
+  }
 
   async getSummary(userId: string): Promise<WalletSummary> {
     const account = await this.getOrCreateAccount(userId);
@@ -269,6 +279,7 @@ export class WalletService {
       cancelUrl: dto.cancelUrl,
       declineUrl: dto.declineUrl,
       referencePrefix: 'WAL',
+      preferredProvider: dto.preferredProvider,
     });
 
     const account = await this.getOrCreateAccount(userId);
@@ -950,7 +961,7 @@ export class WalletService {
     // Never grant a new cash-redeemable credit from that local status alone.
     if (!hasVerifiedWalletTopUpProof(payment)) {
       throw new BadRequestException(
-        'La recharge doit être confirmée par FlexPay avant de créditer des jetons retirables',
+        'La recharge doit être confirmée par le prestataire de paiement avant de créditer des jetons retirables',
       );
     }
 
@@ -964,7 +975,7 @@ export class WalletService {
       relatedEntityType: this.TOP_UP_RELATED_ENTITY_TYPE,
       relatedEntityId: payment.userId,
       paymentTransactionId: payment.id,
-      description: `Recharge de jetons FlexPay ${payment.reference}`,
+      description: `Recharge de jetons ${payment.provider === 'pawapay' ? 'PawaPay' : 'FlexPay'} ${payment.reference}`,
     });
 
     return this.getOrCreateAccount(payment.userId);

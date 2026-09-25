@@ -45,9 +45,8 @@ import { SubscriptionsService } from '../subscriptions/subscriptions.service';
 import {
   assertSelfServiceUserRole,
   isAdminRole,
-  normalizeUserDriverFlags,
-  resolveSelfServiceDriverState,
 } from './user-role.policy';
+import { activateRequestedDriver } from './driver-activation';
 import {
   areLegalNamesEquivalent,
   normalizeLegalName,
@@ -390,6 +389,14 @@ export class UsersService {
 
     const user = await this.findOne(userId);
 
+    if (updateProfileDto.role) {
+      assertSelfServiceUserRole(updateProfileDto.role);
+      if (updateProfileDto.role !== user.role && updateProfileDto.role !== UserRole.DRIVER) {
+        throw new BadRequestException('Le rôle ne peut pas être modifié dans les informations du profil.');
+      }
+      if (isAdminRole(user.role)) throw new BadRequestException('Le rôle de ce compte ne peut pas être modifié ici.');
+    }
+
     if (updateProfileDto.phone && updateProfileDto.phone !== user.phone) {
       const existingUser = await this.userRepository.findOne({
         where: { phone: updateProfileDto.phone },
@@ -451,20 +458,24 @@ export class UsersService {
       }
     }
 
-    if (updateProfileDto.role) {
-      assertSelfServiceUserRole(updateProfileDto.role);
-      const driverState = resolveSelfServiceDriverState({
-        role: updateProfileDto.role,
-      });
-      user.role = driverState.role;
-      user.isDriver = driverState.isDriver;
-    }
-
     if (updateProfileDto.phone) {
       user.phone = updateProfileDto.phone;
     }
 
-    const updatedUser = await this.userRepository.save(user);
+    // A profile write must not restore a stale role after concurrent activation.
+    const profileChanges = {
+      firstName: user.firstName, lastName: user.lastName, gender: user.gender,
+      phone: user.phone, profilePicture: user.profilePicture,
+    };
+    if (updateProfileDto.role === UserRole.DRIVER) {
+      await this.dataSource.transaction(async (manager) => {
+        await activateRequestedDriver(manager, userId, { request: true, requireReady: true });
+        await manager.getRepository(User).update(userId, profileChanges);
+      });
+    } else {
+      await this.userRepository.update(userId, profileChanges);
+    }
+    const updatedUser = await this.findOne(userId);
 
     if (
       profilePictureFile &&
@@ -478,6 +489,12 @@ export class UsersService {
 
     // Convert S3 key to presigned URL before returning
     return await this.enrichUserWithPresignedUrls(updatedUser);
+  }
+
+  async activateDriver(userId: string, requireReady = false): Promise<User> {
+    await this.dataSource.transaction((manager) =>
+      activateRequestedDriver(manager, userId, { request: true, requireReady }));
+    return this.toSafeUser(await this.findOne(userId)) as User;
   }
 
   async uploadKyc(
@@ -744,6 +761,10 @@ export class UsersService {
 
     try {
       // Prepare the KYC document (TypeORM FIX: Pass the 'user' object)
+      const lockedUser = await queryRunner.manager.getRepository(User).findOne({
+        where: { id: userId }, lock: { mode: 'pessimistic_write' },
+      });
+      if (!lockedUser) throw new NotFoundException('Utilisateur introuvable');
       let kycDocument = existingKyc
         ? this.kycDocumentRepository.merge(existingKyc, {})
         : this.kycDocumentRepository.create({
@@ -770,26 +791,14 @@ export class UsersService {
 
       const savedKyc = await queryRunner.manager.save(kycDocument);
 
-      const hasActiveVehicle = await queryRunner.manager
-        .getRepository(Vehicle)
-        .exists({ where: { ownerId: userId, isActive: true } });
-      const driverProfileChanged = normalizeUserDriverFlags(user, {
-        hasActiveVehicle,
-      });
-
       // Update user status ONLY if approval is confirmed
-      if (isApprovalConfirmed) {
-        user.status = UserStatus.ACTIVE;
+      if (isApprovalConfirmed && lockedUser.isActive &&
+        ![UserStatus.SUSPENDED, UserStatus.INACTIVE].includes(lockedUser.status)) {
+        await queryRunner.manager.getRepository(User).update(userId, { status: UserStatus.ACTIVE });
+        this.logger.log(`User ${userId} status updated to ACTIVE after KYC approval`);
       }
 
-      if (isApprovalConfirmed || driverProfileChanged) {
-        await queryRunner.manager.save(user); // Transactional user save
-        if (isApprovalConfirmed) {
-          this.logger.log(
-            `User ${userId} status updated to ACTIVE after KYC approval`,
-          );
-        }
-      }
+      await activateRequestedDriver(queryRunner.manager, userId);
 
       await queryRunner.commitTransaction();
 
@@ -858,8 +867,7 @@ export class UsersService {
       return;
     }
 
-    user.fcmToken = fcmToken;
-    await this.userRepository.save(user);
+    await this.userRepository.update(userId, { fcmToken });
 
     this.logger.debug(`FCM token updated for user: ${userId}`);
   }
@@ -1001,10 +1009,9 @@ export class UsersService {
     const saltRounds = 10;
     const hashedNewPin = await bcrypt.hash(changePinDto.newPin, saltRounds);
 
-    user.password = hashedNewPin;
-    user.refreshToken = null;
-    user.accessToken = null;
-    await this.userRepository.save(user);
+    await this.userRepository.update(userId, {
+      password: hashedNewPin, refreshToken: null, accessToken: null,
+    });
 
     this.logger.log(`PIN changed successfully for user ${userId}`);
   }
@@ -1256,7 +1263,7 @@ export class UsersService {
     // Préparer les véhicules (si driver)
     const premium = await this.subscriptionsService.getPremiumOverview(user.id);
     const vehicles =
-      user.isDriver && user.vehicles
+      user.role === UserRole.DRIVER && user.vehicles
         ? await Promise.all(
             user.vehicles
               .filter((v) => v.isActive)

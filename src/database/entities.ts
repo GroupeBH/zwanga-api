@@ -1,4 +1,5 @@
 import { User } from '../users/entities/user.entity';
+import { PRO_SERVICE_ENTITIES } from '../pro-services/pro-service.entities';
 import { KycDocument } from '../users/entities/kyc-document.entity';
 import { Vehicle } from '../vehicles/entities/vehicle.entity';
 import { Trip } from '../trips/entities/trip.entity';
@@ -40,6 +41,7 @@ import { ReferralLedgerEntry } from '../referrals/entities/referral-ledger-entry
 import { ReferralWithdrawal } from '../referrals/entities/referral-withdrawal.entity';
 
 export const typeOrmEntities = [
+  ...PRO_SERVICE_ENTITIES,
   User,
   KycDocument,
   Vehicle,

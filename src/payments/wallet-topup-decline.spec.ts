@@ -64,6 +64,8 @@ function environment(providerPatch: Partial<FlexPayTransactionStatus> = {}) {
     repository as never,
     config as never,
     flexPay as never,
+    { isConfigured: () => false } as never,
+    { register: jest.fn(), apply: jest.fn() } as never,
   );
   return { payment, result, repository, config, flexPay, service };
 }

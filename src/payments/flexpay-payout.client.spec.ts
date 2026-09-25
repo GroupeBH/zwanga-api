@@ -78,6 +78,8 @@ describe('FlexPaie payout v1.03 (mocked HTTP)', () => {
       repository as unknown as Repository<PaymentTransaction>,
       configuration as unknown as ConfigService,
       flexpay,
+      { isConfigured: () => false } as never,
+      { register: jest.fn(), apply: jest.fn() } as never,
     );
   });
   afterEach(() => jest.restoreAllMocks());

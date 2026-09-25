@@ -10,7 +10,7 @@ import {
   Min,
 } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
-import { PaymentMethod } from '../../payments/entities/payment-transaction.entity';
+import { PaymentMethod, PaymentProvider } from '../../payments/entities/payment-transaction.entity';
 import { SubscriptionPlan } from '../entities/subscription.entity';
 import {
   AdministrativeDocumentType,
@@ -97,6 +97,17 @@ export class SubscribeDto {
   @IsOptional()
   @MaxLength(500)
   declineUrl?: string;
+
+  @ApiProperty({
+    required: false,
+    enum: PaymentProvider,
+    enumName: 'PaymentProvider',
+    description:
+      'Prestataire préféré. Si indisponible, le backend bascule vers l’autre canal Mobile Money.',
+  })
+  @IsEnum(PaymentProvider)
+  @IsOptional()
+  preferredProvider?: PaymentProvider;
 }
 
 export class SubscribeWithPointsDto {

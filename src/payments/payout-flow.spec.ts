@@ -58,6 +58,8 @@ describe('Merchant-to-driver payouts (no real network or database)', () => {
       repository as any,
       configuration as any,
       flexpay,
+      { isConfigured: () => false } as any,
+      { register: jest.fn(), apply: jest.fn() } as any,
     );
   });
   afterEach(() => jest.restoreAllMocks());

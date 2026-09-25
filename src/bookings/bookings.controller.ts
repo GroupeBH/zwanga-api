@@ -65,7 +65,7 @@ export class BookingsController {
   @ApiOperation({
     summary: 'Initiate electronic payment for a booking',
     description:
-      "Disponible uniquement après l'arrivée du passager. Calcule le montant côté backend puis initialise le paiement FlexPay.",
+      "Disponible uniquement après l'arrivée du passager. Calcule le montant côté backend puis initialise le paiement FlexPay ou PawaPay.",
   })
   async initiatePayment(
     @Request() req,

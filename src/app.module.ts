@@ -42,6 +42,7 @@ import { HealthModule } from './health/health.module';
 import { createRedisCacheStore } from './common/utils/redis-cache-store';
 import { ReferralsModule } from './referrals/referrals.module';
 import { ActivityModule } from './activity/activity.module';
+import { ProServicesModule } from './pro-services/pro-services.module';
 
 @Module({
   imports: [
@@ -102,6 +103,7 @@ import { ActivityModule } from './activity/activity.module';
     HealthModule,
     ReferralsModule,
     ActivityModule,
+    ProServicesModule,
   ],
   controllers: [AppController],
   providers: [

@@ -9,6 +9,7 @@ import {
 
 export enum PaymentProvider {
   FLEXPAY = 'flexpay',
+  PAWAPAY = 'pawapay',
 }
 
 export enum PaymentMethod {

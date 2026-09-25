@@ -239,6 +239,7 @@ export class AuthService {
       gender: gender ?? null,
       role: driverState.role,
       isDriver: driverState.isDriver,
+      driverOnboardingRequestedAt: role === UserRole.DRIVER ? new Date() : null,
       status: UserStatus.PENDING_KYC,
     };
 
@@ -250,13 +251,13 @@ export class AuthService {
     const savedUser = await this.userRepository.save(user);
     await this.referralsService.registerUser(savedUser.id, referralAttribution);
 
-    if (vehicle && !driverState.isDriver) {
+    if (vehicle && role !== UserRole.DRIVER) {
       throw new BadRequestException(
         'Les informations du véhicule sont uniquement autorisées pour les conducteurs',
       );
     }
 
-    if (vehicle && driverState.isDriver) {
+    if (vehicle && role === UserRole.DRIVER) {
       await this.vehiclesService.create(savedUser.id, vehicle);
     }
 
@@ -357,7 +358,7 @@ export class AuthService {
 
     // Update last login
     user.lastLoginAt = new Date();
-    await this.userRepository.save(user);
+    await this.userRepository.update(user.id, { lastLoginAt: user.lastLoginAt });
 
     const tokens = await this.generateTokens(user);
 
@@ -482,7 +483,7 @@ export class AuthService {
     user.password = await bcrypt.hash(dto.newPin, 10);
     user.refreshToken = null;
     user.accessToken = null;
-    await this.userRepository.save(user);
+    await this.userRepository.update(user.id, { password: user.password, refreshToken: null, accessToken: null });
 
     this.logger.log(`PIN reset completed for user ${user.id}`);
 
@@ -568,7 +569,7 @@ export class AuthService {
     }
 
     user.lastLoginAt = new Date();
-    await this.userRepository.save(user);
+    await this.userRepository.update(user.id, { lastLoginAt: user.lastLoginAt });
 
     const tokens = await this.generateTokens(user);
     return {
@@ -618,7 +619,7 @@ export class AuthService {
 
     user.password = await bcrypt.hash(dto.newPassword, 12);
     user.passwordChangeRequired = false;
-    await this.userRepository.save(user);
+    await this.userRepository.update(user.id, { password: user.password, passwordChangeRequired: false });
 
     return {
       message: 'Mot de passe administrateur modifié avec succès',
@@ -778,7 +779,7 @@ export class AuthService {
     // Invalidate the refresh token by setting it to null
     user.refreshToken = null;
     user.accessToken = null;
-    await this.userRepository.save(user);
+    await this.userRepository.update(user.id, { refreshToken: null, accessToken: null });
 
     this.logger.log(`User ${userId} logged out successfully`);
 
@@ -977,7 +978,7 @@ export class AuthService {
       this.assertUserCanAuthenticate(user);
 
       user.lastLoginAt = new Date();
-      await this.userRepository.save(user);
+      await this.userRepository.update(user.id, { lastLoginAt: user.lastLoginAt });
 
       const tokens = await this.generateTokens(user);
       return {
@@ -1015,7 +1016,10 @@ export class AuthService {
         if (!user.profilePicture && profilePicture) {
           user.profilePicture = profilePicture;
         }
-        await this.userRepository.save(user);
+        await this.userRepository.update(user.id, {
+          googleId: user.googleId, isEmailVerified: user.isEmailVerified,
+          phone: user.phone, profilePicture: user.profilePicture,
+        });
       } else {
         // Create new user with Google account
         if (!phone) {
@@ -1050,7 +1054,7 @@ export class AuthService {
           signupOptions?.lastName || lastName,
         );
 
-        if (driverState.isDriver && (!legalFirstName || !legalLastName)) {
+        if (role === UserRole.DRIVER && (!legalFirstName || !legalLastName)) {
           throw new BadRequestException(
             'Vos prénom(s) et votre nom exacts sont requis avant la vérification KYC. Le post-nom est facultatif.',
           );
@@ -1067,7 +1071,7 @@ export class AuthService {
           referralAttribution,
         );
 
-        if (vehicle && !driverState.isDriver) {
+        if (vehicle && role !== UserRole.DRIVER) {
           throw new BadRequestException(
             'Les informations du véhicule sont uniquement autorisées pour les conducteurs',
           );
@@ -1083,6 +1087,7 @@ export class AuthService {
           profilePicture: profilePicture ?? undefined,
           role: driverState.role,
           isDriver: driverState.isDriver,
+          driverOnboardingRequestedAt: role === UserRole.DRIVER ? new Date() : null,
           status: UserStatus.PENDING_KYC,
           isEmailVerified: true,
           isPhoneVerified: false,
@@ -1090,7 +1095,7 @@ export class AuthService {
 
         user = await this.userRepository.save(user);
         await this.referralsService.registerUser(user.id, referralAttribution);
-        if (vehicle && driverState.isDriver) {
+        if (vehicle && role === UserRole.DRIVER) {
           await this.vehiclesService.create(user.id, vehicle);
         }
         this.logger.log(`New user created via Google OAuth: ${user.id}`);
@@ -1101,7 +1106,7 @@ export class AuthService {
 
     // Update last login
     user.lastLoginAt = new Date();
-    await this.userRepository.save(user);
+    await this.userRepository.update(user.id, { lastLoginAt: user.lastLoginAt });
 
     // Generate tokens
     const tokens = await this.generateTokens(user);
@@ -1319,7 +1324,7 @@ export class AuthService {
       this.assertUserCanAuthenticate(user);
 
       user.lastLoginAt = new Date();
-      await this.userRepository.save(user);
+      await this.userRepository.update(user.id, { lastLoginAt: user.lastLoginAt });
 
       const tokens = await this.generateTokens(user);
       return {
@@ -1360,7 +1365,10 @@ export class AuthService {
         user.lastName = lastName;
       }
 
-      await this.userRepository.save(user);
+      await this.userRepository.update(user.id, {
+        appleId: user.appleId, isEmailVerified: user.isEmailVerified, phone: user.phone,
+        firstName: user.firstName, lastName: user.lastName,
+      });
     } else {
       if (!phone) {
         throw new UnauthorizedException(
@@ -1389,7 +1397,7 @@ export class AuthService {
       const legalFirstName = normalizeLegalName(firstName);
       const legalLastName = normalizeLegalName(lastName);
 
-      if (driverState.isDriver && (!legalFirstName || !legalLastName)) {
+      if (role === UserRole.DRIVER && (!legalFirstName || !legalLastName)) {
         throw new BadRequestException(
           'Vos prénom(s) et votre nom exacts sont requis avant la vérification KYC. Le post-nom est facultatif.',
         );
@@ -1406,7 +1414,7 @@ export class AuthService {
         referralAttribution,
       );
 
-      if (vehicle && !driverState.isDriver) {
+      if (vehicle && role !== UserRole.DRIVER) {
         throw new BadRequestException(
           'Les informations du véhicule sont uniquement autorisées pour les conducteurs',
         );
@@ -1421,6 +1429,7 @@ export class AuthService {
         gender: signupOptions?.gender ?? null,
         role: driverState.role,
         isDriver: driverState.isDriver,
+        driverOnboardingRequestedAt: role === UserRole.DRIVER ? new Date() : null,
         status: UserStatus.PENDING_KYC,
         isEmailVerified: emailVerified,
         isPhoneVerified: false,
@@ -1428,7 +1437,7 @@ export class AuthService {
 
       user = await this.userRepository.save(user);
       await this.referralsService.registerUser(user.id, referralAttribution);
-      if (vehicle && driverState.isDriver) {
+      if (vehicle && role === UserRole.DRIVER) {
         await this.vehiclesService.create(user.id, vehicle);
       }
       this.logger.log(`New user created via Apple OAuth: ${user.id}`);
@@ -1437,7 +1446,7 @@ export class AuthService {
     this.assertUserCanAuthenticate(user);
 
     user.lastLoginAt = new Date();
-    await this.userRepository.save(user);
+    await this.userRepository.update(user.id, { lastLoginAt: user.lastLoginAt });
 
     const tokens = await this.generateTokens(user);
 
@@ -1471,7 +1480,7 @@ export class AuthService {
     // Save tokens to user
     user.accessToken = accessToken;
     user.refreshToken = refreshToken;
-    await this.userRepository.save(user);
+    await this.userRepository.update(user.id, { accessToken, refreshToken });
 
     return { accessToken, refreshToken };
   }

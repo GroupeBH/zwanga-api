@@ -3,7 +3,13 @@ import { PaymentsService } from './payments.service';
 
 describe('Messages de paiement en français', () => {
   // Pure presentation checks: no database, HTTP call or real payment.
-  const service = new PaymentsService({} as never, {} as never, {} as never);
+  const service = new PaymentsService(
+    {} as never,
+    {} as never,
+    {} as never,
+    {} as never,
+    { register() {}, async apply() {} } as never,
+  );
 
   it.each([
     ['Transaction envoyee avec succes. Push', 'Demande de paiement envoyée. Veuillez valider sur votre téléphone'],

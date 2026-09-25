@@ -1,4 +1,5 @@
-import { Body, Controller, Get, Param, Post, Query, Request } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Param, Post, Query, Req, Request } from '@nestjs/common';
+import type { Request as ExpressRequest } from 'express';
 import { PaymentHistoryPageDto } from '../common/pagination/history-page';
 import { PaymentContextDto } from './payment-context';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
@@ -13,12 +14,58 @@ import { PaymentsService } from './payments.service';
 export class PaymentsController {
   constructor(private readonly paymentsService: PaymentsService) {}
 
+  @Get('providers')
+  @Auth()
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({
+    summary: 'List available payment providers and configured callback URLs',
+  })
+  getProviders() {
+    return this.paymentsService.listPaymentProviders();
+  }
+
   @Post('flexpay/callback')
   @Public()
   @SensitiveThrottle(120, 60000)
   @ApiOperation({ summary: 'Receive a generic FlexPay payment callback' })
   async handleFlexPayCallback(@Body() dto: FlexPayCallbackDto) {
     return this.paymentsService.handleFlexPayCallback(dto);
+  }
+
+  @Post('pawapay/deposits/callback')
+  @HttpCode(200)
+  @Public()
+  @SensitiveThrottle(120, 60000)
+  @ApiOperation({ summary: 'Receive a PawaPay deposit callback' })
+  async handlePawaPayDepositCallback(@Req() request: ExpressRequest) {
+    return this.paymentsService.handlePawaPayCallback(
+      'deposits',
+      request.body ?? {},
+    );
+  }
+
+  @Post('pawapay/payouts/callback')
+  @HttpCode(200)
+  @Public()
+  @SensitiveThrottle(120, 60000)
+  @ApiOperation({ summary: 'Receive a PawaPay payout callback' })
+  async handlePawaPayPayoutCallback(@Req() request: ExpressRequest) {
+    return this.paymentsService.handlePawaPayCallback(
+      'payouts',
+      request.body ?? {},
+    );
+  }
+
+  @Post('pawapay/refunds/callback')
+  @HttpCode(200)
+  @Public()
+  @SensitiveThrottle(120, 60000)
+  @ApiOperation({ summary: 'Receive a PawaPay refund callback' })
+  async handlePawaPayRefundCallback(@Req() request: ExpressRequest) {
+    return this.paymentsService.handlePawaPayCallback(
+      'refunds',
+      request.body ?? {},
+    );
   }
 
   @Get('my-transactions')

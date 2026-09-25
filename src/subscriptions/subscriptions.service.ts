@@ -3,6 +3,7 @@ import {
   NotFoundException,
   BadRequestException,
   Logger,
+  OnModuleInit,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, MoreThan, Not, Repository } from 'typeorm';
@@ -80,7 +81,7 @@ export interface FlexPayCallbackResponse {
 }
 
 @Injectable()
-export class SubscriptionsService {
+export class SubscriptionsService implements OnModuleInit {
   private readonly logger = new Logger(SubscriptionsService.name);
   private readonly DEFAULT_SUBSCRIPTION_CURRENCY = 'USD';
   private readonly DEFAULT_DOCUMENT_FUNDING_CURRENCY = 'CDF';
@@ -98,6 +99,16 @@ export class SubscriptionsService {
     private walletService: WalletService,
     private referralsService: ReferralsService,
   ) {}
+
+  onModuleInit() {
+    this.paymentsService.registerSettlement?.(
+      PaymentPurpose.SUBSCRIPTION_PRO,
+      async (payment) => {
+        const subscription = await this.findSubscriptionForPayment(payment);
+        await this.applyPaymentToSubscription(subscription, payment);
+      },
+    );
+  }
 
   async createTrial(userId: string): Promise<Subscription> {
     this.logger.log(`Creating trial subscription for user: ${userId}`);
@@ -262,6 +273,7 @@ export class SubscriptionsService {
         cancelUrl: dto.cancelUrl,
         declineUrl: dto.declineUrl,
         referencePrefix: 'SUB',
+        preferredProvider: dto.preferredProvider,
       });
     } catch (error) {
       const errorMessage = this.getErrorMessage(error);
@@ -1011,7 +1023,7 @@ export class SubscriptionsService {
       throw new NotFoundException('Utilisateur introuvable');
     }
 
-    if (!user.isDriver && user.role !== UserRole.DRIVER) {
+    if (user.role !== UserRole.DRIVER) {
       throw new BadRequestException(
         'Les abonnements premium sont réservés aux conducteurs',
       );

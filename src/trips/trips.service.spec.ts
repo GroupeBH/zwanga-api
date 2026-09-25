@@ -1,6 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
 import { TripsService } from './trips.service';
-import { UserRole } from '../users/entities/user.entity';
+import { User, UserRole } from '../users/entities/user.entity';
 import { TripStatus } from './entities/trip.entity';
 import { BookingStatus } from '../bookings/entities/booking.entity';
 import { VehicleType } from '../vehicles/entities/vehicle.entity';
@@ -13,8 +13,9 @@ describe('TripsService daily trip publication quota', () => {
     update: jest.Mock;
     findOne: jest.Mock;
     createQueryBuilder: jest.Mock;
+    manager?: any;
   };
-  let userRepository: { findOne: jest.Mock; save: jest.Mock };
+  let userRepository: { findOne: jest.Mock; save: jest.Mock; manager: any };
   let vehicleRepository: { findOne: jest.Mock };
   let subscriptionsService: { getPremiumOverview: jest.Mock };
   let cacheService: { del: jest.Mock };
@@ -44,12 +45,24 @@ describe('TripsService daily trip publication quota', () => {
         id: 'driver-1',
         role: UserRole.DRIVER,
         isDriver: true,
+        isActive: true,
+        profilePicture: 'profiles/driver-photo.jpg',
+        hasPublishedTrip: true,
       }),
       save: jest.fn(),
+      manager: { getRepository: () => ({
+        findOne: jest.fn().mockResolvedValue({ status: 'approved' }),
+        exists: jest.fn().mockResolvedValue(true),
+      }) },
     };
     vehicleRepository = {
       findOne: jest.fn(),
     };
+    tripRepository.manager = { transaction: jest.fn(async (_isolation, work) => work({
+      getRepository: (entity) => entity === User ? userRepository : {
+        save: async (trips) => [await tripRepository.save(trips)],
+      },
+    })) };
     subscriptionsService = {
       getPremiumOverview: jest.fn(),
     };
@@ -384,6 +397,49 @@ describe('TripsService daily trip publication quota', () => {
 
     expect(tripRepository.createQueryBuilder).not.toHaveBeenCalled();
     expect(tripRepository.save).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects a second public publication without a photo before quota or geocoding work', async () => {
+    const driver = await userRepository.findOne();
+    driver.profilePicture = '';
+    await expect(service.create('driver-1', baseCreateTripDto)).rejects.toMatchObject({
+      response: expect.objectContaining({ code: 'DRIVER_PROFILE_PHOTO_REQUIRED' }),
+    });
+    expect(subscriptionsService.getPremiumOverview).not.toHaveBeenCalled();
+    expect(tripRepository.save).not.toHaveBeenCalled();
+  });
+
+  it('keeps private request acceptance available without a photo and without consuming a publication', async () => {
+    const driver = await userRepository.findOne();
+    driver.profilePicture = '';
+    subscriptionsService.getPremiumOverview.mockResolvedValue({ isActive: true });
+    await expect(service.create('driver-1', baseCreateTripDto, { isPrivate: true, tripRequestId: 'request' }))
+      .resolves.toEqual({ id: 'trip-1' });
+    expect(tripRepository.manager.transaction).not.toHaveBeenCalled();
+    expect(tripRepository.save).toHaveBeenCalledWith(expect.objectContaining({ isPrivate: true, tripRequestId: 'request' }));
+  });
+
+  it('requires a photo before saving a new recurring schedule', async () => {
+    jest.spyOn(service, 'resolvePublishingContext').mockResolvedValue({
+      user: { profilePicture: '', hasPublishedTrip: false }, vehicle: { id: 'vehicle' },
+    });
+    service.recurringTripTemplateRepository = { save: jest.fn() };
+    await expect(service.createRecurring('driver-1', baseCreateTripDto)).rejects.toMatchObject({
+      response: expect.objectContaining({ code: 'DRIVER_PROFILE_PHOTO_REQUIRED' }),
+    });
+    expect(service.recurringTripTemplateRepository.save).not.toHaveBeenCalled();
+  });
+
+  it('also checks the driver photo when a passenger makes a private request trip public', async () => {
+    const driver = await userRepository.findOne();
+    Object.assign(driver, { profilePicture: '', status: 'active', vehicles: [{ isActive: true }] });
+    tripRepository.findOne.mockResolvedValue({ id: 'trip-1', driverId: driver.id, isPrivate: true, tripRequestId: 'request' });
+    service.tripRequestRepository = { findOne: jest.fn().mockResolvedValue({ passengerId: 'passenger' }) };
+    service.kycDocumentRepository = { findOne: jest.fn().mockResolvedValue({ status: 'approved' }) };
+    await expect(service.makeTripPublic('trip-1', 'passenger')).rejects.toMatchObject({
+      response: expect.objectContaining({ code: 'DRIVER_PROFILE_PHOTO_REQUIRED' }),
+    });
+    expect(tripRepository.save).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -793,7 +849,7 @@ describe('TripsService started trip ETA expiration', () => {
     increment: jest.Mock;
   };
   let bookingRepository: { update: jest.Mock };
-  let userRepository: { find: jest.Mock };
+  let userRepository: { find: jest.Mock; findOne: jest.Mock; manager: any };
   let cacheService: { del: jest.Mock };
   let googleMapsService: { getDirections: jest.Mock };
   let weatherAwarenessService: { getRouteImpact: jest.Mock };
@@ -813,6 +869,11 @@ describe('TripsService started trip ETA expiration', () => {
     };
     userRepository = {
       find: jest.fn().mockResolvedValue([]),
+      findOne: jest.fn().mockResolvedValue({ id: 'driver-1', role: UserRole.DRIVER, isActive: true }),
+      manager: { getRepository: () => ({
+        findOne: jest.fn().mockResolvedValue({ status: 'approved' }),
+        exists: jest.fn().mockResolvedValue(true),
+      }) },
     };
     cacheService = {
       del: jest.fn().mockResolvedValue(undefined),

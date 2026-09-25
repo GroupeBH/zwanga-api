@@ -12,7 +12,7 @@ import {
   Matches,
   Min,
 } from 'class-validator';
-import { PaymentMethod } from '../../payments/entities/payment-transaction.entity';
+import { PaymentMethod, PaymentProvider } from '../../payments/entities/payment-transaction.entity';
 
 export class RequestWalletWithdrawalDto {
   @ApiProperty({ minimum: 1, example: 50 })
@@ -50,7 +50,7 @@ export class InitiateWalletTopUpDto {
     enum: PaymentMethod,
     enumName: 'PaymentMethod',
     example: PaymentMethod.MOBILE_MONEY,
-    description: 'Canal FlexPay utilisé pour acheter les jetons.',
+    description: 'Canal FlexPay ou PawaPay utilisé pour acheter les jetons.',
   })
   @IsEnum(PaymentMethod)
   method: PaymentMethod;
@@ -82,6 +82,15 @@ export class InitiateWalletTopUpDto {
   @IsOptional()
   @MaxLength(1000)
   declineUrl?: string;
+
+  @ApiProperty({
+    required: false,
+    enum: PaymentProvider,
+    enumName: 'PaymentProvider',
+  })
+  @IsEnum(PaymentProvider)
+  @IsOptional()
+  preferredProvider?: PaymentProvider;
 }
 
 export class TransferWalletPointsDto {

@@ -12,7 +12,7 @@ describe('VehiclesService vehicle creation', () => {
     find: jest.Mock;
     createQueryBuilder: jest.Mock;
   };
-  let userRepository: { findOne: jest.Mock; save: jest.Mock };
+  let userRepository: { findOne: jest.Mock; save: jest.Mock; update: jest.Mock; manager: any };
   let tripRepository: { find: jest.Mock };
   let cacheService: { get: jest.Mock; set: jest.Mock; del: jest.Mock };
 
@@ -31,8 +31,11 @@ describe('VehiclesService vehicle creation', () => {
         id: 'owner-1',
         role: UserRole.PASSENGER,
         isDriver: false,
+        isActive: true,
       }),
       save: jest.fn((user) => Promise.resolve(user)),
+      update: jest.fn(),
+      manager: { transaction: jest.fn(async callback => callback({ getRepository: () => userRepository })) },
     };
     tripRepository = {
       find: jest.fn().mockResolvedValue([]),
@@ -85,12 +88,13 @@ describe('VehiclesService vehicle creation', () => {
     );
   });
 
-  it('promotes a public owner to a coherent driver profile when creating a vehicle', async () => {
+  it('never promotes a passenger just because a vehicle was created', async () => {
     mockPlateLookup(null);
     const owner = {
       id: 'owner-1',
       role: UserRole.PASSENGER,
       isDriver: false,
+      isActive: true,
     };
     userRepository.findOne.mockResolvedValue(owner);
 
@@ -102,12 +106,9 @@ describe('VehiclesService vehicle creation', () => {
       licensePlate: '1576AN01',
     } as any);
 
-    expect(userRepository.save).toHaveBeenCalledWith(
-      expect.objectContaining({
-        role: UserRole.DRIVER,
-        isDriver: true,
-      }),
-    );
+    expect(owner.role).toBe(UserRole.PASSENGER);
+    expect(userRepository.save).not.toHaveBeenCalled();
+    expect(userRepository.update).not.toHaveBeenCalled();
   });
 
   it('rejects vehicle creation from admin accounts', async () => {

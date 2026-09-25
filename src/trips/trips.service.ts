@@ -78,7 +78,8 @@ import {
 import { WeatherAwarenessService } from '../weather/weather-awareness.service';
 import { DriverSettlementsService } from '../driver-settlements/driver-settlements.service';
 import { WalletService } from '../wallet/wallet.service';
-import { normalizeUserDriverFlags } from '../users/user-role.policy';
+import { assertDriverCanOperate } from '../users/driver-activation';
+import { assertDriverPublicationPhoto, savePublicationsWithPhotoPolicy } from './trip-publication-photo';
 import {
   buildPointFromCoordinate,
   isCoordinateAllowedForTrip,
@@ -272,10 +273,11 @@ export class TripsService {
       ...baseTripData
     } = createTripDto;
 
-    const { vehicle } = await this.resolvePublishingContext(
+    const { user, vehicle } = await this.resolvePublishingContext(
       driverId,
       vehicleId || null,
     );
+    if (!options?.isPrivate) assertDriverPublicationPhoto(user, user.hasPublishedTrip);
     this.assertVehicleSeatCapacity(vehicle, baseTripData.totalSeats);
     await this.ensureDailyTripPublicationQuota(driverId);
     const departurePoint = await this.resolvePointFromCoordinatesOrAddress(
@@ -309,7 +311,9 @@ export class TripsService {
       recurringOccurrenceDate: null,
     });
 
-    const savedTrip = await this.tripRepository.save(trip);
+    const savedTrip = options?.isPrivate
+      ? await this.tripRepository.save(trip)
+      : (await savePublicationsWithPhotoPolicy(this.tripRepository, driverId, [trip]))[0];
     await this.invalidateTripCaches();
 
     this.logger.log(
@@ -682,11 +686,13 @@ export class TripsService {
       `Creating recurring trip template for user ${driverId} from ${createRecurringTripDto.departureLocation} to ${createRecurringTripDto.arrivalLocation}`,
     );
 
-    const { vehicle } = await this.resolvePublishingContext(
+    const { user, vehicle } = await this.resolvePublishingContext(
       driverId,
       createRecurringTripDto.vehicleId,
       true,
     );
+    // A recurring schedule authorizes multiple future publications.
+    assertDriverPublicationPhoto(user, true);
 
     if (!vehicle) {
       throw new BadRequestException(
@@ -940,7 +946,7 @@ export class TripsService {
 
     // Rendre le trajet public
     trip.isPrivate = false;
-    await this.tripRepository.save(trip);
+    await savePublicationsWithPhotoPolicy(this.tripRepository, trip.driverId, [trip]);
 
     // Invalider le cache
     await this.cacheService.del(CacheService.getTripKey(tripId));
@@ -1575,6 +1581,9 @@ export class TripsService {
     driverId: string,
     excludedTripId?: string,
   ): Promise<void> {
+    const driver = await this.userRepository.findOne({ where: { id: driverId } });
+    if (!driver) throw new NotFoundException('Utilisateur introuvable');
+    await assertDriverCanOperate(this.userRepository.manager, driver);
     await this.ensureDriverHasNoActiveTrip(driverId, excludedTripId);
   }
 
@@ -2415,6 +2424,7 @@ export class TripsService {
       });
     }
 
+    await assertDriverCanOperate(this.userRepository.manager, user);
     let vehicle: Vehicle | null = null;
 
     if (vehicleId) {
@@ -2446,12 +2456,6 @@ export class TripsService {
         });
       }
 
-      if (normalizeUserDriverFlags(user, { hasActiveVehicle: true })) {
-        this.logger.log(
-          `Aligning user ${driverId} as driver for trip publication`,
-        );
-        await this.userRepository.save(user);
-      }
     } else {
       if (requireVehicle) {
         throw new BadRequestException({
@@ -2459,10 +2463,6 @@ export class TripsService {
           code: 'TRIP_ACTIVE_VEHICLE_REQUIRED',
           message: 'Sélectionnez un véhicule actif avant de publier le trajet.',
         });
-      }
-
-      if (normalizeUserDriverFlags(user)) {
-        await this.userRepository.save(user);
       }
 
       if (!this.isDriverRole(user.role)) {
@@ -2473,7 +2473,7 @@ export class TripsService {
           error: 'Profil conducteur requis',
           code: 'DRIVER_PROFILE_REQUIRED',
           message:
-            'Votre profil doit être conducteur, ou vous devez sélectionner un véhicule vous appartenant, avant de publier un trajet.',
+            'Terminez le parcours Devenir conducteur avant de publier un trajet.',
         });
       }
     }
@@ -2707,7 +2707,7 @@ export class TripsService {
     );
 
     if (publishableTrips.length > 0) {
-      await this.tripRepository.save(publishableTrips);
+      await savePublicationsWithPhotoPolicy(this.tripRepository, template.driverId, publishableTrips);
       await this.invalidateTripCaches();
     }
 

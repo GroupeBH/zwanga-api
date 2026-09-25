@@ -1,4 +1,5 @@
 import {
+  BadGatewayException,
   BadRequestException,
   Injectable,
   Logger,
@@ -7,7 +8,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { ConfigService } from '@nestjs/config';
 import { Repository } from 'typeorm';
-import { randomBytes } from 'crypto';
+import { randomBytes, randomUUID } from 'crypto';
 import {
   PaymentMethod,
   PaymentProvider,
@@ -15,13 +16,28 @@ import {
   PaymentStatus,
   PaymentTransaction,
 } from './entities/payment-transaction.entity';
-import { FlexPayCallbackDto } from './dto/payment.dto';
+import { FlexPayCallbackDto, PawaPayCallbackDto } from './dto/payment.dto';
 import {
   FlexPayCheckTransactionResult,
   FlexPayInitiatePaymentResult,
   FlexPayService,
   FlexPayTransactionStatus,
 } from './flexpay.service';
+import {
+  PawaPayCallbackKind,
+  PawaPayPaymentSnapshot,
+  PawaPayService,
+} from './pawapay.service';
+import {
+  canFailoverPaymentProvider,
+  PaymentGatewayUnavailableError,
+  isUncertainProviderDelivery,
+  parseEnabledPaymentProviders,
+  parsePaymentProvider,
+  resolvePaymentProviders,
+} from './payment-provider.policy';
+import { PaymentSettlementRegistry } from './payment-settlement.registry';
+import { assertPawaPaySnapshotMatches, commitPawaPayState } from './pawapay-payment-state';
 import { formatPaymentLogPayload } from './payment-log.util';
 import { getPayoutFailureMessage, PAYOUT_MESSAGES } from './payout-policy';
 import { hasVerifiedWalletTopUpProof } from './wallet-topup-proof';
@@ -45,6 +61,7 @@ export interface InitiatePaymentInput {
   cancelUrl?: string;
   declineUrl?: string;
   referencePrefix?: string;
+  preferredProvider?: PaymentProvider | null;
 }
 
 export interface InitiatePayoutInput {
@@ -58,6 +75,7 @@ export interface InitiatePayoutInput {
   description: string;
   callbackUrl?: string;
   referencePrefix?: string;
+  preferredProvider?: PaymentProvider | null;
 }
 
 export interface NormalizedFlexPayCallback {
@@ -102,21 +120,83 @@ export class PaymentsService {
     private readonly paymentTransactionRepository: Repository<PaymentTransaction>,
     private readonly configService: ConfigService,
     private readonly flexPayService: FlexPayService,
+    private readonly pawaPayService: PawaPayService,
+    private readonly settlementRegistry: PaymentSettlementRegistry,
   ) {}
+
+  registerSettlement(
+    purpose: string,
+    handler: (payment: PaymentTransaction) => Promise<unknown>,
+  ): void {
+    this.settlementRegistry?.register(purpose, handler);
+  }
+
+  listPaymentProviders() {
+    const enabled = this.getEnabledProviders();
+    const primary =
+      parsePaymentProvider(
+        this.configService.get<string>('PAYMENT_PRIMARY_PROVIDER'),
+      ) ?? PaymentProvider.FLEXPAY;
+    const pawaPayConfigured = this.pawaPayService?.isConfigured() ?? false;
+    const providers = [
+      {
+        id: PaymentProvider.FLEXPAY,
+        name: 'FlexPay',
+        methods: [PaymentMethod.MOBILE_MONEY, PaymentMethod.CARD],
+        configured: enabled.includes(PaymentProvider.FLEXPAY),
+      },
+      {
+        id: PaymentProvider.PAWAPAY,
+        name: 'PawaPay',
+        methods: [PaymentMethod.MOBILE_MONEY],
+        configured: pawaPayConfigured && enabled.includes(PaymentProvider.PAWAPAY),
+      },
+    ];
+    const available = resolvePaymentProviders({
+      method: PaymentMethod.MOBILE_MONEY,
+      primary,
+      enabled,
+      pawaPayConfigured,
+    });
+
+    return {
+      providers,
+      primary: available[0] ?? primary,
+      fallback: available[1] ?? null,
+      callbacks: {
+        flexpay: {
+          generic: this.getGenericFlexPayCallbackUrl(),
+        },
+        pawapay: {
+          deposits: this.getPawaPayCallbackUrl('deposits'),
+          payouts: this.getPawaPayCallbackUrl('payouts'),
+          refunds: null, // No refund ledger workflow: deliberately unavailable.
+        },
+        returnUrls: {
+          success: this.getCustomerReturnUrl('success'),
+          failed: this.getCustomerReturnUrl('failed'),
+        },
+      },
+    };
+  }
 
   async initiatePayment(
     input: InitiatePaymentInput,
   ): Promise<PaymentTransaction> {
     this.ensurePaymentInputIsUsable(input);
-    const callbackUrl =
-      input.callbackUrl || this.getGenericFlexPayCallbackUrl();
+    const providers = this.resolveProviders(input.method, input.preferredProvider);
+    if (providers.length === 0) {
+      throw new BadRequestException(
+        "Aucun prestataire de paiement n'est disponible",
+      );
+    }
 
     const transaction = this.paymentTransactionRepository.create({
       userId: input.userId ?? null,
       purpose: input.purpose || PaymentPurpose.GENERIC,
       relatedEntityType: input.relatedEntityType ?? null,
       relatedEntityId: input.relatedEntityId ?? null,
-      provider: PaymentProvider.FLEXPAY,
+      provider: providers[0],
       method: input.method,
       status: PaymentStatus.PENDING,
       reference: this.generatePaymentReference(
@@ -132,7 +212,11 @@ export class PaymentsService {
       description: input.description,
       phone: input.method === PaymentMethod.MOBILE_MONEY ? input.phone : null,
       paymentUrl: null,
-      callbackUrl,
+      callbackUrl: this.getProviderCallbackUrl(
+        providers[0],
+        'deposits',
+        input.callbackUrl,
+      ),
       rawInitiationResponse: null,
       rawCallbackPayload: null,
       rawCheckResponse: null,
@@ -141,96 +225,74 @@ export class PaymentsService {
 
     let savedTransaction =
       await this.paymentTransactionRepository.save(transaction);
-    let flexPayResponse: FlexPayInitiatePaymentResult;
-
     this.logger.warn(
       `Payment transaction created: id=${savedTransaction.id}, reference=${savedTransaction.reference}, userId=${savedTransaction.userId ?? 'anonymous'}, purpose=${savedTransaction.purpose}, method=${savedTransaction.method}, amount=${savedTransaction.amount} ${savedTransaction.currency}, related=${savedTransaction.relatedEntityType ?? 'none'}:${savedTransaction.relatedEntityId ?? 'none'}`,
     );
-    this.logger.warn(
-      `Starting FlexPay initiation: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, method=${savedTransaction.method}`,
-    );
 
-    try {
-      flexPayResponse = await this.flexPayService.initiatePayment({
-        method: input.method,
-        reference: savedTransaction.reference,
-        phone: input.phone,
-        amount: input.amount,
-        currency: savedTransaction.currency,
-        description: input.description,
-        callbackUrl,
-        approveUrl: input.approveUrl,
-        cancelUrl: input.cancelUrl,
-        declineUrl: input.declineUrl,
-      });
-    } catch (error) {
-      const errorMessage = this.getErrorMessage(error);
-      savedTransaction.status = PaymentStatus.FAILED;
-      savedTransaction.providerMessage =
-        this.translatePaymentMessage(errorMessage) ?? errorMessage;
-      await this.paymentTransactionRepository.save(savedTransaction);
-      this.logger.error(
-        `Payment initiation failed: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, method=${savedTransaction.method}, message=${errorMessage}`,
-        this.getErrorStack(error),
-      );
-      throw error;
-    }
-
-    this.logger.warn(
-      `FlexPay initiation received: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, code=${flexPayResponse.code}, orderNumber=${flexPayResponse.orderNumber ?? 'none'}, hasPaymentUrl=${Boolean(flexPayResponse.paymentUrl)}, message=${flexPayResponse.message ?? 'none'}, response=${formatPaymentLogPayload(flexPayResponse.raw)}`,
-    );
-
-    savedTransaction.orderNumber = flexPayResponse.orderNumber;
-    savedTransaction.providerStatusCode = flexPayResponse.code;
-    savedTransaction.paymentUrl = flexPayResponse.paymentUrl;
-    savedTransaction.providerMessage = this.getInitiationSuccessMessage(
-      savedTransaction.method,
-      savedTransaction.paymentUrl,
-      flexPayResponse.message,
-    );
-    savedTransaction.rawInitiationResponse = flexPayResponse.raw;
-
-    if (!this.flexPayService.isSuccessfulCode(flexPayResponse.code)) {
-      savedTransaction.status = PaymentStatus.FAILED;
-      savedTransaction.providerMessage = this.getInitiationFailureMessage(
-        flexPayResponse.message,
-      );
-      await this.paymentTransactionRepository.save(savedTransaction);
-      if (this.looksLikeFlexPayTokenError(flexPayResponse.message)) {
-        this.logger.error(
-          `FlexPay token configuration rejected: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, code=${flexPayResponse.code}, message=${flexPayResponse.message ?? 'none'}, response=${formatPaymentLogPayload(flexPayResponse.raw)}`,
+    let lastError: unknown;
+    for (let index = 0; index < providers.length; index += 1) {
+      const provider = providers[index];
+      if (index > 0) {
+        this.resetProviderAttempt(
+          savedTransaction,
+          provider,
+          'deposits',
+          input.callbackUrl,
         );
+        savedTransaction =
+          await this.paymentTransactionRepository.save(savedTransaction);
       }
       this.logger.warn(
-        `Payment refused by FlexPay: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, code=${flexPayResponse.code}, message=${flexPayResponse.message ?? 'none'}, response=${formatPaymentLogPayload(flexPayResponse.raw)}`,
+        `Starting ${provider} initiation: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, method=${savedTransaction.method}`,
       );
-      throw new BadRequestException(savedTransaction.providerMessage);
+
+      try {
+        return provider === PaymentProvider.PAWAPAY
+          ? await this.initiatePawaPayDeposit(savedTransaction, input)
+          : await this.initiateFlexPayDeposit(savedTransaction, input);
+      } catch (error) {
+        lastError = error;
+        const canFailover =
+          index < providers.length - 1 && canFailoverPaymentProvider(error);
+        if (canFailover) {
+          this.logger.warn(
+            `Deposit failover from ${provider} to ${providers[index + 1]}: paymentId=${savedTransaction.id}, message=${this.getErrorMessage(error)}`,
+          );
+          continue;
+        }
+        if (isUncertainProviderDelivery(error)) {
+          return this.persistFailedInitiation(savedTransaction, error, true);
+        }
+        await this.persistFailedInitiation(savedTransaction, error, false);
+        throw error;
+      }
     }
 
-    savedTransaction.status = PaymentStatus.INITIATED;
-    savedTransaction =
-      await this.paymentTransactionRepository.save(savedTransaction);
-
-    this.logger.warn(
-      `Payment initialized: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, orderNumber=${savedTransaction.orderNumber ?? 'none'}, status=${savedTransaction.status}, amount=${savedTransaction.amount} ${savedTransaction.currency}, response=${formatPaymentLogPayload(this.formatPaymentLogResponse(savedTransaction))}`,
-    );
-
-    return savedTransaction;
+    throw lastError instanceof Error
+      ? lastError
+      : new BadRequestException("Le paiement n'a pas pu être initialisé");
   }
 
   async initiatePayout(
     input: InitiatePayoutInput,
   ): Promise<PaymentTransaction> {
     this.ensurePayoutInputIsUsable(input);
-    const callbackUrl =
-      input.callbackUrl || this.getGenericFlexPayCallbackUrl();
+    const providers = this.resolveProviders(
+      PaymentMethod.MOBILE_MONEY,
+      input.preferredProvider,
+    );
+    if (providers.length === 0) {
+      throw new BadRequestException(
+        "Aucun prestataire de versement n'est disponible",
+      );
+    }
 
     const transaction = this.paymentTransactionRepository.create({
       userId: input.userId,
       purpose: input.purpose || PaymentPurpose.DRIVER_PAYOUT,
       relatedEntityType: input.relatedEntityType ?? null,
       relatedEntityId: input.relatedEntityId ?? null,
-      provider: PaymentProvider.FLEXPAY,
+      provider: providers[0],
       method: PaymentMethod.MOBILE_MONEY,
       status: PaymentStatus.PENDING,
       reference: this.generatePaymentReference(
@@ -246,7 +308,11 @@ export class PaymentsService {
       description: input.description,
       phone: input.phone,
       paymentUrl: null,
-      callbackUrl,
+      callbackUrl: this.getProviderCallbackUrl(
+        providers[0],
+        'payouts',
+        input.callbackUrl,
+      ),
       rawInitiationResponse: null,
       rawCallbackPayload: null,
       rawCheckResponse: null,
@@ -255,80 +321,60 @@ export class PaymentsService {
 
     let savedTransaction =
       await this.paymentTransactionRepository.save(transaction);
-
     this.logger.warn(
       `Payout transaction created: id=${savedTransaction.id}, reference=${savedTransaction.reference}, userId=${savedTransaction.userId}, amount=${savedTransaction.amount} ${savedTransaction.currency}, related=${savedTransaction.relatedEntityType ?? 'none'}:${savedTransaction.relatedEntityId ?? 'none'}`,
     );
 
-    try {
-      const flexPayResponse = await this.flexPayService.initiatePayout({
-        reference: savedTransaction.reference,
-        phone: input.phone,
-        amount: input.amount,
-        currency: savedTransaction.currency,
-        description: input.description,
-        callbackUrl,
-      });
-      this.logger.warn(
-        `FlexPay payout initiation received: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, code=${flexPayResponse.code}, orderNumber=${flexPayResponse.orderNumber ?? 'none'}, message=${flexPayResponse.message ?? 'none'}, response=${formatPaymentLogPayload(flexPayResponse.raw)}`,
-      );
-
-      savedTransaction.orderNumber = flexPayResponse.orderNumber;
-      savedTransaction.providerStatusCode =
-        flexPayResponse.status ?? flexPayResponse.code;
-      savedTransaction.providerMessage =
-        flexPayResponse.message || 'Paiement chauffeur initialisé';
-      savedTransaction.rawInitiationResponse = flexPayResponse.raw;
-
-      if (flexPayResponse.pending) {
-        savedTransaction.status = PaymentStatus.PENDING;
-        savedTransaction.providerMessage = PAYOUT_MESSAGES.pending;
-        return await this.paymentTransactionRepository.save(savedTransaction);
-      }
-
-      if (!this.flexPayService.isSuccessfulCode(flexPayResponse.code)) {
-        savedTransaction.status = PaymentStatus.FAILED;
-        savedTransaction.providerMessage = getPayoutFailureMessage(
-          flexPayResponse.message,
+    let lastError: unknown;
+    for (let index = 0; index < providers.length; index += 1) {
+      const provider = providers[index];
+      if (index > 0) {
+        this.resetProviderAttempt(
+          savedTransaction,
+          provider,
+          'payouts',
+          input.callbackUrl,
         );
-        await this.paymentTransactionRepository.save(savedTransaction);
-        throw new BadRequestException(savedTransaction.providerMessage);
+        savedTransaction =
+          await this.paymentTransactionRepository.save(savedTransaction);
       }
 
-      savedTransaction.status = PaymentStatus.INITIATED;
-      savedTransaction =
-        await this.paymentTransactionRepository.save(savedTransaction);
-      this.logger.warn(
-        `Payout initialized: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, orderNumber=${savedTransaction.orderNumber ?? 'none'}, status=${savedTransaction.status}, response=${formatPaymentLogPayload(this.formatPaymentLogResponse(savedTransaction))}`,
-      );
-      return savedTransaction;
-    } catch (error) {
-      const errorMessage = this.getErrorMessage(error);
-      const deliveryIsUncertain = !(error instanceof BadRequestException);
-      if (
-        deliveryIsUncertain &&
-        savedTransaction.status !== PaymentStatus.FAILED
-      ) {
-        // Un timeout ou une coupure peut arriver apres que FlexPay a recu la
-        // requete. Garder la transaction reservee evite un second decaissement
-        // pendant que le callback ou la reconciliation confirme le resultat.
-        savedTransaction.status = PaymentStatus.PENDING;
-        savedTransaction.providerMessage = PAYOUT_MESSAGES.pending;
-      } else {
-        savedTransaction.status = PaymentStatus.FAILED;
-        savedTransaction.providerMessage =
-          getPayoutFailureMessage(errorMessage);
+      try {
+        return provider === PaymentProvider.PAWAPAY
+          ? await this.initiatePawaPayPayout(savedTransaction, input)
+          : await this.initiateFlexPayPayout(savedTransaction, input);
+      } catch (error) {
+        lastError = error;
+        const canFailover =
+          index < providers.length - 1 &&
+          canFailoverPaymentProvider(error);
+        if (canFailover) {
+          this.logger.warn(
+            `Payout failover from ${provider} to ${providers[index + 1]}: paymentId=${savedTransaction.id}, message=${this.getErrorMessage(error)}`,
+          );
+          continue;
+        }
+
+        const deliveryIsUncertain = isUncertainProviderDelivery(error);
+        savedTransaction = await this.persistFailedInitiation(
+          savedTransaction,
+          error,
+          deliveryIsUncertain,
+        );
+        this.logger.error(
+          `Payout initiation failed: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, message=${this.getErrorMessage(error)}`,
+          this.getErrorStack(error),
+        );
+        if (deliveryIsUncertain) {
+          return savedTransaction;
+        }
+        throw error;
       }
-      await this.paymentTransactionRepository.save(savedTransaction);
-      this.logger.error(
-        `Payout initiation failed: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, message=${errorMessage}`,
-        this.getErrorStack(error),
-      );
-      if (deliveryIsUncertain) {
-        return savedTransaction;
-      }
-      throw error;
     }
+
+    throw lastError instanceof Error
+      ? lastError
+      : new BadRequestException("Le versement n'a pas pu être initialisé");
   }
 
   async handleFlexPayCallback(
@@ -344,6 +390,9 @@ export class PaymentsService {
       callback.orderNumber ?? undefined,
     );
     const previousStatus = transaction.status;
+    if (transaction.provider === PaymentProvider.PAWAPAY) {
+      throw new BadRequestException('Cette transaction ne dépend pas de FlexPay');
+    }
     if (
       (this.isPayoutTransaction(transaction) ||
         transaction.purpose === PaymentPurpose.WALLET_TOP_UP) &&
@@ -449,6 +498,46 @@ export class PaymentsService {
     return savedTransaction;
   }
 
+  async handlePawaPayCallback(
+    kind: PawaPayCallbackKind,
+    dto: PawaPayCallbackDto | Record<string, unknown>,
+  ): Promise<{ received: true; status: PaymentStatus; reference: string }> {
+    // Refunds have no local ledger workflow yet. Never interpret them as receipts.
+    if (kind === 'refunds') {
+      throw new BadRequestException('Les remboursements PawaPay ne sont pas encore pris en charge');
+    }
+    const callback = this.pawaPayService.normalizeCallback(
+      kind,
+      dto as Record<string, unknown>,
+    );
+    this.logger.warn(
+      `PawaPay ${kind} callback received: paymentId=${callback.paymentId}, status=${callback.status}, reference=${callback.clientReferenceId ?? 'none'}, payload=${formatPaymentLogPayload(callback.raw)}`,
+    );
+
+    const transaction = await this.findTransactionByReferenceOrOrderNumber(
+      callback.clientReferenceId ?? callback.paymentId,
+      callback.paymentId,
+    );
+    if (transaction.provider !== PaymentProvider.PAWAPAY ||
+        transaction.orderNumber !== callback.paymentId ||
+        (callback.clientReferenceId && callback.clientReferenceId !== transaction.reference) ||
+        (kind === 'payouts') !== this.isPayoutTransaction(transaction)) {
+      throw new BadRequestException('La notification PawaPay ne correspond pas à cette transaction');
+    }
+    // Ignore the unsigned callback status, amount and identifiers as evidence.
+    // A failed verification propagates: no HTTP 200 acknowledgement until it can be retried.
+    const saved = await this.checkPawaPayTransactionAndApply(transaction);
+    if (['COMPLETED', 'FAILED'].includes(callback.status) && !this.isTerminalPaymentStatus(saved.status)) {
+      throw new BadGatewayException('La confirmation PawaPay doit être vérifiée à nouveau');
+    }
+    await this.settlementRegistry?.apply?.(saved);
+    return {
+      received: true,
+      status: saved.status,
+      reference: saved.reference,
+    };
+  }
+
   async checkPaymentStatus(
     orderNumber: string,
     userId?: string,
@@ -475,6 +564,11 @@ export class PaymentsService {
       this.logger.warn(
         `Payment status check served from local terminal state: paymentId=${transaction.id}, status=${transaction.status}, response=${formatPaymentLogPayload(this.formatPaymentLogResponse(transaction))}`,
       );
+      if (transaction.provider === PaymentProvider.PAWAPAY) {
+        // Retry the business settlement if a previous callback saved the status
+        // but failed before crediting the wallet/booking/subscription.
+        await this.settlementRegistry.apply(transaction);
+      }
       return transaction;
     }
 
@@ -698,6 +792,12 @@ export class PaymentsService {
   private async checkTransactionAndApply(
     transaction: PaymentTransaction,
   ): Promise<PaymentTransaction> {
+    if (transaction.provider === PaymentProvider.PAWAPAY) {
+      const saved = await this.checkPawaPayTransactionAndApply(transaction);
+      await this.settlementRegistry?.apply?.(saved);
+      return saved;
+    }
+
     if (!transaction.orderNumber) {
       throw new BadRequestException('Le numéro de commande FlexPay est requis');
     }
@@ -1039,6 +1139,372 @@ export class PaymentsService {
         'La devise retournée par FlexPay ne correspond pas à cette transaction',
       );
     }
+  }
+
+  private resolveProviders(
+    method: PaymentMethod,
+    preferred?: PaymentProvider | null,
+  ): PaymentProvider[] {
+    return resolvePaymentProviders({
+      method,
+      preferred,
+      primary: parsePaymentProvider(
+        this.configService.get<string>('PAYMENT_PRIMARY_PROVIDER'),
+      ),
+      enabled: this.getEnabledProviders(),
+      pawaPayConfigured: this.pawaPayService?.isConfigured?.() ?? false,
+    });
+  }
+
+  private getEnabledProviders(): PaymentProvider[] {
+    return parseEnabledPaymentProviders(
+      this.configService.get<string>('PAYMENT_ENABLED_PROVIDERS'),
+    );
+  }
+
+  private resetProviderAttempt(
+    transaction: PaymentTransaction,
+    provider: PaymentProvider,
+    kind: 'deposits' | 'payouts',
+    domainCallbackUrl?: string,
+  ): void {
+    transaction.provider = provider;
+    transaction.status = PaymentStatus.PENDING;
+    transaction.orderNumber = null;
+    transaction.providerReference = null;
+    transaction.providerStatusCode = null;
+    transaction.providerMessage = null;
+    transaction.paymentUrl = null;
+    transaction.rawInitiationResponse = null;
+    transaction.paidAt = null;
+    transaction.callbackUrl = this.getProviderCallbackUrl(
+      provider,
+      kind,
+      domainCallbackUrl,
+    );
+  }
+
+  private async persistFailedInitiation(
+    transaction: PaymentTransaction,
+    error: unknown,
+    keepPending: boolean,
+  ): Promise<PaymentTransaction> {
+    const errorMessage = this.getErrorMessage(error);
+    if (keepPending && transaction.status !== PaymentStatus.FAILED) {
+      transaction.status = PaymentStatus.PENDING;
+      transaction.providerMessage = this.isPayoutTransaction(transaction)
+        ? PAYOUT_MESSAGES.pending
+        : 'Confirmation du paiement en attente. Vérifiez son statut avant de réessayer.';
+    } else if (transaction.status !== PaymentStatus.FAILED) {
+      transaction.status = PaymentStatus.FAILED;
+      transaction.providerMessage = this.isPayoutTransaction(transaction)
+        ? getPayoutFailureMessage(errorMessage)
+        : this.translatePaymentMessage(errorMessage) ?? errorMessage;
+    }
+    if (transaction.provider === PaymentProvider.PAWAPAY) {
+      return commitPawaPayState(this.paymentTransactionRepository, transaction, {
+        status: transaction.status, providerMessage: transaction.providerMessage,
+      });
+    }
+    await this.paymentTransactionRepository.save(transaction);
+    if (!this.isPayoutTransaction(transaction)) {
+      this.logger.error(
+        `Payment initiation failed: paymentId=${transaction.id}, reference=${transaction.reference}, method=${transaction.method}, message=${errorMessage}`,
+        this.getErrorStack(error),
+      );
+    }
+    return transaction;
+  }
+
+  private async initiateFlexPayDeposit(
+    savedTransaction: PaymentTransaction,
+    input: InitiatePaymentInput,
+  ): Promise<PaymentTransaction> {
+    const flexPayResponse: FlexPayInitiatePaymentResult =
+      await this.flexPayService.initiatePayment({
+        method: input.method,
+        reference: savedTransaction.reference,
+        phone: input.phone,
+        amount: input.amount,
+        currency: savedTransaction.currency,
+        description: input.description,
+        callbackUrl:
+          savedTransaction.callbackUrl || this.getGenericFlexPayCallbackUrl(),
+        approveUrl: input.approveUrl,
+        cancelUrl: input.cancelUrl,
+        declineUrl: input.declineUrl,
+      });
+
+    this.logger.warn(
+      `FlexPay initiation received: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, code=${flexPayResponse.code}, orderNumber=${flexPayResponse.orderNumber ?? 'none'}, hasPaymentUrl=${Boolean(flexPayResponse.paymentUrl)}, message=${flexPayResponse.message ?? 'none'}, response=${formatPaymentLogPayload(flexPayResponse.raw)}`,
+    );
+
+    savedTransaction.orderNumber = flexPayResponse.orderNumber;
+    savedTransaction.providerStatusCode = flexPayResponse.code;
+    savedTransaction.paymentUrl = flexPayResponse.paymentUrl;
+    savedTransaction.providerMessage = this.getInitiationSuccessMessage(
+      savedTransaction.method,
+      savedTransaction.paymentUrl,
+      flexPayResponse.message,
+    );
+    savedTransaction.rawInitiationResponse = flexPayResponse.raw;
+
+    if (!this.flexPayService.isSuccessfulCode(flexPayResponse.code)) {
+      savedTransaction.status = PaymentStatus.FAILED;
+      savedTransaction.providerMessage = this.getInitiationFailureMessage(
+        flexPayResponse.message,
+      );
+      await this.paymentTransactionRepository.save(savedTransaction);
+      if (this.looksLikeFlexPayTokenError(flexPayResponse.message)) {
+        this.logger.error(
+          `FlexPay token configuration rejected: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, code=${flexPayResponse.code}, message=${flexPayResponse.message ?? 'none'}, response=${formatPaymentLogPayload(flexPayResponse.raw)}`,
+        );
+        if (flexPayResponse.code && !flexPayResponse.orderNumber) {
+          throw new PaymentGatewayUnavailableError(PaymentProvider.FLEXPAY,
+            'FlexPay a refusé la configuration de paiement', { retryable: true });
+        }
+      }
+      this.logger.warn(
+        `Payment refused by FlexPay: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, code=${flexPayResponse.code}, message=${flexPayResponse.message ?? 'none'}, response=${formatPaymentLogPayload(flexPayResponse.raw)}`,
+      );
+      throw new BadRequestException(savedTransaction.providerMessage);
+    }
+
+    savedTransaction.status = PaymentStatus.INITIATED;
+    const saved = await this.paymentTransactionRepository.save(savedTransaction);
+    this.logger.warn(
+      `Payment initialized: paymentId=${saved.id}, reference=${saved.reference}, orderNumber=${saved.orderNumber ?? 'none'}, status=${saved.status}, amount=${saved.amount} ${saved.currency}, response=${formatPaymentLogPayload(this.formatPaymentLogResponse(saved))}`,
+    );
+    return saved;
+  }
+
+  private async initiatePawaPayDeposit(
+    savedTransaction: PaymentTransaction,
+    input: InitiatePaymentInput,
+  ): Promise<PaymentTransaction> {
+    const depositId = randomUUID();
+    savedTransaction.orderNumber = depositId;
+    savedTransaction =
+      await this.paymentTransactionRepository.save(savedTransaction);
+
+    const result = await this.pawaPayService.initiateDeposit({
+      paymentId: depositId,
+      phone: input.phone ?? savedTransaction.phone ?? '',
+      amount: input.amount,
+      currency: savedTransaction.currency,
+      description: input.description,
+      clientReferenceId: savedTransaction.reference,
+    });
+
+    savedTransaction.rawInitiationResponse = result.raw;
+    savedTransaction.providerStatusCode = result.status;
+    savedTransaction.paymentUrl = result.paymentUrl;
+    if (!result.accepted) {
+      savedTransaction.status = PaymentStatus.FAILED;
+      savedTransaction.providerMessage =
+        result.failureMessage || 'PawaPay a refusé le paiement';
+      await commitPawaPayState(this.paymentTransactionRepository, savedTransaction, {
+        status: savedTransaction.status, providerMessage: savedTransaction.providerMessage,
+        rawInitiationResponse: result.raw, providerStatusCode: result.status,
+      });
+      throw new BadRequestException(savedTransaction.providerMessage);
+    }
+
+    return commitPawaPayState(this.paymentTransactionRepository, savedTransaction, {
+      status: PaymentStatus.INITIATED, rawInitiationResponse: result.raw,
+      providerStatusCode: result.status, paymentUrl: result.paymentUrl,
+      providerMessage: 'Demande de paiement envoyée. Veuillez valider sur votre téléphone',
+    });
+  }
+
+  private async initiateFlexPayPayout(
+    savedTransaction: PaymentTransaction,
+    input: InitiatePayoutInput,
+  ): Promise<PaymentTransaction> {
+    const flexPayResponse = await this.flexPayService.initiatePayout({
+      reference: savedTransaction.reference,
+      phone: input.phone,
+      amount: input.amount,
+      currency: savedTransaction.currency,
+      description: input.description,
+      callbackUrl:
+        savedTransaction.callbackUrl || this.getGenericFlexPayCallbackUrl(),
+    });
+    this.logger.warn(
+      `FlexPay payout initiation received: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, code=${flexPayResponse.code}, orderNumber=${flexPayResponse.orderNumber ?? 'none'}, message=${flexPayResponse.message ?? 'none'}, response=${formatPaymentLogPayload(flexPayResponse.raw)}`,
+    );
+
+    savedTransaction.orderNumber = flexPayResponse.orderNumber;
+    savedTransaction.providerStatusCode =
+      flexPayResponse.status ?? flexPayResponse.code;
+    savedTransaction.providerMessage =
+      flexPayResponse.message || 'Paiement chauffeur initialisé';
+    savedTransaction.rawInitiationResponse = flexPayResponse.raw;
+
+    if (flexPayResponse.pending) {
+      savedTransaction.status = PaymentStatus.PENDING;
+      savedTransaction.providerMessage = PAYOUT_MESSAGES.pending;
+      return this.paymentTransactionRepository.save(savedTransaction);
+    }
+
+    if (!this.flexPayService.isSuccessfulCode(flexPayResponse.code)) {
+      savedTransaction.status = PaymentStatus.FAILED;
+      savedTransaction.providerMessage = getPayoutFailureMessage(
+        flexPayResponse.message,
+      );
+      await this.paymentTransactionRepository.save(savedTransaction);
+      throw new BadRequestException(savedTransaction.providerMessage);
+    }
+
+    savedTransaction.status = PaymentStatus.INITIATED;
+    const saved = await this.paymentTransactionRepository.save(savedTransaction);
+    this.logger.warn(
+      `Payout initialized: paymentId=${saved.id}, reference=${saved.reference}, orderNumber=${saved.orderNumber ?? 'none'}, status=${saved.status}, response=${formatPaymentLogPayload(this.formatPaymentLogResponse(saved))}`,
+    );
+    return saved;
+  }
+
+  private async initiatePawaPayPayout(
+    savedTransaction: PaymentTransaction,
+    input: InitiatePayoutInput,
+  ): Promise<PaymentTransaction> {
+    const payoutId = randomUUID();
+    savedTransaction.orderNumber = payoutId;
+    savedTransaction =
+      await this.paymentTransactionRepository.save(savedTransaction);
+
+    const result = await this.pawaPayService.initiatePayout({
+      paymentId: payoutId,
+      phone: input.phone,
+      amount: input.amount,
+      currency: savedTransaction.currency,
+      description: input.description,
+      clientReferenceId: savedTransaction.reference,
+    });
+    savedTransaction.rawInitiationResponse = result.raw;
+    savedTransaction.providerStatusCode = result.status;
+    if (!result.accepted) {
+      savedTransaction.status = PaymentStatus.FAILED;
+      savedTransaction.providerMessage = getPayoutFailureMessage(
+        result.failureMessage,
+      );
+      await commitPawaPayState(this.paymentTransactionRepository, savedTransaction, {
+        status: savedTransaction.status, providerMessage: savedTransaction.providerMessage,
+        rawInitiationResponse: result.raw, providerStatusCode: result.status,
+      });
+      throw new BadRequestException(savedTransaction.providerMessage);
+    }
+
+    return commitPawaPayState(this.paymentTransactionRepository, savedTransaction, {
+      status: PaymentStatus.INITIATED, providerMessage: PAYOUT_MESSAGES.pending,
+      rawInitiationResponse: result.raw, providerStatusCode: result.status,
+    });
+  }
+
+  private async checkPawaPayTransactionAndApply(
+    transaction: PaymentTransaction,
+  ): Promise<PaymentTransaction> {
+    if (!transaction.orderNumber) {
+      throw new BadRequestException(
+        "L'identifiant de paiement PawaPay est requis",
+      );
+    }
+
+    const snapshot = this.isPayoutTransaction(transaction)
+      ? await this.pawaPayService.checkPayout(transaction.orderNumber)
+      : await this.pawaPayService.checkDeposit(transaction.orderNumber);
+    // NOT_FOUND is not proof of failure, especially immediately after a POST.
+    if (snapshot.status === 'NOT_FOUND') return transaction;
+    return this.applyPawaPaySnapshot(transaction, snapshot);
+  }
+
+  private async applyPawaPaySnapshot(
+    transaction: PaymentTransaction,
+    snapshot: PawaPayPaymentSnapshot,
+  ): Promise<PaymentTransaction> {
+    assertPawaPaySnapshotMatches(transaction, snapshot);
+    const completed = this.pawaPayService.isCompleted(snapshot.status);
+    const failed = this.pawaPayService.isFailed(snapshot.status);
+    return commitPawaPayState(this.paymentTransactionRepository, transaction, {
+      status: completed ? PaymentStatus.SUCCEEDED : failed ? PaymentStatus.FAILED : PaymentStatus.INITIATED,
+      rawCheckResponse: snapshot.raw, providerStatusCode: snapshot.status,
+      providerReference: snapshot.providerTransactionId ?? transaction.providerReference,
+      paymentUrl: snapshot.paymentUrl ?? transaction.paymentUrl,
+      paidAt: completed ? transaction.paidAt ?? new Date() : transaction.paidAt,
+      providerMessage: completed
+        ? (this.isPayoutTransaction(transaction) ? 'Zwanga a versé vos gains sur votre compte Mobile Money.' : 'Paiement confirmé avec succès')
+        : failed ? (this.isPayoutTransaction(transaction) ? getPayoutFailureMessage(snapshot.failureMessage) : 'Le paiement a échoué. Vous pouvez choisir un autre moyen de paiement.')
+        : 'Confirmation du paiement en attente',
+    });
+  }
+
+  private getProviderCallbackUrl(
+    provider: PaymentProvider,
+    kind: 'deposits' | 'payouts',
+    domainCallbackUrl?: string,
+  ): string {
+    if (provider === PaymentProvider.PAWAPAY) {
+      return this.getPawaPayCallbackUrl(kind);
+    }
+    return domainCallbackUrl?.trim() || this.getGenericFlexPayCallbackUrl();
+  }
+
+  private getPawaPayCallbackUrl(kind: PawaPayCallbackKind): string {
+    const explicit = this.configService
+      .get<string>(
+        kind === 'deposits'
+          ? 'PAWAPAY_DEPOSIT_CALLBACK_URL'
+          : kind === 'payouts'
+            ? 'PAWAPAY_PAYOUT_CALLBACK_URL'
+            : 'PAWAPAY_REFUND_CALLBACK_URL',
+      )
+      ?.trim();
+    if (explicit) {
+      return explicit;
+    }
+
+    return this.joinUrl(
+      this.getPublicApiBaseUrl(),
+      `payments/pawapay/${kind}/callback`,
+    );
+  }
+
+  private getCustomerReturnUrl(status: 'success' | 'failed'): string {
+    const explicit = this.configService
+      .get<string>(
+        status === 'success'
+          ? 'PAWAPAY_SUCCESS_URL'
+          : 'PAWAPAY_FAILED_URL',
+      )
+      ?.trim();
+    if (explicit) {
+      return explicit;
+    }
+
+    const frontend =
+      this.configService.get<string>('FRONTEND_URL')?.trim() ||
+      this.configService.get<string>('PUBLIC_APP_URL')?.trim() ||
+      'https://zwanga-app.com';
+    return this.joinUrl(frontend, `payments/return/${status}`);
+  }
+
+  private getPublicApiBaseUrl(): string {
+    return (
+      this.configService.get<string>('PAWAPAY_CALLBACK_BASE_URL')?.trim() ||
+      this.configService.get<string>('FLEXPAY_CALLBACK_BASE_URL')?.trim() ||
+      this.configService.get<string>('PUBLIC_API_BASE_URL')?.trim() ||
+      this.buildLocalApiBaseUrl()
+    );
+  }
+
+  private buildLocalApiBaseUrl(): string {
+    const port = this.configService.get<string | number>('PORT') || 5200;
+    const configuredHost =
+      this.configService.get<string>('HOST')?.trim() || 'localhost';
+    const host = configuredHost === '0.0.0.0' ? 'localhost' : configuredHost;
+    const apiPrefix =
+      this.configService.get<string>('API_PREFIX')?.trim() || 'api/v1';
+    return `http://${host}:${port}/${apiPrefix}`.replace(/([^:]\/)\/+/g, '$1');
   }
 
   private generatePaymentReference(
