@@ -47,6 +47,8 @@ import { User } from '../users/entities/user.entity';
 import { isSuperAdminRole } from '../users/user-role.policy';
 import { applyTokenMovement, refundablePurchasedTokens } from './wallet-origin';
 import { hasVerifiedWalletTopUpProof } from '../payments/wallet-topup-proof';
+import { loadWalletLedgerPage } from './wallet-ledger-page';
+import type { HistoryPageDto } from '../common/pagination/history-page';
 
 export interface WalletSummary {
   account: WalletAccount;
@@ -167,6 +169,10 @@ export class WalletService implements OnModuleInit {
       where: { userId, accountType: WalletAccountType.POINTS },
       order: { createdAt: 'DESC' },
     });
+  }
+
+  getLedgerPage(userId: string, options: HistoryPageDto) {
+    return loadWalletLedgerPage(this.ledgerRepository, userId, options);
   }
 
   async applyAdminAdjustment(
