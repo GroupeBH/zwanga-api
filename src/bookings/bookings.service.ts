@@ -2194,6 +2194,7 @@ export class BookingsService implements OnModuleInit {
       declineUrl: dto.declineUrl,
       referencePrefix: 'TRIP',
       preferredProvider: dto.preferredProvider,
+      pawaPayOperator: dto.pawaPayOperator,
     });
 
     const savedBooking = await this.applyPaymentToBooking(booking, payment);

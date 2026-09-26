@@ -25,7 +25,8 @@ describe('PawaPay settlement guards', () => {
   let settle: jest.Mock;
   const config: any = {
     get: (key: string) =>
-      key === 'PAWAPAY_VERIFY_CALLBACKS' ? 'false' : undefined,
+      key === 'PAWAPAY_VERIFY_CALLBACKS' ? 'false' :
+      ['PAWAPAY_DEPOSITS_ENABLED', 'PAWAPAY_PAYOUTS_ENABLED'].includes(key) ? 'true' : undefined,
   };
   const parser = new PawaPayService({} as any, config);
   const callback = (patch = {}) => ({

@@ -75,6 +75,12 @@ export class InitiatePaymentDto {
   })
   @IsOptional()
   preferredProvider?: PaymentProvider;
+
+  @ApiProperty({ required: false, description: 'Opérateur Mobile Money pawaPay choisi par le client' })
+  @IsString()
+  @IsOptional()
+  @MaxLength(40)
+  pawaPayOperator?: string;
 }
 
 export class FlexPayCallbackDto {

@@ -1,7 +1,9 @@
 import { ConfigService } from '@nestjs/config';
 import { HttpService } from '@nestjs/axios';
 import { of, throwError } from 'rxjs';
+import { generateKeyPairSync } from 'node:crypto';
 import { PawaPayService } from './pawapay.service';
+import { signPawaPayRequest, verifyPawaPayCallback } from './pawapay-signature';
 import {
   canFailoverPaymentProvider,
   isUncertainProviderDelivery,
@@ -16,6 +18,7 @@ const input = {
   currency: 'CDF',
   description: 'Recharge test',
   clientReferenceId: 'TESTREF',
+  operator: 'ORANGE_COD',
 };
 
 describe('PawaPay HTTP contract (no real transactions)', () => {
@@ -32,6 +35,50 @@ describe('PawaPay HTTP contract (no real transactions)', () => {
   beforeEach(() => {
     http.post.mockReset();
     http.get.mockReset();
+    jest.spyOn(service, 'getActiveConfiguration').mockResolvedValue({
+      countries: [
+        {
+          country: 'COD',
+          providers: [
+            {
+              provider: 'ORANGE_COD',
+              currencies: [
+                {
+                  currency: 'CDF',
+                  operationTypes: [
+                    {
+                      operationType: 'DEPOSIT',
+                      status: 'OPERATIONAL',
+                      decimalsInAmount: 'TWO',
+                    },
+                    {
+                      operationType: 'PAYOUT',
+                      status: 'OPERATIONAL',
+                      decimalsInAmount: 'TWO',
+                    },
+                  ],
+                },
+              ],
+            },
+            {
+              provider: 'VODACOM_MPESA_COD',
+              currencies: [
+                {
+                  currency: 'CDF',
+                  operationTypes: [
+                    {
+                      operationType: 'PAYOUT',
+                      status: 'OPERATIONAL',
+                      decimalsInAmount: 'NONE',
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
   });
 
   it.each(['ACCEPTED', 'DUPLICATE_IGNORED'])(
@@ -75,7 +122,11 @@ describe('PawaPay HTTP contract (no real transactions)', () => {
 
   it('rejects unsupported precision before any financial POST', async () => {
     await expect(
-      service.initiatePayout({ ...input, phone: '+243811234567' }),
+      service.initiatePayout({
+        ...input,
+        phone: '+243811234567',
+        operator: 'VODACOM_MPESA_COD',
+      }),
     ).rejects.toThrow('entier');
     expect(http.post).not.toHaveBeenCalled();
   });
@@ -183,5 +234,154 @@ describe('PawaPay HTTP contract (no real transactions)', () => {
     ).toThrow();
     await expect(service.checkDeposit('../payouts')).rejects.toThrow();
     expect(http.get).not.toHaveBeenCalled();
+  });
+
+  it('uses the documented predict-provider contract', async () => {
+    http.post.mockReturnValue(
+      of({
+        data: {
+          country: 'COD',
+          provider: 'ORANGE_COD',
+          phoneNumber: '243891234567',
+        },
+      }),
+    );
+    await expect(service.predictProvider(input.phone)).resolves.toMatchObject({
+      provider: 'ORANGE_COD',
+    });
+    expect(http.post).toHaveBeenCalledWith(
+      'https://api.sandbox.pawapay.io/v2/predict-provider',
+      { phoneNumber: '243891234567' },
+      expect.objectContaining({ timeout: 30000 }),
+    );
+  });
+
+  it('initiates an idempotent refund with deposit id, amount and currency', async () => {
+    http.post.mockReturnValue(
+      of({ data: { refundId: other, status: 'ACCEPTED' } }),
+    );
+    const result = await service.initiateRefund({
+      refundId: other,
+      depositId: id,
+      amount: 0.29,
+      currency: 'CDF',
+      clientReferenceId: 'TESTREF',
+    });
+    expect(result.accepted).toBe(true);
+    expect(http.post).toHaveBeenCalledWith(
+      'https://api.sandbox.pawapay.io/v2/refunds',
+      {
+        refundId: other,
+        depositId: id,
+        amount: '0.29',
+        currency: 'CDF',
+        clientReferenceId: 'TESTREF',
+      },
+      expect.any(Object),
+    );
+  });
+
+  it('signs the exact outbound body when a key is configured', async () => {
+    const keys = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+    const privatePem = keys.privateKey
+      .export({ type: 'pkcs8', format: 'pem' })
+      .toString();
+    const publicPem = keys.publicKey
+      .export({ type: 'spki', format: 'pem' })
+      .toString();
+    const signedService = new PawaPayService(
+      http as unknown as HttpService,
+      {
+        get: (key: string) =>
+          ({
+            PAWAPAY_API_TOKEN: 'test-only-token',
+            PAWAPAY_SIGNING_PRIVATE_KEY_BASE64:
+              Buffer.from(privatePem).toString('base64'),
+            PAWAPAY_SIGNING_KEY_ID: 'ZWANGA_TEST_KEY',
+          })[key],
+      } as ConfigService,
+    );
+    jest
+      .spyOn(signedService, 'getActiveConfiguration')
+      .mockResolvedValue(await service.getActiveConfiguration());
+    http.post.mockReturnValue(
+      of({ data: { depositId: id, status: 'ACCEPTED' } }),
+    );
+    await signedService.initiateDeposit(input);
+    const [url, body, options] = http.post.mock.calls[0];
+    expect(typeof body).toBe('string');
+    const headers = Object.fromEntries(
+      Object.entries(options.headers).map(([name, value]) => [
+        name.toLowerCase(),
+        value,
+      ]),
+    );
+    expect(
+      verifyPawaPayCallback({
+        method: 'POST',
+        url,
+        body: Buffer.from(body),
+        headers,
+        publicKeyPem: publicPem,
+      }),
+    ).toBe('ZWANGA_TEST_KEY');
+  });
+
+  it('verifies a signed callback against the public-key endpoint', async () => {
+    const keys = generateKeyPairSync('ec', { namedCurve: 'prime256v1' });
+    const privatePem = keys.privateKey
+      .export({ type: 'pkcs8', format: 'pem' })
+      .toString();
+    const publicPem = keys.publicKey
+      .export({ type: 'spki', format: 'pem' })
+      .toString();
+    const verifyService = new PawaPayService(
+      http as unknown as HttpService,
+      {
+        get: (key: string) =>
+          ({
+            PAWAPAY_API_TOKEN: 'test-only-token',
+            PAWAPAY_REQUIRE_SIGNED_CALLBACKS: 'true',
+          })[key],
+      } as ConfigService,
+    );
+    const rawBody = Buffer.from(
+      JSON.stringify({ depositId: id, status: 'COMPLETED' }),
+    );
+    const callbackPath = '/api/v1/payments/pawapay/deposits/callback';
+    const headers = signPawaPayRequest(
+      `https://api.zwanga.test${callbackPath}`,
+      rawBody.toString(),
+      privatePem,
+      'PP_TEST',
+    );
+    http.get.mockReturnValue(of({ data: [{ id: 'PP_TEST', key: publicPem }] }));
+    const request = {
+      method: 'POST',
+      originalUrl: callbackPath,
+      rawBody,
+      headers: {
+        host: 'api.zwanga.test',
+        ...Object.fromEntries(
+          Object.entries(headers).map(([name, value]) => [
+            name.toLowerCase(),
+            value,
+          ]),
+        ),
+      },
+    };
+    await expect(
+      verifyService.verifyCallbackRequest(request as any),
+    ).resolves.toBeUndefined();
+    expect(http.get).toHaveBeenCalledWith(
+      'https://api.sandbox.pawapay.io/v2/public-key/http',
+      expect.any(Object),
+    );
+    await expect(
+      verifyService.verifyCallbackRequest({
+        ...request,
+        rawBody: Buffer.from('{}'),
+      } as any),
+    ).rejects.toThrow();
   });
 });

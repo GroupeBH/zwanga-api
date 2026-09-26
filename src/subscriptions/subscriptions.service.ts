@@ -274,6 +274,7 @@ export class SubscriptionsService implements OnModuleInit {
         declineUrl: dto.declineUrl,
         referencePrefix: 'SUB',
         preferredProvider: dto.preferredProvider,
+        pawaPayOperator: dto.pawaPayOperator,
       });
     } catch (error) {
       const errorMessage = this.getErrorMessage(error);

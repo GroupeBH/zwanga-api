@@ -18,6 +18,7 @@ export interface PawaPayInitiateInput {
   currency: string;
   description: string;
   clientReferenceId: string;
+  operator?: string;
 }
 
 export interface PawaPayInitiateResult {

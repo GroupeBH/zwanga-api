@@ -13,6 +13,7 @@ import { Booking } from '../bookings/entities/booking.entity';
 import { Message } from '../chat/entities/message.entity';
 import { Rating } from '../ratings/entities/rating.entity';
 import { PaymentTransaction } from '../payments/entities/payment-transaction.entity';
+import { PawaPayRefund } from '../payments/entities/pawapay-refund.entity';
 import { Subscription } from '../subscriptions/entities/subscription.entity';
 import { DocumentFundingRequest } from '../subscriptions/entities/document-funding-request.entity';
 import { Conversation } from '../chat/entities/conversation.entity';
@@ -54,6 +55,7 @@ export const typeOrmEntities = [
   Message,
   Rating,
   PaymentTransaction,
+  PawaPayRefund,
   Subscription,
   DocumentFundingRequest,
   Conversation,

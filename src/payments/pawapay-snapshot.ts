@@ -40,7 +40,7 @@ export function parsePawaPaySnapshot(
   const status = scalar(data.status)!;
   const paymentId = scalar(data[idKeys[kind]]) ?? '';
   if (status !== 'NOT_FOUND') assertPawaPayId(paymentId);
-  const failure = record(data.failureReason) ?? {};
+  const failure = record(data.failureReason) ?? record(data.rejectionReason) ?? {};
   return {
     paymentId,
     status,
@@ -49,8 +49,8 @@ export function parsePawaPaySnapshot(
     clientReferenceId: scalar(data.clientReferenceId),
     providerTransactionId: scalar(data.providerTransactionId),
     paymentUrl: scalar(data.authorizationUrl),
-    failureCode: scalar(failure.failureCode),
-    failureMessage: scalar(failure.failureMessage),
+    failureCode: scalar(failure.failureCode) ?? scalar(failure.rejectionCode),
+    failureMessage: scalar(failure.failureMessage) ?? scalar(failure.rejectionMessage),
     raw: wrapper,
   };
 }

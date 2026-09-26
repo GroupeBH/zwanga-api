@@ -62,6 +62,7 @@ export interface InitiatePaymentInput {
   declineUrl?: string;
   referencePrefix?: string;
   preferredProvider?: PaymentProvider | null;
+  pawaPayOperator?: string;
 }
 
 export interface InitiatePayoutInput {
@@ -76,6 +77,7 @@ export interface InitiatePayoutInput {
   callbackUrl?: string;
   referencePrefix?: string;
   preferredProvider?: PaymentProvider | null;
+  pawaPayOperator?: string;
 }
 
 export interface NormalizedFlexPayCallback {
@@ -138,6 +140,8 @@ export class PaymentsService {
         this.configService.get<string>('PAYMENT_PRIMARY_PROVIDER'),
       ) ?? PaymentProvider.FLEXPAY;
     const pawaPayConfigured = this.pawaPayService?.isConfigured() ?? false;
+    const pawaPayDepositsEnabled = this.configService.get<string>('PAWAPAY_DEPOSITS_ENABLED') === 'true';
+    const pawaPayPayoutsEnabled = this.configService.get<string>('PAWAPAY_PAYOUTS_ENABLED') === 'true';
     const providers = [
       {
         id: PaymentProvider.FLEXPAY,
@@ -149,14 +153,16 @@ export class PaymentsService {
         id: PaymentProvider.PAWAPAY,
         name: 'PawaPay',
         methods: [PaymentMethod.MOBILE_MONEY],
-        configured: pawaPayConfigured && enabled.includes(PaymentProvider.PAWAPAY),
+        configured: pawaPayConfigured && pawaPayDepositsEnabled && enabled.includes(PaymentProvider.PAWAPAY),
+        depositsEnabled: pawaPayConfigured && pawaPayDepositsEnabled && enabled.includes(PaymentProvider.PAWAPAY),
+        payoutsEnabled: pawaPayConfigured && pawaPayPayoutsEnabled && enabled.includes(PaymentProvider.PAWAPAY),
       },
     ];
     const available = resolvePaymentProviders({
       method: PaymentMethod.MOBILE_MONEY,
       primary,
       enabled,
-      pawaPayConfigured,
+      pawaPayConfigured: pawaPayConfigured && pawaPayDepositsEnabled,
     });
 
     return {
@@ -170,7 +176,7 @@ export class PaymentsService {
         pawapay: {
           deposits: this.getPawaPayCallbackUrl('deposits'),
           payouts: this.getPawaPayCallbackUrl('payouts'),
-          refunds: null, // No refund ledger workflow: deliberately unavailable.
+          refunds: this.getPawaPayCallbackUrl('refunds'),
         },
         returnUrls: {
           success: this.getCustomerReturnUrl('success'),
@@ -184,7 +190,7 @@ export class PaymentsService {
     input: InitiatePaymentInput,
   ): Promise<PaymentTransaction> {
     this.ensurePaymentInputIsUsable(input);
-    const providers = this.resolveProviders(input.method, input.preferredProvider);
+    const providers = this.resolveProviders(input.method, 'deposits', input.preferredProvider);
     if (providers.length === 0) {
       throw new BadRequestException(
         "Aucun prestataire de paiement n'est disponible",
@@ -279,6 +285,7 @@ export class PaymentsService {
     this.ensurePayoutInputIsUsable(input);
     const providers = this.resolveProviders(
       PaymentMethod.MOBILE_MONEY,
+      'payouts',
       input.preferredProvider,
     );
     if (providers.length === 0) {
@@ -502,9 +509,9 @@ export class PaymentsService {
     kind: PawaPayCallbackKind,
     dto: PawaPayCallbackDto | Record<string, unknown>,
   ): Promise<{ received: true; status: PaymentStatus; reference: string }> {
-    // Refunds have no local ledger workflow yet. Never interpret them as receipts.
+    // Refund callbacks are handled by PawaPayOperationsService, not as deposits.
     if (kind === 'refunds') {
-      throw new BadRequestException('Les remboursements PawaPay ne sont pas encore pris en charge');
+      throw new BadRequestException('Utilisez le callback de remboursement PawaPay');
     }
     const callback = this.pawaPayService.normalizeCallback(
       kind,
@@ -541,6 +548,7 @@ export class PaymentsService {
   async checkPaymentStatus(
     orderNumber: string,
     userId?: string,
+    forceProviderCheck = false,
   ): Promise<PaymentTransaction> {
     this.logger.warn(
       `Payment status check requested: orderNumber=${orderNumber}, userId=${userId ?? 'none'}`,
@@ -559,7 +567,8 @@ export class PaymentsService {
       !hasVerifiedWalletTopUpProof(transaction);
     if (
       this.isTerminalPaymentStatus(transaction.status) &&
-      !unverifiedLegacyTopUp
+      !unverifiedLegacyTopUp &&
+      !(forceProviderCheck && transaction.provider === PaymentProvider.PAWAPAY)
     ) {
       this.logger.warn(
         `Payment status check served from local terminal state: paymentId=${transaction.id}, status=${transaction.status}, response=${formatPaymentLogPayload(this.formatPaymentLogResponse(transaction))}`,
@@ -1143,16 +1152,21 @@ export class PaymentsService {
 
   private resolveProviders(
     method: PaymentMethod,
+    kind: 'deposits' | 'payouts',
     preferred?: PaymentProvider | null,
   ): PaymentProvider[] {
+    const pawaPayEnabled = this.configService.get<string>(
+      kind === 'deposits' ? 'PAWAPAY_DEPOSITS_ENABLED' : 'PAWAPAY_PAYOUTS_ENABLED',
+    ) === 'true';
     return resolvePaymentProviders({
       method,
       preferred,
       primary: parsePaymentProvider(
         this.configService.get<string>('PAYMENT_PRIMARY_PROVIDER'),
       ),
-      enabled: this.getEnabledProviders(),
-      pawaPayConfigured: this.pawaPayService?.isConfigured?.() ?? false,
+      enabled: this.getEnabledProviders().filter((provider) =>
+        provider !== PaymentProvider.PAWAPAY || pawaPayEnabled),
+      pawaPayConfigured: pawaPayEnabled && (this.pawaPayService?.isConfigured?.() ?? false),
     });
   }
 
@@ -1294,6 +1308,7 @@ export class PaymentsService {
       currency: savedTransaction.currency,
       description: input.description,
       clientReferenceId: savedTransaction.reference,
+      operator: input.pawaPayOperator,
     });
 
     savedTransaction.rawInitiationResponse = result.raw;
@@ -1380,6 +1395,7 @@ export class PaymentsService {
       currency: savedTransaction.currency,
       description: input.description,
       clientReferenceId: savedTransaction.reference,
+      operator: input.pawaPayOperator,
     });
     savedTransaction.rawInitiationResponse = result.raw;
     savedTransaction.providerStatusCode = result.status;
@@ -1414,7 +1430,13 @@ export class PaymentsService {
       ? await this.pawaPayService.checkPayout(transaction.orderNumber)
       : await this.pawaPayService.checkDeposit(transaction.orderNumber);
     // NOT_FOUND is not proof of failure, especially immediately after a POST.
-    if (snapshot.status === 'NOT_FOUND') return transaction;
+    if (snapshot.status === 'NOT_FOUND') {
+      return commitPawaPayState(this.paymentTransactionRepository, transaction, {
+        status: PaymentStatus.INITIATED,
+        providerStatusCode: 'NOT_FOUND',
+        rawCheckResponse: snapshot.raw,
+      });
+    }
     return this.applyPawaPaySnapshot(transaction, snapshot);
   }
 

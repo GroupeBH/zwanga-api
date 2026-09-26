@@ -286,6 +286,7 @@ export class WalletService implements OnModuleInit {
       declineUrl: dto.declineUrl,
       referencePrefix: 'WAL',
       preferredProvider: dto.preferredProvider,
+      pawaPayOperator: dto.pawaPayOperator,
     });
 
     const account = await this.getOrCreateAccount(userId);

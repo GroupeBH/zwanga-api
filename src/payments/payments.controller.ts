@@ -1,4 +1,15 @@
-import { Body, Controller, Get, HttpCode, Param, Post, Query, Req, Request } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  Param,
+  Post,
+  Query,
+  Req,
+  Request,
+} from '@nestjs/common';
+import type { RawBodyRequest } from '@nestjs/common';
 import type { Request as ExpressRequest } from 'express';
 import { PaymentHistoryPageDto } from '../common/pagination/history-page';
 import { PaymentContextDto } from './payment-context';
@@ -8,11 +19,17 @@ import { Auth } from '../auth/decorators/auth.decorator';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
 import { FlexPayCallbackDto } from './dto/payment.dto';
 import { PaymentsService } from './payments.service';
+import { PawaPayService } from './pawapay.service';
+import { PawaPayOperationsService } from './pawapay-operations.service';
 
 @ApiTags('Payments')
 @Controller('payments')
 export class PaymentsController {
-  constructor(private readonly paymentsService: PaymentsService) {}
+  constructor(
+    private readonly paymentsService: PaymentsService,
+    private readonly pawaPayService: PawaPayService,
+    private readonly pawaPayOperations: PawaPayOperationsService,
+  ) {}
 
   @Get('providers')
   @Auth()
@@ -37,7 +54,10 @@ export class PaymentsController {
   @Public()
   @SensitiveThrottle(120, 60000)
   @ApiOperation({ summary: 'Receive a PawaPay deposit callback' })
-  async handlePawaPayDepositCallback(@Req() request: ExpressRequest) {
+  async handlePawaPayDepositCallback(
+    @Req() request: RawBodyRequest<ExpressRequest>,
+  ) {
+    await this.pawaPayService.verifyCallbackRequest(request);
     return this.paymentsService.handlePawaPayCallback(
       'deposits',
       request.body ?? {},
@@ -49,7 +69,10 @@ export class PaymentsController {
   @Public()
   @SensitiveThrottle(120, 60000)
   @ApiOperation({ summary: 'Receive a PawaPay payout callback' })
-  async handlePawaPayPayoutCallback(@Req() request: ExpressRequest) {
+  async handlePawaPayPayoutCallback(
+    @Req() request: RawBodyRequest<ExpressRequest>,
+  ) {
+    await this.pawaPayService.verifyCallbackRequest(request);
     return this.paymentsService.handlePawaPayCallback(
       'payouts',
       request.body ?? {},
@@ -61,11 +84,11 @@ export class PaymentsController {
   @Public()
   @SensitiveThrottle(120, 60000)
   @ApiOperation({ summary: 'Receive a PawaPay refund callback' })
-  async handlePawaPayRefundCallback(@Req() request: ExpressRequest) {
-    return this.paymentsService.handlePawaPayCallback(
-      'refunds',
-      request.body ?? {},
-    );
+  async handlePawaPayRefundCallback(
+    @Req() request: RawBodyRequest<ExpressRequest>,
+  ) {
+    await this.pawaPayService.verifyCallbackRequest(request);
+    return this.pawaPayOperations.handleRefundCallback(request.body ?? {});
   }
 
   @Get('my-transactions')
@@ -103,8 +126,14 @@ export class PaymentsController {
   @Get('history/page')
   @Auth()
   @SensitiveThrottle(60, 60000)
-  getPaymentHistoryPage(@Request() req, @Query() options: PaymentHistoryPageDto) {
-    return this.paymentsService.findUserTransactionPage(req.user.userId, options);
+  getPaymentHistoryPage(
+    @Request() req,
+    @Query() options: PaymentHistoryPageDto,
+  ) {
+    return this.paymentsService.findUserTransactionPage(
+      req.user.userId,
+      options,
+    );
   }
 
   @Get('history/summary')
@@ -118,7 +147,10 @@ export class PaymentsController {
   @Auth()
   @SensitiveThrottle(60, 60000)
   getPaymentContext(@Request() req, @Query() context: PaymentContextDto) {
-    return this.paymentsService.findUserPaymentContext(req.user.userId, context);
+    return this.paymentsService.findUserPaymentContext(
+      req.user.userId,
+      context,
+    );
   }
 
   @Get(':paymentId/details')

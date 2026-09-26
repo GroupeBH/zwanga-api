@@ -2,6 +2,7 @@ import { FillTotalSeats1780000000000 } from './1780000000000-FillTotalSeats';
 import { AddFinancialHistoryIndexes1780000040000 } from './1780000040000-AddFinancialHistoryIndexes';
 import { AddProServices1780000041000 } from './1780000041000-AddProServices';
 import { AddPawapayPaymentProvider1780000042000 } from './1780000042000-AddPawapayPaymentProvider';
+import { AddPawapayRefunds1780000045000 } from './1780000045000-AddPawapayRefunds';
 import { PreventMultipleActiveDriverTrips1780000001000 } from './1780000001000-PreventMultipleActiveDriverTrips';
 import { AddAppleIdToUsers1780000002000 } from './1780000002000-AddAppleIdToUsers';
 import { AddBookingPayments1780000003000 } from './1780000003000-AddBookingPayments';
@@ -90,4 +91,5 @@ export const databaseMigrations = [
   AddPawapayPaymentProvider1780000042000,
   AddExplicitDriverActivation1780000043000,
   AddDriverPublicationPhotoPolicy1780000044000,
+  AddPawapayRefunds1780000045000,
 ];
