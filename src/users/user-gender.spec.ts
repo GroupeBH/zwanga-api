@@ -45,6 +45,7 @@ describe('User gender', () => {
       save: jest.fn((payload: Partial<User>) =>
         Promise.resolve({ id: 'user-1', ...payload }),
       ),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
     };
     const jwtService = {
       signAsync: jest
@@ -85,6 +86,13 @@ describe('User gender', () => {
     expect(userRepository.create).toHaveBeenCalledWith(
       expect.objectContaining({ gender: UserGender.FEMALE }),
     );
+    expect(userRepository.update).toHaveBeenCalledWith(
+      'user-1',
+      expect.objectContaining({
+        accessToken: 'access-token',
+        refreshToken: 'refresh-token',
+      }),
+    );
   });
 
   it('updates the gender from the current user profile', async () => {
@@ -101,7 +109,7 @@ describe('User gender', () => {
     } as User;
     const userRepository = {
       findOne: jest.fn().mockResolvedValue(user),
-      save: jest.fn((payload: User) => Promise.resolve(payload)),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
     };
     const service = new UsersService(
       userRepository as any,
@@ -124,7 +132,8 @@ describe('User gender', () => {
       gender: UserGender.PREFER_NOT_TO_SAY,
     });
 
-    expect(userRepository.save).toHaveBeenCalledWith(
+    expect(userRepository.update).toHaveBeenCalledWith(
+      'user-1',
       expect.objectContaining({
         gender: UserGender.PREFER_NOT_TO_SAY,
       }),

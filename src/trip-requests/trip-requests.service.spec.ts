@@ -1,12 +1,34 @@
 import { BadRequestException } from '@nestjs/common';
-import { VehicleType } from '../vehicles/entities/vehicle.entity';
+import { Vehicle, VehicleType } from '../vehicles/entities/vehicle.entity';
 import { DriverOfferStatus } from './entities/driver-offer.entity';
 import { TripRequestStatus } from './entities/trip-request.entity';
 import { BookingStatus } from '../bookings/entities/booking.entity';
 import { TripStatus } from '../trips/entities/trip.entity';
 import { TripRequestsService } from './trip-requests.service';
-import { KycStatus } from '../users/entities/kyc-document.entity';
-import { UserRole } from '../users/entities/user.entity';
+import { KycDocument, KycStatus } from '../users/entities/kyc-document.entity';
+import { UserRole, UserStatus } from '../users/entities/user.entity';
+
+const eligibleDriverRepository = () => ({
+  findOne: jest.fn().mockResolvedValue({
+    id: 'driver-1',
+    role: UserRole.DRIVER,
+    isActive: true,
+    status: UserStatus.ACTIVE,
+  }),
+  manager: {
+    getRepository: jest.fn((entity: unknown) => {
+      if (entity === KycDocument) {
+        return {
+          findOne: jest.fn().mockResolvedValue({ status: KycStatus.APPROVED }),
+        };
+      }
+      if (entity === Vehicle) {
+        return { exists: jest.fn().mockResolvedValue(true) };
+      }
+      throw new Error('Unexpected repository in driver eligibility fixture');
+    }),
+  },
+});
 
 describe('TripRequestsService recommended price', () => {
   it('recommends 500 FC per kilometer for cars and applies the heavy-rain coefficient', async () => {
@@ -493,7 +515,7 @@ describe('TripRequestsService motorcycle capacity', () => {
     const service = new TripRequestsService(
       tripRequestRepository as any,
       driverOfferRepository as any,
-      { findOne: jest.fn().mockResolvedValue({ id: 'driver-1' }) } as any,
+      eligibleDriverRepository() as any,
       vehicleRepository as any,
       {} as any,
       {} as any,
@@ -549,7 +571,7 @@ describe('TripRequestsService motorcycle capacity', () => {
     const service = new TripRequestsService(
       tripRequestRepository as any,
       driverOfferRepository as any,
-      { findOne: jest.fn().mockResolvedValue({ id: 'driver-1' }) } as any,
+      eligibleDriverRepository() as any,
       vehicleRepository as any,
       {} as any,
       {} as any,
@@ -787,10 +809,10 @@ describe('TripRequestsService unaccepted request expiration', () => {
     const service = new TripRequestsService(
       tripRequestRepository as any,
       driverOfferRepository as any,
-      { findOne: jest.fn().mockResolvedValue({ id: 'driver-1' }) } as any,
+      eligibleDriverRepository() as any,
       {} as any,
       {} as any,
-      {} as any,
+      { sendNotificationToUser: jest.fn().mockResolvedValue(true) } as any,
       {} as any,
       {} as any,
       {} as any,
