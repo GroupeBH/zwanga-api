@@ -29,14 +29,16 @@ export class AddPawapayRefunds1780000045000 implements MigrationInterface {
     await queryRunner.query(
       'CREATE INDEX "IDX_pawapay_refunds_pending" ON "pawapay_refunds" ("updatedAt") WHERE "status" IN (\'created\', \'initiated\')',
     );
+    // The provider enum gains 'pawapay' earlier in the same migration transaction.
+    // Keep that new value out of the predicate until the transaction commits.
     await queryRunner.query(
-      'CREATE INDEX "IDX_payment_transactions_pawapay_pending" ON "payment_transactions" ("updatedAt") WHERE "provider" = \'pawapay\' AND "status" IN (\'pending\', \'initiated\')',
+      'CREATE INDEX "IDX_payment_transactions_provider_pending" ON "payment_transactions" ("provider", "updatedAt") WHERE "status" IN (\'pending\', \'initiated\')',
     );
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query(
-      'DROP INDEX "IDX_payment_transactions_pawapay_pending"',
+      'DROP INDEX "IDX_payment_transactions_provider_pending"',
     );
     await queryRunner.query('DROP TABLE "pawapay_refunds"');
   }
