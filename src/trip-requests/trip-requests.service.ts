@@ -47,6 +47,7 @@ import { WeatherRouteImpact } from '../weather/weather.types';
 import { TripPaymentMode } from '../payments/enums/trip-payment-mode.enum';
 import { TripRequestRecoveryService } from './trip-request-recovery.service';
 import { KycStatus } from '../users/entities/kyc-document.entity';
+import { assertDriverCanOperate } from '../users/driver-activation';
 
 export interface SanitizedUser {
   id: string;
@@ -615,7 +616,6 @@ export class TripRequestsService {
       // Get all active drivers with FCM tokens, excluding the passenger who created the request
       const drivers = await this.userRepository.find({
         where: {
-          isDriver: true,
           role: UserRole.DRIVER,
           isActive: true,
         },
@@ -852,10 +852,7 @@ export class TripRequestsService {
       throw new NotFoundException('Utilisateur non trouvé');
     }
 
-    // Vérifier que l'utilisateur est bien un conducteur
-    // if (!driver.isDriver || driver.role !== UserRole.DRIVER) {
-    //   throw new ForbiddenException('Seuls les conducteurs peuvent faire des offres sur les demandes de trajets. Vous devez être un conducteur pour effectuer cette action.');
-    // }
+    await assertDriverCanOperate(this.userRepository.manager, driver);
 
     const tripRequest = await this.tripRequestRepository.findOne({
       where: { id: tripRequestId },

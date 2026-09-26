@@ -19,6 +19,7 @@ describe('PIN reset security', () => {
   let userRepository: {
     findOne: jest.Mock;
     save: jest.Mock;
+    update: jest.Mock;
   };
   let keccelOtpService: {
     sendOtp: jest.Mock;
@@ -45,6 +46,7 @@ describe('PIN reset security', () => {
     userRepository = {
       findOne: jest.fn().mockResolvedValue(user),
       save: jest.fn().mockImplementation((value) => Promise.resolve(value)),
+      update: jest.fn(async (_id, patch) => Object.assign(user, patch)),
     };
     keccelOtpService = {
       sendOtp: jest.fn().mockResolvedValue({ success: true }),
@@ -207,7 +209,9 @@ describe('PIN reset security', () => {
     expect(await bcrypt.compare('5678', user.password)).toBe(true);
     expect(user.refreshToken).toBeNull();
     expect(user.accessToken).toBeNull();
-    expect(userRepository.save).toHaveBeenCalledWith(user);
+    expect(userRepository.update).toHaveBeenCalledWith(user.id, {
+      password: user.password, accessToken: null, refreshToken: null,
+    });
 
     redisService.consumeIfValueMatches.mockResolvedValueOnce(false);
     await expect(service.resetPin(dto)).rejects.toBeInstanceOf(

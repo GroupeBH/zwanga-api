@@ -25,8 +25,7 @@ import {
 } from './entities/kyc-document.entity';
 import { User, UserStatus } from './entities/user.entity';
 import { normalizeLegalName } from './legal-identity.util';
-import { Vehicle } from '../vehicles/entities/vehicle.entity';
-import { normalizeUserDriverFlags } from './user-role.policy';
+import { activateRequestedDriver } from './driver-activation';
 
 type DiditHttpMethod = 'GET' | 'POST';
 type DiditPayload = Record<string, unknown>;
@@ -614,32 +613,30 @@ export class DiditKycService {
 
       const savedKyc = await kycRepository.save(kycDocument);
 
-      const hasActiveVehicle = await manager.getRepository(Vehicle).exists({
-        where: { ownerId: input.userId, isActive: true },
-      });
-      const driverProfileChanged = normalizeUserDriverFlags(user, {
-        hasActiveVehicle,
-      });
       let userStatusChanged = false;
+      const mayUpdateStatus = user.isActive &&
+        ![UserStatus.SUSPENDED, UserStatus.INACTIVE].includes(user.status);
 
       if (mappedStatus === KycStatus.APPROVED && !isStalePendingEvent) {
-        if (user.status !== UserStatus.SUSPENDED) {
+        if (mayUpdateStatus) {
           const nextStatus = UserStatus.ACTIVE;
           userStatusChanged = user.status !== nextStatus;
           user.status = nextStatus;
         }
       } else if (
         [KycStatus.PENDING, KycStatus.REJECTED].includes(savedKyc.status) &&
-        user.status !== UserStatus.SUSPENDED
+        mayUpdateStatus
       ) {
         const nextStatus = UserStatus.PENDING_KYC;
         userStatusChanged = user.status !== nextStatus;
         user.status = nextStatus;
       }
 
-      if (driverProfileChanged || userStatusChanged) {
-        await userRepository.save(user);
+      if (userStatusChanged) {
+        await userRepository.update(user.id, { status: user.status });
       }
+
+      await activateRequestedDriver(manager, user.id);
 
       return savedKyc;
     });

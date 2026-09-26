@@ -1551,6 +1551,7 @@ describe('BookingsService trip payments', () => {
     const result = await service.evaluateAutomaticRideProgressForTrip('trip-1');
 
     expect(result.events).toEqual([
+      expect.objectContaining({ type: 'driver_near_pickup', bookingId: 'booking-1' }),
       expect.objectContaining({
         type: 'parties_nearby',
         bookingId: 'booking-1',
@@ -2079,7 +2080,10 @@ describe('BookingsService trip payments', () => {
 
     const result = await service.evaluateAutomaticRideProgressForTrip('trip-1');
 
-    expect(result.events).toEqual([]);
+    expect(result.events).toEqual([
+      expect.objectContaining({ type: 'driver_near_pickup', bookingId: 'booking-1' }),
+    ]);
+    expect(bookingRepository.update).not.toHaveBeenCalled();
     expect(bookingRepository.save).not.toHaveBeenCalled();
   });
 
@@ -2127,7 +2131,7 @@ describe('BookingsService trip payments', () => {
     );
   });
 
-  it('emits a driver-near-pickup event when the driver is within 200 meters of pickup', async () => {
+  it.each([250, 300, 301])('checks driver-near-pickup at %i meters with a 300m inclusive threshold', async (distance) => {
     const now = new Date();
     const autoBooking = {
       ...booking,
@@ -2149,18 +2153,19 @@ describe('BookingsService trip payments', () => {
     };
     bookingRepository.find.mockResolvedValue([autoBooking]);
 
+    jest.spyOn(service as any, 'calculatePointDistanceMeters').mockReturnValue(distance);
     const result = await service.evaluateAutomaticRideProgressForTrip('trip-1');
 
-    expect(result.events).toEqual([
+    expect(result.events).toEqual(distance <= 300 ? [
       expect.objectContaining({
         type: 'driver_near_pickup',
         bookingId: 'booking-1',
         tripId: 'trip-1',
         passengerId: 'passenger-1',
-        distanceMeters: expect.any(Number),
+        distanceMeters: distance,
         detectedAt: expect.any(String),
       }),
-    ]);
+    ] : []);
     expect(bookingRepository.save).not.toHaveBeenCalled();
   });
 

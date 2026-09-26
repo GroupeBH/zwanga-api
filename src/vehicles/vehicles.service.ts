@@ -15,8 +15,8 @@ import {
 import { User } from '../users/entities/user.entity';
 import {
   isAdminRole,
-  normalizeUserDriverFlags,
 } from '../users/user-role.policy';
+import { activateRequestedDriver } from '../users/driver-activation';
 import { Trip, TripStatus } from '../trips/entities/trip.entity';
 import { CacheService } from '../common/services/cache.service';
 import { FileUploadService } from '../common/services/file-upload.service';
@@ -108,13 +108,14 @@ export class VehiclesService {
 
       if (existingVehicle) {
         if (existingVehicle.ownerId === ownerId) {
-          await this.ensureOwnerDriverProfile(owner);
-          return this.reactivateOrUpdateExistingVehicle(
+          const reactivated = await this.reactivateOrUpdateExistingVehicle(
             existingVehicle,
             ownerId,
             sanitizedVehicleData,
             normalizedLicensePlate,
           );
+          await this.ensureOwnerDriverProfile(owner);
+          return reactivated;
         }
 
         this.logger.warn(
@@ -135,8 +136,8 @@ export class VehiclesService {
             : true,
       });
 
-      await this.ensureOwnerDriverProfile(owner);
       const savedVehicle = await this.vehicleRepository.save(vehicle);
+      await this.ensureOwnerDriverProfile(owner);
       await this.invalidateVehicleCaches(ownerId);
 
       this.logger.log(
@@ -284,6 +285,9 @@ export class VehiclesService {
 
     await this.invalidateVehicleCaches(ownerId, id);
 
+    if (updatedVehicle.isActive) {
+      await this.userRepository.manager.transaction((manager) => activateRequestedDriver(manager, ownerId));
+    }
     this.logger.log(`Vehicle ${id} updated successfully`);
     return this.enrichVehiclePhotoUrl(updatedVehicle);
   }
@@ -409,13 +413,8 @@ export class VehiclesService {
   }
 
   private async ensureOwnerDriverProfile(owner: User): Promise<void> {
-    const changed = normalizeUserDriverFlags(owner, {
-      hasActiveVehicle: true,
-    });
-
-    if (changed) {
-      await this.userRepository.save(owner);
-    }
+    await this.userRepository.manager.transaction((manager) =>
+      activateRequestedDriver(manager, owner.id));
   }
 
   private async reactivateOrUpdateExistingVehicle(

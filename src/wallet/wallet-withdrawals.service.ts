@@ -4,6 +4,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  OnModuleInit,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Cron } from '@nestjs/schedule';
@@ -33,7 +34,7 @@ import { applyTokenMovement, tokenCents } from './wallet-origin';
 const RELATED_TYPE = 'wallet_withdrawal';
 
 @Injectable()
-export class WalletWithdrawalsService {
+export class WalletWithdrawalsService implements OnModuleInit {
   private readonly logger = new Logger(WalletWithdrawalsService.name);
   private reconciling = false;
 
@@ -43,6 +44,15 @@ export class WalletWithdrawalsService {
     private readonly wallet: WalletService,
     private readonly config: ConfigService,
   ) {}
+
+  onModuleInit() {
+    this.payments.registerSettlement?.(
+      PaymentPurpose.WALLET_PAYOUT,
+      async (payment) => {
+        await this.settle(payment);
+      },
+    );
+  }
 
   async request(userId: string, dto: RequestWalletWithdrawalDto) {
     const phone = dto.phone?.replace(/^\+/, '');

@@ -2,9 +2,11 @@
 import { BadGatewayException } from '@nestjs/common';
 import {
   PaymentMethod,
+  PaymentProvider,
   PaymentStatus,
 } from './entities/payment-transaction.entity';
 import { PaymentsService } from './payments.service';
+import { PaymentSettlementRegistry } from './payment-settlement.registry';
 
 describe('PaymentsService', () => {
   let paymentTransactionRepository: {
@@ -73,6 +75,8 @@ describe('PaymentsService', () => {
       paymentTransactionRepository as any,
       configService as any,
       flexPayService as any,
+      { isConfigured: () => false } as any,
+      new PaymentSettlementRegistry(),
     );
   });
 
@@ -620,5 +624,45 @@ describe('PaymentsService', () => {
     expect(payout.providerMessage).toContain(
       'Aucun paiement ne vous est demandé',
     );
+  });
+
+  it('does not fail over after an ambiguous FlexPay deposit error', async () => {
+    flexPayService.initiatePayment.mockRejectedValue(
+      new BadGatewayException('Initialisation paiement Mobile Money FlexPay indisponible'),
+    );
+    const pawaPay = {
+      isConfigured: jest.fn().mockReturnValue(true),
+      initiateDeposit: jest.fn().mockResolvedValue({
+        paymentId: '11111111-1111-4111-8111-111111111111',
+        status: 'ACCEPTED',
+        accepted: true,
+        paymentUrl: null,
+        failureCode: null,
+        failureMessage: null,
+        raw: { status: 'ACCEPTED' },
+      }),
+    };
+    const routed = new PaymentsService(
+      paymentTransactionRepository as any,
+      configService as any,
+      flexPayService as any,
+      pawaPay as any,
+      new PaymentSettlementRegistry(),
+    );
+
+    const payment = await routed.initiatePayment({
+      userId: '123e4567-e89b-12d3-a456-426614174000',
+      method: PaymentMethod.MOBILE_MONEY,
+      phone: '+243811234567',
+      amount: 1500,
+      currency: 'CDF',
+      description: 'Course Zwanga',
+      referencePrefix: 'TRIP',
+    });
+
+    expect(flexPayService.initiatePayment).toHaveBeenCalled();
+    expect(pawaPay.initiateDeposit).not.toHaveBeenCalled();
+    expect(payment.provider).toBe(PaymentProvider.FLEXPAY);
+    expect(payment.status).toBe(PaymentStatus.PENDING);
   });
 });

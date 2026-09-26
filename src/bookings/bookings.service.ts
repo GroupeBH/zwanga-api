@@ -4,6 +4,7 @@ import {
   BadRequestException,
   Logger,
   ForbiddenException,
+  OnModuleInit,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { ConfigService } from '@nestjs/config';
@@ -179,7 +180,7 @@ export interface AutomaticRideProgressResult {
 }
 
 @Injectable()
-export class BookingsService {
+export class BookingsService implements OnModuleInit {
   private readonly logger = new Logger(BookingsService.name);
   private readonly CACHE_TTL = 180; // 3 minutes
   private readonly DESTINATION_PROXIMITY_THRESHOLD_METERS = 1000; // 1 km
@@ -187,7 +188,7 @@ export class BookingsService {
     LIVE_LOCATION_FRESHNESS_MS;
   private readonly AUTO_PICKUP_MATCH_THRESHOLD_METERS = 25;
   private readonly AUTO_PICKUP_PASSENGER_READY_THRESHOLD_METERS = 5;
-  private readonly AUTO_PICKUP_DRIVER_NEAR_THRESHOLD_METERS = 200;
+  private readonly AUTO_PICKUP_DRIVER_NEAR_THRESHOLD_METERS = 300;
   private readonly AUTO_PICKUP_DRIVER_ARRIVAL_THRESHOLD_METERS = 80;
   private readonly AUTO_PICKUP_MOVEMENT_THRESHOLD_METERS = 30;
   private readonly AUTO_PICKUP_MAX_HEADING_DELTA_DEGREES = 60;
@@ -248,6 +249,16 @@ export class BookingsService {
   ) {
     this.boardingDetectionConfig = loadBoardingDetectionConfig(
       this.configService,
+    );
+  }
+
+  onModuleInit() {
+    this.paymentsService.registerSettlement?.(
+      PaymentPurpose.TRIP_BOOKING,
+      async (payment) => {
+        const booking = await this.findBookingForPayment(payment);
+        await this.applyPaymentToBooking(booking, payment);
+      },
     );
   }
 
@@ -1372,7 +1383,7 @@ export class BookingsService {
 
     const bookings = await this.bookingRepository.find({
       where: activityOnly ? activeBookingWhere(passengerId) : { passengerId },
-      relations: ['trip', 'trip.driver'],
+      relations: ['trip', 'trip.driver', 'trip.vehicle'],
       order: { createdAt: 'DESC' },
     });
 
@@ -2182,6 +2193,8 @@ export class BookingsService {
       cancelUrl: dto.cancelUrl,
       declineUrl: dto.declineUrl,
       referencePrefix: 'TRIP',
+      preferredProvider: dto.preferredProvider,
+      pawaPayOperator: dto.pawaPayOperator,
     });
 
     const savedBooking = await this.applyPaymentToBooking(booking, payment);

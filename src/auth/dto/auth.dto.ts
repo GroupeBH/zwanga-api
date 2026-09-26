@@ -15,6 +15,7 @@ import { Transform, TransformFnParams, Type } from 'class-transformer';
 import { ApiProperty } from '@nestjs/swagger';
 import { UserGender, UserRole } from '../../users/entities/user.entity';
 import { SELF_SERVICE_USER_ROLES } from '../../users/user-role.policy';
+import { strictDriverBoolean } from '../../users/driver-boolean.transform';
 import { CreateVehicleDto } from '../../vehicles/dto/vehicle.dto';
 import { ReferralAttributionDto } from '../../referrals/dto/referral.dto';
 import { normalizeLegalName } from '../../users/legal-identity.util';
@@ -71,6 +72,7 @@ export class RegisterDto extends ReferralAttributionDto {
   })
   @IsBoolean()
   @IsOptional()
+  @Transform(strictDriverBoolean)
   isDriver?: boolean;
 
   @ApiProperty({ example: 'John' })
@@ -365,6 +367,7 @@ export class GoogleMobileAuthDto extends ReferralAttributionDto {
   })
   @IsBoolean()
   @IsOptional()
+  @Transform(strictDriverBoolean)
   isDriver?: boolean;
 
   @ApiProperty({
@@ -467,6 +470,7 @@ export class AppleMobileAuthDto extends ReferralAttributionDto {
   })
   @IsBoolean()
   @IsOptional()
+  @Transform(strictDriverBoolean)
   isDriver?: boolean;
 
   @ApiProperty({

@@ -9,7 +9,7 @@ import {
 } from './qualified-driver';
 
 describe('qualified driver policy', () => {
-  it('requires isDriver, an approved KYC and an active vehicle', () => {
+  it('requires the driver role, an approved KYC and an active vehicle', () => {
     expect(
       resolveDriverQualification({
         role: UserRole.DRIVER,
@@ -21,8 +21,8 @@ describe('qualified driver policy', () => {
 
     expect(
       resolveDriverQualification({
-        role: UserRole.DRIVER,
-        isDriver: false,
+        role: UserRole.PASSENGER,
+        isDriver: true,
         hasApprovedKyc: true,
         hasActiveVehicle: true,
       }).isQualifiedDriver,
@@ -62,7 +62,7 @@ describe('qualified driver policy', () => {
       QUALIFIED_DRIVER_CONDITION('user'),
       expect.objectContaining({ approvedKycStatus: KycStatus.APPROVED }),
     );
-    expect(QUALIFIED_DRIVER_CONDITION('user')).toContain('"user"."isDriver"');
+    expect(QUALIFIED_DRIVER_CONDITION('user')).toContain('"user"."role"');
     expect(APPROVED_KYC_EXISTS('user')).toContain('"user".id');
 
     query.andWhere.mockClear();

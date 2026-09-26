@@ -40,8 +40,8 @@ export function isSuperAdminRole(role: unknown): role is UserRole.SUPER_ADMIN {
 
 /**
  * Public mobile flows historically sent both `role` and `isDriver`.
- * They are the same business decision, so the backend must never persist
- * contradictory values such as `role=driver/isDriver=false`.
+ * `role` here is signup intent, not an active permission. A passenger choice
+ * must never be promoted by a legacy boolean or an attached vehicle.
  */
 export function resolveSelfServiceDriverState({
   role,
@@ -55,12 +55,10 @@ export function resolveSelfServiceDriverState({
   const requestedRole = role ?? defaultRole;
   assertSelfServiceUserRole(requestedRole);
 
-  const wantsDriver =
-    requestedRole === UserRole.DRIVER || isDriver === true || hasVehicle;
-
-  return wantsDriver
-    ? { role: UserRole.DRIVER, isDriver: true }
-    : { role: UserRole.PASSENGER, isDriver: false };
+  if (requestedRole === UserRole.PASSENGER && (isDriver === true || hasVehicle)) {
+    throw new BadRequestException('Choix passager incompatible avec les informations conducteur. Sélectionnez explicitement le parcours conducteur.');
+  }
+  return { role: UserRole.PASSENGER, isDriver: false };
 }
 
 export function normalizeUserDriverFlags(
@@ -75,12 +73,7 @@ export function normalizeUserDriverFlags(
     return currentIsDriver !== user.isDriver;
   }
 
-  const wantsDriver =
-    user.role === UserRole.DRIVER ||
-    user.isDriver === true ||
-    options.hasActiveVehicle === true;
-
-  user.role = wantsDriver ? UserRole.DRIVER : UserRole.PASSENGER;
+  const wantsDriver = user.role === UserRole.DRIVER;
   user.isDriver = wantsDriver;
 
   return currentRole !== user.role || currentIsDriver !== user.isDriver;

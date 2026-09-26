@@ -77,6 +77,10 @@ export class User {
   @Column({ nullable: true })
   profilePicture: string;
 
+  // Server-owned publication history; deleting a trip must not reset the allowance.
+  @Column({ type: 'boolean', default: false })
+  hasPublishedTrip: boolean;
+
   @Column({
     type: 'enum',
     enum: UserRole,
@@ -109,6 +113,13 @@ export class User {
 
   @Column({ default: false })
   isDriver: boolean;
+
+  // Explicit intent, never inferred from identity verification or vehicle ownership.
+  @Column({ type: 'timestamptz', nullable: true })
+  driverOnboardingRequestedAt: Date | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  driverActivatedAt: Date | null;
 
   @Column({ type: 'text', nullable: true })
   accessToken: string | null;

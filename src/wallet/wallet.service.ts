@@ -4,6 +4,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  OnModuleInit,
 } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import { ConfigService } from '@nestjs/config';
@@ -46,6 +47,8 @@ import { User } from '../users/entities/user.entity';
 import { isSuperAdminRole } from '../users/user-role.policy';
 import { applyTokenMovement, refundablePurchasedTokens } from './wallet-origin';
 import { hasVerifiedWalletTopUpProof } from '../payments/wallet-topup-proof';
+import { loadWalletLedgerPage } from './wallet-ledger-page';
+import type { HistoryPageDto } from '../common/pagination/history-page';
 
 export interface WalletSummary {
   account: WalletAccount;
@@ -95,7 +98,7 @@ export interface WalletTransferResponse {
 }
 
 @Injectable()
-export class WalletService {
+export class WalletService implements OnModuleInit {
   private readonly logger = new Logger(WalletService.name);
   private readonly TOP_UP_RELATED_ENTITY_TYPE = 'wallet_top_up';
   private readonly BOOKING_RELATED_ENTITY_TYPE = 'booking';
@@ -120,6 +123,15 @@ export class WalletService {
     private readonly configService: ConfigService,
     private readonly paymentsService: PaymentsService,
   ) {}
+
+  onModuleInit() {
+    this.paymentsService.registerSettlement?.(
+      PaymentPurpose.WALLET_TOP_UP,
+      async (payment) => {
+        await this.applyTopUpPayment(payment);
+      },
+    );
+  }
 
   async getSummary(userId: string): Promise<WalletSummary> {
     const account = await this.getOrCreateAccount(userId);
@@ -157,6 +169,10 @@ export class WalletService {
       where: { userId, accountType: WalletAccountType.POINTS },
       order: { createdAt: 'DESC' },
     });
+  }
+
+  getLedgerPage(userId: string, options: HistoryPageDto) {
+    return loadWalletLedgerPage(this.ledgerRepository, userId, options);
   }
 
   async applyAdminAdjustment(
@@ -269,6 +285,8 @@ export class WalletService {
       cancelUrl: dto.cancelUrl,
       declineUrl: dto.declineUrl,
       referencePrefix: 'WAL',
+      preferredProvider: dto.preferredProvider,
+      pawaPayOperator: dto.pawaPayOperator,
     });
 
     const account = await this.getOrCreateAccount(userId);
@@ -950,7 +968,7 @@ export class WalletService {
     // Never grant a new cash-redeemable credit from that local status alone.
     if (!hasVerifiedWalletTopUpProof(payment)) {
       throw new BadRequestException(
-        'La recharge doit être confirmée par FlexPay avant de créditer des jetons retirables',
+        'La recharge doit être confirmée par le prestataire de paiement avant de créditer des jetons retirables',
       );
     }
 
@@ -964,7 +982,7 @@ export class WalletService {
       relatedEntityType: this.TOP_UP_RELATED_ENTITY_TYPE,
       relatedEntityId: payment.userId,
       paymentTransactionId: payment.id,
-      description: `Recharge de jetons FlexPay ${payment.reference}`,
+      description: `Recharge de jetons ${payment.provider === 'pawapay' ? 'PawaPay' : 'FlexPay'} ${payment.reference}`,
     });
 
     return this.getOrCreateAccount(payment.userId);

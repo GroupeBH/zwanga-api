@@ -93,6 +93,24 @@ export class UsersController {
     );
   }
 
+  @Post('driver-onboarding')
+  @Auth()
+  @HttpCode(HttpStatus.OK)
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({ summary: 'Request driver onboarding; activation requires approved identity and an active owned vehicle' })
+  async requestDriverOnboarding(@Request() req) {
+    return this.usersService.activateDriver(req.user.userId);
+  }
+
+  @Post('driver-activation')
+  @Auth()
+  @HttpCode(HttpStatus.OK)
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({ summary: 'Activate the driver profile only after all requirements are met' })
+  async activateDriver(@Request() req) {
+    return this.usersService.activateDriver(req.user.userId, true);
+  }
+
   @Post('kyc')
   @Auth()
   @SensitiveThrottle(5, 60000)

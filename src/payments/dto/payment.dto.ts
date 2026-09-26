@@ -1,6 +1,9 @@
 import { IsEnum, IsOptional, IsString, MaxLength } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
-import { PaymentMethod } from '../entities/payment-transaction.entity';
+import {
+  PaymentMethod,
+  PaymentProvider,
+} from '../entities/payment-transaction.entity';
 
 export class InitiatePaymentDto {
   @ApiProperty({
@@ -8,7 +11,7 @@ export class InitiatePaymentDto {
     enum: PaymentMethod,
     enumName: 'PaymentMethod',
     example: PaymentMethod.MOBILE_MONEY,
-    description: 'Canal technique utilisé pour la transaction FlexPay.',
+    description: 'Canal technique utilisé pour la transaction (FlexPay ou PawaPay).',
   })
   @IsEnum(PaymentMethod, {
     message: 'La méthode de paiement sélectionnée est invalide',
@@ -58,6 +61,26 @@ export class InitiatePaymentDto {
   @IsOptional()
   @MaxLength(1000)
   declineUrl?: string;
+
+  @ApiProperty({
+    required: false,
+    enum: PaymentProvider,
+    enumName: 'PaymentProvider',
+    example: PaymentProvider.PAWAPAY,
+    description:
+      'Prestataire préféré. Si indisponible, le backend bascule vers l’autre canal Mobile Money.',
+  })
+  @IsEnum(PaymentProvider, {
+    message: 'Le prestataire de paiement sélectionné est invalide',
+  })
+  @IsOptional()
+  preferredProvider?: PaymentProvider;
+
+  @ApiProperty({ required: false, description: 'Opérateur Mobile Money pawaPay choisi par le client' })
+  @IsString()
+  @IsOptional()
+  @MaxLength(40)
+  pawaPayOperator?: string;
 }
 
 export class FlexPayCallbackDto {
@@ -163,4 +186,62 @@ export class FlexPayCallbackDto {
   @IsString()
   @IsOptional()
   order_number?: string;
+}
+
+export class PawaPayCallbackDto {
+  @ApiProperty({ required: false })
+  @IsOptional()
+  depositId?: string;
+
+  @ApiProperty({ required: false })
+  @IsOptional()
+  payoutId?: string;
+
+  @ApiProperty({ required: false })
+  @IsOptional()
+  refundId?: string;
+
+  @ApiProperty({ required: false })
+  @IsOptional()
+  status?: string;
+
+  @ApiProperty({ required: false })
+  @IsOptional()
+  amount?: string;
+
+  @ApiProperty({ required: false })
+  @IsOptional()
+  currency?: string;
+
+  @ApiProperty({ required: false })
+  @IsOptional()
+  clientReferenceId?: string;
+
+  @ApiProperty({ required: false })
+  @IsOptional()
+  providerTransactionId?: string;
+
+  @ApiProperty({ required: false })
+  @IsOptional()
+  authorizationUrl?: string;
+
+  @ApiProperty({ required: false })
+  @IsOptional()
+  failureReason?: Record<string, unknown>;
+
+  @ApiProperty({ required: false })
+  @IsOptional()
+  payer?: Record<string, unknown>;
+
+  @ApiProperty({ required: false })
+  @IsOptional()
+  recipient?: Record<string, unknown>;
+
+  @ApiProperty({ required: false })
+  @IsOptional()
+  data?: Record<string, unknown>;
+
+  @ApiProperty({ required: false })
+  @IsOptional()
+  metadata?: Record<string, unknown>;
 }

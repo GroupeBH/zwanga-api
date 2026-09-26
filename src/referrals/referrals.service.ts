@@ -3,6 +3,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  OnModuleInit,
 } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
 import { ConfigService } from '@nestjs/config';
@@ -83,7 +84,7 @@ interface ReferralRegistrationResult {
 }
 
 @Injectable()
-export class ReferralsService {
+export class ReferralsService implements OnModuleInit {
   private readonly logger = new Logger(ReferralsService.name);
   private readonly WITHDRAWAL_RELATED_ENTITY_TYPE = 'referral_withdrawal';
   private readonly ATTRIBUTION_BONUS_SOURCE_TYPE = 'referral_attribution';
@@ -122,6 +123,15 @@ export class ReferralsService {
     private readonly paymentsService: PaymentsService,
     private readonly notificationService: NotificationService,
   ) {}
+
+  onModuleInit() {
+    this.paymentsService.registerSettlement?.(
+      PaymentPurpose.REFERRAL_PAYOUT,
+      async (payment) => {
+        await this.applyPaymentToWithdrawal(payment);
+      },
+    );
+  }
 
   async validateCode(code: string) {
     const profile = await this.findUsableReferrerProfile(code);
@@ -599,7 +609,9 @@ export class ReferralsService {
     if (
       subscription.isTrial ||
       payment.status !== PaymentStatus.SUCCEEDED ||
-      payment.provider !== PaymentProvider.FLEXPAY ||
+      ![PaymentProvider.FLEXPAY, PaymentProvider.PAWAPAY].includes(
+        payment.provider,
+      ) ||
       String(payment.purpose) !== String(PaymentPurpose.SUBSCRIPTION_PRO)
     ) {
       return null;
@@ -637,7 +649,9 @@ export class ReferralsService {
       if (
         !payment ||
         payment.status !== PaymentStatus.SUCCEEDED ||
-        payment.provider !== PaymentProvider.FLEXPAY ||
+        ![PaymentProvider.FLEXPAY, PaymentProvider.PAWAPAY].includes(
+          payment.provider,
+        ) ||
         String(payment.purpose) !== String(PaymentPurpose.TRIP_BOOKING)
       ) {
         return null;
