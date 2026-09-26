@@ -38,8 +38,8 @@ export enum PaymentPurpose {
 @Entity('payment_transactions')
 @Index(['userId', 'status'])
 @Index(['purpose', 'relatedEntityType', 'relatedEntityId'])
-@Index('IDX_payment_transactions_pawapay_pending', ['updatedAt'], {
-  where: '"provider" = \'pawapay\' AND "status" IN (\'pending\', \'initiated\')',
+@Index('IDX_payment_transactions_provider_pending', ['provider', 'updatedAt'], {
+  where: "\"status\" IN ('pending', 'initiated')",
 })
 export class PaymentTransaction {
   @PrimaryGeneratedColumn('uuid')
