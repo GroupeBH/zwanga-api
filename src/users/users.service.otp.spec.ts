@@ -1,14 +1,14 @@
 import { PhoneVerificationContext } from './dto/user.dto';
+import { UserRole } from './entities/user.entity';
 import { UsersService } from './users.service';
-import { OTP_SMS_MESSAGES } from '../keccel-otp/otp-messages';
 
-describe('UsersService OTP messages', () => {
+describe('UsersService OTP routes', () => {
   it.each([
     PhoneVerificationContext.REGISTRATION,
     PhoneVerificationContext.LOGIN,
     PhoneVerificationContext.UPDATE,
   ])(
-    'uses the SMS-safe template for %s and preserves accents in the app response',
+    'sends through the OTP service for %s and preserves the app response',
     async (context) => {
       const sendOtp = jest.fn().mockResolvedValue({ success: true });
       const service = {
@@ -22,7 +22,7 @@ describe('UsersService OTP messages', () => {
                 : { id: 'user-1' },
             ),
         },
-        keccelOtpService: { sendOtp },
+        otpService: { sendOtp },
       } as unknown as UsersService;
 
       const result: unknown =
@@ -31,13 +31,134 @@ describe('UsersService OTP messages', () => {
           context,
         });
 
-      expect(sendOtp).toHaveBeenCalledWith(
-        '+243891234567',
-        OTP_SMS_MESSAGES.verification,
-      );
+      expect(sendOtp).toHaveBeenCalledWith('+243891234567');
       expect(result).toEqual({
         message: 'Code de vérification envoyé avec succès',
       });
     },
   );
+
+  it('keeps a new account pending until a phone OTP is verified', async () => {
+    const verifyOtp = jest.fn().mockResolvedValue({ valid: true });
+    const update = jest.fn().mockResolvedValue({ affected: 1 });
+    const service = {
+      logger: { log: jest.fn(), warn: jest.fn() },
+      otpService: { verifyOtp },
+      userRepository: { update },
+    } as unknown as UsersService;
+
+    await expect(
+      UsersService.prototype.verifyPhoneOtp.call(service, {
+        phone: '+243891234567',
+        otp: '12345',
+      }),
+    ).resolves.toMatchObject({ valid: true });
+    expect(update).toHaveBeenCalledWith(
+      {
+        phone: '+243891234567',
+        isPhoneVerified: false,
+        isActive: true,
+      },
+      { isPhoneVerified: true },
+    );
+  });
+
+  it('does not clear the pending flag for an invalid OTP', async () => {
+    const update = jest.fn();
+    const service = {
+      logger: { log: jest.fn(), warn: jest.fn() },
+      otpService: { verifyOtp: jest.fn().mockResolvedValue({ valid: false }) },
+      userRepository: { update },
+    } as unknown as UsersService;
+
+    await expect(
+      UsersService.prototype.verifyPhoneOtp.call(service, {
+        phone: '+243891234567',
+        otp: '00000',
+      }),
+    ).rejects.toThrow('Code OTP invalide ou expiré');
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('signals the pending verification in the private profile', async () => {
+    const user = {
+      id: 'user-1',
+      phone: '+243891234567',
+      isPhoneVerified: false,
+      vehicles: [],
+    };
+    const service = {
+      findOne: jest.fn().mockResolvedValue(user),
+      enrichUserWithPresignedUrls: jest.fn().mockResolvedValue(user),
+      toSafeUser: jest.fn().mockReturnValue(user),
+      tripRepository: { count: jest.fn().mockResolvedValue(0) },
+      bookingRepository: {
+        count: jest.fn().mockResolvedValue(0),
+        createQueryBuilder: jest.fn().mockReturnValue({
+          innerJoin: jest.fn().mockReturnThis(),
+          where: jest.fn().mockReturnThis(),
+          getCount: jest.fn().mockResolvedValue(0),
+        }),
+      },
+      messageRepository: { count: jest.fn().mockResolvedValue(0) },
+      subscriptionsService: {
+        getPremiumOverview: jest.fn().mockResolvedValue({
+          isPremium: false,
+          premiumBadgeEnabled: false,
+        }),
+      },
+    } as unknown as UsersService;
+
+    const result: unknown = await UsersService.prototype.getProfileSummary.call(
+      service,
+      user.id,
+    );
+    expect(result).toMatchObject({
+      user: { isPhoneVerified: false, phoneVerificationRequired: true },
+    });
+  });
+
+  it('requires a new OTP after a verified account changes phone', async () => {
+    const user = {
+      id: 'user-1',
+      phone: '+243891234567',
+      firstName: 'Test',
+      lastName: 'User',
+      role: UserRole.PASSENGER,
+      gender: null,
+      profilePicture: null,
+      kycDocuments: [],
+      isPhoneVerified: true,
+    };
+    const update = jest
+      .fn<Promise<{ affected: number }>, [string, Record<string, unknown>]>()
+      .mockResolvedValue({ affected: 1 });
+    const service = {
+      logger: { log: jest.fn(), warn: jest.fn() },
+      findOne: jest.fn().mockResolvedValue(user),
+      userRepository: {
+        findOne: jest.fn().mockResolvedValue(null),
+        update,
+      },
+      enrichUserWithPresignedUrls: jest.fn().mockResolvedValue(user),
+    } as unknown as UsersService;
+
+    await UsersService.prototype.updateProfile.call(service, user.id, {
+      phone: '+243899999999',
+    });
+    expect(update).toHaveBeenCalledWith(
+      user.id,
+      expect.objectContaining({
+        phone: '+243899999999',
+        isPhoneVerified: false,
+      }),
+    );
+
+    update.mockClear();
+    await UsersService.prototype.updateProfile.call(service, user.id, {
+      phone: '+243899999999',
+    });
+    const unchangedPhoneUpdate: unknown = update.mock.calls[0][1];
+    expect(unchangedPhoneUpdate).not.toHaveProperty('isPhoneVerified');
+  });
 });

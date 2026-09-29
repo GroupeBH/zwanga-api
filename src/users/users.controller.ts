@@ -51,7 +51,11 @@ export class UsersController {
   @Get('me')
   @Auth()
   @SensitiveThrottle(30, 60000)
-  @ApiOperation({ summary: 'Get current user profile' })
+  @ApiOperation({
+    summary: 'Get current user profile',
+    description:
+      'user.isPhoneVerified and user.phoneVerificationRequired report whether this account still needs phone OTP verification; this does not block access yet.',
+  })
   async getProfile(@Request() req) {
     return this.usersService.getProfileSummary(req.user.userId);
   }

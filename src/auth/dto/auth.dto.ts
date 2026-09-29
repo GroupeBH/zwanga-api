@@ -62,7 +62,9 @@ export class RegisterDto extends ReferralAttributionDto {
   @IsNotEmpty()
   @MinLength(4)
   @MaxLength(4)
-  @Matches(/^\d{4}$/, { message: "Le code PIN doit contenir exactement 4 chiffres." })
+  @Matches(/^\d{4}$/, {
+    message: 'Le code PIN doit contenir exactement 4 chiffres.',
+  })
   pin: string;
 
   @ApiProperty({
@@ -137,7 +139,9 @@ export class LoginDto {
   @IsNotEmpty()
   @MinLength(4)
   @MaxLength(4)
-  @Matches(/^\d{4}$/, { message: "Le code PIN doit contenir exactement 4 chiffres." })
+  @Matches(/^\d{4}$/, {
+    message: 'Le code PIN doit contenir exactement 4 chiffres.',
+  })
   pin: string;
 }
 
@@ -153,7 +157,7 @@ export class PinResetRequestDto {
 }
 
 export class PinResetVerifyOtpDto extends PinResetRequestDto {
-  @ApiProperty({ example: '123456', description: 'Code OTP Keccel' })
+  @ApiProperty({ example: '123456', description: 'Code OTP recu par SMS' })
   @Transform(toTrimmedString)
   @IsString()
   @IsNotEmpty()
@@ -217,7 +221,9 @@ export class AdminLoginDto {
   @IsNotEmpty()
   @MinLength(4)
   @MaxLength(4)
-  @Matches(/^\d{4}$/, { message: "Le code PIN doit contenir exactement 4 chiffres." })
+  @Matches(/^\d{4}$/, {
+    message: 'Le code PIN doit contenir exactement 4 chiffres.',
+  })
   pin?: string;
 }
 

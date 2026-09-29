@@ -42,16 +42,20 @@ export class KeccelOtpService {
     private readonly configService: ConfigService,
   ) {
     const token = this.configService.get<string>('KECCEL_TOKEN');
-    if (!token) {
+    const keccelEnabled =
+      (this.configService.get<string>('OTP_PROVIDER') || 'keccel')
+        .trim()
+        .toLowerCase() === 'keccel';
+    if (!token && keccelEnabled) {
       throw new Error('KECCEL_TOKEN is not defined in environment variables');
     }
-    this.token = token;
+    this.token = token || '';
 
     const from = this.configService.get<string>('KECCEL_FROM');
-    if (!from) {
+    if (!from && keccelEnabled) {
       throw new Error('KECCEL_FROM is not defined in environment variables');
     }
-    this.from = from;
+    this.from = from || '';
 
     this.generateUrl =
       this.configService.get<string>('KECCEL_OTP_URL_GENERATE') ||
@@ -59,12 +63,6 @@ export class KeccelOtpService {
     this.validateUrl =
       this.configService.get<string>('KECCEL_OTP_URL_VALIDATE') ||
       'https://api.keccel.com/otp/validate';
-
-    if (!this.token) {
-      this.logger.warn(
-        'KECCEL_TOKEN is not configured. OTP service may not work properly.',
-      );
-    }
   }
 
   /**
@@ -82,6 +80,7 @@ export class KeccelOtpService {
     length?: number,
     lifetime?: number,
   ): Promise<SendOtpResponse> {
+    this.assertConfigured();
     this.logger.log(`Sending OTP to phone: ${this.maskPhone(phone)}`);
 
     if (!phone || !phone.trim()) {
@@ -228,6 +227,7 @@ export class KeccelOtpService {
    * @throws HttpException only if HTTP or API error occurs, not if OTP is invalid
    */
   async verifyOtp(phone: string, otp: string): Promise<VerifyOtpResponse> {
+    this.assertConfigured();
     this.logger.log(`Verifying OTP for phone: ${this.maskPhone(phone)}`);
 
     if (!phone || !phone.trim()) {
@@ -370,7 +370,17 @@ export class KeccelOtpService {
       ...body,
       token: this.maskToken(String(body.token || '')),
       to: this.maskPhone(String(body.to || '')),
+      ...(body.otp !== undefined ? { otp: '***' } : {}),
     };
+  }
+
+  private assertConfigured(): void {
+    if (!this.token || !this.from) {
+      throw new HttpException(
+        'Keccel OTP is not configured',
+        HttpStatus.SERVICE_UNAVAILABLE,
+      );
+    }
   }
 
   private maskPhone(phone: string): string {

@@ -13,11 +13,22 @@ import { Rating } from '../ratings/entities/rating.entity';
 import { Vehicle } from '../vehicles/entities/vehicle.entity';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
 import { DiditKycService } from './didit-kyc.service';
+import { OtpModule } from '../otp/otp.module';
 
 @Module({
   imports: [
-    TypeOrmModule.forFeature([User, KycDocument, Trip, Booking, Message, FavoriteLocation, Rating, Vehicle]),
+    TypeOrmModule.forFeature([
+      User,
+      KycDocument,
+      Trip,
+      Booking,
+      Message,
+      FavoriteLocation,
+      Rating,
+      Vehicle,
+    ]),
     ConfigModule,
+    OtpModule,
     SubscriptionsModule,
   ],
   controllers: [UsersController],
@@ -25,4 +36,3 @@ import { DiditKycService } from './didit-kyc.service';
   exports: [UsersService, DiditKycService],
 })
 export class UsersModule {}
-
