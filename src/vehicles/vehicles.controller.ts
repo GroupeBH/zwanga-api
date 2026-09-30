@@ -58,10 +58,12 @@ export class VehiclesController {
   @Delete(':id')
   @Auth()
   @SensitiveThrottle(10, 6000)
-  @ApiOperation({ summary: 'Deactivate a vehicle (can be used even if linked to trips)' })
+  @ApiOperation({
+    summary:
+      'Deactivate a vehicle only when no ongoing, upcoming or active recurring trip uses it',
+  })
   async remove(@Request() req, @Param('id') id: string) {
     await this.vehiclesService.remove(id, req.user.userId);
-    return { message: 'Véhicule désactivé avec succès' };
+    return { message: 'Véhicule retiré des véhicules actifs', isActive: false };
   }
 }
-

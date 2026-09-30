@@ -26,6 +26,7 @@ import {
 import { User, UserStatus } from './entities/user.entity';
 import { normalizeLegalName } from './legal-identity.util';
 import { activateRequestedDriver } from './driver-activation';
+import { LATEST_IDENTITY_ORDER } from './profile-state';
 
 type DiditHttpMethod = 'GET' | 'POST';
 type DiditPayload = Record<string, unknown>;
@@ -645,7 +646,7 @@ export class DiditKycService {
   private findLatestUserKyc(userId: string): Promise<KycDocument | null> {
     return this.kycDocumentRepository.findOne({
       where: { userId },
-      order: { updatedAt: 'DESC' },
+      order: LATEST_IDENTITY_ORDER,
     });
   }
 

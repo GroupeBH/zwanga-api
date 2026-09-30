@@ -43,6 +43,7 @@ import { UserRole } from './entities/user.entity';
 import { SubscriptionsService } from '../subscriptions/subscriptions.service';
 import { assertSelfServiceUserRole, isAdminRole } from './user-role.policy';
 import { activateRequestedDriver } from './driver-activation';
+import { buildProfileState, LATEST_IDENTITY_ORDER } from './profile-state';
 import {
   areLegalNamesEquivalent,
   normalizeLegalName,
@@ -213,6 +214,7 @@ export class UsersService {
     const premium = await this.subscriptionsService.getPremiumOverview(user.id);
 
     return {
+      profileState: buildProfileState(user),
       user: {
         ...this.toSafeUser(enrichedUser),
         phoneVerificationRequired: Boolean(user.phone) && !user.isPhoneVerified,
@@ -866,8 +868,9 @@ export class UsersService {
   }
 
   async getKycStatus(userId: string): Promise<KycDocument | null> {
-    const kyc = await this.kycDocumentRepository.findOneBy({
-      userId: userId,
+    const kyc = await this.kycDocumentRepository.findOne({
+      where: { userId },
+      order: LATEST_IDENTITY_ORDER,
     });
 
     this.logger.log(`Fetching KYC status for user: ${kyc} ${userId}`);

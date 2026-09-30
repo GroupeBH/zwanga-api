@@ -54,7 +54,7 @@ export class UsersController {
   @ApiOperation({
     summary: 'Get current user profile',
     description:
-      'user.isPhoneVerified and user.phoneVerificationRequired report whether this account still needs phone OTP verification; this does not block access yet.',
+      'profileState v1 exposes server-owned identity status, driver eligibility and nextAction. Reading it never activates a driver. user.isPhoneVerified and user.phoneVerificationRequired report optional phone OTP verification.',
   })
   async getProfile(@Request() req) {
     return this.usersService.getProfileSummary(req.user.userId);

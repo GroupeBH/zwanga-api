@@ -2,6 +2,7 @@ import { BadRequestException } from '@nestjs/common';
 import { VehiclesService } from './vehicles.service';
 import { VehicleType } from './entities/vehicle.entity';
 import { UserRole } from '../users/entities/user.entity';
+import { RecurringTripTemplateStatus } from '../trips/entities/recurring-trip-template.entity';
 
 describe('VehiclesService vehicle creation', () => {
   let service: VehiclesService;
@@ -12,8 +13,14 @@ describe('VehiclesService vehicle creation', () => {
     find: jest.Mock;
     createQueryBuilder: jest.Mock;
   };
-  let userRepository: { findOne: jest.Mock; save: jest.Mock; update: jest.Mock; manager: any };
+  let userRepository: {
+    findOne: jest.Mock;
+    save: jest.Mock;
+    update: jest.Mock;
+    manager: any;
+  };
   let tripRepository: { find: jest.Mock };
+  let recurringTripTemplateRepository: { findOne: jest.Mock };
   let cacheService: { get: jest.Mock; set: jest.Mock; del: jest.Mock };
 
   beforeEach(() => {
@@ -35,10 +42,17 @@ describe('VehiclesService vehicle creation', () => {
       }),
       save: jest.fn((user) => Promise.resolve(user)),
       update: jest.fn(),
-      manager: { transaction: jest.fn(async callback => callback({ getRepository: () => userRepository })) },
+      manager: {
+        transaction: jest.fn(async (callback) =>
+          callback({ getRepository: () => userRepository }),
+        ),
+      },
     };
     tripRepository = {
       find: jest.fn().mockResolvedValue([]),
+    };
+    recurringTripTemplateRepository = {
+      findOne: jest.fn().mockResolvedValue(null),
     };
     cacheService = {
       get: jest.fn(),
@@ -50,6 +64,7 @@ describe('VehiclesService vehicle creation', () => {
       vehicleRepository as any,
       userRepository as any,
       tripRepository as any,
+      recurringTripTemplateRepository as any,
       cacheService as any,
       { getPresignedUrlIfS3Key: jest.fn() } as any,
     );
@@ -299,6 +314,69 @@ describe('VehiclesService vehicle creation', () => {
       }),
     });
 
+    expect(vehicleRepository.save).not.toHaveBeenCalled();
+  });
+
+  it('deactivates a vehicle without ongoing, upcoming or recurring trips', async () => {
+    const vehicle = { id: 'vehicle-1', ownerId: 'owner-1', isActive: true };
+    vehicleRepository.findOne.mockResolvedValue(vehicle);
+
+    await service.remove(vehicle.id, 'owner-1');
+
+    expect(vehicleRepository.save).toHaveBeenCalledWith(
+      expect.objectContaining({ id: vehicle.id, isActive: false }),
+    );
+    expect(recurringTripTemplateRepository.findOne).toHaveBeenCalled();
+    expect(recurringTripTemplateRepository.findOne).toHaveBeenCalledWith({
+      where: expect.arrayContaining([
+        expect.objectContaining({ status: RecurringTripTemplateStatus.ACTIVE }),
+      ]),
+    });
+    expect(cacheService.del).toHaveBeenCalled();
+  });
+
+  it('refuses deactivation when an active recurring trip can generate future trips', async () => {
+    const vehicle = { id: 'vehicle-1', ownerId: 'owner-1', isActive: true };
+    vehicleRepository.findOne.mockResolvedValue(vehicle);
+    recurringTripTemplateRepository.findOne.mockResolvedValue({
+      id: 'template-1',
+    });
+
+    await expect(service.remove(vehicle.id, 'owner-1')).rejects.toMatchObject({
+      status: 400,
+      response: expect.objectContaining({
+        code: 'VEHICLE_HAS_ACTIVE_RECURRING_TRIPS',
+      }),
+    });
+    expect(vehicle.isActive).toBe(true);
+    expect(vehicleRepository.save).not.toHaveBeenCalled();
+  });
+
+  it('cannot bypass trip protection through PUT isActive=false', async () => {
+    const vehicle = { id: 'vehicle-1', ownerId: 'owner-1', isActive: true };
+    vehicleRepository.findOne.mockResolvedValue(vehicle);
+    tripRepository.find.mockResolvedValue([{ id: 'trip-1' }]);
+
+    await expect(
+      service.update(vehicle.id, 'owner-1', { isActive: false }),
+    ).rejects.toMatchObject({
+      status: 400,
+      response: expect.objectContaining({ code: 'VEHICLE_HAS_ACTIVE_TRIPS' }),
+    });
+    expect(vehicleRepository.save).not.toHaveBeenCalled();
+  });
+
+  it('allows a repeated deactivation of an already inactive vehicle', async () => {
+    vehicleRepository.findOne.mockResolvedValue({
+      id: 'vehicle-1',
+      ownerId: 'owner-1',
+      isActive: false,
+    });
+
+    await expect(
+      service.remove('vehicle-1', 'owner-1'),
+    ).resolves.toBeUndefined();
+    expect(tripRepository.find).not.toHaveBeenCalled();
     expect(vehicleRepository.save).not.toHaveBeenCalled();
   });
 

@@ -4,10 +4,11 @@ import { User, UserRole, UserStatus } from './entities/user.entity';
 import { KycDocument, KycStatus } from './entities/kyc-document.entity';
 import { Vehicle } from '../vehicles/entities/vehicle.entity';
 import { isAdminRole } from './user-role.policy';
+import { LATEST_IDENTITY_ORDER } from './profile-state';
 
 export async function driverRequirements(manager: EntityManager, userId: string) {
   const latestIdentity = await manager.getRepository(KycDocument).findOne({
-    where: { userId }, order: { createdAt: 'DESC', id: 'DESC' },
+    where: { userId }, order: LATEST_IDENTITY_ORDER,
     select: { id: true, status: true },
   });
   const hasVehicle = await manager.getRepository(Vehicle).exists({
