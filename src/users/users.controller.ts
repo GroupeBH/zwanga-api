@@ -51,7 +51,11 @@ export class UsersController {
   @Get('me')
   @Auth()
   @SensitiveThrottle(30, 60000)
-  @ApiOperation({ summary: 'Get current user profile' })
+  @ApiOperation({
+    summary: 'Get current user profile',
+    description:
+      'profileState v1 exposes server-owned identity status, driver eligibility and nextAction. Reading it never activates a driver. user.isPhoneVerified and user.phoneVerificationRequired report optional phone OTP verification.',
+  })
   async getProfile(@Request() req) {
     return this.usersService.getProfileSummary(req.user.userId);
   }

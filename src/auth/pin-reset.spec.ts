@@ -11,7 +11,6 @@ import {
 import { ChangePinDto } from '../users/dto/user.dto';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
-import { OTP_SMS_MESSAGES } from '../keccel-otp/otp-messages';
 
 describe('PIN reset security', () => {
   const userId = '123e4567-e89b-42d3-a456-426614174000';
@@ -21,7 +20,7 @@ describe('PIN reset security', () => {
     save: jest.Mock;
     update: jest.Mock;
   };
-  let keccelOtpService: {
+  let otpService: {
     sendOtp: jest.Mock;
     verifyOtp: jest.Mock;
   };
@@ -48,7 +47,7 @@ describe('PIN reset security', () => {
       save: jest.fn().mockImplementation((value) => Promise.resolve(value)),
       update: jest.fn(async (_id, patch) => Object.assign(user, patch)),
     };
-    keccelOtpService = {
+    otpService = {
       sendOtp: jest.fn().mockResolvedValue({ success: true }),
       verifyOtp: jest.fn().mockResolvedValue({ valid: true }),
     };
@@ -65,7 +64,7 @@ describe('PIN reset security', () => {
       {} as any,
       {} as any,
       {} as any,
-      keccelOtpService as any,
+      otpService as any,
       redisService as any,
     );
   });
@@ -128,20 +127,15 @@ describe('PIN reset security', () => {
     );
 
     expect(result.message).toContain('Si ce compte');
-    expect(keccelOtpService.sendOtp).not.toHaveBeenCalled();
+    expect(otpService.sendOtp).not.toHaveBeenCalled();
   });
 
-  it('sends a six-digit OTP with a five-minute lifetime', async () => {
+  it('requests a PIN reset OTP with a five-minute pending window', async () => {
     await service.requestPinResetOtp(
       Object.assign(new PinResetRequestDto(), { phone: user.phone }),
     );
 
-    expect(keccelOtpService.sendOtp).toHaveBeenCalledWith(
-      user.phone,
-      OTP_SMS_MESSAGES.pinReset,
-      6,
-      300,
-    );
+    expect(otpService.sendOtp).toHaveBeenCalledWith(user.phone, 'pin_reset');
     expect(redisService.set).toHaveBeenCalledWith(
       `auth:pin-reset-otp:${userId}`,
       'pending',
@@ -184,7 +178,7 @@ describe('PIN reset security', () => {
       ),
     ).rejects.toBeInstanceOf(BadRequestException);
 
-    expect(keccelOtpService.verifyOtp).not.toHaveBeenCalled();
+    expect(otpService.verifyOtp).not.toHaveBeenCalled();
     expect(redisService.set).not.toHaveBeenCalled();
   });
 
@@ -210,7 +204,9 @@ describe('PIN reset security', () => {
     expect(user.refreshToken).toBeNull();
     expect(user.accessToken).toBeNull();
     expect(userRepository.update).toHaveBeenCalledWith(user.id, {
-      password: user.password, accessToken: null, refreshToken: null,
+      password: user.password,
+      accessToken: null,
+      refreshToken: null,
     });
 
     redisService.consumeIfValueMatches.mockResolvedValueOnce(false);

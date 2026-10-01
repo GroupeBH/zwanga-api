@@ -48,8 +48,7 @@ import {
   isAdminRole,
   resolveSelfServiceDriverState,
 } from '../users/user-role.policy';
-import { KeccelOtpService } from '../keccel-otp/keccel-otp.service';
-import { OTP_SMS_MESSAGES } from '../keccel-otp/otp-messages';
+import { OtpService } from '../otp/otp.service';
 import { provisionAdminAccount } from '../admin/admin-account.provisioning';
 import { normalizeLegalName } from '../users/legal-identity.util';
 import { RedisService } from '../common/services/redis.service';
@@ -138,7 +137,7 @@ export class AuthService {
     private fileUploadService: FileUploadService,
     private vehiclesService: VehiclesService,
     private referralsService: ReferralsService,
-    private keccelOtpService: KeccelOtpService,
+    private otpService: OtpService,
     private redisService: RedisService,
   ) {
     this.googleClient = new OAuth2Client();
@@ -241,6 +240,8 @@ export class AuthService {
       isDriver: driverState.isDriver,
       driverOnboardingRequestedAt: role === UserRole.DRIVER ? new Date() : null,
       status: UserStatus.PENDING_KYC,
+      // Registration currently allows access without a phone OTP.
+      isPhoneVerified: false,
     };
 
     if (profilePicturePath) {
@@ -358,7 +359,9 @@ export class AuthService {
 
     // Update last login
     user.lastLoginAt = new Date();
-    await this.userRepository.update(user.id, { lastLoginAt: user.lastLoginAt });
+    await this.userRepository.update(user.id, {
+      lastLoginAt: user.lastLoginAt,
+    });
 
     const tokens = await this.generateTokens(user);
 
@@ -388,12 +391,7 @@ export class AuthService {
       return { message: PIN_RESET_GENERIC_MESSAGE };
     }
 
-    await this.keccelOtpService.sendOtp(
-      dto.phone,
-      OTP_SMS_MESSAGES.pinReset,
-      6,
-      PIN_RESET_TOKEN_TTL_SECONDS,
-    );
+    await this.otpService.sendOtp(dto.phone, 'pin_reset');
     await this.redisService.set(
       this.getPinResetOtpKey(user.id),
       PIN_RESET_OTP_PENDING_VALUE,
@@ -422,9 +420,10 @@ export class AuthService {
       throw new BadRequestException('Code OTP invalide ou expiré');
     }
 
-    const verification = await this.keccelOtpService.verifyOtp(
+    const verification = await this.otpService.verifyOtp(
       dto.phone,
       dto.otp,
+      'pin_reset',
     );
 
     if (!verification.valid) {
@@ -483,7 +482,11 @@ export class AuthService {
     user.password = await bcrypt.hash(dto.newPin, 10);
     user.refreshToken = null;
     user.accessToken = null;
-    await this.userRepository.update(user.id, { password: user.password, refreshToken: null, accessToken: null });
+    await this.userRepository.update(user.id, {
+      password: user.password,
+      refreshToken: null,
+      accessToken: null,
+    });
 
     this.logger.log(`PIN reset completed for user ${user.id}`);
 
@@ -569,7 +572,9 @@ export class AuthService {
     }
 
     user.lastLoginAt = new Date();
-    await this.userRepository.update(user.id, { lastLoginAt: user.lastLoginAt });
+    await this.userRepository.update(user.id, {
+      lastLoginAt: user.lastLoginAt,
+    });
 
     const tokens = await this.generateTokens(user);
     return {
@@ -619,7 +624,10 @@ export class AuthService {
 
     user.password = await bcrypt.hash(dto.newPassword, 12);
     user.passwordChangeRequired = false;
-    await this.userRepository.update(user.id, { password: user.password, passwordChangeRequired: false });
+    await this.userRepository.update(user.id, {
+      password: user.password,
+      passwordChangeRequired: false,
+    });
 
     return {
       message: 'Mot de passe administrateur modifié avec succès',
@@ -635,11 +643,9 @@ export class AuthService {
     await this.assertAdminBootstrapIsAvailable();
     this.assertAdminBootstrapPhone(dto.phone);
 
-    await this.keccelOtpService.sendOtp(
+    await this.otpService.sendOtp(
       this.getConfiguredAdminBootstrapPhone(),
-      OTP_SMS_MESSAGES.adminBootstrap,
-      6,
-      300,
+      'admin_bootstrap',
     );
 
     return {
@@ -667,9 +673,10 @@ export class AuthService {
     this.assertAdminBootstrapPhone(dto.phone);
 
     const phone = this.getConfiguredAdminBootstrapPhone();
-    const verificationResult = await this.keccelOtpService.verifyOtp(
+    const verificationResult = await this.otpService.verifyOtp(
       phone,
       dto.otp,
+      'admin_bootstrap',
     );
 
     if (!verificationResult.valid) {
@@ -779,7 +786,10 @@ export class AuthService {
     // Invalidate the refresh token by setting it to null
     user.refreshToken = null;
     user.accessToken = null;
-    await this.userRepository.update(user.id, { refreshToken: null, accessToken: null });
+    await this.userRepository.update(user.id, {
+      refreshToken: null,
+      accessToken: null,
+    });
 
     this.logger.log(`User ${userId} logged out successfully`);
 
@@ -887,7 +897,9 @@ export class AuthService {
     const audience = this.getGoogleAudiences();
     if (audience.length === 0) {
       this.logger.error('Missing GOOGLE_MOBILE_CLIENT_IDS / GOOGLE_CLIENT_ID');
-      throw new UnauthorizedException("La connexion avec Google est temporairement indisponible.");
+      throw new UnauthorizedException(
+        'La connexion avec Google est temporairement indisponible.',
+      );
     }
 
     try {
@@ -897,7 +909,9 @@ export class AuthService {
       });
       const payload = ticket.getPayload();
       if (!payload || !payload.sub || !payload.email) {
-        throw new UnauthorizedException("La réponse de connexion Google est invalide. Relancez la connexion.");
+        throw new UnauthorizedException(
+          'La réponse de connexion Google est invalide. Relancez la connexion.',
+        );
       }
 
       return {
@@ -909,7 +923,9 @@ export class AuthService {
         emailVerified: payload.email_verified ?? false,
       };
     } catch (e) {
-      throw new UnauthorizedException("La connexion avec Google n’a pas pu être vérifiée. Réessayez.");
+      throw new UnauthorizedException(
+        'La connexion avec Google n’a pas pu être vérifiée. Réessayez.',
+      );
     }
   }
 
@@ -978,7 +994,9 @@ export class AuthService {
       this.assertUserCanAuthenticate(user);
 
       user.lastLoginAt = new Date();
-      await this.userRepository.update(user.id, { lastLoginAt: user.lastLoginAt });
+      await this.userRepository.update(user.id, {
+        lastLoginAt: user.lastLoginAt,
+      });
 
       const tokens = await this.generateTokens(user);
       return {
@@ -1017,8 +1035,10 @@ export class AuthService {
           user.profilePicture = profilePicture;
         }
         await this.userRepository.update(user.id, {
-          googleId: user.googleId, isEmailVerified: user.isEmailVerified,
-          phone: user.phone, profilePicture: user.profilePicture,
+          googleId: user.googleId,
+          isEmailVerified: user.isEmailVerified,
+          phone: user.phone,
+          profilePicture: user.profilePicture,
         });
       } else {
         // Create new user with Google account
@@ -1087,7 +1107,8 @@ export class AuthService {
           profilePicture: profilePicture ?? undefined,
           role: driverState.role,
           isDriver: driverState.isDriver,
-          driverOnboardingRequestedAt: role === UserRole.DRIVER ? new Date() : null,
+          driverOnboardingRequestedAt:
+            role === UserRole.DRIVER ? new Date() : null,
           status: UserStatus.PENDING_KYC,
           isEmailVerified: true,
           isPhoneVerified: false,
@@ -1106,7 +1127,9 @@ export class AuthService {
 
     // Update last login
     user.lastLoginAt = new Date();
-    await this.userRepository.update(user.id, { lastLoginAt: user.lastLoginAt });
+    await this.userRepository.update(user.id, {
+      lastLoginAt: user.lastLoginAt,
+    });
 
     // Generate tokens
     const tokens = await this.generateTokens(user);
@@ -1165,7 +1188,9 @@ export class AuthService {
       return this.applePublicKeys;
     } catch (error) {
       this.logger.error('Unable to fetch Apple public keys', error);
-      throw new UnauthorizedException("La connexion avec Apple est temporairement indisponible. Réessayez plus tard.");
+      throw new UnauthorizedException(
+        'La connexion avec Apple est temporairement indisponible. Réessayez plus tard.',
+      );
     }
   }
 
@@ -1191,28 +1216,40 @@ export class AuthService {
     expectedNonce?: string,
   ): void {
     if (!payload.sub) {
-      throw new UnauthorizedException("La réponse de connexion Apple est invalide. Relancez la connexion.");
+      throw new UnauthorizedException(
+        'La réponse de connexion Apple est invalide. Relancez la connexion.',
+      );
     }
 
     if (payload.iss !== APPLE_ISSUER) {
-      throw new UnauthorizedException("L’origine de la réponse de connexion Apple n’a pas pu être vérifiée. Réessayez.");
+      throw new UnauthorizedException(
+        'L’origine de la réponse de connexion Apple n’a pas pu être vérifiée. Réessayez.',
+      );
     }
 
     if (!this.isAppleAudienceAllowed(payload.aud, allowedAudiences)) {
-      throw new UnauthorizedException("Cette connexion Apple n’est pas destinée à cette application. Relancez la connexion.");
+      throw new UnauthorizedException(
+        'Cette connexion Apple n’est pas destinée à cette application. Relancez la connexion.',
+      );
     }
 
     const now = Math.floor(Date.now() / 1000);
     if (!payload.exp || payload.exp + TOKEN_CLOCK_TOLERANCE_SECONDS < now) {
-      throw new UnauthorizedException("Votre connexion Apple a expiré. Reconnectez-vous.");
+      throw new UnauthorizedException(
+        'Votre connexion Apple a expiré. Reconnectez-vous.',
+      );
     }
 
     if (payload.iat && payload.iat - TOKEN_CLOCK_TOLERANCE_SECONDS > now) {
-      throw new UnauthorizedException("L’heure de la réponse de connexion Apple est invalide. Relancez la connexion.");
+      throw new UnauthorizedException(
+        'L’heure de la réponse de connexion Apple est invalide. Relancez la connexion.',
+      );
     }
 
     if (expectedNonce && payload.nonce !== expectedNonce) {
-      throw new UnauthorizedException("La réponse Apple ne correspond pas à cette tentative de connexion. Réessayez.");
+      throw new UnauthorizedException(
+        'La réponse Apple ne correspond pas à cette tentative de connexion. Réessayez.',
+      );
     }
   }
 
@@ -1223,26 +1260,32 @@ export class AuthService {
     const allowedAudiences = this.getAppleAudiences();
     if (allowedAudiences.length === 0) {
       this.logger.error('Missing APPLE_CLIENT_IDS / APPLE_CLIENT_ID');
-      throw new UnauthorizedException("La connexion avec Apple est temporairement indisponible.");
+      throw new UnauthorizedException(
+        'La connexion avec Apple est temporairement indisponible.',
+      );
     }
 
     const tokenParts = idToken.split('.');
     if (tokenParts.length !== 3) {
-      throw new UnauthorizedException("La connexion avec Apple n’a pas pu être vérifiée. Réessayez.");
+      throw new UnauthorizedException(
+        'La connexion avec Apple n’a pas pu être vérifiée. Réessayez.',
+      );
     }
 
     const [encodedHeader, encodedPayload, encodedSignature] = tokenParts;
     const header = this.decodeJwtPart<AppleJwtHeader>(
       encodedHeader,
-      "La réponse de connexion Apple est invalide. Relancez la connexion.",
+      'La réponse de connexion Apple est invalide. Relancez la connexion.',
     );
     const payload = this.decodeJwtPart<AppleIdTokenPayload>(
       encodedPayload,
-      "La réponse de connexion Apple est invalide. Relancez la connexion.",
+      'La réponse de connexion Apple est invalide. Relancez la connexion.',
     );
 
     if (header.alg !== 'RS256' || !header.kid) {
-      throw new UnauthorizedException("La réponse de connexion Apple est invalide. Relancez la connexion.");
+      throw new UnauthorizedException(
+        'La réponse de connexion Apple est invalide. Relancez la connexion.',
+      );
     }
 
     let appleKeys = await this.getApplePublicKeys();
@@ -1254,7 +1297,9 @@ export class AuthService {
     }
 
     if (!appleKey) {
-      throw new UnauthorizedException("La connexion avec Apple n’a pas pu être vérifiée. Réessayez.");
+      throw new UnauthorizedException(
+        'La connexion avec Apple n’a pas pu être vérifiée. Réessayez.',
+      );
     }
 
     const signingInput = `${encodedHeader}.${encodedPayload}`;
@@ -1268,13 +1313,17 @@ export class AuthService {
     );
 
     if (!isSignatureValid) {
-      throw new UnauthorizedException("L’authenticité de la réponse Apple n’a pas pu être vérifiée. Relancez la connexion.");
+      throw new UnauthorizedException(
+        'L’authenticité de la réponse Apple n’a pas pu être vérifiée. Relancez la connexion.',
+      );
     }
 
     this.validateAppleClaims(payload, allowedAudiences, expectedNonce);
     const appleId = payload.sub;
     if (!appleId) {
-      throw new UnauthorizedException("La réponse de connexion Apple est invalide. Relancez la connexion.");
+      throw new UnauthorizedException(
+        'La réponse de connexion Apple est invalide. Relancez la connexion.',
+      );
     }
 
     return {
@@ -1324,7 +1373,9 @@ export class AuthService {
       this.assertUserCanAuthenticate(user);
 
       user.lastLoginAt = new Date();
-      await this.userRepository.update(user.id, { lastLoginAt: user.lastLoginAt });
+      await this.userRepository.update(user.id, {
+        lastLoginAt: user.lastLoginAt,
+      });
 
       const tokens = await this.generateTokens(user);
       return {
@@ -1366,8 +1417,11 @@ export class AuthService {
       }
 
       await this.userRepository.update(user.id, {
-        appleId: user.appleId, isEmailVerified: user.isEmailVerified, phone: user.phone,
-        firstName: user.firstName, lastName: user.lastName,
+        appleId: user.appleId,
+        isEmailVerified: user.isEmailVerified,
+        phone: user.phone,
+        firstName: user.firstName,
+        lastName: user.lastName,
       });
     } else {
       if (!phone) {
@@ -1429,7 +1483,8 @@ export class AuthService {
         gender: signupOptions?.gender ?? null,
         role: driverState.role,
         isDriver: driverState.isDriver,
-        driverOnboardingRequestedAt: role === UserRole.DRIVER ? new Date() : null,
+        driverOnboardingRequestedAt:
+          role === UserRole.DRIVER ? new Date() : null,
         status: UserStatus.PENDING_KYC,
         isEmailVerified: emailVerified,
         isPhoneVerified: false,
@@ -1446,7 +1501,9 @@ export class AuthService {
     this.assertUserCanAuthenticate(user);
 
     user.lastLoginAt = new Date();
-    await this.userRepository.update(user.id, { lastLoginAt: user.lastLoginAt });
+    await this.userRepository.update(user.id, {
+      lastLoginAt: user.lastLoginAt,
+    });
 
     const tokens = await this.generateTokens(user);
 

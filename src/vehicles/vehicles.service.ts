@@ -6,18 +6,20 @@ import {
   InternalServerErrorException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, In } from 'typeorm';
+import { Repository, In, IsNull, MoreThanOrEqual } from 'typeorm';
 import {
   getVehicleMaxSeats,
   Vehicle,
   VehicleType,
 } from './entities/vehicle.entity';
 import { User } from '../users/entities/user.entity';
-import {
-  isAdminRole,
-} from '../users/user-role.policy';
+import { isAdminRole } from '../users/user-role.policy';
 import { activateRequestedDriver } from '../users/driver-activation';
 import { Trip, TripStatus } from '../trips/entities/trip.entity';
+import {
+  RecurringTripTemplate,
+  RecurringTripTemplateStatus,
+} from '../trips/entities/recurring-trip-template.entity';
 import { CacheService } from '../common/services/cache.service';
 import { FileUploadService } from '../common/services/file-upload.service';
 
@@ -33,6 +35,8 @@ export class VehiclesService {
     private userRepository: Repository<User>,
     @InjectRepository(Trip)
     private tripRepository: Repository<Trip>,
+    @InjectRepository(RecurringTripTemplate)
+    private recurringTripTemplateRepository: Repository<RecurringTripTemplate>,
     private cacheService: CacheService,
     private fileUploadService: FileUploadService,
   ) {}
@@ -52,9 +56,11 @@ export class VehiclesService {
   private async invalidateOwnerVehiclesCache(ownerId: string): Promise<void> {
     try {
       await this.cacheService.del(CacheService.getVehiclesByOwnerKey(ownerId));
-    } catch (cacheError: any) {
+    } catch (cacheError: unknown) {
+      const message =
+        cacheError instanceof Error ? cacheError.message : String(cacheError);
       this.logger.warn(
-        `Failed to invalidate cache for owner ${ownerId}: ${cacheError.message}`,
+        `Failed to invalidate cache for owner ${ownerId}: ${message}`,
       );
     }
   }
@@ -245,6 +251,10 @@ export class VehiclesService {
     const vehicle = await this.findOwnedVehicleEntity(id, ownerId);
     const sanitizedUpdateData = this.sanitizeVehicleData(updateData);
 
+    if (vehicle.isActive && sanitizedUpdateData.isActive === false) {
+      await this.assertCanDeactivate(id);
+    }
+
     if (updateData.licensePlate !== undefined) {
       const normalizedLicensePlate = sanitizedUpdateData.licensePlate;
       if (!normalizedLicensePlate) {
@@ -286,7 +296,9 @@ export class VehiclesService {
     await this.invalidateVehicleCaches(ownerId, id);
 
     if (updatedVehicle.isActive) {
-      await this.userRepository.manager.transaction((manager) => activateRequestedDriver(manager, ownerId));
+      await this.userRepository.manager.transaction((manager) =>
+        activateRequestedDriver(manager, ownerId),
+      );
     }
     this.logger.log(`Vehicle ${id} updated successfully`);
     return this.enrichVehiclePhotoUrl(updatedVehicle);
@@ -297,6 +309,22 @@ export class VehiclesService {
 
     const vehicle = await this.findOwnedVehicleEntity(id, ownerId);
 
+    if (!vehicle.isActive) {
+      await this.invalidateVehicleCaches(ownerId, id);
+      return;
+    }
+
+    await this.assertCanDeactivate(id);
+
+    vehicle.isActive = false;
+    await this.vehicleRepository.save(vehicle);
+
+    await this.invalidateVehicleCaches(ownerId, id);
+
+    this.logger.log(`Vehicle ${id} deactivated successfully`);
+  }
+
+  private async assertCanDeactivate(id: string): Promise<void> {
     const activeTrips = await this.tripRepository.find({
       where: {
         vehicleId: id,
@@ -311,16 +339,35 @@ export class VehiclesService {
       throw new BadRequestException({
         error: 'Véhicule utilisé par un trajet',
         code: 'VEHICLE_HAS_ACTIVE_TRIPS',
-        message: `Impossible de supprimer ce véhicule : ${activeTrips.length} trajet(s) en cours ou en attente l'utilisent encore. Annulez ou terminez ces trajets, puis réessayez.`,
+        message: `Impossible de retirer ce véhicule : ${activeTrips.length} trajet(s) en cours ou à venir l'utilisent encore. Changez de véhicule ou annulez les trajets à venir, terminez ceux en cours, puis réessayez.`,
       });
     }
 
-    vehicle.isActive = false;
-    await this.vehicleRepository.save(vehicle);
-
-    await this.invalidateVehicleCaches(ownerId, id);
-
-    this.logger.log(`Vehicle ${id} deactivated successfully`);
+    const now = new Date();
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    const recurringTemplate =
+      await this.recurringTripTemplateRepository.findOne({
+        where: [
+          {
+            vehicleId: id,
+            status: RecurringTripTemplateStatus.ACTIVE,
+            endDate: IsNull(),
+          },
+          {
+            vehicleId: id,
+            status: RecurringTripTemplateStatus.ACTIVE,
+            endDate: MoreThanOrEqual(today),
+          },
+        ],
+      });
+    if (recurringTemplate) {
+      throw new BadRequestException({
+        error: 'Véhicule utilisé par un trajet récurrent',
+        code: 'VEHICLE_HAS_ACTIVE_RECURRING_TRIPS',
+        message:
+          'Impossible de retirer ce véhicule : un trajet récurrent actif l’utilise. Mettez d’abord ce trajet récurrent en pause, puis réessayez.',
+      });
+    }
   }
 
   private async findOwnedVehicleEntity(
@@ -352,7 +399,7 @@ export class VehiclesService {
           enriched.photoUrl,
         )) || enriched.photoUrl;
     }
-    return enriched as Vehicle;
+    return enriched;
   }
 
   private sanitizeVehicleData(vehicleData: Partial<Vehicle>): Partial<Vehicle> {
@@ -414,7 +461,8 @@ export class VehiclesService {
 
   private async ensureOwnerDriverProfile(owner: User): Promise<void> {
     await this.userRepository.manager.transaction((manager) =>
-      activateRequestedDriver(manager, owner.id));
+      activateRequestedDriver(manager, owner.id),
+    );
   }
 
   private async reactivateOrUpdateExistingVehicle(

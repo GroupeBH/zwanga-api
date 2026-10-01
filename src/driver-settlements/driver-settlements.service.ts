@@ -38,12 +38,15 @@ import {
 import { RequestDriverPayoutDto } from './dto/driver-settlement.dto';
 import { getPayoutFailureMessage, normalizePayoutPhone, PAYOUT_MESSAGES } from '../payments/payout-policy';
 import { settleCashSubsidy } from './cash-subsidy-settlement';
+import { sumConfirmedDriverCash } from './driver-cash-summary';
 import { loadHistoryPage, type HistoryPageDto } from '../common/pagination/history-page';
 
 export interface DriverSettlementSummary {
   availableBalance: number;
   pendingPayoutBalance: number;
   paidBalance: number;
+  /** Passenger cash already received; never part of the withdrawable balance. */
+  cashReceivedAmount: number;
   currency: string;
   commissionRate: number;
   kycApproved: boolean;
@@ -126,6 +129,7 @@ export class DriverSettlementsService implements OnModuleInit {
       paidBalance,
       kycApproved,
       driver,
+      cashReceivedAmount,
     ] = await Promise.all([
       this.getAvailableBalance(driverId),
       this.sumPayouts(driverId, [
@@ -137,6 +141,7 @@ export class DriverSettlementsService implements OnModuleInit {
         where: { userId: driverId, status: KycStatus.APPROVED },
       }),
       this.userRepository.findOne({ where: { id: driverId } }),
+      sumConfirmedDriverCash(this.bookingRepository, driverId, currency),
     ]);
 
     return {
@@ -144,6 +149,7 @@ export class DriverSettlementsService implements OnModuleInit {
       pendingPayoutBalance,
       paidBalance,
       currency,
+      cashReceivedAmount,
       commissionRate: this.getCommissionRate(),
       kycApproved,
       payoutPhone: driver?.phone ?? null,

@@ -28,7 +28,7 @@ import { AdminModule } from './admin/admin.module';
 import { SupportModule } from './support/support.module';
 import { FaqModule } from './faq/faq.module';
 import { TrackingModule } from './tracking/tracking.module';
-import { KeccelOtpModule } from './keccel-otp/keccel-otp.module';
+import { OtpModule } from './otp/otp.module';
 import { TripRequestsModule } from './trip-requests/trip-requests.module';
 import { SafetyModule } from './safety/safety.module';
 import { GoogleMapsModule } from './google-maps/google-maps.module';
@@ -91,7 +91,7 @@ import { ProServicesModule } from './pro-services/pro-services.module';
     SupportModule,
     FaqModule,
     TrackingModule,
-    KeccelOtpModule,
+    OtpModule,
     TripRequestsModule,
     SafetyModule,
     GoogleMapsModule,

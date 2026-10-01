@@ -822,6 +822,15 @@ export class TripsService {
       driverId,
     );
 
+    const vehicle = await this.vehicleRepository.findOne({
+      where: { id: template.vehicleId, ownerId: driverId, isActive: true },
+    });
+    if (!vehicle) {
+      throw new BadRequestException(
+        'Réactivez le véhicule de ce trajet récurrent avant de le reprendre',
+      );
+    }
+
     if (template.status !== RecurringTripTemplateStatus.ACTIVE) {
       template.status = RecurringTripTemplateStatus.ACTIVE;
       await this.recurringTripTemplateRepository.save(template);
