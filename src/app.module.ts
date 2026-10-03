@@ -14,6 +14,8 @@ import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { RolesGuard } from './common/guards/roles.guard';
 import { IpThrottlerGuard } from './common/guards/throttler.guard';
+import { RedisService } from './common/services/redis.service';
+import { RedisThrottlerStorage } from './common/services/redis-throttler.storage';
 import { AuthModule } from './auth/auth.module';
 import { UsersModule } from './users/users.module';
 import { VehiclesModule } from './vehicles/vehicles.module';
@@ -66,16 +68,26 @@ import { ProServicesModule } from './pro-services/pro-services.module';
     ScheduleModule.forRoot(),
     CommonModule,
     ThrottlerModule.forRootAsync({
-      imports: [ConfigModule],
-      useFactory: (configService: ConfigService) => ({
+      imports: [ConfigModule, CommonModule],
+      useFactory: (configService: ConfigService, redis: RedisService) => {
+        const ttl = Number(configService.get('THROTTLE_TTL_MS') ??
+          Number(configService.get('THROTTLE_TTL') ?? 60) * 1000);
+        const limit = Number(configService.get('THROTTLE_LIMIT') ?? 10);
+        if (!Number.isFinite(ttl) || ttl < 1000 || !Number.isInteger(limit) || limit < 1) {
+          throw new Error('Invalid rate limit configuration: TTL must be >= 1000 ms and limit a positive integer');
+        }
+        return {
+        storage: new RedisThrottlerStorage(redis),
+        errorMessage: 'Trop de demandes. Réessayez dans un instant.',
         throttlers: [
           {
-            ttl: configService.get<number>('THROTTLE_TTL') ?? 60,
-            limit: configService.get<number>('THROTTLE_LIMIT') ?? 10,
+            ttl,
+            limit,
           },
         ],
-      }),
-      inject: [ConfigService],
+        };
+      },
+      inject: [ConfigService, RedisService],
     }),
     AuthModule,
     UsersModule,

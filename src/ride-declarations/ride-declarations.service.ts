@@ -6,7 +6,7 @@ import { Booking, BookingStatus } from '../bookings/entities/booking.entity';
 import { BookingsService } from '../bookings/bookings.service';
 import { Trip, TripStatus } from '../trips/entities/trip.entity';
 import { RideDeclarationDto } from './ride-declaration.dto';
-import { declarationStatus, hasRideDispute } from './ride-declaration.model';
+import { dropoffDeclarationStatus, pickupDeclarationStatus, hasRideDispute } from './ride-declaration.model';
 import { recordDeclaration } from './ride-declaration.policy';
 
 @Injectable()
@@ -22,8 +22,8 @@ export class RideDeclarationsService {
       bookingId: booking.id,
       tripId: booking.tripId,
       actor: driverId === userId ? 'driver' : 'passenger',
-      pickup: { status: declarationStatus(declarations.pickup, Boolean(booking.pickedUp || booking.pickedUpAt)), driver: declarations.pickup?.driver?.decision, passenger: declarations.pickup?.passenger?.decision },
-      dropoff: { status: declarationStatus(declarations.dropoff, Boolean(booking.droppedOff || booking.droppedOffAt)), driver: declarations.dropoff?.driver?.decision, passenger: declarations.dropoff?.passenger?.decision },
+      pickup: { status: pickupDeclarationStatus(declarations.pickup, Boolean(booking.pickedUp || booking.pickedUpAt)), driver: declarations.pickup?.driver?.decision, passenger: declarations.pickup?.passenger?.decision },
+      dropoff: { status: dropoffDeclarationStatus(declarations.dropoff, Boolean(booking.droppedOff || booking.droppedOffAt)), driver: declarations.dropoff?.driver?.decision, passenger: declarations.dropoff?.passenger?.decision },
     };
   }
 
@@ -59,8 +59,9 @@ export class RideDeclarationsService {
       const applied = dto.stage === 'pickup' ? Boolean(booking.pickedUp || booking.pickedUpAt) : Boolean(booking.droppedOff || booking.droppedOffAt);
       const now = new Date();
       const change = recordDeclaration(booking.rideDeclarations, dto.stage, actor, { ...dto, receivedAt: now.toISOString() }, applied);
-      if (!change.changed) return this.view(booking, trip.driverId, userId);
-      const occurredAt = Date.parse(dto.occurredAt);
+      if (!change.changed && !change.ready) return this.view(booking, trip.driverId, userId);
+      // Replaying ready receipts must not refresh their original evidence timestamps.
+      const occurredAt = Date.parse(change.declarations[dto.stage]?.[actor]?.occurredAt ?? dto.occurredAt);
       if (!Number.isFinite(occurredAt) || occurredAt > now.getTime() + 5 * 60_000 || occurredAt < now.getTime() - 72 * 60 * 60_000) {
         throw new ConflictException({ code: 'RIDE_EVENT_TIME', message: 'La date de cette confirmation ne permet pas de la valider. Vérifiez l’heure du téléphone ou contactez l’assistance.' });
       }
@@ -71,7 +72,7 @@ export class RideDeclarationsService {
         throw new ConflictException({ code: 'RIDE_STATE_CHANGED', message: 'Le trajet a changé depuis votre action. Actualisez son détail avant de continuer.' });
       }
       if (dto.stage === 'dropoff' && !(booking.pickedUp || booking.pickedUpAt)) {
-        throw new ConflictException({ code: 'RIDE_PICKUP_REQUIRED', message: 'L’embarquement doit être confirmé par les deux personnes avant de valider l’arrivée.' });
+        throw new ConflictException({ code: 'RIDE_PICKUP_REQUIRED', message: 'L’embarquement doit être validé par les deux personnes ou la détection automatique avant de confirmer l’arrivée.' });
       }
       if (dto.stage === 'pickup' && dto.decision === 'confirm') {
         await this.bookings.validateManualRidePassenger(trip, booking.passengerId, manager);

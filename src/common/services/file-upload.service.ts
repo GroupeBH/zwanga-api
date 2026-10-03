@@ -5,6 +5,8 @@ import { join } from 'path';
 import * as crypto from 'crypto';
 import { S3Service } from './s3.service';
 import { ContentModerationService, ModerationResult } from './content-moderation.service';
+import { normalizeUploadedImage } from '../image-upload-policy';
+import { isLocalUploadKey, signLocalUpload } from '../local-upload-policy';
 
 @Injectable()
 export class FileUploadService {
@@ -69,6 +71,8 @@ export class FileUploadService {
       throw new BadRequestException(`L’image est trop volumineuse. Sa taille ne doit pas dépasser ${maxSize / 1024 / 1024} Mo.`);
     }
 
+    file = await normalizeUploadedImage(file.buffer);
+
     // Content moderation - check for inappropriate content
     if (this.useModeration && this.contentModerationService) {
       try {
@@ -119,6 +123,7 @@ export class FileUploadService {
       const uniqueName = `${crypto.randomUUID()}.${fileExtension}`;
       const filePath = join(this.uploadPath, subfolder, uniqueName);
 
+      await fs.mkdir(join(this.uploadPath, subfolder), { recursive: true });
       await fs.writeFile(filePath, file.buffer);
 
       this.logger.log(`File saved locally successfully: ${subfolder}/${uniqueName}`);
@@ -153,6 +158,7 @@ export class FileUploadService {
       await this.s3Service.deleteFile(s3Key);
       this.logger.debug(`File deleted from S3: ${s3Key}`);
     } else {
+      if (!isLocalUploadKey(filePath)) return;
       try {
         const fullPath = join(this.uploadPath, filePath);
         await fs.unlink(fullPath);
@@ -169,10 +175,11 @@ export class FileUploadService {
    * @param usePresignedUrl Whether to use presigned URL for S3 (default: true for S3)
    * @returns File URL (presigned URL for S3, local path for local storage)
    */
-  async getFileUrl(filePath: string, usePresignedUrl: boolean = true): Promise<string | null> {
+  async getFileUrl(filePath: string, usePresignedUrl: boolean = true, allowKyc = false): Promise<string | null> {
     if (!filePath) {
       return null;
     }
+    if (/(^|\/)kyc\//i.test(filePath) && !allowKyc) return null;
 
     if (this.useS3 && this.s3Service) {
       // Always use presigned URLs for S3 private buckets
@@ -191,7 +198,12 @@ export class FileUploadService {
       }
     } else {
       // Local storage
-      return `/uploads/${filePath}`;
+      const key = filePath.replace(/^\/uploads\//, '').split('?')[0];
+      if (!isLocalUploadKey(key)) return null;
+      if (!key.startsWith('kyc/')) return `/uploads/${key}`;
+      const expires = Math.floor(Date.now() / 1000) + 900;
+      const secret = this.configService.get<string>('LOCAL_UPLOAD_SIGNING_SECRET') || this.configService.get<string>('JWT_SECRET') || '';
+      return `/uploads/${key}?expires=${expires}&signature=${signLocalUpload(key, expires, secret)}`;
     }
   }
 
@@ -200,19 +212,25 @@ export class FileUploadService {
    * @param s3Key S3 key (path) or null
    * @returns Presigned URL or null
    */
-  async getPresignedUrlIfS3Key(s3Key: string | null): Promise<string | null> {
+  async getPresignedUrlIfS3Key(s3Key: string | null, allowKyc = false): Promise<string | null> {
     if (!s3Key) {
       return null;
     }
+    // Only the authenticated KYC reader may mint access to identity documents.
+    if (/(^|\/)kyc\//i.test(s3Key) && !allowKyc) return null;
 
     // Check if it's an S3 key (contains /) or already a URL
     if (s3Key.startsWith('http://') || s3Key.startsWith('https://')) {
+      if (!this.useS3) {
+        const pathname = new URL(s3Key).pathname;
+        if (pathname.startsWith('/uploads/kyc/')) return this.getFileUrl(pathname, true, allowKyc);
+      }
       // Already a URL, return as is
       return s3Key;
     }
 
     // It's an S3 key, generate presigned URL
-    return await this.getFileUrl(s3Key, true);
+    return await this.getFileUrl(s3Key, true, allowKyc);
   }
 }
 

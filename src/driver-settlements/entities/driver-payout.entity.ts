@@ -22,6 +22,12 @@ export enum DriverPayoutStatus {
 @Index(['driverId', 'status'])
 @Index(['paymentTransactionId'])
 @Index(['driverId', 'idempotencyKey'], { unique: true })
+@Index('IDX_driver_payouts_reconciliation', ['lastReconciledAt', 'createdAt'], {
+  where: "\"status\" IN ('pending', 'initiated')",
+})
+@Index('IDX_driver_payouts_recovery_blocked', ['driverId'], {
+  where: '"recoveryBlocked" = true',
+})
 export class DriverPayout {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -63,6 +69,22 @@ export class DriverPayout {
 
   @Column({ type: 'varchar', length: 500, nullable: true })
   failureReason: string | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  reviewRequestedAt: Date | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  reviewResolvedAt: Date | null;
+
+  /** A local release is not a cancellation of an external transfer. */
+  @Column({ type: 'timestamptz', nullable: true })
+  fundsReleasedAt: Date | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  lastReconciledAt: Date | null;
+
+  @Column({ type: 'boolean', default: false })
+  recoveryBlocked: boolean;
 
   @CreateDateColumn()
   createdAt: Date;

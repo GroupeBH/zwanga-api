@@ -29,7 +29,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   async validate(payload: JwtPayload) {
     try {
       // Vérifier que l'utilisateur existe toujours et est actif
-      const user = await this.usersService.findOne(payload.sub);
+      const user = await this.usersService.findAuthIdentity(payload.sub);
 
       if (!user) {
         throw new UnauthorizedException("Utilisateur introuvable.");

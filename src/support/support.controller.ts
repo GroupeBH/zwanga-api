@@ -12,6 +12,7 @@ import {
 } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Auth } from '../auth/decorators/auth.decorator';
+import { LegacyPageQuery } from '../common/legacy-page';
 import { Public } from '../common/decorators/public.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
@@ -134,10 +135,11 @@ export class SupportController {
   @Auth()
   @SensitiveThrottle(60, 60000)
   @ApiOperation({ summary: 'Lister les messages d’une conversation de support' })
-  async getMessages(@Request() req, @Param('id') id: string) {
+  async getMessages(@Request() req, @Param('id') id: string, @Query() query: LegacyPageQuery) {
     return this.supportService.getSupportConversationMessages(
       id,
       req.user.userId,
+      query,
     );
   }
 

@@ -1,5 +1,5 @@
 import { ConflictException } from '@nestjs/common';
-import { declarationStatus, type RideActor, type RideDeclarations, type RideEvidence, type RideStage } from './ride-declaration.model';
+import { pickupDeclarationStatus, type RideActor, type RideDeclarations, type RideEvidence, type RideStage } from './ride-declaration.model';
 
 /** Bounded receipts, one immutable declaration per person and stage. */
 export function recordDeclaration(
@@ -10,6 +10,8 @@ export function recordDeclaration(
   applied: boolean,
 ): { declarations: RideDeclarations; changed: boolean; ready: boolean } {
   const declarations = current ?? {};
+  const replayReady = !applied &&
+    pickupDeclarationStatus(declarations[stage], false) === 'ready';
   for (const [savedStage, votes] of Object.entries(declarations)) {
     for (const [savedActor, vote] of Object.entries(votes ?? {})) {
       if (vote?.eventId !== evidence.eventId) continue;
@@ -19,7 +21,7 @@ export function recordDeclaration(
           vote.accuracy !== evidence.accuracy) {
         throw new ConflictException({ code: 'RIDE_EVENT_CONFLICT', message: 'Cette confirmation a déjà été enregistrée avec des informations différentes. Actualisez le trajet.' });
       }
-      return { declarations, changed: false, ready: false };
+      return { declarations, changed: false, ready: replayReady };
     }
   }
   if (applied) {
@@ -33,13 +35,13 @@ export function recordDeclaration(
     if (previous.decision !== evidence.decision) {
       throw new ConflictException({ code: 'RIDE_DECISION_LOCKED', message: 'Une réponse différente est déjà enregistrée. Contactez l’assistance pour la corriger.' });
     }
-    return { declarations, changed: false, ready: false };
+    return { declarations, changed: false, ready: replayReady };
   }
   const votes = { ...declarations[stage], [actor]: evidence };
   return {
     declarations: { ...declarations, [stage]: votes },
     changed: true,
-    ready: declarationStatus(votes, false) === 'ready',
+    ready: pickupDeclarationStatus(votes, false) === 'ready',
   };
 }
 

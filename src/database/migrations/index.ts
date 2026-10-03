@@ -46,6 +46,8 @@ import { AddCashReceipts1780000039000 } from './1780000039000-AddCashReceipts';
 import { AddExplicitDriverActivation1780000043000 } from './1780000043000-AddExplicitDriverActivation';
 import { AddDriverPublicationPhotoPolicy1780000044000 } from './1780000044000-AddDriverPublicationPhotoPolicy';
 
+import { AddDriverPayoutRecovery1780000046000 } from './1780000046000-AddDriverPayoutRecovery';
+
 export const databaseMigrations = [
   FillTotalSeats1780000000000,
   PreventMultipleActiveDriverTrips1780000001000,
@@ -92,4 +94,5 @@ export const databaseMigrations = [
   AddExplicitDriverActivation1780000043000,
   AddDriverPublicationPhotoPolicy1780000044000,
   AddPawapayRefunds1780000045000,
+  AddDriverPayoutRecovery1780000046000,
 ];

@@ -36,6 +36,7 @@ describe('TrackingGateway boarding detection recovery', () => {
       bookingsService as any,
       {} as any,
       {} as any,
+      {} as any,
     );
   });
 

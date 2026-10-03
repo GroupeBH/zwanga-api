@@ -34,6 +34,7 @@ import { WalletWithdrawal } from '../wallet/entities/wallet-withdrawal.entity';
 import { WalletLedgerEntry } from '../wallet/entities/wallet-ledger-entry.entity';
 import { DriverEarning } from '../driver-settlements/entities/driver-earning.entity';
 import { DriverPayout } from '../driver-settlements/entities/driver-payout.entity';
+import { DriverPayoutEvent } from '../driver-settlements/entities/driver-payout-event.entity';
 import { TripShareLink } from '../tracking/entities/trip-share-link.entity';
 import { ReferralProfile } from '../referrals/entities/referral-profile.entity';
 import { ReferralAccount } from '../referrals/entities/referral-account.entity';
@@ -76,6 +77,7 @@ export const typeOrmEntities = [
   WalletLedgerEntry,
   DriverEarning,
   DriverPayout,
+  DriverPayoutEvent,
   TripShareLink,
   ReferralProfile,
   ReferralAccount,

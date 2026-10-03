@@ -8,6 +8,7 @@ import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { SelectQueryBuilder, Repository } from 'typeorm';
 import { ChatService } from '../chat/chat.service';
+import { LegacyPageQuery } from '../common/legacy-page';
 import {
   CreateSupportConversationDto,
   ListConversationsQueryDto,
@@ -115,8 +116,9 @@ export class SupportService {
   async getSupportConversationMessages(
     conversationId: string,
     userId: string,
+    options: LegacyPageQuery = {},
   ) {
-    return this.chatService.getSupportConversationMessages(conversationId, userId);
+    return this.chatService.getSupportConversationMessages(conversationId, userId, options);
   }
 
   async sendSupportMessage(

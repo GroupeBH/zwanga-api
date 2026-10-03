@@ -2,6 +2,8 @@ import { Injectable, ExecutionContext } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { AuthGuard } from '@nestjs/passport';
 import { IS_PUBLIC_KEY } from '../decorators/public.decorator';
+import { firstValueFrom, isObservable } from 'rxjs';
+const VERIFIED_REQUEST = Symbol('verified-jwt-request');
 
 @Injectable()
 export class JwtAuthGuard extends AuthGuard('jwt') {
@@ -9,7 +11,8 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
     super();
   }
 
-  canActivate(context: ExecutionContext) {
+  async canActivate(context: ExecutionContext) {
+    if (context.getType() !== 'http') return true;
     // Vérifier si la route est marquée comme publique
     const isPublic = this.reflector.getAllAndOverride<boolean>(IS_PUBLIC_KEY, [
       context.getHandler(),
@@ -22,7 +25,13 @@ export class JwtAuthGuard extends AuthGuard('jwt') {
     }
 
     // Sinon, appliquer l'authentification JWT normale
-    return super.canActivate(context);
+    const request = context.switchToHttp().getRequest();
+    // Only this guard can set the symbol; req.user alone is never authentication proof.
+    if (request[VERIFIED_REQUEST]) return true;
+    const result = await super.canActivate(context);
+    const allowed = isObservable(result) ? await firstValueFrom(result) : result;
+    if (allowed) request[VERIFIED_REQUEST] = true;
+    return allowed;
   }
 }
 

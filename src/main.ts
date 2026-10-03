@@ -23,6 +23,9 @@ import type { Server, ServerOptions } from 'socket.io';
 import type { Server as HttpServer } from 'http';
 import type { Socket } from 'net';
 import { ApiExceptionFilter } from './common/filters/api-exception.filter';
+import { isLocalUploadKey, verifyLocalUpload } from './common/local-upload-policy';
+import type { Request, Response } from 'express';
+import { resolve } from 'path';
 
 class RedisSocketIoAdapter extends ConfiguredIoAdapter {
   private redisAdapter?: ReturnType<typeof createAdapter>;
@@ -153,6 +156,8 @@ async function bootstrap() {
   });
 
   const configService = app.get(ConfigService);
+  const trustedProxies = configService.get<string>('TRUSTED_PROXY_CIDRS')?.split(',').map(value => value.trim()).filter(Boolean);
+  app.set('trust proxy', trustedProxies?.length ? trustedProxies : false);
   const apiPrefix = configService.get<string>('API_PREFIX') || 'api/v1';
   const redisIoAdapter = new RedisSocketIoAdapter(app, configService);
   app.useWebSocketAdapter(redisIoAdapter);
@@ -197,8 +202,18 @@ async function bootstrap() {
   const useS3 = configService.get<string>('AWS_S3_BUCKET_NAME') ? true : false;
   if (!useS3) {
     const uploadDest = configService.get<string>('UPLOAD_DEST') || './uploads';
-    app.useStaticAssets(join(process.cwd(), uploadDest), {
-      prefix: '/uploads',
+    const root = resolve(uploadDest);
+    const secret = configService.get<string>('LOCAL_UPLOAD_SIGNING_SECRET') || configService.get<string>('JWT_SECRET') || '';
+    app.use('/uploads', (req: Request, res: Response) => {
+      const key = req.path.replace(/^\//, '');
+      if (!isLocalUploadKey(key) || (key.startsWith('kyc/') &&
+          !verifyLocalUpload(key, req.query.expires, req.query.signature, secret))) {
+        res.sendStatus(404); return;
+      }
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.setHeader('Content-Security-Policy', "default-src 'none'; sandbox");
+      res.setHeader('Cache-Control', key.startsWith('kyc/') ? 'private, no-store' : 'public, max-age=3600');
+      res.sendFile(resolve(root, key), error => { if (error && !res.headersSent) res.sendStatus(404); });
     });
   }
 

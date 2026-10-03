@@ -8,7 +8,9 @@ import {
   OnGatewayDisconnect,
   WsException,
 } from '@nestjs/websockets';
-import { Logger, UseFilters, UseGuards, UsePipes } from '@nestjs/common';
+import { Logger, UseFilters, UseGuards, UsePipes, UseInterceptors } from '@nestjs/common';
+import { WsSessionService } from '../common/services/ws-session.service';
+import { WsWorkInterceptor } from '../common/ws-work.interceptor';
 import { Namespace, Socket } from 'socket.io';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
@@ -22,7 +24,7 @@ import {
   TripSocketDto,
 } from './dto/tracking-socket.dto';
 import {
-  authenticateSocket,
+  assertSocketRoomCapacity,
   createWsValidationPipe,
   emitSocketError,
   WsAuthenticatedGuard,
@@ -33,6 +35,7 @@ import {
   namespace: '/tracking',
 })
 @UseGuards(new WsAuthenticatedGuard())
+@UseInterceptors(WsWorkInterceptor)
 @UsePipes(createWsValidationPipe())
 @UseFilters(new WsErrorFilter())
 export class TrackingGateway
@@ -47,6 +50,7 @@ export class TrackingGateway
     private readonly bookingsService: BookingsService,
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
+    private readonly sessions: WsSessionService,
   ) {}
 
   private parseCoordinates(coordinates?: [number, number]): [number, number] {
@@ -135,7 +139,7 @@ export class TrackingGateway
   async handleConnection(client: Socket) {
     try {
       if (
-        !(await authenticateSocket(client, this.jwtService, this.configService))
+        !(await this.sessions.connect(client, this.jwtService, this.configService))
       ) {
         return;
       }
@@ -173,6 +177,7 @@ export class TrackingGateway
         data.tripId,
         client.data.userId,
       );
+      assertSocketRoomCapacity(client, `trip:${data.tripId}`);
       await client.join(`trip:${data.tripId}`);
       client.data.tripId = data.tripId;
       await this.evaluateAndEmitAutomaticProgress(client, data.tripId);

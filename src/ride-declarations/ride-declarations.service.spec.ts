@@ -35,54 +35,166 @@ function harness() {
   return { booking, trip, locks, manager, bookings, service, dto };
 }
 
-describe('manual ride transaction', () => {
-  it('rejects an event replayed with a different account token before any database work', async () => {
-    const h = harness(); await expect(h.service.declare('booking', 'driver', h.dto())).rejects.toBeInstanceOf(ForbiddenException);
+describe('manual dual ride transaction', () => {
+  for (const stage of ['pickup', 'dropoff'] as const) {
+    for (const first of ['passenger', 'driver'] as const) {
+      const second = first === 'driver' ? 'passenger' : 'driver';
+      it(`${stage}: ${first} then ${second}, exactly one transition and no inline financial effect`, async () => {
+        const h = harness();
+        if (stage === 'dropoff') h.booking.pickedUp = true;
+        const firstEvent = h.dto(stage, 'confirm', first);
+        const result = await h.service.declare('booking', first, firstEvent, first);
+        expect(result[stage].status).toBe('awaiting_other');
+        expect(h.booking[stage === 'pickup' ? 'pickedUp' : 'droppedOff']).toBe(false);
+        expect(h.booking.status).toBe(BookingStatus.ACCEPTED);
+        expect(h.booking.rideDeclarations[stage]?.[second]).toBeUndefined();
+        const count = h.manager.update.mock.calls.length;
+        await h.service.declare('booking', first, firstEvent);
+        await h.service.declare('booking', first, h.dto(stage, 'confirm', first));
+        expect(h.manager.update).toHaveBeenCalledTimes(count);
+        const secondEvent = h.dto(stage, 'confirm', second);
+        expect((await h.service.declare('booking', second, secondEvent, second))[stage].status).toBe('confirmed');
+        expect(h.booking[stage === 'pickup' ? 'pickupDetectionMethod' : 'dropoffDetectionMethod']).toBe('manual_dual_confirmation');
+        expect(h.booking[stage === 'pickup' ? 'pickedUpConfirmedByPassenger' : 'droppedOffConfirmedByPassenger']).toBe(true);
+        expect(h.booking.status).toBe(stage === 'pickup' ? BookingStatus.ACCEPTED : BookingStatus.COMPLETED);
+        expect(h.booking.rideEffectsPending).toEqual([stage]);
+        expect(h.bookings.finishManualRideEffects).not.toHaveBeenCalled();
+        const appliedCount = h.manager.update.mock.calls.length;
+        await h.service.declare('booking', second, secondEvent);
+        await h.service.declare('booking', first, firstEvent);
+        expect(h.manager.update).toHaveBeenCalledTimes(appliedCount);
+        expect(h.locks.slice(0, 2)).toEqual(['trip', 'booking']);
+      });
+    }
+    it(`${stage}: rejects a stranger and a mismatched role`, async () => {
+      for (const actor of ['stranger', 'driver']) {
+        const h = harness(); h.booking.pickedUp = stage === 'dropoff';
+        await expect(h.service.declare('booking', actor, h.dto(stage, 'confirm', actor), 'passenger'))
+          .rejects.toBeInstanceOf(ForbiddenException);
+        expect(h.manager.update).not.toHaveBeenCalled();
+      }
+    });
+    it(`${stage}: a lone provisional vote still waits; a ready pair can be replayed once without rewriting evidence`, async () => {
+      const h = harness(); h.booking.pickedUp = stage === 'dropoff';
+      const event = h.dto(stage);
+      const passenger = { ...event, receivedAt: event.occurredAt };
+      h.booking.rideDeclarations = { [stage]: { passenger } };
+      expect((await h.service.declare('booking', 'passenger', event))[stage].status).toBe('awaiting_other');
+      expect(h.manager.update).not.toHaveBeenCalled();
+      const driverEvent = h.dto(stage, 'confirm', 'driver');
+      h.booking.rideDeclarations[stage]!.driver = { ...driverEvent, receivedAt: driverEvent.occurredAt };
+      expect((await h.service.declare('booking', 'passenger', event))[stage].status).toBe('confirmed');
+      expect(h.booking.rideDeclarations[stage]!.passenger).toEqual(passenger);
+      await h.service.declare('booking', 'driver', driverEvent);
+      expect(h.manager.update).toHaveBeenCalledTimes(1);
+    });
+    it(`${stage}: a fresh ID cannot redate an expired ready receipt`, async () => {
+      const h = harness(); h.booking.pickedUp = stage === 'dropoff';
+      const event = h.dto(stage), driver = h.dto(stage, 'confirm', 'driver');
+      h.booking.rideDeclarations = { [stage]: {
+        passenger: { ...event, occurredAt: new Date(Date.now() - 73 * 3600_000).toISOString(), receivedAt: event.occurredAt },
+        driver: { ...driver, receivedAt: driver.occurredAt },
+      } };
+      await expect(h.service.declare('booking', 'passenger', h.dto(stage)))
+        .rejects.toMatchObject({ response: expect.objectContaining({ code: 'RIDE_EVENT_TIME' }) });
+      expect(h.manager.update).not.toHaveBeenCalled();
+    });
+    it(`${stage}: automatic confirmation wins over late taps from either party`, async () => {
+      const h = harness(); h.booking.pickedUp = true;
+      h.booking.pickupDetectionMethod = 'automatic_shared_movement';
+      if (stage === 'dropoff') {
+        h.booking.droppedOff = true; h.booking.status = BookingStatus.COMPLETED;
+        h.booking.dropoffDetectionMethod = 'automatic_proximity';
+      }
+      for (const actor of ['passenger', 'driver']) {
+        expect((await h.service.declare('booking', actor, h.dto(stage, 'confirm', actor)))[stage].status).toBe('confirmed');
+      }
+      expect(h.manager.update).not.toHaveBeenCalled();
+      expect(h.booking.pickupDetectionMethod).toBe('automatic_shared_movement');
+      if (stage === 'dropoff') expect(h.booking.dropoffDetectionMethod).toBe('automatic_proximity');
+    });
+  }
+  it('rejects a changed account token before any database work', async () => {
+    const h = harness();
+    await expect(h.service.declare('booking', 'driver', h.dto())).rejects.toBeInstanceOf(ForbiddenException);
     expect(h.manager.findOne).not.toHaveBeenCalled();
   });
-  it('authorizes before recording; another account cannot confirm for a passenger', async () => {
-    const h = harness(); await expect(h.service.declare('booking', 'stranger', h.dto())).rejects.toBeInstanceOf(ForbiddenException);
-    expect(h.manager.update).not.toHaveBeenCalled();
+  it('validates identity before either actor can record pickup', async () => {
+    for (const actor of ['passenger', 'driver']) {
+      const h = harness(); h.bookings.validateManualRidePassenger.mockRejectedValueOnce(new ForbiddenException());
+      await expect(h.service.declare('booking', actor, h.dto('pickup', 'confirm', actor))).rejects.toBeInstanceOf(ForbiddenException);
+      expect(h.manager.update).not.toHaveBeenCalled();
+    }
   });
-  it('keeps a single declaration provisional without payment or pickup flags', async () => {
-    const h = harness(); const result = await h.service.declare('booking', 'passenger', h.dto());
-    expect(result.pickup.status).toBe('awaiting_other'); expect(h.booking.pickedUp).toBe(false);
-    expect(h.bookings.finishManualRideEffects).not.toHaveBeenCalled(); expect(h.locks).toEqual(['trip', 'booking']);
-  });
-  it('validates identity requirements before pickup', async () => {
-    const h = harness(); h.bookings.validateManualRidePassenger.mockRejectedValueOnce(new ForbiddenException());
-    await expect(h.service.declare('booking', 'passenger', h.dto())).rejects.toBeInstanceOf(ForbiddenException);
-    expect(h.manager.update).not.toHaveBeenCalled();
-  });
-  it('sets final flags only after two distinct parties, with a durable follow-up', async () => {
-    const h = harness(); await h.service.declare('booking', 'driver', h.dto('pickup', 'confirm', 'driver'));
-    const second = h.dto(); const result = await h.service.declare('booking', 'passenger', second);
-    expect(result.pickup.status).toBe('confirmed'); expect(h.booking.pickedUp).toBe(true);
-    expect(h.booking.rideEffectsPending).toEqual(['pickup']);
-    expect(h.bookings.finishManualRideEffects).not.toHaveBeenCalled();
-    const count = h.manager.update.mock.calls.length;
-    await h.service.declare('booking', 'passenger', second); expect(h.manager.update).toHaveBeenCalledTimes(count);
-  });
-  it('rejects arrival before pickup; after pickup the first arrival vote does not complete or charge', async () => {
-    const h = harness(); await expect(h.service.declare('booking', 'passenger', h.dto('dropoff'))).rejects.toBeInstanceOf(ConflictException);
-    await h.service.declare('booking', 'driver', h.dto('pickup', 'confirm', 'driver')); await h.service.declare('booking', 'passenger', h.dto());
-    await h.service.declare('booking', 'passenger', h.dto('dropoff'));
-    expect(h.booking.status).toBe(BookingStatus.ACCEPTED); expect(h.booking.droppedOff).toBe(false);
+  it('rejects arrival before final pickup, then completes only after both arrival votes', async () => {
+    const h = harness();
+    await h.service.declare('booking', 'passenger', h.dto());
+    await expect(h.service.declare('booking', 'passenger', h.dto('dropoff'))).rejects.toBeInstanceOf(ConflictException);
+    await h.service.declare('booking', 'driver', h.dto('pickup', 'confirm', 'driver'));
+    expect((await h.service.declare('booking', 'passenger', h.dto('dropoff'))).dropoff.status).toBe('awaiting_other');
+    expect(h.booking.status).toBe(BookingStatus.ACCEPTED);
     await h.service.declare('booking', 'driver', h.dto('dropoff', 'confirm', 'driver'));
-    expect(h.booking.status).toBe(BookingStatus.COMPLETED); expect(h.booking.rideEffectsPending).toEqual(['pickup', 'dropoff']);
+    expect(h.booking.status).toBe(BookingStatus.COMPLETED);
+    expect(h.booking.rideEffectsPending).toEqual(['pickup', 'dropoff']);
+    expect(h.bookings.finishManualRideEffects).not.toHaveBeenCalled();
   });
-  it('does not turn a rejection into an automatic payment or completion', async () => {
+  it('a rejection never completes the booking or triggers payment', async () => {
     const h = harness(); h.booking.pickedUp = true;
     await h.service.declare('booking', 'driver', h.dto('dropoff', 'confirm', 'driver'));
     const result = await h.service.declare('booking', 'passenger', h.dto('dropoff', 'reject'));
     expect(result.dropoff.status).toBe('disputed'); expect(h.booking.droppedOff).toBe(false);
     expect(h.bookings.finishManualRideEffects).not.toHaveBeenCalled();
   });
-  it('rejects actions after cancellation and actions timestamped before the ride', async () => {
+  it('rejects cancelled trips and timestamps before the ride', async () => {
     const h = harness(); h.trip.status = TripStatus.CANCELLED;
     await expect(h.service.declare('booking', 'passenger', h.dto())).rejects.toBeInstanceOf(ConflictException);
     h.trip.status = TripStatus.ACTIVE;
-    await expect(h.service.declare('booking', 'passenger', { ...h.dto(), occurredAt: new Date(Date.now() - 3600_000).toISOString() })).rejects.toBeInstanceOf(ConflictException);
+    await expect(h.service.declare('booking', 'passenger', { ...h.dto(), occurredAt: new Date(Date.now() - 3600_000).toISOString() }))
+      .rejects.toBeInstanceOf(ConflictException);
+  });
+});
+
+describe('committed manual ride side effects', () => {
+  it('a lone declaration only notifies the other actor, never settles or announces final pickup', async () => {
+    for (const stage of ['pickup', 'dropoff'] as const) {
+      const booking = { id: 'booking', pickedUp: stage === 'dropoff', droppedOff: false };
+      const context = { bookingRepository: { findOne: jest.fn().mockResolvedValue(booking) },
+        notifyManualRideDeclaration: jest.fn(), settlePaymentAfterArrival: jest.fn(),
+        notifySelectedEmergencyContacts: jest.fn() };
+      await BookingsService.prototype.finishManualRideEffects.call(context, 'booking', stage);
+      expect(context.notifyManualRideDeclaration).toHaveBeenCalledWith(booking, stage);
+      expect(context.settlePaymentAfterArrival).not.toHaveBeenCalled();
+      expect(context.notifySelectedEmergencyContacts).not.toHaveBeenCalled();
+    }
+  });
+  it('the retired driver dropoff service cannot bypass the dual-confirmation rule', async () => {
+    await expect(BookingsService.prototype.confirmDropoff.call({}, 'booking', 'driver'))
+      .rejects.toMatchObject({ response: expect.objectContaining({ code: 'RIDE_DECLARATION_REQUIRED' }) });
+  });
+  it('manual dual dropoff retains the existing settlement and notification worker', async () => {
+    const booking = { id: 'booking', tripId: 'trip', droppedOff: true, dropoffDetectionMethod: 'manual_dual_confirmation' };
+    const context = { bookingRepository: { findOne: jest.fn().mockResolvedValue(booking) }, settlePaymentAfterArrival: jest.fn(),
+      notifySelectedEmergencyContacts: jest.fn(), notifyPassengerAboutAutomaticDropoffConfirmation: jest.fn(),
+      notifyDriverAboutAutomaticDropoffConfirmation: jest.fn(), touchTripInteraction: jest.fn(), invalidateBookingCaches: jest.fn() };
+    await BookingsService.prototype.finishManualRideEffects.call(context, 'booking', 'dropoff');
+    expect(context.settlePaymentAfterArrival).toHaveBeenCalledWith(booking);
+    expect(context.notifyDriverAboutAutomaticDropoffConfirmation).toHaveBeenCalledWith(booking);
+    expect(context.invalidateBookingCaches).toHaveBeenCalledTimes(1);
+  });
+  it('the retired direct driver service cannot bypass the dual-confirmation rule', async () => {
+    await expect(BookingsService.prototype.confirmPickup.call({}, 'booking', 'driver'))
+      .rejects.toMatchObject({ response: expect.objectContaining({ code: 'RIDE_DECLARATION_REQUIRED' }) });
+  });
+  it('keeps pickup notifications and cache refresh but never settles arrival payment', async () => {
+    const context = { bookingRepository: { findOne: jest.fn().mockResolvedValue({ id: 'booking', tripId: 'trip', pickedUp: true, pickupDetectionMethod: 'manual_passenger_confirmation' }) },
+      notifySelectedEmergencyContacts: jest.fn(), notifyDriverEmergencyContactsOnPickup: jest.fn(),
+      notifyPassengerAboutAutomaticPickupConfirmation: jest.fn(), notifyDriverAboutAutomaticPickupConfirmation: jest.fn(),
+      touchTripInteraction: jest.fn(), invalidateBookingCaches: jest.fn(), settlePaymentAfterArrival: jest.fn() };
+    await BookingsService.prototype.finishManualRideEffects.call(context, 'booking', 'pickup');
+    expect(context.notifySelectedEmergencyContacts).toHaveBeenCalledWith(expect.anything(), 'pickup');
+    expect(context.notifyDriverAboutAutomaticPickupConfirmation).toHaveBeenCalledTimes(1);
+    expect(context.invalidateBookingCaches).toHaveBeenCalledTimes(1);
+    expect(context.settlePaymentAfterArrival).not.toHaveBeenCalled();
   });
 });
 

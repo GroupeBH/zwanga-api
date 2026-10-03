@@ -22,7 +22,10 @@ import {
 import { NotificationService } from '../notifications/notifications.service';
 import { FileUploadService } from '../common/services/file-upload.service';
 import { loadMessagePage } from './message-page';
+import { messageResponse } from './message-response';
+import { loadConversationSummaries, ConversationSummary } from './conversation-summaries';
 import type { MessagePageDto } from './dto/message-page.dto';
+import { LegacyPageQuery, legacyPage } from '../common/legacy-page';
 
 @Injectable()
 export class ChatService {
@@ -94,8 +97,8 @@ export class ChatService {
     query: ListConversationsQueryDto,
     options?: { type?: ConversationType },
   ) {
-    const page = query.page ?? 1;
-    const limit = query.limit ?? 20;
+    const page = Math.max(1, Math.trunc(query.page ?? 1));
+    const limit = Math.min(50, Math.max(1, Math.trunc(query.limit ?? 20)));
     const skip = (page - 1) * limit;
 
     const qb = this.conversationRepository
@@ -129,10 +132,11 @@ export class ChatService {
     }
 
     const [conversations, total] = await qb.getManyAndCount();
+    const summaries = await loadConversationSummaries(this.messageRepository, conversations.map(item => item.id), userId);
 
     const data = await Promise.all(
       conversations.map((conversation) =>
-        this.enrichConversation(conversation, userId),
+        this.enrichConversation(conversation, userId, summaries.get(conversation.id)),
       ),
     );
 
@@ -175,6 +179,7 @@ export class ChatService {
     conversationId: string,
     userId: string,
     expectedType?: ConversationType,
+    options: LegacyPageQuery = {},
   ) {
     const conversation = await this.conversationRepository.findOne({
       where: { id: conversationId },
@@ -191,17 +196,18 @@ export class ChatService {
     const messages = await this.messageRepository.find({
       where: { conversationId },
       relations: ['sender'],
-      order: { createdAt: 'ASC' },
+      order: { createdAt: 'DESC', id: 'DESC' },
+      ...legacyPage(options),
     });
 
-    return messages;
+    return messages.reverse().map(messageResponse);
   }
 
   async sendConversationMessage(
     conversationId: string,
     senderId: string,
     content: string,
-  ): Promise<Message | null> {
+  ) {
     const conversation = await this.conversationRepository.findOne({
       where: { id: conversationId },
       relations: ['participants'],
@@ -240,7 +246,7 @@ export class ChatService {
       await this.notifyConversationParticipants(conversation, populatedMessage);
     }
 
-    return populatedMessage;
+    return populatedMessage ? messageResponse(populatedMessage) : null;
   }
 
   async addParticipants(
@@ -376,17 +382,17 @@ export class ChatService {
     bookingId: string,
     senderId: string,
     content: string,
-  ): Promise<Message | null> {
+  ) {
     await this.ensureUserCanAccessBookingChat(bookingId, senderId);
     const conversation = await this.ensureConversationForBooking(bookingId);
 
     return this.sendConversationMessage(conversation.id, senderId, content);
   }
 
-  async getMessages(bookingId: string, userId: string): Promise<Message[]> {
+  async getMessages(bookingId: string, userId: string, options: LegacyPageQuery = {}) {
     await this.ensureUserCanAccessBookingChat(bookingId, userId);
     const conversation = await this.ensureConversationForBooking(bookingId);
-    return this.getConversationMessages(conversation.id, userId);
+    return this.getConversationMessages(conversation.id, userId, undefined, options);
   }
 
   async markAsRead(messageId: string, userId: string): Promise<void> {
@@ -405,7 +411,7 @@ export class ChatService {
     messageId: string,
     userId: string,
     newContent: string,
-  ): Promise<Message> {
+  ) {
     const message = await this.messageRepository.findOne({
       where: { id: messageId },
       relations: ['conversation'],
@@ -428,7 +434,7 @@ export class ChatService {
     message.content = newContent;
     const updated = await this.messageRepository.save(message);
 
-    return updated;
+    return messageResponse(updated);
   }
 
   async deleteMessage(
@@ -456,8 +462,8 @@ export class ChatService {
   /*                                Private bits                                */
   /* -------------------------------------------------------------------------- */
 
-  private async enrichConversation(conversation: Conversation, userId: string) {
-    const lastMessage = await this.messageRepository.findOne({
+  private async enrichConversation(conversation: Conversation, userId: string, summary?: ConversationSummary) {
+    const lastMessage = summary ? summary.lastMessage : await this.messageRepository.findOne({
       where: { conversationId: conversation.id },
       relations: ['sender'],
       order: { createdAt: 'DESC' },
@@ -478,7 +484,7 @@ export class ChatService {
       unreadWhere.createdAt = MoreThan(lastReadAt);
     }
 
-    const unreadCount = await this.messageRepository.count({
+    const unreadCount = summary ? summary.unreadCount : await this.messageRepository.count({
       where: unreadWhere,
     });
 
@@ -506,7 +512,7 @@ export class ChatService {
           };
         }),
       ),
-      lastMessage,
+      lastMessage: lastMessage ? messageResponse(lastMessage) : null,
       unreadCount,
     };
   }
@@ -573,11 +579,13 @@ export class ChatService {
   async getSupportConversationMessages(
     conversationId: string,
     userId: string,
+    options: LegacyPageQuery = {},
   ) {
     return this.getConversationMessages(
       conversationId,
       userId,
       ConversationType.SUPPORT,
+      options,
     );
   }
 

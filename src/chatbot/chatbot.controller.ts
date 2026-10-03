@@ -42,7 +42,7 @@ export class ChatbotController {
     @Request() req?: any,
   ): Promise<ChatbotResponseDto> {
     // Utiliser l'ID utilisateur si authentifié, sinon générer un ID temporaire
-    const userId = req?.user?.userId || `anonymous-${Date.now()}`;
+    const userId = 'anonymous';
     return this.chatbotService.chat(userId, dto);
   }
 
@@ -79,8 +79,8 @@ export class ChatbotController {
     status: 204,
     description: 'Historique supprimé avec succès',
   })
-  async clearConversation(@Param('conversationId') conversationId: string): Promise<void> {
-    this.chatbotService.clearConversationHistory(conversationId);
+  async clearConversation(@Param('conversationId') conversationId: string, @Request() req): Promise<void> {
+    await this.chatbotService.clearConversationHistory(conversationId, req.user.userId);
   }
 }
 

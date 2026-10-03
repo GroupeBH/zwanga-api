@@ -30,7 +30,7 @@ import {
 export class BookingsController {
   constructor(private readonly bookingsService: BookingsService, private readonly rideDeclarations: RideDeclarationsService) { }
 
-  // Older clients use these URLs. They must obey the same two-party rule.
+  // Older clients use these URLs and obey the same stage-specific authorization.
   private async declareLegacy(id: string, userId: string, stage: 'pickup' | 'dropoff', actor: 'driver' | 'passenger') {
     await this.rideDeclarations.declare(id, userId, {
       eventId: randomUUID(), actorUserId: userId, stage, decision: 'confirm', occurredAt: new Date().toISOString(),
@@ -295,7 +295,7 @@ export class BookingsController {
   @Auth()
   // @Roles(UserRole.DRIVER)
   @SensitiveThrottle(20, 60000)
-  @ApiOperation({ summary: 'Confirm passenger pickup (driver only)' })
+  @ApiOperation({ summary: 'Record driver pickup confirmation (both parties required)' })
   async confirmPickup(@Request() req, @Param('id') id: string, @Body() dto: ConfirmPickupDto) {
     return this.declareLegacy(id, req.user.userId, 'pickup', 'driver');
   }
@@ -312,7 +312,7 @@ export class BookingsController {
   @Auth()
   // @Roles(UserRole.DRIVER)
   @SensitiveThrottle(20, 60000)
-  @ApiOperation({ summary: 'Confirm passenger-requested dropoff (driver only)' })
+  @ApiOperation({ summary: 'Record driver dropoff confirmation (both parties required)' })
   async confirmDropoff(@Request() req, @Param('id') id: string, @Body() dto: ConfirmDropoffDto) {
     return this.declareLegacy(id, req.user.userId, 'dropoff', 'driver');
   }
@@ -320,7 +320,7 @@ export class BookingsController {
   @Put(':id/confirm-dropoff-passenger')
   @Auth()
   @SensitiveThrottle(20, 60000)
-  @ApiOperation({ summary: 'Request dropoff by passenger' })
+  @ApiOperation({ summary: 'Confirm dropoff by the reservation holder' })
   async confirmDropoffByPassenger(@Request() req, @Param('id') id: string, @Body() dto: ConfirmDropoffDto) {
     return this.declareLegacy(id, req.user.userId, 'dropoff', 'passenger');
   }

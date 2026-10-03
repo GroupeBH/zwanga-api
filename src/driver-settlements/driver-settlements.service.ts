@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   Logger,
   NotFoundException,
@@ -9,7 +10,7 @@ import { ConfigService } from '@nestjs/config';
 import { Cron } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'crypto';
-import { DataSource, EntityManager, In, Repository } from 'typeorm';
+import { DataSource, EntityManager, In, IsNull, Not, Repository } from 'typeorm';
 import {
   Booking,
   BookingPaymentStatus,
@@ -40,6 +41,8 @@ import { getPayoutFailureMessage, normalizePayoutPhone, PAYOUT_MESSAGES } from '
 import { settleCashSubsidy } from './cash-subsidy-settlement';
 import { sumConfirmedDriverCash } from './driver-cash-summary';
 import { loadHistoryPage, type HistoryPageDto } from '../common/pagination/history-page';
+import { DriverPayoutEvent } from './entities/driver-payout-event.entity';
+import { payoutRecoveryState, payoutReviewDelay } from './driver-payout-recovery.policy';
 
 export interface DriverSettlementSummary {
   availableBalance: number;
@@ -171,6 +174,7 @@ export class DriverSettlementsService implements OnModuleInit {
 
   async findDriverPayoutsPage(driverId: string, options: HistoryPageDto) {
     const page = await loadHistoryPage(this.payoutRepository.createQueryBuilder('entry')
+      .leftJoinAndSelect('entry.paymentTransaction', 'payment')
       .leftJoinAndSelect('entry.paymentTransaction', 'paymentTransaction')
       .where('entry.driverId = :driverId', { driverId }), options);
     return { ...page, data: page.data.map(payout => this.formatPayoutForClient(payout)) };
@@ -810,7 +814,7 @@ export class DriverSettlementsService implements OnModuleInit {
     return payout;
   }
 
-  private async applyPaymentToPayout(
+  async applyPaymentToPayout(
     payment: PaymentTransaction,
     driverId?: string,
   ): Promise<DriverPayoutResponse> {
@@ -824,6 +828,10 @@ export class DriverSettlementsService implements OnModuleInit {
     }
 
     const payout = await this.dataSource.transaction(async (manager) => {
+      // Same lock order as reservation and support resolution. No HTTP under locks.
+      await manager.findOne(User, {
+        where: { id: payment.userId! }, select: { id: true }, lock: { mode: 'pessimistic_write' },
+      });
       const foundPayout = await manager.findOne(DriverPayout, {
         where: [
           ...(payment.relatedEntityId
@@ -843,6 +851,39 @@ export class DriverSettlementsService implements OnModuleInit {
       });
       if (!foundPayout) {
         throw new NotFoundException('Paiement chauffeur introuvable');
+      }
+
+      // A callback/check may have completed while this caller waited for the lock.
+      const currentPayment = await manager.findOne(PaymentTransaction, {
+        where: { id: payment.id }, lock: { mode: 'pessimistic_write' },
+      });
+      if (!currentPayment || currentPayment.userId !== foundPayout.driverId ||
+          currentPayment.relatedEntityId !== foundPayout.id ||
+          currentPayment.relatedEntityType !== this.PAYOUT_RELATED_ENTITY_TYPE ||
+          currentPayment.purpose !== PaymentPurpose.DRIVER_PAYOUT ||
+          Number(currentPayment.amount) !== Number(foundPayout.amount) ||
+          currentPayment.currency !== foundPayout.currency ||
+          (foundPayout.paymentTransactionId && foundPayout.paymentTransactionId !== currentPayment.id)) {
+        throw new BadRequestException('Transaction de retrait incohérente');
+      }
+      payment = currentPayment;
+
+      if (foundPayout.fundsReleasedAt && payment.status !== PaymentStatus.SUCCEEDED) {
+        // Local resolution is final even if a delayed check still says pending.
+        return foundPayout;
+      }
+      if (payment.status === PaymentStatus.SUCCEEDED &&
+          (foundPayout.fundsReleasedAt || [DriverPayoutStatus.FAILED, DriverPayoutStatus.CANCELLED].includes(foundPayout.status)) &&
+          foundPayout.status !== DriverPayoutStatus.SUCCEEDED) {
+        foundPayout.recoveryBlocked = true;
+        foundPayout.reviewRequestedAt = new Date();
+        foundPayout.reviewResolvedAt = null;
+        await manager.save(DriverPayoutEvent, manager.create(DriverPayoutEvent, {
+          payoutId: foundPayout.id, actorId: null, action: 'late_success',
+          reason: 'Succès confirmé après libération du montant : rapprochement requis',
+          evidenceReference: payment.reference, details: { paymentId: payment.id },
+        }));
+        this.logger.error(`DRIVER_PAYOUT_LATE_SUCCESS_REVIEW payoutId=${foundPayout.id}`);
       }
 
       if (
@@ -868,6 +909,13 @@ export class DriverSettlementsService implements OnModuleInit {
               )
             ? (foundPayout.processedAt ?? new Date())
             : null;
+      if ([PaymentStatus.FAILED, PaymentStatus.CANCELLED].includes(payment.status)) {
+        foundPayout.fundsReleasedAt ??= new Date();
+      }
+      if ([PaymentStatus.SUCCEEDED, PaymentStatus.FAILED, PaymentStatus.CANCELLED].includes(payment.status) &&
+          !foundPayout.recoveryBlocked && foundPayout.reviewRequestedAt) {
+        foundPayout.reviewResolvedAt ??= new Date();
+      }
 
       return manager.save(foundPayout);
     });
@@ -891,7 +939,7 @@ export class DriverSettlementsService implements OnModuleInit {
           ]),
         },
         relations: ['paymentTransaction'],
-        order: { requestedAt: 'ASC' },
+        order: { lastReconciledAt: { direction: 'ASC', nulls: 'FIRST' }, createdAt: 'ASC' },
         take: 50,
       });
 
@@ -933,6 +981,9 @@ export class DriverSettlementsService implements OnModuleInit {
               error instanceof Error ? error.message : String(error)
             }`,
           );
+        } finally {
+          // Rotate even errors/order-less rows; old incidents cannot monopolize the batch.
+          await this.payoutRepository.update(payout.id, { lastReconciledAt: new Date() });
         }
       }
     } finally {
@@ -973,6 +1024,16 @@ export class DriverSettlementsService implements OnModuleInit {
       if (existing) {
         this.assertIdempotentPayoutMatches(existing, amount, phone);
         return existing;
+      }
+
+      if (await manager.exists(DriverPayout, { where: [
+        { driverId, recoveryBlocked: true },
+        // Close the gap between provider success persistence and business settlement.
+        { driverId, fundsReleasedAt: Not(IsNull()), status: Not(DriverPayoutStatus.SUCCEEDED),
+          paymentTransaction: { status: PaymentStatus.SUCCEEDED } },
+      ] })) {
+        throw new ConflictException({ code: 'PAYOUT_RECOVERY_BLOCKED',
+          message: 'Un versement nécessite un rapprochement par l’assistance avant tout nouveau retrait.' });
       }
 
       const kycApproved = await manager.exists(KycDocument, {
@@ -1049,19 +1110,25 @@ export class DriverSettlementsService implements OnModuleInit {
         return;
       }
       payout.status = DriverPayoutStatus.FAILED;
+      payout.fundsReleasedAt = new Date();
+      if (payout.reviewRequestedAt) payout.reviewResolvedAt = new Date();
       payout.failureReason = reason.slice(0, 500);
       payout.processedAt = new Date();
       await manager.save(payout);
     });
   }
 
-  private formatPayoutForClient(
+  formatPayoutForClient(
     payout: DriverPayout,
     payment: PaymentTransaction | null = payout.paymentTransaction ?? null,
   ): DriverPayoutResponse {
     const awaiting = [DriverPayoutStatus.PENDING, DriverPayoutStatus.INITIATED].includes(payout.status);
-    const requiresReview = awaiting && Boolean(payment) && !payment?.orderNumber;
-    const paymentMessage = payout.status === DriverPayoutStatus.SUCCEEDED
+    const recovery = payoutRecoveryState(payout, payment,
+      payoutReviewDelay(this.configService.get('DRIVER_PAYOUT_REVIEW_AFTER_MINUTES')));
+    const requiresReview = recovery.requiresReview;
+    const paymentMessage = payout.recoveryBlocked
+      ? 'Un versement a été confirmé après libération du montant. L’assistance doit vérifier votre solde avant un nouveau retrait.'
+      : payout.status === DriverPayoutStatus.SUCCEEDED
       ? 'Zwanga a versé vos gains sur votre compte Mobile Money.'
       : payout.status === DriverPayoutStatus.CANCELLED
         ? 'Le versement a été annulé. Le montant est à nouveau disponible dans vos revenus.'
@@ -1075,7 +1142,7 @@ export class DriverSettlementsService implements OnModuleInit {
       paymentMessage,
       failureReason: payout.failureReason ? getPayoutFailureMessage(payout.failureReason) : null,
       reference: payment?.reference ?? null,
-      requiresReview,
+      ...recovery,
     };
   }
 
@@ -1099,6 +1166,7 @@ export class DriverSettlementsService implements OnModuleInit {
   }
 
   private async getAvailableBalance(driverId: string): Promise<number> {
+    if (await this.payoutRepository.exists({ where: { driverId, recoveryBlocked: true } })) return 0;
     const earnings = await this.sumEarnings(driverId, [
       DriverEarningStatus.AVAILABLE,
     ]);

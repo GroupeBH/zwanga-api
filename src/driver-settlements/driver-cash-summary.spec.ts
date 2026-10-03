@@ -47,6 +47,7 @@ describe('Informational driver cash receipts', () => {
     const earningsQuery = aggregate(String(earned));
     const cashQuery = aggregate('50000');
     const payouts = {
+      exists: jest.fn().mockResolvedValue(false),
       createQueryBuilder: () => {
         const query = aggregate('0');
         query.andWhere.mockImplementation((_sql, { statuses }) => {

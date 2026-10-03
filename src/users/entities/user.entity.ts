@@ -57,7 +57,7 @@ export class User {
   @Column({ unique: true, nullable: true })
   phone: string;
 
-  @Column({ nullable: true })
+  @Column({ nullable: true, select: false })
   password: string;
 
   @Column()
@@ -121,10 +121,10 @@ export class User {
   @Column({ type: 'timestamptz', nullable: true })
   driverActivatedAt: Date | null;
 
-  @Column({ type: 'text', nullable: true })
+  @Column({ type: 'text', nullable: true, select: false })
   accessToken: string | null;
 
-  @Column({ type: 'text', nullable: true })
+  @Column({ type: 'text', nullable: true, select: false })
   refreshToken: string | null;
 
   @Column({ type: 'timestamp', nullable: true })

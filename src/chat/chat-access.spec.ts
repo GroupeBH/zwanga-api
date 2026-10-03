@@ -92,6 +92,13 @@ function fixture() {
 }
 
 describe('Booking conversation access', () => {
+  it('bounds legacy reads before hydration and keeps chronological array responses', async () => {
+    const { service, messages } = fixture();
+    messages.find.mockResolvedValue([{ id: 'newer' }, { id: 'older' }]);
+    const result = await service.getConversationMessages(conversationId, passenger, undefined, { page: 2, limit: 100000 });
+    expect(messages.find).toHaveBeenCalledWith(expect.objectContaining({ take: 100, skip: 100, order: { createdAt: 'DESC', id: 'DESC' } }));
+    expect(result.map(message => message.id)).toEqual(['older', 'newer']);
+  });
   it.each([passenger, driver])(
     'permits the actual booking party %s',
     async (userId) => {
