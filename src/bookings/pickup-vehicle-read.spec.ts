@@ -4,6 +4,18 @@ import { attachBookingRoutePreviews } from '../common/route-preview';
 jest.mock('../common/route-preview', () => ({ attachBookingRoutePreviews: jest.fn().mockResolvedValue(undefined) }));
 
 describe('Passenger pickup vehicle reads', () => {
+  it('reads only the authenticated passenger and requested trip, retaining interruptions and vehicle', async () => {
+    const records = [{ id: 'booking', passengerId: 'owner', tripId: 'trip' }];
+    const find = jest.fn().mockResolvedValue(records);
+    const interruptions = jest.fn().mockResolvedValue(undefined);
+    const service = Object.assign(Object.create(BookingsService.prototype), {
+      bookingRepository: { find }, cacheService: {}, attachActiveInterruptionRequestsToBookings: interruptions,
+    }) as BookingsService;
+    expect(await service.findMineForTrip('owner', 'trip')).toBe(records);
+    expect(find).toHaveBeenCalledWith(expect.objectContaining({ where: { passengerId: 'owner', tripId: 'trip' },
+      relations: ['trip', 'trip.driver', 'trip.vehicle'] }));
+    expect(interruptions).toHaveBeenCalledWith(records);
+  });
   it.each([true, false])('includes the assigned trip vehicle in passenger bookings (activity=%s)', async (activityOnly) => {
     const vehicle = { id: 'vehicle', brand: 'Toyota', model: 'Yaris', color: 'rouge', licensePlate: '1234AB01' };
     const bookings = [{ id: 'booking', tripId: 'trip', passengerId: 'holder', numberOfSeats: 3,

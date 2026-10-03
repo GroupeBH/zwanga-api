@@ -26,6 +26,7 @@ import { messageResponse } from './message-response';
 import { loadConversationSummaries, ConversationSummary } from './conversation-summaries';
 import type { MessagePageDto } from './dto/message-page.dto';
 import { LegacyPageQuery, legacyPage } from '../common/legacy-page';
+import { resolveDirectConversation } from './direct-conversation';
 
 @Injectable()
 export class ChatService {
@@ -71,6 +72,9 @@ export class ChatService {
         booking,
       );
       await this.ensureParticipants(conversation.id, participantIds);
+    } else if (participantIds.length === 2 && !dto.title) {
+      await this.ensureUsersExist(participantIds);
+      conversation = await resolveDirectConversation(this.conversationRepository, creatorId, participantIds.find(id => id !== creatorId)!);
     } else {
       await this.ensureUsersExist(participantIds);
       conversation = this.conversationRepository.create({

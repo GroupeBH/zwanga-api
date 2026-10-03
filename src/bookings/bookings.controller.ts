@@ -1,4 +1,5 @@
 import {
+  ParseUUIDPipe,
   Controller,
   Get,
   Post,
@@ -128,6 +129,13 @@ export class BookingsController {
   @SensitiveThrottle(60, 60000)
   async history(@Request() req, @Query() query: HistoryPageQuery) {
     return this.bookingsService.findPassengerHistory(req.user.userId, query);
+  }
+
+  @Get('my-bookings/trip/:tripId')
+  @Auth()
+  @SensitiveThrottle(60, 60000)
+  async mineForTrip(@Request() req, @Param('tripId', new ParseUUIDPipe()) tripId: string) {
+    return this.bookingsService.findMineForTrip(req.user.userId, tripId);
   }
 
   @Get('trip/:tripId')

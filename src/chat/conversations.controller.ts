@@ -1,5 +1,6 @@
 import {
   Body,
+  BadRequestException,
   Controller,
   Delete,
   Get,
@@ -13,6 +14,7 @@ import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { ChatService } from './chat.service';
 import {
   AddParticipantsDto,
+  ResolveDirectConversationDto,
   CreateConversationDto,
   ListConversationsQueryDto,
   SendMessageDto,
@@ -26,6 +28,14 @@ import { LegacyPageQuery } from '../common/legacy-page';
 @Controller('conversations')
 export class ConversationsController {
   constructor(private readonly chatService: ChatService) {}
+
+  @Post('direct')
+  @Auth()
+  @SensitiveThrottle(20, 60000)
+  async direct(@Request() req, @Body() dto: ResolveDirectConversationDto) {
+    if (req.user.userId === dto.userId) throw new BadRequestException('Choisissez un autre utilisateur.');
+    return this.chatService.createConversation(req.user.userId, { participantIds: [dto.userId] });
+  }
 
   @Post()
   @Auth()

@@ -14,6 +14,7 @@ import { firstValueFrom } from 'rxjs';
 import {
   DataSource,
   EntityManager,
+  In,
   LessThanOrEqual,
   Repository,
 } from 'typeorm';
@@ -36,6 +37,8 @@ import { Subscription } from '../subscriptions/entities/subscription.entity';
 import { KycDocument, KycStatus } from '../users/entities/kyc-document.entity';
 import { User, UserStatus } from '../users/entities/user.entity';
 import { RequestReferralWithdrawalDto } from './dto/referral.dto';
+import { HistoryPageQuery, historyContext, loadHistoryIds, orderHistory } from '../common/history-page';
+import { reconcileReferralRewards } from './reward-reconciliation';
 import { ReferralAccount } from './entities/referral-account.entity';
 import {
   ReferralBalanceBucket,
@@ -85,6 +88,7 @@ interface ReferralRegistrationResult {
 
 @Injectable()
 export class ReferralsService implements OnModuleInit {
+  private readonly rewardReconciliations = new Map<string, Promise<void>>();
   private readonly logger = new Logger(ReferralsService.name);
   private readonly WITHDRAWAL_RELATED_ENTITY_TYPE = 'referral_withdrawal';
   private readonly ATTRIBUTION_BONUS_SOURCE_TYPE = 'referral_attribution';
@@ -453,15 +457,15 @@ export class ReferralsService implements OnModuleInit {
     };
   }
 
-  async getReferrals(userId: string) {
+  async getReferrals(userId: string, ids?: string[]) {
     await this.releaseMatureRewardsForUser(userId);
-    const [profiles, rawEarnings] = await Promise.all([
-      this.profileRepository.find({
-        where: { referredByUserId: userId },
+    const profiles = await this.profileRepository.find({
+        where: { referredByUserId: userId, ...(ids ? { id: In(ids) } : {}) },
         relations: ['user'],
         order: { referredAt: 'DESC' },
-      }),
-      this.rewardRepository
+      });
+    if (!profiles.length) return [];
+    const rawEarnings = await this.rewardRepository
         .createQueryBuilder('reward')
         .select('reward.referredUserId', 'referredUserId')
         .addSelect(
@@ -485,6 +489,7 @@ export class ReferralsService implements OnModuleInit {
           'reversedTokens',
         )
         .where('reward.referrerUserId = :userId', { userId })
+        .andWhere('reward.referredUserId IN (:...referredIds)', { referredIds: profiles.map(profile => profile.userId) })
         .setParameters({
           pending: ReferralRewardStatus.PENDING,
           available: ReferralRewardStatus.AVAILABLE,
@@ -498,8 +503,7 @@ export class ReferralsService implements OnModuleInit {
           pendingTokens: string;
           releasedTokens: string;
           reversedTokens: string;
-        }>(),
-    ]);
+        }>();
     const earningsByUserId = new Map(
       rawEarnings.map((earning) => [earning.referredUserId, earning]),
     );
@@ -531,10 +535,10 @@ export class ReferralsService implements OnModuleInit {
     });
   }
 
-  async getRewards(userId: string) {
+  async getRewards(userId: string, ids?: string[]) {
     await this.releaseMatureRewardsForUser(userId);
     const rewards = await this.rewardRepository.find({
-      where: { referrerUserId: userId },
+      where: { referrerUserId: userId, ...(ids ? { id: In(ids) } : {}) },
       relations: ['referredUser'],
       order: { createdAt: 'DESC' },
       take: 100,
@@ -572,9 +576,9 @@ export class ReferralsService implements OnModuleInit {
     });
   }
 
-  async getWithdrawals(userId: string) {
+  async getWithdrawals(userId: string, ids?: string[]) {
     const withdrawals = await this.withdrawalRepository.find({
-      where: { userId },
+      where: { userId, ...(ids ? { id: In(ids) } : {}) },
       relations: ['paymentTransaction'],
       order: { createdAt: 'DESC' },
       take: 100,
@@ -600,6 +604,31 @@ export class ReferralsService implements OnModuleInit {
       createdAt: withdrawal.createdAt,
       updatedAt: withdrawal.updatedAt,
     }));
+  }
+
+  async getReferralPage(userId: string, options: HistoryPageQuery) {
+    const page = await loadHistoryIds(this.profileRepository.createQueryBuilder('profile')
+      .where('profile.referredByUserId = :userId', { userId }), options,
+      historyContext(options, 'referrals'), 'profile.id', 'COALESCE(profile.referredAt, profile.createdAt)');
+    if (!page.ids.length) return { data: [], nextCursor: null };
+    const profiles = await this.profileRepository.find({ where: { id: In(page.ids), referredByUserId: userId }, select: { id: true, userId: true } });
+    const summaries = await this.getReferrals(userId, page.ids);
+    const byUser = new Map(summaries.map(row => [row.userId, row]));
+    return { data: orderHistory(page.ids, profiles).flatMap(row => byUser.has(row.userId) ? [byUser.get(row.userId)!] : []), nextCursor: page.nextCursor };
+  }
+
+  async getRewardPage(userId: string, options: HistoryPageQuery) {
+    const page = await loadHistoryIds(this.rewardRepository.createQueryBuilder('reward')
+      .where('reward.referrerUserId = :userId', { userId }), options,
+      historyContext(options, 'referral-rewards'), 'reward.id', 'reward.createdAt');
+    return { data: page.ids.length ? orderHistory(page.ids, await this.getRewards(userId, page.ids)) : [], nextCursor: page.nextCursor };
+  }
+
+  async getWithdrawalPage(userId: string, options: HistoryPageQuery) {
+    const page = await loadHistoryIds(this.withdrawalRepository.createQueryBuilder('withdrawal')
+      .where('withdrawal.userId = :userId', { userId }), options,
+      historyContext(options, 'referral-withdrawals'), 'withdrawal.id', 'withdrawal.createdAt');
+    return { data: page.ids.length ? orderHistory(page.ids, await this.getWithdrawals(userId, page.ids)) : [], nextCursor: page.nextCursor };
   }
 
   async awardSubscriptionReward(
@@ -997,22 +1026,12 @@ export class ReferralsService implements OnModuleInit {
   }
 
   private async releaseMatureRewardsForUser(userId: string): Promise<void> {
-    const rewards = await this.rewardRepository.find({
-      select: { id: true },
-      where: {
-        referrerUserId: userId,
-        status: ReferralRewardStatus.PENDING,
-        holdUntil: LessThanOrEqual(new Date()),
-      },
-      take: 500,
-    });
-    for (const reward of rewards) {
-      await this.releaseRewardById(reward.id);
-    }
+    return reconcileReferralRewards(this.dataSource, this.rewardReconciliations, userId,
+      (id, manager) => this.releaseRewardById(id, manager));
   }
 
-  private async releaseRewardById(rewardId: string): Promise<void> {
-    await this.dataSource.transaction(async (manager) => {
+  private async releaseRewardById(rewardId: string, batchManager?: EntityManager): Promise<void> {
+    const apply = async (manager: EntityManager) => {
       const reward = await manager.findOne(ReferralReward, {
         where: { id: rewardId },
         lock: { mode: 'pessimistic_write' },
@@ -1062,7 +1081,9 @@ export class ReferralsService implements OnModuleInit {
       reward.status = ReferralRewardStatus.AVAILABLE;
       reward.availableAt = new Date();
       await manager.save(reward);
-    });
+    };
+    if (batchManager) await apply(batchManager);
+    else await this.dataSource.transaction(apply);
   }
 
   private async reserveWithdrawal(input: {

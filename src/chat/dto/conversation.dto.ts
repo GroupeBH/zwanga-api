@@ -14,6 +14,11 @@ import {
 import { ApiProperty } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 
+export class ResolveDirectConversationDto {
+  @IsUUID('4')
+  userId: string;
+}
+
 export class CreateConversationDto {
   @ApiProperty({
     type: [String],

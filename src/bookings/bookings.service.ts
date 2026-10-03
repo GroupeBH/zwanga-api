@@ -1364,6 +1364,18 @@ export class BookingsService implements OnModuleInit {
     return { data: orderHistory(page.ids, records), nextCursor: page.nextCursor };
   }
 
+  async findMineForTrip(passengerId: string, tripId: string): Promise<Booking[]> {
+    // The passenger identity comes exclusively from the authenticated request.
+    const bookings = await this.bookingRepository.find({
+      where: { passengerId, tripId },
+      relations: ['trip', 'trip.driver', 'trip.vehicle'],
+      order: { createdAt: 'DESC', id: 'DESC' },
+    });
+    await this.attachActiveInterruptionRequestsToBookings(bookings);
+    await attachBookingRoutePreviews(this.cacheService, bookings);
+    return bookings;
+  }
+
   async findAllByPassenger(passengerId: string, activityOnly = false): Promise<Booking[]> {
     this.logger.debug(`Fetching bookings for passenger: ${passengerId}`);
 

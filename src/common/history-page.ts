@@ -12,7 +12,7 @@ export class HistoryPageQuery {
   search?: string;
 }
 
-type Kind = 'trips' | 'bookings';
+type Kind = 'trips' | 'bookings' | 'referrals' | 'referral-rewards' | 'referral-withdrawals';
 type Cursor = { at: string; id: string; asOf: string; kind: Kind; search: string };
 export const normalizeHistorySearch = (value = '') => value.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
 
