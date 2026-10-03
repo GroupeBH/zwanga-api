@@ -1,4 +1,5 @@
 import { validate } from 'class-validator';
+import { createHash } from 'crypto';
 import { AuthService } from '../auth/auth.service';
 import { RegisterDto } from '../auth/dto/auth.dto';
 import { UpdateProfileDto } from './dto/user.dto';
@@ -71,13 +72,18 @@ describe('User gender', () => {
     );
 
     try {
-      await service.register({
-        phone: '+243900000000',
-        pin: '1234',
-        firstName: 'Jane',
-        lastName: 'Doe',
-        role: UserRole.PASSENGER,
-        gender: UserGender.FEMALE,
+      await expect(
+        service.register({
+          phone: '+243900000000',
+          pin: '1234',
+          firstName: 'Jane',
+          lastName: 'Doe',
+          role: UserRole.PASSENGER,
+          gender: UserGender.FEMALE,
+        }),
+      ).resolves.toEqual({
+        accessToken: 'access-token',
+        refreshToken: 'refresh-token',
       });
     } finally {
       consoleSpy.mockRestore();
@@ -89,8 +95,8 @@ describe('User gender', () => {
     expect(userRepository.update).toHaveBeenCalledWith(
       'user-1',
       expect.objectContaining({
-        accessToken: 'access-token',
-        refreshToken: 'refresh-token',
+        accessToken: `sha256:${createHash('sha256').update('access-token').digest('hex')}`,
+        refreshToken: `sha256:${createHash('sha256').update('refresh-token').digest('hex')}`,
       }),
     );
   });
