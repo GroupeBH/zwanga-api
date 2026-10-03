@@ -69,4 +69,21 @@ describe('OTP SMS wording and encoding (no real SMS)', () => {
     await service.sendOtp('+243891234567', message);
     expect(post.mock.calls[0][1].message).toBe(message);
   });
+
+  it.each(['didit'])(
+    'does not require Keccel credentials when %s is selected',
+    async (provider) => {
+      const inactiveKeccel = new KeccelOtpService(
+        { post } as unknown as HttpService,
+        new ConfigService({ OTP_PROVIDER: provider }),
+      );
+
+      await expect(
+        inactiveKeccel.sendOtp('+243891234567'),
+      ).rejects.toMatchObject({
+        status: 503,
+      });
+      expect(post).not.toHaveBeenCalled();
+    },
+  );
 });

@@ -9,6 +9,7 @@ import {
 
 export enum PaymentProvider {
   FLEXPAY = 'flexpay',
+  PAWAPAY = 'pawapay',
 }
 
 export enum PaymentMethod {
@@ -37,6 +38,9 @@ export enum PaymentPurpose {
 @Entity('payment_transactions')
 @Index(['userId', 'status'])
 @Index(['purpose', 'relatedEntityType', 'relatedEntityId'])
+@Index('IDX_payment_transactions_provider_pending', ['provider', 'updatedAt'], {
+  where: "\"status\" IN ('pending', 'initiated')",
+})
 export class PaymentTransaction {
   @PrimaryGeneratedColumn('uuid')
   id: string;

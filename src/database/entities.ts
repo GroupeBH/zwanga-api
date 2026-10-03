@@ -1,4 +1,5 @@
 import { User } from '../users/entities/user.entity';
+import { PRO_SERVICE_ENTITIES } from '../pro-services/pro-service.entities';
 import { KycDocument } from '../users/entities/kyc-document.entity';
 import { Vehicle } from '../vehicles/entities/vehicle.entity';
 import { Trip } from '../trips/entities/trip.entity';
@@ -12,6 +13,7 @@ import { Booking } from '../bookings/entities/booking.entity';
 import { Message } from '../chat/entities/message.entity';
 import { Rating } from '../ratings/entities/rating.entity';
 import { PaymentTransaction } from '../payments/entities/payment-transaction.entity';
+import { PawaPayRefund } from '../payments/entities/pawapay-refund.entity';
 import { Subscription } from '../subscriptions/entities/subscription.entity';
 import { DocumentFundingRequest } from '../subscriptions/entities/document-funding-request.entity';
 import { Conversation } from '../chat/entities/conversation.entity';
@@ -32,6 +34,7 @@ import { WalletWithdrawal } from '../wallet/entities/wallet-withdrawal.entity';
 import { WalletLedgerEntry } from '../wallet/entities/wallet-ledger-entry.entity';
 import { DriverEarning } from '../driver-settlements/entities/driver-earning.entity';
 import { DriverPayout } from '../driver-settlements/entities/driver-payout.entity';
+import { DriverPayoutEvent } from '../driver-settlements/entities/driver-payout-event.entity';
 import { TripShareLink } from '../tracking/entities/trip-share-link.entity';
 import { ReferralProfile } from '../referrals/entities/referral-profile.entity';
 import { ReferralAccount } from '../referrals/entities/referral-account.entity';
@@ -40,6 +43,7 @@ import { ReferralLedgerEntry } from '../referrals/entities/referral-ledger-entry
 import { ReferralWithdrawal } from '../referrals/entities/referral-withdrawal.entity';
 
 export const typeOrmEntities = [
+  ...PRO_SERVICE_ENTITIES,
   User,
   KycDocument,
   Vehicle,
@@ -52,6 +56,7 @@ export const typeOrmEntities = [
   Message,
   Rating,
   PaymentTransaction,
+  PawaPayRefund,
   Subscription,
   DocumentFundingRequest,
   Conversation,
@@ -72,6 +77,7 @@ export const typeOrmEntities = [
   WalletLedgerEntry,
   DriverEarning,
   DriverPayout,
+  DriverPayoutEvent,
   TripShareLink,
   ReferralProfile,
   ReferralAccount,

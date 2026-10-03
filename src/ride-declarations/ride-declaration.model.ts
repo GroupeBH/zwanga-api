@@ -24,6 +24,13 @@ export function declarationStatus(stage: StageDeclarations | undefined, applied:
   return 'none' as const;
 }
 
+/** Both parties must confirm a manual stage; automatic confirmations stay authoritative. */
+export function pickupDeclarationStatus(stage: StageDeclarations | undefined, applied: boolean) {
+  return declarationStatus(stage, applied);
+}
+
+export const dropoffDeclarationStatus = pickupDeclarationStatus;
+
 export function hasRideDispute(data?: RideDeclarations | null) {
   return (['pickup', 'dropoff'] as const).some(stage => declarationStatus(data?.[stage], false) === 'disputed');
 }

@@ -1,4 +1,5 @@
 import { validate } from 'class-validator';
+import { createHash } from 'crypto';
 import { AuthService } from '../auth/auth.service';
 import { RegisterDto } from '../auth/dto/auth.dto';
 import { UpdateProfileDto } from './dto/user.dto';
@@ -45,6 +46,7 @@ describe('User gender', () => {
       save: jest.fn((payload: Partial<User>) =>
         Promise.resolve({ id: 'user-1', ...payload }),
       ),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
     };
     const jwtService = {
       signAsync: jest
@@ -70,13 +72,18 @@ describe('User gender', () => {
     );
 
     try {
-      await service.register({
-        phone: '+243900000000',
-        pin: '1234',
-        firstName: 'Jane',
-        lastName: 'Doe',
-        role: UserRole.PASSENGER,
-        gender: UserGender.FEMALE,
+      await expect(
+        service.register({
+          phone: '+243900000000',
+          pin: '1234',
+          firstName: 'Jane',
+          lastName: 'Doe',
+          role: UserRole.PASSENGER,
+          gender: UserGender.FEMALE,
+        }),
+      ).resolves.toEqual({
+        accessToken: 'access-token',
+        refreshToken: 'refresh-token',
       });
     } finally {
       consoleSpy.mockRestore();
@@ -84,6 +91,13 @@ describe('User gender', () => {
 
     expect(userRepository.create).toHaveBeenCalledWith(
       expect.objectContaining({ gender: UserGender.FEMALE }),
+    );
+    expect(userRepository.update).toHaveBeenCalledWith(
+      'user-1',
+      expect.objectContaining({
+        accessToken: `sha256:${createHash('sha256').update('access-token').digest('hex')}`,
+        refreshToken: `sha256:${createHash('sha256').update('refresh-token').digest('hex')}`,
+      }),
     );
   });
 
@@ -101,7 +115,7 @@ describe('User gender', () => {
     } as User;
     const userRepository = {
       findOne: jest.fn().mockResolvedValue(user),
-      save: jest.fn((payload: User) => Promise.resolve(payload)),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
     };
     const service = new UsersService(
       userRepository as any,
@@ -124,7 +138,8 @@ describe('User gender', () => {
       gender: UserGender.PREFER_NOT_TO_SAY,
     });
 
-    expect(userRepository.save).toHaveBeenCalledWith(
+    expect(userRepository.update).toHaveBeenCalledWith(
+      'user-1',
       expect.objectContaining({
         gender: UserGender.PREFER_NOT_TO_SAY,
       }),

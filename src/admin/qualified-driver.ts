@@ -1,5 +1,6 @@
 import { SelectQueryBuilder } from 'typeorm';
 import { KycStatus } from '../users/entities/kyc-document.entity';
+import { UserRole } from '../users/entities/user.entity';
 import { ADMIN_USER_ROLES, isAdminRole } from '../users/user-role.policy';
 import { AdminUserSegment } from './dto/admin-users.dto';
 
@@ -38,7 +39,7 @@ export const ACTIVE_VEHICLE_EXISTS = (alias: string) =>
 
 export const QUALIFIED_DRIVER_CONDITION = (alias: string) =>
   `(
-    ${quoteIdent(alias)}."isDriver" IS TRUE
+    ${quoteIdent(alias)}."role" = 'driver'
     AND ${APPROVED_KYC_EXISTS(alias)}
     AND ${ACTIVE_VEHICLE_EXISTS(alias)}
   )`;
@@ -82,7 +83,7 @@ export function resolveDriverQualification(input: {
     hasApprovedKyc,
     hasActiveVehicle,
     isQualifiedDriver:
-      Boolean(input.isDriver) &&
+      input.role === UserRole.DRIVER &&
       hasApprovedKyc &&
       hasActiveVehicle &&
       !isAdminRole(input.role),

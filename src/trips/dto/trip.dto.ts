@@ -14,7 +14,10 @@ import {
   IsUUID,
   IsInt,
   Matches,
+  IsIn,
+  MaxLength,
 } from 'class-validator';
+import { Type } from 'class-transformer';
 import { ApiProperty } from '@nestjs/swagger';
 import { TripStatus } from '../entities/trip.entity';
 import { RecurringTripTemplateStatus } from '../entities/recurring-trip-template.entity';
@@ -142,7 +145,18 @@ export class CreateTripDto {
   vehicleId?: string;
 }
 
-export class SearchTripsDto {
+export class TripDiscoveryPageDto {
+  @IsOptional() @IsIn(['next', 'previous'])
+  direction?: 'next' | 'previous';
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(50)
+  limit?: number;
+  @IsOptional() @IsString() @MaxLength(1024)
+  cursor?: string;
+  @IsOptional() @IsIn(['price', 'date', 'nearby'])
+  sort?: 'price' | 'date' | 'nearby';
+}
+
+export class SearchTripsDto extends TripDiscoveryPageDto {
   @ApiProperty({
     required: false,
     description:
@@ -591,7 +605,7 @@ export class UpdateRecurringTripStatusDto {
   status: RecurringTripTemplateStatus;
 }
 
-export class SearchByPointsDto {
+export class SearchByPointsDto extends TripDiscoveryPageDto {
   @ApiProperty({
     required: false,
     description:

@@ -4,6 +4,7 @@ import {
   BadRequestException,
   Logger,
   ForbiddenException,
+  OnModuleInit,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { ConfigService } from '@nestjs/config';
@@ -179,7 +180,7 @@ export interface AutomaticRideProgressResult {
 }
 
 @Injectable()
-export class BookingsService {
+export class BookingsService implements OnModuleInit {
   private readonly logger = new Logger(BookingsService.name);
   private readonly CACHE_TTL = 180; // 3 minutes
   private readonly DESTINATION_PROXIMITY_THRESHOLD_METERS = 1000; // 1 km
@@ -187,7 +188,7 @@ export class BookingsService {
     LIVE_LOCATION_FRESHNESS_MS;
   private readonly AUTO_PICKUP_MATCH_THRESHOLD_METERS = 25;
   private readonly AUTO_PICKUP_PASSENGER_READY_THRESHOLD_METERS = 5;
-  private readonly AUTO_PICKUP_DRIVER_NEAR_THRESHOLD_METERS = 200;
+  private readonly AUTO_PICKUP_DRIVER_NEAR_THRESHOLD_METERS = 300;
   private readonly AUTO_PICKUP_DRIVER_ARRIVAL_THRESHOLD_METERS = 80;
   private readonly AUTO_PICKUP_MOVEMENT_THRESHOLD_METERS = 30;
   private readonly AUTO_PICKUP_MAX_HEADING_DELTA_DEGREES = 60;
@@ -248,6 +249,16 @@ export class BookingsService {
   ) {
     this.boardingDetectionConfig = loadBoardingDetectionConfig(
       this.configService,
+    );
+  }
+
+  onModuleInit() {
+    this.paymentsService.registerSettlement?.(
+      PaymentPurpose.TRIP_BOOKING,
+      async (payment) => {
+        const booking = await this.findBookingForPayment(payment);
+        await this.applyPaymentToBooking(booking, payment);
+      },
     );
   }
 
@@ -1353,13 +1364,27 @@ export class BookingsService {
     return { data: orderHistory(page.ids, records), nextCursor: page.nextCursor };
   }
 
+  async findMineForTrip(passengerId: string, tripId: string): Promise<Booking[]> {
+    // The passenger identity comes exclusively from the authenticated request.
+    const bookings = await this.bookingRepository.find({
+      where: { passengerId, tripId },
+      relations: ['trip', 'trip.driver', 'trip.vehicle'],
+      order: { createdAt: 'DESC', id: 'DESC' },
+    });
+    await this.attachActiveInterruptionRequestsToBookings(bookings);
+    await attachBookingRoutePreviews(this.cacheService, bookings);
+    return bookings;
+  }
+
   async findAllByPassenger(passengerId: string, activityOnly = false): Promise<Booking[]> {
     this.logger.debug(`Fetching bookings for passenger: ${passengerId}`);
 
     const cacheKey = activityOnly
       ? CacheService.getBookingsByPassengerActivityKey(passengerId)
       : CacheService.getBookingsByPassengerKey(passengerId);
-    const cached = await this.cacheService.get<Booking[]>(cacheKey);
+    // The activity revision is read directly from the DB. Never acknowledge that
+    // revision with an older Redis list (which would otherwise remain stale forever).
+    const cached = activityOnly ? undefined : await this.cacheService.get<Booking[]>(cacheKey);
 
     if (cached) {
       this.logger.debug(
@@ -1370,13 +1395,13 @@ export class BookingsService {
 
     const bookings = await this.bookingRepository.find({
       where: activityOnly ? activeBookingWhere(passengerId) : { passengerId },
-      relations: ['trip', 'trip.driver'],
+      relations: ['trip', 'trip.driver', 'trip.vehicle'],
       order: { createdAt: 'DESC' },
     });
 
     await this.attachActiveInterruptionRequestsToBookings(bookings);
     await attachBookingRoutePreviews(this.cacheService, bookings);
-    await this.cacheService.set(cacheKey, bookings, this.CACHE_TTL);
+    if (!activityOnly) await this.cacheService.set(cacheKey, bookings, this.CACHE_TTL);
     this.logger.debug(
       `Fetched ${bookings.length} bookings from database for passenger ${passengerId}`,
     );
@@ -2180,6 +2205,8 @@ export class BookingsService {
       cancelUrl: dto.cancelUrl,
       declineUrl: dto.declineUrl,
       referencePrefix: 'TRIP',
+      preferredProvider: dto.preferredProvider,
+      pawaPayOperator: dto.pawaPayOperator,
     });
 
     const savedBooking = await this.applyPaymentToBooking(booking, payment);
@@ -2477,7 +2504,7 @@ export class BookingsService {
       );
     }
 
-    if (booking.paymentStatus === BookingPaymentStatus.SUCCEEDED) {
+    if (booking.cashReceivedAt || booking.paymentStatus === BookingPaymentStatus.SUCCEEDED) {
       throw new BadRequestException(
         'Impossible de changer un paiement déjà confirmé',
       );
@@ -3694,78 +3721,9 @@ export class BookingsService {
     }
   }
 
-  async confirmPickup(bookingId: string, driverId: string): Promise<Booking> {
-    this.logger.log(
-      `Driver ${driverId} confirming pickup for booking ${bookingId}`,
-    );
-
-    const booking = await this.bookingRepository.findOne({
-      where: { id: bookingId },
-      relations: ['trip', 'trip.driver', 'passenger'],
-    });
-
-    if (!booking) {
-      throw new NotFoundException('Réservation non trouvée');
-    }
-
-    if (booking.trip.driverId !== driverId) {
-      throw new ForbiddenException(
-        "Vous n'êtes pas le conducteur de ce trajet",
-      );
-    }
-
-    if (booking.status !== BookingStatus.ACCEPTED) {
-      throw new BadRequestException(
-        'La réservation doit être acceptée avant de confirmer la prise en charge',
-      );
-    }
-
-    await this.ensurePassengerKycApprovedForTrip(
-      booking.trip,
-      booking.passengerId,
-      {
-        tripId: booking.tripId,
-        bookingId: booking.id,
-        message:
-          "Ce trajet exige une vérification d'identité approuvée avant embarquement.",
-      },
-    );
-
-    if (booking.pickedUp && booking.pickedUpConfirmedByPassenger) {
-      throw new BadRequestException(
-        'Le passager est déjà marqué comme pris en charge',
-      );
-    }
-
-    const now = new Date();
-    const wasPickedUp = booking.pickedUp;
-    booking.pickedUp = true;
-    booking.pickedUpAt = booking.pickedUpAt ?? now;
-    booking.pickedUpConfirmedByPassenger = true;
-    booking.pickedUpConfirmedAt = booking.pickedUpConfirmedAt ?? now;
-    booking.pickupDetectionMethod =
-      booking.pickupDetectionMethod ?? 'manual_passenger_recovery';
-    await this.bookingRepository.save(booking);
-    await this.touchTripInteraction(booking.tripId);
-
-    if (!wasPickedUp) {
-      await this.notifySelectedEmergencyContacts(booking, 'pickup');
-      await this.notifyDriverEmergencyContactsOnPickup(booking);
-    }
-
-    // Notify passenger
-    await this.notifyPassengerAboutPickupConfirmation(booking);
-
-    // Invalidate cache
-    await this.cacheService.del(
-      CacheService.getBookingsByTripKey(booking.tripId),
-    );
-    await this.cacheService.del(
-      CacheService.getBookingsByPassengerKey(booking.passengerId),
-    );
-
-    this.logger.log(`Pickup confirmed for booking ${bookingId}`);
-    return booking;
+  async confirmPickup(_bookingId: string, _driverId: string): Promise<Booking> {
+    // Retired internal entry point: HTTP routes use transactional dual declarations.
+    throw new ForbiddenException({ code: 'RIDE_DECLARATION_REQUIRED', message: 'Utilisez la confirmation du trajet pour enregistrer chaque validation séparément.' });
   }
 
   async validateManualRidePassenger(trip: Trip, passengerId: string, manager: EntityManager) {
@@ -3779,7 +3737,7 @@ export class BookingsService {
     if (booking) await this.invalidateBookingCaches(booking);
   }
 
-  /** Only invoked for a committed, two-party transition by the durable worker. */
+  /** Durable follow-up after commit, including historical two-party declarations. */
   async finishManualRideEffects(bookingId: string, stage: RideStage) {
     const booking = await this.bookingRepository.findOne({
       where: { id: bookingId }, relations: ['trip', 'trip.driver', 'passenger'],
@@ -3790,13 +3748,13 @@ export class BookingsService {
       return;
     }
     if (stage === 'dropoff') {
-      if (!booking.droppedOff || booking.dropoffDetectionMethod !== 'manual_dual_confirmation') return;
+      if (!booking.droppedOff || !['manual_dual_confirmation', 'manual_passenger_confirmation'].includes(booking.dropoffDetectionMethod ?? '')) return;
       await this.settlePaymentAfterArrival(booking);
       await this.notifySelectedEmergencyContacts(booking, 'dropoff');
       await this.notifyPassengerAboutAutomaticDropoffConfirmation(booking);
       await this.notifyDriverAboutAutomaticDropoffConfirmation(booking);
     } else {
-      if (!booking.pickedUp || booking.pickupDetectionMethod !== 'manual_dual_confirmation') return;
+      if (!booking.pickedUp || !['manual_dual_confirmation', 'manual_passenger_confirmation'].includes(booking.pickupDetectionMethod ?? '')) return;
       await this.notifySelectedEmergencyContacts(booking, 'pickup');
       await this.notifyDriverEmergencyContactsOnPickup(booking);
       await this.notifyPassengerAboutAutomaticPickupConfirmation(booking);
@@ -3894,68 +3852,8 @@ export class BookingsService {
     return booking;
   }
 
-  async confirmDropoff(bookingId: string, driverId: string): Promise<Booking> {
-    this.logger.log(
-      `Driver ${driverId} confirming dropoff for booking ${bookingId}`,
-    );
-
-    let booking = await this.bookingRepository.findOne({
-      where: { id: bookingId },
-      relations: ['trip', 'trip.driver', 'passenger'],
-    });
-
-    if (!booking) {
-      throw new NotFoundException('Réservation non trouvée');
-    }
-
-    if (booking.trip.driverId !== driverId) {
-      throw new ForbiddenException(
-        "Vous n'êtes pas le conducteur de ce trajet",
-      );
-    }
-
-    if (!this.hasBookingBeenPickedUpForRideProgress(booking)) {
-      throw new BadRequestException(
-        'La prise en charge du passager doit être confirmée avant son arrivée',
-      );
-    }
-
-    if (booking.droppedOff && booking.status === BookingStatus.COMPLETED) {
-      throw new BadRequestException("L'arrivée est déjà confirmée");
-    }
-
-    const now = new Date();
-    booking.pickedUp = true;
-    booking.pickedUpAt = booking.pickedUpAt ?? now;
-    booking.pickedUpConfirmedByPassenger = true;
-    booking.pickedUpConfirmedAt = booking.pickedUpConfirmedAt ?? now;
-    booking.droppedOffConfirmedByPassenger = true;
-    booking.droppedOffConfirmedAt = booking.droppedOffConfirmedAt ?? now;
-    booking.droppedOff = true;
-    booking.droppedOffAt = booking.droppedOffAt ?? now;
-    booking.dropoffDetectionMethod =
-      booking.dropoffDetectionMethod ?? 'manual_driver_recovery';
-    booking.status = BookingStatus.COMPLETED;
-
-    await this.bookingRepository.save(booking);
-    booking = await this.settlePaymentAfterArrival(booking);
-    await this.touchTripInteraction(booking.tripId);
-
-    await this.notifySelectedEmergencyContacts(booking, 'dropoff');
-
-    // Notify passenger
-    await this.notifyPassengerAboutDropoffConfirmation(booking);
-
-    // Invalidate cache
-    await this.cacheService.del(
-      CacheService.getBookingsByTripKey(booking.tripId),
-    );
-    await this.cacheService.del(
-      CacheService.getBookingsByPassengerKey(booking.passengerId),
-    );
-
-    this.logger.log(`Dropoff confirmed by driver for booking ${bookingId}`);
-    return booking;
+  async confirmDropoff(_bookingId: string, _driverId: string): Promise<Booking> {
+    throw new ForbiddenException({ code: 'RIDE_DECLARATION_REQUIRED', message: 'Utilisez la confirmation du trajet pour enregistrer chaque validation séparément.' });
   }
 
   async confirmDropoffByPassenger(

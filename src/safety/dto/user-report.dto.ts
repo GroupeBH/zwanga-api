@@ -1,6 +1,15 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { IsEnum, IsString, IsNotEmpty, IsOptional, IsUUID } from 'class-validator';
-import { ReportReason } from '../entities/user-report.entity';
+import { Type } from 'class-transformer';
+import {
+  IsEnum,
+  IsString,
+  IsNotEmpty,
+  IsNumber,
+  IsOptional,
+  IsUUID,
+  Min,
+} from 'class-validator';
+import { ReportReason, ReportStatus } from '../entities/user-report.entity';
 
 export class CreateUserReportDto {
   @ApiProperty({ description: 'ID de l\'utilisateur signalé' })
@@ -26,6 +35,40 @@ export class CreateUserReportDto {
   @IsUUID()
   @IsOptional()
   bookingId?: string;
+}
+
+export class ListAdminUserReportsQueryDto {
+  @ApiProperty({ required: false, default: 1 })
+  @Type(() => Number)
+  @IsNumber()
+  @IsOptional()
+  @Min(1)
+  page?: number = 1;
+
+  @ApiProperty({ required: false, default: 20 })
+  @Type(() => Number)
+  @IsNumber()
+  @IsOptional()
+  @Min(1)
+  limit?: number = 20;
+
+  @ApiProperty({ required: false, enum: ReportStatus })
+  @IsEnum(ReportStatus)
+  @IsOptional()
+  status?: ReportStatus;
+
+  @ApiProperty({ required: false, enum: ReportReason })
+  @IsEnum(ReportReason)
+  @IsOptional()
+  reason?: ReportReason;
+
+  @ApiProperty({
+    required: false,
+    description: 'Recherche sur le nom ou le telephone des personnes concernees',
+  })
+  @IsString()
+  @IsOptional()
+  search?: string;
 }
 
 export class UpdateReportStatusDto {

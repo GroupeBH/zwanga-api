@@ -59,6 +59,7 @@ import {
   resolveDriverQualification,
 } from './qualified-driver';
 import { parseKycStatus } from './dto/admin-kyc.dto';
+import { activateRequestedDriver } from '../users/driver-activation';
 import {
   buildBookingsSpreadsheet,
   buildPaymentsSpreadsheet,
@@ -135,21 +136,20 @@ export class AdminService {
       kycDocument.rejectionReason = reason;
     }
 
-    if (approved) {
-      kycDocument.user.status = UserStatus.ACTIVE;
-      await this.userRepository.save(kycDocument.user);
-      this.logger.log(
-        `KYC ${kycId} approved - User ${kycDocument.user.id} status set to ACTIVE`,
-      );
-    } else {
-      kycDocument.user.status = UserStatus.PENDING_KYC;
-      await this.userRepository.save(kycDocument.user);
-      this.logger.log(
-        `KYC ${kycId} rejected - User ${kycDocument.user.id} status set to PENDING_KYC. Reason: ${reason || 'N/A'}`,
-      );
-    }
-
-    return this.kycDocumentRepository.save(kycDocument);
+    return this.userRepository.manager.transaction(async (manager) => {
+      const user = await manager.getRepository(User).findOne({
+        where: { id: kycDocument.userId }, lock: { mode: 'pessimistic_write' },
+      });
+      if (!user) throw new NotFoundException('Utilisateur introuvable');
+      const saved = await manager.getRepository(KycDocument).save(kycDocument);
+      if (user.isActive && ![UserStatus.SUSPENDED, UserStatus.INACTIVE].includes(user.status)) {
+        await manager.getRepository(User).update(user.id, {
+          status: approved ? UserStatus.ACTIVE : UserStatus.PENDING_KYC,
+        });
+      }
+      await activateRequestedDriver(manager, user.id);
+      return saved;
+    });
   }
 
   async getPendingKycs(): Promise<KycDocument[]> {

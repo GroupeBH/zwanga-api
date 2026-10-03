@@ -3,11 +3,11 @@ import { UsersService } from './users.service';
 describe('UsersService.updateFcmToken', () => {
   it('does not write when the token is already current', async () => {
     const user = { id: 'user-1', fcmToken: 'same-token' };
-    const save = jest.fn();
+    const update = jest.fn();
     const service = {
       logger: { debug: jest.fn() },
       findOne: jest.fn().mockResolvedValue(user),
-      userRepository: { save },
+      userRepository: { update },
     } as unknown as UsersService;
 
     await UsersService.prototype.updateFcmToken.call(
@@ -16,16 +16,16 @@ describe('UsersService.updateFcmToken', () => {
       user.fcmToken,
     );
 
-    expect(save).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
   });
 
   it('persists a changed token', async () => {
     const user = { id: 'user-1', fcmToken: 'old-token' };
-    const save = jest.fn().mockResolvedValue(user);
+    const update = jest.fn().mockResolvedValue({ affected: 1 });
     const service = {
       logger: { debug: jest.fn() },
       findOne: jest.fn().mockResolvedValue(user),
-      userRepository: { save },
+      userRepository: { update },
     } as unknown as UsersService;
 
     await UsersService.prototype.updateFcmToken.call(
@@ -34,7 +34,8 @@ describe('UsersService.updateFcmToken', () => {
       'new-token',
     );
 
-    expect(user.fcmToken).toBe('new-token');
-    expect(save).toHaveBeenCalledWith(user);
+    expect(update).toHaveBeenCalledWith(user.id, {
+      fcmToken: 'new-token',
+    });
   });
 });

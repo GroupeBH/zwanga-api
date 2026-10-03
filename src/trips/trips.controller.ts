@@ -33,6 +33,10 @@ import {
 import { Auth } from '../auth/decorators/auth.decorator';
 import { Public } from '../common/decorators/public.decorator';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
+import { Roles } from '../common/decorators/roles.decorator';
+import { ADMIN_USER_ROLES } from '../users/user-role.policy';
+import { publicTripResponse } from './trip-read-policy';
+import { LegacyPageQuery } from '../common/legacy-page';
 
 @ApiTags('Trips')
 @Controller('trips')
@@ -42,9 +46,17 @@ export class TripsController {
     private readonly bookingsService: BookingsService,
   ) {}
 
+  @Post('discovery')
+  @Public()
+  @SensitiveThrottle(60, 60000)
+  async discovery(@Body() query: SearchTripsDto) {
+    const page = await this.tripsService.searchPage(query);
+    return { ...page, data: page.data.map(publicTripResponse) };
+  }
+
   @Post()
   @Auth()
-  @SensitiveThrottle(10, 6000) // 10 requests per minute per IP
+  @SensitiveThrottle(10, 60000) // 10 requests per minute per IP
   @ApiOperation({
     summary: 'Create a new trip',
     description:
@@ -56,7 +68,7 @@ export class TripsController {
 
   @Get()
   @Public()
-  @SensitiveThrottle(30, 6000) // 30 requests per minute per IP
+  @SensitiveThrottle(30, 60000) // 30 requests per minute per IP
   @ApiOperation({
     summary: 'Rechercher des trajets ou obtenir tous les trajets disponibles',
     description:
@@ -64,14 +76,14 @@ export class TripsController {
   })
   async findAll(@Query() searchTripsDto: SearchTripsDto) {
     if (Object.keys(searchTripsDto).length > 0) {
-      return this.tripsService.search(searchTripsDto);
+      return (await this.tripsService.search(searchTripsDto)).map(publicTripResponse);
     }
-    return this.tripsService.findAll();
+    return (await this.tripsService.findAll()).map(publicTripResponse);
   }
 
   @Post('search/coordinates')
   @Public()
-  @SensitiveThrottle(30, 6000)
+  @SensitiveThrottle(30, 60000)
   @ApiOperation({
     summary: 'Rechercher des trajets par coordonnées',
     description:
@@ -94,9 +106,10 @@ export class TripsController {
       departureDate,
       minSeats,
       maxPrice,
+      limit, cursor, sort,
     } = payload;
 
-    return this.tripsService.search({
+    return (await this.tripsService.search({
       keywords,
       departureCoordinates,
       arrivalCoordinates,
@@ -105,12 +118,13 @@ export class TripsController {
       departureDate,
       minSeats,
       maxPrice,
-    });
+      limit, cursor, sort,
+    })).map(publicTripResponse);
   }
 
   @Get('my-trips')
   @Auth()
-  @SensitiveThrottle(20, 6000)
+  @SensitiveThrottle(20, 60000)
   @ApiOperation({ summary: 'Get trips created by current user' })
   async findMyTrips(@Request() req, @Query('scope') scope?: string) {
     return this.tripsService.findByDriver(req.user.userId, scope === 'activity');
@@ -125,7 +139,7 @@ export class TripsController {
 
   @Post('recurring')
   @Auth()
-  @SensitiveThrottle(10, 6000)
+  @SensitiveThrottle(10, 60000)
   @ApiOperation({
     summary: 'Create a recurring trip template',
     description:
@@ -143,7 +157,7 @@ export class TripsController {
 
   @Get('recurring/my')
   @Auth()
-  @SensitiveThrottle(20, 6000)
+  @SensitiveThrottle(20, 60000)
   @ApiOperation({
     summary: 'Get recurring trip templates created by current user',
   })
@@ -153,7 +167,7 @@ export class TripsController {
 
   @Put('recurring/:id/pause')
   @Auth()
-  @SensitiveThrottle(10, 6000)
+  @SensitiveThrottle(10, 60000)
   @ApiOperation({ summary: 'Pause a recurring trip template' })
   async pauseRecurringTrip(@Request() req, @Param('id') id: string) {
     return this.tripsService.pauseRecurring(id, req.user.userId);
@@ -161,22 +175,23 @@ export class TripsController {
 
   @Put('recurring/:id/resume')
   @Auth()
-  @SensitiveThrottle(10, 6000)
+  @SensitiveThrottle(10, 60000)
   @ApiOperation({ summary: 'Resume a recurring trip template' })
   async resumeRecurringTrip(@Request() req, @Param('id') id: string) {
     return this.tripsService.resumeRecurring(id, req.user.userId);
   }
 
   @Get('all-trips')
-  @SensitiveThrottle(20, 6000)
+  @Roles(...ADMIN_USER_ROLES)
+  @SensitiveThrottle(20, 60000)
   @ApiOperation({ summary: 'Get all trips completed or not' })
-  async findAllTrips() {
-    return this.tripsService.findAllTrips();
+  async findAllTrips(@Query() query: LegacyPageQuery) {
+    return this.tripsService.findAllTrips(query);
   }
 
   @Put(':id/driver-location')
   @Auth()
-  @SensitiveThrottle(60, 6000)
+  @SensitiveThrottle(60, 60000)
   @ApiOperation({ summary: 'Update driver location for an active trip' })
   async updateDriverLocation(
     @Request() req,
@@ -201,22 +216,22 @@ export class TripsController {
 
   @Get(':id/driver-location')
   @Auth()
-  @SensitiveThrottle(120, 6000)
+  @SensitiveThrottle(120, 60000)
   @ApiOperation({ summary: 'Get driver location for an active trip' })
   async getDriverLocation(@Request() req, @Param('id') id: string) {
     return this.tripsService.getDriverLocationForUser(id, req.user.userId);
   }
 
   @Get(':id')
-  @SensitiveThrottle(30, 6000)
+  @SensitiveThrottle(30, 60000)
   @ApiOperation({ summary: 'Get a trip by ID' })
-  async findOne(@Param('id') id: string) {
-    return this.tripsService.findOne(id);
+  async findOne(@Param('id') id: string, @Request() req) {
+    return this.tripsService.findOneForViewer(id, req.user.userId);
   }
 
   @Put(':id')
   @Auth()
-  @SensitiveThrottle(10, 6000)
+  @SensitiveThrottle(10, 60000)
   @ApiOperation({
     summary: 'Update a trip',
     description:
@@ -232,7 +247,7 @@ export class TripsController {
 
   @Put(':id/start')
   @Auth()
-  @SensitiveThrottle(10, 6000)
+  @SensitiveThrottle(10, 60000)
   @ApiOperation({ summary: 'Start a trip' })
   async startTrip(@Request() req, @Param('id') id: string) {
     return this.tripsService.startTrip(id, req.user.userId);
@@ -240,7 +255,7 @@ export class TripsController {
 
   @Put(':id/driver-emergency-contacts')
   @Auth()
-  @SensitiveThrottle(10, 6000)
+  @SensitiveThrottle(10, 60000)
   @ApiOperation({
     summary:
       "Select driver's emergency contacts for trip WhatsApp safety notifications",
@@ -259,7 +274,7 @@ export class TripsController {
 
   @Put(':id/pause')
   @Auth()
-  @SensitiveThrottle(10, 6000)
+  @SensitiveThrottle(10, 60000)
   @ApiOperation({ summary: 'Pause/interrupt an active trip' })
   async pauseTrip(@Request() req, @Param('id') id: string) {
     return this.tripsService.pauseTrip(id, req.user.userId);
@@ -281,7 +296,7 @@ export class TripsController {
 
   @Post(':id/interruption-request')
   @Auth()
-  @SensitiveThrottle(10, 6000)
+  @SensitiveThrottle(10, 60000)
   @ApiOperation({
     summary:
       'Request interruption of an active trip; onboard passengers must confirm',
@@ -300,7 +315,7 @@ export class TripsController {
 
   @Put(':id/interruption-request/cancel')
   @Auth()
-  @SensitiveThrottle(10, 6000)
+  @SensitiveThrottle(10, 60000)
   @ApiOperation({ summary: 'Cancel a pending driver interruption request' })
   async cancelTripInterruption(@Request() req, @Param('id') id: string) {
     return this.tripsService.cancelDriverTripInterruption(id, req.user.userId);
@@ -308,7 +323,7 @@ export class TripsController {
 
   @Put(':id/interruption-request/confirm')
   @Auth()
-  @SensitiveThrottle(20, 6000)
+  @SensitiveThrottle(20, 60000)
   @ApiOperation({
     summary: 'Confirm a driver interruption request as an onboard passenger',
   })
@@ -326,7 +341,7 @@ export class TripsController {
 
   @Put(':id/interruption-request/reject')
   @Auth()
-  @SensitiveThrottle(20, 6000)
+  @SensitiveThrottle(20, 60000)
   @ApiOperation({
     summary: 'Reject a driver interruption request as an onboard passenger',
   })
@@ -344,7 +359,7 @@ export class TripsController {
 
   @Put(':id/complete')
   @Auth()
-  @SensitiveThrottle(10, 6000)
+  @SensitiveThrottle(10, 60000)
   @ApiOperation({ summary: 'Complete/end an active trip (driver only)' })
   async completeTrip(@Request() req, @Param('id') id: string) {
     await this.bookingsService.evaluateAutomaticRideProgressForTrip(id);
@@ -353,7 +368,7 @@ export class TripsController {
 
   @Put(':id/make-public')
   @Auth()
-  @SensitiveThrottle(10, 6000)
+  @SensitiveThrottle(10, 60000)
   @ApiOperation({
     summary: 'Make a private trip public',
     description:
@@ -365,7 +380,7 @@ export class TripsController {
 
   @Delete(':id')
   @Auth()
-  @SensitiveThrottle(10, 6000)
+  @SensitiveThrottle(10, 60000)
   @ApiOperation({
     summary:
       'Delete a trip unless a passenger has boarded and has not yet been dropped off',

@@ -11,6 +11,8 @@ import { firstValueFrom } from 'rxjs';
 import { isAxiosError, type AxiosError } from 'axios';
 import { PaymentMethod } from './entities/payment-transaction.entity';
 import { formatPaymentLogPayload } from './payment-log.util';
+import { PaymentGatewayUnavailableError } from './payment-provider.policy';
+import { PaymentProvider } from './entities/payment-transaction.entity';
 import { FlexPayPayoutClient } from './flexpay-payout.client';
 
 export interface FlexPayInitiatePaymentInput {
@@ -417,7 +419,9 @@ export class FlexPayService {
       }
     }
 
-    throw new BadRequestException(`${keys.join(' ou ')} n'est pas configuré`);
+    // This check runs before a financial POST, so failover is safe.
+    throw new PaymentGatewayUnavailableError(PaymentProvider.FLEXPAY,
+      'Le service de paiement FlexPay n’est pas configuré', { retryable: true });
   }
 
   private getOptionalConfig(key: string): string | null {

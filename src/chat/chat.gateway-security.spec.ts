@@ -12,6 +12,10 @@ import { ConfiguredIoAdapter } from '../common/configured-io.adapter';
 import { TrackingGateway } from '../tracking/tracking.gateway';
 import { TripsService } from '../trips/trips.service';
 import { BookingsService } from '../bookings/bookings.service';
+import { WsSessionService } from '../common/services/ws-session.service';
+import { WsWorkInterceptor } from '../common/ws-work.interceptor';
+import { RedisService } from '../common/services/redis.service';
+import { DataSource } from 'typeorm';
 
 const passenger = '00000000-0000-4000-8000-000000000001';
 const driver = '00000000-0000-4000-8000-000000000002';
@@ -79,6 +83,7 @@ describe('Chat and tracking Socket.IO security integration', () => {
   let namespace: Namespace;
   let url: string;
   const clients: SocketTestClient[] = [];
+  const sessionTokens = new Map<string, string>();
   const jwt = new JwtService({ secret: 'socket-integration-test-only' });
   const config = new ConfigService({
     JWT_SECRET: 'socket-integration-test-only',
@@ -105,6 +110,12 @@ describe('Chat and tracking Socket.IO security integration', () => {
       providers: [
         ChatGateway,
         TrackingGateway,
+        WsSessionService,
+        WsWorkInterceptor,
+        { provide: DataSource, useValue: { getRepository: () => ({ find: async ({ where }) =>
+          [...sessionTokens].filter(([id]) => where.id.value.includes(id))
+            .map(([id, accessToken]) => ({ id, accessToken, isActive: true, status: 'active' })) }) } },
+        { provide: RedisService, useValue: { getClient: () => ({ eval: async () => [1, 60000] }) } },
         { provide: ChatService, useValue: chat },
         { provide: TripsService, useValue: trips },
         { provide: BookingsService, useValue: {} },
@@ -129,11 +140,13 @@ describe('Chat and tracking Socket.IO security integration', () => {
   });
 
   async function connect(userId: string, path = '/chat') {
+    const token = jwt.sign({ sub: userId }, { expiresIn: '1h' });
+    sessionTokens.set(userId, token);
     const client = new SocketTestClient(url, path);
     clients.push(client);
     await client.take('0');
     client.socket.send(
-      `40${path},${JSON.stringify({ token: jwt.sign({ sub: userId }, { expiresIn: '1h' }) })}`,
+      `40${path},${JSON.stringify({ token })}`,
     );
     const connected = await client.take(`40${path},`);
     client.id = (

@@ -68,6 +68,7 @@ describe('DiditKycService', () => {
       status: UserStatus.PENDING_KYC,
       role: UserRole.PASSENGER,
       isDriver: false,
+      isActive: true,
     };
     kyc = {
       id: 'kyc-1',
@@ -93,6 +94,7 @@ describe('DiditKycService', () => {
     txUserRepository = {
       findOne: jest.fn().mockResolvedValue(user),
       save: jest.fn(async (payload) => payload),
+      update: jest.fn(async (_id, patch) => Object.assign(user, patch)),
     };
     txKycRepository = {
       findOne: jest.fn().mockResolvedValue(kyc),
@@ -278,14 +280,16 @@ describe('DiditKycService', () => {
 
     expect(result?.status).toBe(KycStatus.APPROVED);
     expect(user.status).toBe(UserStatus.ACTIVE);
-    expect(txUserRepository.save).toHaveBeenCalledWith(
+    expect(txUserRepository.update).toHaveBeenCalledWith(user.id,
       expect.objectContaining({ status: UserStatus.ACTIVE }),
     );
   });
 
-  it('keeps role and isDriver consistent when Didit approves a driver profile', async () => {
-    user.role = UserRole.DRIVER;
+  it('activates only an explicitly requested driver profile after approval', async () => {
+    user.driverOnboardingRequestedAt = new Date();
+    user.role = UserRole.PASSENGER;
     user.isDriver = false;
+    txVehicleRepository.exists.mockResolvedValue(true);
 
     (global.fetch as jest.Mock).mockResolvedValueOnce(
       createFetchResponse({
@@ -303,16 +307,16 @@ describe('DiditKycService', () => {
 
     expect(user.role).toBe(UserRole.DRIVER);
     expect(user.isDriver).toBe(true);
-    expect(txUserRepository.save).toHaveBeenCalledWith(
+    expect(txUserRepository.update).toHaveBeenCalledWith(user.id,
       expect.objectContaining({
         role: UserRole.DRIVER,
         isDriver: true,
-        status: UserStatus.ACTIVE,
+        driverActivatedAt: expect.any(Date),
       }),
     );
   });
 
-  it('promotes a pending user with active vehicles to a coherent driver profile', async () => {
+  it('never promotes a pending identity even when an active vehicle exists', async () => {
     user.role = UserRole.PASSENGER;
     user.isDriver = false;
     txVehicleRepository.exists.mockResolvedValue(true);
@@ -331,8 +335,8 @@ describe('DiditKycService', () => {
       status: 'Not Started',
     });
 
-    expect(user.role).toBe(UserRole.DRIVER);
-    expect(user.isDriver).toBe(true);
+    expect(user.role).toBe(UserRole.PASSENGER);
+    expect(user.isDriver).toBe(false);
     expect(user.status).toBe(UserStatus.PENDING_KYC);
   });
 
@@ -350,7 +354,7 @@ describe('DiditKycService', () => {
     });
 
     expect(result?.status).toBe(KycStatus.PENDING);
-    expect(txUserRepository.save).not.toHaveBeenCalled();
+    expect(txUserRepository.update).not.toHaveBeenCalled();
   });
 
   it('returns an actionable reason when Didit detects a legal name mismatch', async () => {

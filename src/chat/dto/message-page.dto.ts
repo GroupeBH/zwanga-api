@@ -13,4 +13,9 @@ export class MessagePageDto {
   @IsString()
   @MaxLength(256)
   before?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(256)
+  after?: string;
 }

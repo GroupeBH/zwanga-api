@@ -22,7 +22,7 @@ describe('FlexPaie payout v1.03 (mocked HTTP)', () => {
     post: jest.Mock<Observable<{ data: unknown }>, [string, ...unknown[]]>;
     get: jest.Mock<Observable<{ data: unknown }>, [string, ...unknown[]]>;
   };
-  let repository: { create: jest.Mock; save: jest.Mock; findOne: jest.Mock };
+  let repository: { create: jest.Mock; save: jest.Mock; findOne: jest.Mock; manager: any };
   let flexpay: FlexPayService;
   let payments: PaymentsService;
   const input = {
@@ -62,11 +62,18 @@ describe('FlexPaie payout v1.03 (mocked HTTP)', () => {
       ),
       get: jest.fn(),
     };
+    let stored: Partial<PaymentTransaction>;
+    const manager = {
+      transaction: async (work: any) => work(manager),
+      findOne: async () => ({ ...(stored ?? await repository.findOne()) }),
+      save: async (_entity: unknown, value: Partial<PaymentTransaction>) => repository.save(value),
+    };
     repository = {
+      manager,
       create: jest.fn((value: Partial<PaymentTransaction>) => ({ ...value })),
-      save: jest.fn((value: Partial<PaymentTransaction>) =>
-        Promise.resolve({ id: 'payment-1', ...value }),
-      ),
+      save: jest.fn(async (value: Partial<PaymentTransaction>) => {
+        stored = { id: 'payment-1', ...value }; return { ...stored };
+      }),
       findOne: jest.fn(),
     };
     const configuration = { get: (key: string) => config[key] };
@@ -78,6 +85,8 @@ describe('FlexPaie payout v1.03 (mocked HTTP)', () => {
       repository as unknown as Repository<PaymentTransaction>,
       configuration as unknown as ConfigService,
       flexpay,
+      { isConfigured: () => false } as never,
+      { register: jest.fn(), apply: jest.fn() } as never,
     );
   });
   afterEach(() => jest.restoreAllMocks());

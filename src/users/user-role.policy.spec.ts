@@ -47,27 +47,27 @@ describe('self-service user role policy', () => {
     expect(() => assertSuperAdminRole(UserRole.ADMIN)).toThrow();
   });
 
-  it('normalizes legacy role/isDriver combinations from mobile clients', () => {
-    expect(
+  it('rejects contradictory passenger choices rather than silently promoting them', () => {
+    expect(() =>
       resolveSelfServiceDriverState({
         role: UserRole.PASSENGER,
         isDriver: true,
       }),
-    ).toEqual({ role: UserRole.DRIVER, isDriver: true });
+    ).toThrow(BadRequestException);
 
     expect(
       resolveSelfServiceDriverState({
         role: UserRole.DRIVER,
         isDriver: false,
       }),
-    ).toEqual({ role: UserRole.DRIVER, isDriver: true });
+    ).toEqual({ role: UserRole.PASSENGER, isDriver: false });
 
-    expect(
+    expect(() =>
       resolveSelfServiceDriverState({
         role: UserRole.PASSENGER,
         hasVehicle: true,
       }),
-    ).toEqual({ role: UserRole.DRIVER, isDriver: true });
+    ).toThrow(BadRequestException);
 
     expect(resolveSelfServiceDriverState({ role: UserRole.PASSENGER })).toEqual(
       { role: UserRole.PASSENGER, isDriver: false },
@@ -87,10 +87,10 @@ describe('self-service user role policy', () => {
       normalizeUserDriverFlags(passengerWithVehicle, {
         hasActiveVehicle: true,
       }),
-    ).toBe(true);
+    ).toBe(false);
     expect(passengerWithVehicle).toEqual({
-      role: UserRole.DRIVER,
-      isDriver: true,
+      role: UserRole.PASSENGER,
+      isDriver: false,
     });
 
     const admin = { role: UserRole.ADMIN, isDriver: true };

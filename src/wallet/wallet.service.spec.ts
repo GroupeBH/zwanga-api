@@ -324,7 +324,7 @@ describe('WalletService', () => {
     });
     await expect(
       service.checkTopUpPaymentStatus('passenger-1', 'ORDER123'),
-    ).rejects.toThrow('confirmée par FlexPay');
+    ).rejects.toThrow('confirmée par le prestataire de paiement');
     expect(manager.save).not.toHaveBeenCalled();
   });
 

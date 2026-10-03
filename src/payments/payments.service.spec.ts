@@ -1,13 +1,18 @@
 /* eslint-disable @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-return, @typescript-eslint/require-await */
-import { BadGatewayException } from '@nestjs/common';
+import { BadGatewayException, Logger } from '@nestjs/common';
 import {
   PaymentMethod,
+  PaymentProvider,
   PaymentStatus,
+  PaymentTransaction,
 } from './entities/payment-transaction.entity';
+import { DriverPayout } from '../driver-settlements/entities/driver-payout.entity';
 import { PaymentsService } from './payments.service';
+import { PaymentSettlementRegistry } from './payment-settlement.registry';
 
 describe('PaymentsService', () => {
   let paymentTransactionRepository: {
+    manager: any;
     create: jest.Mock;
     save: jest.Mock;
     findOne: jest.Mock;
@@ -27,12 +32,30 @@ describe('PaymentsService', () => {
   let service: PaymentsService;
 
   beforeEach(() => {
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    let stored: any;
+    let draft: any;
+    const manager = {
+      transaction: async (work: any) => work(manager),
+      findOne: async (entity: unknown, options: any) => {
+        if (entity === PaymentTransaction) {
+          const payment = stored ?? await paymentTransactionRepository.findOne(options);
+          return payment ? { provider: PaymentProvider.FLEXPAY, ...payment } : null;
+        }
+        if (entity === DriverPayout) return { id: draft.relatedEntityId, driverId: draft.userId,
+          amount: draft.amount, currency: draft.currency, status: 'pending' };
+        return { id: draft?.userId };
+      },
+      save: async (entity: unknown, value: any) => entity === PaymentTransaction ? paymentTransactionRepository.save(value) : value,
+    };
     paymentTransactionRepository = {
-      create: jest.fn((payload) => payload),
-      save: jest.fn(async (payload) => ({
+      manager,
+      create: jest.fn((payload) => { draft = payload; return payload; }),
+      save: jest.fn(async (payload) => { stored = {
         id: payload.id ?? 'payment-1',
         ...payload,
-      })),
+      }; return { ...stored }; }),
       findOne: jest.fn(),
       find: jest.fn(),
     };
@@ -73,8 +96,12 @@ describe('PaymentsService', () => {
       paymentTransactionRepository as any,
       configService as any,
       flexPayService as any,
+      { isConfigured: () => false } as any,
+      new PaymentSettlementRegistry(),
     );
   });
+
+  afterEach(() => jest.restoreAllMocks());
 
   it('generates a FlexPay-compatible reference with at most 25 characters', async () => {
     const payment = await service.initiatePayment({
@@ -620,5 +647,45 @@ describe('PaymentsService', () => {
     expect(payout.providerMessage).toContain(
       'Aucun paiement ne vous est demandé',
     );
+  });
+
+  it('does not fail over after an ambiguous FlexPay deposit error', async () => {
+    flexPayService.initiatePayment.mockRejectedValue(
+      new BadGatewayException('Initialisation paiement Mobile Money FlexPay indisponible'),
+    );
+    const pawaPay = {
+      isConfigured: jest.fn().mockReturnValue(true),
+      initiateDeposit: jest.fn().mockResolvedValue({
+        paymentId: '11111111-1111-4111-8111-111111111111',
+        status: 'ACCEPTED',
+        accepted: true,
+        paymentUrl: null,
+        failureCode: null,
+        failureMessage: null,
+        raw: { status: 'ACCEPTED' },
+      }),
+    };
+    const routed = new PaymentsService(
+      paymentTransactionRepository as any,
+      configService as any,
+      flexPayService as any,
+      pawaPay as any,
+      new PaymentSettlementRegistry(),
+    );
+
+    const payment = await routed.initiatePayment({
+      userId: '123e4567-e89b-12d3-a456-426614174000',
+      method: PaymentMethod.MOBILE_MONEY,
+      phone: '+243811234567',
+      amount: 1500,
+      currency: 'CDF',
+      description: 'Course Zwanga',
+      referencePrefix: 'TRIP',
+    });
+
+    expect(flexPayService.initiatePayment).toHaveBeenCalled();
+    expect(pawaPay.initiateDeposit).not.toHaveBeenCalled();
+    expect(payment.provider).toBe(PaymentProvider.FLEXPAY);
+    expect(payment.status).toBe(PaymentStatus.PENDING);
   });
 });

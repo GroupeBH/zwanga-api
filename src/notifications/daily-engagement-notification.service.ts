@@ -39,7 +39,7 @@ export class DailyEngagementNotificationService {
     let skippedCount = 0;
 
     for (const user of usersWithToken) {
-      const isDriverProfile = user.isDriver || user.role === UserRole.DRIVER;
+      const isDriverProfile = user.role === UserRole.DRIVER;
       const firstName = (user.firstName || '').trim() || 'cher utilisateur';
 
       const title = `Bonjour ${firstName}`;

@@ -233,6 +233,7 @@ export class PublicUserInfoDto {
   @ApiProperty({ description: "Statistiques de l'utilisateur" })
   stats: {
     tripsAsDriver: number;
+    completedTripsAsDriver: number;
     bookingsAsPassenger: number;
     bookingsAsDriver: number;
     vehiclesCount: number;

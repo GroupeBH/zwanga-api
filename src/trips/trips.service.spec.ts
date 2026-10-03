@@ -1,6 +1,6 @@
 import { BadRequestException } from '@nestjs/common';
 import { TripsService } from './trips.service';
-import { UserRole } from '../users/entities/user.entity';
+import { User, UserRole } from '../users/entities/user.entity';
 import { TripStatus } from './entities/trip.entity';
 import { BookingStatus } from '../bookings/entities/booking.entity';
 import { VehicleType } from '../vehicles/entities/vehicle.entity';
@@ -13,11 +13,13 @@ describe('TripsService daily trip publication quota', () => {
     update: jest.Mock;
     findOne: jest.Mock;
     createQueryBuilder: jest.Mock;
+    manager?: any;
   };
-  let userRepository: { findOne: jest.Mock; save: jest.Mock };
+  let userRepository: { findOne: jest.Mock; save: jest.Mock; manager: any };
   let vehicleRepository: { findOne: jest.Mock };
   let subscriptionsService: { getPremiumOverview: jest.Mock };
   let cacheService: { del: jest.Mock };
+  let notificationService: { sendNotificationToUser: jest.Mock };
   let driverSettlementsService: { notifyDriverTripRevenue: jest.Mock };
 
   const baseCreateTripDto = {
@@ -43,17 +45,32 @@ describe('TripsService daily trip publication quota', () => {
         id: 'driver-1',
         role: UserRole.DRIVER,
         isDriver: true,
+        isActive: true,
+        profilePicture: 'profiles/driver-photo.jpg',
+        hasPublishedTrip: true,
       }),
       save: jest.fn(),
+      manager: { getRepository: () => ({
+        findOne: jest.fn().mockResolvedValue({ status: 'approved' }),
+        exists: jest.fn().mockResolvedValue(true),
+      }) },
     };
     vehicleRepository = {
       findOne: jest.fn(),
     };
+    tripRepository.manager = { transaction: jest.fn(async (_isolation, work) => work({
+      getRepository: (entity) => entity === User ? userRepository : {
+        save: async (trips) => [await tripRepository.save(trips)],
+      },
+    })) };
     subscriptionsService = {
       getPremiumOverview: jest.fn(),
     };
     cacheService = {
       del: jest.fn().mockResolvedValue(undefined),
+    };
+    notificationService = {
+      sendNotificationToUser: jest.fn().mockResolvedValue(true),
     };
     driverSettlementsService = {
       notifyDriverTripRevenue: jest.fn().mockResolvedValue(null),
@@ -73,7 +90,7 @@ describe('TripsService daily trip publication quota', () => {
       {} as any,
       cacheService as any,
       {} as any,
-      {} as any,
+      notificationService as any,
       {} as any,
       {} as any,
       subscriptionsService as any,
@@ -139,6 +156,173 @@ describe('TripsService daily trip publication quota', () => {
     await service.update(trip.id, trip.driverId, { pricePerSeat: 3500 });
     expect(trip.pricePerSeat).toBe(3500);
     expect(tripRepository.save).toHaveBeenCalledWith(trip);
+  });
+
+  it('blocks trip detail changes while an accepted passenger is on board', async () => {
+    const trip = {
+      id: 'trip-1',
+      driverId: 'driver-1',
+      tripRequestId: null,
+      status: TripStatus.ACTIVE,
+      bookings: [
+        {
+          id: 'booking-on-board',
+          passengerId: 'passenger-1',
+          status: BookingStatus.ACCEPTED,
+          pickedUp: true,
+          droppedOff: false,
+        },
+      ],
+    };
+    tripRepository.findOne.mockResolvedValue(trip);
+
+    await expect(
+      service.update(trip.id, trip.driverId, {
+        description: 'Nouvelle description',
+      }),
+    ).rejects.toMatchObject({
+      response: expect.objectContaining({
+        code: 'TRIP_UPDATE_BLOCKED_PASSENGER_ON_BOARD',
+      }),
+    });
+
+    expect(tripRepository.save).not.toHaveBeenCalled();
+    expect(cacheService.del).not.toHaveBeenCalled();
+    expect(notificationService.sendNotificationToUser).not.toHaveBeenCalled();
+  });
+
+  it('notifies only passengers with an accepted booking when trip details change', async () => {
+    const trip = {
+      id: 'trip-1',
+      driverId: 'driver-1',
+      tripRequestId: null,
+      departureLocation: 'Gombe',
+      departureReference: null,
+      departurePoint: { type: 'Point', coordinates: [15.2663, -4.325] },
+      arrivalLocation: 'Limete',
+      arrivalReference: null,
+      arrivalPoint: { type: 'Point', coordinates: [15.3222, -4.4419] },
+      departureDate: new Date('2026-09-22T08:00:00.000Z'),
+      totalSeats: 3,
+      availableSeats: 1,
+      pricePerSeat: 2000,
+      isFree: false,
+      requiresPassengerKyc: false,
+      description: 'Rendez-vous initial',
+      vehicleId: null,
+      vehicle: null,
+      status: TripStatus.PENDING,
+      bookings: [
+        {
+          id: 'booking-accepted',
+          passengerId: 'passenger-accepted',
+          status: BookingStatus.ACCEPTED,
+        },
+        {
+          id: 'booking-pending',
+          passengerId: 'passenger-pending',
+          status: BookingStatus.PENDING,
+        },
+      ],
+    };
+    tripRepository.findOne.mockResolvedValue(trip);
+
+    await service.update(trip.id, trip.driverId, {
+      departureDate: '2026-09-22T09:00:00.000Z',
+      description: 'Nouveau point de rendez-vous',
+    });
+
+    expect(notificationService.sendNotificationToUser).toHaveBeenCalledTimes(1);
+    expect(notificationService.sendNotificationToUser).toHaveBeenCalledWith(
+      'passenger-accepted',
+      '🚗 Votre trajet a été modifié',
+      expect.stringMatching(/date ou heure de départ.*description/),
+      expect.objectContaining({
+        type: 'trip_updated',
+        role: 'passenger',
+        tripId: 'trip-1',
+        bookingId: 'booking-accepted',
+        changedFields: expect.stringContaining('departureDate'),
+      }),
+    );
+  });
+
+  it('does not notify accepted passengers when submitted values are unchanged', async () => {
+    const trip = {
+      id: 'trip-1',
+      driverId: 'driver-1',
+      tripRequestId: null,
+      departureLocation: 'Gombe',
+      arrivalLocation: 'Limete',
+      departureDate: new Date('2026-09-22T08:00:00.000Z'),
+      totalSeats: 3,
+      availableSeats: 1,
+      pricePerSeat: 2000,
+      isFree: false,
+      requiresPassengerKyc: false,
+      description: 'Rendez-vous initial',
+      vehicleId: null,
+      vehicle: null,
+      status: TripStatus.PENDING,
+      bookings: [
+        {
+          id: 'booking-accepted',
+          passengerId: 'passenger-accepted',
+          status: BookingStatus.ACCEPTED,
+        },
+      ],
+    };
+    tripRepository.findOne.mockResolvedValue(trip);
+
+    await service.update(trip.id, trip.driverId, {
+      departureDate: '2026-09-22T08:00:00.000Z',
+      pricePerSeat: 2000,
+      description: 'Rendez-vous initial',
+    });
+
+    expect(notificationService.sendNotificationToUser).not.toHaveBeenCalled();
+  });
+
+  it('keeps the trip update successful when a passenger notification fails', async () => {
+    notificationService.sendNotificationToUser.mockRejectedValueOnce(
+      new Error('Push provider unavailable'),
+    );
+    const trip = {
+      id: 'trip-1',
+      driverId: 'driver-1',
+      tripRequestId: null,
+      departureLocation: 'Gombe',
+      arrivalLocation: 'Limete',
+      departureDate: new Date('2026-09-22T08:00:00.000Z'),
+      totalSeats: 3,
+      availableSeats: 1,
+      pricePerSeat: 2000,
+      isFree: false,
+      requiresPassengerKyc: false,
+      description: 'Rendez-vous initial',
+      vehicleId: null,
+      vehicle: null,
+      status: TripStatus.PENDING,
+      bookings: [
+        {
+          id: 'booking-accepted',
+          passengerId: 'passenger-accepted',
+          status: BookingStatus.ACCEPTED,
+        },
+      ],
+    };
+    tripRepository.findOne.mockResolvedValue(trip);
+
+    await expect(
+      service.update(trip.id, trip.driverId, {
+        description: 'Nouveau point de rendez-vous',
+      }),
+    ).resolves.toEqual({ id: 'trip-1' });
+    expect(tripRepository.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        description: 'Nouveau point de rendez-vous',
+      }),
+    );
   });
 
   it('persists driver samples with a timestamp compare-and-set shared by REST and Socket.IO', async () => {
@@ -213,6 +397,49 @@ describe('TripsService daily trip publication quota', () => {
 
     expect(tripRepository.createQueryBuilder).not.toHaveBeenCalled();
     expect(tripRepository.save).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects a second public publication without a photo before quota or geocoding work', async () => {
+    const driver = await userRepository.findOne();
+    driver.profilePicture = '';
+    await expect(service.create('driver-1', baseCreateTripDto)).rejects.toMatchObject({
+      response: expect.objectContaining({ code: 'DRIVER_PROFILE_PHOTO_REQUIRED' }),
+    });
+    expect(subscriptionsService.getPremiumOverview).not.toHaveBeenCalled();
+    expect(tripRepository.save).not.toHaveBeenCalled();
+  });
+
+  it('keeps private request acceptance available without a photo and without consuming a publication', async () => {
+    const driver = await userRepository.findOne();
+    driver.profilePicture = '';
+    subscriptionsService.getPremiumOverview.mockResolvedValue({ isActive: true });
+    await expect(service.create('driver-1', baseCreateTripDto, { isPrivate: true, tripRequestId: 'request' }))
+      .resolves.toEqual({ id: 'trip-1' });
+    expect(tripRepository.manager.transaction).not.toHaveBeenCalled();
+    expect(tripRepository.save).toHaveBeenCalledWith(expect.objectContaining({ isPrivate: true, tripRequestId: 'request' }));
+  });
+
+  it('requires a photo before saving a new recurring schedule', async () => {
+    jest.spyOn(service, 'resolvePublishingContext').mockResolvedValue({
+      user: { profilePicture: '', hasPublishedTrip: false }, vehicle: { id: 'vehicle' },
+    });
+    service.recurringTripTemplateRepository = { save: jest.fn() };
+    await expect(service.createRecurring('driver-1', baseCreateTripDto)).rejects.toMatchObject({
+      response: expect.objectContaining({ code: 'DRIVER_PROFILE_PHOTO_REQUIRED' }),
+    });
+    expect(service.recurringTripTemplateRepository.save).not.toHaveBeenCalled();
+  });
+
+  it('also checks the driver photo when a passenger makes a private request trip public', async () => {
+    const driver = await userRepository.findOne();
+    Object.assign(driver, { profilePicture: '', status: 'active', vehicles: [{ isActive: true }] });
+    tripRepository.findOne.mockResolvedValue({ id: 'trip-1', driverId: driver.id, isPrivate: true, tripRequestId: 'request' });
+    service.tripRequestRepository = { findOne: jest.fn().mockResolvedValue({ passengerId: 'passenger' }) };
+    service.kycDocumentRepository = { findOne: jest.fn().mockResolvedValue({ status: 'approved' }) };
+    await expect(service.makeTripPublic('trip-1', 'passenger')).rejects.toMatchObject({
+      response: expect.objectContaining({ code: 'DRIVER_PROFILE_PHOTO_REQUIRED' }),
+    });
+    expect(tripRepository.save).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -622,7 +849,7 @@ describe('TripsService started trip ETA expiration', () => {
     increment: jest.Mock;
   };
   let bookingRepository: { update: jest.Mock };
-  let userRepository: { find: jest.Mock };
+  let userRepository: { find: jest.Mock; findOne: jest.Mock; manager: any };
   let cacheService: { del: jest.Mock };
   let googleMapsService: { getDirections: jest.Mock };
   let weatherAwarenessService: { getRouteImpact: jest.Mock };
@@ -642,6 +869,11 @@ describe('TripsService started trip ETA expiration', () => {
     };
     userRepository = {
       find: jest.fn().mockResolvedValue([]),
+      findOne: jest.fn().mockResolvedValue({ id: 'driver-1', role: UserRole.DRIVER, isActive: true }),
+      manager: { getRepository: () => ({
+        findOne: jest.fn().mockResolvedValue({ status: 'approved' }),
+        exists: jest.fn().mockResolvedValue(true),
+      }) },
     };
     cacheService = {
       del: jest.fn().mockResolvedValue(undefined),

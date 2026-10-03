@@ -6,6 +6,7 @@ import {
   ParseUUIDPipe,
   Post,
   Request,
+  Query,
 } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Auth } from '../auth/decorators/auth.decorator';
@@ -19,6 +20,7 @@ import {
 } from './dto/wallet.dto';
 import { WalletService } from './wallet.service';
 import { WalletWithdrawalsService } from './wallet-withdrawals.service';
+import { HistoryPageDto } from '../common/pagination/history-page';
 
 @ApiTags('Wallet')
 @Controller('wallet')
@@ -76,6 +78,14 @@ export class WalletController {
   @ApiOperation({ summary: 'Get current user Zwanga token ledger' })
   async getMyLedger(@Request() req) {
     return this.walletService.getLedger(req.user.userId);
+  }
+
+  @Get('ledger/page')
+  @Auth()
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'Get a cursor page of current user token ledger' })
+  getMyLedgerPage(@Request() req, @Query() options: HistoryPageDto) {
+    return this.walletService.getLedgerPage(req.user.userId, options);
   }
 
   @Post('topups')

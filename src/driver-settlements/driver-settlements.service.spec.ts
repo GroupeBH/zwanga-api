@@ -27,6 +27,8 @@ describe('DriverSettlementsService', () => {
     createQueryBuilder: jest.Mock;
   };
   let payoutRepository: {
+    exists: jest.Mock;
+    update: jest.Mock;
     findOne: jest.Mock;
     create: jest.Mock;
     save: jest.Mock;
@@ -65,6 +67,8 @@ describe('DriverSettlementsService', () => {
       createQueryBuilder: jest.fn(),
     };
     payoutRepository = {
+      exists: jest.fn().mockResolvedValue(false),
+      update: jest.fn(),
       findOne: jest.fn(),
       create: jest.fn((payload) => payload),
       save: jest.fn(async (payload) => ({ id: 'payout-1', ...payload })),
@@ -98,7 +102,7 @@ describe('DriverSettlementsService', () => {
     };
     manager = {
       findOne: jest.fn(),
-      exists: jest.fn().mockResolvedValue(true),
+      exists: jest.fn(async entity => entity !== DriverPayout),
       create: jest.fn((_entity, payload) => payload),
       save: jest.fn(async (payload) => ({
         id: payload.id ?? 'payout-1',
@@ -357,6 +361,7 @@ describe('DriverSettlementsService', () => {
   it('reserves the balance under a driver lock before initiating one payout', async () => {
     let payoutLookupCount = 0;
     manager.findOne.mockImplementation(async (entity) => {
+      if (entity === PaymentTransaction) return paymentsService.initiatePayout.mock.results.at(-1)?.value;
       if (entity === User) {
         return { id: 'driver-1', phone: '+243891234567' };
       }
@@ -394,6 +399,8 @@ describe('DriverSettlementsService', () => {
       purpose: PaymentPurpose.DRIVER_PAYOUT,
       relatedEntityType: 'driver_payout',
       relatedEntityId: 'payout-1',
+      amount: 9500,
+      currency: 'CDF',
       method: PaymentMethod.MOBILE_MONEY,
       status: PaymentStatus.INITIATED,
       orderNumber: 'PAYOUT123',
@@ -429,6 +436,8 @@ describe('DriverSettlementsService', () => {
       purpose: PaymentPurpose.DRIVER_PAYOUT,
       relatedEntityType: 'driver_payout',
       relatedEntityId: 'payout-1',
+      amount: 9500,
+      currency: 'CDF',
       method: PaymentMethod.MOBILE_MONEY,
       status: PaymentStatus.INITIATED,
       orderNumber: 'PAYOUT123',
@@ -450,6 +459,7 @@ describe('DriverSettlementsService', () => {
       failureReason: null,
     };
     manager.findOne.mockImplementation(async (entity) => {
+      if (entity === PaymentTransaction) return payment;
       if (entity === User) {
         return { id: 'driver-1', phone: '+243891234567' };
       }

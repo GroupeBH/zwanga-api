@@ -19,7 +19,7 @@ const createUser = (kycStatus?: KycStatus) =>
 const createService = (user: User) => {
   const userRepository = {
     findOne: jest.fn().mockResolvedValue(user),
-    save: jest.fn((payload: User) => Promise.resolve(payload)),
+    update: jest.fn().mockResolvedValue({ affected: 1 }),
   };
   const service = new UsersService(
     userRepository as any,
@@ -44,7 +44,7 @@ const createService = (user: User) => {
 describe('UsersService legal identity', () => {
   it('normalizes legal names before KYC approval', async () => {
     const user = createUser();
-    const { service } = createService(user);
+    const { service, userRepository } = createService(user);
 
     const result = await service.updateProfile('user-1', {
       firstName: '  Eugène ',
@@ -53,6 +53,10 @@ describe('UsersService legal identity', () => {
 
     expect(result.firstName).toBe('Eugène');
     expect(result.lastName).toBe('Bosuku');
+    expect(userRepository.update).toHaveBeenCalledWith(
+      'user-1',
+      expect.objectContaining({ firstName: 'Eugène', lastName: 'Bosuku' }),
+    );
   });
 
   it('rejects a legal name change after KYC approval', async () => {
@@ -62,7 +66,7 @@ describe('UsersService legal identity', () => {
     await expect(
       service.updateProfile('user-1', { lastName: 'Nom différent' }),
     ).rejects.toBeInstanceOf(BadRequestException);
-    expect(userRepository.save).not.toHaveBeenCalled();
+    expect(userRepository.update).not.toHaveBeenCalled();
   });
 
   it('allows spacing and case normalization after KYC approval', async () => {
@@ -74,7 +78,8 @@ describe('UsersService legal identity', () => {
       lastName: 'bosuku   buania',
     });
 
-    expect(userRepository.save).toHaveBeenCalledWith(
+    expect(userRepository.update).toHaveBeenCalledWith(
+      'user-1',
       expect.objectContaining({
         firstName: 'EUGENE',
         lastName: 'bosuku buania',

@@ -39,6 +39,7 @@ import {
   FileInterceptor,
 } from '@nestjs/platform-express';
 import { DiditKycService } from './didit-kyc.service';
+import { IMAGE_UPLOAD_OPTIONS } from '../common/image-upload-policy';
 
 @ApiTags('Users')
 @Controller('users')
@@ -51,7 +52,11 @@ export class UsersController {
   @Get('me')
   @Auth()
   @SensitiveThrottle(30, 60000)
-  @ApiOperation({ summary: 'Get current user profile' })
+  @ApiOperation({
+    summary: 'Get current user profile',
+    description:
+      'profileState v1 exposes server-owned identity status, driver eligibility and nextAction. Reading it never activates a driver. user.isPhoneVerified and user.phoneVerificationRequired report optional phone OTP verification.',
+  })
   async getProfile(@Request() req) {
     return this.usersService.getProfileSummary(req.user.userId);
   }
@@ -79,7 +84,7 @@ export class UsersController {
   @Auth()
   @SensitiveThrottle(10, 60000)
   @ApiOperation({ summary: 'Update user profile' })
-  @UseInterceptors(FileInterceptor('profilePicture'))
+  @UseInterceptors(FileInterceptor('profilePicture', IMAGE_UPLOAD_OPTIONS))
   @ApiConsumes('multipart/form-data')
   async updateProfile(
     @Request() req,
@@ -93,6 +98,24 @@ export class UsersController {
     );
   }
 
+  @Post('driver-onboarding')
+  @Auth()
+  @HttpCode(HttpStatus.OK)
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({ summary: 'Request driver onboarding; activation requires approved identity and an active owned vehicle' })
+  async requestDriverOnboarding(@Request() req) {
+    return this.usersService.activateDriver(req.user.userId);
+  }
+
+  @Post('driver-activation')
+  @Auth()
+  @HttpCode(HttpStatus.OK)
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({ summary: 'Activate the driver profile only after all requirements are met' })
+  async activateDriver(@Request() req) {
+    return this.usersService.activateDriver(req.user.userId, true);
+  }
+
   @Post('kyc')
   @Auth()
   @SensitiveThrottle(5, 60000)
@@ -101,7 +124,7 @@ export class UsersController {
       { name: 'cniFront', maxCount: 1 },
       { name: 'cniBack', maxCount: 1 },
       { name: 'selfie', maxCount: 1 },
-    ]),
+    ], IMAGE_UPLOAD_OPTIONS),
   )
   @ApiConsumes('multipart/form-data')
   @ApiBody({

@@ -49,6 +49,17 @@ export class Booking {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
+  // Readable by participants, but never overwritten by stale GPS/payment entity saves.
+  // Written only by the explicit, conditional cash-receipt command.
+  @Column({ type: 'timestamptz', nullable: true, update: false })
+  cashReceivedAt: Date | null;
+
+  @Column({ type: 'uuid', nullable: true, update: false })
+  cashReceivedByDriverId: string | null;
+
+  @Column({ type: 'numeric', precision: 10, scale: 2, nullable: true, update: false })
+  cashReceivedAmount: number | null;
+
   // Explicitly selected only by the declarations service. Existing GPS/payment
   // saves must never write an old copy of these concurrent receipts.
   @Column({ type: 'jsonb', default: () => "'{}'::jsonb", select: false })

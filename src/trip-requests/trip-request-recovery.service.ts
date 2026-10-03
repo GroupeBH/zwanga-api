@@ -134,7 +134,7 @@ export class TripRequestRecoveryService {
       );
 
       const drivers = await this.userRepository.find({
-        where: { isDriver: true, role: UserRole.DRIVER, isActive: true },
+        where: { role: UserRole.DRIVER, isActive: true },
         select: ['id', 'fcmToken'],
       });
       const driversWithTokens = drivers.filter(

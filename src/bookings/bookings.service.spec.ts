@@ -1200,7 +1200,7 @@ describe('BookingsService trip payments', () => {
       },
     });
 
-    const result = await service.confirmPickup('booking-1', 'driver-1');
+    const result = await service.confirmPickupByPassenger('booking-1', 'passenger-1');
 
     expect(result).toEqual(
       expect.objectContaining({
@@ -1336,50 +1336,11 @@ describe('BookingsService trip payments', () => {
     );
   });
 
-  it('lets the driver complete dropoff without waiting for a passenger button', async () => {
-    const finalizeCompletedBookingSpy = jest
-      .spyOn(service as any, 'finalizeCompletedBooking')
-      .mockResolvedValue(undefined);
-    jest
-      .spyOn(service as any, 'notifySelectedEmergencyContacts')
-      .mockResolvedValue(undefined);
-    jest
-      .spyOn(service as any, 'notifyPassengerAboutDropoffConfirmation')
-      .mockResolvedValue(undefined);
-    jest
-      .spyOn(service as any, 'touchTripInteraction')
-      .mockResolvedValue(undefined);
-
-    bookingRepository.findOne.mockResolvedValue({
-      ...booking,
-      paymentMode: TripPaymentMode.CASH,
-      paymentStatus: BookingPaymentStatus.NOT_REQUIRED,
-      pickedUp: true,
-      pickedUpConfirmedByPassenger: false,
-      droppedOff: false,
-      droppedOffConfirmedByPassenger: false,
-      trip: {
-        ...booking.trip,
-        driverId: 'driver-1',
-      },
+  it('rejects driver-only dropoff without changing a booking', async () => {
+    await expect(service.confirmDropoff('booking-1', 'driver-1')).rejects.toMatchObject({
+      response: expect.objectContaining({ code: 'RIDE_DECLARATION_REQUIRED' }),
     });
-
-    const result = await service.confirmDropoff('booking-1', 'driver-1');
-
-    expect(result.droppedOff).toBe(true);
-    expect(result.droppedOffConfirmedByPassenger).toBe(true);
-    expect(result.status).toBe(BookingStatus.COMPLETED);
-    expect(bookingRepository.save).toHaveBeenCalledWith(
-      expect.objectContaining({
-        droppedOff: true,
-        pickedUpConfirmedByPassenger: true,
-        droppedOffConfirmedByPassenger: true,
-        status: BookingStatus.COMPLETED,
-      }),
-    );
-    expect(finalizeCompletedBookingSpy).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'booking-1' }),
-    );
+    expect(bookingRepository.save).not.toHaveBeenCalled();
   });
 
   it('lets the passenger complete dropoff without waiting for a driver button', async () => {
@@ -1427,47 +1388,11 @@ describe('BookingsService trip payments', () => {
     );
   });
 
-  it('finalizes the booking when the driver confirms a passenger-requested dropoff', async () => {
-    const finalizeCompletedBookingSpy = jest
-      .spyOn(service as any, 'finalizeCompletedBooking')
-      .mockResolvedValue(undefined);
-    jest
-      .spyOn(service as any, 'notifySelectedEmergencyContacts')
-      .mockResolvedValue(undefined);
-    jest
-      .spyOn(service as any, 'notifyPassengerAboutDropoffConfirmation')
-      .mockResolvedValue(undefined);
-    jest
-      .spyOn(service as any, 'touchTripInteraction')
-      .mockResolvedValue(undefined);
-
-    bookingRepository.findOne.mockResolvedValue({
-      ...booking,
-      paymentMode: TripPaymentMode.CASH,
-      paymentStatus: BookingPaymentStatus.NOT_REQUIRED,
-      pickedUp: true,
-      pickedUpConfirmedByPassenger: true,
-      droppedOff: false,
-      droppedOffConfirmedByPassenger: true,
-      trip: {
-        ...booking.trip,
-        driverId: 'driver-1',
-      },
+  it('does not let the retired driver endpoint finalize a passenger dropoff', async () => {
+    await expect(service.confirmDropoff('booking-1', 'driver-1')).rejects.toMatchObject({
+      response: expect.objectContaining({ code: 'RIDE_DECLARATION_REQUIRED' }),
     });
-
-    const result = await service.confirmDropoff('booking-1', 'driver-1');
-
-    expect(result.droppedOff).toBe(true);
-    expect(result.status).toBe(BookingStatus.COMPLETED);
-    expect(bookingRepository.save).toHaveBeenCalledWith(
-      expect.objectContaining({
-        droppedOff: true,
-        status: BookingStatus.COMPLETED,
-      }),
-    );
-    expect(finalizeCompletedBookingSpy).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'booking-1' }),
-    );
+    expect(bookingRepository.save).not.toHaveBeenCalled();
   });
 
   it('automatically confirms pickup when driver and passenger GPS stay together after moving from pickup', async () => {
@@ -1551,6 +1476,7 @@ describe('BookingsService trip payments', () => {
     const result = await service.evaluateAutomaticRideProgressForTrip('trip-1');
 
     expect(result.events).toEqual([
+      expect.objectContaining({ type: 'driver_near_pickup', bookingId: 'booking-1' }),
       expect.objectContaining({
         type: 'parties_nearby',
         bookingId: 'booking-1',
@@ -2079,7 +2005,10 @@ describe('BookingsService trip payments', () => {
 
     const result = await service.evaluateAutomaticRideProgressForTrip('trip-1');
 
-    expect(result.events).toEqual([]);
+    expect(result.events).toEqual([
+      expect.objectContaining({ type: 'driver_near_pickup', bookingId: 'booking-1' }),
+    ]);
+    expect(bookingRepository.update).not.toHaveBeenCalled();
     expect(bookingRepository.save).not.toHaveBeenCalled();
   });
 
@@ -2127,7 +2056,7 @@ describe('BookingsService trip payments', () => {
     );
   });
 
-  it('emits a driver-near-pickup event when the driver is within 200 meters of pickup', async () => {
+  it.each([250, 300, 301])('checks driver-near-pickup at %i meters with a 300m inclusive threshold', async (distance) => {
     const now = new Date();
     const autoBooking = {
       ...booking,
@@ -2149,18 +2078,19 @@ describe('BookingsService trip payments', () => {
     };
     bookingRepository.find.mockResolvedValue([autoBooking]);
 
+    jest.spyOn(service as any, 'calculatePointDistanceMeters').mockReturnValue(distance);
     const result = await service.evaluateAutomaticRideProgressForTrip('trip-1');
 
-    expect(result.events).toEqual([
+    expect(result.events).toEqual(distance <= 300 ? [
       expect.objectContaining({
         type: 'driver_near_pickup',
         bookingId: 'booking-1',
         tripId: 'trip-1',
         passengerId: 'passenger-1',
-        distanceMeters: expect.any(Number),
+        distanceMeters: distance,
         detectedAt: expect.any(String),
       }),
-    ]);
+    ] : []);
     expect(bookingRepository.save).not.toHaveBeenCalled();
   });
 

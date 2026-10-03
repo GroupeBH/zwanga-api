@@ -24,15 +24,24 @@ export class NotificationsController {
   @ApiOperation({ summary: 'Récupérer toutes les notifications de l\'utilisateur' })
   @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Nombre de notifications à récupérer' })
   @ApiQuery({ name: 'offset', required: false, type: Number, description: 'Nombre de notifications à ignorer' })
+  @ApiQuery({
+    name: 'scope',
+    required: false,
+    enum: ['all', 'critical'],
+    description:
+      'critical masque le suivi courant des trajets, des demandes de trajet et des conversations',
+  })
   @ApiResponse({ status: 200, description: 'Liste des notifications' })
   async findAll(
     @Request() req,
     @Query('limit') limit?: number,
     @Query('offset') offset?: number,
+    @Query('scope') scope?: string,
   ) {
     return this.notificationService.findAllByUser(req.user.userId, {
       limit: limit ? parseInt(String(limit)) : undefined,
       offset: offset ? parseInt(String(offset)) : undefined,
+      scope: scope === 'critical' ? 'critical' : 'all',
     });
   }
 

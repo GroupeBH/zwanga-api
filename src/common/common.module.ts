@@ -9,10 +9,14 @@ import { KycValidationService } from './services/kyc-validation.service';
 import { RolesGuard } from './guards/roles.guard';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 import { LoggingInterceptor } from './interceptors/logging.interceptor';
+import { WsSessionService } from './services/ws-session.service';
+import { WsWorkInterceptor } from './ws-work.interceptor';
 
 @Global()
 @Module({
   providers: [
+    WsSessionService,
+    WsWorkInterceptor,
     CacheService,
     RedisService,
     LocationHistoryService,
@@ -25,6 +29,8 @@ import { LoggingInterceptor } from './interceptors/logging.interceptor';
     LoggingInterceptor,
   ],
   exports: [
+    WsSessionService,
+    WsWorkInterceptor,
     CacheService,
     RedisService,
     LocationHistoryService,

@@ -1,5 +1,6 @@
 import {
   Body,
+  BadRequestException,
   Controller,
   Delete,
   Get,
@@ -13,6 +14,7 @@ import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { ChatService } from './chat.service';
 import {
   AddParticipantsDto,
+  ResolveDirectConversationDto,
   CreateConversationDto,
   ListConversationsQueryDto,
   SendMessageDto,
@@ -20,11 +22,20 @@ import {
 import { Auth } from '../auth/decorators/auth.decorator';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
 import { MessagePageDto } from './dto/message-page.dto';
+import { LegacyPageQuery } from '../common/legacy-page';
 
 @ApiTags('Conversations')
 @Controller('conversations')
 export class ConversationsController {
   constructor(private readonly chatService: ChatService) {}
+
+  @Post('direct')
+  @Auth()
+  @SensitiveThrottle(20, 60000)
+  async direct(@Request() req, @Body() dto: ResolveDirectConversationDto) {
+    if (req.user.userId === dto.userId) throw new BadRequestException('Choisissez un autre utilisateur.');
+    return this.chatService.createConversation(req.user.userId, { participantIds: [dto.userId] });
+  }
 
   @Post()
   @Auth()
@@ -65,8 +76,8 @@ export class ConversationsController {
   @Auth()
   @SensitiveThrottle(60, 60000)
   @ApiOperation({ summary: 'Liste des messages d’une conversation' })
-  async getMessages(@Request() req, @Param('id') id: string) {
-    return this.chatService.getConversationMessages(id, req.user.userId);
+  async getMessages(@Request() req, @Param('id') id: string, @Query() query: LegacyPageQuery) {
+    return this.chatService.getConversationMessages(id, req.user.userId, undefined, query);
   }
 
   @Post(':id/messages')

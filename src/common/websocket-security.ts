@@ -25,6 +25,12 @@ export function socketUserId(client: Socket): string {
   return userId;
 }
 
+export function assertSocketRoomCapacity(client: Socket, room: string) {
+  if (client.rooms && !client.rooms.has(room) && client.rooms.size >= 32) {
+    throw new WsException('Trop de conversations ou de suivis ouverts. Fermez-en un avant de continuer.');
+  }
+}
+
 export class WsAuthenticatedGuard implements CanActivate {
   canActivate(context: ExecutionContext): boolean {
     const client = context.switchToWs().getClient<Socket>();

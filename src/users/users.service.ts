@@ -37,17 +37,13 @@ import { Rating } from '../ratings/entities/rating.entity';
 import { Vehicle } from '../vehicles/entities/vehicle.entity';
 import { FileUploadService } from '../common/services/file-upload.service';
 import { KycValidationService } from '../common/services/kyc-validation.service';
-import { KeccelOtpService } from '../keccel-otp/keccel-otp.service';
-import { OTP_SMS_MESSAGES } from '../keccel-otp/otp-messages';
+import { OtpService } from '../otp/otp.service';
 import { Express } from 'express';
 import { UserRole } from './entities/user.entity';
 import { SubscriptionsService } from '../subscriptions/subscriptions.service';
-import {
-  assertSelfServiceUserRole,
-  isAdminRole,
-  normalizeUserDriverFlags,
-  resolveSelfServiceDriverState,
-} from './user-role.policy';
+import { assertSelfServiceUserRole, isAdminRole } from './user-role.policy';
+import { activateRequestedDriver } from './driver-activation';
+import { buildProfileState, LATEST_IDENTITY_ORDER } from './profile-state';
 import {
   areLegalNamesEquivalent,
   normalizeLegalName,
@@ -76,7 +72,7 @@ export class UsersService {
     private vehicleRepository: Repository<Vehicle>,
     private fileUploadService: FileUploadService,
     private kycValidationService: KycValidationService,
-    private keccelOtpService: KeccelOtpService,
+    private otpService: OtpService,
     private subscriptionsService: SubscriptionsService,
     private readonly dataSource: DataSource,
     private configService: ConfigService,
@@ -157,6 +153,7 @@ export class UsersService {
       kyc.cniFrontUrl =
         (await this.fileUploadService.getPresignedUrlIfS3Key(
           kyc.cniFrontUrl,
+          true,
         )) || kyc.cniFrontUrl;
     }
     // Handle array of CNI front URLs
@@ -164,22 +161,29 @@ export class UsersService {
       kyc.cniFrontUrls = await Promise.all(
         kyc.cniFrontUrls.map((url) =>
           this.fileUploadService
-            .getPresignedUrlIfS3Key(url)
+            .getPresignedUrlIfS3Key(url, true)
             .then((presigned) => presigned || url),
         ),
       );
     }
     if (kyc.cniBackUrl) {
       kyc.cniBackUrl =
-        (await this.fileUploadService.getPresignedUrlIfS3Key(kyc.cniBackUrl)) ||
+        (await this.fileUploadService.getPresignedUrlIfS3Key(kyc.cniBackUrl, true)) ||
         kyc.cniBackUrl;
     }
     if (kyc.selfieUrl) {
       kyc.selfieUrl =
-        (await this.fileUploadService.getPresignedUrlIfS3Key(kyc.selfieUrl)) ||
+        (await this.fileUploadService.getPresignedUrlIfS3Key(kyc.selfieUrl, true)) ||
         kyc.selfieUrl;
     }
     return kyc;
+  }
+
+  async findAuthIdentity(id: string) {
+    if (!id) return null;
+    return this.userRepository.findOne({ where: { id }, select: [
+      'id', 'email', 'phone', 'role', 'status', 'isActive', 'passwordChangeRequired',
+    ] });
   }
 
   async findOne(id: string): Promise<User> {
@@ -218,8 +222,10 @@ export class UsersService {
     const premium = await this.subscriptionsService.getPremiumOverview(user.id);
 
     return {
+      profileState: buildProfileState(user),
       user: {
         ...this.toSafeUser(enrichedUser),
+        phoneVerificationRequired: Boolean(user.phone) && !user.isPhoneVerified,
         isPremium: premium.isPremium,
         premiumBadge: premium.premiumBadgeEnabled,
       },
@@ -390,7 +396,25 @@ export class UsersService {
 
     const user = await this.findOne(userId);
 
-    if (updateProfileDto.phone && updateProfileDto.phone !== user.phone) {
+    if (updateProfileDto.role) {
+      assertSelfServiceUserRole(updateProfileDto.role);
+      if (
+        updateProfileDto.role !== user.role &&
+        updateProfileDto.role !== UserRole.DRIVER
+      ) {
+        throw new BadRequestException(
+          'Le rôle ne peut pas être modifié dans les informations du profil.',
+        );
+      }
+      if (isAdminRole(user.role))
+        throw new BadRequestException(
+          'Le rôle de ce compte ne peut pas être modifié ici.',
+        );
+    }
+
+    const phoneChanged =
+      Boolean(updateProfileDto.phone) && updateProfileDto.phone !== user.phone;
+    if (phoneChanged) {
       const existingUser = await this.userRepository.findOne({
         where: { phone: updateProfileDto.phone },
       });
@@ -451,20 +475,31 @@ export class UsersService {
       }
     }
 
-    if (updateProfileDto.role) {
-      assertSelfServiceUserRole(updateProfileDto.role);
-      const driverState = resolveSelfServiceDriverState({
-        role: updateProfileDto.role,
-      });
-      user.role = driverState.role;
-      user.isDriver = driverState.isDriver;
-    }
-
     if (updateProfileDto.phone) {
       user.phone = updateProfileDto.phone;
     }
 
-    const updatedUser = await this.userRepository.save(user);
+    // A profile write must not restore a stale role after concurrent activation.
+    const profileChanges = {
+      firstName: user.firstName,
+      lastName: user.lastName,
+      gender: user.gender,
+      phone: user.phone,
+      ...(phoneChanged ? { isPhoneVerified: false } : {}),
+      profilePicture: user.profilePicture,
+    };
+    if (updateProfileDto.role === UserRole.DRIVER) {
+      await this.dataSource.transaction(async (manager) => {
+        await activateRequestedDriver(manager, userId, {
+          request: true,
+          requireReady: true,
+        });
+        await manager.getRepository(User).update(userId, profileChanges);
+      });
+    } else {
+      await this.userRepository.update(userId, profileChanges);
+    }
+    const updatedUser = await this.findOne(userId);
 
     if (
       profilePictureFile &&
@@ -478,6 +513,13 @@ export class UsersService {
 
     // Convert S3 key to presigned URL before returning
     return await this.enrichUserWithPresignedUrls(updatedUser);
+  }
+
+  async activateDriver(userId: string, requireReady = false): Promise<User> {
+    await this.dataSource.transaction((manager) =>
+      activateRequestedDriver(manager, userId, { request: true, requireReady }),
+    );
+    return this.toSafeUser(await this.findOne(userId)) as User;
   }
 
   async uploadKyc(
@@ -744,6 +786,11 @@ export class UsersService {
 
     try {
       // Prepare the KYC document (TypeORM FIX: Pass the 'user' object)
+      const lockedUser = await queryRunner.manager.getRepository(User).findOne({
+        where: { id: userId },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!lockedUser) throw new NotFoundException('Utilisateur introuvable');
       let kycDocument = existingKyc
         ? this.kycDocumentRepository.merge(existingKyc, {})
         : this.kycDocumentRepository.create({
@@ -770,26 +817,21 @@ export class UsersService {
 
       const savedKyc = await queryRunner.manager.save(kycDocument);
 
-      const hasActiveVehicle = await queryRunner.manager
-        .getRepository(Vehicle)
-        .exists({ where: { ownerId: userId, isActive: true } });
-      const driverProfileChanged = normalizeUserDriverFlags(user, {
-        hasActiveVehicle,
-      });
-
       // Update user status ONLY if approval is confirmed
-      if (isApprovalConfirmed) {
-        user.status = UserStatus.ACTIVE;
+      if (
+        isApprovalConfirmed &&
+        lockedUser.isActive &&
+        ![UserStatus.SUSPENDED, UserStatus.INACTIVE].includes(lockedUser.status)
+      ) {
+        await queryRunner.manager
+          .getRepository(User)
+          .update(userId, { status: UserStatus.ACTIVE });
+        this.logger.log(
+          `User ${userId} status updated to ACTIVE after KYC approval`,
+        );
       }
 
-      if (isApprovalConfirmed || driverProfileChanged) {
-        await queryRunner.manager.save(user); // Transactional user save
-        if (isApprovalConfirmed) {
-          this.logger.log(
-            `User ${userId} status updated to ACTIVE after KYC approval`,
-          );
-        }
-      }
+      await activateRequestedDriver(queryRunner.manager, userId);
 
       await queryRunner.commitTransaction();
 
@@ -834,8 +876,9 @@ export class UsersService {
   }
 
   async getKycStatus(userId: string): Promise<KycDocument | null> {
-    const kyc = await this.kycDocumentRepository.findOneBy({
-      userId: userId,
+    const kyc = await this.kycDocumentRepository.findOne({
+      where: { userId },
+      order: LATEST_IDENTITY_ORDER,
     });
 
     this.logger.log(`Fetching KYC status for user: ${kyc} ${userId}`);
@@ -858,8 +901,7 @@ export class UsersService {
       return;
     }
 
-    user.fcmToken = fcmToken;
-    await this.userRepository.save(user);
+    await this.userRepository.update(userId, { fcmToken });
 
     this.logger.debug(`FCM token updated for user: ${userId}`);
   }
@@ -907,11 +949,8 @@ export class UsersService {
       }
     }
 
-    // Send OTP using Keccel service
-    await this.keccelOtpService.sendOtp(
-      sendOtpDto.phone.trim(),
-      OTP_SMS_MESSAGES.verification,
-    );
+    // The configured OTP provider sends the code; registration remains optional.
+    await this.otpService.sendOtp(sendOtpDto.phone.trim());
 
     this.logger.log(
       `Phone verification OTP sent successfully to ${sendOtpDto.phone} (context: ${sendOtpDto.context})`,
@@ -920,7 +959,7 @@ export class UsersService {
   }
 
   /**
-   * Verify OTP without modifying user data
+   * Verify OTP and record proof for an existing account.
    * @param verifyOtpDto DTO containing phone number and OTP code
    * @returns Verification result
    */
@@ -929,8 +968,8 @@ export class UsersService {
   ): Promise<{ message: string; valid: boolean }> {
     this.logger.log(`Verifying phone OTP for: ${verifyOtpDto.phone}`);
 
-    // Verify OTP using Keccel service
-    const verificationResult = await this.keccelOtpService.verifyOtp(
+    // A successful provider check is the only path that clears the pending flag.
+    const verificationResult = await this.otpService.verifyOtp(
       verifyOtpDto.phone,
       verifyOtpDto.otp,
     );
@@ -942,7 +981,14 @@ export class UsersService {
       throw new BadRequestException('Code OTP invalide ou expiré');
     }
 
-    // Just return the verification result without modifying any user data
+    // A registration OTP may be checked before the account exists. It cannot
+    // prove a later signup without a bound proof token, so keep that signup
+    // pending until its account completes a phone OTP verification.
+    await this.userRepository.update(
+      { phone: verifyOtpDto.phone, isPhoneVerified: false, isActive: true },
+      { isPhoneVerified: true },
+    );
+
     this.logger.log(
       `Phone OTP verified successfully for: ${verifyOtpDto.phone}`,
     );
@@ -957,7 +1003,9 @@ export class UsersService {
   async changePin(userId: string, changePinDto: ChangePinDto): Promise<void> {
     this.logger.log(`Changing PIN for user ${userId}`);
 
-    const user = await this.findOne(userId);
+    const user = await this.userRepository.findOne({ where: { id: userId },
+      select: ['id', 'role', 'password'] });
+    if (!user) throw new NotFoundException('Utilisateur introuvable');
 
     if (isAdminRole(user.role)) {
       throw new BadRequestException(
@@ -1001,10 +1049,11 @@ export class UsersService {
     const saltRounds = 10;
     const hashedNewPin = await bcrypt.hash(changePinDto.newPin, saltRounds);
 
-    user.password = hashedNewPin;
-    user.refreshToken = null;
-    user.accessToken = null;
-    await this.userRepository.save(user);
+    await this.userRepository.update(userId, {
+      password: hashedNewPin,
+      refreshToken: null,
+      accessToken: null,
+    });
 
     this.logger.log(`PIN changed successfully for user ${userId}`);
   }
@@ -1224,7 +1273,7 @@ export class UsersService {
     }
 
     // Calculer les statistiques
-    const [tripsAsDriver, bookingsAsPassenger, bookingsAsDriver] =
+    const [tripsAsDriver, bookingsAsPassenger, bookingsAsDriver, completedTripsAsDriver] =
       await Promise.all([
         this.tripRepository.count({ where: { driverId: userId } }),
         this.bookingRepository.count({ where: { passengerId: userId } }),
@@ -1233,6 +1282,7 @@ export class UsersService {
           .innerJoin('booking.trip', 'trip')
           .where('trip.driverId = :userId', { userId })
           .getCount(),
+        this.tripRepository.count({ where: { driverId: userId, status: TripStatus.COMPLETED } }),
       ]);
 
     // Calculer la note moyenne et le nombre total de notes
@@ -1256,7 +1306,7 @@ export class UsersService {
     // Préparer les véhicules (si driver)
     const premium = await this.subscriptionsService.getPremiumOverview(user.id);
     const vehicles =
-      user.isDriver && user.vehicles
+      user.role === UserRole.DRIVER && user.vehicles
         ? await Promise.all(
             user.vehicles
               .filter((v) => v.isActive)
@@ -1298,6 +1348,7 @@ export class UsersService {
       totalRatings,
       stats: {
         tripsAsDriver,
+        completedTripsAsDriver,
         bookingsAsPassenger,
         bookingsAsDriver,
         vehiclesCount: user.vehicles?.filter((v) => v.isActive).length ?? 0,
