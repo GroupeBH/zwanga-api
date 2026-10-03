@@ -27,6 +27,8 @@ import { AuthGuard } from '@nestjs/passport';
 import type { Request, Response } from 'express';
 import { AuthService, type GoogleAuthProfile } from './auth.service';
 import { Auth } from './decorators/auth.decorator';
+import { AccountThrottle } from '../common/decorators/account-throttle.decorator';
+import { IMAGE_UPLOAD_OPTIONS } from '../common/image-upload-policy';
 import {
   RegisterDto,
   LoginDto,
@@ -80,9 +82,7 @@ export class AuthController {
         { name: 'cniImage', maxCount: 1 },
         { name: 'selfieImage', maxCount: 1 },
       ],
-      {
-        limits: { fileSize: 5 * 1024 * 1024 }, // 5MB
-      },
+      IMAGE_UPLOAD_OPTIONS,
     ),
   )
   @ApiConsumes('multipart/form-data')
@@ -196,6 +196,7 @@ export class AuthController {
   }
 
   @Post('login')
+  @AccountThrottle()
   @Public()
   @SensitiveThrottle(10, 60000) // 10 requests per minute per IP
   @HttpCode(HttpStatus.OK)
@@ -242,6 +243,7 @@ export class AuthController {
   }
 
   @Post('admin/login')
+  @AccountThrottle()
   @Public()
   @SensitiveThrottle(5, 60000)
   @HttpCode(HttpStatus.OK)

@@ -45,6 +45,7 @@ import { assertWalletTopUpCheckEvidence } from './wallet-topup-check-evidence';
 import { loadPaymentHistoryPage, loadPaymentHistorySummary } from './payment-history-page';
 import { loadPaymentContext, PaymentContextDto } from './payment-context';
 import type { PaymentHistoryPageDto } from '../common/pagination/history-page';
+import { claimDriverPayoutPayment, commitFlexPayPayoutState } from './flexpay-payout-state';
 
 export interface InitiatePaymentInput {
   userId?: string | null;
@@ -326,8 +327,12 @@ export class PaymentsService {
       paidAt: null,
     });
 
-    let savedTransaction =
-      await this.paymentTransactionRepository.save(transaction);
+    const claim = transaction.purpose === PaymentPurpose.DRIVER_PAYOUT &&
+        transaction.relatedEntityType === 'driver_payout' && transaction.relatedEntityId
+      ? await claimDriverPayoutPayment(this.paymentTransactionRepository, transaction)
+      : { payment: await this.paymentTransactionRepository.save(transaction), created: true };
+    if (!claim.created) return claim.payment;
+    let savedTransaction = claim.payment;
     this.logger.warn(
       `Payout transaction created: id=${savedTransaction.id}, reference=${savedTransaction.reference}, userId=${savedTransaction.userId}, amount=${savedTransaction.amount} ${savedTransaction.currency}, related=${savedTransaction.relatedEntityType ?? 'none'}:${savedTransaction.relatedEntityId ?? 'none'}`,
     );
@@ -591,6 +596,22 @@ export class PaymentsService {
       where: { userId },
       order: { createdAt: 'DESC' },
     });
+  }
+
+  /** Recovery may supply a missing order number, but it is bound only after provider verification. */
+  async reconcileFlexPayDriverPayout(paymentId: string, orderNumber?: string): Promise<PaymentTransaction> {
+    const payment = await this.findTransactionById(paymentId);
+    if (payment.provider !== PaymentProvider.FLEXPAY || payment.purpose !== PaymentPurpose.DRIVER_PAYOUT) {
+      throw new BadRequestException('Cette opération concerne uniquement les retraits conducteur FlexPay');
+    }
+    const order = orderNumber?.trim() || payment.orderNumber;
+    if (payment.orderNumber && order !== payment.orderNumber) {
+      throw new BadRequestException('Le numéro de commande ne correspond pas au retrait');
+    }
+    if (!order) return payment;
+    const result = await this.flexPayService.checkPayoutTransaction(order);
+    if (!result.transaction) return payment;
+    return this.applyFlexPayPayoutCheckResult({ ...payment, orderNumber: order }, result);
   }
 
   async findUserTransactionPage(userId: string, options: PaymentHistoryPageDto) {
@@ -976,7 +997,7 @@ export class PaymentsService {
         );
       }
     }
-    return this.paymentTransactionRepository.save(transaction);
+    return commitFlexPayPayoutState(this.paymentTransactionRepository, transaction);
   }
 
   private async applyFlexPayPayoutCheckResult(
@@ -988,7 +1009,7 @@ export class PaymentsService {
     const provider = checkResult.transaction;
     transaction.providerStatusCode = provider?.status ?? checkResult.code;
     transaction.providerMessage = PAYOUT_MESSAGES.pending;
-    if (!provider) return this.paymentTransactionRepository.save(transaction);
+    if (!provider) return commitFlexPayPayoutState(this.paymentTransactionRepository, transaction);
 
     // Payout checks omit amount/currency in v1.03, so both identifiers must match.
     if (
@@ -1020,7 +1041,7 @@ export class PaymentsService {
       );
     }
     // A missing transaction, unknown status or inconsistent result is not a rejection.
-    return this.paymentTransactionRepository.save(transaction);
+    return commitFlexPayPayoutState(this.paymentTransactionRepository, transaction);
   }
 
   private async findTransactionByReferenceOrOrderNumber(
@@ -1220,6 +1241,9 @@ export class PaymentsService {
         status: transaction.status, providerMessage: transaction.providerMessage,
       });
     }
+    if (this.isPayoutTransaction(transaction)) {
+      return commitFlexPayPayoutState(this.paymentTransactionRepository, transaction);
+    }
     await this.paymentTransactionRepository.save(transaction);
     if (!this.isPayoutTransaction(transaction)) {
       this.logger.error(
@@ -1359,7 +1383,7 @@ export class PaymentsService {
     if (flexPayResponse.pending) {
       savedTransaction.status = PaymentStatus.PENDING;
       savedTransaction.providerMessage = PAYOUT_MESSAGES.pending;
-      return this.paymentTransactionRepository.save(savedTransaction);
+      return commitFlexPayPayoutState(this.paymentTransactionRepository, savedTransaction);
     }
 
     if (!this.flexPayService.isSuccessfulCode(flexPayResponse.code)) {
@@ -1367,12 +1391,12 @@ export class PaymentsService {
       savedTransaction.providerMessage = getPayoutFailureMessage(
         flexPayResponse.message,
       );
-      await this.paymentTransactionRepository.save(savedTransaction);
+      await commitFlexPayPayoutState(this.paymentTransactionRepository, savedTransaction);
       throw new BadRequestException(savedTransaction.providerMessage);
     }
 
     savedTransaction.status = PaymentStatus.INITIATED;
-    const saved = await this.paymentTransactionRepository.save(savedTransaction);
+    const saved = await commitFlexPayPayoutState(this.paymentTransactionRepository, savedTransaction);
     this.logger.warn(
       `Payout initialized: paymentId=${saved.id}, reference=${saved.reference}, orderNumber=${saved.orderNumber ?? 'none'}, status=${saved.status}, response=${formatPaymentLogPayload(this.formatPaymentLogResponse(saved))}`,
     );

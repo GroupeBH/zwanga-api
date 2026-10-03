@@ -1,4 +1,5 @@
-import { Body, Controller, Get, Param, Post, Request } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Request, Query } from '@nestjs/common';
+import { HistoryPageQuery } from '../common/history-page';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Auth } from '../auth/decorators/auth.decorator';
 import { Public } from '../common/decorators/public.decorator';
@@ -64,6 +65,27 @@ export class ReferralsController {
       req.user.userId,
       dto,
     );
+  }
+
+  @Get('me/referrals/page')
+  @Auth()
+  @SensitiveThrottle(30, 60000)
+  referralPage(@Request() req: AuthenticatedRequest, @Query() query: HistoryPageQuery) {
+    return this.referralsService.getReferralPage(req.user.userId, query);
+  }
+
+  @Get('me/rewards/page')
+  @Auth()
+  @SensitiveThrottle(30, 60000)
+  rewardPage(@Request() req: AuthenticatedRequest, @Query() query: HistoryPageQuery) {
+    return this.referralsService.getRewardPage(req.user.userId, query);
+  }
+
+  @Get('me/withdrawals/page')
+  @Auth()
+  @SensitiveThrottle(30, 60000)
+  withdrawalPage(@Request() req: AuthenticatedRequest, @Query() query: HistoryPageQuery) {
+    return this.referralsService.getWithdrawalPage(req.user.userId, query);
   }
 
   @Get('me/referrals')

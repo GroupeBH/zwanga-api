@@ -1,4 +1,5 @@
-import { Controller, Get, Param, Request, Put } from '@nestjs/common';
+import { Controller, Get, Param, Request, Put, Query } from '@nestjs/common';
+import { LegacyPageQuery } from '../common/legacy-page';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { ChatService } from './chat.service';
 import { Auth } from '../auth/decorators/auth.decorator';
@@ -13,8 +14,8 @@ export class ChatController {
   @Auth()
   @SensitiveThrottle(30, 60000)
   @ApiOperation({ summary: 'Get messages for a booking' })
-  async getMessages(@Request() req, @Param('bookingId') bookingId: string) {
-    return this.chatService.getMessages(bookingId, req.user.userId);
+  async getMessages(@Request() req, @Param('bookingId') bookingId: string, @Query() query: LegacyPageQuery) {
+    return this.chatService.getMessages(bookingId, req.user.userId, query);
   }
 
   @Put('messages/:messageId/read')

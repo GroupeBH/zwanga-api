@@ -1,4 +1,4 @@
-import { Injectable, Logger, BadRequestException } from '@nestjs/common';
+import { Injectable, Logger, BadRequestException, HttpException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ChatOllama } from '@langchain/ollama';
 import { ChatPromptTemplate } from '@langchain/core/prompts';
@@ -6,18 +6,22 @@ import { RunnableSequence } from '@langchain/core/runnables';
 import { StringOutputParser } from '@langchain/core/output_parsers';
 import { FaqService } from '../faq/faq.service';
 import { ChatbotMessageDto, ChatbotResponseDto } from './dto/chatbot.dto';
+import { RedisService } from '../common/services/redis.service';
+import { ChatbotHistory } from './chatbot-history';
+import { AIMessage, HumanMessage, SystemMessage, BaseMessage } from '@langchain/core/messages';
 
 @Injectable()
 export class ChatbotService {
   private readonly logger = new Logger(ChatbotService.name);
   private readonly llm: ChatOllama;
-  private readonly conversationHistory: Map<string, Array<{ role: string; content: string }>> = new Map();
-  private readonly maxHistoryLength = 10; // Garder les 10 derniers messages
+  private readonly history: ChatbotHistory;
 
   constructor(
     private readonly configService: ConfigService,
     private readonly faqService: FaqService,
+    redis: RedisService,
   ) {
+    this.history = new ChatbotHistory(redis, configService.get<string>('JWT_SECRET') || '');
     // Configuration Ollama depuis les variables d'environnement
     const ollamaBaseUrl = this.configService.get<string>('OLLAMA_BASE_URL') || 'http://localhost:11434';
     const model = this.configService.get<string>('OLLAMA_MODEL') || 'llama3.2';
@@ -28,6 +32,7 @@ export class ChatbotService {
       baseUrl: ollamaBaseUrl,
       model,
       temperature: 0.7,
+      numPredict: 512,
       // Optionnel: ajouter d'autres paramètres
       // topP: 0.9,
       // topK: 40,
@@ -38,8 +43,12 @@ export class ChatbotService {
     userId: string,
     dto: ChatbotMessageDto,
   ): Promise<ChatbotResponseDto> {
+    let release: (() => Promise<void>) | undefined;
     try {
-      const conversationId = dto.conversationId || `conv-${userId}-${Date.now()}`;
+      const session = this.history.open(userId, dto.conversationId, dto.conversationToken);
+      const conversationId = session.id;
+      release = await this.history.acquire(conversationId);
+      const history = await this.history.read(session);
 
       // Récupérer les FAQ pertinentes pour le contexte
       const relevantFaqs = await this.getRelevantFaqs(dto.message);
@@ -48,24 +57,21 @@ export class ChatbotService {
       const systemPrompt = this.buildSystemPrompt(relevantFaqs);
 
       // Récupérer l'historique de conversation
-      const history = this.getConversationHistory(conversationId);
 
       // Construire le prompt avec historique
-      const messages: Array<['system' | 'human' | 'ai', string]> = [
-        ['system', systemPrompt],
-      ];
+      const messages: BaseMessage[] = [new SystemMessage(systemPrompt)];
 
       // Ajouter l'historique en convertissant les rôles
       history.forEach((msg) => {
         if (msg.role === 'human') {
-          messages.push(['human', msg.content]);
+          messages.push(new HumanMessage(msg.content));
         } else if (msg.role === 'assistant') {
-          messages.push(['ai', msg.content]);
+          messages.push(new AIMessage(msg.content));
         }
       });
 
       // Ajouter le message actuel
-      messages.push(['human', '{input}']);
+      messages.push(new HumanMessage(dto.message));
 
       const prompt = ChatPromptTemplate.fromMessages(messages);
 
@@ -77,13 +83,11 @@ export class ChatbotService {
       ]);
 
       // Appeler le modèle
-      const response = await chain.invoke({
-        input: dto.message,
-      });
+      const response = await chain.invoke({}, { signal: AbortSignal.timeout(30_000) });
 
       // Sauvegarder dans l'historique
-      this.addToHistory(conversationId, 'human', dto.message);
-      this.addToHistory(conversationId, 'assistant', response);
+      await this.history.save(session, [...history,
+        { role: 'human', content: dto.message }, { role: 'assistant', content: response }]);
 
       // Extraire les IDs des FAQ utilisées
       const relatedFaqIds = relevantFaqs.map((faq) => faq.id);
@@ -93,9 +97,11 @@ export class ChatbotService {
       return {
         response: response.trim(),
         conversationId,
+        conversationToken: session.conversationToken,
         relatedFaqs: relatedFaqIds.length > 0 ? relatedFaqIds : undefined,
       };
     } catch (error) {
+      if (error instanceof HttpException) throw error;
       this.logger.error(`Error in chatbot service: ${error.message}`, error.stack);
       
       // Si Ollama n'est pas disponible, retourner une réponse de fallback
@@ -105,9 +111,9 @@ export class ChatbotService {
         );
       }
 
-      throw new BadRequestException(
-        `Erreur lors de la génération de la réponse: ${error.message}`,
-      );
+      throw new BadRequestException('L’assistant est temporairement indisponible. Réessayez ou contactez le support.');
+    } finally {
+      await release?.().catch(() => undefined);
     }
   }
 
@@ -159,41 +165,8 @@ Sinon, réponds de manière générale en te basant sur tes connaissances sur le
     return prompt;
   }
 
-  private getConversationHistory(conversationId: string): Array<{ role: string; content: string }> {
-    return this.conversationHistory.get(conversationId) || [];
-  }
-
-  private addToHistory(conversationId: string, role: string, content: string): void {
-    if (!this.conversationHistory.has(conversationId)) {
-      this.conversationHistory.set(conversationId, []);
-    }
-
-    const history = this.conversationHistory.get(conversationId)!;
-    history.push({ role, content });
-
-    // Limiter la taille de l'historique
-    if (history.length > this.maxHistoryLength * 2) {
-      // Garder seulement les derniers messages (alternance human/assistant)
-      const recentHistory = history.slice(-this.maxHistoryLength * 2);
-      this.conversationHistory.set(conversationId, recentHistory);
-    }
-  }
-
-  /**
-   * Nettoie l'historique d'une conversation (utile pour libérer la mémoire)
-   */
-  clearConversationHistory(conversationId: string): void {
-    this.conversationHistory.delete(conversationId);
-    this.logger.log(`Cleared conversation history for ${conversationId}`);
-  }
-
-  /**
-   * Nettoie les anciennes conversations (plus de 24h)
-   */
-  cleanupOldConversations(): void {
-    // Cette méthode peut être appelée périodiquement pour nettoyer l'historique
-    // Pour l'instant, on garde tout en mémoire, mais on pourrait ajouter un timestamp
-    this.logger.log('Cleanup old conversations called');
+  async clearConversationHistory(conversationId: string, userId: string): Promise<void> {
+    await this.history.clear(conversationId, userId);
   }
 }
 

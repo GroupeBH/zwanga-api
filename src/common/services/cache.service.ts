@@ -26,6 +26,9 @@ export class CacheService {
   async del(key: string): Promise<void> {
     this.logger.debug(`Deleting cache: ${key}`);
     await this.cacheManager.del(key);
+    if (key === CacheService.getTripsListKey('all')) {
+      await this.cacheManager.del(CacheService.getTripsListKey('discovery-v2'));
+    }
     // Existing booking/payment mutations invalidate the canonical passenger key.
     // Always evict its activity projection too, without changing other cache domains.
     if (/^bookings:passenger:[^:]+$/.test(key)) {

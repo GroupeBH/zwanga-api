@@ -39,6 +39,7 @@ import {
   FileInterceptor,
 } from '@nestjs/platform-express';
 import { DiditKycService } from './didit-kyc.service';
+import { IMAGE_UPLOAD_OPTIONS } from '../common/image-upload-policy';
 
 @ApiTags('Users')
 @Controller('users')
@@ -83,7 +84,7 @@ export class UsersController {
   @Auth()
   @SensitiveThrottle(10, 60000)
   @ApiOperation({ summary: 'Update user profile' })
-  @UseInterceptors(FileInterceptor('profilePicture'))
+  @UseInterceptors(FileInterceptor('profilePicture', IMAGE_UPLOAD_OPTIONS))
   @ApiConsumes('multipart/form-data')
   async updateProfile(
     @Request() req,
@@ -123,7 +124,7 @@ export class UsersController {
       { name: 'cniFront', maxCount: 1 },
       { name: 'cniBack', maxCount: 1 },
       { name: 'selfie', maxCount: 1 },
-    ]),
+    ], IMAGE_UPLOAD_OPTIONS),
   )
   @ApiConsumes('multipart/form-data')
   @ApiBody({

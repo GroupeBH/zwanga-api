@@ -2,7 +2,7 @@ import { BadRequestException, Logger } from '@nestjs/common';
 import { DriverSettlementsService } from './driver-settlements.service';
 import { DriverPayout, DriverPayoutStatus } from './entities/driver-payout.entity';
 import { User } from '../users/entities/user.entity';
-import { PaymentMethod, PaymentPurpose, PaymentStatus } from '../payments/entities/payment-transaction.entity';
+import { PaymentMethod, PaymentPurpose, PaymentStatus, PaymentTransaction } from '../payments/entities/payment-transaction.entity';
 
 describe('Driver payout reservation and recovery', () => {
   let service: DriverSettlementsService;
@@ -21,8 +21,8 @@ describe('Driver payout reservation and recovery', () => {
     approved = true;
     let balanceRead = 0;
     manager = {
-      findOne: jest.fn(async (entity) => entity === User ? { id: 'driver-A', phone: driverPhone } : saved),
-      exists: jest.fn(async () => approved),
+      findOne: jest.fn(async (entity) => entity === User ? { id: 'driver-A', phone: driverPhone } : entity === PaymentTransaction ? payment : saved),
+      exists: jest.fn(async (entity) => entity === DriverPayout ? Boolean(saved?.recoveryBlocked) : approved),
       create: jest.fn((_entity, data) => ({ ...data, id: 'payout-A' })),
       save: jest.fn(async (data) => { saved = { ...data, paymentTransaction: payment }; return saved; }),
       createQueryBuilder: jest.fn(() => ({
@@ -44,7 +44,7 @@ describe('Driver payout reservation and recovery', () => {
       formatLogPayload: () => '{}', formatPaymentLogResponse: () => ({}),
     };
     service = new DriverSettlementsService(
-      {} as any, { find: async () => saved ? [saved] : [] } as any, {} as any, {} as any, {} as any, {} as any,
+      {} as any, { find: async () => saved ? [saved] : [], update: jest.fn() } as any, {} as any, {} as any, {} as any, {} as any,
       { get: () => undefined } as any, payments,
       { transaction: async (work) => work(manager) } as any, {} as any,
     );

@@ -62,7 +62,11 @@ describe('ReferralsService', () => {
       qualifiedAt: null,
       rewardWindowEndsAt: null,
     } as ReferralProfile;
+    const matureQuery: any = {};
+    for (const key of ['where', 'andWhere', 'orderBy', 'take', 'setLock', 'setOnLocked']) matureQuery[key] = jest.fn().mockReturnValue(matureQuery);
+    matureQuery.getMany = jest.fn().mockResolvedValue([]);
     const manager = {
+      getRepository: jest.fn(() => ({ createQueryBuilder: () => matureQuery })),
       query: jest.fn().mockResolvedValue([{ pg_advisory_xact_lock: null }]),
       findOne: jest.fn((entity: unknown, findOptions?: unknown) => {
         void findOptions;
@@ -97,6 +101,7 @@ describe('ReferralsService', () => {
       ),
     };
     const rewardStatsQuery = {
+      andWhere: jest.fn().mockReturnThis(),
       select: jest.fn().mockReturnThis(),
       addSelect: jest.fn().mockReturnThis(),
       where: jest.fn().mockReturnThis(),
@@ -189,6 +194,28 @@ describe('ReferralsService', () => {
   };
 
   const paymentPaidAt = new Date('2026-08-24T10:00:00Z');
+
+  it('uses the supplied batch transaction and keeps both ledger entries without a second credit', async () => {
+    const { service, manager, account, dataSource } = buildService();
+    const reward = { id: 'mature-reward', referrerUserId: account.userId, rewardTokens: 2.5,
+      status: ReferralRewardStatus.PENDING, holdUntil: new Date('2020-01-01'), paymentTransactionId: 'payment' };
+    account.pendingTokens = 10;
+    account.availableTokens = 4;
+    manager.findOne.mockImplementation((entity: unknown) => Promise.resolve(entity === ReferralReward ? reward : account) as any);
+    await (service as any).releaseRewardById(reward.id, manager);
+    expect(dataSource.transaction).not.toHaveBeenCalled();
+    expect(account.pendingTokens).toBe(7.5);
+    expect(account.availableTokens).toBe(6.5);
+    const ledger = manager.create.mock.calls.filter(call => call[0] === ReferralLedgerEntry).map(call => call[1]);
+    expect(ledger).toEqual([
+      expect.objectContaining({ type: ReferralLedgerEntryType.REWARD_RELEASED, bucket: 'pending', amountTokens: -2.5, balanceAfter: 7.5 }),
+      expect.objectContaining({ type: ReferralLedgerEntryType.REWARD_RELEASED, bucket: 'available', amountTokens: 2.5, balanceAfter: 6.5 }),
+    ]);
+    expect(reward.status).toBe(ReferralRewardStatus.AVAILABLE);
+    await (service as any).releaseRewardById(reward.id, manager);
+    expect(account.availableTokens).toBe(6.5);
+    expect(manager.create).toHaveBeenCalledTimes(2);
+  });
   const succeededSubscriptionPayment = {
     id: 'payment-1',
     userId: 'referred-1',

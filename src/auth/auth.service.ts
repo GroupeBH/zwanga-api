@@ -52,6 +52,7 @@ import { OtpService } from '../otp/otp.service';
 import { provisionAdminAccount } from '../admin/admin-account.provisioning';
 import { normalizeLegalName } from '../users/legal-identity.util';
 import { RedisService } from '../common/services/redis.service';
+import { matchesStoredToken, tokenFingerprint } from './token-fingerprint';
 
 const APPLE_ISSUER = 'https://appleid.apple.com';
 const APPLE_PUBLIC_KEYS_URL = 'https://appleid.apple.com/auth/keys';
@@ -298,7 +299,8 @@ export class AuthService {
   }
 
   async validateUser(phone: string, pin: string): Promise<User | null> {
-    const user = await this.userRepository.findOne({ where: { phone } });
+    const user = await this.userRepository.findOne({ where: { phone },
+      select: ['id', 'password'] });
 
     if (!user) {
       return null;
@@ -588,7 +590,8 @@ export class AuthService {
     userId: string,
     dto: AdminChangePasswordDto,
   ): Promise<{ message: string; passwordChangeRequired: boolean }> {
-    const user = await this.userRepository.findOne({ where: { id: userId } });
+    const user = await this.userRepository.findOne({ where: { id: userId },
+      select: ['id', 'password', 'role', 'status', 'isActive', 'passwordChangeRequired'] });
     if (!user) {
       throw new UnauthorizedException('Utilisateur non trouvé');
     }
@@ -753,11 +756,14 @@ export class AuthService {
 
       const user = await this.userRepository.findOne({
         where: { id: payload.sub },
+        select: ['id', 'phone', 'role', 'status', 'isActive', 'refreshToken'],
       });
 
-      if (!user || user.refreshToken !== refreshTokenDto.refreshToken) {
+      if (!user || !matchesStoredToken(user.refreshToken, refreshTokenDto.refreshToken)) {
         throw new UnauthorizedException('Token de rafraîchissement invalide');
       }
+
+      this.assertUserCanAuthenticate(user);
 
       const tokens = await this.generateTokens(user);
 
@@ -1535,9 +1541,11 @@ export class AuthService {
     });
 
     // Save tokens to user
-    user.accessToken = accessToken;
-    user.refreshToken = refreshToken;
-    await this.userRepository.update(user.id, { accessToken, refreshToken });
+    user.accessToken = tokenFingerprint(accessToken);
+    user.refreshToken = tokenFingerprint(refreshToken);
+    await this.userRepository.update(user.id, {
+      accessToken: user.accessToken, refreshToken: user.refreshToken,
+    });
 
     return { accessToken, refreshToken };
   }

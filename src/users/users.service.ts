@@ -153,6 +153,7 @@ export class UsersService {
       kyc.cniFrontUrl =
         (await this.fileUploadService.getPresignedUrlIfS3Key(
           kyc.cniFrontUrl,
+          true,
         )) || kyc.cniFrontUrl;
     }
     // Handle array of CNI front URLs
@@ -160,22 +161,29 @@ export class UsersService {
       kyc.cniFrontUrls = await Promise.all(
         kyc.cniFrontUrls.map((url) =>
           this.fileUploadService
-            .getPresignedUrlIfS3Key(url)
+            .getPresignedUrlIfS3Key(url, true)
             .then((presigned) => presigned || url),
         ),
       );
     }
     if (kyc.cniBackUrl) {
       kyc.cniBackUrl =
-        (await this.fileUploadService.getPresignedUrlIfS3Key(kyc.cniBackUrl)) ||
+        (await this.fileUploadService.getPresignedUrlIfS3Key(kyc.cniBackUrl, true)) ||
         kyc.cniBackUrl;
     }
     if (kyc.selfieUrl) {
       kyc.selfieUrl =
-        (await this.fileUploadService.getPresignedUrlIfS3Key(kyc.selfieUrl)) ||
+        (await this.fileUploadService.getPresignedUrlIfS3Key(kyc.selfieUrl, true)) ||
         kyc.selfieUrl;
     }
     return kyc;
+  }
+
+  async findAuthIdentity(id: string) {
+    if (!id) return null;
+    return this.userRepository.findOne({ where: { id }, select: [
+      'id', 'email', 'phone', 'role', 'status', 'isActive', 'passwordChangeRequired',
+    ] });
   }
 
   async findOne(id: string): Promise<User> {
@@ -995,7 +1003,9 @@ export class UsersService {
   async changePin(userId: string, changePinDto: ChangePinDto): Promise<void> {
     this.logger.log(`Changing PIN for user ${userId}`);
 
-    const user = await this.findOne(userId);
+    const user = await this.userRepository.findOne({ where: { id: userId },
+      select: ['id', 'role', 'password'] });
+    if (!user) throw new NotFoundException('Utilisateur introuvable');
 
     if (isAdminRole(user.role)) {
       throw new BadRequestException(
@@ -1263,7 +1273,7 @@ export class UsersService {
     }
 
     // Calculer les statistiques
-    const [tripsAsDriver, bookingsAsPassenger, bookingsAsDriver] =
+    const [tripsAsDriver, bookingsAsPassenger, bookingsAsDriver, completedTripsAsDriver] =
       await Promise.all([
         this.tripRepository.count({ where: { driverId: userId } }),
         this.bookingRepository.count({ where: { passengerId: userId } }),
@@ -1272,6 +1282,7 @@ export class UsersService {
           .innerJoin('booking.trip', 'trip')
           .where('trip.driverId = :userId', { userId })
           .getCount(),
+        this.tripRepository.count({ where: { driverId: userId, status: TripStatus.COMPLETED } }),
       ]);
 
     // Calculer la note moyenne et le nombre total de notes
@@ -1337,6 +1348,7 @@ export class UsersService {
       totalRatings,
       stats: {
         tripsAsDriver,
+        completedTripsAsDriver,
         bookingsAsPassenger,
         bookingsAsDriver,
         vehiclesCount: user.vehicles?.filter((v) => v.isActive).length ?? 0,

@@ -11,12 +11,19 @@ import { DriverSettlementsService } from './driver-settlements.service';
 import { DriverEarning } from './entities/driver-earning.entity';
 import { DriverPayout } from './entities/driver-payout.entity';
 import { CashSubsidyRecoveryService } from './cash-subsidy-recovery.service';
+import { DriverPayoutEvent } from './entities/driver-payout-event.entity';
+import { DriverPayoutRecoveryService } from './driver-payout-recovery.service';
+import {
+  AdminDriverPayoutRecoveryController,
+  DriverPayoutRecoveryController,
+} from './driver-payout-recovery.controller';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([
       DriverEarning,
       DriverPayout,
+      DriverPayoutEvent,
       User,
       KycDocument,
       Booking,
@@ -25,8 +32,16 @@ import { CashSubsidyRecoveryService } from './cash-subsidy-recovery.service';
     PaymentsModule,
     NotificationsModule,
   ],
-  controllers: [DriverSettlementsController],
-  providers: [DriverSettlementsService, CashSubsidyRecoveryService],
+  controllers: [
+    DriverSettlementsController,
+    DriverPayoutRecoveryController,
+    AdminDriverPayoutRecoveryController,
+  ],
+  providers: [
+    DriverSettlementsService,
+    CashSubsidyRecoveryService,
+    DriverPayoutRecoveryService,
+  ],
   exports: [DriverSettlementsService],
 })
 export class DriverSettlementsModule {}

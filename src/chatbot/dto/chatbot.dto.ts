@@ -18,10 +18,18 @@ export class ChatbotMessageDto {
   })
   @IsOptional()
   @IsString()
+  @MaxLength(80)
   conversationId?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(1024)
+  conversationToken?: string;
 }
 
 export class ChatbotResponseDto {
+  @ApiProperty({ required: false, description: 'Preuve de session anonyme à renvoyer avec conversationId' })
+  conversationToken?: string;
   @ApiProperty({ example: 'Pour réserver un trajet, vous devez...' })
   response: string;
 

@@ -5,11 +5,19 @@ import {
   IsString,
   IsNotEmpty,
   IsUUID,
-  IsNumber,
+  IsInt,
+  Max,
+  MaxLength,
+  ArrayMaxSize,
   Min,
 } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
+
+export class ResolveDirectConversationDto {
+  @IsUUID('4')
+  userId: string;
+}
 
 export class CreateConversationDto {
   @ApiProperty({
@@ -18,12 +26,14 @@ export class CreateConversationDto {
   })
   @IsArray()
   @ArrayMinSize(1)
+  @ArrayMaxSize(50)
   @IsUUID('4', { each: true })
   participantIds: string[];
 
   @ApiProperty({ required: false, description: 'Titre de la conversation' })
   @IsString()
   @IsOptional()
+  @MaxLength(200)
   title?: string;
 
   @ApiProperty({
@@ -40,22 +50,24 @@ export class CreateConversationDto {
   })
   @IsString()
   @IsOptional()
+  @MaxLength(4000)
   initialMessage?: string;
 }
 
 export class ListConversationsQueryDto {
   @ApiProperty({ required: false, default: 1 })
   @Type(() => Number)
-  @IsNumber()
+  @IsInt()
   @IsOptional()
   @Min(1)
   page?: number = 1;
 
   @ApiProperty({ required: false, default: 20 })
   @Type(() => Number)
-  @IsNumber()
+  @IsInt()
   @IsOptional()
   @Min(1)
+  @Max(50)
   limit?: number = 20;
 }
 
@@ -63,6 +75,7 @@ export class SendMessageDto {
   @ApiProperty()
   @IsString()
   @IsNotEmpty()
+  @MaxLength(4000)
   content: string;
 }
 
@@ -70,6 +83,7 @@ export class AddParticipantsDto {
   @ApiProperty({ type: [String] })
   @IsArray()
   @ArrayMinSize(1)
+  @ArrayMaxSize(50)
   @IsUUID('4', { each: true })
   userIds: string[];
 }
@@ -81,6 +95,7 @@ export class CreateSupportConversationDto {
   })
   @IsString()
   @IsOptional()
+  @MaxLength(200)
   subject?: string;
 
   @ApiProperty({
@@ -88,6 +103,7 @@ export class CreateSupportConversationDto {
   })
   @IsString()
   @IsNotEmpty()
+  @MaxLength(4000)
   message: string;
 }
 

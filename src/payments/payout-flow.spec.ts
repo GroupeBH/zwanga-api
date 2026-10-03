@@ -8,7 +8,7 @@ import { PaymentStatus } from './entities/payment-transaction.entity';
 describe('Merchant-to-driver payouts (no real network or database)', () => {
   let config: Record<string, string>;
   let http: { post: jest.Mock; get: jest.Mock };
-  let repository: { create: jest.Mock; save: jest.Mock };
+  let repository: { create: jest.Mock; save: jest.Mock; manager: any };
   let flexpay: FlexPayService;
   let service: PaymentsService;
   const input = {
@@ -49,9 +49,16 @@ describe('Merchant-to-driver payouts (no real network or database)', () => {
         ),
       get: jest.fn(),
     };
+    let stored: any;
+    const manager = {
+      transaction: async (work: any) => work(manager),
+      findOne: async () => structuredClone(stored ?? await repository.save.mock.results[0]?.value),
+      save: async (_entity: unknown, value: any) => repository.save(value),
+    };
     repository = {
+      manager,
       create: jest.fn((value) => ({ ...value })),
-      save: jest.fn(async (value) => ({ ...value, id: 'payment-test' })),
+      save: jest.fn(async (value) => { stored = structuredClone({ ...value, id: 'payment-test' }); return structuredClone(stored); }),
     };
     flexpay = new FlexPayService(http as any, configuration as any);
     service = new PaymentsService(

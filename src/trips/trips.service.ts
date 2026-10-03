@@ -20,6 +20,9 @@ import {
 } from 'typeorm';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { Trip, TripStatus } from './entities/trip.entity';
+import { tripResponseForViewer } from './trip-read-policy';
+import { selectDiscoveryPage } from './trip-discovery-page';
+import { LegacyPageQuery, legacyPage } from '../common/legacy-page';
 import { activeTripWhere } from '../common/activity-read-policy';
 import { selectTripHistory } from './trip-history';
 import { orderHistory, type HistoryPageQuery } from '../common/history-page';
@@ -140,6 +143,9 @@ export type SanitizedTrip = Omit<
   arrivalCoordinates: Coordinates;
   vehicle: SanitizedVehicle | null;
   isFeatured: boolean;
+  estimatedDurationSeconds?: number | null;
+  previewArrivalDate?: string | null;
+  arrivalEstimateSource?: string;
 };
 
 interface RecurringTripFutureMeta {
@@ -325,7 +331,7 @@ export class TripsService {
   async findAll(): Promise<SanitizedTrip[]> {
     this.logger.debug('Fetching all trips');
 
-    const cacheKey = CacheService.getTripsListKey('all');
+    const cacheKey = CacheService.getTripsListKey('discovery-v2');
     const cached = await this.cacheService.get<SanitizedTrip[]>(cacheKey);
 
     if (cached) {
@@ -349,7 +355,9 @@ export class TripsService {
           isPrivate: false, // Exclude private trips
         },
       ],
-      relations: ['driver', 'vehicle', 'bookings', 'bookings.passenger'],
+      // Discovery remains explicitly public, bounded, and cached separately from detail.
+      take: 50,
+      relations: ['driver', 'vehicle'],
       order: {
         departureDate: 'ASC',
       },
@@ -374,21 +382,14 @@ export class TripsService {
     return sanitized;
   }
 
-  async findAllTrips(): Promise<SanitizedTrip[]> {
-    this.logger.debug('Fetching all trips of zwanga ended or none');
-
-    const cacheKey = CacheService.getTripsListKey('allTrips');
-    const cached = await this.cacheService.get<SanitizedTrip[]>(cacheKey);
-
-    if (cached) {
-      this.logger.debug(`Returning ${cached.length} trips from cache`);
-      return cached;
-    }
-
+  async findAllTrips(options: LegacyPageQuery = {}): Promise<SanitizedTrip[]> {
+    // Administrator-only compatibility route, bounded independently of public discovery.
     const trips = await this.tripRepository.find({
       relations: ['driver', 'vehicle', 'bookings', 'bookings.passenger'],
+      ...legacyPage(options, 50),
       order: {
         departureDate: 'ASC',
+        id: 'ASC',
       },
     });
 
@@ -404,14 +405,14 @@ export class TripsService {
       ),
     );
 
-    await this.cacheService.set(cacheKey, sanitized, this.CACHE_TTL);
-    this.logger.log(
-      `Fetched ${trips.length} trips of zwanga from database (${trips.filter((t) => t.status === TripStatus.PENDING).length} pending, ${trips.filter((t) => t.status === TripStatus.ACTIVE).length} active)`,
-    );
     return sanitized;
   }
 
   async search(searchTripsDto: SearchTripsDto): Promise<SanitizedTrip[]> {
+    return (await this.searchPage(searchTripsDto)).data;
+  }
+
+  async searchPage(searchTripsDto: SearchTripsDto) {
     this.logger.log(
       `Searching trips with filters: ${JSON.stringify(searchTripsDto)}`,
     );
@@ -421,8 +422,6 @@ export class TripsService {
       .createQueryBuilder('trip')
       .leftJoinAndSelect('trip.driver', 'driver')
       .leftJoinAndSelect('trip.vehicle', 'vehicle')
-      .leftJoinAndSelect('trip.bookings', 'bookings')
-      .leftJoinAndSelect('bookings.passenger', 'bookingPassenger')
       .where('trip.isPrivate = :isPrivate', { isPrivate: false })
       .andWhere(
         new Brackets((qb) => {
@@ -582,7 +581,11 @@ export class TripsService {
       queryBuilder.orderBy('trip.departureDate', 'ASC');
     }
 
-    const results = await queryBuilder.getMany();
+    const nearbyOrder = hasDepartureCoords ? `ST_Distance(${this.getDepartureSearchPointExpression()}, ST_SetSRID(ST_MakePoint(:depLng, :depLat), 4326)::geography)`
+      : hasArrivalCoords ? 'ST_Distance(trip.arrivalPoint, ST_SetSRID(ST_MakePoint(:arrLng, :arrLat), 4326)::geography)'
+      : 'EXTRACT(EPOCH FROM trip.departureDate)::double precision';
+    const page = await selectDiscoveryPage(queryBuilder, searchTripsDto, nearbyOrder);
+    const results = page.entities;
     const userIds = this.collectTripUserIds(results);
     const userRatingsMap = await this.buildUserRatingsMap(userIds);
     const userPremiumMap =
@@ -595,7 +598,21 @@ export class TripsService {
       ),
     );
     this.logger.log(`Trip search returned ${sanitized.length} results`);
-    return sanitized;
+    return { data: sanitized, nextCursor: page.nextCursor, previousCursor: page.previousCursor };
+  }
+
+  async findOneForViewer(id: string, viewerId: string) {
+    // Authorization must use current server state, not the shared detail cache.
+    if (!viewerId) throw new ForbiddenException('Accès à ce trajet refusé.');
+    const access = await this.tripRepository.findOne({ where: { id },
+      select: { id: true, driverId: true, isPrivate: true, status: true,
+        bookings: { id: true, passengerId: true, status: true } }, relations: ['bookings'] });
+    if (!access) throw new NotFoundException('Trajet introuvable.');
+    if (access.isPrivate && access.driverId !== viewerId &&
+        !access.bookings.some(booking => booking.passengerId === viewerId)) {
+      throw new ForbiddenException('Accès à ce trajet refusé.');
+    }
+    return tripResponseForViewer(await this.findOne(id), viewerId, access);
   }
 
   async findOne(id: string): Promise<SanitizedTrip> {

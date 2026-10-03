@@ -1,4 +1,120 @@
-# Versements conducteur : correctif du 15 septembre 2026
+# Versements conducteur et résolution des retraits bloqués
+
+## Résolution des retraits bloqués du 3 octobre 2026
+
+Le backend et l'écran mobile des gains conducteur disposent maintenant d'un
+parcours de vérification et de résolution. Un délai dépassé ne prouve jamais
+l'échec du virement : aucun retrait n'est annulé sur son seul âge. Ces changements
+sont locaux, non déployés, et ne résolvent pas automatiquement l'incident existant.
+
+### Comportements
+
+- Les retraits `pending` / `initiated` de plus de 24 heures nécessitent une revue,
+  même s'ils ont un `orderNumber`. La variable facultative
+  `DRIVER_PAYOUT_REVIEW_AFTER_MINUTES` remplace ce seuil (15 à 43 200 minutes,
+  défaut 1 440). Aucune nouvelle variable n'est nécessaire pour activer le défaut.
+- Le conducteur peut demander une vérification, même sans numéro de commande.
+  Les répétitions retournent le même dossier sans renvoyer d'argent.
+- Le support dispose d'une liste paginée des dossiers anciens, signalés ou sans
+  numéro de commande, d'un détail et d'un historique des interventions.
+- Un numéro de commande retrouvé chez FlexPay peut être fourni au rapprochement.
+  Il n'est associé qu'après contrôle de la référence par l'API authentifiée.
+- La libération manuelle exige un administrateur, la référence exacte du dossier,
+  une attestation explicite et la référence de la confirmation **définitive** de
+  non-exécution ou d'annulation obtenue chez FlexPay. Un simple ticket ouvert,
+  « transaction introuvable », timeout, capture du téléphone ou solde non reçu
+  n'est pas une confirmation suffisante.
+- La libération locale met le retrait en `cancelled`, mais ne falsifie pas le
+  statut de la transaction prestataire. Elle ne lance pas d'appel d'annulation
+  chez FlexPay et ne supprime aucun historique. Les gains deviennent disponibles
+  par le calcul existant du solde, sans crédit supplémentaire au portefeuille.
+- Une confirmation tardive de succès reste traitée : le retrait devient
+  `succeeded`, un incident est enregistré et les nouveaux retraits du conducteur
+  sont bloqués jusqu'au rapprochement. Clore cet incident ne rembourse rien et
+  conserve le versement réussi dans le calcul du solde.
+- La réconciliation automatique reste toutes les cinq minutes, avec rotation
+  par `lastReconciledAt` pour ne plus relire uniquement les 50 plus anciens cas.
+- Les états terminaux restent compatibles avec l'ancienne app. Après résolution
+  serveur, son rafraîchissement peut déjà rétablir la possibilité de retrait ;
+  le nouveau bouton de signalement nécessite la mise à jour mobile.
+
+### Endpoints
+
+Toutes les routes sont sous `/api/v1`. Les opérations conducteur exigent son JWT
+et vérifient la propriété du retrait. Les opérations `/admin` exigent le rôle
+administrateur (ou super-administrateur via la hiérarchie existante).
+
+| Méthode et route | Action |
+| --- | --- |
+| `POST /driver-settlements/payouts/:id/review` | Signaler avec `{ "reason": "Retrait non reçu" }` |
+| `POST /driver-settlements/payouts/:id/refresh` | Vérifier par ID interne, sans nouvel envoi |
+| `GET /admin/driver-payouts?limit=50&offset=0` | File des dossiers à vérifier |
+| `GET /admin/driver-payouts/:id` | Détail et 100 derniers événements |
+| `POST /admin/driver-payouts/:id/reconcile` | Vérifier ; corps `{}` ou `{ "orderNumber": "REFERENCE_FLEXPAY" }` |
+| `POST /admin/driver-payouts/:id/resolve-not-paid` | Libérer après confirmation externe définitive |
+| `POST /admin/driver-payouts/:id/close-late-success` | Clore un incident tardif après rapprochement financier |
+
+Exemple de corps de résolution (valeurs fictives à remplacer par les références
+du dossier réel, **uniquement après confirmation du prestataire**) :
+
+```json
+{
+  "expectedReference": "REFERENCE_ZWANGA_DU_RETRAIT",
+  "confirmedNotPaid": true,
+  "reason": "Non-exécution définitive confirmée par FlexPay",
+  "evidenceReference": "REFERENCE_DE_LA_CONFIRMATION_FLEXPAY"
+}
+```
+
+Si aucune transaction n'a été créée, `expectedReference` est l'ID du retrait.
+Le backend refuse les retraits de moins de 15 minutes, les références incohérentes,
+les versements déjà réussis et la résolution manuelle PawaPay. Un statut vérifié
+de succès ne peut pas être forcé en échec. L'endpoint `close-late-success` exige
+`reason` et `evidenceReference` ; il n'efface ni le versement ni une éventuelle dette.
+
+### Déploiement et traitement de l'incident existant
+
+1. Livrer la migration `1780000046000-AddDriverPayoutRecovery` puis le backend
+   selon le workflow habituel. Ne pas utiliser `synchronize` ni modifier les
+   statuts à la main en SQL. La migration ajoute les champs de revue, les index
+   et `driver_payout_events`, sans annuler aucun retrait existant.
+2. Avec un compte administrateur, retrouver le retrait via la file puis lire
+   son détail. Vérifier son montant, conducteur, référence et numéro FlexPay.
+3. Exécuter `reconcile`. Si le numéro manque, le demander à FlexPay à partir de
+   la référence marchand et le faire vérifier par ce même endpoint.
+4. Si le résultat demeure inconnu, laisser les fonds réservés et obtenir la
+   confirmation définitive du prestataire. Après cette confirmation seulement,
+   utiliser `resolve-not-paid` et conserver la preuve dans le dossier de support.
+5. Le conducteur actualise ses gains puis crée un **nouveau** retrait avec une
+   nouvelle clé d'idempotence. Rejouer l'ancienne clé retourne l'ancien retrait.
+
+La référence de l'incident de production n'a pas été fournie : aucun retrait réel
+n'a été inspecté, annulé ou relancé dans cette intervention. Une validation réelle
+avec FlexPay reste nécessaire. Ne jamais partager un token dans le motif ou la preuve.
+
+### Garanties et validation
+
+Les recommandations PostgreSQL ont guidé les transactions courtes et l'ordre de
+verrouillage conducteur → retrait → transaction, sans appel réseau sous verrou.
+Création du paiement et réservation sont liées atomiquement, empêchant une
+soumission concurrente ou une soumission après libération d'un retrait non envoyé.
+Les réponses FlexPay retardées ne peuvent plus écraser un succès déjà enregistré.
+Les preuves et acteurs sont consignés ; le rollback de la migration est refusé
+si cet historique contient des événements.
+
+Fichiers principaux : `src/driver-settlements/driver-payout-recovery.*`, DTO et
+entités associés, `driver-settlements.service.ts`, `src/payments/flexpay-payout-state.ts`,
+`payments.service.ts` et la migration. Côté mobile : API de règlements, hook
+`useDriverPayout`, `PayoutHistory`, modèle de présentation et types des gains.
+
+Validation locale : 303 tests sur les paiements, règlements et retraits de jetons ;
+5 tests sur une base PostgreSQL 18 jetable (libérations concurrentes, succès
+tardif, soumission unique, annulation avant soumission, audit) ; 43 tests
+JavaScript mobile. Contrôles TypeScript backend et mobile réussis.
+La base de test a été arrêtée et supprimée. Aucun essai sur appareil physique,
+appel marchand réel, migration de production ou déploiement n'a été effectué.
+
+## Historique du correctif du 15 septembre 2026
 
 > Mise à jour du 17 septembre 2026 : les références à `merchantPayOutService`
 > et au token d'encaissement ci-dessous décrivent l'ancien contrat. Le retrait
@@ -72,7 +188,8 @@ un versement. Ne pas créer une migration qui annule tous les retraits en attent
 
 ## Livraison et tests
 
-Aucune nouvelle migration. Déployer d'abord le backend avec sa configuration
+Le correctif de septembre n'ajoutait pas de migration ; celui du 3 octobre en
+ajoute une, décrite plus haut. Déployer d'abord le backend avec sa configuration
 validée, puis l'application mobile. Celle-ci conserve une intention de versement
 sur le téléphone avant envoi et réutilise sa clé après une réponse perdue.
 

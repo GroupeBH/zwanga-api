@@ -11,13 +11,15 @@ import { Server, Socket } from 'socket.io';
 import { ChatService } from './chat.service';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
-import { UseFilters, UseGuards, UsePipes } from '@nestjs/common';
+import { UseFilters, UseGuards, UsePipes, UseInterceptors } from '@nestjs/common';
+import { WsSessionService } from '../common/services/ws-session.service';
+import { WsWorkInterceptor } from '../common/ws-work.interceptor';
 import {
   BookingChatSocketDto,
   SendChatSocketMessageDto,
 } from './dto/chat-socket.dto';
 import {
-  authenticateSocket,
+  assertSocketRoomCapacity,
   createWsValidationPipe,
   emitSocketError,
   socketUserId,
@@ -29,6 +31,7 @@ import {
   namespace: '/chat',
 })
 @UseGuards(new WsAuthenticatedGuard())
+@UseInterceptors(WsWorkInterceptor)
 @UsePipes(createWsValidationPipe())
 @UseFilters(new WsErrorFilter())
 export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
@@ -39,10 +42,11 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private chatService: ChatService,
     private jwtService: JwtService,
     private configService: ConfigService,
+    private readonly sessions: WsSessionService,
   ) {}
 
   async handleConnection(client: Socket) {
-    if (await authenticateSocket(client, this.jwtService, this.configService)) {
+    if (await this.sessions.connect(client, this.jwtService, this.configService)) {
       await client.join(`user:${socketUserId(client)}`);
     }
   }
@@ -60,8 +64,15 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
       data.bookingId,
       socketUserId(client),
     );
+    assertSocketRoomCapacity(client, `booking:${data.bookingId}`);
     await client.join(`booking:${data.bookingId}`);
     return { success: true, bookingId: data.bookingId };
+  }
+
+  @SubscribeMessage('leave_booking')
+  async handleLeaveBooking(@ConnectedSocket() client: Socket, @MessageBody() data: BookingChatSocketDto) {
+    await client.leave(`booking:${data.bookingId}`);
+    return { success: true };
   }
 
   @SubscribeMessage('send_message')
