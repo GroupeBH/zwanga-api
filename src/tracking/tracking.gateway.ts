@@ -235,8 +235,18 @@ export class TrackingGateway
         speed: data.speed,
         recordedAt: data.recordedAt,
       });
+      // Socket.IO correlates this reply with the original emit, independently of
+      // the corrected server clock. Room echoes remain compatible with old apps.
+      return {
+        success: true,
+        status: location.ignoredAsOutOfOrder ? 'superseded' : 'accepted',
+        tripId: data.tripId,
+        recordedAt: data.recordedAt,
+        updatedAt: location.updatedAt,
+      };
     } catch (error) {
       emitSocketError(client, error);
+      return { success: false };
     }
   }
 
@@ -289,8 +299,17 @@ export class TrackingGateway
         speed: data.speed,
         recordedAt: data.recordedAt,
       });
+      return {
+        success: true,
+        status: location.ignoredAsOutOfOrder ? 'superseded' : 'accepted',
+        tripId: location.tripId,
+        bookingId: location.bookingId,
+        recordedAt: data.recordedAt,
+        updatedAt: location.updatedAt,
+      };
     } catch (error) {
       emitSocketError(client, error);
+      return { success: false };
     }
   }
 

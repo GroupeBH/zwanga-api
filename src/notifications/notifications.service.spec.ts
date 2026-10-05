@@ -176,7 +176,7 @@ describe('NotificationService critical push reliability', () => {
     expect(queryBuilder.setLock).toHaveBeenCalledWith('pessimistic_write');
     expect(queryBuilder.setOnLocked).toHaveBeenCalledWith('skip_locked');
     expect(queryBuilder.andWhere).toHaveBeenCalledWith(
-      "notification.data ->> 'type' IN (:...types)",
+      "(notification.eventKey IS NOT NULL OR notification.data ->> 'type' IN (:...types))",
       {
         types: expect.arrayContaining(['trip_request_driver_overdue']),
       },
@@ -188,6 +188,169 @@ describe('NotificationService critical push reliability', () => {
       }),
     ]);
     expect(claimed).toHaveLength(1);
+  });
+
+  it('delivers a committed outbox row only after releasing its claim transaction', async () => {
+    const { service, notificationRepository, userRepository, queryBuilder } =
+      buildService();
+    let claimed = false;
+    const work =
+      notificationRepository.manager.transaction.getMockImplementation()!;
+    notificationRepository.manager.transaction.mockImplementation(
+      async (callback) => {
+        const result = await work(callback);
+        claimed = true;
+        return result;
+      },
+    );
+    queryBuilder.getMany.mockResolvedValue([
+      {
+        id: 'outbox',
+        eventKey: 'wallet:entry',
+        userId: 'user',
+        status: NotificationStatus.PENDING,
+        data: { type: 'wallet_admin_adjustment' },
+        title: 'Solde ajusté',
+        body: '+25 jetons',
+      },
+    ]);
+    userRepository.findOne.mockResolvedValue({
+      fcmToken: 'ExponentPushToken[new-device]',
+    });
+    const fetchSpy = jest
+      .spyOn(global, 'fetch')
+      .mockImplementation(async () => {
+        expect(claimed).toBe(true);
+        return {
+          ok: true,
+          json: async () => ({ data: { status: 'ok', id: 'ticket' } }),
+        } as Response;
+      });
+    await service.dispatchTransactionalNotifications();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(queryBuilder.setOnLocked).toHaveBeenCalledWith('skip_locked');
+    expect(notificationRepository.save).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        status: NotificationStatus.SENT,
+        fcmToken: 'ExponentPushToken[new-device]',
+      }),
+    );
+  });
+
+  it('keeps token-less outbox notifications then retries them using a newly registered device', async () => {
+    const { service, notificationRepository, userRepository, queryBuilder } =
+      buildService();
+    const row = {
+      id: 'outbox',
+      eventKey: 'wallet:entry',
+      userId: 'user',
+      status: NotificationStatus.PENDING,
+      data: { type: 'wallet_transfer_in' },
+      title: 'Jetons reçus',
+      body: '5 jetons',
+    };
+    queryBuilder.getMany.mockResolvedValue([row]);
+    userRepository.findOne.mockResolvedValue({ fcmToken: null });
+    const fetchSpy = jest
+      .spyOn(global, 'fetch')
+      .mockResolvedValue({
+        ok: true,
+        json: async () => ({ data: { status: 'ok', id: 'ticket' } }),
+      } as Response);
+    await service.dispatchTransactionalNotifications();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(row.status).toBe(NotificationStatus.FAILED);
+    userRepository.findOne.mockResolvedValue({
+      fcmToken: 'ExpoPushToken[new-device]',
+    });
+    await service.retryCriticalFinancialNotifications();
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(notificationRepository.save).toHaveBeenLastCalledWith(
+      expect.objectContaining({ status: NotificationStatus.SENT }),
+    );
+  });
+
+  it('suppresses obsolete pending withdrawal messages after the payout succeeds', async () => {
+    const { service, notificationRepository, userRepository, queryBuilder } =
+      buildService();
+    Object.assign(notificationRepository.manager, {
+      findOneBy: jest
+        .fn()
+        .mockResolvedValue({ userId: 'user', status: 'succeeded' }),
+    });
+    queryBuilder.getMany.mockResolvedValue([
+      {
+        id: 'outbox',
+        eventKey: 'wallet-withdrawal:payout:pending',
+        userId: 'user',
+        status: NotificationStatus.PENDING,
+        data: { type: 'wallet_withdrawal_pending', withdrawalId: 'payout' },
+      },
+    ]);
+    await service.dispatchTransactionalNotifications();
+    expect(userRepository.findOne).not.toHaveBeenCalled();
+    expect(notificationRepository.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        isActive: false,
+        status: NotificationStatus.FAILED,
+      }),
+    );
+  });
+
+  it('does not retry an approval that has since been revoked', async () => {
+    const { service, notificationRepository, userRepository, queryBuilder } =
+      buildService();
+    Object.assign(notificationRepository.manager, {
+      findOneBy: jest
+        .fn()
+        .mockResolvedValue({
+          userId: 'user',
+          status: 'rejected',
+          reviewedBy: 'admin',
+        }),
+    });
+    queryBuilder.getMany.mockResolvedValue([
+      {
+        id: 'outbox',
+        eventKey: 'kyc:document:approved',
+        userId: 'user',
+        status: NotificationStatus.FAILED,
+        data: { type: 'kyc_approved', kycId: 'document', status: 'approved' },
+      },
+    ]);
+    await service.retryCriticalFinancialNotifications();
+    expect(userRepository.findOne).not.toHaveBeenCalled();
+    expect(notificationRepository.save).toHaveBeenCalledWith(
+      expect.objectContaining({ isActive: false }),
+    );
+  });
+
+  it('isolates push failures between recipients and leaves the failed row retryable', async () => {
+    const { service, userRepository, queryBuilder } = buildService();
+    const failed = {
+      id: 'a',
+      eventKey: 'wallet:a',
+      userId: 'a',
+      status: NotificationStatus.PENDING,
+      data: { type: 'wallet_transfer_out' },
+    };
+    const success = { ...failed, id: 'b', eventKey: 'wallet:b', userId: 'b' };
+    queryBuilder.getMany.mockResolvedValue([failed, success]);
+    userRepository.findOne.mockResolvedValue({
+      fcmToken: 'ExpoPushToken[device]',
+    });
+    jest
+      .spyOn(global, 'fetch')
+      .mockRejectedValueOnce(new Error('push unavailable'))
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ data: { status: 'ok', id: 'ticket' } }),
+      } as Response);
+    await expect(
+      service.dispatchTransactionalNotifications(),
+    ).resolves.toBeUndefined();
+    expect(failed.status).toBe(NotificationStatus.FAILED);
+    expect(success.status).toBe(NotificationStatus.SENT);
   });
 
   it('does not retry an overdue pickup notification once the trip request expired', async () => {

@@ -15,6 +15,12 @@ import {
   NotificationStatus,
 } from './entities/notification.entity';
 import { User } from '../users/entities/user.entity';
+import { DriverPayout } from '../driver-settlements/entities/driver-payout.entity';
+import { WalletWithdrawal } from '../wallet/entities/wallet-withdrawal.entity';
+import { ReferralWithdrawal } from '../referrals/entities/referral-withdrawal.entity';
+import { KycDocument } from '../users/entities/kyc-document.entity';
+import { PaymentTransaction } from '../payments/entities/payment-transaction.entity';
+import { PawaPayRefund } from '../payments/entities/pawapay-refund.entity';
 import {
   TripRequest,
   TripRequestStatus,
@@ -105,6 +111,7 @@ interface ExpoPushReceiptsResponse {
 export class NotificationService implements OnModuleInit {
   private readonly logger = new Logger(NotificationService.name);
   private firebaseApp: App;
+  private dispatchingTransactionalNotifications = false;
 
   constructor(
     private configService: ConfigService,
@@ -448,6 +455,70 @@ export class NotificationService implements OnModuleInit {
     return error instanceof Error ? error.message : String(error);
   }
 
+  /** Deliver newly committed outbox rows without holding business/database locks over HTTP. */
+  @Cron(CronExpression.EVERY_10_SECONDS)
+  async dispatchTransactionalNotifications(): Promise<void> {
+    if (this.dispatchingTransactionalNotifications) return;
+    this.dispatchingTransactionalNotifications = true;
+    try {
+      const notifications =
+        await this.notificationRepository.manager.transaction(
+          async (manager) => {
+            const repository = manager.getRepository(Notification);
+            const rows = await repository
+              .createQueryBuilder('notification')
+              .where('notification.eventKey IS NOT NULL')
+              .andWhere('notification.status = :status', {
+                status: NotificationStatus.PENDING,
+              })
+              .andWhere('notification.errorMessage IS NULL')
+              .andWhere('notification.isActive = true')
+              .orderBy('notification.createdAt', 'ASC')
+              .take(CRITICAL_RETRY_BATCH_SIZE)
+              .setLock('pessimistic_write')
+              .setOnLocked('skip_locked')
+              .getMany();
+            for (const row of rows)
+              row.errorMessage = 'TRANSACTIONAL_PUSH_CLAIMED';
+            return rows.length ? repository.save(rows) : rows;
+          },
+        );
+      // At most five simultaneous requests, all outside the claim transaction.
+      for (let index = 0; index < notifications.length; index += 5) {
+        await Promise.all(
+          notifications.slice(index, index + 5).map(async (notification) => {
+            try {
+              if (
+                !(await this.isCriticalNotificationStillDeliverable(
+                  notification,
+                ))
+              ) {
+                await this.suppressCriticalNotification(
+                  notification,
+                  'Notification transactionnelle remplacée par un état plus récent',
+                );
+                return;
+              }
+              const user = await this.userRepository.findOne({
+                where: { id: notification.userId! },
+                select: ['id', 'fcmToken'],
+              });
+              notification.fcmToken = user?.fcmToken?.trim() ?? '';
+              await this.deliverSavedNotification(notification);
+            } catch (error) {
+              // A crashed/failed delivery is recovered by the existing stale-claim retry.
+              this.logger.error(
+                `TRANSACTIONAL_PUSH_FAILED notificationId=${notification.id}: ${this.getErrorMessage(error)}`,
+              );
+            }
+          }),
+        );
+      }
+    } finally {
+      this.dispatchingTransactionalNotifications = false;
+    }
+  }
+
   @Cron(CronExpression.EVERY_5_MINUTES)
   async retryCriticalFinancialNotifications(): Promise<void> {
     const notifications = await this.claimCriticalFinancialNotifications();
@@ -460,7 +531,9 @@ export class NotificationService implements OnModuleInit {
       if (!(await this.isCriticalNotificationStillDeliverable(notification))) {
         await this.suppressCriticalNotification(
           notification,
-          'Notification critique obsolete: demande de trajet non recuperable',
+          notification.eventKey
+            ? 'Notification transactionnelle remplacée par un état plus récent'
+            : 'Notification critique obsolete: demande de trajet non recuperable',
         );
         continue;
       }
@@ -498,9 +571,12 @@ export class NotificationService implements OnModuleInit {
         .where('notification.status IN (:...statuses)', {
           statuses: [NotificationStatus.FAILED, NotificationStatus.PENDING],
         })
-        .andWhere("notification.data ->> 'type' IN (:...types)", {
-          types: [...CRITICAL_NOTIFICATION_TYPES],
-        })
+        .andWhere(
+          "(notification.eventKey IS NOT NULL OR notification.data ->> 'type' IN (:...types))",
+          {
+            types: [...CRITICAL_NOTIFICATION_TYPES],
+          },
+        )
         .andWhere('notification.isActive = true')
         .andWhere('notification.updatedAt <= :retryBefore', { retryBefore })
         .andWhere('notification.createdAt >= :createdAfter', { createdAfter })
@@ -526,6 +602,79 @@ export class NotificationService implements OnModuleInit {
     notification: Notification,
   ): Promise<boolean> {
     const type = notification.data?.type;
+    if (
+      notification.eventKey &&
+      (type === 'kyc_approved' || type === 'kyc_rejected')
+    ) {
+      const document = await this.notificationRepository.manager.findOneBy(
+        KycDocument,
+        { id: notification.data!.kycId },
+      );
+      return Boolean(
+        document &&
+        document.userId === notification.userId &&
+        document.status === notification.data!.status &&
+        document.reviewedBy &&
+        (!notification.data!.reviewedAt ||
+          document.reviewedAt?.toISOString() === notification.data!.reviewedAt),
+      );
+    }
+    if (
+      notification.eventKey &&
+      typeof type === 'string' &&
+      /^(driver|wallet|referral)_withdrawal_(pending|succeeded|failed|cancelled|review)$/.test(
+        type,
+      )
+    ) {
+      const entity = type.startsWith('driver_')
+        ? DriverPayout
+        : type.startsWith('wallet_')
+          ? WalletWithdrawal
+          : ReferralWithdrawal;
+      const withdrawal = await this.notificationRepository.manager.findOneBy(
+        entity as typeof WalletWithdrawal,
+        { id: notification.data!.withdrawalId },
+      );
+      if (!withdrawal) return false;
+      const driverPayout = withdrawal as unknown as DriverPayout;
+      const review =
+        withdrawal.status === 'review' || Boolean(driverPayout.recoveryBlocked);
+      const currentStatus = review
+        ? 'review'
+        : withdrawal.status === 'initiated'
+          ? 'pending'
+          : withdrawal.status;
+      return (
+        (driverPayout.driverId ?? withdrawal.userId) === notification.userId &&
+        currentStatus === notification.data!.status
+      );
+    }
+    if (
+      notification.eventKey &&
+      typeof type === 'string' &&
+      /^payment_(succeeded|failed|cancelled)$/.test(type)
+    ) {
+      const payment = await this.notificationRepository.manager.findOneBy(
+        PaymentTransaction,
+        { id: notification.data!.paymentTransactionId },
+      );
+      return Boolean(
+        payment &&
+        payment.userId === notification.userId &&
+        payment.status === notification.data!.status,
+      );
+    }
+    if (
+      notification.eventKey &&
+      typeof type === 'string' &&
+      /^payment_refund_(completed|failed)$/.test(type)
+    ) {
+      const refund = await this.notificationRepository.manager.findOneBy(
+        PawaPayRefund,
+        { id: notification.data!.refundId },
+      );
+      return refund?.status === notification.data!.status;
+    }
     if (type !== 'trip_request_driver_overdue') {
       return true;
     }
@@ -561,7 +710,9 @@ export class NotificationService implements OnModuleInit {
     );
   }
 
-  private extractTripRequestId(data: Record<string, any> | null): string | null {
+  private extractTripRequestId(
+    data: Record<string, any> | null,
+  ): string | null {
     const value = data?.tripRequestId ?? data?.requestId;
     return typeof value === 'string' && value.trim() ? value.trim() : null;
   }
@@ -671,9 +822,12 @@ export class NotificationService implements OnModuleInit {
         .andWhere('notification.messageId LIKE :ticketPrefix', {
           ticketPrefix: `${EXPO_TICKET_PREFIX}%`,
         })
-        .andWhere("notification.data ->> 'type' IN (:...types)", {
-          types: [...CRITICAL_NOTIFICATION_TYPES],
-        })
+        .andWhere(
+          "(notification.eventKey IS NOT NULL OR notification.data ->> 'type' IN (:...types))",
+          {
+            types: [...CRITICAL_NOTIFICATION_TYPES],
+          },
+        )
         .andWhere('notification.isActive = true')
         .andWhere(
           '(notification.errorMessage IS NULL OR notification.errorMessage = :checking)',

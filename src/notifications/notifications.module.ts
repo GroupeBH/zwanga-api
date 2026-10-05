@@ -10,6 +10,7 @@ import { Notification } from './entities/notification.entity';
 import { TripRequest } from '../trip-requests/entities/trip-request.entity';
 import { TripAvailabilityNotificationService } from './trip-availability-notification.service';
 import { DailyEngagementNotificationService } from './daily-engagement-notification.service';
+import { TransactionalNotificationsSubscriber } from './transactional-notifications.subscriber';
 
 @Module({
   imports: [
@@ -21,8 +22,8 @@ import { DailyEngagementNotificationService } from './daily-engagement-notificat
     NotificationService,
     TripAvailabilityNotificationService,
     DailyEngagementNotificationService,
+    TransactionalNotificationsSubscriber,
   ],
   exports: [NotificationService],
 })
 export class NotificationsModule {}
-

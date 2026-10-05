@@ -2,6 +2,48 @@
 
 Ce fichier répertorie les changements qui influencent un prix, un paiement, un solde, une commission, une récompense ou un retrait.
 
+## 4 octobre 2026
+
+### Notifications push des opérations financières et des décisions KYC manuelles
+
+Statut : implémentation backend locale ; migration puis déploiement requis. Aucun envoi réel, ajustement de solde de production ou changement AWS réalisé.
+
+Les notifications manquantes sont désormais enregistrées dans la même transaction PostgreSQL que l’opération. Une transaction annulée ne laisse aucune notification. Un traitement toutes les 10 secondes récupère les notifications confirmées, puis appelle Expo/FCM hors transaction. Les gains conducteur et les récapitulatifs de trajet déjà notifiés sont conservés.
+
+| Opération | Destinataire et déclenchement |
+| --- | --- |
+| Ajustement administrateur positif ou négatif | Titulaire, après écriture du mouvement ; montant signé et solde après opération |
+| Recharge, paiement en jetons, remboursement, correction tarifaire | Titulaire, après mouvement comptable effectif ; une recharge prestataire réussie sans crédit de jetons ne déclenche pas de faux crédit |
+| Transfert de jetons | Expéditeur et bénéficiaire, chacun pour son propre mouvement |
+| Bonus de fidélité et d’abonnement | Bénéficiaire après crédit |
+| Commissions et bonus de parrainage | Parrain ; attente, disponibilité ou annulation clairement distinguées ; pas de double alerte pour les deux écritures d’un changement de compartiment |
+| Retraits conducteur, portefeuille et parrainage | Titulaire ; demande enregistrée, résultat confirmé ou vérification requise ; pas de deuxième alerte pour le simple accusé de réception du prestataire |
+| Paiements électroniques et remboursements PawaPay | Payeur, jamais l’administrateur ayant demandé le remboursement ; seulement aux états définitifs et sans doublonner le crédit/retrait métier |
+| Espèces | Passager et conducteur après confirmation explicite de l’encaissement ; aucun crédit électronique supplémentaire créé |
+| Financement des services Pro | Propriétaire du dossier après acompte, financement ou remboursement enregistré ; aucun push possible pour un dossier web sans compte utilisateur lié |
+| KYC manuel approuvé ou rejeté | Utilisateur concerné après validation de la transaction ; décisions administrateur répétées idempotentes, aucune donnée du document ni note interne dans le push |
+
+Fiabilité et limites :
+
+- Une clé métier unique `notifications.eventKey` empêche les doublons d’enregistrement dus aux callbacks/requêtes répétés. Les travailleurs utilisent `FOR UPDATE SKIP LOCKED` pour partager la file entre instances ECS.
+- Une erreur du transport push ne revient pas sur une opération réussie. En revanche, l’impossibilité d’enregistrer la notification dans la transaction provoque son annulation : aucun mouvement nouvellement confirmé ne doit perdre cette notification silencieusement.
+- Envoi sans quota hebdomadaire marketing. Le jeton du terminal est relu avant l’envoi. Sans jeton ou en cas d’erreur, la notification reste en historique et bénéficie des reprises existantes toutes les 5 minutes pendant 72 heures, avec suivi des reçus Expo.
+- Les états de paiement/retrait ou décisions KYC remplacés par une décision plus récente sont ignorés avant envoi/reprise. Les mouvements comptables restent des événements historiques avec leur solde après opération.
+- La déduplication en base ne garantit pas un affichage exactement une fois sur le téléphone : une interruption après acceptation par Expo/FCM mais avant sauvegarde locale peut provoquer une nouvelle tentative. Le système mobile, la permission de notification et la validité du jeton restent nécessaires.
+- Aucun rattrapage massif des opérations historiques ; les nouveaux mouvements et transitions observés par le backend sont couverts. Les écritures métier doivent conserver les subscribers TypeORM et utiliser `save()` pour les changements d’état. Les commandes SQL directes doivent enregistrer explicitement la notification avec leur propre `EntityManager`, comme la confirmation des espèces.
+- Les validations automatiques Didit ne sont pas transformées en décisions manuelles. Une identité approuvée ne signifie pas qu’un compte suspendu est réactivé ni que toutes les conditions conducteur sont remplies.
+- Aucun changement mobile requis pour recevoir et afficher les push génériques existants. Les nouveaux types peuvent ouvrir l’accueil au clic tant que leur routage dédié n’est pas ajouté au mobile.
+
+Déploiement : appliquer `1780000047000-AddTransactionalNotifications` avant de démarrer le nouveau backend, puis déployer toutes les instances. Les anciens processus n’émettent pas ces nouveaux événements durant une coexistence de versions. Aucune variable d’environnement supplémentaire. La migration conserve l’historique existant et refuse une annulation qui supprimerait des clés de notifications déjà créées.
+
+Fichiers principaux : `src/notifications/transactional-notifications.subscriber.ts`, `financial-notification.policy.ts`, `transactional-notification.ts`, `notifications.service.ts`, `src/admin/admin.service.ts`, `src/bookings/cash-receipts.service.ts` et la migration ci-dessus.
+
+Tests : couverture des crédits/débits, destinataires, callbacks répétés, décisions KYC, transport indisponible et jeton renouvelé. Le test PostgreSQL isolé `src/database/transactional-notifications-postgres.spec.ts` s’active uniquement avec `NOTIFICATIONS_TEST_POSTGRES_BIN` pointant vers les exécutables PostgreSQL ; il crée et nettoie son propre cluster temporaire, sans lire `.env` ni utiliser la base de l’application. Les services de push y sont simulés ; aucun test physique sur téléphone n’est revendiqué.
+
+Validation locale finale : 1 193 tests réussis dans la suite complète (21 tests opt-in ignorés), puis les 12 nouveaux tests PostgreSQL exécutés séparément avec succès ; TypeScript et ESLint ciblé sur le nouveau code de production réussis. Les clusters temporaires ont été arrêtés et nettoyés.
+
+Référence d’implémentation : [subscribers et gestionnaire transactionnel TypeORM](https://typeorm.io/docs/listeners-and-subscribers/).
+
 ## 19 septembre 2026
 
 ### FIN-WALLET-005 — Vérifications finales du retrait de jetons achetés

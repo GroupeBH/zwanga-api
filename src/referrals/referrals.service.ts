@@ -359,7 +359,9 @@ export class ReferralsService implements OnModuleInit {
       `Referral attribution attached: referredUserId=${userId}, referrerUserId=${result.referrer.userId}, provider=${result.profile.attributionProvider}`,
     );
 
-    if (!result.referrer.fcmToken) {
+    // A credited attribution bonus already creates a durable financial push
+    // via its ledger entry, including for users without a current push token.
+    if (result.attributionBonusTokens > 0 || !result.referrer.fcmToken) {
       return;
     }
 

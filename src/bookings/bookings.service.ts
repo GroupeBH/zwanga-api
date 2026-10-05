@@ -6046,8 +6046,8 @@ export class BookingsService implements OnModuleInit {
 
       await this.notificationService.sendNotification(
         driver.fcmToken,
-        'Arrivee confirmee',
-        `${passengerName} est marque comme depose automatiquement par GPS.`,
+        'Arrivée à destination confirmée',
+        `L’arrivée à destination de ${passengerName} a été confirmée automatiquement par GPS.`,
         {
           type: 'dropoff_confirmed_automatically',
           bookingId: booking.id,
@@ -6198,6 +6198,7 @@ export class BookingsService implements OnModuleInit {
     coordinates: [number, number];
     updatedAt: Date;
     autoProgress: AutomaticRideProgressResult;
+    ignoredAsOutOfOrder?: boolean;
   }> {
     const booking = await this.bookingRepository.findOne({
       where: { id: bookingId, passengerId },
@@ -6259,6 +6260,7 @@ export class BookingsService implements OnModuleInit {
         ],
         updatedAt: booking.passengerLastLocationUpdateAt!,
         autoProgress,
+        ignoredAsOutOfOrder: true,
       };
     }
 
@@ -6302,6 +6304,7 @@ export class BookingsService implements OnModuleInit {
           booking.passengerLastLocationUpdateAt ??
           observedAt,
         autoProgress,
+        ignoredAsOutOfOrder: true,
       };
     }
 

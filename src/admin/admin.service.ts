@@ -129,25 +129,33 @@ export class AdminService {
       throw new NotFoundException("Document de vérification d’identité introuvable.");
     }
 
-    kycDocument.status = approved ? KycStatus.APPROVED : KycStatus.REJECTED;
-    kycDocument.reviewedBy = adminId;
-    kycDocument.reviewedAt = new Date();
-    if (reason) {
-      kycDocument.rejectionReason = reason;
-    }
-
     return this.userRepository.manager.transaction(async (manager) => {
       const user = await manager.getRepository(User).findOne({
         where: { id: kycDocument.userId }, lock: { mode: 'pessimistic_write' },
       });
       if (!user) throw new NotFoundException('Utilisateur introuvable');
-      const saved = await manager.getRepository(KycDocument).save(kycDocument);
+      const documents = manager.getRepository(KycDocument);
+      const current = await documents.findOne({
+        where: { id: kycId }, lock: { mode: 'pessimistic_write' },
+      });
+      if (!current) throw new NotFoundException('Document de vérification introuvable');
+      const status = approved ? KycStatus.APPROVED : KycStatus.REJECTED;
+      // A repeated/concurrent admin decision is not a new identity event.
+      let saved = current;
+      if (current.status !== status || !current.reviewedBy) {
+        current.status = status;
+        current.reviewedBy = adminId;
+        current.reviewedAt = new Date();
+        current.rejectionReason = approved ? null : reason ?? null;
+        saved = await documents.save(current);
+      }
       if (user.isActive && ![UserStatus.SUSPENDED, UserStatus.INACTIVE].includes(user.status)) {
         await manager.getRepository(User).update(user.id, {
           status: approved ? UserStatus.ACTIVE : UserStatus.PENDING_KYC,
         });
       }
       await activateRequestedDriver(manager, user.id);
+      saved.user = kycDocument.user;
       return saved;
     });
   }

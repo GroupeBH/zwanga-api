@@ -1462,7 +1462,7 @@ export class TripsService {
         `Trip completion failed: Trip ${tripId} still has ${unfinishedBookings.length} accepted booking(s) not dropped off`,
       );
       throw new BadRequestException(
-        "Impossible de terminer le trajet tant que tous les passagers acceptés n'ont pas été déposés",
+        'Impossible de terminer le trajet tant que l’arrivée à destination de tous les passagers acceptés n’a pas été confirmée.',
       );
     }
 
