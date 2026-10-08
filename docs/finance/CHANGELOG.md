@@ -1,5 +1,16 @@
 # Journal des modifications financières
 
+## 2026-10-08 — Bonus de bienvenue conducteur présenté en FC pour Pro
+
+- Texte conducteur : « Bienvenue chez Zwanga ! 5 000 FC vous sont offerts sous forme de jetons Zwanga pour vous permettre de payer votre abonnement Pro. » Le message ne présente ni un versement en espèces ni un abonnement déjà activé. La copie passager reste inchangée.
+- Changement de présentation uniquement : crédit unique de **50 PTS**, promotionnel/non retirable, équivalent à **5 000 CDF au taux de 100 CDF/jeton** déjà prévu. Aucun tarif, conversion, solde, disponibilité, règle de commission ou critère KYC/compte modifié ; le paiement de Pro reste une action du conducteur soumise au solde disponible.
+- Chemin ORM : `financial-notification.policy.ts` choisit le texte selon le rôle persistant lu dans la transaction par `transactional-notifications.subscriber.ts`, uniquement pour le bonus de bienvenue. Aucun accès supplémentaire au rôle pour les autres mouvements.
+- Chemins KYC manuel, Didit et cron SQL : migration additive **1780000059000-DriverWelcomeBonusCopy** remplaçant seulement l'expression du texte dans `zwanga_grant_welcome_bonus(uuid)`. Anciennes migrations, code d'attribution, verrous, déduplication, ledger et événement mobile `wallet_loyalty_reward` conservés. Payload toujours `amount=50`, `currency=PTS`, même clé `wallet:<ledgerEntryId>`.
+- Conformément au guide PostgreSQL, modification transactionnelle avec délais bornés, refus d'une définition inattendue, sans balayage de l'historique ni appel réseau sous verrou. Aucune notification passée ou déjà en attente réécrite, aucun renvoi ni recrédit pour les bénéficiaires existants. Seules les prochaines notifications produites utilisent le nouveau texte.
+- Déploiement : compiler, appliquer la migration 59 via le workflow historique existant, puis déployer le backend. Aucune nouvelle variable d'environnement, aucun changement CI/CD/Terraform ni mobile. Le texte serveur fonctionne avec les versions mobiles existantes ; le portefeuille continue de comptabiliser ses unités internes.
+- Retour arrière : le `down` de la migration 59 rétablit uniquement le texte futur de la fonction, sans annuler de crédit ni modifier l'historique ; restaurer aussi la copie applicative si un retour de texte complet est souhaité. Ne pas revenir sur les migrations financières antérieures.
+- Vérifications : 64 tests unitaires ciblés et 95 tests PostgreSQL 18 jetable réussis (3 diagnostics historiques ignorés), dont parité SQL/ORM, message passager inchangé, absence de double crédit, historique inchangé, migration idempotente et restauration du texte. Premier démarrage PostgreSQL impossible dans le sandbox ; test relancé avec autorisation sur un cluster temporaire puis nettoyé. Compilation finale réussie, diff vérifié. Aucun accès à la base applicative, aucune migration AWS ni push réel.
+
 ## 2026-10-08 — Deuxième réparation UUID, réservation et accueil cohérent
 
 - La réparation 57 de publication ne couvrait pas `zwanga_booking_cash_guard`.

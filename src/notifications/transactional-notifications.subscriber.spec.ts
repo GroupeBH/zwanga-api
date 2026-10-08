@@ -9,6 +9,7 @@ import { KycDocument, KycStatus } from '../users/entities/kyc-document.entity';
 import { DriverPayout } from '../driver-settlements/entities/driver-payout.entity';
 import { PaymentTransaction } from '../payments/entities/payment-transaction.entity';
 import { PawaPayRefund } from '../payments/entities/pawapay-refund.entity';
+import { User, UserRole } from '../users/entities/user.entity';
 import {
   ProServiceCase,
   ProServiceLedger,
@@ -27,6 +28,7 @@ const fixture = () => {
   const manager = {
     createQueryBuilder: jest.fn(() => builder),
     findOneBy: jest.fn(),
+    findOne: jest.fn(),
   };
   const event = (target: unknown, entity: object, databaseEntity?: object) =>
     ({
@@ -39,6 +41,22 @@ const fixture = () => {
 };
 
 describe('transactional notification subscriber', () => {
+  it.each([UserRole.DRIVER, UserRole.PASSENGER])('uses the persisted recipient role for welcome copy (%s)', async role => {
+    const f = fixture();
+    f.manager.findOne.mockResolvedValue({ role });
+    await f.subscriber.afterInsert(f.event(WalletLedgerEntry, {
+      id: 'welcome', userId: 'recipient', type: WalletLedgerEntryType.LOYALTY_REWARD,
+      relatedEntityType: 'welcome_bonus', amount: 50, currency: 'PTS', balanceAfter: 50,
+    }));
+    expect(f.manager.findOne).toHaveBeenCalledWith(User, {
+      where: { id: 'recipient' }, select: { role: true },
+    });
+    const row = f.builder.values.mock.calls[0][0];
+    expect(row.body).toContain(role === UserRole.DRIVER ? '5 000 FC' : '50 jetons');
+    expect(row.data).toMatchObject({ amount: 50, currency: 'PTS' });
+    expect(row.eventKey).toBe('wallet:welcome');
+  });
+
   it('persists new pending booking invitations with a stable key in the business transaction', async () => {
     const f = fixture();
     f.manager.findOneBy.mockResolvedValue({ id: 'trip', driverId: 'driver', tripRequestId: null });
@@ -114,6 +132,7 @@ describe('transactional notification subscriber', () => {
     expect(f.builder.onConflict).toHaveBeenCalledWith(
       '("eventKey") DO NOTHING',
     );
+    expect(f.manager.findOne).not.toHaveBeenCalled();
   });
 
   it.each([KycStatus.APPROVED, KycStatus.REJECTED])(

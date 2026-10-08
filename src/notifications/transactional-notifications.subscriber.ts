@@ -7,7 +7,8 @@ import {
   InsertEvent,
   UpdateEvent,
 } from 'typeorm';
-import { WalletLedgerEntry } from '../wallet/entities/wallet-ledger-entry.entity';
+import { WalletLedgerEntry, WalletLedgerEntryType } from '../wallet/entities/wallet-ledger-entry.entity';
+import { User } from '../users/entities/user.entity';
 import { ReferralLedgerEntry } from '../referrals/entities/referral-ledger-entry.entity';
 import { DriverPayout } from '../driver-settlements/entities/driver-payout.entity';
 import { WalletWithdrawal } from '../wallet/entities/wallet-withdrawal.entity';
@@ -160,8 +161,17 @@ export class TransactionalNotificationsSubscriber
         };
       }
     }
-    if (target === WalletLedgerEntry && inserted)
-      notification = walletMovementNotification(entity as WalletLedgerEntry);
+    if (target === WalletLedgerEntry && inserted) {
+      const entry = entity as WalletLedgerEntry;
+      const recipient = entry.type === WalletLedgerEntryType.LOYALTY_REWARD &&
+        entry.relatedEntityType === 'welcome_bonus'
+        ? await event.manager.findOne(User, {
+            where: { id: entry.userId },
+            select: { role: true },
+          })
+        : null;
+      notification = walletMovementNotification(entry, recipient?.role);
+    }
     if (target === ReferralLedgerEntry && inserted)
       notification = referralMovementNotification(
         entity as ReferralLedgerEntry,

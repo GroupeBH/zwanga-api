@@ -2,6 +2,15 @@
 
 Les entrées sont classées de la plus récente à la plus ancienne. Elles décrivent le code versionné et les opérations réellement exécutées sur AWS, sans inclure de valeur secrète.
 
+## INFRA-2026-10-08-003 — Texte du bonus conducteur, sans modification du CI/CD
+
+- Préparé localement, non déployé : migration applicative `1780000059000-DriverWelcomeBonusCopy`, enregistrée dans `src/database/migrations/index.ts`, et copie des notifications ORM. Le pipeline historique et tous les fichiers Terraform sont inchangés.
+- Nouveau texte : « 5 000 FC vous sont offerts sous forme de jetons Zwanga pour vous permettre de payer votre abonnement Pro ». La fonction SQL conserve son crédit de 50 PTS, son éligibilité et sa déduplication ; seule la copie conducteur change. Pas de recrédit ni de renvoi aux bénéficiaires existants, pas de modification des notifications déjà stockées.
+- Déploiement prévu : build, migrations TypeORM via le workflow existant, puis redéploiement de l'application. Aucune ressource, permission, variable SSM ou prestation payante ajoutée. Aucun apply, accès RDS, push ou déploiement AWS réalisé.
+- La migration borne les délais et refuse une forme de fonction inconnue ; surveiller ses logs, le prochain bonus et l'unicité de sa notification. Son `down` restaure le texte futur uniquement, sans annuler de crédit ; ne pas annuler les migrations financières antérieures. Les limites du pipeline historique décrites ci-dessous restent valables.
+- Validation et détails métier : [journal financier](../../docs/finance/CHANGELOG.md#2026-10-08--bonus-de-bienvenue-conducteur-présenté-en-fc-pour-pro).
+- Contrôles locaux : 64 tests unitaires ciblés et 95 tests PostgreSQL 18 isolés réussis, 3 diagnostics ignorés ; compilation réussie, CI/CD et Terraform confirmés inchangés. Aucun serveur applicatif démarré.
+
 ## INFRA-2026-10-08-002 — Retour au CI/CD et à l'infrastructure antérieurs
 
 ### Contexte et statut
