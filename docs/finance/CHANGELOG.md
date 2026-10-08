@@ -1,5 +1,22 @@
 # Journal des modifications financières
 
+## 2026-10-08 — Conservation KYC sans expiration automatique
+
+- Décision utilisateur : conserver indéfiniment les copies de pièce et selfie. `DIDIT_KYC_ARCHIVE_RETENTION_DAYS=0` devient la valeur explicite pour ce mode ; vide/absent reste invalide, 1 à 3 650 jours reste disponible. Exemples d'environnement mis à `0` avec collecte toujours désactivée.
+- Migration complémentaire `1780000062000-KycEvidenceIndefiniteRetention`, enregistrée après la 61 : autorise `expiresAt=NULL` sans réécriture des échéances existantes. Guide PostgreSQL appliqué : type temporel conservé, modification de métadonnées transactionnelle avec délais bornés, aucun téléchargement sous verrou ni modification de la migration historique.
+- File, lecture admin, reprises et capture acceptent les dossiers sans échéance. Une suppression admin ou celle du dossier KYC lors de la suppression du compte conserve ses effets : accès révoqué, purge physique asynchrone des versions S3, tombstone empêchant une recollecte. Ne concerne pas la conservation chez Didit, les règles lifecycle S3 ni les sauvegardes.
+- Vérifications : **86 tests KYC ciblés**, **13 tests PostgreSQL 18 jetable** et compilation réussis. Le cluster de test a été arrêté et nettoyé. Suite globale non relancée pour cet ajustement. Aucun `.env` réel, AWS, serveur applicatif, compte ou média réel touché.
+- Analyse en lecture seule des notifications de demande de trajet : flux classique diffusé aux conducteurs actifs avec token ; dispatch immédiat ciblé séquentiellement selon proximité, position fraîche et compatibilité push. Aucun code de notification ou mobile modifié. Limites de position en arrière-plan et différences de son expliquées à l'utilisateur ; pas d'essai acoustique ou de recontrôle AWS.
+- Configuration, préconditions et API : [guide Didit](kyc-didit-integration.md#8-octobre-2026--archivage-privé-des-justificatifs-didit).
+
+## 2026-10-08 — Justificatifs KYC Didit archivables côté backend
+
+- Demande : récupérer et conserver pièce d'identité, selfie et détails utiles après KYC. Migration additive 61, worker d'archivage privé S3 et endpoints admin de consultation/téléchargement/purge. Les champs sensibles sont isolés des profils publics et des réponses KYC mobiles existantes.
+- Enqueue transactionnel depuis synchronisation/webhook Didit et décision admin, déduplication, téléchargements hors verrou, reprises bornées, contrôle d'appartenance, audit des lectures, échéance obligatoire et purge des objets/version S3 après expiration ou suppression du dossier. Aucune collecte massive des existants ; reprise ciblée admin disponible.
+- Taux, portefeuilles, bonus de bienvenue, droits Pro, statut KYC et notification d'approbation conservés. Une panne réseau/S3 d'archivage ne retire pas une approbation. Pas de scan biométrique supplémentaire, paiement, push réel, migration applicative ou opération AWS.
+- Configuration inactive par défaut ; durée de conservation et hôtes médias à confirmer avant activation. Détails, limites (copies normalisées, données manquantes, sauvegardes et IAM versionné), API et procédure : [intégration Didit](kyc-didit-integration.md#8-octobre-2026--archivage-privé-des-justificatifs-didit).
+- Vérification : suite complète exécutée, **1 491 tests réussis / 176 ignorés**, 138 suites réussies ; puis **81 tests KYC ciblés réussis** après les derniers ajustements de concurrence et purge S3 ; **9 tests PostgreSQL 18 isolés réussis**. Compilations backend réussies. Guide PostgreSQL appliqué : migration additive, types/index appropriés, baux de travail et téléchargements hors transaction ; historiques préservés. Aucun test sur données réelles ni activation en production.
+
 ## 2026-10-08 — Tolérance cash cumulée, utilisable tant que la dette reste dans les 25 jetons
 
 - Demande : conserver la tolérance de 25 jetons et bloquer le choix cash au-delà. L'ancien contrôle bloquait dès la première dette positive. Désormais, `dette existante + part non couverte de la nouvelle commission <= 25`, tous trajets du conducteur confondus. À 20 jetons dus, il reste 5 jetons de crédit ; à 25, toute nouvelle commission doit être financée ; au-delà, aucun nouveau cash payant. Ce crédit n'est ni un bonus de portefeuille ni une nouvelle franchise par réservation.

@@ -25,6 +25,7 @@ import {
   VerifyOtpResponse,
 } from './dto/keccel-otp.dto';
 import { OTP_SMS_MESSAGES } from './otp-messages';
+import { normalizeOtpPhone } from '../otp/otp-phone.util';
 
 @Injectable()
 export class KeccelOtpService {
@@ -328,37 +329,10 @@ export class KeccelOtpService {
   }
 
   private normalizePhoneForKeccel(phone: string): string {
-    const defaultCountryCode = (
-      this.configService.get<string>('DEFAULT_COUNTRY_CODE') || '+243'
-    ).replace(/\D/g, '');
-
-    let normalized = phone.trim().replace(/[\s().-]/g, '');
-
-    if (normalized.startsWith('+')) {
-      normalized = normalized.slice(1);
-    }
-
-    if (normalized.startsWith('00')) {
-      normalized = normalized.slice(2);
-    }
-
-    if (normalized.startsWith('0')) {
-      normalized = `${defaultCountryCode}${normalized.slice(1)}`;
-    } else if (
-      defaultCountryCode &&
-      !normalized.startsWith(defaultCountryCode) &&
-      /^\d{8,10}$/.test(normalized)
-    ) {
-      normalized = `${defaultCountryCode}${normalized}`;
-    }
-
-    if (!/^\d{8,15}$/.test(normalized)) {
-      throw new BadRequestException(
-        'Le numéro de téléphone doit être au format international, par exemple +243900000000',
-      );
-    }
-
-    return normalized;
+    return normalizeOtpPhone(
+      phone,
+      this.configService.get<string>('DEFAULT_COUNTRY_CODE') || '+243',
+    );
   }
 
   private isGenerateSuccess(data: KeccelOtpGenerateResponse): boolean {

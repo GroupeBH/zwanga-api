@@ -64,6 +64,35 @@ describe('OTP SMS wording and encoding (no real SMS)', () => {
     expect(body.lifetime).toBe(300);
   });
 
+  it.each([
+    ['+352 26 00 00', '352260000'],
+    ['0032 2 000 00 00', '3220000000'],
+    ['+683 4000', '6834000'],
+    ['0900000000', '243900000000'],
+  ])(
+    'uses the same international normalization for Keccel send/check: %s',
+    async (phone, expected) => {
+      const request = jest
+        .fn()
+        .mockReturnValue(of({ data: { status: 'VALID' } }));
+      const internationalService = new KeccelOtpService(
+        { post, request } as unknown as HttpService,
+        new ConfigService({
+          KECCEL_TOKEN: 'test-token',
+          KECCEL_FROM: 'Zwanga',
+        }),
+      );
+      await internationalService.sendOtp(phone);
+      expect(post.mock.calls[0][1].to).toBe(expected);
+      await internationalService.verifyOtp(phone, '12345');
+      expect(request).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ to: expected }),
+        }),
+      );
+    },
+  );
+
   it('does not silently remove accents from custom messages', async () => {
     const message = 'Code de sécurité : %OTP%';
     await service.sendOtp('+243891234567', message);

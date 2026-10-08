@@ -38,6 +38,7 @@ describe('manual KYC decisions', () => {
         userRepository: repository,
         kycDocumentRepository: documents,
         logger: { log: jest.fn(), warn: jest.fn() },
+        evidence: { enqueue: jest.fn().mockResolvedValue(undefined) },
       },
     );
     return { service, document, documents, users, manager };
@@ -61,6 +62,7 @@ describe('manual KYC decisions', () => {
     expect(f.users.update).toHaveBeenCalledWith('user', {
       status: UserStatus.ACTIVE,
     });
+    expect((f.service as any).evidence.enqueue).toHaveBeenCalledWith(f.manager,expect.objectContaining({id:'kyc',status:KycStatus.APPROVED}));
   });
 
   it('does not save or create a new decision on an identical retry', async () => {

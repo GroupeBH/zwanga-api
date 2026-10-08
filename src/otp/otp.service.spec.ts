@@ -108,6 +108,55 @@ describe('OtpService provider routing', () => {
     expect(keccel.verifyOtp).toHaveBeenCalledWith(phone, '12345');
   });
 
+  it.each([
+    ['+352 26 00 00', '00352260000', '+352260000'],
+    ['0032 2 000 00 00', '+3220000000', '+3220000000'],
+    ['+683 4000', '006834000', '+6834000'],
+    ['0900000000', '+243900000000', '+243900000000'],
+  ])(
+    'sends and consumes the same foreign/local Didit challenge for %s',
+    async (input, verifyPhone, canonical) => {
+      const service = serviceFor('didit');
+      await service.sendOtp(input);
+      expect(didit.sendCode).toHaveBeenCalledWith(
+        canonical,
+        'phone_verification',
+        expect.any(String),
+      );
+      expect(await service.verifyOtp(verifyPhone, '12345')).toEqual({
+        valid: true,
+        status: 'VALID',
+      });
+      expect(didit.verifyCode).toHaveBeenCalledWith(
+        canonical,
+        '12345',
+        expect.any(String),
+        expect.any(String),
+      );
+      expect(await service.verifyOtp(verifyPhone, '12345')).toEqual({
+        valid: false,
+        status: 'INVALID',
+      });
+    },
+  );
+
+  it('does not verify a foreign challenge against a different inferred country', async () => {
+    const service = serviceFor('didit');
+    await service.sendOtp('+352260000');
+    expect(await service.verifyOtp('352260000', '12345')).toEqual({
+      valid: false,
+      status: 'INVALID',
+    });
+    expect(didit.verifyCode).not.toHaveBeenCalled();
+    expect(
+      await service.verifyOtp('+352260000', '12345', 'pin_reset'),
+    ).toMatchObject({ valid: false });
+    expect(didit.verifyCode).not.toHaveBeenCalled();
+    expect(await service.verifyOtp('00352260000', '12345')).toMatchObject({
+      valid: true,
+    });
+  });
+
   it('retains invalid challenges, rejects missing challenges and rejects malformed codes', async () => {
     const service = serviceFor('didit');
     expect(await service.verifyOtp(phone, '12345')).toMatchObject({
