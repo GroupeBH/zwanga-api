@@ -27,6 +27,27 @@ export function walletMovementNotification(
     return null;
   const amount = displayAmount(entry.amount, entry.currency);
   const balance = displayAmount(entry.balanceAfter, entry.currency);
+  if (
+    entry.type === WalletType.LOYALTY_REWARD &&
+    entry.relatedEntityType === 'welcome_bonus'
+  ) {
+    return {
+      eventKey: `wallet:${entry.id}`,
+      userId: entry.userId,
+      title: 'Bonus de bienvenue reçu',
+      body: `Votre identité et votre compte sont validés. ${amount} de bienvenue ont été ajoutés à votre portefeuille.`,
+      data: {
+        type: 'wallet_loyalty_reward', // Compatible with already-published mobile versions.
+        ledgerEntryId: entry.id,
+        amount: Number(entry.amount),
+        currency: entry.currency,
+        balanceAfter: Number(entry.balanceAfter),
+        relatedEntityType: entry.relatedEntityType,
+        relatedEntityId: entry.relatedEntityId,
+        paymentTransactionId: entry.paymentTransactionId,
+      },
+    };
+  }
   const copy: Partial<Record<WalletType, [string, string]>> = {
     [WalletType.TOP_UP]: [
       'Recharge réussie',
@@ -87,6 +108,11 @@ export function walletMovementNotification(
       relatedEntityType: entry.relatedEntityType,
       relatedEntityId: entry.relatedEntityId,
       paymentTransactionId: entry.paymentTransactionId,
+      ...([WalletType.TRANSFER_IN, WalletType.TRANSFER_OUT].includes(
+        entry.type,
+      ) && entry.relatedEntityType === 'wallet_transfer'
+        ? { transferId: entry.relatedEntityId }
+        : {}),
     },
   };
 }
@@ -105,7 +131,7 @@ export function referralMovementNotification(
   const copy: Partial<Record<ReferralType, [string, string]>> = {
     [ReferralType.ATTRIBUTION_BONUS]: [
       'Bonus de parrainage reçu',
-      `${amount} ont été ajoutés à votre solde de parrainage après une nouvelle inscription.`,
+      `${amount} ont été ajoutés à votre solde de parrainage après le rattachement d’un filleul.`,
     ],
     [ReferralType.REWARD_PENDING]: [
       'Commission de parrainage enregistrée',

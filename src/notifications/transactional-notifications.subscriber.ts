@@ -1,4 +1,6 @@
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
+import { Booking, BookingStatus } from '../bookings/entities/booking.entity';
+import { Trip } from '../trips/entities/trip.entity';
 import {
   DataSource,
   EntitySubscriberInterface,
@@ -33,6 +35,7 @@ import {
 } from './financial-notification.policy';
 
 const INSERT_TARGETS = new Set<unknown>([
+  Booking,
   WalletLedgerEntry,
   ReferralLedgerEntry,
   DriverPayout,
@@ -143,6 +146,20 @@ export class TransactionalNotificationsSubscriber
         `Transactional notification requires the ${event.metadata.tableName} primary key; use save() for business state transitions`,
       );
     let notification: TransactionalNotification | null = null;
+    if (target === Booking && inserted) {
+      const booking = entity as Booking;
+      if (booking.status === BookingStatus.PENDING) {
+        const trip = await event.manager.findOneBy(Trip, { id: booking.tripId });
+        // Assigned requests already have their own dispatch invitation.
+        if (trip && !trip.tripRequestId) notification = {
+          eventKey: `booking:${booking.id}:new`, userId: trip.driverId,
+          title: 'Nouvelle réservation',
+          body: 'Un passager souhaite réserver votre trajet. Accepter ou refuser ?',
+          data: { type: 'new_booking', bookingId: booking.id, tripId: trip.id,
+            driverId: trip.driverId, role: 'driver' },
+        };
+      }
+    }
     if (target === WalletLedgerEntry && inserted)
       notification = walletMovementNotification(entity as WalletLedgerEntry);
     if (target === ReferralLedgerEntry && inserted)
@@ -177,12 +194,15 @@ export class TransactionalNotificationsSubscriber
         inserted ||
         previous?.reviewedBy !== kyc.reviewedBy ||
         String(previous?.reviewedAt ?? '') !== String(kyc.reviewedAt ?? '');
-      // Didit/automatic checks have their own workflow; this covers explicit admin decisions.
+      const statusChanged = inserted || previous?.status !== kyc.status;
+      // An approval is an identity event, regardless of its source. Polling or
+      // an admin confirming the same Didit approval is not a second approval.
+      // Preserve notifications for explicit manual rejections as well.
       if (
-        manualReviewChanged &&
         kyc.userId &&
-        kyc.reviewedBy &&
-        [KycStatus.APPROVED, KycStatus.REJECTED].includes(kyc.status)
+        ((kyc.status === KycStatus.APPROVED && statusChanged) ||
+          (kyc.status === KycStatus.REJECTED &&
+            kyc.reviewedBy && manualReviewChanged))
       ) {
         const approved = kyc.status === KycStatus.APPROVED;
         notification = {
@@ -192,7 +212,7 @@ export class TransactionalNotificationsSubscriber
             ? 'Identité vérifiée'
             : 'Vérification d’identité à reprendre',
           body: approved
-            ? 'Votre identité a été validée par notre équipe. Consultez votre profil pour voir les fonctionnalités disponibles.'
+            ? 'Votre identité a été vérifiée avec succès. Consultez votre profil pour voir les fonctionnalités disponibles.'
             : 'Votre vérification d’identité n’a pas été validée. Consultez votre profil pour connaître la suite à donner.',
           data: {
             type: `kyc_${kyc.status}`,

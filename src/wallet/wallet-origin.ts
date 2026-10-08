@@ -15,6 +15,7 @@ export function applyTokenMovement(
     balance: number;
     withdrawableBalance?: number;
     withdrawalsBlocked?: boolean;
+    reservedCashCommissionBalance?: number;
   },
   amount: number,
   purchasedCredit = 0,
@@ -22,9 +23,10 @@ export function applyTokenMovement(
 ): number {
   const total = tokenCents(account.balance);
   const purchased = tokenCents(account.withdrawableBalance ?? 0);
+  const reserved = tokenCents(account.reservedCashCommissionBalance ?? 0);
   const delta = tokenCents(amount);
   let purchasedDelta = tokenCents(purchasedCredit);
-  if (purchased < 0 || purchased > total || delta === 0) {
+  if (purchased < 0 || purchased > total || reserved < 0 || reserved > total || delta === 0) {
     throw new BadRequestException('Solde de jetons incohérent');
   }
   if (delta < 0) {
@@ -33,17 +35,18 @@ export function applyTokenMovement(
         'Votre portefeuille nécessite une vérification. Contactez le support.',
       );
     }
-    if (total + delta < 0 || (purchasedOnly && purchased + delta < 0)) {
+    const reservedPurchased = Math.max(0, reserved - (total - purchased));
+    if (total - reserved + delta < 0 || (purchasedOnly && purchased - reservedPurchased + delta < 0)) {
       throw new BadRequestException(
         purchasedOnly
           ? 'Solde de jetons retirables insuffisant. Les jetons de fidélité ne sont pas retirables.'
           : 'Solde de jetons insuffisant',
       );
     }
-    // Spend rewards first, except when explicitly reserving a cash withdrawal.
+    // Cash holds have priority on rewards; spend only unreserved origins.
     purchasedDelta = purchasedOnly
       ? delta
-      : -Math.max(0, -delta - (total - purchased));
+      : -Math.max(0, -delta - Math.max(0, total - purchased - reserved));
   } else if (purchasedDelta < 0 || purchasedDelta > delta) {
     throw new BadRequestException('Origine des jetons incohérente');
   }

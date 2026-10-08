@@ -22,6 +22,9 @@ export enum NotificationStatus {
 @Index(['userId', 'isActive'])
 @Index(['userId', 'isAutomatic', 'createdAt'])
 @Index(['status'])
+@Index('IDX_notifications_urgent_outbox', ['createdAt', 'id'], {
+  where: `"eventKey" IS NOT NULL AND "isActive" = true AND status IN ('pending', 'failed') AND data ->> 'type' IN ('new_booking', 'driver_dispatch_offer')`,
+})
 @Index('IDX_notifications_outbox_pending', ['createdAt', 'id'], {
   where: `"eventKey" IS NOT NULL AND status = 'pending' AND "errorMessage" IS NULL AND "isActive" = true`,
 })

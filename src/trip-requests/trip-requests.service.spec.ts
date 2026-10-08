@@ -834,6 +834,43 @@ describe('TripRequestsService unaccepted request expiration', () => {
   });
 });
 
+describe('TripRequestsService failed provisional booking', () => {
+  for (const path of ['direct', 'selected'] as const) {
+    for (const cleanupFails of [false, true]) {
+      it(`${path}: compensates the exact provisional trip and preserves the original error (cleanup fails: ${cleanupFails})`, async () => {
+        const now = Date.now();
+        const request = {
+          id: 'request-test', passengerId: 'passenger-test',
+          status: path === 'direct' ? TripRequestStatus.PENDING : TripRequestStatus.DRIVER_SELECTED,
+          selectedDriverId: path === 'selected' ? 'driver-test' : null,
+          departureDateMin: new Date(now + 60000), departureDateMax: new Date(now + 3600000),
+          vehicleType: VehicleType.CAR, numberOfSeats: 1, maxPricePerSeat: 8500, driverOffers: [],
+        };
+        const failure = new Error('booking insert failed');
+        const requests = { findOne: jest.fn().mockResolvedValue(request), save: jest.fn() };
+        const trips = { create: jest.fn().mockResolvedValue({ id: 'trip-test' }),
+          ensureDriverCanStartTrip: jest.fn(),
+          cancelFailedRequestTrip: cleanupFails ? jest.fn().mockRejectedValue(new Error('cleanup failed')) : jest.fn(),
+        };
+        const service = new TripRequestsService(
+          requests as any,
+          { findOne: jest.fn().mockResolvedValue({ proposedDepartureDate: request.departureDateMin, availableSeats: 1 }) } as any,
+          { findOne: jest.fn().mockResolvedValue({ id: 'driver-test' }) } as any,
+          { findOne: jest.fn().mockResolvedValue({ id: 'vehicle-test', type: VehicleType.CAR, isActive: true }) } as any,
+          {} as any, {} as any, trips as any,
+          { create: jest.fn().mockRejectedValue(failure) } as any,
+          {} as any, {} as any, {} as any, {} as any,
+        );
+        await expect(path === 'direct'
+          ? service.acceptTripRequest('driver-test', request.id, {})
+          : service.startTripFromRequest(request.id, 'driver-test')).rejects.toBe(failure);
+        expect(trips.cancelFailedRequestTrip).toHaveBeenCalledWith('trip-test', 'driver-test', request.id);
+        expect(requests.save).not.toHaveBeenCalled();
+      });
+    }
+  }
+});
+
 describe('TripRequestsService passenger KYC requirements', () => {
   it('rejects direct driver acceptance when KYC is required and the passenger is not approved', async () => {
     const now = Date.now();

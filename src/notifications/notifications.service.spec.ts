@@ -8,6 +8,7 @@ describe('NotificationService critical push reliability', () => {
       where: jest.fn().mockReturnThis(),
       andWhere: jest.fn().mockReturnThis(),
       orderBy: jest.fn().mockReturnThis(),
+      addOrderBy: jest.fn().mockReturnThis(),
       take: jest.fn().mockReturnThis(),
       setLock: jest.fn().mockReturnThis(),
       setOnLocked: jest.fn().mockReturnThis(),
@@ -37,6 +38,7 @@ describe('NotificationService critical push reliability', () => {
       },
     };
     const userRepository = {
+      count: jest.fn().mockResolvedValue(1),
       findOne: jest.fn(),
       update: jest.fn().mockResolvedValue({ affected: 1 }),
     };
@@ -63,6 +65,64 @@ describe('NotificationService critical push reliability', () => {
 
   afterEach(() => {
     jest.restoreAllMocks();
+  });
+
+  it('does not deliver private messages while an old duplicated push token has ambiguous ownership', async () => {
+    const f = buildService();
+    f.userRepository.findOne.mockResolvedValue({ fcmToken: 'ExpoPushToken[shared]' });
+    f.userRepository.count.mockResolvedValue(2);
+    const fetchSpy = jest.spyOn(global, 'fetch');
+    expect(await (f.service as any).deliverSavedNotification({ id: 'saved', userId: 'a' })).toBe(false);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(f.notificationRepository.save).toHaveBeenCalledWith(expect.objectContaining({ errorMessage: 'PUSH_TOKEN_OWNERSHIP_AMBIGUOUS' }));
+  });
+
+  it('delivers urgent invitations while the ordinary lane is still busy', async () => {
+    const f = buildService(); let finishRegular!: (rows: never[]) => void;
+    const urgent = { id: 'urgent', eventKey: 'booking:b:new', userId: 'driver',
+      status: NotificationStatus.PENDING, data: { type: 'new_booking', bookingId: 'b' } };
+    f.queryBuilder.getMany.mockImplementationOnce(() => new Promise(resolve => { finishRegular = resolve; }))
+      .mockResolvedValueOnce([urgent] as never[]);
+    Object.assign(f.notificationRepository.manager, { query: jest.fn().mockResolvedValue([{}]) });
+    f.userRepository.findOne.mockResolvedValue({ fcmToken: 'synthetic-device' });
+    const delivery = jest.spyOn(f.service as any, 'deliverSavedNotification').mockResolvedValue(true);
+    const run = f.service.dispatchTransactionalNotifications();
+    await new Promise(resolve => setImmediate(resolve));
+    expect(delivery).toHaveBeenCalledWith(urgent);
+    expect(f.queryBuilder.andWhere).toHaveBeenCalledWith("notification.data ->> 'type' IN (:...urgentTypes)", expect.any(Object));
+    expect(f.queryBuilder.andWhere).toHaveBeenCalledWith("COALESCE(notification.data ->> 'type', '') NOT IN (:...urgentTypes)", expect.any(Object));
+    expect(f.queryBuilder.take).toHaveBeenCalledWith(10);
+    finishRegular([]); await run;
+  });
+
+  it('suppresses a booking invitation already accepted/cancelled or no longer owned by the recipient', async () => {
+    const f = buildService();
+    f.queryBuilder.getMany.mockResolvedValueOnce([{ id: 'stale', eventKey: 'booking:b:new',
+      userId: 'driver', data: { type: 'new_booking', bookingId: 'b' } }] as never[]);
+    const query = jest.fn().mockResolvedValue([]);
+    Object.assign(f.notificationRepository.manager, { query });
+    const delivery = jest.spyOn(f.service as any, 'deliverSavedNotification').mockResolvedValue(true);
+    await f.service.dispatchUrgentNotifications();
+    expect(query).toHaveBeenCalledWith(expect.stringContaining("b.status = 'pending'"), ['b', 'driver']);
+    expect(delivery).not.toHaveBeenCalled();
+    expect(f.notificationRepository.save).toHaveBeenCalledWith(expect.objectContaining({ isActive: false }));
+  });
+
+  it('never delivers a saved device snapshot after its account has unregistered push', async () => {
+    const f = buildService(); f.userRepository.findOne.mockResolvedValue({ fcmToken: null });
+    const fetchSpy = jest.spyOn(global, 'fetch');
+    const result = await (f.service as any).deliverSavedNotification({ id: 'saved', userId: 'a', fcmToken: 'ExpoPushToken[stale]' });
+    expect(result).toBe(false); expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('revalidates ownership for account-addressed batches and supports current Expo tokens', async () => {
+    const f = buildService();
+    f.userRepository.findOne.mockImplementation(async ({ where }) => ({ fcmToken: where.id === 'a' ? null : 'ExpoPushToken[current]' }));
+    const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true,
+      json: async () => ({ data: { status: 'ok', id: 'ticket' } }) } as Response);
+    await f.service.sendToMultiple(['stale-a', 'stale-b'], 'Trip', 'Message', {}, ['a', 'b']);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(fetchSpy.mock.calls[0][1]!.body as string).to).toBe('ExpoPushToken[current]');
   });
 
   it('routes an Expo token through Expo Push and persists the ticket', async () => {
@@ -203,7 +263,7 @@ describe('NotificationService critical push reliability', () => {
         return result;
       },
     );
-    queryBuilder.getMany.mockResolvedValue([
+    queryBuilder.getMany.mockResolvedValueOnce([
       {
         id: 'outbox',
         eventKey: 'wallet:entry',
@@ -301,9 +361,10 @@ describe('NotificationService critical push reliability', () => {
     const { service, notificationRepository, userRepository, queryBuilder } =
       buildService();
     Object.assign(notificationRepository.manager, {
-      findOneBy: jest
+      findOne: jest
         .fn()
         .mockResolvedValue({
+          id: 'document',
           userId: 'user',
           status: 'rejected',
           reviewedBy: 'admin',
@@ -325,6 +386,50 @@ describe('NotificationService critical push reliability', () => {
     );
   });
 
+  it.each(['initial', 'retry'])('delivers a Didit approval without an admin reviewer (%s)', async (mode) => {
+    const f = buildService();
+    const reviewedAt = new Date('2026-10-07T10:00:00Z');
+    Object.assign(f.notificationRepository.manager, {
+      findOne: jest.fn().mockResolvedValue({
+        id: 'document', userId: 'user', status: 'approved', reviewedBy: null, reviewedAt,
+      }),
+    });
+    const row = {
+      id: 'outbox', eventKey: `kyc:document:approved:${reviewedAt.toISOString()}`,
+      userId: 'user', status: NotificationStatus.PENDING,
+      data: { type: 'kyc_approved', kycId: 'document', status: 'approved', reviewedAt: reviewedAt.toISOString() },
+      title: 'Identité vérifiée', body: 'Votre identité a été vérifiée avec succès.',
+    };
+    f.queryBuilder.getMany.mockResolvedValueOnce([row]);
+    f.userRepository.findOne.mockResolvedValue({ fcmToken: 'ExpoPushToken[device]' });
+    const send = jest.spyOn(f.service as any, 'sendExpoPushNotification').mockResolvedValue('ticket');
+    if (mode === 'retry') await f.service.retryCriticalFinancialNotifications();
+    else await f.service.dispatchTransactionalNotifications();
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(row.status).toBe(NotificationStatus.SENT);
+  });
+
+  it.each([
+    { id: 'newer-document' },
+    { userId: 'another-user' },
+    { reviewedAt: new Date('2026-10-07T11:00:00Z') },
+  ])('suppresses an obsolete approval when the latest identity differs: %j', async (change) => {
+    const f = buildService();
+    const reviewedAt = new Date('2026-10-07T10:00:00Z');
+    Object.assign(f.notificationRepository.manager, {
+      findOne: jest.fn().mockResolvedValue({
+        id: 'document', userId: 'user', status: 'approved', reviewedBy: null, reviewedAt, ...change,
+      }),
+    });
+    f.queryBuilder.getMany.mockResolvedValueOnce([{
+      id: 'outbox', eventKey: 'kyc:document:approved', userId: 'user', status: NotificationStatus.PENDING,
+      data: { type: 'kyc_approved', kycId: 'document', status: 'approved', reviewedAt: reviewedAt.toISOString() },
+    }]);
+    await f.service.dispatchTransactionalNotifications();
+    expect(f.userRepository.findOne).not.toHaveBeenCalled();
+    expect(f.notificationRepository.save).toHaveBeenCalledWith(expect.objectContaining({ isActive: false }));
+  });
+
   it('isolates push failures between recipients and leaves the failed row retryable', async () => {
     const { service, userRepository, queryBuilder } = buildService();
     const failed = {
@@ -335,7 +440,7 @@ describe('NotificationService critical push reliability', () => {
       data: { type: 'wallet_transfer_out' },
     };
     const success = { ...failed, id: 'b', eventKey: 'wallet:b', userId: 'b' };
-    queryBuilder.getMany.mockResolvedValue([failed, success]);
+    queryBuilder.getMany.mockResolvedValueOnce([failed, success]);
     userRepository.findOne.mockResolvedValue({
       fcmToken: 'ExpoPushToken[device]',
     });

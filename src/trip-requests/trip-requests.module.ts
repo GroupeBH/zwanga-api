@@ -15,6 +15,8 @@ import { GoogleMapsModule } from '../google-maps/google-maps.module';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
 import { WeatherModule } from '../weather/weather.module';
 import { TripRequestRecoveryModule } from './trip-request-recovery.module';
+import { DriverDispatchService } from './dispatch/dispatch.service';
+import { DriverDispatchController } from './dispatch/dispatch.controller';
 
 @Module({
   imports: [
@@ -29,8 +31,8 @@ import { TripRequestRecoveryModule } from './trip-request-recovery.module';
     WeatherModule,
     TripRequestRecoveryModule,
   ],
-  controllers: [TripRequestsController],
-  providers: [TripRequestsService],
+  controllers: [DriverDispatchController, TripRequestsController],
+  providers: [TripRequestsService, DriverDispatchService],
   exports: [TripRequestsService],
 })
 export class TripRequestsModule {}

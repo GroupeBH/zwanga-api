@@ -40,8 +40,8 @@ function createQueryBuilderMock() {
 
 describe('AdminService wallet administration', () => {
   const userRepository = { findOne: jest.fn() };
-  const walletAccountRepository = { createQueryBuilder: jest.fn() };
-  const walletLedgerRepository = { createQueryBuilder: jest.fn() };
+  const walletAccountRepository = { createQueryBuilder: jest.fn(), findOne: jest.fn() };
+  const walletLedgerRepository = { createQueryBuilder: jest.fn(), find: jest.fn() };
   const walletService = { applyAdminAdjustment: jest.fn() };
   let service: AdminService;
 
@@ -62,6 +62,24 @@ describe('AdminService wallet administration', () => {
       {} as any,
       walletService as any,
     );
+  });
+
+  it('reads a missing wallet as zero without creating any account', async () => {
+    userRepository.findOne.mockResolvedValue({ id: 'user-1' });
+    walletAccountRepository.findOne.mockResolvedValue(null);
+    walletLedgerRepository.find.mockResolvedValue([]);
+    expect(await service.getUserWallet('user-1')).toEqual({ account: null, balance: 0, entries: [] });
+    expect(walletLedgerRepository.find).toHaveBeenCalledWith({ where: { userId: 'user-1' }, order: { createdAt: 'DESC' }, take: 20 });
+  });
+
+  it('returns origin and reservation balances without leaking user credentials', async () => {
+    userRepository.findOne.mockResolvedValue({ id: 'user-1', password: 'secret', accessToken: 'secret' });
+    walletAccountRepository.findOne.mockResolvedValue({ id: 'wallet', userId: 'user-1', balance: '40.50', withdrawableBalance: '20', reservedWithdrawalBalance: '5', withdrawalsBlocked: false });
+    walletLedgerRepository.find.mockResolvedValue([{ id: 'entry', amount: '-5', balanceAfter: '40.50', type: 'admin_adjustment' }]);
+    const result = await service.getUserWallet('user-1');
+    expect(result).toMatchObject({ balance: 40.5, account: { withdrawableBalance: 20, reservedWithdrawalBalance: 5 }, entries: [{ amount: -5, balanceAfter: 40.5 }] });
+    expect(result.account?.user).not.toHaveProperty('password');
+    expect(result.account?.user).not.toHaveProperty('accessToken');
   });
 
   it('returns paginated token accounts with numeric balances and a global summary', async () => {

@@ -1,4 +1,5 @@
 import type { Point } from 'typeorm';
+import { TripPaymentMode } from '../../payments/enums/trip-payment-mode.enum';
 import {
   Entity,
   PrimaryGeneratedColumn,
@@ -37,6 +38,12 @@ export enum TripStatus {
   where: `"status" = 'ongoing'`,
 })
 export class Trip {
+  @Column({ type: 'text', array: true, default: () => "ARRAY['electronic','points','cash']" })
+  acceptedPaymentModes: TripPaymentMode[];
+
+  @Column({ type: 'boolean', default: false })
+  paymentModesExplicit: boolean;
+
   @PrimaryGeneratedColumn('uuid')
   id: string;
 

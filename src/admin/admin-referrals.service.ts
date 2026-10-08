@@ -18,7 +18,7 @@ import {
   ReferralWithdrawal,
   ReferralWithdrawalStatus,
 } from '../referrals/entities/referral-withdrawal.entity';
-import { User } from '../users/entities/user.entity';
+import { User, UserStatus } from '../users/entities/user.entity';
 import { isSuperAdminRole } from '../users/user-role.policy';
 import {
   buildReferralAccountsSpreadsheet,
@@ -49,6 +49,54 @@ export class AdminReferralsService {
     private readonly withdrawalRepository: Repository<ReferralWithdrawal>,
     private readonly referralsService: ReferralsService,
   ) {}
+
+  async getUserReferral(userId: string) {
+    const [profile, filleuls] = await Promise.all([
+      this.profileRepository.findOne({
+        where: { userId }, relations: ['referredByUser'],
+      }),
+      this.profileRepository.find({
+        where: { referredByUserId: userId },
+        relations: ['user'],
+        order: { referredAt: 'DESC' },
+        take: 50,
+      }),
+    ]);
+    return {
+      referrer: this.serializeUser(profile?.referredByUser),
+      referredAt: profile?.referredAt ?? null,
+      attributionProvider: profile?.attributionProvider ?? null,
+      canAttach: !profile?.referredByUserId,
+      filleuls: filleuls.flatMap((item) => {
+        const user = this.serializeUser(item.user);
+        return user ? [{ user, referredAt: item.referredAt ?? null }] : [];
+      }),
+    };
+  }
+
+  async searchReferrers(search?: string) {
+    const term = search?.trim() ?? '';
+    if (term.length < 2) return { users: [] };
+    const users = await this.userRepository.createQueryBuilder('candidate')
+      .select(this.userSelect('candidate'))
+      .where('candidate.isActive = :active', { active: true })
+      .andWhere('candidate.status NOT IN (:...excluded)', { excluded: [UserStatus.INACTIVE, UserStatus.SUSPENDED] })
+      .andWhere(new Brackets((query) => {
+        query.where('candidate.firstName ILIKE :term')
+          .orWhere('candidate.lastName ILIKE :term')
+          .orWhere("concat(candidate.firstName, ' ', candidate.lastName) ILIKE :term")
+          .orWhere('candidate.phone ILIKE :term')
+          .orWhere('candidate.email ILIKE :term')
+          .orWhere('CAST(candidate.id AS TEXT) ILIKE :term');
+      }), { term: `%${term.slice(0, 160).replace(/[\\%_]/g, '\\$&')}%` })
+      .orderBy('candidate.firstName', 'ASC').addOrderBy('candidate.id', 'ASC')
+      .take(15).getMany();
+    return { users: users.map((user) => this.serializeUser(user)) };
+  }
+
+  attachReferrer(adminId: string, userId: string, referrerUserId: string, reason: string) {
+    return this.referralsService.attachUserByAdmin(adminId, userId, referrerUserId, reason);
+  }
 
   async getAccounts(page: number = 1, limit: number = 25, search?: string) {
     const { pageNumber, pageSize } = this.normalizePagination(page, limit);

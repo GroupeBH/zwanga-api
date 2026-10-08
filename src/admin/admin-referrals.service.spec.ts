@@ -48,9 +48,13 @@ function createQueryBuilderMock() {
 }
 
 describe('AdminReferralsService', () => {
-  const userRepository = { findOne: jest.fn() };
+  const userRepository = { findOne: jest.fn(), createQueryBuilder: jest.fn() };
   const accountRepository = { createQueryBuilder: jest.fn() };
-  const profileRepository = { createQueryBuilder: jest.fn() };
+  const profileRepository = {
+    createQueryBuilder: jest.fn(),
+    findOne: jest.fn(),
+    find: jest.fn(),
+  };
   const rewardRepository = { createQueryBuilder: jest.fn() };
   const withdrawalRepository = {
     createQueryBuilder: jest.fn(),
@@ -73,6 +77,7 @@ describe('AdminReferralsService', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    profileRepository.find.mockResolvedValue([]);
     service = new AdminReferralsService(
       userRepository as any,
       accountRepository as any,
@@ -81,6 +86,32 @@ describe('AdminReferralsService', () => {
       withdrawalRepository as any,
       referralsService as any,
     );
+  });
+
+  it('returns only safe referrer fields and prevents replacing an existing parent', async () => {
+    profileRepository.findOne.mockResolvedValue({ referredByUserId: 'user-1', referredByUser: { ...safeUser, password: 'hidden', fcmToken: 'hidden' }, attributionProvider: 'admin', referredAt: new Date() });
+    const result = await service.getUserReferral('child');
+    expect(result).toMatchObject({ canAttach: false, attributionProvider: 'admin', referrer: { id: 'user-1' } });
+    expect(result.referrer).not.toHaveProperty('password');
+    expect(result.referrer).not.toHaveProperty('fcmToken');
+    expect(result).not.toHaveProperty('linkToken');
+  });
+
+  it('permits attaching a first parent when no referral profile exists', async () => {
+    profileRepository.findOne.mockResolvedValue(null);
+    expect(await service.getUserReferral('child')).toEqual({ referrer: null, referredAt: null, attributionProvider: null, canAttach: true, filleuls: [] });
+  });
+
+  it('bounds the candidate search, excludes unavailable users and sanitizes results', async () => {
+    const query = createQueryBuilderMock();
+    query.getMany.mockResolvedValue([{ ...safeUser, accessToken: 'hidden' }]);
+    userRepository.createQueryBuilder.mockReturnValue(query);
+    expect(await service.searchReferrers('a')).toEqual({ users: [] });
+    expect(userRepository.createQueryBuilder).not.toHaveBeenCalled();
+    const result = await service.searchReferrers('Aline');
+    expect(query.where).toHaveBeenCalledWith('candidate.isActive = :active', { active: true });
+    expect(query.take).toHaveBeenCalledWith(15);
+    expect(result.users[0]).not.toHaveProperty('accessToken');
   });
 
   it('returns accounts, direct referral counts and global balances without private link tokens', async () => {

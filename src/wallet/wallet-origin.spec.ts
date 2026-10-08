@@ -1,6 +1,21 @@
 import { applyTokenMovement, refundablePurchasedTokens } from './wallet-origin';
 
 describe('wallet token provenance', () => {
+  it('keeps cash commission holds unavailable to payments, transfers, admin debits and withdrawals', () => {
+    const account = { balance: 100, withdrawableBalance: 70, reservedCashCommissionBalance: 40 };
+    expect(() => applyTokenMovement(account, -61)).toThrow('insuffisant');
+    expect(() => applyTokenMovement(account, -61, 0, true)).toThrow('insuffisant');
+    expect(applyTokenMovement(account, -60)).toBe(-60);
+    expect(account).toEqual({ balance: 40, withdrawableBalance: 10, reservedCashCommissionBalance: 40 });
+    expect(() => applyTokenMovement(account, -0.01)).toThrow('insuffisant');
+  });
+  it('protects bonus cash holds while allowing only unreserved purchased withdrawals', () => {
+    const account = { balance: 100, withdrawableBalance: 20, reservedCashCommissionBalance: 90 };
+    expect(() => applyTokenMovement(account, -11, 0, true)).toThrow('insuffisant');
+    expect(applyTokenMovement(account, -10, 0, true)).toBe(-10);
+    expect(account).toEqual({ balance: 90, withdrawableBalance: 10, reservedCashCommissionBalance: 90 });
+    expect(() => applyTokenMovement(account, -1)).toThrow('insuffisant');
+  });
   it('spends rewards first for a mixed wallet', () => {
     const account = { balance: 100, withdrawableBalance: 70 };
     expect(applyTokenMovement(account, -20)).toBe(0);

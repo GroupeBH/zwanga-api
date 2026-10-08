@@ -1,6 +1,220 @@
 # Journal des modifications financières
 
+## 2026-10-08 — Deuxième réparation UUID, réservation et accueil cohérent
+
+- La réparation 57 de publication ne couvrait pas `zwanga_booking_cash_guard`.
+  Les logs locaux montrent un second HTTP 500 à l'insertion de réservation ;
+  trois trajets provisoires sans réservation restaient affichables pour une
+  demande toujours en attente. Aucune preuve de démarrage réussi pour ces essais.
+- Migration additive 58 `FixBookingRequestUuid` : deux conversions du lien
+  varchar en UUID, à la lecture de la demande puis au transfert de réserve.
+  Corps déployé préservé, transaction et délais bornés, forme inconnue refusée,
+  idempotence. Commission 5 %, dette 25 jetons, tous types de jetons débitables,
+  réserves et soldes inchangés. Les anciennes migrations ne sont pas réécrites.
+- Outil local de réparation étendu à 57/58 ; migration 58 appliquée à la base
+  locale/non-production autorisée. Relecture : aucune migration en attente et
+  conversions présentes. Aucun trajet, réservation ou portefeuille modifié.
+  Les trois anciens trajets incomplets attendent une autorisation d'annulation.
+  Aucun déploiement ou migration en production.
+- `cancel-empty-request-trip.ts` + services trips/trip-requests : compensation
+  d'un trajet privé provisoire uniquement si la création de réservation échoue
+  et qu'aucune réservation n'existe. Verrou de ligne, lecture fraîche, identité
+  demande/conducteur et statut vérifiés. Préserve les réservations déjà validées
+  en base et l'erreur initiale ; cache invalidé après annulation. Ne garantit pas
+  l'atomicité globale du parcours ni le nettoyage si la base est indisponible.
+- Tests : 43 unitaires serveur ; 94 réussis / 3 ignorés sur PostgreSQL 18 isolé,
+  incluant les deux comparaisons varchar réelles, transfert sans double débit,
+  capture à la fin et compensation ciblée. Typage serveur de production vérifié.
+  Fixture PL/pgSQL recompilée après changement de type de test pour éliminer son
+  plan ancien ; aucun changement du type de colonne de l'application.
+- Mobile associé : actualisation des caches après confirmation serveur uniquement,
+  garde de session, premier candidat Home disponible ; 158 tests JavaScript
+  ciblés réussis. Journal détaillé : `../zwanga/docs/CHANGEMENTS_TECHNIQUES.md`
+  (dans le dépôt mobile voisin). Pas de test physique ni de trajet réel déclenché.
+
+## 2026-10-08 — Correction UUID du contrôle de publication privée
+
+- HTTP 500 à l'acceptation d'une demande : `zwanga_publication_cash_guard`
+  comparait un UUID à `NEW."tripRequestId"` déclaré varchar. Migration additive
+  `1780000057000-FixPublicationRequestUuid` : conversion du lien en `::uuid`, sans
+  modifier les autres instructions de la fonction installée, les anciennes
+  migrations, les colonnes, montants, soldes ou réserves. Migration enregistrée
+  dans `src/database/migrations/index.ts` ; transaction obligatoire, délais de
+  verrou/requête bornés, forme inconnue refusée et correction idempotente.
+- La commission de 5 %, la tolérance de 25 jetons, la protection contre la double
+  réserve dispatch et le drapeau d'activation restent inchangés. Aucun index
+  rendu inutilisable par une conversion de sa colonne UUID en texte.
+- `src/database/repair-local-publication-uuid.ts` : lecture seule par défaut,
+  `--apply` exige une cible locale/non-production et cette seule migration en
+  attente ; fonction et journal des migrations modifiés dans une seule transaction.
+- Application réellement faite à la base locale de développement confirmée par
+  l'utilisateur ; relecture réussie, aucune migration restante et cast présent.
+  Aucune donnée métier modifiée, aucune acceptation/démarrage de trajet réel.
+  Aucun déploiement/migration en production ; les autres environnements doivent
+  recevoir cette migration via leur procédure habituelle.
+- Vérifications : 3 tests unitaires migration réussis ; PostgreSQL 18 éphémère :
+  88 tests réussis et 3 ignorés, dont 5 nouveaux cas de régression avec un lien
+  varchar conforme au schéma applicatif. Reproduction de 42883 avant correctif,
+  création privée après, invariance des soldes et maintien des contrôles financiers.
+  TypeScript de production sans émission réussi. Aucun essai natif mobile requis
+  pour le SQL, mais le parcours réel n'a pas été exécuté à la place du conducteur.
+
 Ce fichier répertorie les changements qui influencent un prix, un paiement, un solde, une commission, une récompense ou un retrait.
+
+## 2026-10-07 — Confirmation push du KYC admin et Didit
+
+- Correction locale : les approbations automatiques/Didit passent désormais par la même outbox transactionnelle que les approbations admin. Le message ne cite plus une validation par l'équipe quand la décision vient de Didit.
+- Décision datée sans renouvellement sur les synchronisations répétées ; confirmation admin du même accord sans second push. Le dispatcher accepte les approbations sans `reviewedBy`, vérifie le dernier dossier et écarte les décisions obsolètes. Les refus manuels restent notifiés.
+- Envoi après commit, panne push sans annulation du KYC, reprises et protection de propriété du token conservées. Aucune modification des commissions, de l'éligibilité ou de l'unicité du bonus de bienvenue ; pas de notification rétroactive massive ni de migration supplémentaire.
+- Vérifications : suite backend complète **1 363 tests réussis, 146 ignorés** ; 58 tests ciblés inclus dans cette suite ; **27 tests PostgreSQL 18 réussis séparément**, base éphémère et transports simulés. Compilation backend réussie. Aucun déploiement, push réel ou opération financière réelle.
+- Fonctionnement, prérequis webhook `status.updated` et limites : [documentation KYC](kyc-didit-integration.md#notifications-dapprobation--7-octobre-2026).
+
+## 2026-10-07 — Transition financière progressive et compatibilité stores
+
+Statut : implémentation locale, aucun déploiement, crédit réel ou appel fournisseur effectué. Cette entrée complète l'audit ci-dessous ; elle ne signifie pas qu'une répétition sur une copie de RDS ou un test des binaires stores a été réalisé.
+
+- Migration **1780000056000-StageFinancialRollout** : phase `prepared` puis activation explicite et à sens unique. Les migrations précédentes ne sont pas réécrites. Les fonctions de réservation/capture, la commission de 5 %, les 25 jetons de tolérance, les origines mixtes, Pro, les bonus et l'outbox sont conservés. Si des commissions existent déjà, la migration conserve la politique active ; elle ne désactive jamais leur traitement.
+- `financial-rollout-cli prepare-legacy` vérifie l'absence d'historique cash/activation préalable, puis exécute **toutes les migrations dans une seule transaction**. Avant le commit, les anciens serveurs ne voient pas de schéma intermédiaire ; après le commit, les nouveaux contrôles cash sont en attente. Il faut utiliser cette procédure de déploiement, pas appliquer les migrations une par une avec des commits intermédiaires.
+- Durant la préparation, les engagements cash restent sous la politique historique 0, sans nouvelles réserves pouvant bloquer les débits de l'ancien serveur. À l'activation, seules les demandes/réservations encore en attente passent à la politique 2. Les trajets déjà acceptés ne sont pas refacturés. Les déclencheurs couvrent aussi une création en attente concurrente avec l'activation.
+- La contrainte d'unicité push est différée durant le premier remplacement pour laisser fonctionner l'ancien enregistrement d'appareil. Le nouveau dispatcher refuse les destinataires à propriété de token ambiguë. À l'activation, nettoyage transactionnel des doublons et recréation de l'index. Le déclencheur différé de bienvenue est exécuté avant ce DDL, évitant l'erreur PostgreSQL « pending trigger events ». Les appareils concernés par un doublon doivent réenregistrer leur token ; aucune propriété n'est attribuée arbitrairement.
+- Publication historique sans modes explicites : si la couverture cash manque, la publication conserve les modes électroniques/jetons au lieu d'échouer globalement. Un choix cash explicite reste strictement contrôlé ; aucune exemption de commission n'est créée. `paymentModesExplicit` est conservé aussi pour les trajets récurrents. Les refus cash restent explicites lors d'une réservation/paiement incompatible.
+- `WalletCompatibilityInterceptor` ne modifie que la représentation HTTP : sans `X-Zwanga-Finance-Contract: 2`, le solde et le montant retirable correspondent aux fonds disponibles, réserves déduites. Les soldes persistés, écritures et origines ne changent pas. Les totaux restent exposés dans des champs additionnels. La nouvelle app annonce le contrat 2 et conserve son affichage détaillé des réserves. L'ancien build 145 n'a aucun nouvel en-tête obligatoire à envoyer.
+- Résilience : un débit protégé par `CHK_wallet_cash_reserve` produit un conflit explicatif, les erreurs transitoires PostgreSQL connues un 503, sans réexécution automatique d'une opération financière. `/health` vérifie aussi le contrat du schéma et la fonction d'activation, avec instruction SQL bornée. Les réglages de débit, seuils et mécanismes d'idempotence existants sont préservés.
+- Les recommandations PostgreSQL ont guidé la transaction atomique de préparation, l'ordre des verrous, les délais bornés et le traitement des déclencheurs différés. Les transactions d'activation ne font aucun appel réseau fournisseur.
+
+Déploiement : suivre l'entrée correspondante dans `infra-aws/docs/CHANGELOG.md`. Préparer d'abord les permissions IAM et la configuration ECS via un plan Terraform relu. Le workflow remplace les serveurs puis active automatiquement les règles, uniquement après vérification de l'arrêt des anciennes tâches. Aucune nouvelle valeur secrète/SSM requise ; `ZWANGA_FINANCE_CONTRACT=1` est un marqueur technique de la définition de tâche, pas un commutateur utilisateur.
+
+Reprise : si le remplacement échoue avant activation, l'image précédente épinglée reste compatible avec la phase préparée. Relancer le workflow est possible sans double bonus/capture. Si l'activation a réussi, **ne jamais revenir à un backend pré-contrat** et ne pas lancer de `migration:revert` financier ; conserver le nouveau serveur et corriger en avant. Une tâche d'activation échouée n'autorise pas à supposer que son commit n'a pas eu lieu : vérifier `financial_rollout`, puis relancer la procédure idempotente.
+
+Vérifications : **1 353 tests backend réussis, 141 ignorés** dans la suite générale ; **105 tests PostgreSQL 18 réussis** dans les clusters jetables, 3 diagnostics historiques ignorés. Ces tests couvrent préparation, ancien débit, activation, courses historiques, frontière d'activation, frais mixtes, bonus et tokens push. Les tests AWS simulés couvrent migration échouée, rollback ECS et ancienne tâche encore en arrêt. **24 tests mobiles ciblés réussis**, compilation backend et TypeScript mobile réussis, `terraform validate` réussi. Le CLI de préparation borne aussi ses connexions (5 s), attentes de verrou (5 s), instructions et transactions inactives (60 s), sans modifier les paramètres des requêtes API. Limites : pas de RDS cloné/PostGIS complet, pas de charge production, aucun push réel ni test sur téléphone physique.
+
+## 2026-10-07 — Commission cash sur tous les types de jetons
+
+- Problème : seuls les jetons retirables alimentaient les réserves/commissions cash.
+- Migration en avant `1780000055000-CashCommissionAllTokenOrigins` et SQL
+  `cash-all-token-origins.ts` : capacité sur solde total libre, réserve prioritaire
+  sur les bonus, capture et remboursement traçant la part retirable réellement
+  débitée (`chargedWithdrawableTokens`). Reprise historique sans recalcul de taux.
+- Tous les crédits points peuvent régulariser une dette, y compris bienvenue,
+  fidélité, récompenses, partages, ajustements et remboursements. Les dettes
+  existantes sont rapprochées avec les fonds déjà éligibles lors de la migration.
+- `wallet-origin.ts`, `wallet.service.ts`, `wallet-account.entity.ts` et
+  `driver-finance.service.ts` : fonds réservés protégés et disponibilité retirable
+  cohérente. Les bonus restent non retirables. Commission 5 %, dette 25 jetons,
+  blocage des nouveaux engagements cash et exception de fin de course conservés.
+- Tests : 134 unitaires backend, 73 PostgreSQL 17 éphémères réussis, dont 16 cas
+  de nouvelle politique ; 3 diagnostics historiques opt-in ignorés. TypeScript
+  applicatif validé. Aucun `.env`, paiement réel, migration applicative ni déploiement.
+- Déploiement coordonné requis : ne pas laisser d'ancien serveur financier
+  traiter les nouvelles réserves mixtes. Les incompatibilités de l'audit ci-dessous
+  ne sont pas déclarées résolues. Pas de rollback automatique de données financières.
+- Détails et vérifications mobile :
+  [journal technique mobile](../../../zwanga/docs/CASH_COMMISSION_CREDIT.md#extension-à-toutes-les-origines--7-octobre-2026).
+
+## 2026-10-07 — Audit de compatibilité AWS et versions stores
+
+**Verdict : ne pas déployer l'ensemble du lot financier tel quel en remplacement progressif.** Les consignes d'activation ci-dessous ne constituent pas une validation de compatibilité avec l'ancien serveur.
+
+- Contrôles AWS en lecture seule : service ECS sain, définition `zwanga-api-production-api:13`, image active correspondant au commit `0622209641443e0d5809a974f9c5900f652d6bd5` (3 octobre). RDS utilise PostgreSQL 18.3. Le remplacement est progressif (`minimumHealthyPercent=100`, `maximumPercent=200`), sans circuit breaker/rollback automatique activé. Aucune migration ni écriture en production pendant cet audit.
+- Référence mobile fournie : Android 1.0.16/build 145. Les métadonnées EAS associent ce build au commit `97f93bb8f51f56823003944b61e5f7ab1cc7f059` ; le build iOS associé au même commit est 1.0.16/131. EAS établit la provenance du build, pas son statut de publication effectif dans les stores ni les éventuelles mises à jour OTA.
+- Validation du code actuel : suite backend **1 328 tests réussis / 112 ignorés**, suite mobile **1 502 réussis**, compilation backend et contrôle TypeScript mobile réussis. Puis **82 tests PostgreSQL 18 isolés réussis**, dont **3 scénarios d'audit qui confirment des incompatibilités attendues** : ce dernier résultat n'est donc pas un feu vert de déploiement.
+- Les migrations sont exécutées avant le remplacement de l'ancien serveur dans `.github/workflows/deploy.yml`. Sur le schéma migré, le code du commit réellement déployé ne reconnaît pas les nouveaux refus de commission cash : acceptation de réservation et publication avec fonds insuffisants peuvent devenir des HTTP 500. Son calcul de débit ignore aussi `reservedCashCommissionBalance` ; la contrainte PostgreSQL protège le solde mais rejette certains débits avec une erreur 500. Reproductions conservées dans `driver-finance-postgres.spec.ts`, opt-in `DEPLOYED_BACKEND_AUDIT_COMMIT` en plus du chemin PostgreSQL de test.
+- Exécution en mémoire des adaptateurs du commit mobile du build 145 : lecture du bonus `loyalty_reward` et des nouveaux champs sans exception ; les push de bienvenue/transfert retombent sur l'accueil, pas sur le portefeuille. En revanche, cet ancien client ignore la réserve cash et peut afficher 50 jetons retirables alors que 5 sont réservés et seulement 45 disponibles. Il ne propose pas non plus la sélection des modes acceptés à la publication.
+- Avant activation globale : préparer une phase backend rétrocompatible, dissocier l'installation du schéma de l'activation des contraintes métier, puis valider les parcours cash/retrait sur les anciens clients. La distribution du bonus et les push de transfert ne présentent pas, dans les contrats examinés, la même rupture que l'activation immédiate du nouveau modèle cash.
+
+Limites : pas d'exécution des binaires stores sur téléphone, pas de test de livraison push réelle, pas de lecture de la table des migrations RDS et pas de répétition de toute la chaîne sur une copie de production avec PostGIS. Les tests PostgreSQL utilisent des schémas de test réduits et des transports push simulés. Seuls des tests d'audit et cette note ont été ajoutés pendant cette vérification ; aucune correction applicative ni aucun déploiement.
+
+## 2026-10-07 — Push de transfert et rattrapage prioritaire des conducteurs
+
+Statut : code local, sans déploiement, crédit réel ou push réel.
+
+- Les transferts `WalletService.transferPoints` créent déjà deux écritures atomiques. Le subscriber transactionnel existant prépare une confirmation `wallet_transfer_out` pour l'expéditeur et `wallet_transfer_in` pour le destinataire ; il est conservé pour ne pas créer un deuxième circuit de push. `financial-notification.policy.ts` ajoute le `transferId` commun aux deux messages. Le montant et le solde sont indiqués, sans exposer la note libre du transfert sur l'écran verrouillé.
+- Tests PostgreSQL du **vrai service de transfert, du subscriber et du dispatcher** : deux notifications après succès, envoi après commit, déduplication par écriture ; un échec du crédit destinataire annule les deux écritures et notifications. Un solde insuffisant ne produit aucune confirmation. Le transport Expo est simulé, pas contacté.
+- Le cron de bienvenue existant est nommé `welcome-bonus-catch-up`, exécuté toutes les minutes sans chevauchement local. La migration **`1780000054000-PrioritizeDriverWelcomeBonus`** remplace sa fonction de sélection : conducteurs d'abord, puis passagers dans la capacité restante, au maximum 100 comptes examinés par passage et par instance. `SKIP LOCKED` permet aux autres instances de continuer ; un conducteur occupé est repris au passage suivant.
+- Il s'agit du **même bonus de 50 jetons**, pas d'une nouvelle campagne : la preuve `welcome_bonus_grants` et le marqueur d'écriture `welcome_bonus` sont réutilisés. Aucun second crédit si un conducteur a déjà reçu le bonus en tant que passager ou lors de son KYC. Les notifications du bonus restent atomiques avec le crédit. Les recommandations PostgreSQL ont guidé les transactions bornées, les verrous et la sélection sans tri global par rôle.
+- **Éligibilité inchangée en l'absence de confirmation d'un élargissement : compte actif et dernier KYC approuvé.** Pas de bonus aux comptes supprimés, suspendus ou encore en attente de KYC. Les jetons restent promotionnels/non retirables ; aucune modification des commissions ou de la tolérance cash introduite par la migration `1780000053000`.
+- Mobile `zwanga` : les deux push de transfert ouvrent le portefeuille et invalident son cache à la réception au premier plan et à l'ouverture. Pas de changement d'endpoint, de payload obligatoire ou de règle de transfert. Les anciennes versions peuvent recevoir le texte push ; le nouveau routage nécessite la mise à jour mobile.
+
+Déploiement : migrations jusqu'à `1780000054000` dans l'image compilée (`npm run migration:run:prod`), puis déploiement des instances backend, avec `TYPEORM_SYNCHRONIZE=false`. Aucune nouvelle variable d'environnement. Les migrations préexistantes de notifications et de bonus restent nécessaires. Le cron démarre automatiquement ; les logs `Welcome bonus: N accounts credited` et la table `welcome_bonus_grants` permettent le contrôle. Sans déploiement, les comptes de production ne sont pas modifiés.
+
+Validation locale : **117 tests backend ciblés réussis**, incluant les tests PostgreSQL des transferts/notifications et des invariants financiers/bonus dans des clusters jetables ; **17 tests mobiles de navigation réussis**. Contrôles TypeScript production backend et mobile réussis. Aucun test sur téléphone physique ; aucun fournisseur push contacté. La suite backend complète n'a pas été relancée pour ce complément.
+
+## 2026-10-07 — Bonus de bienvenue après validation du compte et du KYC
+
+Statut : implémentation locale ; aucun compte réel crédité, aucune migration applicative ni opération AWS exécutée.
+
+- **50 jetons, une seule fois par compte**, conducteur ou passager. Conditions cumulatives : `isActive=true`, `status=active`, dernier dossier KYC `approved` (ordre `createdAt DESC, id DESC`). Les comptes suspendus, inactifs, en attente, sans KYC approuvé et les rôles administratifs sont exclus. Un simple indicateur téléphone/email vérifié ne suffit pas ; inversement, aucune nouvelle obligation OTP n'est introduite.
+- Bonus promotionnel : `balance += 50`, `withdrawableAmount=0`. Le solde acheté/retirable et les réserves de commissions cash ne sont pas augmentés. Le bonus ne règle pas une dette de commission cash. Les règles de fidélité, parrainage, Pro et commissions restent inchangées.
+- Migration `1780000052000-AddVerifiedWelcomeBonus` : preuve durable `welcome_bonus_grants`, index unique d'écriture de bienvenue, index d'éligibilité et de dernier KYC. Déclencheurs différés sur utilisateurs et KYC : validation manuelle, Didit et SQL suivent la même règle à la fin de la transaction, quel que soit l'ordre des deux validations. Un rejet ou une suspension avant commit empêche l'attribution.
+- Revalidations, rappels Didit, concurrence et reprise après redémarrage ne produisent pas un second crédit. La preuve reste présente si le document KYC ou l'historique portefeuille est remplacé. La garantie porte sur l'identifiant du compte : ce n'est pas une détection universelle des comptes multiples d'une même personne. Les anciens ajustements administratifs sans marqueur de bienvenue ne sont pas interprétés comme ce nouveau bonus.
+- Le contrôle PostgreSQL a guidé les contraintes, transactions courtes et verrous : utilisateur avant portefeuille, `NO KEY UPDATE` compatible avec les références des recharges. Si une validation détient déjà un verrou utilisateur fort et rencontre un portefeuille occupé, l'essai de bonus est annulé isolément après contention (250 ms), sans annuler le KYC ; le rattrapage reprend ensuite.
+- Crédit, écriture et notification sont atomiques. L'écriture conserve le type existant `loyalty_reward`, avec `relatedEntityType=welcome_bonus` et la description « Bonus de bienvenue : KYC et compte validés », pour rester lisible par les versions mobiles publiées. La push `wallet_loyalty_reward` annonce explicitement **50 jetons de bienvenue** ; clé unique `wallet:<ledgerEntryId>`. Aucun appel réseau sous verrou ; envoi après commit par le dispatcher existant, avec ses reprises. Une panne push ne recrédite pas le compte et n'annule pas le bonus. La réception sur l'appareil exige toujours un token push valable, les autorisations et un fournisseur opérationnel.
+- `WelcomeBonusService`, enregistré dans `WalletModule`, rattrape automatiquement les comptes existants : au plus **100 comptes par minute et par instance**, verrous `SKIP LOCKED`, transaction bornée (attente verrou 2 s, instruction 15 s), reprise des comptes encore sans preuve. Aucune nouvelle variable d'environnement ni action utilisateur requise. Les nouveaux comptes éligibles sont normalement crédités dès la validation ; le job couvre aussi les attributions différées par contention.
+- Mobile `zwanga` : toucher la confirmation de bienvenue ouvre `/wallet`. L'historique existant affiche déjà la description explicite et les 50 jetons. Sur une ancienne version mobile, crédit et texte push fonctionnent sans mise à jour ; le nouveau raccourci au clic nécessite la version intégrant ce changement.
+
+### Activation et contrôle
+
+1. Recette/staging et sauvegarde habituelles, puis image backend compilée. Garder `TYPEORM_SYNCHRONIZE=false` : les fonctions et déclencheurs nécessitent la migration, pas la synchronisation d'entités.
+2. Exécuter les migrations via la tâche ECS habituelle (`npm run migration:run:prod` dans l'image compilée), jusqu'à `1780000052000`, puis déployer les instances backend. **Le déploiement active le rattrapage automatiquement** ; la migration ne distribue pas tout l'historique dans sa transaction DDL. Les validations intervenant après installation des déclencheurs peuvent déjà attribuer un bonus.
+3. Suivre le journal `Welcome bonus: N accounts credited` et les éventuelles erreurs de reprise. Contrôle agrégé après migration :
+
+```sql
+SELECT count(*) AS comptes_credites, coalesce(sum(amount), 0) AS jetons_distribues
+FROM welcome_bonus_grants;
+
+SELECT n.status, count(*)
+FROM welcome_bonus_grants g
+JOIN notifications n ON n."eventKey" = 'wallet:' || g."ledgerEntryId"
+GROUP BY n.status;
+```
+
+Ne pas utiliser `migration:revert` pour effacer des crédits déjà distribués : le rollback automatique est volontairement refusé. Un éventuel correctif financier doit être explicite et traçable.
+
+Vérifications locales : **1 326 tests backend réussis** (96 tests opt-in ignorés dans cette commande), **63 tests PostgreSQL financiers et de notifications réussis** séparément dans des clusters jetables, **16 tests mobiles de navigation réussis** et contrôles TypeScript production backend/mobile réussis. Les tests PostgreSQL couvrent les deux ordres de validation, les exclusions, le dernier dossier KYC, les transactions annulées, les notifications invisibles avant commit, la concurrence, le rattrapage par lots et les réserves/dettes cash. Deux anciennes fixtures `users.service.fcm-token.spec.ts` ont été alignées sur l'enregistrement transactionnel et l'appartenance exclusive du token push déjà en place ; aucune modification de cette logique de production. ESLint ciblé backend sans erreur. Aucun push réel envoyé ni appareil physique testé.
+
+## 2026-10-07 — Pro, commissions cash préfinancées et modes acceptés
+
+Statut : code backend et application `zwanga` modifiés localement. Aucune migration d’application, modification AWS, transaction réelle ou publication mobile effectuée.
+
+### Règles appliquées
+
+- Pro coûte **5 000 CDF pour 30 jours**, sans renouvellement ou débit automatique. Les anciens paramètres de prix/devise/durée et de prix indépendant en jetons ne remplacent plus cette règle. Le paiement en jetons utilise l’équivalent portefeuille de 5 000 CDF. Les abonnements déjà actifs conservent leurs dates ; une transaction prestataire déjà initiée reste suivie avec son montant d’origine pour éviter un double paiement.
+- L’essai offre uniquement Pro pendant **30 jours calendaires**, à partir du premier trajet conducteur terminé (première réservation terminée). Les 5 % restent dus pendant l’essai et avec Pro. Une preuve persistante par compte et empreinte du numéro empêche de renouveler l’essai via l’ancien endpoint ou une réinscription avec le même numéro. Les anciens essais gardent leurs dates, sans prolongation rétroactive. Ce contrôle n’est pas une détection universelle des comptes multiples avec des numéros différents.
+- Le **plafond indépendant de 100 000 CDF** n’est pas ajouté : sa période de renouvellement n’a pas été confirmée. Les limites gratuites existantes, dont les cinq publications quotidiennes hors Pro, restent en place. Pas de suspension générale du compte faute de réserve.
+- Cash : réserve de 5 % de la somme due par le passager sur les **jetons achetés disponibles**, à l’acceptation de la réservation ; débit lors de la fin de course. Les bonus fidélité, abonnement et crédits administrateur ne financent pas cette réserve. Les jetons achetés reçus par transfert gardent leur origine. À la valeur par défaut de 100 CDF/jeton, 50 jetons financent 100 000 CDF de courses cash.
+- Les jetons réservés ne peuvent pas être dépensés, partagés, retirés ou enlevés par un ajustement administratif. Annulation, rejet, expiration, absence ou embarquement incertain libèrent la réserve sans commission. Une récupération GPS d’un faux absent peut terminer la course et comptabiliser un éventuel complément.
+- Un changement vers le cash exige une réserve suffisante, même après l’arrivée. Un dépassement du tarif d’une **course cash déjà engagée** ne bloque pas sa fin : le manque devient une dette de commission, bloque de nouvelles acceptations cash et est régularisé, dans l’ordre chronologique, par les prochains crédits de jetons achetés. Les écritures répétées ne redébitent pas la commission. Une baisse du tarif ou un passage à un autre mode avant encaissement libère/rembourse la différence.
+- Électronique/jetons : les 5 % sont retenus dans le calcul du gain conducteur ; aucun second débit sur son portefeuille de jetons. Le cash reçu ne devient pas un gain à retirer. Pour toutes les nouvelles réservations version 1, la commission porte sur la **part payée par le passager**, pas sur la subvention Zwanga. Exemple subventionné : tarif 10 000, passager 4 000, subvention 6 000 → commission 200, gain électronique/jetons 9 800. En cash : 4 000 remis au conducteur, commission de 200 financée par ses jetons et 6 000 de subvention à retirer. Les anciennes réservations version 0 conservent leur assiette historique, sans recalcul des gains déjà comptabilisés.
+- Conversion figée par réservation. Arrondis aux centimes CDF puis aux centièmes de jeton, comme le portefeuille existant : la valeur effectivement débitée peut différer de la commission théorique d’au plus un demi-centième de jeton. Les nouvelles commissions cash sont limitées au CDF.
+
+### Contrat et fiabilité
+
+- `POST /trips`, `PUT /trips/:id` et `POST /trips/recurring` acceptent `acceptedPaymentModes` : tableau non vide parmi `cash`, `electronic`, `points`. Les occurrences récurrentes héritent du choix. Les anciens trajets/clients sans ce champ restent compatibles avec les trois modes ; une modification ultérieure du trajet ne supprime pas le mode déjà accepté d’une réservation.
+- Nouveaux GET authentifiés : `/driver-finance/me` (Pro, essai, réserves, dette, capacité cash et vingt dernières commissions), `/driver-finance/trips/:id/payment-options?numberOfSeats=1`, `/driver-finance/bookings/:id/payment-options`. Les deux derniers n’exposent pas les soldes du conducteur et vérifient l’accès au trajet privé/à la réservation. La disponibilité est indicative : le verrou final est pris à l’acceptation effective, pas à l’affichage ou à la publication ni à la simple proposition de dispatch.
+- Migration `1780000050000-DriverCashCommissions` : `cash_commissions`, `driver_pro_trial_claims`, modes acceptés et réserve dédiée du portefeuille. Des triggers assurent l’invariant dans la même transaction que les écritures ORM **et SQL directes** (GPS, interruptions, annulations). Verrou de référence utilisateur (`KEY SHARE`) avant portefeuille puis commission, contraintes de conservation et index de dette/historique. Le verrou de référence évite une inversion avec un retrait/ajustement tenant déjà le verrou utilisateur. Aucun appel prestataire sous verrou.
+- Les notifications de débit, régularisation, réserve épuisée, dette et activation d’essai utilisent l’outbox transactionnelle existante. Les notifications financières cash ouvrent le portefeuille mobile. Un terminal joignable et ses permissions push restent nécessaires.
+- Les réservations déjà acceptées/terminées/absentes/incertaines au moment de la migration sont marquées comme historiques et ne sont pas facturées rétroactivement. L’historique d’une commission encaissée est conservé même si la réservation est supprimée. Les écritures financières existantes ne sont pas recalculées.
+
+### Déploiement et validation
+
+1. Sauvegarde et recette staging avec les mêmes paramètres de conversion qu’en production. Conserver `TYPEORM_SYNCHRONIZE=false` : la synchronisation d’entités ne crée pas ces fonctions/triggers.
+2. Compiler, puis appliquer les migrations avec la procédure ECS habituelle (`migration:run:prod` dans l’image compilée). La migration de notifications et celles déjà en attente doivent précéder cette migration. Prévoir une fenêtre sans écritures financières anciennes : ne pas laisser des processus d’ancienne version modifier des portefeuilles pendant la bascule. Le verrou DDL expire après cinq secondes : en cas de contention, l’opération échoue au lieu d’attendre indéfiniment.
+3. Déployer toutes les instances backend puis la nouvelle application. L’API protège aussi les anciennes versions mobiles, mais leurs écrans n’affichent pas les nouvelles réserves. Vérifier une recharge, une acceptation/refus cash, la fin de trajet, une annulation, l’achat Pro et les notifications en staging, avec deux appareils.
+4. Ne pas utiliser `migration:revert` pour cette fonctionnalité : le retour arrière automatique refuse d’effacer l’historique financier. Réconcilier puis utiliser une migration corrective en avant.
+
+Vérifications locales : suite backend complète **1 305 tests réussis** (68 tests opt-in ignorés à cette étape), puis **12 tests de gains conducteur revalidés** après ajout de la conservation du taux historique (ensembles partiellement communs) ; **20 tests PostgreSQL financiers** et **16 tests PostgreSQL de notifications** réussis dans des clusters jetables, prestataires simulés. Une tentative simultanée avec la suite mobile a dépassé les délais d’initialisation des clusters ; les relances isolées réussissent. Tous les clusters temporaires ont été arrêtés/nettoyés, y compris les deux initialisations interrompues. Compilation production `tsc -p tsconfig.build.json --noEmit --incremental false` réussie. Le contrôle TypeScript incluant tous les fichiers de tests signale des erreurs dans des fixtures hors périmètre (activité, OTP, PawaPay, confidentialité, identité et fidélité), contrairement à la compilation production et à Jest. Mobile : **1 468 tests JavaScript réussis**, TypeScript et contrôles taille/frontière réseau réussis. ESLint ciblé sur le nouveau code de production backend et les composants/hooks mobiles contrôlés : sans erreur ni avertissement. Aucun essai sur téléphone physique ni paiement réel.
+
+Fichiers principaux : `src/driver-finance/*`, migration ci-dessus, `wallet-origin.ts`, `subscriptions.service.ts`, `bookings.service.ts`, entités/DTO/services des trajets ; mobile : `driverFinanceApi.ts`, publication, choix du paiement, portefeuille et écrans Pro. Détails mobile dans `zwanga/docs/CHANGEMENTS_TECHNIQUES.md`.
+
+## 2026-10-06 — Actions financières depuis la fiche utilisateur administrateur
+
+- La fiche utilisateur de `zwanga-admin` affiche le portefeuille, sa part retirable/réservée, les 20 derniers mouvements et le parrain actuel. Les superadministrateurs peuvent ajouter/retirer des jetons ou rattacher un premier parrain ; les administrateurs ordinaires conservent la lecture seule pour ces actions.
+- `GET /admin/users/:userId/financial-summary` ne crée aucun portefeuille lors de la consultation. Un premier crédit manuel crée le portefeuille dans la transaction. `POST /admin/wallets/:userId/adjustments` reste compatible, exige un motif et une clé stable, refuse les débits excessifs et une réutilisation de clé avec des paramètres différents. Les crédits manuels ne deviennent pas retirables ; les réservations de retrait restent intactes.
+- Le navigateur conserve la demande de jetons non confirmée dans son stockage de session, avec le même identifiant pour la reprise après une coupure réseau. Il n'autorise pas à modifier cette demande tant que son résultat reste incertain.
+- `GET /admin/referrals/candidates?search=...` recherche au maximum 15 comptes actifs par nom, téléphone, email ou identifiant. `POST /admin/users/:userId/referrer` accepte `{ referrerUserId, reason }` (UUID, motif de 10 à 300 caractères). L'acteur provient du JWT et ses droits sont revérifiés dans le service.
+- Un rattachement administratif conserve les règles normales : bonus configuré au parrain une seule fois, aucune commission rétroactive, aucune modification d'un parrain existant. L'auteur, le filleul et le motif figurent dans l'écriture de bonus ; le profil indique `attributionProvider=admin`. Les rattachements mobiles et administratifs sont sérialisés pour empêcher les boucles concurrentes. Auto-parrainage et parrains indisponibles sont refusés.
+- Les notifications transactionnelles existantes prennent en charge l'ajustement utilisateur et le bonus du parrain après validation de la transaction. Aucun appel push externe n'est fait sous verrou. Le texte du bonus parle maintenant de rattachement plutôt que d'une nouvelle inscription.
+- Aucun changement de schéma ni nouvelle variable d'environnement. Déployer le backend avant l'administration web ; les migrations préexistantes de portefeuille, parrainage et notifications doivent déjà être appliquées.
 
 ## 4 octobre 2026
 

@@ -219,7 +219,11 @@ export class UsersController {
   @Public()
   @HttpCode(HttpStatus.OK)
   @SensitiveThrottle(5, 60000) // 5 requests per minute per IP
-  @ApiOperation({ summary: 'Send OTP code to phone number for verification' })
+  @ApiOperation({
+    summary: 'Send OTP code to phone number for verification',
+    description:
+      'Registration rejects numbers reserved by enabled active/pending-KYC accounts. Inactive or suspended accounts do not block a new signup; their number is released only when the new account is created. Login/update require a usable account.',
+  })
   @ApiResponse({
     status: 200,
     description: 'OTP sent successfully',
@@ -235,7 +239,8 @@ export class UsersController {
   })
   @ApiResponse({
     status: 400,
-    description: 'Bad request - Phone already exists or not found',
+    description:
+      'Bad request - Phone reserved by a usable account, or no usable account found for login/update',
   })
   async sendPhoneVerificationOtp(
     @Body() sendOtpDto: SendPhoneVerificationOtpDto,

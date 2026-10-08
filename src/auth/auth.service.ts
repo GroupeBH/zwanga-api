@@ -53,6 +53,11 @@ import { provisionAdminAccount } from '../admin/admin-account.provisioning';
 import { normalizeLegalName } from '../users/legal-identity.util';
 import { RedisService } from '../common/services/redis.service';
 import { matchesStoredToken, tokenFingerprint } from './token-fingerprint';
+import { rethrowSessionError } from './session-error';
+import {
+  accountReservesPhone,
+  saveRegistrationWithPhone,
+} from '../users/registration-phone.policy';
 
 const APPLE_ISSUER = 'https://appleid.apple.com';
 const APPLE_PUBLIC_KEYS_URL = 'https://appleid.apple.com/auth/keys';
@@ -153,7 +158,7 @@ export class AuthService {
     },
   ): Promise<AuthResponseDto> {
     const {
-      phone,
+      phone: requestedPhone,
       pin,
       firstName,
       lastName,
@@ -167,6 +172,7 @@ export class AuthService {
       referralReferringLink,
       referralCapturedAt,
     } = registerDto;
+    const phone = requestedPhone.trim();
     assertSelfServiceUserRole(role);
     const legalFirstName = normalizeLegalName(firstName);
     const legalLastName = normalizeLegalName(lastName);
@@ -189,7 +195,7 @@ export class AuthService {
       where: [{ phone }],
     });
 
-    if (existingUser) {
+    if (accountReservesPhone(existingUser)) {
       throw new UnauthorizedException('Ce numéro de téléphone existe déjà');
     }
 
@@ -250,7 +256,7 @@ export class AuthService {
     }
 
     const user = this.userRepository.create(userData);
-    const savedUser = await this.userRepository.save(user);
+    const savedUser = await saveRegistrationWithPhone(this.userRepository, user);
     await this.referralsService.registerUser(savedUser.id, referralAttribution);
 
     if (vehicle && role !== UserRole.DRIVER) {
@@ -772,7 +778,7 @@ export class AuthService {
         refreshToken: tokens.refreshToken,
       };
     } catch (error) {
-      throw new UnauthorizedException('Token de rafraîchissement invalide');
+      rethrowSessionError(error);
     }
   }
 
@@ -795,6 +801,7 @@ export class AuthService {
     await this.userRepository.update(user.id, {
       refreshToken: null,
       accessToken: null,
+      fcmToken: null,
     });
 
     this.logger.log(`User ${userId} logged out successfully`);
@@ -1058,7 +1065,7 @@ export class AuthService {
         const phoneOwner = await this.userRepository.findOne({
           where: { phone },
         });
-        if (phoneOwner) {
+        if (accountReservesPhone(phoneOwner)) {
           throw new UnauthorizedException(
             'Ce numéro de téléphone est déjà utilisé',
           );
@@ -1120,7 +1127,7 @@ export class AuthService {
           isPhoneVerified: false,
         });
 
-        user = await this.userRepository.save(user);
+        user = await saveRegistrationWithPhone(this.userRepository, user);
         await this.referralsService.registerUser(user.id, referralAttribution);
         if (vehicle && role === UserRole.DRIVER) {
           await this.vehiclesService.create(user.id, vehicle);
@@ -1439,7 +1446,7 @@ export class AuthService {
       const phoneOwner = await this.userRepository.findOne({
         where: { phone },
       });
-      if (phoneOwner) {
+      if (accountReservesPhone(phoneOwner)) {
         throw new UnauthorizedException(
           'Ce numéro de téléphone est déjà utilisé',
         );
@@ -1496,7 +1503,7 @@ export class AuthService {
         isPhoneVerified: false,
       });
 
-      user = await this.userRepository.save(user);
+      user = await saveRegistrationWithPhone(this.userRepository, user);
       await this.referralsService.registerUser(user.id, referralAttribution);
       if (vehicle && role === UserRole.DRIVER) {
         await this.vehiclesService.create(user.id, vehicle);

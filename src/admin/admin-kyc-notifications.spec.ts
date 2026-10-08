@@ -72,6 +72,15 @@ describe('manual KYC decisions', () => {
     expect(f.document.reviewedAt).toBe(firstReviewedAt);
   });
 
+  it('preserves the Didit decision date when an admin confirms the same approval', async () => {
+    const f = fixture();
+    const reviewedAt = new Date('2026-10-07T10:00:00Z');
+    Object.assign(f.document, { status: KycStatus.APPROVED, reviewedAt });
+    await f.service.verifyKyc('kyc', 'admin', true);
+    expect(f.document.reviewedAt).toBe(reviewedAt);
+    expect(f.document.reviewedBy).toBe('admin');
+  });
+
   it('does not reactivate a suspended account when identity is approved', async () => {
     const f = fixture();
     f.users.findOne.mockResolvedValue({

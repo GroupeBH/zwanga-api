@@ -1,4 +1,5 @@
 import { DataSource } from 'typeorm';
+import { Booking } from '../bookings/entities/booking.entity';
 import { TransactionalNotificationsSubscriber } from './transactional-notifications.subscriber';
 import {
   WalletLedgerEntry,
@@ -38,6 +39,25 @@ const fixture = () => {
 };
 
 describe('transactional notification subscriber', () => {
+  it('persists new pending booking invitations with a stable key in the business transaction', async () => {
+    const f = fixture();
+    f.manager.findOneBy.mockResolvedValue({ id: 'trip', driverId: 'driver', tripRequestId: null });
+    await f.subscriber.afterInsert(f.event(Booking, { id: 'booking', tripId: 'trip', status: 'pending' }));
+    expect(f.builder.values).toHaveBeenCalledWith(expect.objectContaining({
+      eventKey: 'booking:booking:new', userId: 'driver', fcmToken: '', status: 'pending',
+      data: expect.objectContaining({ type: 'new_booking', bookingId: 'booking', driverId: 'driver' }),
+    }));
+    expect(f.builder.onConflict).toHaveBeenCalledWith('("eventKey") DO NOTHING');
+    expect(() => f.subscriber.beforeInsert({ ...f.event(Booking, {}), queryRunner: { isTransactionActive: false } })).toThrow('require a transaction');
+  });
+
+  it('does not turn an assigned request or already accepted booking into another invitation', async () => {
+    const f = fixture();
+    f.manager.findOneBy.mockResolvedValue({ id: 'trip', driverId: 'driver', tripRequestId: 'request' });
+    await f.subscriber.afterInsert(f.event(Booking, { id: 'booking', tripId: 'trip', status: 'pending' }));
+    await f.subscriber.afterInsert(f.event(Booking, { id: 'accepted', tripId: 'trip', status: 'accepted' }));
+    expect(f.builder.execute).not.toHaveBeenCalled();
+  });
   it('registers with Nest data source and unregisters on shutdown', () => {
     const f = fixture();
     expect(f.dataSource.subscribers).toContain(f.subscriber);
@@ -142,7 +162,7 @@ describe('transactional notification subscriber', () => {
     expect(f.builder.execute).not.toHaveBeenCalled();
   });
 
-  it('does not mistake a provider KYC response for a manual approval', async () => {
+  it('queues a provider approval without requiring an admin reviewer', async () => {
     const f = fixture();
     await f.subscriber.afterUpdate(
       f.event(
@@ -151,7 +171,11 @@ describe('transactional notification subscriber', () => {
         { status: 'pending' },
       ),
     );
-    expect(f.builder.execute).not.toHaveBeenCalled();
+    expect(f.builder.values).toHaveBeenCalledWith(expect.objectContaining({
+      userId: 'user',
+      title: 'Identité vérifiée',
+      data: expect.objectContaining({ type: 'kyc_approved', kycId: 'kyc' }),
+    }));
   });
 
   it('does not attribute a later Didit status update to an older admin decision', async () => {
@@ -170,6 +194,32 @@ describe('transactional notification subscriber', () => {
         { status: 'rejected', reviewedBy: 'admin', reviewedAt },
       ),
     );
+    const row = f.builder.values.mock.calls[0][0];
+    expect(row.data.type).toBe('kyc_approved');
+    expect(row.body).not.toContain('notre équipe');
+  });
+
+  it('notifies an approval inserted directly, but not pending or automatic rejections', async () => {
+    const f = fixture();
+    for (const status of [KycStatus.PENDING, KycStatus.REJECTED, KycStatus.APPROVED]) {
+      await f.subscriber.afterInsert(f.event(KycDocument, {
+        id: 'kyc', userId: 'user', status, reviewedBy: null,
+      }));
+    }
+    expect(f.builder.execute).toHaveBeenCalledTimes(1);
+    expect(f.builder.values.mock.calls[0][0].data.type).toBe('kyc_approved');
+  });
+
+  it('does not notify again when polling or an admin confirms an existing approval', async () => {
+    const f = fixture();
+    const decision = {
+      id: 'kyc', userId: 'user', status: 'approved', reviewedBy: null,
+      reviewedAt: new Date('2026-10-07T10:00:00Z'),
+    };
+    await f.subscriber.afterUpdate(f.event(KycDocument,
+      { ...decision, diditLastSyncedAt: new Date() }, decision));
+    await f.subscriber.afterUpdate(f.event(KycDocument,
+      { ...decision, reviewedBy: 'admin' }, decision));
     expect(f.builder.execute).not.toHaveBeenCalled();
   });
 

@@ -16,6 +16,11 @@ import { TripPaymentMode } from '../../payments/enums/trip-payment-mode.enum';
 import { VehicleType } from '../../vehicles/entities/vehicle.entity';
 
 export class CreateTripRequestDto {
+  @ApiProperty({ required: false, default: false })
+  @IsOptional()
+  @IsBoolean()
+  immediateDispatch?: boolean;
+
   @ApiProperty()
   @IsString()
   @IsNotEmpty()

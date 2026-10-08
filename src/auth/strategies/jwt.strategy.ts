@@ -4,6 +4,7 @@ import { ExtractJwt, Strategy } from 'passport-jwt';
 import { ConfigService } from '@nestjs/config';
 import { UsersService } from '../../users/users.service';
 import { UserStatus } from '../../users/entities/user.entity';
+import { rethrowSessionError } from '../session-error';
 
 interface JwtPayload {
   sub: string;
@@ -52,7 +53,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
         passwordChangeRequired: user.passwordChangeRequired,
       };
     } catch (error) {
-      throw new UnauthorizedException("Votre session est invalide ou a expiré. Reconnectez-vous.");
+      rethrowSessionError(error);
     }
   }
 }

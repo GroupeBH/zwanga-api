@@ -21,8 +21,13 @@ import { Type } from 'class-transformer';
 import { ApiProperty } from '@nestjs/swagger';
 import { TripStatus } from '../entities/trip.entity';
 import { RecurringTripTemplateStatus } from '../entities/recurring-trip-template.entity';
+import { TripPaymentMode } from '../../payments/enums/trip-payment-mode.enum';
 
 export class CreateTripDto {
+  @ApiProperty({ required: false, enum: TripPaymentMode, isArray: true })
+  @IsOptional() @IsArray() @ArrayMinSize(1) @ArrayMaxSize(3) @IsEnum(TripPaymentMode, { each: true })
+  acceptedPaymentModes?: TripPaymentMode[];
+
   @ApiProperty()
   @IsString()
   @IsNotEmpty()
@@ -265,6 +270,10 @@ export class SearchTripsDto extends TripDiscoveryPageDto {
 }
 
 export class UpdateTripDto {
+  @ApiProperty({ required: false, enum: TripPaymentMode, isArray: true })
+  @IsOptional() @IsArray() @ArrayMinSize(1) @ArrayMaxSize(3) @IsEnum(TripPaymentMode, { each: true })
+  acceptedPaymentModes?: TripPaymentMode[];
+
   @ApiProperty({ required: false })
   @IsString()
   @IsOptional()
@@ -448,6 +457,10 @@ export class UpdateDriverLocationDto {
 }
 
 export class CreateRecurringTripDto {
+  @ApiProperty({ required: false, enum: TripPaymentMode, isArray: true })
+  @IsOptional() @IsArray() @ArrayMinSize(1) @ArrayMaxSize(3) @IsEnum(TripPaymentMode, { each: true })
+  acceptedPaymentModes?: TripPaymentMode[];
+
   @ApiProperty()
   @IsString()
   @IsNotEmpty()

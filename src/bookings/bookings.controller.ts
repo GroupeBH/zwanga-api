@@ -11,6 +11,7 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { BookingsService } from './bookings.service';
+import { BookingInvitationResponseDto } from './dto/booking.dto';
 import { PassengerInterruptionPreviewDto } from './dto/interruption-preview.dto';
 import { HistoryPageQuery } from '../common/history-page';
 import { randomUUID } from 'crypto';
@@ -174,6 +175,14 @@ export class BookingsController {
   @ApiOperation({ summary: 'Accept a booking (driver only)' })
   async accept(@Request() req, @Param('id') id: string) {
     return this.bookingsService.acceptBooking(id, req.user.userId);
+  }
+
+  @Put(':id/respond-invitation')
+  @Auth()
+  @SensitiveThrottle(20, 60000)
+  async respondToInvitation(@Request() req: { user: { userId: string } },
+    @Param('id', ParseUUIDPipe) id: string, @Body() body: BookingInvitationResponseDto) {
+    return this.bookingsService.respondToInvitation(id, req.user.userId, body.accept);
   }
 
   @Put(':id/reject')

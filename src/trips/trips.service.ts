@@ -1,3 +1,5 @@
+import { trustedContactMessagesEnabled } from '../safety/trusted-contact-policy';
+import { cancelEmptyRequestTrip } from './cancel-empty-request-trip';
 import {
   Injectable,
   NotFoundException,
@@ -78,6 +80,7 @@ import {
   PremiumSubscriptionFeatures,
   SubscriptionsService,
 } from '../subscriptions/subscriptions.service';
+import { normalizeAcceptedPaymentModes } from '../driver-finance/driver-finance.policy';
 import { WeatherAwarenessService } from '../weather/weather-awareness.service';
 import { DriverSettlementsService } from '../driver-settlements/driver-settlements.service';
 import { WalletService } from '../wallet/wallet.service';
@@ -301,6 +304,8 @@ export class TripsService {
 
     const trip = this.tripRepository.create({
       ...baseTripData,
+      acceptedPaymentModes: normalizeAcceptedPaymentModes(createTripDto.acceptedPaymentModes),
+      paymentModesExplicit: createTripDto.acceptedPaymentModes !== undefined,
       driverId,
       vehicleId: vehicle?.id ?? null,
       departureDate: new Date(departureDate),
@@ -326,6 +331,11 @@ export class TripsService {
       `Trip created successfully: ${savedTrip.id} by user ${driverId}`,
     );
     return this.findOne(savedTrip.id);
+  }
+
+  async cancelFailedRequestTrip(tripId: string, driverId: string, requestId: string): Promise<void> {
+    if (await cancelEmptyRequestTrip(this.tripRepository, tripId, driverId, requestId))
+      await this.invalidateTripCaches(tripId);
   }
 
   async findAll(): Promise<SanitizedTrip[]> {
@@ -751,6 +761,8 @@ export class TripsService {
     );
 
     const template = this.recurringTripTemplateRepository.create({
+      acceptedPaymentModes: normalizeAcceptedPaymentModes(createRecurringTripDto.acceptedPaymentModes),
+      paymentModesExplicit: createRecurringTripDto.acceptedPaymentModes !== undefined,
       driverId,
       vehicleId: vehicle.id,
       departureLocation: createRecurringTripDto.departureLocation,
@@ -1072,6 +1084,11 @@ export class TripsService {
 
     if (departureDate) {
       trip.departureDate = new Date(departureDate);
+    }
+
+    if (updateTripDto.acceptedPaymentModes !== undefined) {
+      trip.paymentModesExplicit = true;
+      restPayload.acceptedPaymentModes = normalizeAcceptedPaymentModes(updateTripDto.acceptedPaymentModes);
     }
 
     const shouldRefreshDeparturePoint =
@@ -2716,6 +2733,8 @@ export class TripsService {
           availableSeats: template.totalSeats,
           pricePerSeat: template.isFree ? 0 : template.pricePerSeat,
           isFree: template.isFree,
+          acceptedPaymentModes: normalizeAcceptedPaymentModes(template.acceptedPaymentModes),
+          paymentModesExplicit: template.paymentModesExplicit ?? false,
           requiresPassengerKyc: template.requiresPassengerKyc,
           description: template.description ?? undefined,
           status: TripStatus.PENDING,
@@ -4198,6 +4217,7 @@ export class TripsService {
     trip: Trip,
     eventType: 'trip_started' | 'trip_completed',
   ): Promise<void> {
+    if (!trustedContactMessagesEnabled()) return;
     try {
       const selectedContactIds = trip.driverSafetyEmergencyContactIds ?? [];
       if (selectedContactIds.length === 0) {
@@ -4298,6 +4318,7 @@ export class TripsService {
     trip: Trip,
     bookings: Booking[],
   ): Promise<void> {
+    if (!trustedContactMessagesEnabled()) return;
     try {
       if (bookings.length === 0) {
         return;

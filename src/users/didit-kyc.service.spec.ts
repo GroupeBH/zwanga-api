@@ -279,10 +279,35 @@ describe('DiditKycService', () => {
     });
 
     expect(result?.status).toBe(KycStatus.APPROVED);
+    expect(result?.reviewedAt).toBeInstanceOf(Date);
+    expect(result?.reviewedBy).toBeNull();
     expect(user.status).toBe(UserStatus.ACTIVE);
     expect(txUserRepository.update).toHaveBeenCalledWith(user.id,
       expect.objectContaining({ status: UserStatus.ACTIVE }),
     );
+  });
+
+  it('keeps the decision date stable on repeated approvals, including an admin-confirmed approval', async () => {
+    (global.fetch as jest.Mock).mockResolvedValue(createFetchResponse({
+      session_id: 'session-1', status: 'Approved', vendor_data: user.id,
+    }));
+    await service.syncSession(user.id, { sessionId: 'session-1' });
+    const reviewedAt = kyc.reviewedAt;
+    kyc.reviewedBy = 'admin-1';
+    await service.syncSession(user.id, { sessionId: 'session-1' });
+    expect(kyc.reviewedAt).toBe(reviewedAt);
+    expect(kyc.reviewedBy).toBe('admin-1');
+  });
+
+  it('versions a new Didit approval and clears attribution to an older admin rejection', async () => {
+    const previousDate = new Date(Date.now() + 1_000);
+    Object.assign(kyc, { status: KycStatus.REJECTED, reviewedAt: previousDate, reviewedBy: 'admin-1' });
+    (global.fetch as jest.Mock).mockResolvedValue(createFetchResponse({
+      session_id: 'session-1', status: 'Approved', vendor_data: user.id,
+    }));
+    await service.syncSession(user.id, { sessionId: 'session-1' });
+    expect(kyc.reviewedAt.getTime()).toBeGreaterThan(previousDate.getTime());
+    expect(kyc.reviewedBy).toBeNull();
   });
 
   it('activates only an explicitly requested driver profile after approval', async () => {
@@ -403,8 +428,10 @@ describe('DiditKycService', () => {
     ).rejects.toBeInstanceOf(UnauthorizedException);
   });
 
-  it('accepts a signed v2 webhook and applies the refreshed Didit decision', async () => {
+  it('accepts a signed v2 manual-review webhook and applies the refreshed Didit decision', async () => {
     const payload = {
+      webhook_type: 'status.updated',
+      trigger: 'manual_review',
       session_id: 'session-1',
       status: 'Approved',
       vendor_data: user.id,

@@ -96,6 +96,7 @@ export class User {
   })
   status: UserStatus;
 
+  @Index('UQ_users_push_token', { unique: true, where: '"fcmToken" IS NOT NULL' })
   @Column({ type: 'varchar', nullable: true })
   fcmToken: string | null;
 

@@ -1,3 +1,4 @@
+import { isAppUpdateDeliverable } from '../app-updates/app-update-dispatch.service';
 import {
   cert,
   initializeApp,
@@ -5,6 +6,7 @@ import {
   type ServiceAccount,
 } from 'firebase-admin/app';
 import { getMessaging, type MulticastMessage } from 'firebase-admin/messaging';
+import { createHash } from 'node:crypto';
 import { Injectable, OnModuleInit, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Cron, CronExpression } from '@nestjs/schedule';
@@ -19,6 +21,7 @@ import { DriverPayout } from '../driver-settlements/entities/driver-payout.entit
 import { WalletWithdrawal } from '../wallet/entities/wallet-withdrawal.entity';
 import { ReferralWithdrawal } from '../referrals/entities/referral-withdrawal.entity';
 import { KycDocument } from '../users/entities/kyc-document.entity';
+import { LATEST_IDENTITY_ORDER } from '../users/profile-state';
 import { PaymentTransaction } from '../payments/entities/payment-transaction.entity';
 import { PawaPayRefund } from '../payments/entities/pawapay-refund.entity';
 import {
@@ -34,6 +37,7 @@ const PUSH_DELIVERY_TIMEOUT_MS = 10_000;
 const CRITICAL_RETRY_DELAY_MS = 5 * 60 * 1000;
 const CRITICAL_RETRY_WINDOW_MS = 72 * 60 * 60 * 1000;
 const CRITICAL_RETRY_BATCH_SIZE = 25;
+const URGENT_NOTIFICATION_TYPES = ['new_booking', 'driver_dispatch_offer'];
 const EXPO_RECEIPT_DELAY_MS = 15 * 60 * 1000;
 const EXPO_RECEIPT_WINDOW_MS = 24 * 60 * 60 * 1000;
 const EXPO_RECEIPT_BATCH_SIZE = 100;
@@ -112,6 +116,7 @@ export class NotificationService implements OnModuleInit {
   private readonly logger = new Logger(NotificationService.name);
   private firebaseApp: App;
   private dispatchingTransactionalNotifications = false;
+  private dispatchingUrgentNotifications = false;
 
   constructor(
     private configService: ConfigService,
@@ -295,6 +300,13 @@ export class NotificationService implements OnModuleInit {
   private async deliverSavedNotification(
     savedNotification: Notification,
   ): Promise<boolean> {
+    // A queued token snapshot is not proof that the device still belongs to this account.
+    if (savedNotification.userId) {
+      const owner = await this.userRepository.findOne({
+        where: { id: savedNotification.userId }, select: ['id', 'fcmToken'],
+      });
+      savedNotification.fcmToken = owner?.fcmToken?.trim() ?? '';
+    }
     const pushToken = savedNotification.fcmToken?.trim();
     if (!pushToken) {
       await this.markNotificationFailed(
@@ -305,6 +317,13 @@ export class NotificationService implements OnModuleInit {
     }
 
     try {
+      this.logger.debug(
+        `Verifying unambiguous push ownership`,
+      );
+      if (savedNotification.userId && await this.userRepository.count({ where: { fcmToken: pushToken } }) !== 1) {
+        await this.markNotificationFailed(savedNotification, 'PUSH_TOKEN_OWNERSHIP_AMBIGUOUS');
+        return false;
+      }
       this.logger.debug(
         `Sending notification through ${this.isExpoPushToken(pushToken) ? 'Expo' : 'FCM'} - Title: ${savedNotification.title}`,
       );
@@ -343,13 +362,29 @@ export class NotificationService implements OnModuleInit {
     if (!this.firebaseApp) {
       throw new Error('FCM non configuré sur le serveur');
     }
+    const version = await this.driverActionVersion(notification, pushToken);
+    if (version > 0) {
+      // No title/message fields: Expo must treat this as headless and let Notifee display it once.
+      const data = { ...notification.data, actionProtocol: 'driver-v1', invitationText: notification.body,
+        ...(version === 2 ? { ringVersion: 'v2' } : {}) };
+      return getMessaging(this.firebaseApp).send({ token: pushToken,
+        data: this.stringifyNotificationData(data),
+        android: { priority: 'high', ttl: this.driverNotificationTtl(notification) * 1000 },
+      });
+    }
+    const passengerRing = notification.data?.type === 'trip_request_accepted' &&
+      await this.ringClientVersion(notification, pushToken) === 2;
     return getMessaging(this.firebaseApp).send({
       token: pushToken,
       notification: {
         title: notification.title,
         body: notification.body,
       },
-      data: this.stringifyNotificationData(notification.data),
+      data: this.stringifyNotificationData(passengerRing
+        ? { ...notification.data, ringAlert: 'request-accepted-v1' } : notification.data),
+      ...(passengerRing ? { android: { priority: 'high' as const, ttl: 60_000,
+        notification: { channelId: 'booking-ring-v2', sound: 'driver_ring',
+          tag: `request-accepted-${notification.data?.tripRequestId}`, visibility: 'private' as const } } } : {}),
     });
   }
 
@@ -357,6 +392,11 @@ export class NotificationService implements OnModuleInit {
     notification: Notification,
     pushToken: string,
   ): Promise<string> {
+    const version = await this.driverActionVersion(notification, pushToken);
+    const driverActions = version > 0;
+    const passengerRing = notification.data?.type === 'trip_request_accepted' &&
+      await this.ringClientVersion(notification, pushToken) === 2;
+    const longRing = version === 2 || passengerRing;
     const response = await fetch(EXPO_PUSH_API_URL, {
       method: 'POST',
       headers: {
@@ -367,9 +407,13 @@ export class NotificationService implements OnModuleInit {
         to: pushToken,
         title: notification.title,
         body: notification.body,
-        data: notification.data ?? undefined,
-        sound: 'default',
-        priority: 'high',
+        data: driverActions ? { ...notification.data, actionProtocol: 'driver-v1' }
+          : passengerRing ? { ...notification.data, ringAlert: 'request-accepted-v1' } : notification.data ?? undefined,
+        ...(driverActions ? { categoryId: version === 2 ? 'driver-offer-v2' : 'driver-offer-v1', ttl: this.driverNotificationTtl(notification) } : {}),
+        ...(longRing ? { interruptionLevel: 'time-sensitive' } : {}),
+        ...(passengerRing ? { channelId: 'booking-ring-v2', ttl: 60 } : {}),
+        sound: longRing ? 'driver_ring.wav' : 'default',
+        priority: notification.data?.type === 'app_update' ? 'normal' : 'high',
       }),
       signal: AbortSignal.timeout(PUSH_DELIVERY_TIMEOUT_MS),
     });
@@ -394,6 +438,28 @@ export class NotificationService implements OnModuleInit {
     return ticket.id
       ? `${EXPO_TICKET_PREFIX}${ticket.id}`
       : `${EXPO_RECEIPT_OK_PREFIX}accepted-${notification.id}`;
+  }
+
+  private driverNotificationTtl(notification: Notification): number {
+    const deadline = Date.parse(String(notification.data?.expiresAt ?? ''));
+    return Number.isFinite(deadline) ? Math.max(1, Math.ceil((deadline - Date.now()) / 1000)) : 3600;
+  }
+
+  private async driverActionVersion(notification: Notification, pushToken: string): Promise<number> {
+    if (!['new_booking', 'driver_dispatch_offer'].includes(notification.data?.type)) return 0;
+    if (notification.data?.type === 'driver_dispatch_offer' &&
+        this.configService.get<string>('DRIVER_DISPATCH_ENABLED') !== 'true') return 0;
+    return this.ringClientVersion(notification, pushToken);
+  }
+
+  private async ringClientVersion(notification: Notification, pushToken: string): Promise<number> {
+    if (!notification.userId) return 0;
+    const rows: { version: number }[] = await this.notificationRepository.manager.query(
+      `SELECT CASE WHEN "tokenHash" = $3 THEN 2 ELSE 1 END AS version FROM driver_notification_clients
+        WHERE "userId" = $1 AND "tokenHash" IN ($2,$3)`,
+      [notification.userId, createHash('sha256').update(pushToken).digest('hex'),
+        createHash('sha256').update(pushToken + ':driver-v2').digest('hex')]);
+    return rows.length > 0 ? (rows[0].version === 2 ? 2 : 1) : 0;
   }
 
   private stringifyNotificationData(
@@ -458,8 +524,22 @@ export class NotificationService implements OnModuleInit {
   /** Deliver newly committed outbox rows without holding business/database locks over HTTP. */
   @Cron(CronExpression.EVERY_10_SECONDS)
   async dispatchTransactionalNotifications(): Promise<void> {
-    if (this.dispatchingTransactionalNotifications) return;
-    this.dispatchingTransactionalNotifications = true;
+    await Promise.all([this.dispatchNotificationLane(false), this.dispatchNotificationLane(true)]);
+  }
+
+  @Cron('*/5 * * * * *')
+  async dispatchUrgentNotifications(): Promise<void> {
+    await this.dispatchNotificationLane(true);
+  }
+
+  private async dispatchNotificationLane(urgent: boolean): Promise<void> {
+    if (urgent) {
+      if (this.dispatchingUrgentNotifications) return;
+      this.dispatchingUrgentNotifications = true;
+    } else {
+      if (this.dispatchingTransactionalNotifications) return;
+      this.dispatchingTransactionalNotifications = true;
+    }
     try {
       const notifications =
         await this.notificationRepository.manager.transaction(
@@ -468,18 +548,30 @@ export class NotificationService implements OnModuleInit {
             const rows = await repository
               .createQueryBuilder('notification')
               .where('notification.eventKey IS NOT NULL')
-              .andWhere('notification.status = :status', {
-                status: NotificationStatus.PENDING,
+              .andWhere(urgent
+                ? "notification.data ->> 'type' IN (:...urgentTypes)"
+                : "COALESCE(notification.data ->> 'type', '') NOT IN (:...urgentTypes)",
+                { urgentTypes: URGENT_NOTIFICATION_TYPES })
+              .andWhere(urgent
+                ? '(notification.status = :pending AND notification.errorMessage IS NULL OR notification.status = :failed AND notification.updatedAt < :retryBefore OR notification.status = :pending AND notification.updatedAt < :leaseBefore)'
+                : 'notification.status = :pending AND notification.errorMessage IS NULL', {
+                pending: NotificationStatus.PENDING,
+                failed: NotificationStatus.FAILED,
+                retryBefore: new Date(Date.now() - 15_000),
+                leaseBefore: new Date(Date.now() - 120_000),
               })
-              .andWhere('notification.errorMessage IS NULL')
               .andWhere('notification.isActive = true')
-              .orderBy('notification.createdAt', 'ASC')
-              .take(CRITICAL_RETRY_BATCH_SIZE)
+              .orderBy(urgent ? "CASE WHEN notification.data ->> 'type' = 'driver_dispatch_offer' THEN 0 ELSE 1 END" : 'notification.createdAt', 'ASC')
+              .addOrderBy('notification.createdAt', 'ASC')
+              .addOrderBy('notification.id', 'ASC')
+              .take(urgent ? 10 : CRITICAL_RETRY_BATCH_SIZE)
               .setLock('pessimistic_write')
               .setOnLocked('skip_locked')
               .getMany();
-            for (const row of rows)
+            for (const row of rows) {
+              row.status = NotificationStatus.PENDING;
               row.errorMessage = 'TRANSACTIONAL_PUSH_CLAIMED';
+            }
             return rows.length ? repository.save(rows) : rows;
           },
         );
@@ -499,11 +591,6 @@ export class NotificationService implements OnModuleInit {
                 );
                 return;
               }
-              const user = await this.userRepository.findOne({
-                where: { id: notification.userId! },
-                select: ['id', 'fcmToken'],
-              });
-              notification.fcmToken = user?.fcmToken?.trim() ?? '';
               await this.deliverSavedNotification(notification);
             } catch (error) {
               // A crashed/failed delivery is recovered by the existing stale-claim retry.
@@ -515,7 +602,8 @@ export class NotificationService implements OnModuleInit {
         );
       }
     } finally {
-      this.dispatchingTransactionalNotifications = false;
+      if (urgent) this.dispatchingUrgentNotifications = false;
+      else this.dispatchingTransactionalNotifications = false;
     }
   }
 
@@ -545,11 +633,6 @@ export class NotificationService implements OnModuleInit {
         );
         continue;
       }
-      const user = await this.userRepository.findOne({
-        where: { id: notification.userId },
-        select: ['id', 'fcmToken'],
-      });
-      notification.fcmToken = user?.fcmToken?.trim() ?? '';
       if (await this.deliverSavedNotification(notification)) {
         delivered += 1;
       }
@@ -578,6 +661,7 @@ export class NotificationService implements OnModuleInit {
           },
         )
         .andWhere('notification.isActive = true')
+        .andWhere("COALESCE(notification.data ->> 'type', '') NOT IN (:...urgentTypes)", { urgentTypes: URGENT_NOTIFICATION_TYPES })
         .andWhere('notification.updatedAt <= :retryBefore', { retryBefore })
         .andWhere('notification.createdAt >= :createdAfter', { createdAfter })
         .orderBy('notification.updatedAt', 'ASC')
@@ -602,19 +686,40 @@ export class NotificationService implements OnModuleInit {
     notification: Notification,
   ): Promise<boolean> {
     const type = notification.data?.type;
+    if (type === 'new_booking') {
+      const rows: unknown[] = await this.notificationRepository.manager.query(`SELECT 1 FROM bookings b
+        JOIN trips t ON t.id = b."tripId" WHERE b.id = $1 AND t."driverId" = $2
+        AND b.status = 'pending' AND t.status IN ('upcoming', 'ongoing')
+        AND t."tripRequestId" IS NULL`, [notification.data?.bookingId, notification.userId]);
+      return rows.length > 0;
+    }
+    if (type === 'app_update') {
+      if (this.configService.get<string>('APP_UPDATES_ENABLED') !== 'true') return false;
+      return isAppUpdateDeliverable(this.notificationRepository.manager, notification.data?.releaseId, notification.userId);
+    }
+    if (type === 'driver_dispatch_offer') {
+      if (this.configService.get<string>('DRIVER_DISPATCH_ENABLED') !== 'true') return false;
+      const rows: unknown[] = await this.notificationRepository.manager.query(`SELECT 1 FROM trip_request_dispatch_offers o
+        JOIN trip_requests r ON r.id = o."requestId" WHERE o.id = $1 AND o."driverId" = $2
+        AND o.status = 'pending' AND o."expiresAt" > now() AND r.status = 'pending'`,
+        [notification.data?.offerId, notification.userId]);
+      return rows.length > 0;
+    }
     if (
       notification.eventKey &&
       (type === 'kyc_approved' || type === 'kyc_rejected')
     ) {
-      const document = await this.notificationRepository.manager.findOneBy(
+      if (!notification.userId) return false;
+      const document = await this.notificationRepository.manager.findOne(
         KycDocument,
-        { id: notification.data!.kycId },
+        { where: { userId: notification.userId }, order: LATEST_IDENTITY_ORDER },
       );
       return Boolean(
         document &&
+        document.id === notification.data!.kycId &&
         document.userId === notification.userId &&
         document.status === notification.data!.status &&
-        document.reviewedBy &&
+        (type === 'kyc_approved' || document.reviewedBy) &&
         (!notification.data!.reviewedAt ||
           document.reviewedAt?.toISOString() === notification.data!.reviewedAt),
       );
@@ -859,7 +964,7 @@ export class NotificationService implements OnModuleInit {
     data?: Record<string, any>,
     userIds?: string[],
   ): Promise<void> {
-    if (!this.firebaseApp || fcmTokens.length === 0) {
+    if ((!this.firebaseApp && !userIds?.length) || fcmTokens.length === 0) {
       this.logger.debug(
         'FCM not configured or no tokens provided, skipping multicast notification',
       );
@@ -882,6 +987,23 @@ export class NotificationService implements OnModuleInit {
     // Sauvegarder toutes les notifications en attente
     const savedNotifications =
       await this.notificationRepository.save(notifications);
+
+    if (userIds?.length) {
+      // Account-addressed batches use current ownership and the appropriate Expo/FCM transport.
+      // Never fall back to a stale token when an account id is missing in a partial batch.
+      for (let offset = 0; offset < savedNotifications.length; offset += 5) {
+        await Promise.all(savedNotifications.slice(offset, offset + 5).map(async notification => {
+          try {
+            if (!notification.userId) {
+              await this.markNotificationFailed(notification, 'Destinataire manquant');
+              return;
+            }
+            await this.deliverSavedNotification(notification);
+          } catch { await this.markNotificationFailed(notification, 'Envoi temporairement indisponible'); }
+        }));
+      }
+      return;
+    }
 
     try {
       this.logger.log(

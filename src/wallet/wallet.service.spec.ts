@@ -250,6 +250,8 @@ describe('WalletService', () => {
           id: 'adjustment-1',
           userId: 'passenger-1',
           type: WalletLedgerEntryType.ADMIN_ADJUSTMENT,
+          amount: 25,
+          description: 'Ajustement par admin admin-1: Regularisation ticket SUP-1042',
         });
       }
       return Promise.resolve(null);

@@ -16,6 +16,10 @@ import { BookingStatus } from '../entities/booking.entity';
 import { ReportReason } from '../../safety/entities/user-report.entity';
 import { TripPaymentMode } from '../../payments/enums/trip-payment-mode.enum';
 
+export class BookingInvitationResponseDto {
+  @IsBoolean() accept: boolean;
+}
+
 class PassengerDestinationCoordinatesDto {
   @ApiProperty({
     description: 'Latitude de la destination du passager',

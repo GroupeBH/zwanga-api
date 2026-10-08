@@ -84,6 +84,25 @@ export class ApiExceptionFilter implements ExceptionFilter {
 
   private describeException(exception: unknown): ErrorDescriptor {
     const technicalError = this.asTransportError(exception);
+    // Only translate known business exceptions from the atomic booking guard.
+    const database = (exception as { driverError?: { code?: string; message?: string; constraint?: string } })?.driverError;
+    if (database?.code === '23514' && database.constraint === 'CHK_wallet_cash_reserve') {
+      return { statusCode: HttpStatus.CONFLICT, error: 'Solde réservé', code: 'WALLET_FUNDS_RESERVED', message: 'Une partie de vos jetons couvre des courses cash confirmées. Actualisez votre portefeuille et utilisez le solde disponible.' };
+    }
+    if (database?.code && ['55P03', '40P01', '40001', '53300', '57P01', '08006'].includes(database.code)) {
+      return { statusCode: HttpStatus.SERVICE_UNAVAILABLE, error: 'Service temporairement occupé', code: 'DATABASE_TEMPORARILY_UNAVAILABLE', message: 'Le service est momentanément occupé. Vérifiez le statut de votre opération avant de réessayer.' };
+    }
+    const financeMessages: Record<string, string> = {
+      CASH_COMMISSION_INSUFFICIENT: 'Jetons insuffisants pour couvrir la commission cash de 5 % dans la limite autorisée de 25 jetons de dette (2 500 FC). Rechargez ou choisissez un autre paiement.',
+      CASH_DEBT_OUTSTANDING: 'Une commission cash reste due. Régularisez-la en rechargeant vos jetons avant tout nouveau paiement cash. Les courses confirmées peuvent se terminer.',
+      TRIP_PAYMENT_MODE_UNAVAILABLE: 'Ce mode de paiement n’est pas accepté sur ce trajet. Choisissez un mode proposé.',
+      CASH_CURRENCY_UNSUPPORTED: 'Le paiement cash est disponible uniquement en francs congolais.',
+      CASH_STATE_CONFLICT: 'La réservation a déjà été finalisée. Actualisez son état.',
+      CASH_OWNER_CHANGED: 'Le conducteur de cette réservation ne peut plus être modifié.',
+    };
+    if (database?.code === 'P0001' && database.message && financeMessages[database.message]) {
+      return { statusCode: HttpStatus.CONFLICT, error: 'Paiement indisponible', code: database.message, message: financeMessages[database.message] };
+    }
 
     if (this.isRequestAborted(technicalError)) {
       return {

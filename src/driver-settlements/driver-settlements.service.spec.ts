@@ -159,7 +159,32 @@ describe('DriverSettlementsService', () => {
     );
   });
 
-  it('records electronic first-trip driver earnings on the full fare, not only the passenger-paid amount', async () => {
+  it.each([TripPaymentMode.ELECTRONIC, TripPaymentMode.POINTS])('charges 5%% of the new passenger payment, retaining the full subsidy for %s', async paymentMode => {
+    earningRepository.findOne.mockResolvedValue(null);
+    const result = await service.recordCompletedBookingEarning({
+      id: 'new-booking', tripId: 'trip', passengerId: 'passenger', numberOfSeats: 1,
+      status: BookingStatus.COMPLETED, paymentStatus: BookingPaymentStatus.SUCCEEDED,
+      paymentMode, paymentAmount: 4000, grossPaymentAmount: 10000, zwangaSubsidyAmount: 6000,
+      firstTripSubsidyApplied: true, cashCommissionPolicyVersion: 1, paymentCurrency: 'CDF',
+      trip: { id: 'trip', driverId: 'driver', status: TripStatus.COMPLETED },
+    } as any);
+    expect(result).toEqual(expect.objectContaining({ grossAmount: 10000, commissionAmount: 200, commissionRate: 0.05, netAmount: 9800 }));
+  });
+
+  it('reconciles an existing historical earning using its recorded rate without rewriting it', async () => {
+    const existing = { id: 'historical', tripId: 'trip', passengerId: 'passenger', driverId: 'driver',
+      grossAmount: 10000, commissionRate: 0.1, commissionAmount: 1000, netAmount: 9000 };
+    earningRepository.findOne.mockResolvedValue(existing);
+    const result = await service.recordCompletedBookingEarning({ id: 'booking', tripId: 'trip', passengerId: 'passenger',
+      status: BookingStatus.COMPLETED, paymentStatus: BookingPaymentStatus.SUCCEEDED,
+      paymentMode: TripPaymentMode.ELECTRONIC, paymentAmount: 10000, cashCommissionPolicyVersion: 0,
+      trip: { driverId: 'driver' },
+    } as any);
+    expect(result).toBe(existing);
+    expect(earningRepository.save).not.toHaveBeenCalled();
+  });
+
+  it('keeps historical electronic first-trip earnings on their original full-fare basis', async () => {
     earningRepository.findOne.mockResolvedValue(null);
 
     const result = await service.recordCompletedBookingEarning({

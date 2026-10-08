@@ -119,6 +119,14 @@ describe('SubscriptionsService points payments', () => {
     );
   });
 
+  it('advertises 5000 CDF, 30 days and 5% even if legacy pricing variables remain configured', () => {
+    configService.get.mockImplementation((key: string) => ({ SUBSCRIPTION_PRO_PRICE: 2, SUBSCRIPTION_PRO_CURRENCY: 'USD', SUBSCRIPTION_PRO_POINTS_PRICE: 999, SUBSCRIPTION_TRIAL_DAYS: 7 })[key]);
+    expect(service.getPlans()[0]).toMatchObject({ amount: 5000, currency: 'CDF', durationDays: 30, trialDays: 30, commissionRate: 0.05, pointsAmount: 50, cashCommissionRequiresPurchasedTokens: true });
+    expect(walletService.convertMoneyToPoints).toHaveBeenCalledWith(5000, 'CDF');
+    const started = new Date('2026-01-31T10:00:00Z');
+    expect((service as any).calculateEndDate(started).toISOString()).toBe('2026-03-02T10:00:00.000Z');
+  });
+
   it('lists points as a subscription payment option', () => {
     expect(service.getPlans()).toEqual([
       expect.objectContaining({

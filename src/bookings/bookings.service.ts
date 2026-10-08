@@ -1,3 +1,5 @@
+import { enqueueTransactionalNotification } from '../notifications/transactional-notification';
+import { trustedContactMessagesEnabled } from '../safety/trusted-contact-policy';
 import {
   Injectable,
   NotFoundException,
@@ -820,6 +822,7 @@ export class BookingsService implements OnModuleInit {
     bookingId: string,
     driverId: string,
     updateStatusDto: UpdateBookingStatusDto,
+    invitationOnly = false,
   ): Promise<Booking> {
     const entityManager = this.bookingRepository.manager;
     const updatedBooking = await entityManager.transaction(async (manager) => {
@@ -860,6 +863,18 @@ export class BookingsService implements OnModuleInit {
 
       if (oldStatus === nextStatus) {
         return booking;
+      }
+
+      if (invitationOnly) {
+        if (oldStatus !== BookingStatus.PENDING || trip.tripRequestId) {
+          throw new BadRequestException('Cette réservation a déjà été traitée. Actualisez les détails du trajet.');
+        }
+        await enqueueTransactionalNotification(manager, {
+          eventKey: `booking-invitation:${booking.id}`, userId: booking.passengerId,
+          title: nextStatus === BookingStatus.ACCEPTED ? 'Réservation acceptée' : 'Réservation refusée',
+          body: 'Le conducteur a répondu à votre réservation. Consultez les détails dans l’application.',
+          data: { type: 'booking_response', bookingId: booking.id, tripId: trip.id, role: 'passenger' },
+        });
       }
 
       if (
@@ -1301,6 +1316,9 @@ export class BookingsService implements OnModuleInit {
     );
     const paymentCurrency = this.getTripPaymentCurrency();
     const paymentMode = createBookingDto.paymentMode ?? TripPaymentMode.CASH;
+    if (grossPaymentAmount > 0 && trip.acceptedPaymentModes && !trip.acceptedPaymentModes.includes(paymentMode)) {
+      throw new BadRequestException({ code: 'TRIP_PAYMENT_MODE_UNAVAILABLE', message: 'Ce mode de paiement n’est pas accepté sur ce trajet. Choisissez un mode proposé.' });
+    }
 
     const booking = this.bookingRepository.create({
       tripId: createBookingDto.tripId,
@@ -1325,6 +1343,7 @@ export class BookingsService implements OnModuleInit {
       grossPaymentAmount,
       paymentCurrency,
       paymentMode,
+      cashCommissionTokenValue: paymentCurrency === 'CDF' ? 100 : this.walletService.convertPointsToMoney(1, paymentCurrency),
     });
 
     await this.applyFirstTripSubsidyPolicy(booking, trip);
@@ -1350,7 +1369,8 @@ export class BookingsService implements OnModuleInit {
       `Booking created successfully: ${savedBooking.id} for passenger ${passengerId} on trip ${createBookingDto.tripId}. Seats will be deducted when the booking is accepted.`,
     );
 
-    await this.notifyDriverOfNewBooking(trip, passengerId, savedBooking);
+    // The transactional subscriber persists the invitation with the booking.
+    // Push delivery is handled asynchronously, including missing/expired device tokens.
     return savedBooking;
   }
 
@@ -2474,6 +2494,13 @@ export class BookingsService implements OnModuleInit {
     });
     await this.notifyPassengerOfStatusChange(booking, BookingStatus.ACCEPTED);
     return booking;
+  }
+
+  async respondToInvitation(bookingId: string, driverId: string, accept: boolean): Promise<Booking> {
+    return this.updateStatusTransactionally(bookingId, driverId, {
+      status: accept ? BookingStatus.ACCEPTED : BookingStatus.REJECTED,
+      ...(accept ? {} : { rejectionReason: 'Réservation refusée par le conducteur.' }),
+    }, true);
   }
 
   async updatePaymentMode(
@@ -3663,59 +3690,6 @@ export class BookingsService implements OnModuleInit {
     } catch (error) {
       this.logger.error(
         `Failed to send passenger notification: ${error.message}`,
-        error.stack,
-      );
-    }
-  }
-
-  private async notifyDriverOfNewBooking(
-    trip: Trip,
-    passengerId: string,
-    booking: Booking,
-  ) {
-    try {
-      const driver =
-        trip.driver ??
-        (await this.userRepository.findOne({ where: { id: trip.driverId } }));
-
-      if (!driver?.fcmToken) {
-        this.logger.debug(
-          `Driver ${trip.driverId} has no FCM token, skipping notification`,
-        );
-        return;
-      }
-
-      const passenger = await this.userRepository.findOne({
-        where: { id: passengerId },
-      });
-      const passengerName = passenger
-        ? `${passenger.firstName} ${passenger.lastName}`
-        : 'Un passager';
-
-      // Build destination message
-      const destination = booking.passengerDestination || trip.arrivalLocation;
-      const destinationMessage =
-        booking.passengerDestination &&
-        booking.passengerDestination !== trip.arrivalLocation
-          ? `${trip.departureLocation} → ${destination} (destination personnalisée)`
-          : `${trip.departureLocation} → ${trip.arrivalLocation}`;
-
-      await this.notificationService.sendNotification(
-        driver.fcmToken,
-        'Nouvelle réservation',
-        `${passengerName} a réservé ${booking.numberOfSeats} place(s) sur votre trajet ${destinationMessage}`,
-        {
-          bookingId: booking.id,
-          tripId: trip.id,
-          passengerDestination: destination,
-          role: 'driver',
-          driverId: trip.driverId,
-        },
-        trip.driverId,
-      );
-    } catch (error) {
-      this.logger.error(
-        `Failed to send booking notification: ${error.message}`,
         error.stack,
       );
     }
@@ -5242,6 +5216,7 @@ export class BookingsService implements OnModuleInit {
     booking: Booking,
     eventType: 'pickup' | 'dropoff' | 'trip_end_without_dropoff',
   ): Promise<void> {
+    if (!trustedContactMessagesEnabled()) return;
     try {
       const selectedContactIds = booking.safetyEmergencyContactIds ?? [];
       if (selectedContactIds.length === 0) {
@@ -5411,6 +5386,7 @@ export class BookingsService implements OnModuleInit {
   private async notifyDriverEmergencyContactsOnPickup(
     booking: Booking,
   ): Promise<void> {
+    if (!trustedContactMessagesEnabled()) return;
     try {
       const trip = await this.tripRepository.findOne({
         where: { id: booking.tripId },

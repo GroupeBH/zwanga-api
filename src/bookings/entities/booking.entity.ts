@@ -46,6 +46,13 @@ export enum BookingPaymentStatus {
 @Index('IDX_bookings_passenger_history', ['passengerId', 'tripId', 'id'])
 @Index(['tripId', 'passengerId'])
 export class Booking {
+  // Server-only policy snapshots, never writable through booking DTOs.
+  @Column({ type: 'smallint', default: 2, update: false })
+  cashCommissionPolicyVersion: number;
+
+  @Column({ type: 'numeric', precision: 12, scale: 4, default: 100, update: false })
+  cashCommissionTokenValue: number;
+
   @PrimaryGeneratedColumn('uuid')
   id: string;
 

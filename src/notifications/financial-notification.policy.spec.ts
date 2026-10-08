@@ -20,6 +20,33 @@ import {
 } from '../payments/entities/payment-transaction.entity';
 
 describe('financial notification coverage', () => {
+  it('identifies the welcome bonus without breaking the existing mobile event type', () => {
+    const result = walletMovementNotification({
+      id: 'welcome',
+      userId: 'owner',
+      type: WalletLedgerEntryType.LOYALTY_REWARD,
+      relatedEntityType: 'welcome_bonus',
+      relatedEntityId: 'owner',
+      amount: 50,
+      withdrawableAmount: 0,
+      balanceAfter: 150,
+      currency: 'PTS',
+      paymentTransactionId: null,
+    } as WalletLedgerEntry)!;
+    expect(result).toMatchObject({
+      eventKey: 'wallet:welcome',
+      title: 'Bonus de bienvenue reçu',
+      data: {
+        type: 'wallet_loyalty_reward',
+        relatedEntityType: 'welcome_bonus',
+        amount: 50,
+      },
+    });
+    expect(result.body).toBe(
+      'Votre identité et votre compte sont validés. 50 jetons de bienvenue ont été ajoutés à votre portefeuille.',
+    );
+  });
+
   it.each(Object.values(WalletLedgerEntryType))(
     'covers wallet movement %s or delegates to withdrawal lifecycle',
     (type) => {
@@ -79,6 +106,8 @@ describe('financial notification coverage', () => {
       id: 'debit',
       userId: 'sender',
       type: WalletLedgerEntryType.TRANSFER_OUT,
+      relatedEntityType: 'wallet_transfer',
+      relatedEntityId: 'transfer',
       amount: -5,
       balanceAfter: 5,
       currency: 'PTS',
@@ -87,6 +116,8 @@ describe('financial notification coverage', () => {
       id: 'credit',
       userId: 'recipient',
       type: WalletLedgerEntryType.TRANSFER_IN,
+      relatedEntityType: 'wallet_transfer',
+      relatedEntityId: 'transfer',
       amount: 5,
       balanceAfter: 10,
       currency: 'PTS',
@@ -94,6 +125,8 @@ describe('financial notification coverage', () => {
     expect(sender.userId).toBe('sender');
     expect(recipient.userId).toBe('recipient');
     expect(sender.eventKey).not.toBe(recipient.eventKey);
+    expect(sender.data).toMatchObject({ transferId: 'transfer', amount: -5 });
+    expect(recipient.data).toMatchObject({ transferId: 'transfer', amount: 5 });
   });
 
   it('notifies a released referral commission once across its two bucket entries', () => {

@@ -50,6 +50,7 @@ describe('BookingsService trip payments', () => {
     formatLogPayload: jest.Mock;
   };
   let walletService: {
+    convertPointsToMoney: jest.Mock;
     payForBooking: jest.Mock;
     payForBookingWithManager: jest.Mock;
     refundBookingPayment: jest.Mock;
@@ -169,6 +170,7 @@ describe('BookingsService trip payments', () => {
       formatLogPayload: jest.fn((payload: unknown) => JSON.stringify(payload)),
     };
     walletService = {
+      convertPointsToMoney: jest.fn((points: number) => points * 100),
       payForBooking: jest.fn(),
       payForBookingWithManager: jest.fn(),
       refundBookingPayment: jest.fn(),
@@ -563,9 +565,6 @@ describe('BookingsService trip payments', () => {
     jest
       .spyOn(service as any, 'recalculateAvailableSeatsForTrip')
       .mockResolvedValue(3);
-    jest
-      .spyOn(service as any, 'notifyDriverOfNewBooking')
-      .mockResolvedValue(undefined);
 
     const result = await service.create('new-passenger', {
       tripId: 'trip-first',
@@ -648,9 +647,6 @@ describe('BookingsService trip payments', () => {
     jest
       .spyOn(service as any, 'recalculateAvailableSeatsForTrip')
       .mockResolvedValue(1);
-    jest
-      .spyOn(service as any, 'notifyDriverOfNewBooking')
-      .mockResolvedValue(undefined);
 
     const result = await service.create('passenger-approved', {
       tripId: 'trip-extra-seats',
@@ -724,9 +720,6 @@ describe('BookingsService trip payments', () => {
     jest
       .spyOn(service as any, 'recalculateAvailableSeatsForTrip')
       .mockResolvedValue(3);
-    jest
-      .spyOn(service as any, 'notifyDriverOfNewBooking')
-      .mockResolvedValue(undefined);
 
     const result = await service.create('existing-passenger', {
       tripId: 'trip-not-first',
