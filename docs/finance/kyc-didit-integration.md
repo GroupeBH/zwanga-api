@@ -5,6 +5,147 @@ Date : 1 septembre 2026
 Périmètre : application mobile, backend NestJS, back-office admin, retraits conducteur, retraits de parrainage  
 Statut : implémenté localement ; migration, variables d'environnement, configuration Didit et déploiements requis
 
+## 8 octobre 2026 — Archivage privé des justificatifs Didit
+
+**Implémenté dans le backend, désactivé par défaut, non déployé.** Le KYC historique
+ne conservait qu'un résumé de décision. La migration additive
+`1780000061000-KycEvidenceArchive` ajoute une file durable et un journal d'accès,
+sans toucher aux verdicts, bonus, commissions ni notifications existants.
+La migration complémentaire `1780000062000-KycEvidenceIndefiniteRetention`
+permet la conservation sans expiration choisie ensuite par l'utilisateur,
+sans modifier la migration 61 ni réécrire les échéances déjà enregistrées.
+
+### Données et fonctionnement
+
+- Après synchronisation/webhook Didit ou validation admin, un dossier Didit éligible
+  est mis en file dans la même transaction que sa validation. Aucun téléchargement
+  sous verrou. Les justificatifs legacy déjà envoyés restent dans leur stockage existant.
+- Le worker `src/users/kyc-evidence/` traite une session par minute et par instance,
+  avec bail PostgreSQL, `SKIP LOCKED`, déduplication dossier/session, cinq tentatives
+  espacées de cinq minutes et récupération après arrêt d'une tâche ECS.
+- Il relit `GET /v3/session/{sessionId}/decision/`, vérifie l'appartenance et exploite
+  les tableaux v3. Recto, verso disponible et selfie sont copiés ; noms, numéro/type
+  de pièce, dates de naissance/émission/expiration, pays/nationalité et statuts des
+  contrôles sont conservés lorsqu'ils sont fournis. Une approbation sans justificatifs
+  ne crée pas magiquement les pièces manquantes.
+- Les images sont des **copies JPEG normalisées** (réencodage, retrait EXIF/GPS,
+  côté maximal 2 560 px), pas des originaux judiciaires certifiés. Empreinte SHA-256
+  par copie. Pas de vidéo, PDF, gabarit biométrique, IP, numéro personnel supplémentaire,
+  recherche de visages ou données d'autres personnes issues de `matches[]`.
+- Stockage dans un bundle JSON privé sous `kyc/evidence/<archive>/<tentative>.json`
+  du bucket applicatif, chiffré SSE-S3 AES256. Pas de données d'identité extraites ni
+  d'URL fournisseur dans les nouvelles tables SQL ; pas de lien public/présigné
+  retourné au client. Limites : quatre documents et quatre contrôles selfie,
+  5 Mo par image source, 24 Mo par bundle. Les absences sont signalées : `partial`
+  après épuisement des tentatives, jamais un faux `ready`.
+- Le choix d'un bundle permet de ne pas exposer d'URL directe ; chaque consultation
+  lit le bundle côté backend, avec au maximum deux lectures simultanées par
+  instance (HTTP 503 temporaire au-delà). Pour de forts volumes, surveiller mémoire/latence
+  et faire évoluer le stockage sans ouvrir d'accès public.
+
+### Endpoints admin
+
+Tous exigent le JWT et le rôle admin (règles superadmin existantes conservées),
+avec limitation de débit et `Cache-Control: no-store`. Préfixe API habituel omis :
+
+| Méthode et chemin | Fonction |
+| --- | --- |
+| `POST /admin/kyc/:kycId/evidence` | Demander la collecte d'une session existante ou relancer un échec/partiel encore conservable. |
+| `GET /admin/kyc/:kycId/evidence` | Lister les 20 archives les plus récentes et leurs états. |
+| `GET /admin/kyc/:kycId/evidence/:archiveId` | Détails et manifeste des justificatifs, sans octets image ni URL fournisseur. |
+| `GET /admin/kyc/:kycId/evidence/:archiveId/files/:index` | Télécharger une copie JPEG après nouveau contrôle d'accès. |
+| `DELETE /admin/kyc/:kycId/evidence/:archiveId` | Révoquer immédiatement l'accès et programmer la purge. |
+
+La consultation des données/images est auditée **avant** lecture S3 ; si l'audit
+échoue, aucun justificatif n'est retourné. Une récupération historique est possible
+uniquement si la session appartient encore au dossier local et existe chez Didit.
+Pas de collecte rétroactive massive. Relances admin bornées à 30 clés planifiées
+par archive, sans prolonger la conservation. Aucun changement mobile ou écran du
+back-office réalisé ; ces derniers peuvent consommer les nouveaux endpoints.
+
+### Configuration à vérifier avant activation
+
+| Variable | Valeur / rôle |
+| --- | --- |
+| `DIDIT_KYC_ARCHIVE_ENABLED` | `false` par défaut ; `true` seulement après revue confidentialité et stockage. |
+| `DIDIT_KYC_ARCHIVE_RETENTION_DAYS` | `0` pour la conservation sans expiration demandée ; sinon de 1 à 3 650 jours. Valeur obligatoire : vide ou absente ne signifie jamais « indéfiniment ». |
+| `DIDIT_KYC_MEDIA_HOSTS` | Hôtes HTTPS exacts des médias de votre application Didit, séparés par virgules ; pas de wildcard ni URL complète. |
+
+La clé Didit existante (`DIDIT_API_KEY`, sinon `DIDIT_KYC_API_KEY`) et
+`AWS_S3_BUCKET_NAME` sont réutilisées ; aucun nouvel accès AWS statique. Les hôtes
+ne sont pas devinés depuis le nom du fournisseur : vérifier les hôtes des URLs
+renvoyées dans une session de test autorisée, sans copier ses données personnelles
+dans des logs. DNS public épinglé, IPv4 uniquement, aucun suivi de redirection,
+aucun envoi de clé Didit au serveur d'images, délais et tailles bornés.
+
+Le bucket doit réellement bloquer l'accès public. `AWS_S3_PUBLIC_BUCKET=true`
+interdit l'activation dans le code, mais un réglage local ne remplace pas la
+vérification de la politique S3. Les permissions existantes couvrent Put/Get/Delete ;
+**la purge requiert aussi `s3:ListBucketVersions` sur le bucket (condition
+`s3:prefix` limitée à `kyc/evidence/*`) et `s3:DeleteObjectVersion` sur les objets
+de ce préfixe**. Le worker énumère les versions et marqueurs de suppression de
+chaque clé exacte avant de les supprimer, y compris les versions masquées et la
+version `null`. Une clé planifiée mais jamais téléversée donne une liste vide ;
+un refus IAM ne vaut jamais suppression réussie. L'énumération est bornée à dix
+pages de 100 entrées et la purge d'une clé à deux minutes ; un dépassement conserve
+l'état à purger. Voir les API AWS [ListObjectVersions](https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectVersions.html)
+et [DeleteObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_DeleteObject.html).
+Aucun fichier Terraform/IAM, secret SSM ou réglage de bucket n'a été modifié.
+
+### Conservation, suppression et limites
+
+- Décision utilisateur du 8 octobre 2026 : **conservation sans expiration automatique**.
+  Avec `DIDIT_KYC_ARCHIVE_RETENTION_DAYS=0`, les nouvelles archives ont
+  `expiresAt: null` en base et dans l'API admin. Ce n'est pas une date très lointaine
+  ni une suspension du worker de purge. La migration 62 conserve les échéances
+  finies existantes ; changer la configuration ou rejouer un webhook ne prolonge
+  pas les archives et ne restaure pas celles déjà purgées. Les exemples sont à `0`,
+  mais aucun `.env` réel ou paramètre AWS n'a été modifié.
+- Pour une durée positive, l'échéance reste fixée lors de la première mise en file,
+  non renouvelée à chaque webhook. La politique de confidentialité doit refléter
+  la décision retenue ; ce choix technique ne constitue pas une validation juridique.
+- À échéance lorsqu'il y en a une, sur demande de suppression admin, ou à la suppression de `kyc_documents` lors de la suppression du
+  compte, l'accès admin est refusé. Les références des objets restent dans la file
+  pour la purge asynchrone, y compris après un crash entre upload et commit.
+- Deux purges par cycle, sans téléchargement sous transaction. La purge continue
+  même si la collecte est désactivée. Une panne/IAM/Object Lock peut retarder la
+  suppression physique : alerter sur `ARCHIVE_PURGE_FAILED` et traiter le retard.
+  Un upload déjà en cours termine son bail avant purge. Les retries ne recréent
+  pas une archive expirée ; un marqueur minimal reste pour la déduplication/audit.
+- La purge concerne les nouvelles copies Zwanga, **pas** les sessions Didit,
+  anciennes pièces legacy ni les sauvegardes/répliques administrées ailleurs.
+  Définir séparément les durées Didit, journaux d'audit, sauvegardes et éventuelles
+  réplications/lifecycle S3 ; une règle S3 d'expiration peut effacer les fichiers
+  indépendamment du `0` applicatif, donc vérifier ce préfixe avant activation.
+  Le `down` refuse de supprimer les tables sans purge
+  explicite ; désactiver la collecte n'efface pas instantanément les archives.
+- Le backend conserve ses statuts/notifications KYC usuels indépendamment d'un
+  échec réseau de collecte. L'insertion en file étant transactionnelle, une erreur
+  SQL d'enqueue fait néanmoins échouer la transaction : migrations 61 et 62 obligatoires
+  avant activation et surveillance des erreurs de base nécessaire.
+
+Sources consultées le 8 octobre 2026 : [résultat de session v3](https://docs.didit.me/sessions-api/retrieve-session)
+et [modèles de données / médias temporaires](https://docs.didit.me/reference/data-models).
+Les anciens liens `reference/retrieve-session` renvoyaient 404 ; l'implémentation
+utilise la documentation actuelle. Tests locaux et état de livraison : voir
+le [journal financier](CHANGELOG.md). Aucun appel réel à Didit/S3 ni donnée réelle
+récupérée ; une recette sur session synthétique autorisée reste nécessaire.
+
+Vérifications locales : suite complète exécutée avec **1 491 tests réussis**
+(138 suites, 176 tests ignorés), puis **81 tests KYC ciblés réussis** couvrant aussi
+les derniers ajustements de concurrence des lectures et de purge des versions S3 ; **9 tests PostgreSQL 18 réussis**
+sur cluster éphémère, transports cloud simulés et compilation backend réussie.
+Après ajout du mode sans expiration : **86 tests KYC ciblés et 13 tests PostgreSQL
+18 isolés réussis**, compilation réussie. Contrôles ajoutés : configuration `0`
+explicite, archive sans échéance toujours consultable, purge admin/compte conservée,
+absence de recollecte après purge, échéances finies préservées. La suite globale
+n'a pas été relancée pour ce seul ajustement ; ses chiffres ci-dessus sont antérieurs.
+Premier essai du nouveau test réseau corrigé : l'espion Jest ne pouvait pas
+redéfinir le getter d'un import namespace Node ; utilisation de l'import CommonJS
+du module natif, sans changement du transport pour masquer une erreur.
+Les changements OTP/dispatch concurrents du workspace n'ont pas été modifiés
+par cette intervention. Les résultats sont ceux de l'arbre de travail testé.
+
 ## Objectif
 
 Zwanga remplace progressivement la vérification KYC interne basée sur l'upload

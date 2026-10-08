@@ -14,6 +14,7 @@ import { Vehicle } from '../vehicles/entities/vehicle.entity';
 import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
 import { DiditKycService } from './didit-kyc.service';
 import { OtpModule } from '../otp/otp.module';
+import { KycEvidenceModule } from './kyc-evidence/kyc-evidence.module';
 
 @Module({
   imports: [
@@ -29,6 +30,7 @@ import { OtpModule } from '../otp/otp.module';
     ]),
     ConfigModule,
     OtpModule,
+    KycEvidenceModule,
     SubscriptionsModule,
   ],
   controllers: [UsersController],

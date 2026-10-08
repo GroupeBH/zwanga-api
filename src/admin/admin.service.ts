@@ -4,6 +4,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Point, Repository, SelectQueryBuilder } from 'typeorm';
@@ -70,6 +71,7 @@ import {
   buildWalletLedgerSpreadsheet,
 } from './admin-spreadsheets';
 import type { SpreadsheetFile } from './spreadsheet';
+import { KycEvidenceRepository } from '../users/kyc-evidence/kyc-evidence.repository';
 
 type Coordinates = [number, number] | null;
 type WalletAccountWithUser = WalletAccount & { user?: User | null };
@@ -104,6 +106,7 @@ export class AdminService {
     private readonly bookingsService: BookingsService,
     private readonly tripRequestsService: TripRequestsService,
     private readonly walletService: WalletService,
+    @Optional() private readonly evidence?: KycEvidenceRepository,
   ) {}
 
   async verifyKyc(
@@ -162,6 +165,7 @@ export class AdminService {
         });
       }
       await activateRequestedDriver(manager, user.id);
+      await this.evidence?.enqueue(manager, saved);
       saved.user = kycDocument.user;
       return saved;
     });

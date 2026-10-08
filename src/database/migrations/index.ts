@@ -62,6 +62,8 @@ import { FixPublicationRequestUuid1780000057000 } from './1780000057000-FixPubli
 import { FixBookingRequestUuid1780000058000 } from './1780000058000-FixBookingRequestUuid';
 import { DriverWelcomeBonusCopy1780000059000 } from './1780000059000-DriverWelcomeBonusCopy';
 import { CumulativeCashDebtLimit1780000060000 } from './1780000060000-CumulativeCashDebtLimit';
+import { KycEvidenceArchive1780000061000 } from './1780000061000-KycEvidenceArchive';
+import { KycEvidenceIndefiniteRetention1780000062000 } from './1780000062000-KycEvidenceIndefiniteRetention';
 
 export const databaseMigrations = [
   FillTotalSeats1780000000000,
@@ -124,4 +126,6 @@ export const databaseMigrations = [
   FixBookingRequestUuid1780000058000,
   DriverWelcomeBonusCopy1780000059000,
   CumulativeCashDebtLimit1780000060000,
+  KycEvidenceArchive1780000061000,
+  KycEvidenceIndefiniteRetention1780000062000,
 ];

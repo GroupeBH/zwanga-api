@@ -7,6 +7,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -27,6 +28,7 @@ import { User, UserStatus } from './entities/user.entity';
 import { normalizeLegalName } from './legal-identity.util';
 import { activateRequestedDriver } from './driver-activation';
 import { LATEST_IDENTITY_ORDER } from './profile-state';
+import { KycEvidenceRepository } from './kyc-evidence/kyc-evidence.repository';
 
 type DiditHttpMethod = 'GET' | 'POST';
 type DiditPayload = Record<string, unknown>;
@@ -94,6 +96,7 @@ export class DiditKycService {
     private readonly kycDocumentRepository: Repository<KycDocument>,
     private readonly configService: ConfigService,
     private readonly dataSource: DataSource,
+    @Optional() private readonly evidence?: KycEvidenceRepository,
   ) {}
 
   async createSession(
@@ -624,6 +627,7 @@ export class DiditKycService {
       }
 
       const savedKyc = await kycRepository.save(kycDocument);
+      if (input.source !== 'session_created') await this.evidence?.enqueue(manager, savedKyc);
 
       let userStatusChanged = false;
       const mayUpdateStatus = user.isActive &&

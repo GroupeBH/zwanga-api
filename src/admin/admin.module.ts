@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AdminService } from './admin.service';
+import { KycEvidenceModule } from '../users/kyc-evidence/kyc-evidence.module';
 import { AdminController } from './admin.controller';
 import { User } from '../users/entities/user.entity';
 import { KycDocument } from '../users/entities/kyc-document.entity';
@@ -24,6 +25,7 @@ import { ReferralWithdrawal } from '../referrals/entities/referral-withdrawal.en
 
 @Module({
   imports: [
+    KycEvidenceModule,
     TypeOrmModule.forFeature([
       User,
       KycDocument,

@@ -22,6 +22,7 @@ describe('Trip requests HTTP access', () => {
     createDriverOffer: jest.fn(),
     acceptTripRequest: jest.fn(),
     startTripFromRequest: jest.fn(),
+    getPassengerContact: jest.fn().mockResolvedValue({ passenger: { id: 'passenger', phone: null } }),
   };
 
   beforeAll(async () => {
@@ -91,6 +92,21 @@ describe('Trip requests HTTP access', () => {
       .expect('Cache-Control', 'private, no-store')
       .expect(200, []);
     expect(service.findAll).toHaveBeenCalledWith('driver');
+  });
+
+  it('protects explicit passenger contact with authentication, role and UUID validation', async () => {
+    const path = '/trip-requests/11111111-1111-4111-8111-111111111111/passenger-contact';
+    await request(server).get(path).expect(401);
+    for (const role of [UserRole.PASSENGER, UserRole.ADMIN, UserRole.SUPER_ADMIN]) {
+      await request(server).get(path).set('Authorization', `Bearer ${jwt.sign({ userId: 'stranger', role })}`).expect(403);
+    }
+    const token = jwt.sign({ userId: 'driver', role: UserRole.DRIVER });
+    await request(server).get('/trip-requests/not-an-id/passenger-contact').set('Authorization', `Bearer ${token}`).expect(400);
+    expect(service.getPassengerContact).not.toHaveBeenCalled();
+    await request(server).get(path + '?driverId=someone-else').set('Authorization', `Bearer ${token}`)
+      .expect('Cache-Control', 'private, no-store').expect(200);
+    expect(service.getPassengerContact).toHaveBeenCalledWith('11111111-1111-4111-8111-111111111111', 'driver');
+    expect(Reflect.getMetadata('THROTTLER:LIMITdefault', TripRequestsController.prototype.getPassengerContact)).toBe(10);
   });
 
   it('denies passengers access to my-offers', async () => {

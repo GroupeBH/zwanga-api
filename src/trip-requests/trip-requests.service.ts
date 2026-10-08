@@ -2116,6 +2116,51 @@ export class TripRequestsService {
     return [Number(longitude), Number(latitude)];
   }
 
+  /** Explicit contact lookup only; list/detail payloads keep their privacy rules. */
+  async getPassengerContact(requestId: string, driverId: string) {
+    const driver = driverId
+      ? await this.userRepository.findOne({ where: { id: driverId } })
+      : null;
+    if (!driver) throw new ForbiddenException('Accès réservé aux conducteurs');
+    await assertDriverCanOperate(this.userRepository.manager, driver);
+
+    const request = await this.tripRequestRepository.findOne({
+      where: { id: requestId },
+      relations: ['passenger', 'driverOffers'],
+      select: {
+        id: true, passengerId: true, status: true, selectedDriverId: true,
+        tripId: true, immediateDispatch: true, departureDateMax: true,
+        passenger: { id: true, firstName: true, lastName: true, phone: true },
+        driverOffers: { id: true, status: true },
+      },
+    });
+    if (!request?.passenger || request.passengerId === driverId ||
+      ![TripRequestStatus.PENDING, TripRequestStatus.OFFERS_RECEIVED].includes(request.status) ||
+      this.hasAcceptedDriver(request)) {
+      throw new NotFoundException('Cette demande n’est plus disponible pour contacter le passager.');
+    }
+    let deadline = this.getRequestExpirationAt(request)?.getTime() ?? NaN;
+    if (request.immediateDispatch) {
+      // Only the currently invited driver can access an immediate request's contact.
+      const offerDeadline = await this.driverDispatch?.getContactDeadline(driverId, requestId);
+      deadline = Math.min(deadline, offerDeadline?.getTime() ?? NaN);
+    }
+    const now = Date.now();
+    if (!Number.isFinite(deadline) || deadline <= now) {
+      throw new NotFoundException('Cette demande n’est plus disponible pour contacter le passager.');
+    }
+    return {
+      requestId: request.id,
+      passenger: {
+        id: request.passenger.id,
+        name: [request.passenger.firstName, request.passenger.lastName].filter(Boolean).join(' ').trim() || 'Passager',
+        phone: request.passenger.phone?.trim() || null,
+      },
+      expiresAt: new Date(deadline).toISOString(),
+      serverNow: new Date(now).toISOString(),
+    };
+  }
+
   private async assertDriverViewer(userId: string): Promise<void> {
     const user = userId
       ? await this.userRepository.findOne({ where: { id: userId } })

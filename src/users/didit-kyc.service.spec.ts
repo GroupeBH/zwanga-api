@@ -57,6 +57,7 @@ describe('DiditKycService', () => {
   let txVehicleRepository: any;
   let dataSource: any;
   let service: DiditKycService;
+  let evidence: { enqueue: jest.Mock };
 
   beforeEach(() => {
     user = {
@@ -119,11 +120,13 @@ describe('DiditKycService', () => {
         }),
       ),
     };
+    evidence = { enqueue: jest.fn().mockResolvedValue(undefined) };
     service = new DiditKycService(
       userRepository,
       kycRepository,
       createConfigService(baseConfig) as any,
       dataSource,
+      evidence as any,
     );
     jest.spyOn(global, 'fetch').mockResolvedValue(
       createFetchResponse({
@@ -426,6 +429,7 @@ describe('DiditKycService', () => {
         },
       ),
     ).rejects.toBeInstanceOf(UnauthorizedException);
+    expect(evidence.enqueue).not.toHaveBeenCalled();
   });
 
   it('accepts a signed v2 manual-review webhook and applies the refreshed Didit decision', async () => {
@@ -454,6 +458,8 @@ describe('DiditKycService', () => {
     );
 
     expect(result.status).toBe(KycStatus.APPROVED);
+    expect(evidence.enqueue).toHaveBeenCalledWith(expect.objectContaining({getRepository:expect.any(Function)}),
+      expect.objectContaining({id:kyc.id,userId:user.id,status:KycStatus.APPROVED,diditSessionId:'session-1'}));
     expect(txKycRepository.save).toHaveBeenCalledWith(
       expect.objectContaining({
         status: KycStatus.APPROVED,

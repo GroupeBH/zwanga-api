@@ -8,6 +8,7 @@ import {
   Delete,
   Request,
   Header,
+  ParseUUIDPipe,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { TripRequestsService } from './trip-requests.service';
@@ -125,6 +126,19 @@ export class TripRequestsController {
   })
   async findOne(@Param('id') id: string, @Request() req) {
     return this.tripRequestsService.findOne(id, req.user.userId);
+  }
+
+  @Get(':id/passenger-contact')
+  @Header('Cache-Control', 'private, no-store')
+  @Auth()
+  @Roles(UserRole.DRIVER)
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({ summary: 'Contact the passenger of an open request before accepting' })
+  async getPassengerContact(
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Request() req: { user: { userId: string } },
+  ) {
+    return this.tripRequestsService.getPassengerContact(id, req.user.userId);
   }
 
   @Get(':id/offers')

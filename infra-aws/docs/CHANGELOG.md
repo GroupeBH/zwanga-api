@@ -2,6 +2,141 @@
 
 Les entrées sont classées de la plus récente à la plus ancienne. Elles décrivent le code versionné et les opérations réellement exécutées sur AWS, sans inclure de valeur secrète.
 
+## INFRA-2026-10-08-007 — Conservation KYC sans expiration, préparée localement
+
+- **État : code local validé, 8 octobre 2026, Africa/Kinshasa ; aucun changement AWS.** L'utilisateur a choisi une conservation indéfinie après l'entrée 006. Aucun Terraform, CI/CD, IAM, secret, `.env` réel, tâche ECS ou configuration du dispatch modifié.
+- Avant/après : la durée positive était obligatoire ; `DIDIT_KYC_ARCHIVE_RETENTION_DAYS=0` signifie désormais aucune expiration liée à l'âge. Vide/absent reste refusé. Les trois exemples d'environnement utilisent `0`, mais `DIDIT_KYC_ARCHIVE_ENABLED=false` est conservé et les hôtes restent à renseigner.
+- Code/données : migration complémentaire `1780000062000-KycEvidenceIndefiniteRetention`, ajoutée à l'index sans modifier la 61. Rend `expiresAt` nullable via une opération de métadonnées transactionnelle, verrou limité à 5 s et requête à 15 s, sans réécrire les dossiers existants. Politique, file, capture et tests adaptés à `NULL`. Aucun changement de verdict KYC ou de notification.
+- Disponibilité/confidentialité : les archives sans échéance restent accessibles aux admins autorisés, avec audit. Suppression admin ou suppression du dossier/compte = révocation immédiate et purge asynchrone inchangée. Les permissions S3 de l'entrée 006 restent requises, même sans expiration. La conservation chez Didit et les sauvegardes ne sont pas modifiées ; vérifier qu'aucune règle lifecycle ne supprime le préfixe indépendamment de l'application.
+- Déploiement à faire : appliquer 61 puis 62 par la procédure habituelle avant activation ; déployer le backend, contrôler stockage privé/IAM/hôtes, faire la recette Didit/S3 et adapter l'information des utilisateurs. Ajouter la valeur `0` à SSM puis remplacer les tâches ECS selon le flux habituel ; aucun import ni déploiement n'a été effectué ici.
+- Coûts : conservation S3 susceptible de croître sans borne temporelle et lectures/purges à surveiller ; aucun nouveau service ni coût cloud engagé par cette intervention, aucune estimation tarifaire faite.
+- Validation : 86 tests KYC ciblés, 13 tests PostgreSQL 18 jetable et compilation réussis ; cluster arrêté/nettoyé. Tests couvrant l'absence de purge par âge, les suppressions admin/compte et la préservation des anciennes échéances. Pas de suite globale relancée, de plan/apply/validate Terraform, de push réel ou de recette native.
+- Surveillance/retour arrière : surveiller volumes S3, échecs de capture/purge et accès admin. Désactiver la collecte conserve les purges demandées ; ne pas revenir à l'ancien code pour lire des échéances nulles, ni forcer un `down`. Revenir à une durée positive ne modifie que les nouvelles archives : changement des anciennes durées à traiter séparément et explicitement. Documentation : [guide Didit](../../docs/finance/kyc-didit-integration.md#8-octobre-2026--archivage-privé-des-justificatifs-didit).
+
+## INFRA-2026-10-08-006 — Archivage privé des justificatifs KYC, préparé sans activation AWS
+
+- **État : code local uniquement, 8 octobre 2026, Africa/Kinshasa.** Aucun déploiement, appel Didit/S3, migration RDS, push, modification IAM/Terraform/CI/CD ou crédit réel. Les changements de dispatch de l'entrée 005 sont conservés sans intervention.
+- Avant : stockage du verdict Didit et résumé technique seulement ; médias externes non archivés. Après : migration `1780000061000-KycEvidenceArchive`, file SQL et audit, worker NestJS, routes admin authentifiées et copies normalisées privées dans `kyc/evidence/*`. Les endpoints mobiles et la validation KYC restent compatibles.
+- Modifications : `src/users/kyc-evidence/*`, intégrations `didit-kyc.service.ts` / `admin.service.ts` et modules, migration/index, tests et exemples `.env.example`, `.env.docker.example`, `.env.production.example`. Aucune valeur de `.env` réel consultée ou modifiée.
+- Nouveaux paramètres runtime facultatifs tant que la fonctionnalité reste éteinte : `DIDIT_KYC_ARCHIVE_ENABLED=false`, `DIDIT_KYC_ARCHIVE_RETENTION_DAYS` (à décider), `DIDIT_KYC_MEDIA_HOSTS` (hôtes exacts vérifiés). Réutilisation des variables Didit KYC, région et bucket existantes. Aucun nouvel identifiant AWS statique ni nouvelle dépendance.
+- IAM/stockage : bucket privé et blocage public à vérifier avant activation ; chiffrement SSE-S3 AES256 explicite, clés immuables, aucun accès S3 direct exposé aux clients. Ajouter après revue `s3:ListBucketVersions` sur le bucket avec condition de préfixe `kyc/evidence/*`, et `s3:DeleteObjectVersion` sur les objets de ce préfixe. La purge énumère et supprime les versions/markers de chaque clé exacte ; les permissions actuelles Get/Put/Delete ne suffisent pas. Ces permissions n'ont pas été ajoutées automatiquement. Object Lock, lifecycle, réplication et sauvegardes doivent être examinés selon la durée choisie.
+- Données/disponibilité : migration transactionnelle avec délais bornés et index de file ; aucune réécriture des anciens KYC ou données financières. Les téléchargements sont hors transaction, erreurs réseau reprises sans retirer l'approbation. La suppression d'un dossier invalide immédiatement l'accès, mais l'effacement S3 est asynchrone et surveillé ; références conservées en cas d'échec. La suppression des données chez Didit reste une procédure distincte.
+- Coûts futurs : stockage/requêtes S3, lecture d'une décision Didit et téléchargements, CPU de normalisation et audit RDS ; aucun tarif chiffré ni gratuité supposée. Aucun coût cloud engagé pendant cette intervention.
+- Déploiement prévu : sauvegardes/préconditions, migration 61 via procédure habituelle, backend avec collecte désactivée, contrôle du bucket/IAM et recette synthétique, décision de conservation/information des utilisateurs, puis ajout des paramètres validés et remplacement des tâches ECS. Ne pas activer sans confirmer les hôtes et la purge effective. Aucun apply ni plan Terraform nécessaire pour les seuls fichiers applicatifs ; une éventuelle extension IAM doit suivre une revue distincte.
+- Surveillance : files `pending`/`failed`/`partial`, échéances, `ARCHIVE_PURGE_FAILED`, volumes/latences S3 et journal des accès admin. Régression à vérifier : même approbation KYC, même notification et même unicité du bonus. Retour arrière fonctionnel : remettre la collecte à `false` tout en gardant le worker de purge ; pas de `migration:revert` destructeur ni promesse d'effacement immédiat des sauvegardes.
+- Documentation métier et recette : [intégration Didit](../../docs/finance/kyc-didit-integration.md#8-octobre-2026--archivage-privé-des-justificatifs-didit). Les vérifications locales ne remplacent pas une recette Didit/S3 autorisée.
+- Validation locale : compilation backend réussie ; suite complète exécutée avec 1 491 tests réussis, 176 ignorés et 138 suites réussies ; puis 81 tests KYC ciblés après les derniers ajustements de concurrence et purge S3 ; 9 tests PostgreSQL 18 jetable réussis, cluster arrêté et supprimé après tests. Pas d'apply ni validate Terraform (aucun fichier Terraform modifié). Aucun fichier OTP ou script dispatch concurrent modifié par ce travail.
+
+## INFRA-2026-10-08-005 — Activation des propositions au conducteur proche
+
+### Contexte, autorisation et état initial
+
+- Production, 8 octobre 2026 ; activation lancée à 07:56, fuseau Africa/Kinshasa.
+  Statut final : **appliqué, service stable et configuration runtime vérifiée**.
+  Opération autorisée dans la
+  conversation après confirmation que les notifications iOS restaient standard.
+- Le service utilisait la révision ECS 13 sans référence au paramètre
+  `DRIVER_DISPATCH_ENABLED`. Le code et la sonnerie pouvaient être à jour sans
+  que le flux de propositions ciblées soit actif. Les annonces générales
+  `trip_request` conservent volontairement le son standard.
+- Le contrôle de l'archive iOS 1.0.16 (134), documenté côté mobile, avait confirmé
+  le WAV embarqué de 29 secondes. L'activation serveur ne démontre pas à elle
+  seule sa lecture acoustique sur l'iPhone signalé.
+
+### Changements appliqués et fichiers
+
+- Création du seul paramètre runtime `DRIVER_DISPATCH_ENABLED` dans SSM, de type
+  `SecureString`, avec la clé KMS applicative existante. Sa valeur n'est pas
+  reproduite dans ce journal. Aucun import global de fichier d'environnement.
+- Nouvelle révision ECS **14**, copiée de la **13**, ajoutant la référence à ce
+  paramètre sur le conteneur API. Image applicative, sidecar, rôles IAM, réseaux,
+  ports et dimensionnement conservés ; pas de reconstruction Docker.
+- Service `zwanga-api-production-api` mis à jour vers cette révision. Déploiement
+  progressif existant : minimum sain 100 %, maximum 200 %. Pas de `terraform apply`
+  global, de modification du CI/CD ou d'activation du déploiement financier.
+- `infra-aws/scripts/check-driver-dispatch.cjs` : contrôle exécuté dans l'image
+  backend sans lancer Nest ni ses tâches planifiées. Une connexion PostgreSQL
+  TLS vérifiée, session et transaction en lecture seule, délais bornés. Vérifie
+  colonnes, index, migrations et code de présence automatique. Simule le transport
+  Expo pour contrôler le son et les catégories, sans envoyer de notification.
+- `infra-aws/scripts/invoke-driver-dispatch-preflight.ps1` : lance ce contrôle dans
+  une tâche Fargate temporaire utilisant les mêmes accès réseau et références SSM.
+  Refuse un service instable ou un tag d'image différent de l'image active.
+- `infra-aws/scripts/enable-driver-dispatch.ps1` : exige le résultat positif de la
+  tâche de contrôle et le même digest d'image ; refuse d'écraser un paramètre déjà
+  présent ou une configuration concurrente. Sauvegarde les métadonnées de retour
+  arrière dans un dossier temporaire, crée le paramètre, enregistre la révision
+  puis déclenche le déploiement. Ne pas relancer aveuglément après une erreur
+  partielle : inspecter les étapes déjà accomplies.
+
+### Vérifications réellement effectuées
+
+- Avant activation : service stable, tâche saine, tag ECR `latest` identique au
+  digest de la tâche active. Le contrôle Fargate utilise ce même digest.
+- Contrôle runtime avant activation réussi : schéma et index requis présents,
+  toutes les migrations connues de l'image déjà appliquées, code de présence
+  automatique présent ; serializer Expo compilé correct pour les capacités v0/v2,
+  réservations et invitations ciblées, annonces générales conservées standard.
+  Le conteneur de contrôle est sorti avec le code 0 ; aucune migration exécutée.
+- Après lancement : santé HTTPS `/health` = 200 ; nouvelle tâche avec les mêmes
+  digests API et sidecar que l'ancienne. Révision 14 `COMPLETED`, une tâche
+  `RUNNING/HEALTHY`, aucune en attente ni en échec de démarrage ; cible ALB saine.
+- Comparaison des paramètres des révisions : un seul ajout, une référence SSM
+  dans `containerDefinitions[0].secrets`. Aucun autre paramètre runtime modifié.
+- Deuxième contrôle Fargate après stabilisation : conteneur API sorti avec le
+  code 0 ; activation chargée confirmée, contrôles schéma/migrations/code/payload
+  de nouveau positifs. Deux tâches de contrôle au total, toutes deux arrêtées.
+- Échantillon des journaux post-déploiement : pas d'erreur liée explicitement au
+  composant ou aux routes du dispatch dans les 300 entrées consultées. Des erreurs
+  du composant `WelcomeBonusService` subsistent et existaient aussi sur la révision
+  précédente ; elles ne sont pas corrigées par cette activation. Ne pas interpréter
+  la santé ECS comme une absence générale d'erreurs applicatives.
+- Syntaxes JavaScript/PowerShell vérifiées. Aucun compte réel, réservation,
+  acceptation ou paiement créé pour tester. Pas de validation acoustique iPhone.
+- Contrôle documentaire `check-infra-documentation.sh HEAD WORKTREE` et
+  `git diff --check` réussis. Les scripts opérationnels n'introduisent aucune
+  nouvelle dépendance. Pas de compilation mobile ni de nouvelle bêta publiée.
+
+### Exploitation, impacts et retour arrière
+
+- Procédure utilisée : lancer `invoke-driver-dispatch-preflight.ps1`, attendre la
+  sortie réussie du conteneur API et vérifier le résultat CloudWatch dédié, puis
+  lancer `enable-driver-dispatch.ps1 -PreflightStatePath <fichier retourné>`.
+  Surveiller ensuite ECS, ALB, `/health` et les erreurs du dispatch.
+- Le paramètre suit la découverte SSM existante de `infra-aws/ssm.tf` : le prochain
+  plan Terraform doit conserver sa référence. La mise à jour ECS manuelle doit
+  être prise en compte avant tout apply ultérieur. Le workflow historique avec
+  l'image `latest` reste utilisable ; aucun épinglage permanent du tag ajouté.
+- IAM, certificats, routage, secrets existants et données métier inchangés.
+  L'activation concerne les nouvelles demandes immédiates ; aucune conversion
+  rétroactive des demandes générales. Les réservations publiées et leurs alertes
+  restent indépendantes de ce drapeau. Les contrôles d'identité, véhicule,
+  proximité, position récente, conducteur occupé et compatibilité push subsistent.
+- Coûts : paramètre SSM supplémentaire, tâche(s) de contrôle Fargate éphémères et
+  chevauchement temporaire de deux tâches pendant le rolling deployment ; aucun
+  nouveau service permanent ni redimensionnement. Impact financier non mesuré.
+- Retour arrière initial : remettre le service sur `zwanga-api-production-api:13`
+  et attendre sa stabilité. Cette révision ne référence pas le paramètre ; ne pas
+  supprimer de lignes SQL ni de propositions pour revenir en arrière. Si des
+  propositions réelles ont déjà été émises, examiner leur état et les laisser
+  terminer/expirer selon le parcours existant ; le retour arrière n'annule pas
+  automatiquement les engagements déjà pris. Pour un retrait durable, désactiver
+  ensuite le paramètre SSM et redéployer de façon contrôlée, afin d'éviter une
+  réactivation au prochain plan Terraform. Ne pas utiliser la révision 13 si de
+  nouveaux changements applicatifs/configurations ont été déployés entre-temps.
+
+### Recette restante sur appareils
+
+Rouvrir les apps passager et conducteur pour rafraîchir le statut serveur,
+enregistrer les actions push et obtenir une position récente du conducteur.
+Verrouiller l'iPhone du conducteur puis créer une **nouvelle** demande avec départ
+« Maintenant », proche et compatible avec son véhicule. Vérifier la proposition
+ciblée, le son, Accepter/Refuser et l'arrêt à l'ouverture ; refaire séparément une
+réservation publiée. Les valeurs par défaut du code sont conservées : réponse
+30 secondes, rayon 5 km, position utilisable pendant 5 minutes. Une position trop
+ancienne, un conducteur occupé ou inéligible empêchent normalement la proposition.
+Le contrôle serveur positif ne prouve ni la livraison APNs ni l'audibilité iOS.
+
 ## INFRA-2026-10-08-004 — Plafond cash cumulatif, sans changement du pipeline
 
 - Préparé localement : migration applicative `1780000060000-CumulativeCashDebtLimit`, déclarée dans l'index TypeORM, et règles API associées. Aucune modification de workflow, Terraform, IAM, SSM ou ressource ; aucune action AWS.
