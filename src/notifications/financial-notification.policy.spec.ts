@@ -18,8 +18,42 @@ import {
   PaymentStatus,
   PaymentTransaction,
 } from '../payments/entities/payment-transaction.entity';
+import { UserRole } from '../users/entities/user.entity';
 
 describe('financial notification coverage', () => {
+  it('presents the driver welcome bonus in FC for Pro without changing the mobile payload', () => {
+    const result = walletMovementNotification({
+      id: 'welcome', userId: 'driver',
+      type: WalletLedgerEntryType.LOYALTY_REWARD,
+      relatedEntityType: 'welcome_bonus', amount: 50,
+      balanceAfter: 150, currency: 'PTS',
+    } as WalletLedgerEntry, UserRole.DRIVER)!;
+    expect(result.body).toBe(
+      'Bienvenue chez Zwanga ! 5 000 FC vous sont offerts sous forme de jetons Zwanga pour vous permettre de payer votre abonnement Pro.',
+    );
+    expect(result.body).not.toMatch(/50 jetons|abonnement activé/);
+    expect(result.data).toMatchObject({ amount: 50, currency: 'PTS', balanceAfter: 150,
+      type: 'wallet_loyalty_reward', relatedEntityType: 'welcome_bonus' });
+  });
+
+  it.each([UserRole.PASSENGER, undefined])('keeps non-driver welcome copy unchanged (%s)', role => {
+    const result = walletMovementNotification({
+      id: 'welcome', userId: 'passenger', type: WalletLedgerEntryType.LOYALTY_REWARD,
+      relatedEntityType: 'welcome_bonus', amount: 50, currency: 'PTS', balanceAfter: 50,
+    } as WalletLedgerEntry, role)!;
+    expect(result.body).toContain('50 jetons de bienvenue');
+    expect(result.body).not.toContain('abonnement Pro');
+  });
+
+  it('does not advertise the fixed FC welcome offer for a different credit', () => {
+    const result = walletMovementNotification({
+      id: 'welcome', userId: 'driver', type: WalletLedgerEntryType.LOYALTY_REWARD,
+      relatedEntityType: 'welcome_bonus', amount: 25, currency: 'PTS', balanceAfter: 25,
+    } as WalletLedgerEntry, UserRole.DRIVER)!;
+    expect(result.body).toContain('25 jetons');
+    expect(result.body).not.toContain('5 000 FC');
+  });
+
   it('identifies the welcome bonus without breaking the existing mobile event type', () => {
     const result = walletMovementNotification({
       id: 'welcome',

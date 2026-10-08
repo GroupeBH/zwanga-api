@@ -8,6 +8,8 @@ import { DataSource } from 'typeorm';
 import { DriverCashCommissions1780000050000 } from './migrations/1780000050000-DriverCashCommissions';
 import { AddVerifiedWelcomeBonus1780000052000 } from './migrations/1780000052000-AddVerifiedWelcomeBonus';
 import { PrioritizeDriverWelcomeBonus1780000054000 } from './migrations/1780000054000-PrioritizeDriverWelcomeBonus';
+import { DriverWelcomeBonusCopy1780000059000 } from './migrations/1780000059000-DriverWelcomeBonusCopy';
+import { UserRole } from '../users/entities/user.entity';
 import { CashCommissionCredit1780000053000 } from './migrations/1780000053000-CashCommissionCredit';
 import { walletMovementNotification } from '../notifications/financial-notification.policy';
 import { cashAllTokenOriginsCases } from '../../test/cash-all-token-origins-postgres';
@@ -94,6 +96,7 @@ const pgBin = process.env.DRIVER_FINANCE_TEST_POSTGRES_BIN;
         await new AddVerifiedWelcomeBonus1780000052000().up(runner);
         await new CashCommissionCredit1780000053000().up(runner);
         await new PrioritizeDriverWelcomeBonus1780000054000().up(runner);
+        await new DriverWelcomeBonusCopy1780000059000().up(runner);
         await runner.commitTransaction();
       } catch (error) {
         await runner.rollbackTransaction();
@@ -305,7 +308,7 @@ const pgBin = process.env.DRIVER_FINANCE_TEST_POSTGRES_BIN;
           ...walletMovementNotification({
             ...entry,
             paymentTransactionId: null,
-          }),
+          }, UserRole.DRIVER),
           status: 'pending',
           fcmToken: '',
           isAutomatic: false,
@@ -322,6 +325,27 @@ const pgBin = process.env.DRIVER_FINANCE_TEST_POSTGRES_BIN;
           driver,
         ]);
         expect((await account()).balance).toBe('150.00');
+      });
+
+      it('changes future copy only without rewriting existing notifications or duplicating a welcome grant', async () => {
+        await db.transaction(async manager => {
+          const migration = new DriverWelcomeBonusCopy1780000059000();
+          const runner = manager.queryRunner!;
+          await migration.down(runner);
+          await manager.query('INSERT INTO kyc_documents ("userId",status) VALUES ($1,$2)', [driver, 'approved']);
+          await manager.query('SET CONSTRAINTS ALL IMMEDIATE');
+          const notices = await manager.query('SELECT * FROM notifications');
+          expect(notices[0].body).toContain('50 jetons de bienvenue');
+          const ledger = await manager.query('SELECT * FROM wallet_ledger_entries');
+          await migration.up(runner);
+          await migration.up(runner);
+          expect(await manager.query('SELECT * FROM notifications')).toEqual(notices);
+          expect(await manager.query('SELECT * FROM wallet_ledger_entries')).toEqual(ledger);
+          expect(await manager.query('SELECT zwanga_grant_welcome_bonus($1) AS credited', [driver])).toEqual([{ credited: false }]);
+          expect(await manager.query('SELECT * FROM notifications')).toHaveLength(1);
+        });
+        expect((await account()).balance).toBe('150.00');
+        expect(await claims()).toHaveLength(1);
       });
 
       it.each(['pending', 'rejected'])(
@@ -387,6 +411,9 @@ const pgBin = process.env.DRIVER_FINANCE_TEST_POSTGRES_BIN;
           withdrawableBalance: '0.00',
           currency: 'PTS',
         });
+        const [notice] = await db.query('SELECT body FROM notifications WHERE "userId"=$1', [passenger]);
+        expect(notice.body).toContain('50 jetons de bienvenue');
+        expect(notice.body).not.toContain('abonnement Pro');
       });
 
       it('uses the latest KYC, not any historical approval (including timestamp ties)', async () => {

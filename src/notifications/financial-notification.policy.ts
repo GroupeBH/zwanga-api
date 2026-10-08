@@ -16,9 +16,11 @@ import {
   displayAmount,
   TransactionalNotification,
 } from './transactional-notification';
+import { UserRole } from '../users/entities/user.entity';
 
 export function walletMovementNotification(
   entry: WalletLedgerEntry,
+  recipientRole?: UserRole,
 ): TransactionalNotification | null {
   // Withdrawal lifecycle owns these notifications (one alert, not one per ledger + state).
   if (
@@ -35,7 +37,11 @@ export function walletMovementNotification(
       eventKey: `wallet:${entry.id}`,
       userId: entry.userId,
       title: 'Bonus de bienvenue reçu',
-      body: `Votre identité et votre compte sont validés. ${amount} de bienvenue ont été ajoutés à votre portefeuille.`,
+      body:
+        recipientRole === UserRole.DRIVER &&
+        entry.currency === 'PTS' && Number(entry.amount) === 50
+          ? 'Bienvenue chez Zwanga ! 5 000 FC vous sont offerts sous forme de jetons Zwanga pour vous permettre de payer votre abonnement Pro.'
+          : `Votre identité et votre compte sont validés. ${amount} de bienvenue ont été ajoutés à votre portefeuille.`,
       data: {
         type: 'wallet_loyalty_reward', // Compatible with already-published mobile versions.
         ledgerEntryId: entry.id,
