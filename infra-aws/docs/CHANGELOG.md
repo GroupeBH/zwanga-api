@@ -2,6 +2,16 @@
 
 Les entrées sont classées de la plus récente à la plus ancienne. Elles décrivent le code versionné et les opérations réellement exécutées sur AWS, sans inclure de valeur secrète.
 
+## INFRA-2026-10-08-004 — Plafond cash cumulatif, sans changement du pipeline
+
+- Préparé localement : migration applicative `1780000060000-CumulativeCashDebtLimit`, déclarée dans l'index TypeORM, et règles API associées. Aucune modification de workflow, Terraform, IAM, SSM ou ressource ; aucune action AWS.
+- La dette cash autorisée est cumulée par conducteur : 25 jetons au total, et non par réservation. Les publications explicites incompatibles sont refusées ; les publications anciennes aux modes implicites conservent leurs autres modes sans cash. Les réservations déjà acceptées restent terminables.
+- Migration transactionnelle, délais bornés, corps de fonctions vérifiés et verrous existants conservés ; aucun recalcul historique, solde ou notification passée modifié. Le `down` refuse l'annulation financière ; privilégier une correction en avant.
+- Le contrôle de capacité à la publication fonctionne aussi en mode préparé. **Le drapeau `financial_rollout.enabled` n'est pas activé** : si faux, les réservations/prélèvements/régularisations cash restent inactifs. Contrôler son état effectif avant de considérer le flux actif ; ne pas le basculer pendant la coexistence avec un backend incompatible. Le workflow historique reste inchangé et ne le bascule pas.
+- Déploiement prévu : migration via la procédure existante puis backend, et distribution de la mise à jour mobile pour le grisement et les nouvelles explications. Surveiller migrations, erreurs `CASH_DEBT_OUTSTANDING`/`CASH_COMMISSION_INSUFFICIENT` et finances après déploiement. Les limites de rolling deployment décrites dans l'entrée 002 restent applicables.
+- Détails, invariants et tests : [journal financier](../../docs/finance/CHANGELOG.md#2026-10-08--tolérance-cash-cumulée-utilisable-tant-que-la-dette-reste-dans-les-25-jetons). Aucun accès RDS, paiement, notification réelle ni serveur applicatif lancé.
+- Contrôles locaux finaux : 345 tests backend ciblés et 104 tests PostgreSQL isolés réussis (respectivement 8 et 3 ignorés), 49 tests mobile réussis, compilation backend et TypeScript mobile valides. Le cluster de test a été arrêté/nettoyé automatiquement. Aucun workflow ou fichier Terraform modifié.
+
 ## INFRA-2026-10-08-003 — Texte du bonus conducteur, sans modification du CI/CD
 
 - Préparé localement, non déployé : migration applicative `1780000059000-DriverWelcomeBonusCopy`, enregistrée dans `src/database/migrations/index.ts`, et copie des notifications ORM. Le pipeline historique et tous les fichiers Terraform sont inchangés.

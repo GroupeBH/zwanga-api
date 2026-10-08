@@ -15,6 +15,7 @@ import { walletMovementNotification } from '../notifications/financial-notificat
 import { cashAllTokenOriginsCases } from '../../test/cash-all-token-origins-postgres';
 import { financialRolloutCases } from '../../test/financial-rollout-postgres';
 import { publicationRequestUuidCases } from '../../test/publication-request-uuid-postgres';
+import { cumulativeCashDebtCases } from '../../test/cumulative-cash-debt-postgres';
 import { WalletLedgerEntry } from '../wallet/entities/wallet-ledger-entry.entity';
 import { ModuleKind, ScriptTarget, transpileModule } from 'typescript';
 
@@ -1114,5 +1115,6 @@ const pgBin = process.env.DRIVER_FINANCE_TEST_POSTGRES_BIN;
     cashAllTokenOriginsCases(() => db, driver, trip);
     financialRolloutCases(() => db, driver, trip);
     publicationRequestUuidCases(() => db, driver);
+    cumulativeCashDebtCases(() => db, driver, trip);
   },
 );

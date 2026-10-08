@@ -39,18 +39,45 @@ describe('driver notification transport', () => {
     expect(query).not.toHaveBeenCalled();
     expect(send.mock.calls[0][0].data.actionProtocol).toBeUndefined();
   });
-  it('sends a dedicated sound and time-sensitive category only for v2 iOS clients', async () => {
+  it('requests the iOS sound without capability registration but gates categories and time-sensitive', async () => {
     const original = global.fetch;
     const send = jest.fn().mockResolvedValue({ ok: true, json: async () => ({ data: { status: 'ok', id: 'test-ticket' } }) });
     global.fetch = send;
     try {
-      for (const version of [1, 2]) {
-        const { service, query } = fixture(true); query.mockResolvedValue([{ version }]);
+      for (const version of [0, 1, 2]) {
+        const { service, query } = fixture(true); query.mockResolvedValue(version ? [{ version }] : []);
         await service.sendExpoPushNotification({ userId: 'driver', title: 'Réservation', body: 'Test', data: { type: 'new_booking' } }, 'ExponentPushToken[test]');
         const payload = JSON.parse(send.mock.calls.at(-1)![1].body);
-        expect(payload.categoryId).toBe(`driver-offer-v${version}`);
-        expect(payload.sound).toBe(version === 2 ? 'driver_ring.wav' : 'default');
+        expect(payload.categoryId).toBe(version ? `driver-offer-v${version}` : undefined);
+        expect(payload.sound).toBe('driver_ring.wav');
+        expect(payload.data.actionProtocol).toBe(version ? 'driver-v1' : undefined);
+        expect(payload.ttl).toBeLessThanOrEqual(30);
         expect(payload.interruptionLevel).toBe(version === 2 ? 'time-sensitive' : undefined);
+        if (version === 2) {
+          expect(Date.parse(payload.data.ringUntil)).toBeGreaterThan(Date.now());
+          expect(payload.ttl).toBeLessThanOrEqual(30);
+        } else expect(payload.data.ringUntil).toBeUndefined();
+      }
+    } finally { global.fetch = original; }
+  });
+  it('only targeted enabled iOS invitations ring when interactive registration is absent', async () => {
+    const original = global.fetch;
+    const send = jest.fn().mockResolvedValue({ ok: true, json: async () => ({ data: { status: 'ok', id: 'ticket' } }) });
+    global.fetch = send;
+    try {
+      for (const enabled of [true, false]) {
+        for (const type of ['driver_dispatch_offer', 'trip_request', 'message']) {
+          const { service } = fixture(false); service.configService.get = () => String(enabled);
+          await service.sendExpoPushNotification({ userId: 'driver', body: 'Test', data: {
+            type, expiresAt: new Date(Date.now() + 5000).toISOString(),
+          } }, 'ExponentPushToken[test]');
+          const payload = JSON.parse(send.mock.calls.at(-1)![1].body);
+          expect(payload.sound).toBe(enabled && type === 'driver_dispatch_offer' ? 'driver_ring.wav' : 'default');
+          expect(payload.data.actionProtocol).toBeUndefined();
+          expect(payload.categoryId).toBeUndefined();
+          expect(payload.interruptionLevel).toBeUndefined();
+          if (enabled && type === 'driver_dispatch_offer') expect(payload.ttl).toBeLessThanOrEqual(5);
+        }
       }
     } finally { global.fetch = original; }
   });
@@ -65,6 +92,27 @@ describe('driver notification transport', () => {
     expect(payload.data).toMatchObject({ actionProtocol: 'driver-v1', ringVersion: 'v2' });
     expect(payload.android).toMatchObject({ priority: 'high' });
     expect(payload.android.ttl).toBeLessThanOrEqual(30000);
+    expect(Date.parse(payload.data.ringUntil)).toBeLessThanOrEqual(Date.now() + 30000);
+  });
+  it('bounds ringing transport to 30s for a booking without changing its business expiry', async () => {
+    const { service, send, query } = fixture(true); query.mockResolvedValue([{ version: 2 }]);
+    const data = { type: 'new_booking', bookingId: 'booking', driverId: 'driver' };
+    await service.sendFirebaseNotification({ userId: 'driver', body: 'Booking', data }, 'fixture-token');
+    const payload = send.mock.calls[0][0];
+    expect(payload.android.ttl).toBeGreaterThan(0);
+    expect(payload.android.ttl).toBeLessThanOrEqual(30000);
+    expect(payload.data.expiresAt).toBeUndefined();
+    expect(data).not.toHaveProperty('ringUntil');
+  });
+  it('never extends a shorter dispatch deadline to provide a full 30s sound', async () => {
+    const { service, send, query } = fixture(true); query.mockResolvedValue([{ version: 2 }]);
+    const expiresAt = new Date(Date.now() + 5000).toISOString();
+    await service.sendFirebaseNotification({ userId: 'driver', body: 'Nearby', data: {
+      type: 'driver_dispatch_offer', expiresAt,
+    } }, 'fixture-token');
+    const payload = send.mock.calls[0][0];
+    expect(payload.data.ringUntil).toBe(expiresAt);
+    expect(payload.android.ttl).toBeLessThanOrEqual(5000);
   });
   it('rings for the passenger after acceptance without assigning driver actions', async () => {
     for (const version of [0, 1, 2]) {

@@ -37,16 +37,21 @@ export class DriverFinanceService {
       [userId],
     );
     const reservedTokens = Number(account?.reservedCashCommissionBalance ?? 0);
+    const debtTokens = Number(row?.debt ?? 0);
     return {
       policyActive: row?.enabled !== false,
       availableTokens: Math.max(
         0,
-        Math.round(
-          (Number(account?.balance ?? 0) - reservedTokens) * 100,
-        ) / 100,
+        Math.round((Number(account?.balance ?? 0) - reservedTokens) * 100) /
+          100,
       ),
       reservedTokens,
-      debtTokens: Number(row?.debt ?? 0),
+      debtTokens,
+      remainingCreditTokens: Math.max(
+        0,
+        Math.round((DRIVER_FINANCE.cashDebtLimitTokens - debtTokens) * 100) /
+          100,
+      ),
       blocked: Boolean(account?.withdrawalsBlocked),
       moneyPerToken: 100,
       debtLimitTokens: DRIVER_FINANCE.cashDebtLimitTokens,
@@ -73,9 +78,12 @@ export class DriverFinanceService {
       cash: {
         ...cash,
         enabled:
-          !cash.blocked && cash.debtTokens === 0,
-        availableCreditTokens: !cash.blocked && cash.debtTokens === 0 ? cash.debtLimitTokens : 0,
-        debtAmount: Math.round(cash.debtTokens * cash.moneyPerToken * 100) / 100,
+          !cash.blocked &&
+          cash.debtTokens <= cash.debtLimitTokens &&
+          cash.availableTokens + cash.remainingCreditTokens > 0,
+        availableCreditTokens: !cash.blocked ? cash.remainingCreditTokens : 0,
+        debtAmount:
+          Math.round(cash.debtTokens * cash.moneyPerToken * 100) / 100,
         coverageAmount: Math.floor(
           (cash.availableTokens * cash.moneyPerToken) /
             DRIVER_FINANCE.commissionRate,
@@ -90,15 +98,18 @@ export class DriverFinanceService {
     const accepted = normalizeAcceptedPaymentModes(trip.acceptedPaymentModes);
     const state = await this.reserveState(trip.driverId);
     const tokens = cashCommissionTokens(amount, state.moneyPerToken);
-    const credit = booking && booking.cashCommissionPolicyVersion < 2 ? 0 : state.debtLimitTokens;
+    const credit =
+      booking && booking.cashCommissionPolicyVersion < 2
+        ? 0
+        : state.remainingCreditTokens;
     const alreadyAcceptedCash =
       booking?.paymentMode === TripPaymentMode.CASH &&
       ['accepted', 'completed'].includes(booking.status);
     const cashAvailable =
-      !state.policyActive || amount <= 0 ||
+      amount <= 0 ||
       alreadyAcceptedCash ||
       (!state.blocked &&
-        state.debtTokens === 0 &&
+        state.debtTokens <= state.debtLimitTokens &&
         state.availableTokens + credit >= tokens);
     return {
       acceptedPaymentModes: accepted,
@@ -108,7 +119,7 @@ export class DriverFinanceService {
       cashUnavailableReason:
         cashAvailable || !accepted.includes(TripPaymentMode.CASH)
           ? null
-          : 'Le conducteur doit recharger sa réserve de commissions. Choisissez un autre mode ou réessayez après sa recharge.',
+          : 'La commission dépasserait la réserve disponible ou le plafond cumulé de 25 jetons de dette du conducteur. Choisissez un autre mode ou réessayez après sa recharge.',
       commissionRate: DRIVER_FINANCE.commissionRate,
     };
   }
