@@ -95,33 +95,6 @@ data "aws_iam_policy_document" "github_actions_deploy" {
   }
 
   statement {
-    sid       = "RegisterImmutableApplicationRevision"
-    effect    = "Allow"
-    actions   = ["ecs:RegisterTaskDefinition"]
-    resources = [local.ecs_task_definition_arn_pattern]
-  }
-
-  statement {
-    sid     = "ReadApplicationTaskDefinition"
-    effect  = "Allow"
-    actions = ["ecs:DescribeTaskDefinition"]
-    # DescribeTaskDefinition does not support resource-level permissions.
-    resources = ["*"]
-  }
-
-  statement {
-    sid       = "InspectServiceTasksBeforeFinancialActivation"
-    effect    = "Allow"
-    actions   = ["ecs:ListTasks"]
-    resources = ["*"]
-    condition {
-      test     = "ArnEquals"
-      variable = "ecs:cluster"
-      values   = [local.ecs_cluster_arn]
-    }
-  }
-
-  statement {
     sid    = "DescribeDatabaseMigrationTask"
     effect = "Allow"
     actions = [
