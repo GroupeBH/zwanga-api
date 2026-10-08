@@ -1,12 +1,24 @@
 import { BadRequestException } from '@nestjs/common';
 import { Vehicle, VehicleType } from '../vehicles/entities/vehicle.entity';
 import { DriverOfferStatus } from './entities/driver-offer.entity';
-import { TripRequestStatus } from './entities/trip-request.entity';
+import { TripRequest, TripRequestStatus } from './entities/trip-request.entity';
 import { BookingStatus } from '../bookings/entities/booking.entity';
 import { TripStatus } from '../trips/entities/trip.entity';
 import { TripRequestsService } from './trip-requests.service';
 import { KycDocument, KycStatus } from '../users/entities/kyc-document.entity';
 import { UserRole, UserStatus } from '../users/entities/user.entity';
+
+const attachEditTransaction = (repository: any, request: any) => {
+  request.updatedAt = new Date();
+  const update = jest.fn().mockResolvedValue({ affected: 1 });
+  const requests = { findOne: jest.fn().mockImplementation(async () => ({ ...request })), update };
+  repository.manager = { transaction: (work: any) => work({
+    getRepository: (entity: any) => entity === TripRequest ? requests : {
+      exists: jest.fn().mockResolvedValue(false), update: jest.fn().mockResolvedValue({ affected: 0 }),
+    },
+  }) };
+  return update;
+};
 
 const eligibleDriverRepository = () => ({
   findOne: jest.fn().mockResolvedValue({
@@ -341,6 +353,7 @@ describe('TripRequestsService KYC seat limit', () => {
       driverOffers: [],
     };
     tripRequestRepository.findOne.mockResolvedValue(tripRequest);
+    const update = attachEditTransaction(tripRequestRepository, tripRequest);
     jest
       .spyOn(service, 'findOne')
       .mockResolvedValue({ id: tripRequest.id, numberOfSeats: 3 } as any);
@@ -350,8 +363,8 @@ describe('TripRequestsService KYC seat limit', () => {
     });
 
     expect(tripRequest.numberOfSeats).toBe(3);
-    expect(tripRequestRepository.save).toHaveBeenCalledWith(
-      expect.objectContaining({ id: tripRequest.id, numberOfSeats: 3 }),
+    expect(update).toHaveBeenCalledWith(
+      tripRequest.id, expect.objectContaining({ numberOfSeats: 3 }),
     );
   });
 
@@ -426,11 +439,12 @@ describe('TripRequestsService vehicle type update', () => {
       .spyOn(service, 'findOne')
       .mockResolvedValue({ id: tripRequest.id } as any);
 
-    return { service, tripRequest, tripRequestRepository };
+    const update = attachEditTransaction(tripRequestRepository, tripRequest);
+    return { service, tripRequest, tripRequestRepository, update };
   };
 
   it('changes the vehicle type without recalculating the confirmed price when no new price is sent', async () => {
-    const { service, tripRequest, tripRequestRepository } = buildService();
+    const { service, tripRequest, update } = buildService();
     const calculateRecommendedPricePerSeat = jest
       .spyOn(service as any, 'calculateRecommendedPricePerSeat')
       .mockResolvedValue(5000);
@@ -442,7 +456,7 @@ describe('TripRequestsService vehicle type update', () => {
     expect(calculateRecommendedPricePerSeat).not.toHaveBeenCalled();
     expect(tripRequest.vehicleType).toBe(VehicleType.MOTORCYCLE_TWO_WHEELS);
     expect(tripRequest.maxPricePerSeat).toBe(2500);
-    expect(tripRequestRepository.save).toHaveBeenCalledWith(tripRequest);
+    expect(update).toHaveBeenCalledWith(tripRequest.id, expect.objectContaining({ vehicleType: VehicleType.MOTORCYCLE_TWO_WHEELS }));
   });
 
   it.each([
@@ -624,14 +638,14 @@ describe('TripRequestsService unaccepted request expiration', () => {
       {} as any,
     );
 
-  it('keeps an old unaccepted request visible until thirty seconds after its departure window', async () => {
+  it('keeps an old unaccepted request visible until three hours after its departure window', async () => {
     const now = Date.now();
     const request = {
       id: 'request-recent',
       status: TripRequestStatus.PENDING,
       createdAt: new Date(now - 30 * 24 * 60 * 60 * 1000),
       departureDateMin: new Date(now - 13 * 60 * 60 * 1000),
-      departureDateMax: new Date(now + 10_000),
+      departureDateMax: new Date(now - 2 * 60 * 60_000),
       driverOffers: [],
     };
     const tripRequestRepository = {
@@ -707,7 +721,7 @@ describe('TripRequestsService unaccepted request expiration', () => {
     );
   });
 
-  it('expires unaccepted requests after thirty seconds and keeps accepted requests for two hours', async () => {
+  it('expires unaccepted requests after three hours and keeps accepted requests for two hours', async () => {
     const now = Date.now();
     const unansweredRequest = {
       id: 'request-unanswered',
@@ -787,7 +801,7 @@ describe('TripRequestsService unaccepted request expiration', () => {
     );
   });
 
-  it('rejects a driver response once the thirty-second deadline has passed', async () => {
+  it('rejects a driver response once the three-hour deadline has passed', async () => {
     const now = Date.now();
     const tripRequest = {
       id: 'request-expired',

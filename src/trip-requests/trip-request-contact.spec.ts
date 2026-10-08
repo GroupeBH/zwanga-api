@@ -28,7 +28,7 @@ describe('Explicit passenger contact before request acceptance', () => {
     const f = fixture();
     const result = await f.service.getPassengerContact('request', 'driver');
     expect(result).toEqual({ requestId: 'request', passenger: { id: 'passenger', name: 'Passager Test', phone: f.passenger.phone },
-      expiresAt: new Date(f.request.departureDateMax.getTime() + 30_000).toISOString(), serverNow: expect.any(String) });
+      expiresAt: new Date(f.request.departureDateMax.getTime() + 3 * 60 * 60_000).toISOString(), serverNow: expect.any(String) });
     expect(f.requests.findOne).toHaveBeenCalledTimes(1);
     expect(f.requests.findOne).toHaveBeenCalledWith(expect.objectContaining({
       where: { id: 'request' }, select: expect.objectContaining({ passenger: { id: true, firstName: true, lastName: true, phone: true } }),
@@ -79,7 +79,7 @@ describe('Explicit passenger contact before request acceptance', () => {
     const cases: Partial<TripRequest>[] = [
       { passengerId: 'driver' }, { selectedDriverId: 'another' }, { tripId: 'trip' },
       { driverOffers: [Object.assign(new DriverOffer(), { status: DriverOfferStatus.ACCEPTED })] },
-      { departureDateMax: new Date(Date.now() - 30_001) }, { departureDateMax: new Date(NaN) },
+      { departureDateMax: new Date(Date.now() - 3 * 60 * 60_000 - 1) }, { departureDateMax: new Date(NaN) },
     ];
     for (const patch of cases) {
       const f = fixture(); Object.assign(f.request, patch);

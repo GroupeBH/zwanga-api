@@ -450,6 +450,11 @@ export class AcceptTripRequestDto {
 }
 
 export class UpdateTripRequestDto {
+  @ApiProperty({ required: false, description: 'updatedAt lu à l’ouverture du formulaire ; refuse une modification concurrente.' })
+  @IsOptional()
+  @IsDateString()
+  expectedUpdatedAt?: string;
+
   @ApiProperty({ required: false })
   @IsString()
   @IsOptional()

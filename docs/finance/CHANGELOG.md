@@ -1,5 +1,33 @@
 # Journal des modifications financières
 
+## 2026-10-08 — Demandes modifiables et reprogrammation des départs expirés
+
+- Les demandes sans conducteur confirmé expirent à `departureDateMax + 3 heures`.
+  Le régime accepté de deux heures est conservé. Le propriétaire et l'admin peuvent
+  modifier les demandes non assignées ou rouvrir une demande expirée avec un nouveau
+  créneau futur ; les offres en attente précédentes sont invalidées.
+- Écriture ciblée sous verrou TypeORM, protection `expectedUpdatedAt`, création et
+  acceptation d'offres et insertion finale de trajet sérialisées avec l'édition.
+  Le guide PostgreSQL a orienté des transactions courtes sans appels réseau sous
+  verrou. Dispatch et rappel technique ne faussent plus la version du formulaire.
+- `POST /trips/:id/reprogram` crée une nouvelle publication pour un départ public
+  passé jamais démarré, sans réservation active/embarquement. Réutilisation des
+  conditions de publication, KYC, véhicule, photo, quotas et finance ; historique,
+  réservations et paiements du trajet source non transférés/non modifiés.
+- Mobile : Modifier/Reprogrammer, date future proposée, nouvelle navigation après
+  republication, protection contre doubles clics. Admin : édition filtrée selon
+  l'assignation, dates locales correctes et envoi des seuls champs modifiés.
+- Vérification : suite backend globale **1 556 réussis / 184 ignorés**, puis
+  tests PostgreSQL 18/PostGIS isolés du dispatch et de l'édition ; compilation
+  backend et TypeScript mobile/admin réussis. Tests Node ciblés : **16 mobile**,
+  **3 admin**. Détails et dernières vérifications dans le guide ci-dessous.
+  Aucun essai sur appareil, déploiement, modification AWS, lecture de `.env` réel,
+  push ou paiement réel. Les clusters de test jetables sont arrêtés/nettoyés.
+- Pas de migration ni nouvelle variable d'environnement. Les anciennes apps qui
+  calculent encore trente secondes en local nécessitent une mise à jour pour
+  l'affichage à trois heures et les nouveaux boutons. [Contrats et limites](trip-request-response-expiration.md).
+
+
 ## 2026-10-08 — Conservation KYC sans expiration automatique
 
 - Décision utilisateur : conserver indéfiniment les copies de pièce et selfie. `DIDIT_KYC_ARCHIVE_RETENTION_DAYS=0` devient la valeur explicite pour ce mode ; vide/absent reste invalide, 1 à 3 650 jours reste disponible. Exemples d'environnement mis à `0` avec collecte toujours désactivée.

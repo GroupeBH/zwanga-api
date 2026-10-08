@@ -121,7 +121,7 @@ describe('Confirmed request price propagation', () => {
           isFree: Number(price) === 0,
           totalSeats: 4,
         }),
-        { isPrivate: true, tripRequestId: request.id },
+        expect.objectContaining({ isPrivate: true, tripRequestId: request.id, requestSnapshot: expect.objectContaining({ id: request.id }) }),
       );
       expect(bookingsService.create).toHaveBeenCalledWith(
         'passenger-1',

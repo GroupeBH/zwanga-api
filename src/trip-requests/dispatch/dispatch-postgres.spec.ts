@@ -13,6 +13,8 @@ import { User, UserRole, UserStatus } from '../../users/entities/user.entity';
 import { KycDocument, KycStatus } from '../../users/entities/kyc-document.entity';
 import { Vehicle, VehicleType } from '../../vehicles/entities/vehicle.entity';
 import { TripRequest } from '../entities/trip-request.entity';
+import { DriverOffer } from '../entities/driver-offer.entity';
+import { TripRequestsService } from '../trip-requests.service';
 import { boundedInteger, dispatchOfferIsActionable } from './dispatch-policy';
 
 describe('dispatch policy', () => {
@@ -81,6 +83,64 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
       numberOfSeats: seats, maxPricePerSeat: 1000, vehicleType: VehicleType.CAR });
   };
   const offers = (requestId: string) => source.query('SELECT * FROM trip_request_dispatch_offers WHERE "requestId" = $1 ORDER BY "createdAt"', [requestId]);
+
+  const editor = () => {
+    const edits = new TripRequestsService(source.getRepository(TripRequest), source.getRepository(DriverOffer),
+      source.getRepository(User), source.getRepository(Vehicle), {} as never, {} as never, {} as never,
+      {} as never, {} as never, {} as never, {} as never, {} as never);
+    jest.spyOn(edits, 'findOne').mockImplementation(async id => source.getRepository(TripRequest).findOneByOrFail({ id }) as never);
+    jest.spyOn(edits as any, 'notifyPassengerAboutDriverOffer').mockResolvedValue(undefined);
+    jest.spyOn(edits as any, 'notifyDriverAboutOfferAcceptance').mockResolvedValue(undefined);
+    jest.spyOn(edits as any, 'sanitizeDriverOffer').mockImplementation(async offer => offer);
+    return edits;
+  };
+
+  it('editing cancels an old dispatch invitation atomically, and stale acceptance is refused', async () => {
+    const d = await driver(); const r = await request(); await service.tick();
+    const [offer] = await offers(r.id);
+    await editor().update(r.passengerId, r.id, { description: 'Entrée côté rue' });
+    expect((await offers(r.id))[0].status).toBe('cancelled');
+    await expect(service.respond(d.user.id, offer.id, 'accept')).rejects.toThrow();
+    expect((await source.getRepository(TripRequest).findOneByOrFail({ id: r.id })).selectedDriverId).toBeNull();
+  });
+
+  it('background dispatch checks do not invalidate an open edit form', async () => {
+    await driver(); const r = await request();
+    await service.tick(); await service.tick();
+    const current = await source.getRepository(TripRequest).findOneByOrFail({ id: r.id });
+    expect(current.updatedAt.getTime()).toBe(r.updatedAt.getTime());
+    await expect(editor().update(r.passengerId, r.id, { expectedUpdatedAt: r.updatedAt.toISOString(), description: 'Repère ajouté' })).resolves.toMatchObject({ description: 'Repère ajouté' });
+  });
+
+  it('one of a concurrent edit and dispatch acceptance wins; the loser cannot change the assignment', async () => {
+    const d = await driver(); const r = await request(); await service.tick(); const [offer] = await offers(r.id);
+    const result = await Promise.allSettled([
+      editor().update(r.passengerId, r.id, { description: 'Nouvelles conditions' }),
+      service.respond(d.user.id, offer.id, 'accept'),
+    ]);
+    expect(result.filter(item => item.status === 'fulfilled')).toHaveLength(1);
+    const final = await source.getRepository(TripRequest).findOneByOrFail({ id: r.id });
+    if (result[0].status === 'fulfilled') {
+      expect(final.description).toBe('Nouvelles conditions');
+      expect(final.selectedDriverId).toBeNull();
+    } else {
+      expect(final.status).toBe('driver_selected');
+      expect(final.description).not.toBe('Nouvelles conditions');
+    }
+  });
+
+  it('editing a classical request retires persisted offers; those old terms cannot be accepted', async () => {
+    const d = await driver(); const r = await request(false); const edits = editor();
+    const offer = await edits.createDriverOffer(d.user.id, r.id, { vehicleId: d.vehicle.id,
+      proposedDepartureDate: new Date(Date.now() + 60000).toISOString(), pricePerSeat: 1000, availableSeats: 1 });
+    await edits.update(r.passengerId, r.id, { description: 'Nouveau point de rencontre' });
+    expect((await source.getRepository(DriverOffer).findOneByOrFail({ id: offer.id })).status).toBe('rejected');
+    await expect(edits.acceptDriverOffer(r.passengerId, r.id, { offerId: offer.id })).rejects.toThrow('disponible');
+    const replacement = await edits.createDriverOffer(d.user.id, r.id, { vehicleId: d.vehicle.id,
+      proposedDepartureDate: new Date(Date.now() + 60000).toISOString(), pricePerSeat: 1000, availableSeats: 1 });
+    await expect(edits.acceptDriverOffer(r.passengerId, r.id, { offerId: replacement.id })).resolves.toMatchObject({ status: 'driver_selected', selectedDriverId: d.user.id });
+    expect((await source.getRepository(DriverOffer).findOneByOrFail({ id: offer.id })).status).toBe('rejected');
+  });
 
   it('chooses the closest compatible driver, then the next after decline', async () => {
     const near = await driver(); const far = await driver(15.32); const r = await request();

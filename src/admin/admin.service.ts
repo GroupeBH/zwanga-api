@@ -938,6 +938,7 @@ export class AdminService {
       tripRequest.passengerId,
       tripRequestId,
       updateTripRequestDto,
+      adminId,
     );
   }
 

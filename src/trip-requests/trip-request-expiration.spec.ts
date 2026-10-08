@@ -46,7 +46,7 @@ describe('Trip request expiration scheduling', () => {
     ).toMatchObject({ cronTime: '*/30 * * * * *', waitForCompletion: true });
   });
 
-  it('expires unaccepted requests at thirty seconds and accepted requests at two hours', async () => {
+  it('expires unaccepted requests at three hours and accepted requests at two hours', async () => {
     const now = new Date('2026-09-12T22:00:00.000Z');
     jest.useFakeTimers({ now, doNotFake: ['setImmediate'] });
     const { service, repository, notifications } = buildService();
@@ -54,7 +54,7 @@ describe('Trip request expiration scheduling', () => {
       id,
       passengerId: 'passenger',
       status: TripRequestStatus.PENDING,
-      departureDateMax: new Date(now.getTime() - 30_000),
+      departureDateMax: new Date(now.getTime() - 3 * 60 * 60_000),
       driverOffers: [],
       ...extra,
     });
@@ -62,14 +62,15 @@ describe('Trip request expiration scheduling', () => {
       request('pending'),
       request('offers', { status: TripRequestStatus.OFFERS_RECEIVED }),
       request('future', {
-        departureDateMax: new Date(now.getTime() - 30_000 + 1),
+        departureDateMax: new Date(now.getTime() - 3 * 60 * 60_000 + 1),
       }),
       request('accepted', {
+        departureDateMax: new Date(now.getTime() - 60_000),
         driverOffers: [{ status: DriverOfferStatus.ACCEPTED }],
       }),
-      request('selected', { selectedDriverId: 'driver' }),
-      request('trip', { tripId: 'trip' }),
-      request('assigned', { status: TripRequestStatus.DRIVER_SELECTED }),
+      request('selected', { selectedDriverId: 'driver', departureDateMax: new Date(now.getTime() - 60_000) }),
+      request('trip', { tripId: 'trip', departureDateMax: new Date(now.getTime() - 60_000) }),
+      request('assigned', { status: TripRequestStatus.DRIVER_SELECTED, departureDateMax: new Date(now.getTime() - 60_000) }),
       request('accepted-expired', {
         status: TripRequestStatus.DRIVER_SELECTED,
         selectedDriverId: 'driver',
@@ -85,7 +86,7 @@ describe('Trip request expiration scheduling', () => {
       expect.objectContaining({
         where: expect.objectContaining({
           departureDateMax: LessThanOrEqual(
-            new Date('2026-09-12T21:59:30.000Z'),
+            new Date('2026-09-12T20:00:00.000Z'),
           ),
         }) as unknown,
       }),
