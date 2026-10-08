@@ -127,6 +127,16 @@ export class DriverDispatchService {
     return Boolean(row.busy);
   }
 
+  async getContactDeadline(driverId: string, requestId: string): Promise<Date | null> {
+    if (!this.enabled) return null;
+    const rows: { expiresAt: Date }[] = await this.db.query(`SELECT o."expiresAt"
+      FROM trip_request_dispatch_offers o JOIN trip_requests r ON r.id = o."requestId"
+      WHERE o."requestId" = $1 AND o."driverId" = $2 AND o.status = 'pending'
+        AND o."expiresAt" > now() AND r.status = 'pending'
+        AND r."selectedDriverId" IS NULL AND r."tripId" IS NULL LIMIT 1`, [requestId, driverId]);
+    return rows[0] ? new Date(rows[0].expiresAt) : null;
+  }
+
   async getOffer(driverId: string, id: string) {
     const [offer]: DispatchOffer[] = await this.db.query(`SELECT * FROM trip_request_dispatch_offers WHERE id = $1 AND "driverId" = $2`, [id, driverId]);
     if (!offer) throw new NotFoundException('Proposition introuvable.');
