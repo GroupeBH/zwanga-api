@@ -61,6 +61,7 @@ import { StageFinancialRollout1780000056000 } from './1780000056000-StageFinanci
 import { FixPublicationRequestUuid1780000057000 } from './1780000057000-FixPublicationRequestUuid';
 import { FixBookingRequestUuid1780000058000 } from './1780000058000-FixBookingRequestUuid';
 import { DriverWelcomeBonusCopy1780000059000 } from './1780000059000-DriverWelcomeBonusCopy';
+import { CumulativeCashDebtLimit1780000060000 } from './1780000060000-CumulativeCashDebtLimit';
 
 export const databaseMigrations = [
   FillTotalSeats1780000000000,
@@ -122,4 +123,5 @@ export const databaseMigrations = [
   FixPublicationRequestUuid1780000057000,
   FixBookingRequestUuid1780000058000,
   DriverWelcomeBonusCopy1780000059000,
+  CumulativeCashDebtLimit1780000060000,
 ];

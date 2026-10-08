@@ -94,7 +94,7 @@ export class ApiExceptionFilter implements ExceptionFilter {
     }
     const financeMessages: Record<string, string> = {
       CASH_COMMISSION_INSUFFICIENT: 'Jetons insuffisants pour couvrir la commission cash de 5 % dans la limite autorisée de 25 jetons de dette (2 500 FC). Rechargez ou choisissez un autre paiement.',
-      CASH_DEBT_OUTSTANDING: 'Une commission cash reste due. Régularisez-la en rechargeant vos jetons avant tout nouveau paiement cash. Les courses confirmées peuvent se terminer.',
+      CASH_DEBT_OUTSTANDING: 'Le plafond cumulé de 25 jetons de dette cash est dépassé ou le serait avec cette commission. Rechargez vos jetons ou choisissez un autre paiement. Les courses confirmées peuvent se terminer.',
       TRIP_PAYMENT_MODE_UNAVAILABLE: 'Ce mode de paiement n’est pas accepté sur ce trajet. Choisissez un mode proposé.',
       CASH_CURRENCY_UNSUPPORTED: 'Le paiement cash est disponible uniquement en francs congolais.',
       CASH_STATE_CONFLICT: 'La réservation a déjà été finalisée. Actualisez son état.',

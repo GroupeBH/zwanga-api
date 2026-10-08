@@ -5,7 +5,11 @@ import { WalletAccount } from '../wallet/entities/wallet-account.entity';
 
 describe('driver finance API projections', () => {
   let service: DriverFinanceService;
-  let trip: any, booking: any, account: any, debt: number;
+  let trip: any,
+    booking: any,
+    account: any,
+    debt: number,
+    policyActive: boolean;
   beforeEach(() => {
     trip = {
       id: 'trip',
@@ -30,6 +34,7 @@ describe('driver finance API projections', () => {
       withdrawalsBlocked: false,
     };
     debt = 0;
+    policyActive = true;
     const db = {
       getRepository: (entity: any) => ({
         findOneBy: async () =>
@@ -37,16 +42,17 @@ describe('driver finance API projections', () => {
         findOne: async () => (entity === Booking ? booking : null),
         existsBy: async () => false,
       }),
-      query: async () => [{ debt }],
+      query: async (sql: string) =>
+        sql.includes('COALESCE(SUM') ? [{ debt, enabled: policyActive }] : [],
     };
     service = new DriverFinanceService(
       db as any,
       { convertPointsToMoney: () => 100 } as any,
-      {} as any,
+      { getPremiumOverview: async () => ({ isActive: true }) } as any,
     );
   });
   it('does not expose driver wallet amounts to a passenger', async () => {
-    debt = 1;
+    debt = 26;
     expect(await service.tripOptions('passenger', 'trip')).toEqual({
       acceptedPaymentModes: ['cash', 'points'],
       availablePaymentModes: ['points'],
@@ -54,7 +60,7 @@ describe('driver finance API projections', () => {
       cashUnavailableReason: expect.any(String),
     });
   });
-  it('uses all seats and all free tokens, blocking new cash while debt remains', async () => {
+  it('uses all seats and all free tokens, blocking cash above the aggregate debt limit', async () => {
     account.reservedCashCommissionBalance = 0;
     expect(
       (await service.tripOptions('passenger', 'trip', 2)).availablePaymentModes,
@@ -62,20 +68,74 @@ describe('driver finance API projections', () => {
     expect(
       (await service.tripOptions('passenger', 'trip', 8)).availablePaymentModes,
     ).not.toContain('cash');
-    debt = 0.01;
+    debt = 25.01;
     expect(
       (await service.tripOptions('passenger', 'trip')).availablePaymentModes,
     ).not.toContain('cash');
     await expect(service.tripOptions('passenger', 'trip', 0)).rejects.toThrow();
   });
-  it('allows exactly 25 tokens of new debt, but no further cash once any debt exists', async () => {
+  it('deducts existing debt from the remaining 25-token allowance', async () => {
     account.balance = 0;
     account.withdrawableBalance = 0;
     account.reservedCashCommissionBalance = 0;
-    expect((await service.tripOptions('passenger', 'trip', 5)).availablePaymentModes).toContain('cash');
-    expect((await service.tripOptions('passenger', 'trip', 6)).availablePaymentModes).not.toContain('cash');
+    expect(
+      (await service.tripOptions('passenger', 'trip', 5)).availablePaymentModes,
+    ).toContain('cash');
+    expect(
+      (await service.tripOptions('passenger', 'trip', 6)).availablePaymentModes,
+    ).not.toContain('cash');
     debt = 0.01;
-    expect((await service.tripOptions('passenger', 'trip')).availablePaymentModes).not.toContain('cash');
+    expect(
+      (await service.tripOptions('passenger', 'trip')).availablePaymentModes,
+    ).toContain('cash');
+    expect(
+      (await service.tripOptions('passenger', 'trip', 5)).availablePaymentModes,
+    ).not.toContain('cash');
+  });
+  it.each([
+    [20, 0, true],
+    [20.01, 0, false],
+    [25, 0, false],
+    [25, 5, true],
+    [25.01, 5, false],
+  ])(
+    'projects the cumulative ceiling with debt=%s and funds=%s',
+    async (owed, funds, allowed) => {
+      debt = owed as number;
+      account.balance = funds;
+      account.reservedCashCommissionBalance = 0;
+      expect(
+        (
+          await service.tripOptions('passenger', 'trip')
+        ).availablePaymentModes.includes('cash'),
+      ).toBe(allowed);
+    },
+  );
+  it('reports remaining credit rather than granting another 25 for every trip', async () => {
+    debt = 20;
+    account.balance = 0;
+    account.reservedCashCommissionBalance = 0;
+    expect((await service.summary('driver')).cash).toMatchObject({
+      enabled: true,
+      debtTokens: 20,
+      availableCreditTokens: 5,
+    });
+    debt = 25;
+    expect((await service.summary('driver')).cash).toMatchObject({
+      enabled: false,
+      availableCreditTokens: 0,
+    });
+    account.balance = 5;
+    expect((await service.summary('driver')).cash.enabled).toBe(true);
+    debt = 25.01;
+    expect((await service.summary('driver')).cash.enabled).toBe(false);
+  });
+  it('does not bypass payment eligibility when deferred collection is inactive', async () => {
+    policyActive = false;
+    debt = 26;
+    expect(
+      (await service.tripOptions('passenger', 'trip')).availablePaymentModes,
+    ).not.toContain('cash');
   });
   it('preserves the accepted mode even if the trip or wallet changed later', async () => {
     booking.paymentMode = 'cash';
@@ -87,11 +147,18 @@ describe('driver finance API projections', () => {
     ).toContain('cash');
   });
   it('includes bonus-only funds in cash eligibility without exposing the driver balance', async () => {
-    account.balance = 50; account.withdrawableBalance = 0;
+    account.balance = 50;
+    account.withdrawableBalance = 0;
     account.reservedCashCommissionBalance = 5;
-    expect((await service.tripOptions('passenger', 'trip', 10)).availablePaymentModes).toContain('cash');
+    expect(
+      (await service.tripOptions('passenger', 'trip', 10))
+        .availablePaymentModes,
+    ).toContain('cash');
     account.reservedCashCommissionBalance = 30;
-    expect((await service.tripOptions('passenger', 'trip', 10)).availablePaymentModes).not.toContain('cash');
+    expect(
+      (await service.tripOptions('passenger', 'trip', 10))
+        .availablePaymentModes,
+    ).not.toContain('cash');
   });
   it('enforces booking ownership and private-trip visibility', async () => {
     await expect(

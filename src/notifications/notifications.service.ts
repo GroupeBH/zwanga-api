@@ -364,12 +364,13 @@ export class NotificationService implements OnModuleInit {
     }
     const version = await this.driverActionVersion(notification, pushToken);
     if (version > 0) {
+      const ringUntil = version === 2 ? this.driverRingUntil(notification) : undefined;
       // No title/message fields: Expo must treat this as headless and let Notifee display it once.
       const data = { ...notification.data, actionProtocol: 'driver-v1', invitationText: notification.body,
-        ...(version === 2 ? { ringVersion: 'v2' } : {}) };
+        ...(ringUntil ? { ringVersion: 'v2', ringUntil } : {}) };
       return getMessaging(this.firebaseApp).send({ token: pushToken,
         data: this.stringifyNotificationData(data),
-        android: { priority: 'high', ttl: this.driverNotificationTtl(notification) * 1000 },
+        android: { priority: 'high', ttl: this.driverNotificationTtl(notification, ringUntil) * 1000 },
       });
     }
     const passengerRing = notification.data?.type === 'trip_request_accepted' &&
@@ -396,7 +397,13 @@ export class NotificationService implements OnModuleInit {
     const driverActions = version > 0;
     const passengerRing = notification.data?.type === 'trip_request_accepted' &&
       await this.ringClientVersion(notification, pushToken) === 2;
-    const longRing = version === 2 || passengerRing;
+    // APNs can request a bundled sound independently of interactive JS support.
+    // An older iOS binary without the file falls back to the system sound. Keep
+    // categories and time-sensitive entitlement usage gated by client capability.
+    const driverRing = this.isDriverRingInvitation(notification);
+    const longRing = driverRing || passengerRing;
+    const timeSensitive = version === 2 || passengerRing;
+    const ringUntil = driverRing ? this.driverRingUntil(notification) : undefined;
     const response = await fetch(EXPO_PUSH_API_URL, {
       method: 'POST',
       headers: {
@@ -407,10 +414,12 @@ export class NotificationService implements OnModuleInit {
         to: pushToken,
         title: notification.title,
         body: notification.body,
-        data: driverActions ? { ...notification.data, actionProtocol: 'driver-v1' }
+        data: driverActions ? { ...notification.data, actionProtocol: 'driver-v1',
+          ...(version === 2 ? { ringVersion: 'v2', ringUntil } : {}) }
           : passengerRing ? { ...notification.data, ringAlert: 'request-accepted-v1' } : notification.data ?? undefined,
-        ...(driverActions ? { categoryId: version === 2 ? 'driver-offer-v2' : 'driver-offer-v1', ttl: this.driverNotificationTtl(notification) } : {}),
-        ...(longRing ? { interruptionLevel: 'time-sensitive' } : {}),
+        ...(driverActions ? { categoryId: version === 2 ? 'driver-offer-v2' : 'driver-offer-v1' } : {}),
+        ...(driverRing ? { ttl: this.driverNotificationTtl(notification, ringUntil) } : {}),
+        ...(timeSensitive ? { interruptionLevel: 'time-sensitive' } : {}),
         ...(passengerRing ? { channelId: 'booking-ring-v2', ttl: 60 } : {}),
         sound: longRing ? 'driver_ring.wav' : 'default',
         priority: notification.data?.type === 'app_update' ? 'normal' : 'high',
@@ -440,16 +449,27 @@ export class NotificationService implements OnModuleInit {
       : `${EXPO_RECEIPT_OK_PREFIX}accepted-${notification.id}`;
   }
 
-  private driverNotificationTtl(notification: Notification): number {
-    const deadline = Date.parse(String(notification.data?.expiresAt ?? ''));
+  /** A stale booking stays actionable in-app, but must not ring an hour later. */
+  private driverRingUntil(notification: Notification): string {
+    const expiry = Date.parse(String(notification.data?.expiresAt ?? ''));
+    const deadline = Date.now() + 30_000;
+    return new Date(Number.isFinite(expiry) ? Math.min(expiry, deadline) : deadline).toISOString();
+  }
+
+  private driverNotificationTtl(notification: Notification, ringUntil?: string): number {
+    const deadline = Date.parse(ringUntil ?? String(notification.data?.expiresAt ?? ''));
     return Number.isFinite(deadline) ? Math.max(1, Math.ceil((deadline - Date.now()) / 1000)) : 3600;
   }
 
   private async driverActionVersion(notification: Notification, pushToken: string): Promise<number> {
-    if (!['new_booking', 'driver_dispatch_offer'].includes(notification.data?.type)) return 0;
-    if (notification.data?.type === 'driver_dispatch_offer' &&
-        this.configService.get<string>('DRIVER_DISPATCH_ENABLED') !== 'true') return 0;
+    if (!this.isDriverRingInvitation(notification)) return 0;
     return this.ringClientVersion(notification, pushToken);
+  }
+
+  private isDriverRingInvitation(notification: Notification): boolean {
+    return notification.data?.type === 'new_booking' ||
+      (notification.data?.type === 'driver_dispatch_offer' &&
+        this.configService.get<string>('DRIVER_DISPATCH_ENABLED') === 'true');
   }
 
   private async ringClientVersion(notification: Notification, pushToken: string): Promise<number> {
