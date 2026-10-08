@@ -2,8 +2,60 @@
 
 Les entrées sont classées de la plus récente à la plus ancienne. Elles décrivent le code versionné et les opérations réellement exécutées sur AWS, sans inclure de valeur secrète.
 
+## INFRA-2026-10-08-002 — Retour au CI/CD et à l'infrastructure antérieurs
+
+### Contexte et statut
+
+- Date : 8 octobre 2026, Africa/Kinshasa. Demande explicite de l'utilisateur : retirer les modifications de transition et revenir au CI/CD et à l'infrastructure existants.
+- **Appliqué au dépôt uniquement.** Aucun appel AWS, apply, déploiement, changement GitHub distant, migration, écriture financière ou notification réelle effectué pendant cette intervention.
+- Référence retenue : `6a45121` (5 octobre 2026), dernier commit avant les modifications CI/CD/Terraform de `cb271cf`. Les changements applicatifs de ce dernier ne sont pas annulés.
+- Avant : publication par digest, épinglage de secours, préparation/remplacement/activation et contrôles des anciennes tâches. Des fichiers staging non suivis subsistaient aussi de la préparation précédente ; ce staging n'avait pas été provisionné.
+- Après : pipeline historique sur `release`, tags du commit et `latest`, tâche de migrations TypeORM puis `force-new-deployment` et attente de stabilité. Aucun workflow staging restant.
+
+### Fichiers et ressources
+
+| Fichier | Modification |
+| --- | --- |
+| `.github/workflows/deploy.yml` | Restauration exacte de `6a45121`, sans les phases de transition ajoutées. Tests, build, contrôle documentaire, OIDC, runner ARM64, migrations et attente ECS historiques conservés. |
+| `infra-aws/ecs.tf` | Restauration exacte : retrait du circuit breaker et de l'exception `ignore_changes = [task_definition]` ajoutés pour la transition. |
+| `infra-aws/oidc.tf` | Restauration exacte : retrait des permissions ajoutées pour l'enregistrement des révisions, la lecture des définitions et l'inspection des anciennes tâches. Permissions historiques conservées. |
+| `infra-aws/scripts/deploy-resilient.cjs`, `src/database/deployment-transition.spec.ts` | Suppression de l'orchestrateur abandonné et de ses tests, qui l'importaient. Récupérables dans l'historique Git (`cb271cf`). |
+| `.github/workflows/deploy-staging.yml`, `infra-aws/scripts/deploy-staging.cjs`, fichiers source de `infra-aws/environments/staging/`, `infra-aws/tests/staging-isolation.tftest.hcl`, `src/database/staging-deployment.spec.ts` | Suppression des nouveaux fichiers staging locaux non suivis, désormais abandonnés ; aucun state, ressource AWS ou fichier de données supprimé. Ces fichiers non committés ne sont pas récupérables par Git. |
+| `infra-aws/README.md`, présent journal | Retour à la procédure historique, ajout des limites actuelles et conservation de l'historique des décisions. |
+
+Le reste des fichiers CI/CD et Terraform suivis était déjà identique à `6a45121`.
+Aucune variable, valeur SSM, clé, base, bucket, DNS, VPC, cache ou image ECR modifié
+sur AWS. Les secrets ne sont ni lus ni copiés. Les migrations, bonus, commissions,
+notifications, KYC, OTP et autres fonctionnalités applicatives sont conservés.
+
+### Impacts et limites
+
+- Disponibilité : retour aux migrations exécutées pendant que l'ancienne application peut encore fonctionner, puis rolling deployment historique. Plus de vérification ajoutée de l'arrêt effectif de toutes les anciennes tâches ni d'image de secours épinglée. Le tag `latest` redevient mutable.
+- Données : aucun rollback SQL. La migration `1780000056000` et le mécanisme d'activation financier restent dans le backend. Sans commissions cash existantes, cette migration initialise la politique en attente ; le pipeline historique n'appelle plus l'activation. Le contrôle `/health` accepte un schéma préparé : un CI vert ne prouve donc pas l'activation des nouveaux contrôles cash ni de l'index push différé.
+- Définition ECS : si les phases de transition avaient déjà été exécutées hors de cette intervention, un service pointant vers un digest ne suivrait pas automatiquement le nouveau `latest`. Vérifier l'image réellement référencée avant relance ; aucune hypothèse sur l'état AWS réel n'est présentée comme vérifiée.
+- IAM : les permissions supplémentaires de transition sont retirées du code ; elles ne sont pas retirées automatiquement du compte AWS. Terraform reprend la gestion de `task_definition` lors d'un éventuel apply.
+- Coûts : aucun changement réel ; aucune nouvelle stack staging provisionnée. Le coût temporaire des tâches de migration et du rolling deployment historique reste possible lors d'un futur déploiement.
+
+### Déploiement, surveillance et reprise
+
+1. Relire le diff et vérifier la définition ECS, la disponibilité des sauvegardes RDS et l'état du schéma/activation avant une publication en production.
+2. Si des changements Terraform de transition avaient effectivement été appliqués, exécuter un plan et le faire approuver avant tout apply ; ne pas appliquer un ancien plan enregistré. Ne pas détruire de stack ni modifier le state pour revenir au workflow historique.
+3. Publier sur `release` uniquement après ces vérifications. Le workflow est revenu au format demandé, pas à un backend antérieur et pas à un schéma antérieur.
+4. Surveiller les logs de migrations, événements ECS, cibles ALB et `/health`, puis vérifier les parcours financiers, l'état des contrôles cash et les notifications après déploiement.
+5. Une reprise du mécanisme de transition nécessiterait une décision distincte et une restauration coordonnée des fichiers depuis Git après contrôle de l'état réel. Ne pas revenir à un ancien backend incompatible ni exécuter `migration:revert` sur l'historique financier.
+
+### Validation locale
+
+- Égalité avec `6a45121` vérifiée pour le workflow et les deux fichiers Terraform restaurés ; README initialement restauré puis complété par les avertissements ci-dessus.
+- Les configurations CI/CD et Terraform suivies sont identiques à `6a45121` ; seuls le README et ce journal diffèrent dans ces répertoires pour documenter le retour.
+- YAML des workflows et syntaxe bash de leurs commandes valides ; aucune référence restante aux orchestrateurs supprimés dans le code actif.
+- `terraform fmt -check ecs.tf oidc.tf` et `terraform validate` réussis dans WSL, sans plan connecté à AWS.
+- `npm run build` réussi. `npm test -- --runInBand` : 132 suites et 1 373 tests réussis ; 7 suites / 157 tests ignorés, dont les tests PostgreSQL nécessitant une activation explicite. Aucun test de déploiement réel ni vérification de l'état AWS.
+- `git diff --check` et contrôle documentaire `check-infra-documentation.sh HEAD WORKTREE` réussis.
+
 ## INFRA-2026-10-07-001 — Déploiement financier en phases, images immuables et reprise
 
+- **Entrée historique : orchestration CI/CD et changements Terraform annulés le 8 octobre 2026 ; voir `INFRA-2026-10-08-002`.** Le code/migrations applicatifs de cette transition n'ont pas été supprimés.
 - **Statut : code local seulement.** Aucun `terraform apply`, déploiement ECS, changement SSM, migration RDS, crédit ou push réel pendant cette intervention.
 - Problème : l'ancien workflow installait les contrôles cash avant de remplacer les serveurs, et réutilisait `:latest`. Un service stable pouvait aussi être une ancienne version rétablie par ECS.
 - Fichiers : `.github/workflows/deploy.yml`, `infra-aws/scripts/deploy-resilient.cjs`, `ecs.tf`, `oidc.tf`, migration `1780000056000`, commandes `financial-rollout-cli` et tests associés. Les bonus, transferts, commissions sur toutes origines et autres évolutions applicatives sont conservés.

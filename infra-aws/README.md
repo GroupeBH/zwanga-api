@@ -6,6 +6,31 @@ Ce dossier provisionne l'infrastructure AWS du backend NestJS en Terraform. La v
 
 Chaque modification ou opération AWS doit être décrite dans le [journal détaillé](./docs/CHANGELOG.md) en suivant le [modèle de changement](./docs/change-template.md). Le [guide documentaire](./docs/README.md) précise le périmètre, les preuves attendues et les informations qui ne doivent jamais être copiées. Un contrôle GitHub Actions fait échouer la pull request et le déploiement AWS lorsque ce journal n'est pas mis à jour.
 
+## Retour au déploiement historique — 8 octobre 2026
+
+À la demande de l'utilisateur, le workflow de production et la configuration
+Terraform ont été remis à leur état du commit `6a45121`, avant l'orchestration
+de transition. Les fichiers de staging préparés localement ont été retirés.
+Cette modification concerne le dépôt uniquement : aucun changement AWS appliqué.
+
+Le pipeline publie de nouveau le tag du commit et `latest`, exécute les migrations
+TypeORM avec la définition ECS du service, puis force son redéploiement. Il
+n'exécute plus les étapes `prepare` / `activate`, ne fixe plus une image de secours
+par digest et n'attend plus explicitement l'arrêt de tous les anciens serveurs.
+
+**Limites à vérifier avant production :** les fonctionnalités et migrations
+applicatives récentes sont conservées. La migration `1780000056000` peut laisser
+`financial_rollout.enabled=false` lorsqu'aucun historique de commission cash
+n'existe ; l'ancien pipeline ne réalise pas l'activation différée. Un `/health`
+vert ne prouve pas que ces nouveaux contrôles cash sont actifs. Aucune activation
+ou modification financière n'a été effectuée pendant ce retour au CI/CD historique.
+Si la définition ECS réelle pointe déjà vers un digest ou un ancien tag de commit,
+republier `latest` et forcer un déploiement ne change pas cette image : vérifier
+la définition réellement utilisée, les migrations et les sauvegardes avant toute
+relance. Ne pas lancer de régression des migrations pour restaurer le pipeline.
+
+Voir le [journal de ce retour](./docs/CHANGELOG.md#infra-2026-10-08-002--retour-au-cicd-et-à-linfrastructure-antérieurs).
+
 ## Architecture
 
 ```text
@@ -126,7 +151,7 @@ terraform plan -out=tfplan
 terraform apply tfplan
 ```
 
-Le service ECS peut etre cree avant que l'image de bootstrap existe dans ECR, car `ecs_wait_for_steady_state = false` par defaut. Le workflow de transition financiere exige desormais un service existant sain pour identifier une image de secours fiable. Un environnement neuf ou arrete doit faire l'objet d'un bootstrap coordonne distinct ; ne pas contourner cette verification en production.
+Le service ECS peut etre cree avant que l'image `latest` existe dans ECR, car `ecs_wait_for_steady_state = false` par defaut. La premiere execution GitHub Actions pousse l'image et force ensuite un nouveau deploiement ECS.
 
 ### HTTPS pour `compute-api.zwanga-app.com`
 
@@ -281,8 +306,6 @@ terraform apply `
 
 ## 3. Pousser une premiere image si necessaire
 
-**Bootstrap neuf uniquement. Ne pas remplacer `latest` sur un environnement existant : utiliser le workflow par digest de la section suivante. Pousser une image ne suffit pas a preparer le schema ni a activer la politique financiere.**
-
 Depuis la racine `zwanga-backend` :
 
 ```bash
@@ -317,7 +340,7 @@ Dans `Settings > Secrets and variables > Actions > Variables`, creer :
 | `ECS_CLUSTER` | `terraform output -raw ecs_cluster_name` |
 | `ECS_SERVICE` | `terraform output -raw ecs_service_name` |
 
-Le workflow [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml) publie le tag du commit puis deploie par digest immuable, sans ecraser `latest`. Appliquer au prealable les modifications IAM/ECS d'un plan Terraform relu. Procedure et reprise : [transition financiere](docs/CHANGELOG.md#infra-2026-10-07-001--déploiement-financier-en-phases-images-immuables-et-reprise).
+Le workflow [`.github/workflows/deploy.yml`](../.github/workflows/deploy.yml) teste le backend, construit l'image, publie les tags du commit et `latest`, execute les migrations TypeORM dans une tache ECS temporaire, puis appelle `aws ecs update-service --force-new-deployment`.
 
 Ordre du deploiement :
 
@@ -325,14 +348,12 @@ Ordre du deploiement :
 tests
 build NestJS
 build/push Docker vers ECR
-verification du service sain et epinglage de son image actuelle
-tache ECS nouvelle image : assert-bootstrap + financial-rollout-cli prepare-legacy/prepare
-remplacement ECS par la nouvelle definition immuable
-verification de la version cible et arret effectif de toutes les anciennes taches
-tache ECS : financial-rollout-cli activate
+tache ECS temporaire : npm run database:assert-bootstrap:prod && npm run migration:run:prod
+ecs update-service --force-new-deployment
+wait services-stable
 ```
 
-La tache de migration utilise la nouvelle image et le dernier modele Terraform de la famille (variables SSM, roles, ressources et sidecars conserves), avec le reseau du service. Les migrations sont appliquees en une seule transaction ; les nouveaux controles cash restent en attente pendant le premier remplacement. Avant TypeORM, le controle de bootstrap verifie les tables importees de Neon (`users`, `trips`, `bookings`). Une base vide ne peut pas etre creee par ces migrations incrementales. Un serveur stable apres rollback n'est pas accepte comme la version cible. Apres activation financiere, ne pas revenir a une image pre-contrat ni annuler l'historique financier.
+La tache de migration reutilise la definition ECS du service. Elle recupere donc les memes variables SSM que l'application et accede a RDS avec les memes Security Groups. Avant TypeORM, elle verifie que RDS contient deja les tables de base importees depuis Neon (`users`, `trips`, `bookings`). Si RDS est vide, le workflow s'arrete avec un message clair : il faut importer Neon avant d'executer les migrations incrementales.
 
 ## Importer les donnees NeonDB vers AWS RDS
 
@@ -460,8 +481,8 @@ Important : l'ancien projet utilisait `TYPEORM_SYNCHRONIZE=true`. La base Neon c
 Apres l'import :
 
 - verifie les logs CloudWatch de la tache ;
-- etablis d'abord un service sain si c'est un bootstrap neuf, puis lance ou relance le workflow GitHub Actions sur `release` ;
-- le workflow executera le controle de bootstrap et la preparation transactionnelle avant remplacement, puis l'activation financiere apres arret des anciens serveurs ;
+- lance ou relance le workflow GitHub Actions sur `release` ;
+- le workflow executera `npm run database:assert-bootstrap:prod && npm run migration:run:prod` dans ECS avant de redeployer l'application ;
 - teste `/health`, login, recherche de trajets, wallet, paiements et tracking.
 
 Si tu ne redeploies pas immediatement via GitHub Actions, remets le service AWS a `1` :
