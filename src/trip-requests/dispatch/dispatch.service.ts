@@ -234,7 +234,8 @@ export class DriverDispatchService {
         .where('r.id = :requestId AND r.immediateDispatch = true AND r.status = :status', { requestId, status: TripRequestStatus.PENDING })
         .andWhere('r.departureDateMax > NOW()').setLock('pessimistic_write').setOnLocked('skip_locked').getOne();
       if (!request || !request.departurePoint) return;
-      await manager.getRepository(TripRequest).update(request.id, { dispatchCheckedAt: new Date() });
+      // Dispatch scheduling is not a user edit. Keep the form's optimistic version stable.
+      await manager.getRepository(TripRequest).update(request.id, { dispatchCheckedAt: new Date(), updatedAt: () => '"updatedAt"' });
       const [pending] = await manager.query(`SELECT id FROM trip_request_dispatch_offers WHERE "requestId" = $1 AND status = 'pending'`, [requestId]);
       if (pending) return;
       const candidates: { driverId: string; vehicleId: string; seats: number }[] = await manager.query(`

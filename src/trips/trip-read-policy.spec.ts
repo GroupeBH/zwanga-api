@@ -1,4 +1,4 @@
-import { publicTripResponse, tripResponseForViewer } from './trip-read-policy';
+import { isExpiredDeparture, publicTripResponse, tripResponseForViewer } from './trip-read-policy';
 import { SanitizedTrip, TripsService } from './trips.service';
 import { BookingStatus } from '../bookings/entities/booking.entity';
 
@@ -22,7 +22,7 @@ describe('Trip read privacy', () => {
     expect(result).not.toHaveProperty('driverSafetyEmergencyContactIds');
   });
   it('preserves the driver’s management data', () => {
-    expect(tripResponseForViewer(trip, 'driver', trip)).toBe(trip);
+    expect(tripResponseForViewer(trip, 'driver', trip)).toEqual({ ...trip, isExpired: false });
   });
   it('checks fresh ownership before reading a potentially privileged cached detail', async () => {
     const service: any = Object.create(TripsService.prototype);
@@ -41,5 +41,40 @@ describe('Trip read privacy', () => {
     const result = tripResponseForViewer(trip, 'passenger', { ...trip, status: 'completed' as any });
     expect(result.currentLocation).toBeNull();
     expect(result.status).toBe('completed');
+  });
+  it.each(['upcoming', 'completed'])('identifies a never-started expired %s departure without disclosing owner data', status => {
+    const expired = { ...trip, isPrivate: false, status, startedAt: null,
+      departureDate: new Date('2000-01-01T08:00:00Z'), canReprogram: true } as SanitizedTrip;
+    const publicView = tripResponseForViewer(expired, 'outsider', expired);
+    expect(publicView.isExpired).toBe(true);
+    expect(publicView).not.toHaveProperty('canReprogram');
+    expect(publicView.driver).not.toHaveProperty('phone');
+    expect(publicView.bookings).toEqual([]);
+    const ownerView = tripResponseForViewer(expired, 'driver', expired);
+    expect(ownerView).toMatchObject({ id: trip.id, isExpired: true, canReprogram: true });
+    expect(ownerView.bookings).toEqual(trip.bookings);
+  });
+  it.each([
+    ['ongoing', null, '2000-01-01'], ['cancelled', null, '2000-01-01'],
+    ['completed', new Date('2000-01-01'), '2000-01-01'], ['completed', undefined, '2000-01-01'],
+    ['upcoming', null, '2099-01-01'], ['upcoming', null, 'invalid'],
+  ])('does not mislabel %s with start %s and departure %s', (status, startedAt, departure) => {
+    expect(isExpiredDeparture({ ...trip, status, startedAt, departureDate: new Date(departure as string) } as SanitizedTrip)).toBe(false);
+  });
+  it('uses the current server status even when the detail cache still says upcoming', () => {
+    const stale = { ...trip, isPrivate: false, status: 'upcoming', startedAt: null,
+      departureDate: new Date('2000-01-01') } as SanitizedTrip;
+    const current = { ...stale, status: 'ongoing' } as SanitizedTrip;
+    expect(tripResponseForViewer(stale, 'outsider', current).isExpired).toBe(false);
+    expect(tripResponseForViewer(stale, 'driver', current).status).toBe('ongoing');
+  });
+  it('does not confuse a completed ride with an expired departure when the cache predates its start', () => {
+    const stale = { ...trip, isPrivate: false, status: 'upcoming', startedAt: null,
+      departureDate: new Date('2000-01-01'), canReprogram: true } as SanitizedTrip;
+    const current = { ...stale, status: 'completed', startedAt: new Date('2000-01-01T09:00:00Z') } as SanitizedTrip;
+    expect(tripResponseForViewer(stale, 'outsider', current).isExpired).toBe(false);
+    expect(tripResponseForViewer(stale, 'driver', current).canReprogram).toBe(false);
+    const rescheduled = { ...stale, departureDate: new Date('2099-01-01') };
+    expect(tripResponseForViewer(stale, 'outsider', rescheduled).isExpired).toBe(false);
   });
 });

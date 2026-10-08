@@ -3,6 +3,13 @@ import type { SanitizedTrip } from './trips.service';
 import { TripStatus } from './entities/trip.entity';
 import { BookingStatus } from '../bookings/entities/booking.entity';
 
+/** The expiry job stores never-started departures as completed; expose the distinction. */
+export function isExpiredDeparture(trip: Pick<SanitizedTrip, 'status' | 'startedAt' | 'departureDate'>, now = Date.now()): boolean {
+  if (trip.status !== TripStatus.PENDING && trip.status !== TripStatus.COMPLETED) return false;
+  if (trip.startedAt || (trip.status === TripStatus.COMPLETED && trip.startedAt !== null)) return false;
+  return new Date(trip.departureDate).getTime() < now;
+}
+
 export function publicTripResponse(trip: SanitizedTrip) {
   const driver = trip.driver;
   const vehicle = trip.vehicle;
@@ -15,6 +22,7 @@ export function publicTripResponse(trip: SanitizedTrip) {
     totalSeats: trip.totalSeats, availableSeats: trip.availableSeats, pricePerSeat: trip.pricePerSeat,
     isFree: trip.isFree, requiresPassengerKyc: trip.requiresPassengerKyc,
     description: trip.description, status: trip.status, isPrivate: trip.isPrivate,
+    isExpired: isExpiredDeparture(trip),
     isFeatured: trip.isFeatured, createdAt: trip.createdAt, updatedAt: trip.updatedAt,
     estimatedDurationSeconds: trip.estimatedDurationSeconds,
     previewArrivalDate: trip.previewArrivalDate, arrivalEstimateSource: trip.arrivalEstimateSource,
@@ -30,14 +38,20 @@ export function publicTripResponse(trip: SanitizedTrip) {
 }
 
 export function tripResponseForViewer(trip: SanitizedTrip, viewerId: string,
-  access: { driverId: string; isPrivate: boolean; status: TripStatus; bookings: { id: string; passengerId: string; status: BookingStatus }[] }) {
+  access: { driverId: string; isPrivate: boolean; status: TripStatus;
+    departureDate?: SanitizedTrip['departureDate']; startedAt?: SanitizedTrip['startedAt'];
+    bookings: { id: string; passengerId: string; status: BookingStatus }[] }) {
   const isDriver = access.driverId === viewerId;
   const ownBookings = access.bookings.filter(booking => booking.passengerId === viewerId);
   if (!viewerId || (access.isPrivate && !isDriver && !ownBookings.length)) {
     throw new ForbiddenException('Accès à ce trajet refusé.');
   }
-  if (isDriver) return trip;
-  const visible = { ...publicTripResponse(trip), isPrivate: access.isPrivate, status: access.status };
+  const currentTrip = { ...trip, status: access.status,
+    ...(access.departureDate !== undefined ? { departureDate: access.departureDate } : {}),
+    ...(access.startedAt !== undefined ? { startedAt: access.startedAt } : {}) };
+  if (isDriver) return { ...currentTrip, isExpired: isExpiredDeparture(currentTrip),
+    ...(trip.canReprogram !== undefined ? { canReprogram: trip.canReprogram && isExpiredDeparture(currentTrip) } : {}) };
+  const visible = { ...publicTripResponse(currentTrip), isPrivate: access.isPrivate };
   if (!ownBookings.length) return visible;
   const canTrack = ownBookings.some(booking => booking.status === BookingStatus.ACCEPTED);
   return {

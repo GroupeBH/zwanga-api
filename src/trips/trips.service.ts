@@ -1,5 +1,7 @@
 import { trustedContactMessagesEnabled } from '../safety/trusted-contact-policy';
 import { cancelEmptyRequestTrip } from './cancel-empty-request-trip';
+import { saveRequestTrip } from './save-request-trip';
+import { canReprogramTrip } from './trip-reprogram-policy';
 import {
   Injectable,
   NotFoundException,
@@ -149,6 +151,7 @@ export type SanitizedTrip = Omit<
   estimatedDurationSeconds?: number | null;
   previewArrivalDate?: string | null;
   arrivalEstimateSource?: string;
+  canReprogram?: boolean;
 };
 
 interface RecurringTripFutureMeta {
@@ -264,7 +267,7 @@ export class TripsService {
   async create(
     driverId: string,
     createTripDto: CreateTripDto,
-    options?: { isPrivate?: boolean; tripRequestId?: string },
+    options?: { isPrivate?: boolean; tripRequestId?: string; requestSnapshot?: TripRequest },
   ): Promise<SanitizedTrip> {
     const isFree = createTripDto.isFree ?? createTripDto.pricePerSeat === 0;
     const pricePerSeat = isFree ? 0 : createTripDto.pricePerSeat;
@@ -323,7 +326,9 @@ export class TripsService {
     });
 
     const savedTrip = options?.isPrivate
-      ? await this.tripRepository.save(trip)
+      ? options.requestSnapshot
+        ? await saveRequestTrip(this.tripRepository, trip, options.requestSnapshot)
+        : await this.tripRepository.save(trip)
       : (await savePublicationsWithPhotoPolicy(this.tripRepository, driverId, [trip]))[0];
     await this.invalidateTripCaches();
 
@@ -616,6 +621,7 @@ export class TripsService {
     if (!viewerId) throw new ForbiddenException('Accès à ce trajet refusé.');
     const access = await this.tripRepository.findOne({ where: { id },
       select: { id: true, driverId: true, isPrivate: true, status: true,
+        departureDate: true, startedAt: true,
         bookings: { id: true, passengerId: true, status: true } }, relations: ['bookings'] });
     if (!access) throw new NotFoundException('Trajet introuvable.');
     if (access.isPrivate && access.driverId !== viewerId &&
@@ -994,6 +1000,37 @@ export class TripsService {
     this.logger.log(`Trip ${tripId} is now public`);
 
     return this.findOne(tripId);
+  }
+
+  async reprogram(id: string, driverId: string, dto: UpdateTripDto): Promise<SanitizedTrip> {
+    const source = await this.tripRepository.findOne({ where: { id, driverId }, relations: ['bookings'] });
+    if (!source) throw new NotFoundException('Trajet non trouvé');
+    if (!canReprogramTrip(source) || (source.bookings ?? []).some(b =>
+      [BookingStatus.PENDING, BookingStatus.ACCEPTED].includes(b.status) || this.hasBookingEmbarked(b))) {
+      throw new BadRequestException('Seul un trajet public jamais démarré, sans réservation active, peut être reprogrammé.');
+    }
+    if (!dto.departureDate || !Number.isFinite(Date.parse(dto.departureDate)) || Date.parse(dto.departureDate) <= Date.now())
+      throw new BadRequestException('Choisissez une nouvelle date de départ dans le futur.');
+    if (dto.status !== undefined) throw new BadRequestException('La reprogrammation crée un nouveau trajet à venir.');
+    // Reuse publication eligibility, photo, vehicle, quota and financial checks.
+    // The old trip/bookings/payments remain untouched, even if publication fails.
+    const price = dto.pricePerSeat ?? Number(source.pricePerSeat);
+    return this.create(driverId, {
+      departureDate: dto.departureDate,
+      departureLocation: dto.departureLocation ?? source.departureLocation,
+      departureReference: dto.departureReference ?? source.departureReference ?? undefined,
+      departureCoordinates: dto.departureCoordinates ?? (dto.departureLocation || dto.departureReference !== undefined ? undefined : this.pointToCoordinates(source.departurePoint) ?? undefined),
+      arrivalLocation: dto.arrivalLocation ?? source.arrivalLocation,
+      arrivalReference: dto.arrivalReference ?? source.arrivalReference ?? undefined,
+      arrivalCoordinates: dto.arrivalCoordinates ?? (dto.arrivalLocation || dto.arrivalReference !== undefined ? undefined : this.pointToCoordinates(source.arrivalPoint) ?? undefined),
+      totalSeats: dto.totalSeats ?? source.totalSeats ?? source.availableSeats,
+      vehicleId: dto.vehicleId ?? source.vehicleId ?? undefined,
+      pricePerSeat: price,
+      isFree: dto.isFree ?? price === 0,
+      requiresPassengerKyc: dto.requiresPassengerKyc ?? source.requiresPassengerKyc,
+      acceptedPaymentModes: dto.acceptedPaymentModes ?? source.acceptedPaymentModes,
+      description: dto.description ?? source.description ?? undefined,
+    });
   }
 
   async update(
@@ -3374,6 +3411,8 @@ export class TripsService {
       bookings: sanitizedBookings,
       vehicle: sanitizedVehicle,
       isFeatured: driverPremium.featuredTripsEnabled,
+      canReprogram: canReprogramTrip(trip) && Array.isArray(bookings) && !bookings.some(b =>
+        [BookingStatus.PENDING, BookingStatus.ACCEPTED].includes(b.status) || this.hasBookingEmbarked(b)),
       ...await getTripRoutePreview(this.cacheService, trip),
     } as SanitizedTrip;
   }

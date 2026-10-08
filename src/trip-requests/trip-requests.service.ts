@@ -4,6 +4,7 @@ import {
   BadRequestException,
   Logger,
   ForbiddenException,
+  ConflictException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import {
@@ -36,7 +37,7 @@ import {
 import { FileUploadService } from '../common/services/file-upload.service';
 import { NotificationService } from '../notifications/notifications.service';
 import { TripsService } from '../trips/trips.service';
-import { TripStatus } from '../trips/entities/trip.entity';
+import { Trip, TripStatus } from '../trips/entities/trip.entity';
 import { BookingsService } from '../bookings/bookings.service';
 import { BookingStatus } from '../bookings/entities/booking.entity';
 import { GoogleMapsService } from '../google-maps/google-maps.service';
@@ -49,6 +50,7 @@ import { TripRequestRecoveryService } from './trip-request-recovery.service';
 import { KycStatus } from '../users/entities/kyc-document.entity';
 import { assertDriverCanOperate } from '../users/driver-activation';
 import { DriverDispatchService } from './dispatch/dispatch.service';
+import { ACCEPTED_REQUEST_EXPIRATION_MS, UNACCEPTED_REQUEST_EXPIRATION_MS, assertRequestSnapshot, assertUnassignedRequest } from './request-edit-policy';
 
 export interface SanitizedUser {
   id: string;
@@ -173,8 +175,8 @@ export interface TripRequestVehicleOptionsResponse {
 export class TripRequestsService {
   private readonly logger = new Logger(TripRequestsService.name);
   private readonly MAX_SEATS_WITHOUT_APPROVED_KYC = 2;
-  private readonly UNACCEPTED_REQUEST_EXPIRATION_MS = 30 * 1000;
-  private readonly ACCEPTED_REQUEST_EXPIRATION_MS = 2 * 60 * 60 * 1000;
+  private readonly UNACCEPTED_REQUEST_EXPIRATION_MS = UNACCEPTED_REQUEST_EXPIRATION_MS;
+  private readonly ACCEPTED_REQUEST_EXPIRATION_MS = ACCEPTED_REQUEST_EXPIRATION_MS;
   private readonly EXPIRATION_WARNING_MS = 30 * 60 * 1000;
   private readonly RECOMMENDED_PRICE_PER_KM_PER_PASSENGER_BY_VEHICLE_TYPE: Record<
     VehicleType,
@@ -434,6 +436,7 @@ export class TripRequestsService {
     passengerId: string,
     tripRequestId: string,
     updateTripRequestDto: UpdateTripRequestDto,
+    adminId?: string,
   ): Promise<SanitizedTripRequest> {
     this.logger.log(
       `Updating trip request ${tripRequestId} by passenger ${passengerId}`,
@@ -453,14 +456,14 @@ export class TripRequestsService {
       );
     }
 
-    await this.expireRequests([tripRequest]);
-
-    if (tripRequest.immediateDispatch) {
-      throw new BadRequestException('Annulez la recherche en cours puis créez une nouvelle demande pour modifier ses conditions.');
+    const reopening = tripRequest.status === TripRequestStatus.EXPIRED || this.shouldExpireRequest(tripRequest, new Date());
+    if (reopening && (!updateTripRequestDto.departureDateMin || !updateTripRequestDto.departureDateMax ||
+      new Date(updateTripRequestDto.departureDateMin).getTime() <= Date.now())) {
+      throw new BadRequestException('Pour reprogrammer cette demande expirée, choisissez un nouveau créneau dans le futur.');
     }
 
-    // Check if trip request can be updated (only PENDING or OFFERS_RECEIVED, no driver selected)
-    if (tripRequest.status === TripRequestStatus.DRIVER_SELECTED) {
+    // Editing/reopening never changes an existing driver or trip assignment.
+    if (tripRequest.status === TripRequestStatus.DRIVER_SELECTED || tripRequest.selectedDriverId || tripRequest.tripId) {
       this.logger.warn(
         `Trip request update failed: Driver already selected for trip request ${tripRequestId}`,
       );
@@ -470,14 +473,13 @@ export class TripRequestsService {
     }
 
     if (
-      tripRequest.status === TripRequestStatus.CANCELLED ||
-      tripRequest.status === TripRequestStatus.EXPIRED
+      tripRequest.status === TripRequestStatus.CANCELLED
     ) {
       this.logger.warn(
         `Trip request update failed: Trip request ${tripRequestId} is ${tripRequest.status}`,
       );
       throw new BadRequestException(
-        'Vous ne pouvez pas modifier une demande annulée ou expirée',
+        'Vous ne pouvez pas modifier une demande annulée',
       );
     }
 
@@ -495,19 +497,31 @@ export class TripRequestsService {
       );
     }
 
+    const snapshot = { ...tripRequest };
+    for (const field of ['departureLocation', 'arrivalLocation', 'departureDateMin', 'departureDateMax', 'numberOfSeats', 'vehicleType', 'paymentMode'] as const) {
+      if (updateTripRequestDto[field] === null)
+        throw new BadRequestException(`Le champ ${field} ne peut pas être null.`);
+    }
+    for (const field of ['departureLocation', 'arrivalLocation'] as const) {
+      if (updateTripRequestDto[field] !== undefined && !updateTripRequestDto[field]!.trim())
+        throw new BadRequestException('Indiquez une adresse de départ et une adresse d’arrivée.');
+    }
+    if (updateTripRequestDto.expectedUpdatedAt &&
+        new Date(updateTripRequestDto.expectedUpdatedAt).getTime() !== new Date(snapshot.updatedAt).getTime()) {
+      throw new ConflictException('La demande a changé depuis son ouverture. Actualisez-la avant de réessayer.');
+    }
     const {
       departureCoordinates,
       arrivalCoordinates,
       departureDateMin,
       departureDateMax,
       vehicleType,
-      ...rest
     } = updateTripRequestDto;
 
     const resultingNumberOfSeats =
       updateTripRequestDto.numberOfSeats ?? tripRequest.numberOfSeats;
     const resultingVehicleType = vehicleType ?? tripRequest.vehicleType;
-    if (resultingNumberOfSeats < 1) {
+    if (!Number.isInteger(resultingNumberOfSeats) || resultingNumberOfSeats < 1 || updateTripRequestDto.numberOfSeats === null) {
       throw new BadRequestException('Le nombre de places doit être au moins 1');
     }
     await this.ensurePassengerKycForExtraSeatsById(
@@ -577,13 +591,13 @@ export class TripRequestsService {
         : tripRequest.departureDateMax;
 
       // Validate dates
-      if (minDate >= maxDate) {
+      if (!Number.isFinite(minDate.getTime()) || !Number.isFinite(maxDate.getTime()) || minDate >= maxDate) {
         throw new BadRequestException(
           'La date de départ minimum doit être antérieure à la date maximum',
         );
       }
 
-      if (minDate < new Date()) {
+      if (minDate.getTime() !== snapshot.departureDateMin.getTime() && minDate < new Date()) {
         throw new BadRequestException(
           'La date de départ minimum ne peut pas être dans le passé',
         );
@@ -616,10 +630,46 @@ export class TripRequestsService {
       tripRequest.description = updateTripRequestDto.description;
     }
 
-    const updated = await this.tripRequestRepository.save(tripRequest);
-    this.logger.log(`Trip request updated: ${updated.id}`);
-
-    return this.findOne(updated.id, passengerId);
+    // Persist only editable fields: never write a stale status/assignment snapshot.
+    const editable = ['departureLocation', 'departureReference', 'departurePoint',
+      'arrivalLocation', 'arrivalReference', 'arrivalPoint', 'departureDateMin', 'departureDateMax',
+      'numberOfSeats', 'maxPricePerSeat', 'vehicleType', 'paymentMode', 'description'] as const;
+    const patch: Partial<Pick<TripRequest, typeof editable[number] | 'immediateDispatch' | 'expirationNotificationSent'>> = {};
+    for (const field of editable) {
+      if (JSON.stringify(tripRequest[field]) !== JSON.stringify(snapshot[field]))
+        Object.assign(patch, { [field]: tripRequest[field] });
+    }
+    if (!Object.keys(patch).length && !reopening) return this.findOne(tripRequestId, passengerId);
+    // Rescheduling a proximity search outside its immediate horizon makes it a classic request.
+    if (tripRequest.immediateDispatch && (reopening || tripRequest.departureDateMin.getTime() > Date.now() + 10 * 60_000 ||
+      tripRequest.departureDateMax.getTime() > Date.now() + 60 * 60_000)) patch.immediateDispatch = false;
+    if (reopening || patch.departureDateMax) patch.expirationNotificationSent = false;
+    await this.tripRequestRepository.manager.transaction(async (manager) => {
+      const requests = manager.getRepository(TripRequest);
+      const current = await requests.findOne({ where: { id: tripRequestId }, lock: { mode: 'pessimistic_write' } });
+      assertRequestSnapshot(current, snapshot);
+      assertUnassignedRequest(current!, Date.now(), true);
+      // Trip creation may have committed before the request's tripId is filled.
+      const linked = await manager.getRepository(Trip).exists({ where: {
+        tripRequestId, status: In([TripStatus.PENDING, TripStatus.ACTIVE, TripStatus.COMPLETED]),
+      } });
+      const offers = manager.getRepository(DriverOffer);
+      if (linked || await offers.exists({ where: { tripRequestId, status: DriverOfferStatus.ACCEPTED } }))
+        throw new ConflictException('Une prise en charge existe déjà pour cette demande.');
+      // Validate the resulting schedule too: an edit cannot create an expired request.
+      assertUnassignedRequest({ ...current!, ...patch, status: TripRequestStatus.PENDING });
+      await offers.update({ tripRequestId, status: DriverOfferStatus.PENDING },
+        { status: DriverOfferStatus.REJECTED, rejectedAt: new Date() });
+      if (current!.immediateDispatch) {
+        await manager.createQueryBuilder().update('trip_request_dispatch_offers')
+          .set({ status: 'cancelled' }).where('"requestId" = :id AND status = :status',
+            { id: tripRequestId, status: 'pending' }).execute();
+      }
+      await requests.update(tripRequestId, { ...patch, status: TripRequestStatus.PENDING });
+    });
+    this.logger.log(`Trip request updated: ${tripRequestId}${adminId ? ` by admin ${adminId}` : ''}`);
+    if (tripRequest.immediateDispatch && patch.immediateDispatch !== false) void this.driverDispatch?.tick();
+    return this.findOne(tripRequestId, passengerId);
   }
 
   private async notifyDriversAboutTripRequest(
@@ -1037,15 +1087,18 @@ export class TripRequestsService {
       proposedDepartureDate: proposedDate,
     });
 
-    const saved = await this.driverOfferRepository.save(offer);
-
-    // Update trip request status (only update status field to avoid relation sync issues)
-    if (tripRequest.status === TripRequestStatus.PENDING) {
-      await this.tripRequestRepository.update(
-        { id: tripRequestId },
-        { status: TripRequestStatus.OFFERS_RECEIVED },
-      );
-    }
+    const saved = await this.tripRequestRepository.manager.transaction(async (manager) => {
+      const requests = manager.getRepository(TripRequest);
+      const current = await requests.findOne({ where: { id: tripRequestId }, lock: { mode: 'pessimistic_write' } });
+      assertRequestSnapshot(current, tripRequest);
+      assertUnassignedRequest(current!);
+      const offers = manager.getRepository(DriverOffer);
+      if (await offers.exists({ where: { tripRequestId, driverId, status: DriverOfferStatus.PENDING } }))
+        throw new ConflictException('Vous avez déjà une offre en attente pour cette demande.');
+      const result = await offers.save(offer);
+      await requests.update(tripRequestId, { status: TripRequestStatus.OFFERS_RECEIVED });
+      return result;
+    });
 
     this.logger.log(`Driver offer created: ${saved.id}`);
 
@@ -1240,34 +1293,28 @@ export class TripRequestsService {
       });
     }
 
-    // Accept the offer
-    offer.status = DriverOfferStatus.ACCEPTED;
-    offer.acceptedAt = new Date();
-    await this.driverOfferRepository.save(offer);
-
-    // Reject all other pending offers
-    const otherOffers =
-      tripRequest.driverOffers?.filter(
-        (o) =>
-          o.id !== acceptDto.offerId && o.status === DriverOfferStatus.PENDING,
-      ) || [];
-
-    for (const otherOffer of otherOffers) {
-      otherOffer.status = DriverOfferStatus.REJECTED;
-      otherOffer.rejectedAt = new Date();
-      await this.driverOfferRepository.save(otherOffer);
-    }
-
-    // Update trip request
-    tripRequest.status = TripRequestStatus.DRIVER_SELECTED;
-    tripRequest.selectedDriverId = offer.driverId;
-    tripRequest.selectedVehicleId = offer.vehicleId;
-    tripRequest.selectedPricePerSeat = offer.pricePerSeat;
-    tripRequest.selectedDriverRequiresPassengerKyc = offer.requiresPassengerKyc;
-    tripRequest.selectedAt = new Date();
-    tripRequest.driverPickupOverdueNotifiedAt = null;
-
-    await this.tripRequestRepository.save(tripRequest);
+    await this.tripRequestRepository.manager.transaction(async (manager) => {
+      const requests = manager.getRepository(TripRequest);
+      const current = await requests.findOne({ where: { id: tripRequestId }, lock: { mode: 'pessimistic_write' } });
+      assertRequestSnapshot(current, tripRequest);
+      assertUnassignedRequest(current!);
+      if (await manager.getRepository(Trip).exists({ where: { tripRequestId,
+        status: In([TripStatus.PENDING, TripStatus.ACTIVE, TripStatus.COMPLETED]) } }))
+        throw new ConflictException('Une prise en charge existe déjà pour cette demande.');
+      const offers = manager.getRepository(DriverOffer);
+      const acceptedAt = new Date();
+      const result = await offers.update({ id: offer.id, tripRequestId, status: DriverOfferStatus.PENDING },
+        { status: DriverOfferStatus.ACCEPTED, acceptedAt });
+      if (result.affected !== 1) throw new ConflictException('Cette offre a changé. Actualisez la demande.');
+      await offers.update({ tripRequestId, status: DriverOfferStatus.PENDING },
+        { status: DriverOfferStatus.REJECTED, rejectedAt: acceptedAt });
+      await requests.update(tripRequestId, {
+        status: TripRequestStatus.DRIVER_SELECTED, selectedDriverId: offer.driverId,
+        selectedVehicleId: offer.vehicleId, selectedPricePerSeat: offer.pricePerSeat,
+        selectedDriverRequiresPassengerKyc: offer.requiresPassengerKyc,
+        selectedAt: acceptedAt, driverPickupOverdueNotifiedAt: null,
+      });
+    });
 
     this.logger.log(
       `Driver offer ${acceptDto.offerId} accepted for trip request ${tripRequestId}`,
@@ -1624,6 +1671,7 @@ export class TripRequestsService {
       {
         isPrivate: true, // Trajet privé par défaut
         tripRequestId: tripRequest.id,
+        requestSnapshot: tripRequest,
       },
     );
 
@@ -2797,7 +2845,7 @@ export class TripRequestsService {
   /**
    * Cron job to mark expired trip requests
    * Runs every thirty seconds. Deadlines start at departureDateMax:
-   * thirty seconds without acceptance, two hours once accepted.
+   * three hours without acceptance, two hours once accepted.
    * Only the request is expired; linked trips/bookings/payments stay intact.
    */
   @Cron(CronExpression.EVERY_30_SECONDS, { waitForCompletion: true })
@@ -2809,7 +2857,7 @@ export class TripRequestsService {
 
     const now = new Date();
     const latestAcceptedDepartureCutoff = new Date(
-      now.getTime() - this.UNACCEPTED_REQUEST_EXPIRATION_MS,
+      now.getTime() - Math.min(this.UNACCEPTED_REQUEST_EXPIRATION_MS, this.ACCEPTED_REQUEST_EXPIRATION_MS),
     );
 
     const expirationCandidates = await this.tripRequestRepository.find({
@@ -2900,8 +2948,9 @@ export class TripRequestsService {
           await this.notifyPassengerAboutUpcomingExpiration(tripRequest);
 
           // Mark notification as sent
-          tripRequest.expirationNotificationSent = true;
-          await this.tripRequestRepository.save(tripRequest);
+          await this.tripRequestRepository.update({ id: tripRequest.id,
+            departureDateMax: tripRequest.departureDateMax, status: tripRequest.status },
+          { expirationNotificationSent: true, updatedAt: () => '"updatedAt"' });
         } catch (error) {
           this.logger.error(
             `Error notifying passenger about trip request expiration ${tripRequest.id}: ${error.message}`,

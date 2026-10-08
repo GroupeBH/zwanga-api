@@ -229,6 +229,14 @@ export class TripsController {
     return this.tripsService.findOneForViewer(id, req.user.userId);
   }
 
+  @Post(':id/reprogram')
+  @Auth()
+  @SensitiveThrottle(5, 60000)
+  @ApiOperation({ summary: 'Reprogrammer un trajet expiré en nouvelle publication, sans reprendre ses réservations' })
+  async reprogram(@Request() req, @Param('id') id: string, @Body() dto: UpdateTripDto) {
+    return this.tripsService.reprogram(id, req.user.userId, dto);
+  }
+
   @Put(':id')
   @Auth()
   @SensitiveThrottle(10, 60000)
