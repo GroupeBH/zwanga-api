@@ -605,6 +605,17 @@ export class DiditKycService {
       );
 
       if (!isStalePendingEvent) {
+        if (kycDocument.status !== mappedStatus) {
+          // A provider decision must not be attributed to an earlier admin.
+          // Keep the last decision date through pending states, then advance it
+          // only on a new terminal decision (never on a repeated sync/webhook).
+          kycDocument.reviewedBy = null;
+          if (mappedStatus !== KycStatus.PENDING) {
+            kycDocument.reviewedAt = new Date(
+              Math.max(now.getTime(), (kycDocument.reviewedAt?.getTime() ?? 0) + 1),
+            );
+          }
+        }
         kycDocument.status = mappedStatus;
         kycDocument.rejectionReason =
           mappedStatus === KycStatus.REJECTED

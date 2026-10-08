@@ -38,6 +38,7 @@ import { CacheService } from '../common/services/cache.service';
 import { WalletLedgerEntry } from '../wallet/entities/wallet-ledger-entry.entity';
 import { WalletService } from '../wallet/wallet.service';
 import { ReferralsService } from '../referrals/referrals.service';
+import { DRIVER_FINANCE } from '../driver-finance/driver-finance.policy';
 
 export interface PremiumSubscriptionFeatures {
   isActive: boolean;
@@ -111,42 +112,16 @@ export class SubscriptionsService implements OnModuleInit {
   }
 
   async createTrial(userId: string): Promise<Subscription> {
-    this.logger.log(`Creating trial subscription for user: ${userId}`);
-
-    const user = await this.getDriverUser(userId);
-    await this.ensureNoActiveSubscription(
-      userId,
-      'Vous avez déjà un abonnement actif',
-    );
-
-    const trialPeriodDays = this.getNumberConfig('TRIAL_PERIOD_DAYS', 7);
-    const startDate = new Date();
-    const endDate = new Date();
-    endDate.setDate(endDate.getDate() + trialPeriodDays);
-
-    const subscription = this.subscriptionRepository.create({
-      userId: user.id,
-      plan: SubscriptionPlan.PRO,
-      status: SubscriptionStatus.ACTIVE,
-      startDate,
-      endDate,
-      amount: 0,
-      currency: this.getSubscriptionCurrency(),
-      premiumBadgeEnabled: true,
-      featuredTripsEnabled: true,
-      documentFundingEnabled: false,
-      documentFundingLimit: 0,
-      documentFundingCurrency: this.getDocumentFundingCurrency(),
-      isTrial: true,
-    });
-
-    const savedSubscription =
-      await this.subscriptionRepository.save(subscription);
+    await this.getDriverUser(userId);
+    // Kept for existing mobile clients. The first completed ride fixes the clock;
+    // calling this endpoint cannot move it forward or renew an expired trial.
+    const [first] = await this.subscriptionRepository.manager.query(`SELECT MIN(COALESCE(b."droppedOffAt", b."createdAt")) AS started
+      FROM bookings b JOIN trips t ON t.id = b."tripId" WHERE t."driverId" = $1 AND b.status = 'completed'`, [userId]);
+    if (!first?.started) throw new BadRequestException('Votre essai Pro de 30 jours démarre automatiquement à la fin de votre premier trajet conducteur.');
+    const [claim] = await this.subscriptionRepository.manager.query('SELECT zwanga_start_driver_trial($1, $2) AS id', [userId, first.started]);
+    if (!claim?.id) throw new BadRequestException('Cet essai a déjà été utilisé ou un abonnement Pro est déjà actif.');
+    const savedSubscription = await this.subscriptionRepository.findOneByOrFail({ id: claim.id });
     await this.invalidatePremiumCaches();
-
-    this.logger.log(
-      `Trial subscription created successfully: ${savedSubscription.id} for user ${userId} (${trialPeriodDays} days)`,
-    );
     return savedSubscription;
   }
 
@@ -157,6 +132,10 @@ export class SubscriptionsService implements OnModuleInit {
     return [
       {
         plan: SubscriptionPlan.PRO,
+        durationDays: DRIVER_FINANCE.durationDays,
+        trialDays: DRIVER_FINANCE.durationDays,
+        commissionRate: DRIVER_FINANCE.commissionRate,
+        cashCommissionRequiresPurchasedTokens: true,
         amount: this.getSubscriptionPrice(),
         currency: this.getSubscriptionCurrency(),
         premiumBadgeEnabled: true,
@@ -1047,14 +1026,7 @@ export class SubscriptionsService implements OnModuleInit {
   }
 
   private getSubscriptionPrice(): number {
-    return this.getFirstNumberConfig(
-      [
-        'SUBSCRIPTION_PRO_PRICE',
-        'SUBSCRIPTION_PRO_PRICE_USD',
-        'SUBSCRIPTION_PRICE',
-      ],
-      2,
-    );
+    return DRIVER_FINANCE.proPrice;
   }
 
   private getSubscriptionPointsPriceForPlans(): number | null {
@@ -1066,24 +1038,8 @@ export class SubscriptionsService implements OnModuleInit {
   }
 
   private getSubscriptionPointsPrice(): number {
-    const explicitPointsPrice = this.getOptionalFirstNumberConfig([
-      'SUBSCRIPTION_PRO_PRICE_POINTS',
-      'SUBSCRIPTION_PRICE_POINTS',
-    ]);
-    if (explicitPointsPrice !== null && explicitPointsPrice > 0) {
-      return this.roundMoney(explicitPointsPrice);
-    }
-
     const subscriptionPrice = this.getSubscriptionPrice();
     const subscriptionCurrency = this.getSubscriptionCurrency();
-    const pointsPerCurrencyUnit = this.getOptionalFirstNumberConfig([
-      `SUBSCRIPTION_POINTS_PER_${subscriptionCurrency}`,
-      `ZWANGA_POINTS_PER_${subscriptionCurrency}`,
-    ]);
-    if (pointsPerCurrencyUnit !== null && pointsPerCurrencyUnit > 0) {
-      return this.roundMoney(subscriptionPrice * pointsPerCurrencyUnit);
-    }
-
     return this.walletService.convertMoneyToPoints(
       subscriptionPrice,
       subscriptionCurrency,
@@ -1092,10 +1048,7 @@ export class SubscriptionsService implements OnModuleInit {
 
   private calculateEndDate(startDate: Date): Date {
     const endDate = new Date(startDate);
-    endDate.setDate(
-      endDate.getDate() +
-        this.getNumberConfig('SUBSCRIPTION_PRO_DURATION_DAYS', 30),
-    );
+    endDate.setUTCDate(endDate.getUTCDate() + DRIVER_FINANCE.durationDays);
     return endDate;
   }
 
@@ -1111,27 +1064,7 @@ export class SubscriptionsService implements OnModuleInit {
   }
 
   private getSubscriptionCurrency(): string {
-    const explicitCurrency =
-      this.configService.get<string>('SUBSCRIPTION_PRO_CURRENCY')?.trim() ||
-      this.configService.get<string>('SUBSCRIPTION_CURRENCY')?.trim();
-
-    if (explicitCurrency) {
-      return explicitCurrency.toUpperCase();
-    }
-
-    const hasLegacyCdfPrice = Boolean(
-      this.configService.get<string | number>('SUBSCRIPTION_PRICE'),
-    );
-    const hasExplicitProPrice = Boolean(
-      this.configService.get<string | number>('SUBSCRIPTION_PRO_PRICE') ||
-      this.configService.get<string | number>('SUBSCRIPTION_PRO_PRICE_USD'),
-    );
-
-    if (hasLegacyCdfPrice && !hasExplicitProPrice) {
-      return 'CDF';
-    }
-
-    return this.DEFAULT_SUBSCRIPTION_CURRENCY;
+    return DRIVER_FINANCE.currency;
   }
 
   private getDocumentFundingCurrency(): string {

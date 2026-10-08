@@ -30,6 +30,15 @@ export enum TripRequestStatus {
 @Index(['departureDateMax'])
 @Index('IDX_trip_requests_vehicle_type', ['vehicleType'])
 export class TripRequest {
+  @Column({ type: 'smallint', default: 2, update: false })
+  cashCommissionPolicyVersion: number;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  dispatchCheckedAt: Date | null;
+
+  @Column({ default: false })
+  immediateDispatch: boolean;
+
   @PrimaryGeneratedColumn('uuid')
   id: string;
 

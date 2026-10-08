@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   Logger,
   NotFoundException,
@@ -36,6 +37,7 @@ import { NotificationService } from '../notifications/notifications.service';
 import { Subscription } from '../subscriptions/entities/subscription.entity';
 import { KycDocument, KycStatus } from '../users/entities/kyc-document.entity';
 import { User, UserStatus } from '../users/entities/user.entity';
+import { isAdminRole } from '../users/user-role.policy';
 import { RequestReferralWithdrawalDto } from './dto/referral.dto';
 import { HistoryPageQuery, historyContext, loadHistoryIds, orderHistory } from '../common/history-page';
 import { reconcileReferralRewards } from './reward-reconciliation';
@@ -84,6 +86,12 @@ interface ReferralRegistrationResult {
   } | null;
   referredFirstName: string;
   attributionBonusTokens: number;
+}
+
+interface AdminReferralAssignment {
+  adminId: string;
+  referrerUserId: string;
+  reason: string;
 }
 
 @Injectable()
@@ -222,9 +230,38 @@ export class ReferralsService implements OnModuleInit {
     };
   }
 
+  async attachUserByAdmin(
+    adminId: string,
+    userId: string,
+    referrerUserId: string,
+    requestedReason: string,
+  ) {
+    const admin = await this.userRepository.findOne({ where: { id: adminId } });
+    if (!admin || !isAdminRole(admin.role)) {
+      throw new ForbiddenException('Administrateur requis');
+    }
+    const reason = requestedReason.trim();
+    if (reason.length < 10 || reason.length > 300) {
+      throw new BadRequestException('Le motif doit contenir entre 10 et 300 caractères');
+    }
+    const result = await this.registerUserInternal(userId, {}, {
+      adminId, referrerUserId, reason,
+    });
+    await this.afterReferralAssignment(userId, result);
+    return {
+      attached: true,
+      newlyAttached: result.newlyAttached,
+      userId,
+      referrerUserId: result.profile.referredByUserId,
+      referredAt: result.profile.referredAt,
+      attributionBonusTokens: result.attributionBonusTokens,
+    };
+  }
+
   private async registerUserInternal(
     userId: string,
     attribution: ReferralRegistrationAttribution = {},
+    adminAssignment?: AdminReferralAssignment,
   ): Promise<ReferralRegistrationResult> {
     const normalizedCode = this.normalizeCode(attribution.referralCode);
     const normalizedToken = this.normalizeToken(attribution.referralToken);
@@ -234,15 +271,26 @@ export class ReferralsService implements OnModuleInit {
     );
 
     return this.dataSource.transaction(async (manager) => {
+      if (normalizedCode || normalizedToken || adminAssignment) {
+        // Serialize graph changes, including mobile attribution, so two
+        // simultaneous assignments cannot introduce a referral cycle.
+        await manager.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
+          'zwanga:referral-attribution',
+        ]);
+      }
       await this.lockReferralUser(manager, userId);
 
-      const user = await manager.findOne(User, { where: { id: userId } });
+      const user = await manager.findOne(User, {
+        where: { id: userId },
+        select: { id: true, firstName: true, fcmToken: true, isActive: true, status: true },
+      });
       if (!user) {
         throw new NotFoundException('Utilisateur introuvable');
       }
 
       let profile = await manager.findOne(ReferralProfile, {
         where: { userId },
+        lock: { mode: 'pessimistic_write' },
       });
       if (!profile) {
         profile = manager.create(ReferralProfile, {
@@ -266,7 +314,7 @@ export class ReferralsService implements OnModuleInit {
       let resolvedReferrer: ReferralRegistrationResult['referrer'] = null;
       let attributionBonusTokens = 0;
 
-      if (normalizedCode || normalizedToken) {
+      if (normalizedCode || normalizedToken || adminAssignment) {
         const codeProfile = normalizedCode
           ? await manager.findOne(ReferralProfile, {
               where: { code: normalizedCode },
@@ -287,37 +335,40 @@ export class ReferralsService implements OnModuleInit {
           );
         }
         const referrerProfile = tokenProfile ?? codeProfile;
-        const referrerUser = referrerProfile
+        const referrerUserId = adminAssignment?.referrerUserId ?? referrerProfile?.userId;
+        const referrerUser = referrerUserId
           ? await manager.findOne(User, {
-              where: { id: referrerProfile.userId },
+              where: { id: referrerUserId },
+              select: { id: true, firstName: true, fcmToken: true, isActive: true, status: true },
             })
           : null;
-        if (!referrerProfile || !this.isUserEligibleAsReferrer(referrerUser)) {
+        if (!referrerUserId || !this.isUserEligibleAsReferrer(referrerUser)) {
           throw new BadRequestException(
             'Code de parrainage invalide ou inactif',
           );
         }
         resolvedReferrer = {
-          userId: referrerProfile.userId,
+          userId: referrerUserId,
           firstName: referrerUser!.firstName,
           fcmToken: referrerUser!.fcmToken,
         };
 
         if (profile.referredByUserId) {
-          if (profile.referredByUserId !== referrerProfile.userId) {
+          if (profile.referredByUserId !== referrerUserId) {
             throw new BadRequestException(
               'Le parrain d’un compte déjà inscrit ne peut pas être modifié',
             );
           }
         } else {
-          if (referrerProfile.userId === userId) {
+          if (referrerUserId === userId) {
             throw new BadRequestException(
               'Vous ne pouvez pas utiliser votre propre code de parrainage',
             );
           }
-          profile.referredByUserId = referrerProfile.userId;
+          await this.assertNoReferralCycle(manager, userId, referrerUserId);
+          profile.referredByUserId = referrerUserId;
           profile.referredAt = new Date();
-          profile.attributionProvider = normalizedToken
+          profile.attributionProvider = adminAssignment ? 'admin' : normalizedToken
             ? this.resolveAttributionProvider(attribution)
             : 'legacy_code';
           profile.attributionLinkToken = normalizedToken;
@@ -335,6 +386,7 @@ export class ReferralsService implements OnModuleInit {
           manager,
           resolvedReferrer.userId,
           userId,
+          adminAssignment,
         );
       }
       return {
@@ -345,6 +397,21 @@ export class ReferralsService implements OnModuleInit {
         attributionBonusTokens,
       };
     });
+  }
+
+  private async assertNoReferralCycle(manager: EntityManager, userId: string, referrerUserId: string) {
+    const visited = new Set([userId]);
+    let ancestor: string | null = referrerUserId;
+    while (ancestor) {
+      if (visited.has(ancestor)) {
+        throw new BadRequestException('Ce rattachement créerait une boucle de parrainage');
+      }
+      visited.add(ancestor);
+      const profile = await manager.findOne(ReferralProfile, {
+        where: { userId: ancestor }, select: { referredByUserId: true },
+      });
+      ancestor = profile?.referredByUserId ?? null;
+    }
   }
 
   private async afterReferralAssignment(
@@ -359,7 +426,9 @@ export class ReferralsService implements OnModuleInit {
       `Referral attribution attached: referredUserId=${userId}, referrerUserId=${result.referrer.userId}, provider=${result.profile.attributionProvider}`,
     );
 
-    if (!result.referrer.fcmToken) {
+    // A credited attribution bonus already creates a durable financial push
+    // via its ledger entry, including for users without a current push token.
+    if (result.attributionBonusTokens > 0 || !result.referrer.fcmToken) {
       return;
     }
 
@@ -1436,6 +1505,7 @@ export class ReferralsService implements OnModuleInit {
     manager: EntityManager,
     referrerUserId: string,
     referredUserId: string,
+    adminAssignment?: AdminReferralAssignment,
   ): Promise<number> {
     const bonusTokens = this.getAttributionBonusTokens();
     if (bonusTokens <= 0) {
@@ -1473,7 +1543,9 @@ export class ReferralsService implements OnModuleInit {
       paymentTransactionId: null,
       sourceType: this.ATTRIBUTION_BONUS_SOURCE_TYPE,
       sourceEntityId: referredUserId,
-      description: `Bonus de ${bonusTokens} jetons pour le rattachement du filleul ${referredUserId}`,
+      description: adminAssignment
+        ? `Bonus de ${bonusTokens} jetons ; filleul ${referredUserId} ; admin ${adminAssignment.adminId} : ${adminAssignment.reason}`
+        : `Bonus de ${bonusTokens} jetons pour le rattachement du filleul ${referredUserId}`,
     });
     this.logger.log(
       `Referral attribution bonus credited: referrer=${referrerUserId}, referred=${referredUserId}, tokens=${bonusTokens}`,

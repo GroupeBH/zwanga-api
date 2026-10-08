@@ -45,6 +45,8 @@ import { createRedisCacheStore } from './common/utils/redis-cache-store';
 import { ReferralsModule } from './referrals/referrals.module';
 import { ActivityModule } from './activity/activity.module';
 import { ProServicesModule } from './pro-services/pro-services.module';
+import { AppUpdatesModule } from './app-updates/app-updates.module';
+import { DriverFinanceModule } from './driver-finance/driver-finance.module';
 
 @Module({
   imports: [
@@ -116,6 +118,8 @@ import { ProServicesModule } from './pro-services/pro-services.module';
     ReferralsModule,
     ActivityModule,
     ProServicesModule,
+    AppUpdatesModule,
+    DriverFinanceModule,
   ],
   controllers: [AppController],
   providers: [

@@ -289,6 +289,58 @@ retour mobile. Pour cette raison :
    rétrograde pas un dossier déjà terminal (`approved` ou `rejected`).
 5. Les webhooks répétés réécrivent le même état sans créer de doublon.
 
+## Notifications d'approbation — 7 octobre 2026
+
+Statut : correction backend locale, non déployée. Aucune nouvelle migration ni
+variable d'environnement pour cette correction ; le schéma d'outbox existant
+doit néanmoins être installé avec les migrations du lot.
+
+Le push `kyc_approved` est créé quand le KYC passe à `approved`, que la décision
+provienne de l'admin Zwanga, du webhook Didit ou de la synchronisation serveur
+Didit. Une insertion directement approuvée est également couverte. Le message
+est neutre quant au fournisseur : **Identité vérifiée** — « Votre identité a été
+vérifiée avec succès. Consultez votre profil pour voir les fonctionnalités
+disponibles. » Il ne promet pas l'activation d'un compte suspendu ou du profil
+conducteur. Les notifications de refus manuels sont conservées.
+
+1. L'admin ou Didit enregistre la décision sous verrou utilisateur puis dossier.
+2. Le subscriber TypeORM insère la notification dans la **même transaction**.
+   Un rollback annule aussi le message ; aucun push ne part avant le commit.
+3. `reviewedAt` identifie la décision terminale, y compris pour Didit, dont
+   `reviewedBy` reste nul lors d'une nouvelle décision. Une resynchronisation
+   identique ou la confirmation du même accord par un admin ne change pas cette
+   date et ne crée pas une seconde notification d'approbation.
+4. Le dispatcher passe toutes les 10 secondes. Il vérifie que le dossier est
+   toujours le dernier KYC de cet utilisateur, avec la même décision, puis
+   résout son token actuel et envoie via Expo/Firebase, **hors transaction**.
+5. Un échec d'envoi ne révoque pas le KYC. La reprise existante passe toutes les
+   5 minutes, pour les notifications de moins de 72 heures. Un token absent ou
+   ambigu empêche l'envoi ; l'app doit enregistrer un token valide et autorisé.
+6. Les approbations devenues obsolètes sont désactivées avant envoi/reprise.
+   La clé unique d'événement évite les doublons d'outbox ; elle ne constitue pas
+   une garantie de livraison physique « exactement une fois » par le fournisseur.
+
+Pour une approbation depuis la console Didit alors que l'app est fermée,
+configurer la destination HTTPS `/api/v1/users/kyc/didit/webhook`, l'événement
+`status.updated` et le secret de signature correspondant. Une session créée
+hors Zwanga doit être rattachée au bon utilisateur (`vendor_data` ou session
+déjà associée). Sans webhook reçu, le backend ne découvre le changement qu'à
+la prochaine synchronisation. Référence :
+[webhooks Didit](https://docs.didit.me/integration/webhooks).
+
+Pas de campagne rétroactive sur tous les dossiers déjà approuvés. Le bonus de
+bienvenue et sa notification restent séparés, avec leur éligibilité et leur
+déduplication existantes. Les endpoints et le type de push restent compatibles
+avec les clients existants ; aucune mise à jour mobile n'est requise pour
+l'envoi, sans garantir une nouvelle navigation dans les anciens builds.
+
+Vérifications ciblées : 58 tests unitaires (admin, Didit, subscriber, dispatcher)
+et 27 tests PostgreSQL 18 sur un cluster local jetable, transports simulés.
+Suite backend complète : 1 363 tests réussis, 146 ignorés ; compilation réussie.
+Cas supplémentaires : approbation sans admin, répétition, confirmation manuelle,
+rollback, panne push puis reprise, décision révoquée/remplacée et nouveau dossier.
+Aucun appel réel à Didit/Expo/Firebase et aucun test sur téléphone physique.
+
 ## Impact financier
 
 Aucun montant, taux, commission, solde ou conversion ne change.

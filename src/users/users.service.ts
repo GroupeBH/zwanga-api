@@ -43,6 +43,7 @@ import { UserRole } from './entities/user.entity';
 import { SubscriptionsService } from '../subscriptions/subscriptions.service';
 import { assertSelfServiceUserRole, isAdminRole } from './user-role.policy';
 import { activateRequestedDriver } from './driver-activation';
+import { accountReservesPhone } from './registration-phone.policy';
 import { buildProfileState, LATEST_IDENTITY_ORDER } from './profile-state';
 import {
   areLegalNamesEquivalent,
@@ -893,15 +894,27 @@ export class UsersService {
   }
 
   async updateFcmToken(userId: string, fcmToken: string): Promise<void> {
+    if (typeof fcmToken !== 'string' || !/^[\x21-\x7E]{1,1024}$/.test(fcmToken)) {
+      throw new BadRequestException('Identifiant de notification invalide.');
+    }
     this.logger.debug(`Updating FCM token for user: ${userId}`);
 
-    const user = await this.findOne(userId);
-    if (user.fcmToken === fcmToken) {
-      this.logger.debug(`FCM token already up to date for user: ${userId}`);
-      return;
-    }
-
-    await this.userRepository.update(userId, { fcmToken });
+    await this.userRepository.manager.transaction(async manager => {
+      // Serialize device ownership changes across backend replicas, never over HTTP.
+      await manager.query('SELECT pg_advisory_xact_lock(782341, 1)');
+      const users = manager.getRepository(User);
+      const current = await users.findOne({ where: { id: userId }, select: ['id', 'fcmToken'] });
+      if (!current) throw new NotFoundException('Utilisateur non trouvé');
+      await manager.query(`DELETE FROM driver_notification_clients WHERE "userId" IN (
+        SELECT id FROM users WHERE ("fcmToken" = $1 AND id <> $2)
+        OR (id = $2 AND "fcmToken" IS DISTINCT FROM $1))`, [fcmToken, userId]);
+      await manager.query(`DELETE FROM app_update_clients WHERE "userId" IN (
+        SELECT id FROM users WHERE ("fcmToken" = $1 AND id <> $2)
+        OR (id = $2 AND "fcmToken" IS DISTINCT FROM $1))`, [fcmToken, userId]);
+      await users.createQueryBuilder().update(User).set({ fcmToken: null })
+        .where('"fcmToken" = :fcmToken AND id <> :userId', { fcmToken, userId }).execute();
+      await users.update(userId, { fcmToken });
+    });
 
     this.logger.debug(`FCM token updated for user: ${userId}`);
   }
@@ -918,15 +931,16 @@ export class UsersService {
       `Sending phone verification OTP to: ${sendOtpDto.phone} (context: ${sendOtpDto.context})`,
     );
 
-    // Check if phone number already exists in database
+    const phone = sendOtpDto.phone.trim();
+    // An inactive/suspended historical account must not block a fresh signup.
+    // The phone is released atomically at registration, not during this check.
     const existingUser = await this.userRepository.findOne({
-      where: { phone: sendOtpDto.phone },
+      where: { phone },
     });
 
     // Different logic based on context
     if (sendOtpDto.context === PhoneVerificationContext.REGISTRATION) {
-      // For registration: if user exists, return error
-      if (existingUser) {
+      if (accountReservesPhone(existingUser)) {
         this.logger.warn(
           `Registration failed: Phone ${sendOtpDto.phone} already exists`,
         );
@@ -938,8 +952,8 @@ export class UsersService {
       sendOtpDto.context === PhoneVerificationContext.LOGIN ||
       sendOtpDto.context === PhoneVerificationContext.UPDATE
     ) {
-      // For login or update: if user doesn't exist, return error
-      if (!existingUser) {
+      // Login/update cannot verify or reactivate an unavailable old account.
+      if (!accountReservesPhone(existingUser)) {
         this.logger.warn(
           `Login/Update failed: Phone ${sendOtpDto.phone} not found`,
         );
@@ -950,7 +964,7 @@ export class UsersService {
     }
 
     // The configured OTP provider sends the code; registration remains optional.
-    await this.otpService.sendOtp(sendOtpDto.phone.trim());
+    await this.otpService.sendOtp(phone);
 
     this.logger.log(
       `Phone verification OTP sent successfully to ${sendOtpDto.phone} (context: ${sendOtpDto.context})`,
@@ -985,7 +999,12 @@ export class UsersService {
     // prove a later signup without a bound proof token, so keep that signup
     // pending until its account completes a phone OTP verification.
     await this.userRepository.update(
-      { phone: verifyOtpDto.phone, isPhoneVerified: false, isActive: true },
+      {
+        phone: verifyOtpDto.phone.trim(),
+        isPhoneVerified: false,
+        isActive: true,
+        status: Not(In([UserStatus.INACTIVE, UserStatus.SUSPENDED])),
+      },
       { isPhoneVerified: true },
     );
 

@@ -598,7 +598,8 @@ describe('ReferralsService', () => {
         sourceEntityId: 'existing-user',
       }),
     );
-    expect(notificationService.sendNotification).toHaveBeenCalledTimes(1);
+    // The transactional ledger subscriber owns the credited bonus notification.
+    expect(notificationService.sendNotification).not.toHaveBeenCalled();
     expect(manager.query).toHaveBeenCalledWith(
       'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
       ['zwanga:referral-user:existing-user'],
@@ -618,7 +619,7 @@ describe('ReferralsService', () => {
       expect.objectContaining({ attached: true, newlyAttached: false }),
     );
     expect(account.availableTokens).toBe(5);
-    expect(notificationService.sendNotification).toHaveBeenCalledTimes(1);
+    expect(notificationService.sendNotification).not.toHaveBeenCalled();
   });
 
   it('never replaces the referrer of an existing account', async () => {

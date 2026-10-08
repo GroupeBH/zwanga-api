@@ -1,4 +1,5 @@
 import { FillTotalSeats1780000000000 } from './1780000000000-FillTotalSeats';
+import { AddAppUpdates1780000049000 } from './1780000049000-AddAppUpdates';
 import { AddFinancialHistoryIndexes1780000040000 } from './1780000040000-AddFinancialHistoryIndexes';
 import { AddProServices1780000041000 } from './1780000041000-AddProServices';
 import { AddPawapayPaymentProvider1780000042000 } from './1780000042000-AddPawapayPaymentProvider';
@@ -47,6 +48,18 @@ import { AddExplicitDriverActivation1780000043000 } from './1780000043000-AddExp
 import { AddDriverPublicationPhotoPolicy1780000044000 } from './1780000044000-AddDriverPublicationPhotoPolicy';
 
 import { AddDriverPayoutRecovery1780000046000 } from './1780000046000-AddDriverPayoutRecovery';
+import { AddTransactionalNotifications1780000047000 } from './1780000047000-AddTransactionalNotifications';
+
+import { AddDriverDispatch1780000048000 } from './1780000048000-AddDriverDispatch';
+import { DriverCashCommissions1780000050000 } from './1780000050000-DriverCashCommissions';
+import { HardenPushOwnershipAndPriority1780000051000 } from './1780000051000-HardenPushOwnershipAndPriority';
+import { AddVerifiedWelcomeBonus1780000052000 } from './1780000052000-AddVerifiedWelcomeBonus';
+import { CashCommissionCredit1780000053000 } from './1780000053000-CashCommissionCredit';
+import { PrioritizeDriverWelcomeBonus1780000054000 } from './1780000054000-PrioritizeDriverWelcomeBonus';
+import { CashCommissionAllTokenOrigins1780000055000 } from './1780000055000-CashCommissionAllTokenOrigins';
+import { StageFinancialRollout1780000056000 } from './1780000056000-StageFinancialRollout';
+import { FixPublicationRequestUuid1780000057000 } from './1780000057000-FixPublicationRequestUuid';
+import { FixBookingRequestUuid1780000058000 } from './1780000058000-FixBookingRequestUuid';
 
 export const databaseMigrations = [
   FillTotalSeats1780000000000,
@@ -95,4 +108,16 @@ export const databaseMigrations = [
   AddDriverPublicationPhotoPolicy1780000044000,
   AddPawapayRefunds1780000045000,
   AddDriverPayoutRecovery1780000046000,
+  AddTransactionalNotifications1780000047000,
+  AddDriverDispatch1780000048000,
+  AddAppUpdates1780000049000,
+  DriverCashCommissions1780000050000,
+  HardenPushOwnershipAndPriority1780000051000,
+  AddVerifiedWelcomeBonus1780000052000,
+  CashCommissionCredit1780000053000,
+  PrioritizeDriverWelcomeBonus1780000054000,
+  CashCommissionAllTokenOrigins1780000055000,
+  StageFinancialRollout1780000056000,
+  FixPublicationRequestUuid1780000057000,
+  FixBookingRequestUuid1780000058000,
 ];

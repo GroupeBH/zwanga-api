@@ -8,6 +8,7 @@ import { WalletController } from './wallet.controller';
 import { WalletService } from './wallet.service';
 import { WalletWithdrawalsService } from './wallet-withdrawals.service';
 import { WalletWithdrawal } from './entities/wallet-withdrawal.entity';
+import { WelcomeBonusService } from './welcome-bonus.service';
 
 @Module({
   imports: [
@@ -20,7 +21,7 @@ import { WalletWithdrawal } from './entities/wallet-withdrawal.entity';
     PaymentsModule,
   ],
   controllers: [WalletController],
-  providers: [WalletService, WalletWithdrawalsService],
+  providers: [WalletService, WalletWithdrawalsService, WelcomeBonusService],
   exports: [WalletService],
 })
 export class WalletModule {}

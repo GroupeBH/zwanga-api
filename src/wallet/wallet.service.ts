@@ -44,7 +44,7 @@ import {
   TransferWalletPointsDto,
 } from './dto/wallet.dto';
 import { User } from '../users/entities/user.entity';
-import { isSuperAdminRole } from '../users/user-role.policy';
+import { isAdminRole } from '../users/user-role.policy';
 import { applyTokenMovement, refundablePurchasedTokens } from './wallet-origin';
 import { hasVerifiedWalletTopUpProof } from '../payments/wallet-topup-proof';
 import { loadWalletLedgerPage } from './wallet-ledger-page';
@@ -153,7 +153,7 @@ export class WalletService implements OnModuleInit {
         moneyPerToken: this.convertPointsToMoney(1, currency),
         minimumTokens: 1,
         availableMoney: this.convertPointsToMoney(
-          Number(account.withdrawableBalance ?? 0),
+          Math.max(0, Math.min(Number(account.withdrawableBalance ?? 0), Number(account.balance) - Number(account.reservedCashCommissionBalance ?? 0))),
           currency,
         ),
         nonWithdrawableTokens: this.roundMoney(
@@ -187,6 +187,7 @@ export class WalletService implements OnModuleInit {
 
     if (
       !Number.isFinite(amount) ||
+      amount !== Number(requestedAmount) ||
       amount === 0 ||
       Math.abs(amount) > 1_000_000
     ) {
@@ -204,21 +205,22 @@ export class WalletService implements OnModuleInit {
       this.userRepository.findOne({ where: { id: adminId } }),
       this.userRepository.findOne({ where: { id: userId } }),
     ]);
-    if (!admin || !isSuperAdminRole(admin.role)) {
-      throw new ForbiddenException('Super administrateur requis');
+    if (!admin || !isAdminRole(admin.role)) {
+      throw new ForbiddenException('Administrateur requis');
     }
     if (!targetUser) {
       throw new NotFoundException('Utilisateur introuvable');
     }
 
     return this.dataSource.transaction(async (manager) => {
-      const account = await manager.findOne(WalletAccount, {
-        where: { userId, type: WalletAccountType.POINTS },
+      // Lock the user even when the wallet has not been created yet.
+      // The same order is used by loyalty credits and purchased-token withdrawals.
+      await manager.findOne(User, {
+        where: { id: userId },
+        select: { id: true },
         lock: { mode: 'pessimistic_write' },
       });
-      if (!account) {
-        throw new NotFoundException('Portefeuille de jetons introuvable');
-      }
+      const account = await this.getOrCreateAccountWithManager(manager, userId);
 
       const existingEntry = await manager.findOne(WalletLedgerEntry, {
         where: {
@@ -228,9 +230,13 @@ export class WalletService implements OnModuleInit {
         },
       });
       if (existingEntry) {
-        if (existingEntry.userId !== userId) {
+        if (
+          existingEntry.userId !== userId ||
+          Number(existingEntry.amount) !== amount ||
+          existingEntry.description !== `Ajustement par admin ${adminId}: ${reason}`
+        ) {
           throw new BadRequestException(
-            "L'identifiant de demande est déjà associé à un autre portefeuille",
+            "L'identifiant de demande est déjà associé à un autre ajustement",
           );
         }
         return account;

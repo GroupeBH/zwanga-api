@@ -5,7 +5,10 @@ import {
   UserStatus,
 } from '../users/entities/user.entity';
 import { KycStatus } from '../users/entities/kyc-document.entity';
-import { parseAdminUserSegment } from './dto/admin-users.dto';
+import {
+  parseAdminUserSegment,
+  parseRegistrationRange,
+} from './dto/admin-users.dto';
 import { parseKycStatus } from './dto/admin-kyc.dto';
 import { AdminService } from './admin.service';
 import { QUALIFIED_DRIVER_CONDITION } from './qualified-driver';
@@ -47,6 +50,30 @@ describe('parseAdminUserSegment', () => {
   it('rejects unsupported roles', () => {
     expect(() => parseAdminUserSegment('admin')).toThrow(BadRequestException);
     expect(() => parseAdminUserSegment('driver ')).toThrow(BadRequestException);
+  });
+});
+
+describe('parseRegistrationRange', () => {
+  it('treats empty values as no filter', () => {
+    expect(parseRegistrationRange(undefined, '')).toEqual({
+      from: undefined,
+      to: undefined,
+    });
+  });
+
+  it('bounds Kinshasa calendar days, end exclusive', () => {
+    const range = parseRegistrationRange('2026-10-01', '2026-10-07');
+    expect(range.from?.toISOString()).toBe('2026-09-30T23:00:00.000Z');
+    expect(range.to?.toISOString()).toBe('2026-10-07T23:00:00.000Z');
+  });
+
+  it('rejects an inverted range and an impossible day', () => {
+    expect(() => parseRegistrationRange('2026-10-08', '2026-10-01')).toThrow(
+      BadRequestException,
+    );
+    expect(() => parseRegistrationRange('2026-02-31', undefined)).toThrow(
+      BadRequestException,
+    );
   });
 });
 
@@ -165,6 +192,21 @@ describe('AdminService user listing and export', () => {
     );
     expect(usersQuery.skip).toHaveBeenCalledWith(0);
     expect(usersQuery.take).toHaveBeenCalledWith(10);
+  });
+
+  it('limits the list to the Kinshasa registration days requested', async () => {
+    usersQuery.getManyAndCount.mockResolvedValue([[], 0]);
+
+    await service.getAllUsers(1, 10, undefined, '2026-10-01', '2026-10-01');
+
+    expect(usersQuery.andWhere).toHaveBeenCalledWith(
+      'user.createdAt >= :registeredFrom',
+      { registeredFrom: new Date('2026-10-01T00:00:00+01:00') },
+    );
+    expect(usersQuery.andWhere).toHaveBeenCalledWith(
+      'user.createdAt < :registeredTo',
+      { registeredTo: new Date('2026-10-02T00:00:00+01:00') },
+    );
   });
 
   it('exports non-drivers and annotates qualification flags', async () => {

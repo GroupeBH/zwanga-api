@@ -14,6 +14,7 @@ export enum WalletAccountType {
 }
 
 @Entity('wallet_accounts')
+@Check('CHK_wallet_cash_reserve', '"reservedCashCommissionBalance" >= 0 AND "reservedCashCommissionBalance" <= balance')
 @Unique('UQ_wallet_accounts_user_type', ['userId', 'type'])
 @Index(['userId', 'type'])
 @Check('CHK_wallet_accounts_balance_non_negative', '"balance" >= 0')
@@ -39,6 +40,9 @@ export class WalletAccount {
 
   @Column({ type: 'decimal', precision: 12, scale: 2, default: 0 })
   reservedWithdrawalBalance: number;
+
+  @Column({ type: 'decimal', precision: 12, scale: 2, default: 0 })
+  reservedCashCommissionBalance: number;
 
   // Provider contradictions require reconciliation before any further debit.
   @Column({ type: 'boolean', default: false })

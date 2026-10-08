@@ -43,6 +43,7 @@ import { sumConfirmedDriverCash } from './driver-cash-summary';
 import { loadHistoryPage, type HistoryPageDto } from '../common/pagination/history-page';
 import { DriverPayoutEvent } from './entities/driver-payout-event.entity';
 import { payoutRecoveryState, payoutReviewDelay } from './driver-payout-recovery.policy';
+import { DRIVER_FINANCE } from '../driver-finance/driver-finance.policy';
 
 export interface DriverSettlementSummary {
   availableBalance: number;
@@ -90,7 +91,6 @@ export type DriverPayoutResponse = DriverPayout & {
 export class DriverSettlementsService implements OnModuleInit {
   private readonly logger = new Logger(DriverSettlementsService.name);
   private readonly PAYOUT_RELATED_ENTITY_TYPE = 'driver_payout';
-  private readonly DEFAULT_COMMISSION_RATE = 0.05;
   private readonly DEFAULT_CURRENCY = 'CDF';
   private readonly DEFAULT_MINIMUM_PAYOUT_AMOUNT = 1;
   private readonly ORPHAN_PAYOUT_GRACE_MS = 15 * 60 * 1000;
@@ -312,7 +312,7 @@ export class DriverSettlementsService implements OnModuleInit {
         continue;
       }
 
-      const netAmount = this.roundMoney(grossAmount * (1 - commissionRate));
+      const netAmount = this.roundMoney(grossAmount - this.bookingCommission(booking, grossAmount, commissionRate));
       if (!earning && booking.paymentStatus === BookingPaymentStatus.SUCCEEDED) {
         creditPendingAmount += netAmount;
       } else if (!earning && booking.paymentMode === TripPaymentMode.ELECTRONIC) {
@@ -592,7 +592,7 @@ export class DriverSettlementsService implements OnModuleInit {
     }
 
     const commissionRate = this.resolveDriverEarningCommissionRate(booking);
-    const commissionAmount = this.roundMoney(grossAmount * commissionRate);
+    const commissionAmount = this.bookingCommission(booking, grossAmount, commissionRate);
     const netAmount = this.roundMoney(grossAmount - commissionAmount);
 
     if (!booking.trip?.driverId) {
@@ -627,6 +627,17 @@ export class DriverSettlementsService implements OnModuleInit {
       throw new BadRequestException(
         `Aucun gain conducteur attendu pour la réservation ${booking.id}`,
       );
+    }
+
+    if (booking.cashCommissionPolicyVersion === 0) {
+      // Historical ledger entries keep their recorded rate, even if an old
+      // environment override differed from today's fixed 5% policy.
+      const historicalRate = Number(earning.commissionRate);
+      if (Number.isFinite(historicalRate) && historicalRate >= 0 && historicalRate < 1) {
+        expectedEarning.commissionRate = historicalRate;
+        expectedEarning.commissionAmount = this.roundMoney(expectedEarning.grossAmount * historicalRate);
+        expectedEarning.netAmount = this.roundMoney(expectedEarning.grossAmount - expectedEarning.commissionAmount);
+      }
     }
 
     const expectedDriverId = booking.trip?.driverId;
@@ -699,6 +710,15 @@ export class DriverSettlementsService implements OnModuleInit {
     return booking.paymentMode === TripPaymentMode.CASH
       ? 0
       : this.getCommissionRate();
+  }
+
+  private bookingCommission(booking: Booking, grossAmount: number, rate: number): number {
+    // New bookings charge the PASSENGER payment, not Zwanga's subsidy, regardless
+    // of payment mode. Keep historical snapshots reconcilable without repricing.
+    const base = booking.cashCommissionPolicyVersion >= 1
+      ? Math.max(0, Math.min(grossAmount, Number(booking.paymentAmount ?? grossAmount)))
+      : grossAmount;
+    return this.roundMoney(base * rate);
   }
 
   async requestPayout(
@@ -1254,15 +1274,7 @@ export class DriverSettlementsService implements OnModuleInit {
   }
 
   private getCommissionRate(): number {
-    const raw =
-      this.configService.get<string | number>('ZWANGA_COMMISSION_RATE') ??
-      this.DEFAULT_COMMISSION_RATE;
-    const rate = Number(raw);
-    if (!Number.isFinite(rate) || rate < 0 || rate >= 1) {
-      return this.DEFAULT_COMMISSION_RATE;
-    }
-
-    return rate;
+    return DRIVER_FINANCE.commissionRate;
   }
 
   private getCurrency(): string {

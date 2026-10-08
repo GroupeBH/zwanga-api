@@ -1,5 +1,6 @@
 import { PhoneVerificationContext } from './dto/user.dto';
-import { UserRole } from './entities/user.entity';
+import { UserRole, UserStatus } from './entities/user.entity';
+import { In, Not } from 'typeorm';
 import { UsersService } from './users.service';
 
 describe('UsersService OTP routes', () => {
@@ -58,6 +59,7 @@ describe('UsersService OTP routes', () => {
         phone: '+243891234567',
         isPhoneVerified: false,
         isActive: true,
+        status: Not(In([UserStatus.INACTIVE, UserStatus.SUSPENDED])),
       },
       { isPhoneVerified: true },
     );
@@ -79,6 +81,86 @@ describe('UsersService OTP routes', () => {
     ).rejects.toThrow('Code OTP invalide ou expiré');
     expect(update).not.toHaveBeenCalled();
   });
+
+  it.each([
+    { status: UserStatus.INACTIVE, isActive: false },
+    { status: UserStatus.SUSPENDED, isActive: false },
+    { status: UserStatus.SUSPENDED, isActive: true },
+    { status: UserStatus.ACTIVE, isActive: false },
+  ])(
+    'allows registration OTP for an unavailable account (%j) without changing it',
+    async (account) => {
+      const sendOtp = jest.fn().mockResolvedValue({ success: true });
+      const update = jest.fn();
+      const service = {
+        logger: { log: jest.fn(), warn: jest.fn() },
+        userRepository: {
+          findOne: jest.fn().mockResolvedValue({ id: 'old-user', ...account }),
+          update,
+        },
+        otpService: { sendOtp },
+      } as unknown as UsersService;
+      await expect(
+        UsersService.prototype.sendPhoneVerificationOtp.call(service, {
+          phone: ' +243891234567 ',
+          context: PhoneVerificationContext.REGISTRATION,
+        }),
+      ).resolves.toMatchObject({
+        message: 'Code de vérification envoyé avec succès',
+      });
+      expect(sendOtp).toHaveBeenCalledWith('+243891234567');
+      expect(update).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([UserStatus.ACTIVE, UserStatus.PENDING_KYC])(
+    'keeps the phone reserved for an enabled %s account',
+    async (status) => {
+      const sendOtp = jest.fn();
+      const service = {
+        logger: { log: jest.fn(), warn: jest.fn() },
+        userRepository: {
+          findOne: jest
+            .fn()
+            .mockResolvedValue({ id: 'active-user', isActive: true, status }),
+        },
+        otpService: { sendOtp },
+      } as unknown as UsersService;
+      await expect(
+        UsersService.prototype.sendPhoneVerificationOtp.call(service, {
+          phone: '+243891234567',
+          context: PhoneVerificationContext.REGISTRATION,
+        }),
+      ).rejects.toThrow('déjà utilisé');
+      expect(sendOtp).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([PhoneVerificationContext.LOGIN, PhoneVerificationContext.UPDATE])(
+    'does not send a %s OTP to a disabled old account',
+    async (context) => {
+      const sendOtp = jest.fn();
+      const service = {
+        logger: { log: jest.fn(), warn: jest.fn() },
+        userRepository: {
+          findOne: jest
+            .fn()
+            .mockResolvedValue({
+              isActive: false,
+              status: UserStatus.SUSPENDED,
+            }),
+        },
+        otpService: { sendOtp },
+      } as unknown as UsersService;
+      await expect(
+        UsersService.prototype.sendPhoneVerificationOtp.call(service, {
+          phone: '+243891234567',
+          context,
+        }),
+      ).rejects.toThrow('Aucun compte');
+      expect(sendOtp).not.toHaveBeenCalled();
+    },
+  );
 
   it('signals the pending verification in the private profile', async () => {
     const user = {

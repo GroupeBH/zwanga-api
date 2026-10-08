@@ -7,6 +7,7 @@ import {
   Post,
   Request,
   Query,
+  UseInterceptors,
 } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Auth } from '../auth/decorators/auth.decorator';
@@ -21,9 +22,11 @@ import {
 import { WalletService } from './wallet.service';
 import { WalletWithdrawalsService } from './wallet-withdrawals.service';
 import { HistoryPageDto } from '../common/pagination/history-page';
+import { WalletCompatibilityInterceptor } from './wallet-compatibility.interceptor';
 
 @ApiTags('Wallet')
 @Controller('wallet')
+@UseInterceptors(WalletCompatibilityInterceptor)
 export class WalletController {
   constructor(
     private readonly walletService: WalletService,

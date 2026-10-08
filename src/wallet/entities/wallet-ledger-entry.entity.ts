@@ -24,6 +24,8 @@ export enum WalletLedgerEntryType {
   ADMIN_ADJUSTMENT = 'admin_adjustment',
   WITHDRAWAL = 'withdrawal',
   WITHDRAWAL_REFUND = 'withdrawal_refund',
+  CASH_COMMISSION = 'cash_commission',
+  CASH_COMMISSION_REFUND = 'cash_commission_refund',
 }
 
 @Entity('wallet_ledger_entries')

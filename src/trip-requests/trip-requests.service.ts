@@ -48,6 +48,7 @@ import { TripPaymentMode } from '../payments/enums/trip-payment-mode.enum';
 import { TripRequestRecoveryService } from './trip-request-recovery.service';
 import { KycStatus } from '../users/entities/kyc-document.entity';
 import { assertDriverCanOperate } from '../users/driver-activation';
+import { DriverDispatchService } from './dispatch/dispatch.service';
 
 export interface SanitizedUser {
   id: string;
@@ -106,6 +107,7 @@ export interface SanitizedDriverOfferWithTripRequest extends SanitizedDriverOffe
 }
 
 export interface SanitizedTripRequest {
+  immediateDispatch: boolean;
   id: string;
   passenger: SanitizedUser;
   departureLocation: string;
@@ -205,6 +207,7 @@ export class TripRequestsService {
     private subscriptionsService: SubscriptionsService,
     private weatherAwarenessService: WeatherAwarenessService,
     private tripRequestRecoveryService: TripRequestRecoveryService,
+    private driverDispatch?: DriverDispatchService,
   ) {}
 
   async create(
@@ -244,6 +247,11 @@ export class TripRequestsService {
     // Validate dates
     const minDate = new Date(departureDateMin);
     const maxDate = new Date(departureDateMax);
+
+    if (createTripRequestDto.immediateDispatch && (!this.driverDispatch?.enabled ||
+        minDate.getTime() > Date.now() + 10 * 60 * 1000 || maxDate.getTime() > Date.now() + 60 * 60 * 1000)) {
+      throw new BadRequestException('La recherche de proximité est réservée aux départs immédiats activés sur le serveur.');
+    }
 
     if (minDate >= maxDate) {
       throw new BadRequestException(
@@ -295,7 +303,8 @@ export class TripRequestsService {
     this.logger.log(`Trip request created: ${saved.id}`);
 
     // Notify all active drivers about the new trip request
-    await this.notifyDriversAboutTripRequest(saved);
+    if (saved.immediateDispatch) void this.driverDispatch?.tick();
+    else await this.notifyDriversAboutTripRequest(saved);
 
     return this.findOne(saved.id, passengerId);
   }
@@ -445,6 +454,10 @@ export class TripRequestsService {
     }
 
     await this.expireRequests([tripRequest]);
+
+    if (tripRequest.immediateDispatch) {
+      throw new BadRequestException('Annulez la recherche en cours puis créez une nouvelle demande pour modifier ses conditions.');
+    }
 
     // Check if trip request can be updated (only PENDING or OFFERS_RECEIVED, no driver selected)
     if (tripRequest.status === TripRequestStatus.DRIVER_SELECTED) {
@@ -702,7 +715,7 @@ export class TripRequestsService {
     // Filter out trip requests that have an accepted offer (even if status is not DRIVER_SELECTED yet)
     const visibleTripRequests = tripRequests.filter(
       (tr) =>
-        tr.status !== TripRequestStatus.EXPIRED && !this.hasAcceptedDriver(tr),
+        !tr.immediateDispatch && tr.status !== TripRequestStatus.EXPIRED && !this.hasAcceptedDriver(tr),
     );
 
     return Promise.all(
@@ -864,6 +877,10 @@ export class TripRequestsService {
     }
 
     await this.expireRequests([tripRequest]);
+
+    if (tripRequest.immediateDispatch) {
+      throw new BadRequestException('Répondez à la proposition de proximité qui vous a été personnellement adressée.');
+    }
 
     // Check if trip request status allows new offers
     if (tripRequest.status === TripRequestStatus.DRIVER_SELECTED) {
@@ -1192,6 +1209,9 @@ export class TripRequestsService {
       throw new BadRequestException("Cette demande n'accepte plus d'offres");
     }
 
+    if (tripRequest.immediateDispatch) {
+      throw new BadRequestException('La sélection du conducteur est gérée par la recherche de proximité.');
+    }
     const offer = tripRequest.driverOffers?.find(
       (o) => o.id === acceptDto.offerId,
     );
@@ -1367,15 +1387,26 @@ export class TripRequestsService {
     );
 
     // Create booking for the passenger automatically (ACCEPTED status)
-    await this.bookingsService.create(tripRequest.passengerId, {
-      tripId: trip.id,
-      numberOfSeats: tripRequest.numberOfSeats,
-      passengerOrigin: tripRequest.departureLocation,
-      passengerOriginReference: tripRequest.departureReference || undefined,
-      passengerDestination: tripRequest.arrivalLocation,
-      passengerDestinationReference: tripRequest.arrivalReference || undefined,
-      paymentMode: tripRequest.paymentMode,
-    });
+    try {
+      await this.bookingsService.create(tripRequest.passengerId, {
+        tripId: trip.id,
+        numberOfSeats: tripRequest.numberOfSeats,
+        passengerOrigin: tripRequest.departureLocation,
+        passengerOriginReference: tripRequest.departureReference || undefined,
+        passengerDestination: tripRequest.arrivalLocation,
+        passengerDestinationReference: tripRequest.arrivalReference || undefined,
+        paymentMode: tripRequest.paymentMode,
+      });
+    } catch (error) {
+      // A failed booking must not leave an empty upcoming trip on the driver's Home.
+      // A booking that actually committed (ambiguous response) is never cancelled here.
+      try {
+        await this.tripsService.cancelFailedRequestTrip(trip.id, driverId, tripRequest.id);
+      } catch {
+        this.logger.warn('Unable to cancel an empty request trip after booking failure');
+      }
+      throw error;
+    }
 
     // Accept the booking automatically
     const bookings = await this.bookingsService.findAllByTrip(
@@ -1439,6 +1470,10 @@ export class TripRequestsService {
     }
 
     await this.expireRequests([tripRequest]);
+
+    if (tripRequest.immediateDispatch) {
+      throw new BadRequestException('Répondez à votre proposition de proximité pour accepter cette demande.');
+    }
 
     // Check if trip request can be accepted
     if (tripRequest.status === TripRequestStatus.DRIVER_SELECTED) {
@@ -1593,15 +1628,24 @@ export class TripRequestsService {
     );
 
     // Create booking for the passenger automatically with the number of seats they requested
-    await this.bookingsService.create(tripRequest.passengerId, {
-      tripId: trip.id,
-      numberOfSeats: tripRequest.numberOfSeats, // Use the number of seats requested by the passenger
-      passengerOrigin: tripRequest.departureLocation,
-      passengerOriginReference: tripRequest.departureReference || undefined,
-      passengerDestination: tripRequest.arrivalLocation,
-      passengerDestinationReference: tripRequest.arrivalReference || undefined,
-      paymentMode: tripRequest.paymentMode,
-    });
+    try {
+      await this.bookingsService.create(tripRequest.passengerId, {
+        tripId: trip.id,
+        numberOfSeats: tripRequest.numberOfSeats,
+        passengerOrigin: tripRequest.departureLocation,
+        passengerOriginReference: tripRequest.departureReference || undefined,
+        passengerDestination: tripRequest.arrivalLocation,
+        passengerDestinationReference: tripRequest.arrivalReference || undefined,
+        paymentMode: tripRequest.paymentMode,
+      });
+    } catch (error) {
+      try {
+        await this.tripsService.cancelFailedRequestTrip(trip.id, driverId, tripRequest.id);
+      } catch {
+        this.logger.warn('Unable to cancel an empty request trip after booking failure');
+      }
+      throw error;
+    }
 
     // Accept the booking automatically
     const bookings = await this.bookingsService.findAllByTrip(
@@ -1691,6 +1735,19 @@ export class TripRequestsService {
       );
     }
 
+    if (tripRequest.immediateDispatch && !tripRequest.selectedDriverId) {
+      await this.tripRequestRepository.manager.transaction(async (manager) => {
+        const locked = await manager.getRepository(TripRequest).findOne({
+          where: { id: tripRequestId, passengerId }, lock: { mode: 'pessimistic_write' },
+        });
+        if (!locked || locked.selectedDriverId) {
+          throw new BadRequestException('Un conducteur vient de répondre. Actualisez la demande avant de l’annuler.');
+        }
+        await manager.getRepository(TripRequest).update(tripRequestId, { status: TripRequestStatus.CANCELLED });
+        await manager.query(`UPDATE trip_request_dispatch_offers SET status = 'cancelled' WHERE "requestId" = $1 AND status = 'pending'`, [tripRequestId]);
+      });
+      return;
+    }
     if (
       tripRequest.status === TripRequestStatus.DRIVER_SELECTED &&
       tripRequest.tripId
@@ -2377,6 +2434,7 @@ export class TripRequestsService {
 
     return {
       id: tripRequest.id,
+      immediateDispatch: tripRequest.immediateDispatch ?? false,
       passenger,
       // Authenticated drivers need exact pickup/drop-off points before accepting.
       // Contact disclosure is a separate, acceptance-dependent permission.

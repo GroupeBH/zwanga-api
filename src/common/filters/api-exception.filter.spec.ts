@@ -43,6 +43,32 @@ describe('ApiExceptionFilter', () => {
     jest.restoreAllMocks();
   });
 
+  it('turns a protected cash hold into an actionable conflict without leaking SQL', () => {
+    const { host, response } = createHttpHost();
+    filter.catch({ driverError: { code: '23514', constraint: 'CHK_wallet_cash_reserve', message: 'private balances' } }, host);
+    expect(response.status).toHaveBeenCalledWith(409);
+    expect(response.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'WALLET_FUNDS_RESERVED' }));
+    expect(JSON.stringify(response.json.mock.calls)).not.toContain('private balances');
+  });
+
+  it.each(['55P03', '40P01', '40001', '53300', '57P01', '08006'])('reports temporary database failure %s without retrying a financial operation', code => {
+    const { host, response } = createHttpHost();
+    filter.catch({ driverError: { code } }, host);
+    expect(response.status).toHaveBeenCalledWith(503);
+    expect(response.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'DATABASE_TEMPORARILY_UNAVAILABLE', message: expect.stringContaining('statut') }));
+  });
+
+  it('translates only known database business errors into actionable conflicts', () => {
+    const { host, response } = createHttpHost();
+    filter.catch({ driverError: { code: 'P0001', message: 'CASH_COMMISSION_INSUFFICIENT' } }, host);
+    expect(response.status).toHaveBeenCalledWith(409);
+    expect(response.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'CASH_COMMISSION_INSUFFICIENT', message: expect.stringContaining('5 %') }));
+    const unknown = createHttpHost();
+    filter.catch({ driverError: { code: 'P0001', message: 'private SQL detail' } }, unknown.host);
+    expect(unknown.response.status).toHaveBeenCalledWith(500);
+    expect(JSON.stringify(unknown.response.json.mock.calls)).not.toContain('private SQL detail');
+  });
+
   it('returns a stable, user-facing error for an incomplete request body', () => {
     const { host, response } = createHttpHost();
     const error = Object.assign(new Error('request aborted'), {

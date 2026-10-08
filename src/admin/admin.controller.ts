@@ -23,6 +23,7 @@ import { UpdateTripDto } from '../trips/dto/trip.dto';
 import { UpdateTripRequestDto } from '../trip-requests/dto/trip-request.dto';
 import { BookingStatus } from '../bookings/entities/booking.entity';
 import { AdminWalletAdjustmentDto } from './dto/admin-wallet.dto';
+import { AdminAttachReferrerDto } from './dto/admin-referral.dto';
 import { AdminReferralsService } from './admin-referrals.service';
 import { CreateAdminAccountDto, ResetAdminAccountPasswordDto } from './dto/admin-account.dto';
 import { spreadsheetHeaders, type SpreadsheetFile } from './spreadsheet';
@@ -115,8 +116,16 @@ export class AdminController {
     @Query('page') page: number = 1,
     @Query('limit') limit: number = 10,
     @Query('role') role?: string,
+    @Query('registeredFrom') registeredFrom?: string,
+    @Query('registeredTo') registeredTo?: string,
   ) {
-    return this.adminService.getAllUsers(page, limit, role);
+    return this.adminService.getAllUsers(
+      page,
+      limit,
+      role,
+      registeredFrom,
+      registeredTo,
+    );
   }
 
   @Get('users/export')
@@ -130,8 +139,14 @@ export class AdminController {
   async exportUsers(
     @Res({ passthrough: true }) res: Response,
     @Query('role') role?: string,
+    @Query('registeredFrom') registeredFrom?: string,
+    @Query('registeredTo') registeredTo?: string,
   ) {
-    const file = await this.adminService.exportUsersXls(role);
+    const file = await this.adminService.exportUsersXls(
+      role,
+      registeredFrom,
+      registeredTo,
+    );
     return this.sendSpreadsheet(res, file);
   }
 
@@ -289,7 +304,7 @@ export class AdminController {
 
   @Post('wallets/:userId/adjustments')
   @Auth()
-  @Roles(UserRole.SUPER_ADMIN)
+  @Roles(UserRole.ADMIN)
   @SensitiveThrottle(5, 60000)
   @ApiOperation({ summary: 'Apply an audited token balance adjustment' })
   async adjustWallet(
@@ -421,6 +436,41 @@ export class AdminController {
   })
   async getUserDetails(@Param('userId') userId: string) {
     return this.adminService.getUserDetails(userId);
+  }
+
+  @Get('users/:userId/financial-summary')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'Get token wallet, recent movements and current referrer for a user' })
+  async getUserFinancialSummary(@Param('userId', ParseUUIDPipe) userId: string) {
+    const [wallet, referral] = await Promise.all([
+      this.adminService.getUserWallet(userId),
+      this.adminReferralsService.getUserReferral(userId),
+    ]);
+    return { wallet, referral };
+  }
+
+  @Get('referrals/candidates')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(60, 60000)
+  @ApiOperation({ summary: 'Find active referrers by name, phone, email or user ID' })
+  searchReferrers(@Query('search') search?: string) {
+    return this.adminReferralsService.searchReferrers(search);
+  }
+
+  @Post('users/:userId/referrer')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(5, 60000)
+  @ApiOperation({ summary: 'Attach a first referrer with an audited, non-retroactive attribution bonus' })
+  attachUserReferrer(
+    @Request() req: AuthenticatedAdminRequest,
+    @Param('userId', ParseUUIDPipe) userId: string,
+    @Body() dto: AdminAttachReferrerDto,
+  ) {
+    return this.adminReferralsService.attachReferrer(req.user.userId, userId, dto.referrerUserId, dto.reason);
   }
 
   @Put('users/:userId/suspend')

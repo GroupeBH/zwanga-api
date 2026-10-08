@@ -48,6 +48,7 @@ import { provisionAdminAccount } from './admin-account.provisioning';
 import {
   AdminUserSegment,
   parseAdminUserSegment,
+  parseRegistrationRange,
 } from './dto/admin-users.dto';
 import {
   buildUsersSpreadsheet,
@@ -129,25 +130,39 @@ export class AdminService {
       throw new NotFoundException("Document de vérification d’identité introuvable.");
     }
 
-    kycDocument.status = approved ? KycStatus.APPROVED : KycStatus.REJECTED;
-    kycDocument.reviewedBy = adminId;
-    kycDocument.reviewedAt = new Date();
-    if (reason) {
-      kycDocument.rejectionReason = reason;
-    }
-
     return this.userRepository.manager.transaction(async (manager) => {
       const user = await manager.getRepository(User).findOne({
         where: { id: kycDocument.userId }, lock: { mode: 'pessimistic_write' },
       });
       if (!user) throw new NotFoundException('Utilisateur introuvable');
-      const saved = await manager.getRepository(KycDocument).save(kycDocument);
+      const documents = manager.getRepository(KycDocument);
+      const current = await documents.findOne({
+        where: { id: kycId }, lock: { mode: 'pessimistic_write' },
+      });
+      if (!current) throw new NotFoundException('Document de vérification introuvable');
+      const status = approved ? KycStatus.APPROVED : KycStatus.REJECTED;
+      // A repeated/concurrent admin decision is not a new identity event.
+      let saved = current;
+      if (current.status !== status || !current.reviewedBy) {
+        // Confirming an existing Didit decision keeps its notification valid
+        // and must not produce a second approval push.
+        if (current.status !== status || !current.reviewedAt) {
+          current.reviewedAt = new Date(
+            Math.max(Date.now(), (current.reviewedAt?.getTime() ?? 0) + 1),
+          );
+        }
+        current.status = status;
+        current.reviewedBy = adminId;
+        current.rejectionReason = approved ? null : reason ?? null;
+        saved = await documents.save(current);
+      }
       if (user.isActive && ![UserStatus.SUSPENDED, UserStatus.INACTIVE].includes(user.status)) {
         await manager.getRepository(User).update(user.id, {
           status: approved ? UserStatus.ACTIVE : UserStatus.PENDING_KYC,
         });
       }
       await activateRequestedDriver(manager, user.id);
+      saved.user = kycDocument.user;
       return saved;
     });
   }
@@ -209,14 +224,17 @@ export class AdminService {
     page: number = 1,
     limit: number = 10,
     role?: string,
+    registeredFrom?: string,
+    registeredTo?: string,
   ): Promise<{ users: Array<Record<string, unknown>>; total: number }> {
     const { pageNumber, pageSize } = this.normalizePagination(page, limit);
     const roleFilter = parseAdminUserSegment(role);
+    const registered = parseRegistrationRange(registeredFrom, registeredTo);
     this.logger.debug(
       `Fetching all users - Page: ${pageNumber}, Limit: ${pageSize}, Role: ${roleFilter ?? 'all'}`,
     );
 
-    const query = this.createUsersListQuery(roleFilter)
+    const query = this.createUsersListQuery(roleFilter, registered)
       .orderBy('user.createdAt', 'DESC')
       .skip((pageNumber - 1) * pageSize)
       .take(pageSize);
@@ -229,17 +247,22 @@ export class AdminService {
     };
   }
 
-  async exportUsersXls(role?: string): Promise<{
+  async exportUsersXls(
+    role?: string,
+    registeredFrom?: string,
+    registeredTo?: string,
+  ): Promise<{
     buffer: Buffer;
     filename: string;
     contentType: string;
   }> {
     const roleFilter = parseAdminUserSegment(role);
+    const registered = parseRegistrationRange(registeredFrom, registeredTo);
     this.logger.debug(
       `Exporting users spreadsheet - Role: ${roleFilter ?? 'all'}`,
     );
 
-    const users = await this.createUsersListQuery(roleFilter)
+    const users = await this.createUsersListQuery(roleFilter, registered)
       .orderBy('user.createdAt', 'DESC')
       .getMany();
     const serialized = await this.serializeUsersWithDriverQualification(users);
@@ -540,6 +563,20 @@ export class AdminService {
     );
   }
 
+  async getUserWallet(userId: string) {
+    const user = await this.userRepository.findOne({ where: { id: userId } });
+    if (!user) throw new NotFoundException('Utilisateur introuvable');
+    const [account, entries] = await Promise.all([
+      this.walletAccountRepository.findOne({ where: { userId, type: WalletAccountType.POINTS } }),
+      this.walletLedgerRepository.find({ where: { userId }, order: { createdAt: 'DESC' }, take: 20 }),
+    ]);
+    return {
+      account: account ? this.serializeWalletAccount({ ...account, user }) : null,
+      balance: Number(account?.balance ?? 0),
+      entries: entries.map((entry) => this.serializeWalletLedgerEntry(entry)),
+    };
+  }
+
   async adjustWallet(
     adminId: string,
     userId: string,
@@ -547,9 +584,9 @@ export class AdminService {
     reason: string,
     requestId: string,
   ) {
-    await this.ensureSuperAdmin(
+    await this.ensureAdmin(
       adminId,
-      'Only super admins can adjust a wallet balance',
+      'Only admins can adjust a wallet balance',
     );
     const account = await this.walletService.applyAdminAdjustment(
       adminId,
@@ -998,13 +1035,29 @@ export class AdminService {
     return account;
   }
 
-  private createUsersListQuery(roleFilter?: AdminUserSegment) {
-    const query = this.userRepository.createQueryBuilder('user');
-    if (!roleFilter) {
-      return query;
+  private createUsersListQuery(
+    roleFilter?: AdminUserSegment,
+    registered?: { from?: Date; to?: Date },
+  ) {
+    const query = roleFilter
+      ? applyAdminUserSegmentFilter(
+          this.userRepository.createQueryBuilder('user'),
+          roleFilter,
+        )
+      : this.userRepository.createQueryBuilder('user');
+
+    if (registered?.from) {
+      query.andWhere('user.createdAt >= :registeredFrom', {
+        registeredFrom: registered.from,
+      });
+    }
+    if (registered?.to) {
+      query.andWhere('user.createdAt < :registeredTo', {
+        registeredTo: registered.to,
+      });
     }
 
-    return applyAdminUserSegmentFilter(query, roleFilter);
+    return query;
   }
 
   private createKycListQuery(status?: KycStatus, search?: string) {
@@ -1327,6 +1380,9 @@ export class AdminService {
       userId: account.userId,
       type: account.type,
       balance: Number(account.balance),
+      withdrawableBalance: Number(account.withdrawableBalance ?? 0),
+      reservedWithdrawalBalance: Number(account.reservedWithdrawalBalance ?? 0),
+      withdrawalsBlocked: Boolean(account.withdrawalsBlocked),
       currency: account.currency,
       createdAt: account.createdAt,
       updatedAt: account.updatedAt,

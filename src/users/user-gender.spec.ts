@@ -47,7 +47,11 @@ describe('User gender', () => {
         Promise.resolve({ id: 'user-1', ...payload }),
       ),
       update: jest.fn().mockResolvedValue({ affected: 1 }),
+      manager: { transaction: jest.fn() },
     };
+    userRepository.manager.transaction.mockImplementation(callback => callback({
+      query: jest.fn().mockResolvedValue([]), getRepository: () => userRepository,
+    }));
     const jwtService = {
       signAsync: jest
         .fn()
@@ -69,6 +73,8 @@ describe('User gender', () => {
         assertReferralAttribution: jest.fn().mockResolvedValue(undefined),
         registerUser: jest.fn().mockResolvedValue(undefined),
       } as any,
+      {} as any,
+      {} as any,
     );
 
     try {
