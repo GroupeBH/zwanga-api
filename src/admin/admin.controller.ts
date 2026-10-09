@@ -25,6 +25,7 @@ import { BookingStatus } from '../bookings/entities/booking.entity';
 import { AdminWalletAdjustmentDto } from './dto/admin-wallet.dto';
 import { AdminAttachReferrerDto } from './dto/admin-referral.dto';
 import { AdminReferralsService } from './admin-referrals.service';
+import { TripStatementService } from './trip-statement.service';
 import { CreateAdminAccountDto, ResetAdminAccountPasswordDto } from './dto/admin-account.dto';
 import { spreadsheetHeaders, type SpreadsheetFile } from './spreadsheet';
 
@@ -38,6 +39,7 @@ export class AdminController {
   constructor(
     private readonly adminService: AdminService,
     private readonly adminReferralsService: AdminReferralsService,
+    private readonly tripStatementService: TripStatementService,
   ) {}
 
   private sendSpreadsheet(res: Response, file: SpreadsheetFile) {
@@ -510,6 +512,15 @@ export class AdminController {
     @Query('limit') limit: number = 10,
   ) {
     return this.adminService.getAllTrips(page, limit);
+  }
+
+  @Get('trips/:tripId/statement')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'Trip detail with the gain of each party' })
+  getTripStatement(@Param('tripId', ParseUUIDPipe) tripId: string) {
+    return this.tripStatementService.getStatement(tripId);
   }
 
   @Get('trips/export')

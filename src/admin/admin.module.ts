@@ -22,6 +22,8 @@ import { ReferralAccount } from '../referrals/entities/referral-account.entity';
 import { ReferralProfile } from '../referrals/entities/referral-profile.entity';
 import { ReferralReward } from '../referrals/entities/referral-reward.entity';
 import { ReferralWithdrawal } from '../referrals/entities/referral-withdrawal.entity';
+import { DriverEarning } from '../driver-settlements/entities/driver-earning.entity';
+import { TripStatementService } from './trip-statement.service';
 
 @Module({
   imports: [
@@ -40,6 +42,7 @@ import { ReferralWithdrawal } from '../referrals/entities/referral-withdrawal.en
       ReferralWithdrawal,
       TripRequest,
       DriverOffer,
+      DriverEarning,
     ]),
     TripsModule,
     BookingsModule,
@@ -48,7 +51,7 @@ import { ReferralWithdrawal } from '../referrals/entities/referral-withdrawal.en
     ReferralsModule,
   ],
   controllers: [AdminController],
-  providers: [AdminService, AdminReferralsService],
+  providers: [AdminService, AdminReferralsService, TripStatementService],
   exports: [AdminService],
 })
 export class AdminModule {}

@@ -3,6 +3,7 @@ import {
   UnauthorizedException,
   Logger,
   BadRequestException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -64,6 +65,7 @@ const APPLE_PUBLIC_KEYS_URL = 'https://appleid.apple.com/auth/keys';
 const APPLE_KEYS_CACHE_MS = 6 * 60 * 60 * 1000;
 const TOKEN_CLOCK_TOLERANCE_SECONDS = 300;
 const PIN_RESET_TOKEN_TTL_SECONDS = 5 * 60;
+const PIN_RESET_REDIS_TIMEOUT_MS = 2000;
 const PIN_RESET_KEY_PREFIX = 'auth:pin-reset:';
 const PIN_RESET_OTP_KEY_PREFIX = 'auth:pin-reset-otp:';
 const PIN_RESET_OTP_PENDING_VALUE = 'pending';
@@ -469,34 +471,68 @@ export class AuthService {
       );
     }
 
-    const consumed = await this.redisService.consumeIfValueMatches(
-      this.getPinResetKey(userId),
-      this.hashPinResetToken(dto.resetToken),
-    );
-
-    if (!consumed) {
+    const key = this.getPinResetKey(userId);
+    const tokenHash = this.hashPinResetToken(dto.resetToken);
+    // Reject invalid proofs before bcrypt, without consuming their five-minute TTL.
+    if (
+      (await this.withPinResetRedisDeadline(
+        this.redisService.get<string>(key),
+      )) !== tokenHash
+    ) {
       throw new BadRequestException(
         'Jeton de réinitialisation invalide ou expiré',
       );
     }
 
-    const user = await this.userRepository.findOne({ where: { id: userId } });
-    if (!this.canUseSelfServicePinReset(user)) {
-      throw new BadRequestException(
-        'Jeton de réinitialisation invalide ou expiré',
-      );
-    }
-
-    user.password = await bcrypt.hash(dto.newPin, 10);
-    user.refreshToken = null;
-    user.accessToken = null;
-    await this.userRepository.update(user.id, {
-      password: user.password,
-      refreshToken: null,
-      accessToken: null,
+    const password = await bcrypt.hash(dto.newPin, 10);
+    await this.userRepository.manager.transaction(async (manager) => {
+      await manager.query("SET LOCAL lock_timeout = '3s'");
+      await manager.query("SET LOCAL statement_timeout = '5s'");
+      // Serialize confirmations, then recheck Redis: an older proof may have
+      // expired or been replaced while hashing/waiting for the user row.
+      const user = await manager.findOne(User, {
+        where: { id: userId },
+        select: {
+          id: true,
+          role: true,
+          status: true,
+          isActive: true,
+          lastPinResetTokenHash: true,
+        },
+        lock: { mode: 'for_no_key_update' },
+      });
+      if (
+        !this.canUseSelfServicePinReset(user) ||
+        user.lastPinResetTokenHash === tokenHash ||
+        (await this.withPinResetRedisDeadline(
+          this.redisService.get<string>(key),
+        )) !== tokenHash
+      ) {
+        throw new BadRequestException(
+          'Jeton de réinitialisation invalide ou expiré',
+        );
+      }
+      await manager.update(User, userId, {
+        password,
+        refreshToken: null,
+        accessToken: null,
+        lastPinResetTokenHash: tokenHash,
+      });
     });
 
-    this.logger.log(`PIN reset completed for user ${user.id}`);
+    // PostgreSQL is the replay authority. A rollback leaves the proof usable;
+    // successful COMMIT remains non-replayable even if Redis cleanup fails.
+    // Compare-and-delete must not erase a newer proof issued in the meantime.
+    try {
+      await this.withPinResetRedisDeadline(
+        this.redisService.consumeIfValueMatches(key, tokenHash),
+      );
+    } catch {
+      this.logger.warn(
+        'PIN reset committed; Redis proof cleanup deferred to TTL',
+      );
+    }
+    this.logger.log(`PIN reset completed for user ${userId}`);
 
     return {
       message:
@@ -512,6 +548,26 @@ export class AuthService {
       user.status !== UserStatus.SUSPENDED &&
       user.status !== UserStatus.INACTIVE,
     );
+  }
+
+  /** Never hold a user row lock indefinitely during a Redis reconnect/outage. */
+  private async withPinResetRedisDeadline<T>(operation: Promise<T>): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        operation,
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(
+            () => reject(new ServiceUnavailableException(
+              'Réinitialisation temporairement indisponible. Réessayez dans un instant.',
+            )),
+            PIN_RESET_REDIS_TIMEOUT_MS,
+          );
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   private getPinResetKey(userId: string): string {

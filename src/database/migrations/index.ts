@@ -64,6 +64,8 @@ import { DriverWelcomeBonusCopy1780000059000 } from './1780000059000-DriverWelco
 import { CumulativeCashDebtLimit1780000060000 } from './1780000060000-CumulativeCashDebtLimit';
 import { KycEvidenceArchive1780000061000 } from './1780000061000-KycEvidenceArchive';
 import { KycEvidenceIndefiniteRetention1780000062000 } from './1780000062000-KycEvidenceIndefiniteRetention';
+import { IsolateWelcomeBonusFailures1780000063000 } from './1780000063000-IsolateWelcomeBonusFailures';
+import { AddPinResetReplayProtection1780000064000 } from './1780000064000-AddPinResetReplayProtection';
 
 export const databaseMigrations = [
   FillTotalSeats1780000000000,
@@ -128,4 +130,6 @@ export const databaseMigrations = [
   CumulativeCashDebtLimit1780000060000,
   KycEvidenceArchive1780000061000,
   KycEvidenceIndefiniteRetention1780000062000,
+  IsolateWelcomeBonusFailures1780000063000,
+  AddPinResetReplayProtection1780000064000,
 ];

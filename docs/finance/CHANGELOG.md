@@ -1,5 +1,80 @@
 # Journal des modifications financières
 
+## 2026-10-09 — Réinitialisation du PIN et isolation du bonus de bienvenue
+
+- Incident diagnostiqué en lecture seule dans AWS : `WELCOME_BONUS_INVALID_WALLET_CURRENCY`
+  annulait des écritures sur `users`, notamment le nouveau PIN et `lastLoginAt`.
+  Le bonus était déclenché sur toute modification du compte, même sans changement
+  de validation. Cette entrée décrit un correctif local préparé pour un déploiement
+  ultérieur, pas une intervention déjà effectuée en production.
+- Migration **1780000063000-IsolateWelcomeBonusFailures** : les écritures de PIN,
+  sessions, connexion et profil ne déclenchent plus le bonus. Les insertions et
+  changements de rôle/activation/statut, ainsi que les approbations KYC, conservent
+  leur tentative de crédit différée au commit, selon l'éligibilité finale.
+- `PTS` et l'alias historique `POINTS` sont acceptés pour les portefeuilles de type
+  `points`. Le bonus utilise la dénomination du portefeuille pour son écriture de
+  journal et sa notification. Aucun portefeuille ni historique n'est converti ;
+  montant de 50 jetons, caractère promotionnel non retirable, unicité du crédit
+  et texte conducteur « 5 000 FC ... sous forme de jetons Zwanga » sont conservés.
+  Un code inconnu comme `CDF` n'est **pas** converti automatiquement en jetons.
+- Chaque échec ordinaire du bonus annule uniquement sa propre tentative
+  (solde + journal + attribution + notification). Une ligne dans
+  `welcome_bonus_retry_state` contient l'identifiant interne du compte, le nombre
+  d'essais, un code d'erreur et la prochaine tentative, différée de 15 minutes.
+  Le cron reste actif chaque minute, privilégie les conducteurs et examine au plus
+  100 comptes par lot ; il saute les comptes en attente de reprise pour continuer
+  les autres crédits. Les erreurs ne sont pas effacées silencieusement : warnings
+  PostgreSQL `WELCOME_BONUS_DEFERRED` et état de reprise consultable en base.
+  Les annulations de requête/timeouts globaux PostgreSQL ne sont pas interceptés.
+- Migration **1780000064000-AddPinResetReplayProtection** : ajoute le champ nullable,
+  non sélectionné par défaut, `users.lastPinResetTokenHash`. Après vérification OTP,
+  la confirmation écrit le PIN haché, la révocation des sessions et l'empreinte de
+  la preuve dans **la même transaction**. Verrou utilisateur, relecture de la preuve
+  Redis sous verrou, délais bornés et protection contre deux confirmations simultanées.
+  La preuve n'est plus supprimée avant un commit réussi. En cas de rollback elle
+  reste utilisable jusqu'à son expiration initiale de cinq minutes, sans prolongation.
+  Après succès, le marqueur en base interdit le rejeu même si le nettoyage Redis
+  échoue ; le nettoyage conditionnel ne supprime jamais une preuve plus récente.
+- Contrats HTTP, OTP Didit, formats PIN/OTP et réponses de succès inchangés : pas
+  de mise à jour mobile obligatoire pour ce correctif. La possibilité de retenter
+  une confirmation avec la même preuve dépend toutefois de sa conservation par le
+  client ; une app qui l'efface dès un échec doit toujours recommencer le parcours.
+  Aucun OTP, push ou paiement réel n'est envoyé par les tests.
+
+### Déploiement ultérieur et surveillance
+
+- Les deux migrations sont enregistrées dans `databaseMigrations`. Le pipeline ECS
+  existant exécute déjà les migrations **avant** la mise à jour du service : conserver
+  cet ordre, ne pas déployer seulement le nouveau code sans la migration 64.
+  Pas de modification CI/CD, Terraform, AWS Parameter Store, `.env` réel ou donnée AWS.
+  Aucune nouvelle variable d'environnement de production n'est nécessaire.
+- La migration 63 vérifie la forme de la fonction déployée avant de la modifier et
+  échoue explicitement si elle est inattendue. Ne pas forcer son application dans
+  ce cas. Les anciennes migrations restent immuables. Les corrections sont en avant :
+  ne pas supprimer des crédits historiques ni restaurer le déclencheur bloquant.
+- Attendre la fin du remplacement des anciennes tâches ECS avant de valider les
+  garanties du nouveau parcours PIN ; les anciennes tâches gardent leur ancien
+  mécanisme de consommation de preuve pendant un éventuel chevauchement.
+- Après déploiement, contrôler `POST /auth/pin/reset`, les connexions et le cron.
+  Si un portefeuille possède un code autre que `PTS`/`POINTS`, l'accès au compte
+  reste débloqué mais son bonus est différé : vérifier sa vraie unité avant toute
+  correction ciblée. Ne pas déduire son unité du seul message d'erreur.
+- Guide `supabase-postgres-best-practices` appliqué : migrations additives,
+  délais/verrous bornés, ordre utilisateur → portefeuille conservé, sous-transactions
+  isolées et worker `SKIP LOCKED`. Les sous-transactions suivent le mécanisme
+  [d'isolation des exceptions PL/pgSQL](https://www.postgresql.org/docs/current/plpgsql-control-structures.html#PLPGSQL-ERROR-TRAPPING).
+- Tests ajoutés : preuve non consommée après erreur d'écriture/commit, panne Redis,
+  refus de rejeu, validation de compte recontrôlée, isolation d'un portefeuille
+  incompatible, alias `POINTS`, atomicité bonus/journal/push, absence de doublon et
+  concurrence réelle PostgreSQL. Test PostgreSQL opt-in sur cluster local jetable :
+  définir `PIN_RESET_TEST_POSTGRES_BIN` vers le répertoire `bin` de PostgreSQL puis
+  exécuter `npm run test -- --runInBand --runTestsByPath src/database/pin-reset-welcome-bonus-postgres.spec.ts`.
+  Ce test ne lit ni `.env` ni URL de base applicative et arrête/nettoie son cluster.
+- Vérification locale : **1 588 tests réussis / 197 ignorés** dans la suite générale
+  (144 suites réussies), puis **13 tests PostgreSQL 18 ciblés réussis** en opt-in.
+  Compilation backend réussie. L'erreur d'origine est reproduite avant application
+  du correctif sur la base fictive ; le cluster jetable est arrêté et supprimé.
+
 ## 2026-10-08 — Demandes modifiables et reprogrammation des départs expirés
 
 - Les demandes sans conducteur confirmé expirent à `departureDateMax + 3 heures`.
