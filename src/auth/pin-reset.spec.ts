@@ -1,4 +1,8 @@
-import { BadRequestException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Logger,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { validate } from 'class-validator';
 import * as bcrypt from 'bcrypt';
 import { AuthService } from './auth.service';
@@ -19,6 +23,7 @@ describe('PIN reset security', () => {
     findOne: jest.Mock;
     save: jest.Mock;
     update: jest.Mock;
+    manager: { transaction: jest.Mock };
   };
   let otpService: {
     sendOtp: jest.Mock;
@@ -30,6 +35,15 @@ describe('PIN reset security', () => {
     consumeIfValueMatches: jest.Mock;
   };
   let service: AuthService;
+  let transactionManager: {
+    findOne: jest.Mock;
+    update: jest.Mock;
+    query: jest.Mock;
+  };
+  let failCommit: boolean;
+  let values: Map<string, string>;
+
+  afterEach(() => jest.restoreAllMocks());
 
   beforeEach(() => {
     user = {
@@ -41,20 +55,49 @@ describe('PIN reset security', () => {
       password: 'previous-hash',
       accessToken: 'access-token',
       refreshToken: 'refresh-token',
+      lastPinResetTokenHash: null,
     } as User;
+    failCommit = false;
+    values = new Map([[`auth:pin-reset-otp:${userId}`, 'pending']]);
+    transactionManager = {
+      query: jest.fn().mockResolvedValue([]),
+      findOne: jest.fn(async () => ({ ...user })),
+      update: jest.fn(async (_entity, _id, patch) =>
+        Object.assign(user, patch),
+      ),
+    };
     userRepository = {
       findOne: jest.fn().mockResolvedValue(user),
       save: jest.fn().mockImplementation((value) => Promise.resolve(value)),
       update: jest.fn(async (_id, patch) => Object.assign(user, patch)),
+      manager: {
+        transaction: jest.fn(async (work) => {
+          const previous = { ...user };
+          try {
+            const result = await work(transactionManager);
+            if (failCommit) throw new Error('commit failed');
+            return result;
+          } catch (error) {
+            Object.assign(user, previous);
+            throw error;
+          }
+        }),
+      },
     };
     otpService = {
       sendOtp: jest.fn().mockResolvedValue({ success: true }),
       verifyOtp: jest.fn().mockResolvedValue({ valid: true }),
     };
     redisService = {
-      get: jest.fn().mockResolvedValue('pending'),
-      set: jest.fn().mockResolvedValue(undefined),
-      consumeIfValueMatches: jest.fn().mockResolvedValue(true),
+      get: jest.fn(async (key) => values.get(key) ?? null),
+      set: jest.fn(async (key, value) => {
+        values.set(key, value);
+      }),
+      consumeIfValueMatches: jest.fn(async (key, expected) => {
+        if (values.get(key) !== expected) return false;
+        values.delete(key);
+        return true;
+      }),
     };
     service = new AuthService(
       userRepository as any,
@@ -203,15 +246,130 @@ describe('PIN reset security', () => {
     expect(await bcrypt.compare('5678', user.password)).toBe(true);
     expect(user.refreshToken).toBeNull();
     expect(user.accessToken).toBeNull();
-    expect(userRepository.update).toHaveBeenCalledWith(user.id, {
+    expect(transactionManager.update).toHaveBeenCalledWith(User, user.id, {
       password: user.password,
       accessToken: null,
       refreshToken: null,
+      lastPinResetTokenHash: expect.stringMatching(/^[a-f0-9]{64}$/),
     });
+    expect(transactionManager.findOne).toHaveBeenCalledWith(
+      User,
+      expect.objectContaining({
+        lock: { mode: 'for_no_key_update' },
+      }),
+    );
 
     redisService.consumeIfValueMatches.mockResolvedValueOnce(false);
     await expect(service.resetPin(dto)).rejects.toBeInstanceOf(
       BadRequestException,
     );
   });
+
+  async function issueProof() {
+    const { resetToken } = await service.verifyPinResetOtp(
+      Object.assign(new PinResetVerifyOtpDto(), {
+        phone: user.phone,
+        otp: '123456',
+      }),
+    );
+    return Object.assign(new PinResetConfirmDto(), {
+      resetToken,
+      newPin: '5678',
+    });
+  }
+
+  it('keeps the proof and old PIN after a database write failure, allowing a retry', async () => {
+    const dto = await issueProof();
+    const proof = values.get(`auth:pin-reset:${userId}`);
+    transactionManager.update.mockRejectedValueOnce(
+      new Error('database unavailable'),
+    );
+    await expect(service.resetPin(dto)).rejects.toThrow('database unavailable');
+    expect(user.password).toBe('previous-hash');
+    expect(user.lastPinResetTokenHash).toBeNull();
+    expect(values.get(`auth:pin-reset:${userId}`)).toBe(proof);
+    await expect(service.resetPin(dto)).resolves.toHaveProperty('message');
+    expect(await bcrypt.compare('5678', user.password)).toBe(true);
+  });
+
+  it('does not consume a proof when a deferred trigger fails at COMMIT', async () => {
+    const dto = await issueProof();
+    failCommit = true;
+    await expect(service.resetPin(dto)).rejects.toThrow('commit failed');
+    expect(user.password).toBe('previous-hash');
+    expect(values.has(`auth:pin-reset:${userId}`)).toBe(true);
+    failCommit = false;
+    await expect(service.resetPin(dto)).resolves.toHaveProperty('message');
+  });
+
+  it('returns success and prevents replay even if Redis cleanup fails', async () => {
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const dto = await issueProof();
+    redisService.consumeIfValueMatches.mockRejectedValueOnce(
+      new Error('redis down'),
+    );
+    await expect(service.resetPin(dto)).resolves.toHaveProperty('message');
+    expect(values.has(`auth:pin-reset:${userId}`)).toBe(true);
+    await expect(service.resetPin(dto)).rejects.toBeInstanceOf(
+      BadRequestException,
+    );
+    expect(transactionManager.update).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not delete a newer proof during cleanup', async () => {
+    const dto = await issueProof();
+    transactionManager.update.mockImplementationOnce(
+      async (_entity, _id, patch) => {
+        Object.assign(user, patch);
+        values.set(`auth:pin-reset:${userId}`, 'newer-proof');
+      },
+    );
+    await service.resetPin(dto);
+    expect(values.get(`auth:pin-reset:${userId}`)).toBe('newer-proof');
+  });
+
+  it('bounds a stalled Redis read while holding a user lock and keeps the proof', async () => {
+    const dto = await issueProof();
+    redisService.get
+      .mockResolvedValueOnce(values.get(`auth:pin-reset:${userId}`))
+      .mockImplementationOnce(() => new Promise(() => undefined));
+    await expect(service.resetPin(dto)).rejects.toBeInstanceOf(
+      ServiceUnavailableException,
+    );
+    expect(transactionManager.update).not.toHaveBeenCalled();
+    expect(user.lastPinResetTokenHash).toBeNull();
+    expect(values.has(`auth:pin-reset:${userId}`)).toBe(true);
+  });
+
+  it.each([null, 'replacement-proof'])(
+    'rechecks expiry/replacement under the row lock (%s)',
+    async (proof) => {
+      const dto = await issueProof();
+      redisService.get
+        .mockResolvedValueOnce(values.get(`auth:pin-reset:${userId}`))
+        .mockResolvedValueOnce(proof);
+      await expect(service.resetPin(dto)).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
+      expect(transactionManager.update).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    { isActive: false },
+    { status: UserStatus.SUSPENDED },
+    { status: UserStatus.INACTIVE },
+    { role: UserRole.ADMIN },
+    { role: UserRole.SUPER_ADMIN },
+  ])(
+    'rechecks account eligibility after OTP verification (%j)',
+    async (patch) => {
+      const dto = await issueProof();
+      Object.assign(user, patch);
+      await expect(service.resetPin(dto)).rejects.toBeInstanceOf(
+        BadRequestException,
+      );
+      expect(transactionManager.update).not.toHaveBeenCalled();
+    },
+  );
 });

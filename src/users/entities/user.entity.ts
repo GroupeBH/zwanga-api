@@ -60,6 +60,10 @@ export class User {
   @Column({ nullable: true, select: false })
   password: string;
 
+  // Server-only replay marker, committed atomically with the PIN; never a raw proof.
+  @Column({ type: 'text', nullable: true, select: false })
+  lastPinResetTokenHash: string | null;
+
   @Column()
   firstName: string;
 
