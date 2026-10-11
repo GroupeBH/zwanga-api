@@ -37,7 +37,7 @@ for file in "${changed_files[@]}"; do
   case "${file}" in
     infra-aws/docs/*)
       ;;
-    infra-aws/*|.github/workflows/deploy.yml|.github/workflows/infra-documentation.yml|Dockerfile|docker-compose.yml|docker-compose.nginx.yml|.env.docker.example)
+    infra-aws/*|.github/workflows/deploy*.yml|.github/workflows/infra-documentation.yml|Dockerfile|docker-compose.yml|docker-compose.nginx.yml|.env.docker.example)
       infra_changes+=("${file}")
       ;;
   esac

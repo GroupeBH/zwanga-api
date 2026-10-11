@@ -3941,10 +3941,10 @@ export class TripsService {
    * Cron job to notify drivers and passengers about upcoming trip departure
    * Runs every 15 minutes to check for trips starting in the next 30 minutes
    */
-  @Cron('*/15 * * * *') // Every 15 minutes
+  @Cron('*/15 * * * *', { waitForCompletion: true })
   async notifyAboutUpcomingTripDeparture() {
-    // Use setImmediate to ensure HTTP requests have priority
-    setImmediate(async () => {
+    // Await the work so database failures are handled by the scheduler.
+    await (async () => {
       this.logger.debug(
         'Running cron job to notify about upcoming trip departure',
       );
@@ -3981,7 +3981,7 @@ export class TripsService {
       this.logger.log(
         `Successfully notified about ${tripsStartingSoon.length} trips starting soon`,
       );
-    });
+    })();
   }
 
   /**
@@ -4093,10 +4093,10 @@ export class TripsService {
    * Cron job to notify drivers and passengers about upcoming trip expiration
    * Runs every 15 minutes to check for trips expiring in the next hour
    */
-  @Cron('*/15 * * * *') // Every 15 minutes
+  @Cron('*/15 * * * *', { waitForCompletion: true })
   async notifyAboutUpcomingTripExpiration() {
-    // Use setImmediate to ensure HTTP requests have priority
-    setImmediate(async () => {
+    // Await the work so database failures are handled by the scheduler.
+    await (async () => {
       this.logger.debug(
         'Running cron job to notify about upcoming trip expiration',
       );
@@ -4141,7 +4141,7 @@ export class TripsService {
       this.logger.log(
         `Successfully notified about ${tripsExpiringSoon.length} trips expiring soon`,
       );
-    });
+    })();
   }
 
   /**

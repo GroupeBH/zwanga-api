@@ -95,8 +95,30 @@ function buildBaseOptions(params: {
   databaseSslRejectUnauthorized?: string;
   nodeEnv?: string;
   typeormSynchronize?: string;
+  poolMax?: string | number;
+  connectionTimeoutMs?: string | number;
+  statementTimeoutMs?: string | number;
+  lockTimeoutMs?: string | number;
+  migration?: boolean;
 }): DataSourceOptions {
   const ssl = buildDatabaseSslOptions(params);
+  const positive = (name: string, value: string | number | undefined, fallback: number) => {
+    if (value === undefined || value === '') return fallback;
+    const parsed = Number(value);
+    if (!Number.isSafeInteger(parsed) || parsed < 1) throw new Error(`${name} must be a positive integer`);
+    return parsed;
+  };
+  const extra = {
+    ...(ssl ? { ssl } : {}),
+    max: positive('DATABASE_POOL_MAX', params.poolMax, params.migration ? 2 : 10),
+    connectionTimeoutMillis: positive('DATABASE_CONNECTION_TIMEOUT_MS', params.connectionTimeoutMs, 5_000),
+    // CLI migrations retain their own per-migration budgets, not the API budget.
+    ...(params.migration ? {} : {
+      statement_timeout: positive('DATABASE_STATEMENT_TIMEOUT_MS', params.statementTimeoutMs, 30_000),
+      lock_timeout: positive('DATABASE_LOCK_TIMEOUT_MS', params.lockTimeoutMs, 5_000),
+      idle_in_transaction_session_timeout: 60_000,
+    }),
+  };
   const baseConfig = {
     type: 'postgres' as const,
     entities: typeOrmEntities,
@@ -115,7 +137,7 @@ function buildBaseOptions(params: {
       ...baseConfig,
       url: params.databaseUrl,
       ssl,
-      extra: ssl ? { ssl } : undefined,
+      extra,
     };
   }
 
@@ -127,7 +149,7 @@ function buildBaseOptions(params: {
     password: params.databasePassword,
     database: params.databaseName,
     ssl,
-    extra: ssl ? { ssl } : undefined,
+    extra,
   };
 }
 
@@ -147,6 +169,10 @@ export function buildTypeOrmModuleOptions(
     ),
     nodeEnv: configService.get<string>('NODE_ENV'),
     typeormSynchronize: configService.get<string>('TYPEORM_SYNCHRONIZE'),
+    poolMax: configService.get<string>('DATABASE_POOL_MAX'),
+    connectionTimeoutMs: configService.get<string>('DATABASE_CONNECTION_TIMEOUT_MS'),
+    statementTimeoutMs: configService.get<string>('DATABASE_STATEMENT_TIMEOUT_MS'),
+    lockTimeoutMs: configService.get<string>('DATABASE_LOCK_TIMEOUT_MS'),
   }) as TypeOrmModuleOptions;
 }
 
@@ -154,7 +180,7 @@ export function buildTypeOrmDataSourceOptions(
   env: EnvironmentReader = process.env,
 ): DataSourceOptions {
   return buildBaseOptions({
-    databaseUrl: env.DATABASE_URL,
+    databaseUrl: env.MIGRATION_DATABASE_URL || env.DATABASE_URL,
     databaseHost: env.DATABASE_HOST,
     databasePort: env.DATABASE_PORT ? Number(env.DATABASE_PORT) : undefined,
     databaseUser: env.DATABASE_USER,
@@ -164,5 +190,8 @@ export function buildTypeOrmDataSourceOptions(
     databaseSslRejectUnauthorized: env.DATABASE_SSL_REJECT_UNAUTHORIZED,
     nodeEnv: env.NODE_ENV,
     typeormSynchronize: env.TYPEORM_SYNCHRONIZE,
+    migration: true,
+    poolMax: env.MIGRATION_DATABASE_POOL_MAX,
+    connectionTimeoutMs: env.DATABASE_CONNECTION_TIMEOUT_MS,
   });
 }

@@ -1,5 +1,5 @@
 import { BadRequestException } from '@nestjs/common';
-import { Repository } from 'typeorm';
+import { EntityManager, Repository } from 'typeorm';
 import { User, UserStatus } from './entities/user.entity';
 
 /** Pending KYC is still a usable account, not an available phone number. */
@@ -22,6 +22,7 @@ export function accountReservesPhone(
 export async function saveRegistrationWithPhone(
   users: Repository<User>,
   newUser: User,
+  afterSave?: (user: User, manager: EntityManager) => Promise<void>,
 ): Promise<User> {
   return users.manager.transaction(async (manager) => {
     const phone = newUser.phone.trim();
@@ -48,6 +49,9 @@ export async function saveRegistrationWithPhone(
       });
     }
     newUser.phone = phone;
-    return repository.save(newUser);
+    const saved = await repository.save(newUser);
+    // Phone ownership and all mandatory signup records commit or roll back together.
+    await afterSave?.(saved, manager);
+    return saved;
   });
 }

@@ -59,6 +59,13 @@ infra-aws/terraform.tfvars
 infra-aws/*.auto.tfvars
 !infra-aws/production.auto.tfvars
 infra-aws/bootstrap/terraform.tfvars
+infra-aws/environments/*/terraform.tfvars
+infra-aws/environments/*/*.auto.tfvars
+infra-aws/environments/*/backend.hcl
+infra-aws/environments/*/tfplan
+infra-aws/environments/*/baseline-*/
+infra-aws/environments/*/.terraform-*/
+infra-aws/environments/*/**/__pycache__/
 
 # Local renderings and temporary validation artifacts
 /tmp/

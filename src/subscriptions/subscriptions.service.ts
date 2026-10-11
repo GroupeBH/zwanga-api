@@ -750,7 +750,7 @@ export class SubscriptionsService implements OnModuleInit {
     payment: PaymentTransaction,
   ): Promise<Subscription> {
     const alreadyActivatedForPayment =
-      subscription.status === SubscriptionStatus.ACTIVE &&
+      [SubscriptionStatus.ACTIVE, SubscriptionStatus.EXPIRED].includes(subscription.status) &&
       subscription.paymentTransactionId === payment.id;
     subscription.paymentReference = payment.reference;
     subscription.paymentTransactionId = payment.id;
@@ -770,25 +770,23 @@ export class SubscriptionsService implements OnModuleInit {
       return this.activatePaidSubscription(subscription, payment);
     }
 
-    if (payment.status === PaymentStatus.FAILED) {
-      subscription.status = SubscriptionStatus.PAYMENT_FAILED;
-      this.logger.warn(
-        `Subscription marked payment_failed: subscriptionId=${subscription.id}, paymentId=${payment.id}, reference=${payment.reference}`,
-      );
-    }
-
-    if (payment.status === PaymentStatus.CANCELLED) {
-      subscription.status = SubscriptionStatus.CANCELLED;
-      this.logger.warn(
-        `Subscription marked cancelled from payment: subscriptionId=${subscription.id}, paymentId=${payment.id}, reference=${payment.reference}`,
-      );
-    }
-
-    const savedSubscription =
-      await this.subscriptionRepository.save(subscription);
+    const savedSubscription = await this.subscriptionRepository.manager.transaction(async manager => {
+      await manager.findOne(User, { where: { id: subscription.userId }, lock: { mode: 'pessimistic_write' } });
+      const current = await manager.findOne(Subscription, { where: { id: subscription.id }, lock: { mode: 'pessimistic_write' } });
+      if (!current) throw new NotFoundException('Abonnement introuvable');
+      // A status request started before activation cannot undo that activation.
+      if ([SubscriptionStatus.ACTIVE, SubscriptionStatus.EXPIRED].includes(current.status)) return current;
+      current.paymentReference = payment.reference;
+      current.paymentTransactionId = payment.id;
+      if (payment.status === PaymentStatus.FAILED && current.status !== SubscriptionStatus.CANCELLED) {
+        current.status = SubscriptionStatus.PAYMENT_FAILED;
+      }
+      if (payment.status === PaymentStatus.CANCELLED) current.status = SubscriptionStatus.CANCELLED;
+      return manager.save(Subscription, current);
+    });
     if (
-      payment.status === PaymentStatus.FAILED ||
-      payment.status === PaymentStatus.CANCELLED
+      [SubscriptionStatus.PAYMENT_FAILED, SubscriptionStatus.CANCELLED].includes(savedSubscription.status) &&
+      (payment.status === PaymentStatus.FAILED || payment.status === PaymentStatus.CANCELLED)
     ) {
       await this.referralsService.reverseSubscriptionReward(
         savedSubscription.id,
@@ -805,29 +803,29 @@ export class SubscriptionsService implements OnModuleInit {
     subscription: Subscription,
     payment: PaymentTransaction,
   ): Promise<Subscription> {
-    await this.subscriptionRepository.update(
-      {
-        userId: subscription.userId,
-        status: SubscriptionStatus.ACTIVE,
-        id: Not(subscription.id),
-      },
-      { status: SubscriptionStatus.CANCELLED },
-    );
-
-    const startDate = new Date();
-    subscription.status = SubscriptionStatus.ACTIVE;
-    subscription.startDate = startDate;
-    subscription.endDate = this.calculateEndDate(startDate);
-    subscription.paymentReference = payment.reference;
-    subscription.paymentTransactionId = payment.id;
-    subscription.premiumBadgeEnabled = true;
-    subscription.featuredTripsEnabled = true;
-    subscription.documentFundingEnabled = true;
-    subscription.documentFundingLimit = this.getDocumentFundingLimit();
-    subscription.documentFundingCurrency = this.getDocumentFundingCurrency();
-
-    const savedSubscription =
-      await this.subscriptionRepository.save(subscription);
+    const savedSubscription = await this.subscriptionRepository.manager.transaction(async manager => {
+      // Serialize concurrent callback/status/reconciliation activations for this user.
+      await manager.findOne(User, { where: { id: subscription.userId }, lock: { mode: 'pessimistic_write' } });
+      const current = await manager.findOne(Subscription, { where: { id: subscription.id }, lock: { mode: 'pessimistic_write' } });
+      if (!current) throw new NotFoundException('Abonnement introuvable');
+      if (current.status === SubscriptionStatus.CANCELLED) {
+        // A late paid, superseded purchase needs support/refund, not cancellation of the current Pro.
+        throw new BadRequestException('Paiement reçu pour un abonnement annulé : régularisation nécessaire');
+      }
+      if (current.paymentTransactionId === payment.id &&
+          [SubscriptionStatus.ACTIVE, SubscriptionStatus.EXPIRED].includes(current.status)) return current;
+      await manager.update(Subscription, {
+        userId: current.userId, status: SubscriptionStatus.ACTIVE, id: Not(current.id),
+      }, { status: SubscriptionStatus.CANCELLED });
+      const startDate = new Date();
+      Object.assign(current, {
+        status: SubscriptionStatus.ACTIVE, startDate, endDate: this.calculateEndDate(startDate),
+        paymentReference: payment.reference, paymentTransactionId: payment.id,
+        premiumBadgeEnabled: true, featuredTripsEnabled: true, documentFundingEnabled: true,
+        documentFundingLimit: this.getDocumentFundingLimit(), documentFundingCurrency: this.getDocumentFundingCurrency(),
+      });
+      return manager.save(Subscription, current);
+    });
     await this.walletService.awardSubscriptionPaymentTokens(
       savedSubscription,
       payment.id,

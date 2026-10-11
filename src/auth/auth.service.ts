@@ -7,13 +7,14 @@ import {
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { EntityManager, Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { OAuth2Client } from 'google-auth-library';
 import {
   createHash,
   createPublicKey,
   randomBytes,
+  randomUUID,
   timingSafeEqual,
   verify as verifySignature,
   type JsonWebKey,
@@ -258,40 +259,32 @@ export class AuthService {
     }
 
     const user = this.userRepository.create(userData);
-    const savedUser = await saveRegistrationWithPhone(this.userRepository, user);
-    await this.referralsService.registerUser(savedUser.id, referralAttribution);
-
-    if (vehicle && role !== UserRole.DRIVER) {
-      throw new BadRequestException(
-        'Les informations du véhicule sont uniquement autorisées pour les conducteurs',
-      );
+    let tokens!: { accessToken: string; refreshToken: string };
+    let afterCommit: (() => Promise<void>) | undefined;
+    try {
+      await saveRegistrationWithPhone(this.userRepository, user, async (savedUser, manager) => {
+        afterCommit = await this.referralsService.registerUserInTransaction(manager, savedUser.id, referralAttribution);
+        if (vehicle && role === UserRole.DRIVER) {
+          await this.vehiclesService.createForRegistration(manager, savedUser, vehicle);
+        }
+        if (cniImagePath || selfieImagePath) {
+          const documents = manager.getRepository(KycDocument);
+          await documents.save(documents.create({
+            userId: savedUser.id, status: KycStatus.PENDING,
+            ...(cniImagePath ? { cniFrontUrl: cniImagePath } : {}),
+            ...(selfieImagePath ? { selfieUrl: selfieImagePath } : {}),
+          }));
+        }
+        tokens = await this.generateTokens(savedUser, manager);
+      });
+    } catch (error) {
+      // These are only the files created for this failed attempt, never existing assets.
+      await Promise.allSettled([profilePicturePath, cniImagePath, selfieImagePath]
+        .filter((path): path is string => Boolean(path))
+        .map(path => this.fileUploadService.deleteFile(path)));
+      throw error;
     }
-
-    if (vehicle && role === UserRole.DRIVER) {
-      await this.vehiclesService.create(savedUser.id, vehicle);
-    }
-
-    // Create KYC document if CNI or selfie images are provided
-    if (cniImagePath || selfieImagePath) {
-      const kycData: Partial<KycDocument> = {
-        userId: savedUser.id,
-        status: KycStatus.PENDING,
-      };
-
-      if (cniImagePath) {
-        kycData.cniFrontUrl = cniImagePath;
-      }
-
-      if (selfieImagePath) {
-        kycData.selfieUrl = selfieImagePath;
-      }
-
-      const kycDocument = this.kycDocumentRepository.create(kycData);
-      await this.kycDocumentRepository.save(kycDocument);
-    }
-
-    // Generate tokens for the newly registered user
-    const tokens = await this.generateTokens(savedUser);
+    await afterCommit?.();
 
     return {
       accessToken: tokens.accessToken,
@@ -1183,11 +1176,14 @@ export class AuthService {
           isPhoneVerified: false,
         });
 
-        user = await saveRegistrationWithPhone(this.userRepository, user);
-        await this.referralsService.registerUser(user.id, referralAttribution);
-        if (vehicle && role === UserRole.DRIVER) {
-          await this.vehiclesService.create(user.id, vehicle);
-        }
+        let afterCommit: (() => Promise<void>) | undefined;
+        user = await saveRegistrationWithPhone(this.userRepository, user, async (created, manager) => {
+          afterCommit = await this.referralsService.registerUserInTransaction(manager, created.id, referralAttribution);
+          if (vehicle && role === UserRole.DRIVER) {
+            await this.vehiclesService.createForRegistration(manager, created, vehicle);
+          }
+        });
+        await afterCommit?.();
         this.logger.log(`New user created via Google OAuth: ${user.id}`);
       }
     }
@@ -1559,11 +1555,14 @@ export class AuthService {
         isPhoneVerified: false,
       });
 
-      user = await saveRegistrationWithPhone(this.userRepository, user);
-      await this.referralsService.registerUser(user.id, referralAttribution);
-      if (vehicle && role === UserRole.DRIVER) {
-        await this.vehiclesService.create(user.id, vehicle);
-      }
+      let afterCommit: (() => Promise<void>) | undefined;
+      user = await saveRegistrationWithPhone(this.userRepository, user, async (created, manager) => {
+        afterCommit = await this.referralsService.registerUserInTransaction(manager, created.id, referralAttribution);
+        if (vehicle && role === UserRole.DRIVER) {
+          await this.vehiclesService.createForRegistration(manager, created, vehicle);
+        }
+      });
+      await afterCommit?.();
       this.logger.log(`New user created via Apple OAuth: ${user.id}`);
     }
 
@@ -1582,8 +1581,10 @@ export class AuthService {
     };
   }
 
-  private async generateTokens(user: User) {
+  private async generateTokens(user: User, manager?: EntityManager) {
     const payload = {
+      // A logout followed by a login in the same second must not revive a JWT.
+      jti: randomUUID(),
       sub: user.id,
       phone: user.phone,
       role: user.role,
@@ -1606,7 +1607,7 @@ export class AuthService {
     // Save tokens to user
     user.accessToken = tokenFingerprint(accessToken);
     user.refreshToken = tokenFingerprint(refreshToken);
-    await this.userRepository.update(user.id, {
+    await (manager?.getRepository(User) ?? this.userRepository).update(user.id, {
       accessToken: user.accessToken, refreshToken: user.refreshToken,
     });
 

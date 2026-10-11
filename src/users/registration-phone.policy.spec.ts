@@ -91,6 +91,13 @@ describe('Phone ownership during registration', () => {
     expect(f.users.save).not.toHaveBeenCalled();
   });
 
+  it('awaits mandatory dependent records inside the same transaction', async () => {
+    const f = fixture(null);
+    const afterSave = jest.fn().mockRejectedValue(new Error('vehicle unavailable'));
+    await expect(saveRegistrationWithPhone(f.repository as any, f.fresh, afterSave)).rejects.toThrow('vehicle unavailable');
+    expect(afterSave).toHaveBeenCalledWith(expect.objectContaining({ id: 'new-user' }), f.manager);
+  });
+
   it('creates a fresh account when deletion has already released the phone', async () => {
     const f = fixture(null);
     await saveRegistrationWithPhone(f.repository as any, f.fresh);

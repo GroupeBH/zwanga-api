@@ -1,0 +1,16 @@
+[Unit]
+Description=Resume the last successful Zwanga staging release
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+ConditionPathExists=/opt/zwanga-staging/last-release.json
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/zwanga-staging
+ExecStart=/usr/bin/python3 /opt/zwanga-staging/runtime.py resume
+TimeoutStartSec=600
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

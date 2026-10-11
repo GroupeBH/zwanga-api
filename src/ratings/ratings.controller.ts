@@ -1,4 +1,5 @@
-import { Controller, Get, Post, Body, Param, Request } from '@nestjs/common';
+import { Controller, Get, Post, Body, Param, Request, Query, ParseUUIDPipe } from '@nestjs/common';
+import { HistoryPageDto } from '../common/pagination/history-page';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { RatingsService } from './ratings.service';
 import { CreateRatingDto } from './dto/rating.dto';
@@ -23,6 +24,13 @@ export class RatingsController {
   @ApiOperation({ summary: 'Get ratings for a user' })
   async findByUser(@Param('userId') userId: string) {
     return this.ratingsService.findByUser(userId);
+  }
+
+  @Get('user/:userId/page')
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'Get a bounded page of public reviews' })
+  async findPage(@Param('userId', ParseUUIDPipe) userId: string, @Query() options: HistoryPageDto) {
+    return this.ratingsService.findPage(userId, options);
   }
 
   @Get('user/:userId/average')

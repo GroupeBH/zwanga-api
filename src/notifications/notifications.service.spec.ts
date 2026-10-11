@@ -89,7 +89,9 @@ describe('NotificationService critical push reliability', () => {
     const run = f.service.dispatchTransactionalNotifications();
     await new Promise(resolve => setImmediate(resolve));
     expect(delivery).toHaveBeenCalledWith(urgent);
-    expect(f.queryBuilder.andWhere).toHaveBeenCalledWith("notification.data ->> 'type' IN (:...urgentTypes)", expect.any(Object));
+    expect(f.queryBuilder.andWhere).toHaveBeenCalledWith("notification.data ->> 'type' IN (:...urgentTypes)", {
+      urgentTypes: ['new_booking', 'driver_dispatch_offer', 'trip_request_nearby'],
+    });
     expect(f.queryBuilder.andWhere).toHaveBeenCalledWith("COALESCE(notification.data ->> 'type', '') NOT IN (:...urgentTypes)", expect.any(Object));
     expect(f.queryBuilder.take).toHaveBeenCalledWith(10);
     finishRegular([]); await run;

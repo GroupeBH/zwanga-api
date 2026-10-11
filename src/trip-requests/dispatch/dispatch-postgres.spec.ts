@@ -8,6 +8,7 @@ import { DataSource } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { typeOrmEntities } from '../../database/entities';
 import { AddDriverDispatch1780000048000 } from '../../database/migrations/1780000048000-AddDriverDispatch';
+import { IndexNearbyRequestAlerts1780000066000 } from '../../database/migrations/1780000066000-IndexNearbyRequestAlerts';
 import { DriverDispatchService } from './dispatch.service';
 import { User, UserRole, UserStatus } from '../../users/entities/user.entity';
 import { KycDocument, KycStatus } from '../../users/entities/kyc-document.entity';
@@ -16,6 +17,8 @@ import { TripRequest } from '../entities/trip-request.entity';
 import { DriverOffer } from '../entities/driver-offer.entity';
 import { TripRequestsService } from '../trip-requests.service';
 import { boundedInteger, dispatchOfferIsActionable } from './dispatch-policy';
+import { NotificationService } from '../../notifications/notifications.service';
+import { Notification } from '../../notifications/entities/notification.entity';
 
 describe('dispatch policy', () => {
   it('bounds configuration and treats the exact deadline as expired', () => {
@@ -83,6 +86,63 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
       numberOfSeats: seats, maxPricePerSeat: 1000, vehicleType: VehicleType.CAR });
   };
   const offers = (requestId: string) => source.query('SELECT * FROM trip_request_dispatch_offers WHERE "requestId" = $1 ORDER BY "createdAt"', [requestId]);
+
+  it('hides old driver order alerts from a passenger inbox and unread counts while retaining own updates', async () => {
+    const owner = await passenger();
+    const repository = source.getRepository(Notification);
+    for (const type of ['trip_request', 'new_trip_request', 'driver_dispatch_offer', 'trip_request_nearby', 'trip_request_accepted', 'trip_request_reopened']) {
+      await repository.save({ userId: owner.id, fcmToken: 'synthetic-token', title: 'Test', body: 'Test', data: { type }, isActive: true, isRead: false });
+    }
+    const inbox = new NotificationService(new ConfigService(), repository, source.getRepository(User), source.getRepository(TripRequest));
+    const result = await inbox.findAllByUser(owner.id, { limit: 1 });
+    expect(result.notifications).toHaveLength(1); expect(result.total).toBe(2); expect(result.unreadCount).toBe(2);
+    const all = await inbox.findAllByUser(owner.id);
+    expect(all.notifications.map(n => n.data?.type).sort()).toEqual(['trip_request_accepted', 'trip_request_reopened']);
+    await source.getRepository(User).update(owner.id, { role: UserRole.DRIVER, status: UserStatus.ACTIVE });
+    expect((await inbox.findAllByUser(owner.id)).total).toBe(6);
+    await source.getRepository(User).update(owner.id, { status: UserStatus.SUSPENDED });
+    expect((await inbox.findAllByUser(owner.id)).total).toBe(2);
+  });
+
+  it('alerts the nearest compatible current v2 driver for tomorrow without assigning or blocking them', async () => {
+    await driver(15.31, VehicleType.MOTORCYCLE_TWO_WHEELS, 2);
+    await driver(15.311, VehicleType.CAR, 1);
+    await driver(15.312); // Legacy installation: not a long-ring target.
+    const near = await driver(15.313), far = await driver(15.32);
+    await service.registerNotifications(near.user.id, 2); await service.registerNotifications(far.user.id, 2);
+    const r = await request(false, 2);
+    await source.getRepository(TripRequest).update(r.id, {
+      departureDateMin: new Date(Date.now() + 86_400_000), departureDateMax: new Date(Date.now() + 90_000_000),
+    });
+    await Promise.all([service.notifyScheduledRequest(r.id), service.notifyScheduledRequest(r.id)]);
+    const rows = await source.query('SELECT * FROM notifications WHERE "eventKey" = $1', [`nearby-scheduled-request:${r.id}`]);
+    expect(rows).toHaveLength(1); expect(rows[0].userId).toBe(near.user.id);
+    expect(rows[0].data).toMatchObject({ type: 'trip_request_nearby', ringAlert: 'nearby-request-v1' });
+    expect(await offers(r.id)).toHaveLength(0);
+    expect(await source.getRepository(TripRequest).findOneByOrFail({ id: r.id })).toMatchObject({ status: 'pending', selectedDriverId: null });
+    expect((await service.status(near.user.id)).available).toBe(true);
+  });
+
+  it('does not ring a stale or out-of-radius position for a scheduled request', async () => {
+    const stale = await driver(15.31), distant = await driver(16.3);
+    await service.registerNotifications(stale.user.id, 2); await service.registerNotifications(distant.user.id, 2);
+    await service.setPresence(stale.user.id, { available: false });
+    const r = await request(false); await service.notifyScheduledRequest(r.id);
+    expect(await source.query('SELECT id FROM notifications WHERE "eventKey" = $1', [`nearby-scheduled-request:${r.id}`])).toHaveLength(0);
+  });
+
+  it('migrates and rolls back the urgent index without altering notification rows', async () => {
+    const migration = new IndexNearbyRequestAlerts1780000066000();
+    const runner = source.createQueryRunner();
+    try {
+      await runner.startTransaction(); await migration.up(runner); await runner.commitTransaction();
+      const [index] = await source.query("SELECT indexdef FROM pg_indexes WHERE indexname = 'IDX_notifications_urgent_outbox_v2'");
+      expect(index.indexdef).toContain('trip_request_nearby');
+      await runner.startTransaction(); await migration.down(runner); await runner.commitTransaction();
+      expect(await source.query("SELECT 1 FROM pg_indexes WHERE indexname = 'IDX_notifications_urgent_outbox'")).toHaveLength(1);
+      await runner.startTransaction(); await migration.up(runner); await runner.commitTransaction();
+    } finally { if (runner.isTransactionActive) await runner.rollbackTransaction(); await runner.release(); }
+  });
 
   const editor = () => {
     const edits = new TripRequestsService(source.getRepository(TripRequest), source.getRepository(DriverOffer),

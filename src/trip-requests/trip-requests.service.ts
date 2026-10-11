@@ -250,9 +250,9 @@ export class TripRequestsService {
     const minDate = new Date(departureDateMin);
     const maxDate = new Date(departureDateMax);
 
-    if (createTripRequestDto.immediateDispatch && (!this.driverDispatch?.enabled ||
+    if (createTripRequestDto.immediateDispatch && (
         minDate.getTime() > Date.now() + 10 * 60 * 1000 || maxDate.getTime() > Date.now() + 60 * 60 * 1000)) {
-      throw new BadRequestException('La recherche de proximité est réservée aux départs immédiats activés sur le serveur.');
+      throw new BadRequestException('La recherche immédiate est réservée aux départs dans les prochaines minutes.');
     }
 
     if (minDate >= maxDate) {
@@ -290,6 +290,7 @@ export class TripRequestsService {
 
     const tripRequest = this.tripRequestRepository.create({
       ...rest,
+      immediateDispatch: Boolean(createTripRequestDto.immediateDispatch && this.driverDispatch?.enabled),
       paymentMode: rest.paymentMode ?? TripPaymentMode.CASH,
       maxPricePerSeat: recommendedPrice,
       vehicleType,
@@ -304,9 +305,20 @@ export class TripRequestsService {
     const saved = await this.tripRequestRepository.save(tripRequest);
     this.logger.log(`Trip request created: ${saved.id}`);
 
-    // Notify all active drivers about the new trip request
+    // Immediate invitations keep their exclusive accept/decline flow. A scheduled
+    // nearby alert only opens the existing request; it does not reserve the driver.
     if (saved.immediateDispatch) void this.driverDispatch?.tick();
-    else await this.notifyDriversAboutTripRequest(saved);
+    else {
+      let nearbyAlertQueued = false;
+      if (this.driverDispatch?.enabled) {
+        try { nearbyAlertQueued = await this.driverDispatch.notifyScheduledRequest(saved.id); }
+        catch { this.logger.warn('Nearby scheduled-request alert could not be queued; falling back to legacy delivery.'); }
+      }
+      // Store versions without compatible nearby alerts must still receive the
+      // existing notification when no alert could be queued. Never broadcast
+      // an immediate/exclusive invitation or duplicate a committed nearby alert.
+      if (!nearbyAlertQueued) await this.notifyDriversAboutTripRequest(saved);
+    }
 
     return this.findOne(saved.id, passengerId);
   }
@@ -452,14 +464,14 @@ export class TripRequestsService {
         `Trip request update failed: Trip request ${tripRequestId} not found for passenger ${passengerId}`,
       );
       throw new NotFoundException(
-        "Demande de trajet non trouvée ou vous n'êtes pas le propriétaire",
+        "Commande de trajet non trouvée ou vous n'êtes pas le propriétaire",
       );
     }
 
     const reopening = tripRequest.status === TripRequestStatus.EXPIRED || this.shouldExpireRequest(tripRequest, new Date());
     if (reopening && (!updateTripRequestDto.departureDateMin || !updateTripRequestDto.departureDateMax ||
       new Date(updateTripRequestDto.departureDateMin).getTime() <= Date.now())) {
-      throw new BadRequestException('Pour reprogrammer cette demande expirée, choisissez un nouveau créneau dans le futur.');
+      throw new BadRequestException('Pour reprogrammer cette commande expirée, choisissez un nouveau créneau dans le futur.');
     }
 
     // Editing/reopening never changes an existing driver or trip assignment.
@@ -468,7 +480,7 @@ export class TripRequestsService {
         `Trip request update failed: Driver already selected for trip request ${tripRequestId}`,
       );
       throw new BadRequestException(
-        'Vous ne pouvez pas modifier une demande pour laquelle un driver a été sélectionné',
+        'Vous ne pouvez pas modifier une commande pour laquelle un driver a été sélectionné',
       );
     }
 
@@ -479,7 +491,7 @@ export class TripRequestsService {
         `Trip request update failed: Trip request ${tripRequestId} is ${tripRequest.status}`,
       );
       throw new BadRequestException(
-        'Vous ne pouvez pas modifier une demande annulée',
+        'Vous ne pouvez pas modifier une commande annulée',
       );
     }
 
@@ -493,7 +505,7 @@ export class TripRequestsService {
         `Trip request update failed: An offer has been accepted for trip request ${tripRequestId}`,
       );
       throw new BadRequestException(
-        'Vous ne pouvez pas modifier une demande pour laquelle une offre a été acceptée',
+        'Vous ne pouvez pas modifier une commande pour laquelle une offre a été acceptée',
       );
     }
 
@@ -508,7 +520,7 @@ export class TripRequestsService {
     }
     if (updateTripRequestDto.expectedUpdatedAt &&
         new Date(updateTripRequestDto.expectedUpdatedAt).getTime() !== new Date(snapshot.updatedAt).getTime()) {
-      throw new ConflictException('La demande a changé depuis son ouverture. Actualisez-la avant de réessayer.');
+      throw new ConflictException('La commande a changé depuis son ouverture. Actualisez-la avant de réessayer.');
     }
     const {
       departureCoordinates,
@@ -655,7 +667,7 @@ export class TripRequestsService {
       } });
       const offers = manager.getRepository(DriverOffer);
       if (linked || await offers.exists({ where: { tripRequestId, status: DriverOfferStatus.ACCEPTED } }))
-        throw new ConflictException('Une prise en charge existe déjà pour cette demande.');
+        throw new ConflictException('Une prise en charge existe déjà pour cette commande.');
       // Validate the resulting schedule too: an edit cannot create an expired request.
       assertUnassignedRequest({ ...current!, ...patch, status: TripRequestStatus.PENDING });
       await offers.update({ tripRequestId, status: DriverOfferStatus.PENDING },
@@ -700,9 +712,9 @@ export class TripRequestsService {
       const fcmTokens = driversWithTokens.map((driver) => driver.fcmToken!);
       const driverIds = driversWithTokens.map((driver) => driver.id);
 
-      const title = 'Nouvelle demande de trajet disponible';
+      const title = 'Nouvelle commande de trajet disponible';
       const body =
-        'Un passager cherche un trajet. Consultez la demande pour voir les points de départ et d’arrivée.';
+        'Un passager cherche un trajet. Consultez la commande pour voir les points de départ et d’arrivée.';
 
       const data = {
         type: 'trip_request',
@@ -779,7 +791,7 @@ export class TripRequestsService {
     this.logger.debug(`Fetching trip request: ${id}`);
 
     if (!userId) {
-      throw new NotFoundException('Demande de trajet non trouvée');
+      throw new NotFoundException('Commande de trajet non trouvée');
     }
 
     const tripRequest = await this.tripRequestRepository.findOne({
@@ -795,7 +807,7 @@ export class TripRequestsService {
     });
 
     if (!tripRequest) {
-      throw new NotFoundException('Demande de trajet non trouvée');
+      throw new NotFoundException('Commande de trajet non trouvée');
     }
 
     await this.expireRequests([tripRequest]);
@@ -804,13 +816,13 @@ export class TripRequestsService {
     if (!isPassenger) {
       if (this.hasAcceptedDriver(tripRequest)) {
         if (this.getSelectedDriverId(tripRequest) !== userId) {
-          throw new NotFoundException('Demande de trajet non trouvée');
+          throw new NotFoundException('Commande de trajet non trouvée');
         }
       } else if (
         tripRequest.status !== TripRequestStatus.PENDING &&
         tripRequest.status !== TripRequestStatus.OFFERS_RECEIVED
       ) {
-        throw new NotFoundException('Demande de trajet non trouvée');
+        throw new NotFoundException('Commande de trajet non trouvée');
       }
       await this.assertDriverViewer(userId);
     }
@@ -834,7 +846,7 @@ export class TripRequestsService {
     });
 
     if (!tripRequest) {
-      throw new NotFoundException('Demande de trajet non trouvée');
+      throw new NotFoundException('Commande de trajet non trouvée');
     }
 
     // Only passenger can see all offers
@@ -923,7 +935,7 @@ export class TripRequestsService {
     });
 
     if (!tripRequest) {
-      throw new NotFoundException('Demande de trajet non trouvée');
+      throw new NotFoundException('Commande de trajet non trouvée');
     }
 
     await this.expireRequests([tripRequest]);
@@ -935,7 +947,7 @@ export class TripRequestsService {
     // Check if trip request status allows new offers
     if (tripRequest.status === TripRequestStatus.DRIVER_SELECTED) {
       throw new BadRequestException(
-        "Cette demande de trajet n'accepte plus d'offres car un driver a déjà été sélectionné",
+        "Cette commande de trajet n'accepte plus d'offres car un driver a déjà été sélectionné",
       );
     }
 
@@ -944,7 +956,7 @@ export class TripRequestsService {
       tripRequest.status !== TripRequestStatus.OFFERS_RECEIVED
     ) {
       throw new BadRequestException(
-        "Cette demande de trajet n'accepte plus d'offres",
+        "Cette commande de trajet n'accepte plus d'offres",
       );
     }
 
@@ -955,13 +967,13 @@ export class TripRequestsService {
 
     if (hasAcceptedOffer) {
       throw new BadRequestException(
-        "Cette demande de trajet n'accepte plus d'offres car une offre a déjà été acceptée",
+        "Cette commande de trajet n'accepte plus d'offres car une offre a déjà été acceptée",
       );
     }
 
     if (tripRequest.passengerId === driverId) {
       throw new BadRequestException(
-        'Vous ne pouvez pas faire une offre sur votre propre demande',
+        'Vous ne pouvez pas faire une offre sur votre propre commande',
       );
     }
 
@@ -975,7 +987,7 @@ export class TripRequestsService {
     });
     if (existingOffer) {
       throw new BadRequestException(
-        'Vous avez déjà fait une offre pour cette demande',
+        'Vous avez déjà fait une offre pour cette commande',
       );
     }
 
@@ -1094,7 +1106,7 @@ export class TripRequestsService {
       assertUnassignedRequest(current!);
       const offers = manager.getRepository(DriverOffer);
       if (await offers.exists({ where: { tripRequestId, driverId, status: DriverOfferStatus.PENDING } }))
-        throw new ConflictException('Vous avez déjà une offre en attente pour cette demande.');
+        throw new ConflictException('Vous avez déjà une offre en attente pour cette commande.');
       const result = await offers.save(offer);
       await requests.update(tripRequestId, { status: TripRequestStatus.OFFERS_RECEIVED });
       return result;
@@ -1138,7 +1150,7 @@ export class TripRequestsService {
         ? `${offer.driver.firstName} ${offer.driver.lastName}`
         : 'Un conducteur';
       const title = 'Nouvelle offre reçue';
-      const body = `${driverName} a fait une offre pour votre demande de trajet de ${tripRequest.departureLocation} à ${tripRequest.arrivalLocation}`;
+      const body = `${driverName} a fait une offre pour votre commande de trajet de ${tripRequest.departureLocation} à ${tripRequest.arrivalLocation}`;
 
       const data = {
         type: 'driver_offer',
@@ -1243,7 +1255,7 @@ export class TripRequestsService {
 
     if (!tripRequest) {
       throw new NotFoundException(
-        "Demande de trajet non trouvée ou vous n'êtes pas le propriétaire",
+        "Commande de trajet non trouvée ou vous n'êtes pas le propriétaire",
       );
     }
 
@@ -1251,7 +1263,7 @@ export class TripRequestsService {
 
     if (tripRequest.status === TripRequestStatus.DRIVER_SELECTED) {
       throw new BadRequestException(
-        'Un driver a déjà été sélectionné pour cette demande',
+        'Un driver a déjà été sélectionné pour cette commande',
       );
     }
 
@@ -1259,7 +1271,7 @@ export class TripRequestsService {
       tripRequest.status === TripRequestStatus.CANCELLED ||
       tripRequest.status === TripRequestStatus.EXPIRED
     ) {
-      throw new BadRequestException("Cette demande n'accepte plus d'offres");
+      throw new BadRequestException("Cette commande n'accepte plus d'offres");
     }
 
     if (tripRequest.immediateDispatch) {
@@ -1278,7 +1290,7 @@ export class TripRequestsService {
 
     if (!offer.vehicle) {
       throw new BadRequestException(
-        'Cette offre ne contient pas de véhicule compatible avec la demande',
+        'Cette offre ne contient pas de véhicule compatible avec la commande',
       );
     }
     this.assertVehicleMatchesTripRequest(offer.vehicle, tripRequest);
@@ -1300,12 +1312,12 @@ export class TripRequestsService {
       assertUnassignedRequest(current!);
       if (await manager.getRepository(Trip).exists({ where: { tripRequestId,
         status: In([TripStatus.PENDING, TripStatus.ACTIVE, TripStatus.COMPLETED]) } }))
-        throw new ConflictException('Une prise en charge existe déjà pour cette demande.');
+        throw new ConflictException('Une prise en charge existe déjà pour cette commande.');
       const offers = manager.getRepository(DriverOffer);
       const acceptedAt = new Date();
       const result = await offers.update({ id: offer.id, tripRequestId, status: DriverOfferStatus.PENDING },
         { status: DriverOfferStatus.ACCEPTED, acceptedAt });
-      if (result.affected !== 1) throw new ConflictException('Cette offre a changé. Actualisez la demande.');
+      if (result.affected !== 1) throw new ConflictException('Cette offre a changé. Actualisez la commande.');
       await offers.update({ tripRequestId, status: DriverOfferStatus.PENDING },
         { status: DriverOfferStatus.REJECTED, rejectedAt: acceptedAt });
       await requests.update(tripRequestId, {
@@ -1337,13 +1349,13 @@ export class TripRequestsService {
     });
 
     if (!tripRequest) {
-      throw new NotFoundException('Demande de trajet non trouvée');
+      throw new NotFoundException('Commande de trajet non trouvée');
     }
 
     await this.expireRequests([tripRequest]);
     if (tripRequest.status === TripRequestStatus.EXPIRED) {
       throw new BadRequestException(
-        'Cette demande a expiré. Créez une nouvelle demande pour organiser un autre départ.',
+        'Cette commande a expiré. Créez une nouvelle commande pour organiser un autre départ.',
       );
     }
 
@@ -1355,13 +1367,13 @@ export class TripRequestsService {
 
     if (tripRequest.selectedDriverId !== driverId) {
       throw new ForbiddenException(
-        "Vous n'êtes pas le driver sélectionné pour cette demande",
+        "Vous n'êtes pas le driver sélectionné pour cette commande",
       );
     }
 
     if (tripRequest.tripId) {
       throw new BadRequestException(
-        'Un trajet a déjà été créé à partir de cette demande !',
+        'Un trajet a déjà été créé à partir de cette commande !',
       );
     }
 
@@ -1495,7 +1507,7 @@ export class TripRequestsService {
     acceptDto: AcceptTripRequestDto,
   ): Promise<{ trip: any; tripRequest: SanitizedTripRequest }> {
     this.logger.log(
-      `Driver ${driverId} accepte la demande de trajet ${tripRequestId}`,
+      `Driver ${driverId} accepte la commande de trajet ${tripRequestId}`,
     );
 
     // Verify driver exists
@@ -1513,19 +1525,19 @@ export class TripRequestsService {
     });
 
     if (!tripRequest) {
-      throw new NotFoundException('Demande de trajet non trouvée');
+      throw new NotFoundException('Commande de trajet non trouvée');
     }
 
     await this.expireRequests([tripRequest]);
 
     if (tripRequest.immediateDispatch) {
-      throw new BadRequestException('Répondez à votre proposition de proximité pour accepter cette demande.');
+      throw new BadRequestException('Répondez à votre proposition de proximité pour accepter cette commande.');
     }
 
     // Check if trip request can be accepted
     if (tripRequest.status === TripRequestStatus.DRIVER_SELECTED) {
       throw new BadRequestException(
-        'Cette demande de trajet a déjà été acceptée par un autre driver',
+        'Cette commande de trajet a déjà été acceptée par un autre driver',
       );
     }
 
@@ -1534,21 +1546,21 @@ export class TripRequestsService {
       tripRequest.status === TripRequestStatus.EXPIRED
     ) {
       throw new BadRequestException(
-        "Cette demande de trajet n'est plus disponible",
+        "Cette commande de trajet n'est plus disponible",
       );
     }
 
     // Check if driver is not the passenger
     if (tripRequest.passengerId === driverId) {
       throw new BadRequestException(
-        'Vous ne pouvez pas accepter votre propre demande',
+        'Vous ne pouvez pas accepter votre propre commande',
       );
     }
 
     // Check if trip request already has a trip created
     if (tripRequest.tripId) {
       throw new BadRequestException(
-        'Un trajet a déjà été créé à partir de cette demande',
+        'Un trajet a déjà été créé à partir de cette commande',
       );
     }
 
@@ -1564,7 +1576,7 @@ export class TripRequestsService {
           tripRequestId,
           driverId,
           message:
-            "Ce conducteur exige une vérification d'identité approuvée avant d'accepter cette demande.",
+            "Ce conducteur exige une vérification d'identité approuvée avant d'accepter cette commande.",
         },
       );
     }
@@ -1610,7 +1622,7 @@ export class TripRequestsService {
 
       if (!vehicle) {
         throw new BadRequestException(
-          'Vous devez avoir au moins un véhicule actif pour accepter une demande',
+          'Vous devez avoir au moins un véhicule actif pour accepter une commande',
         );
       }
     }
@@ -1740,8 +1752,8 @@ export class TripRequestsService {
       if (passenger?.fcmToken && driverWithName) {
         await this.notificationService.sendNotification(
           passenger.fcmToken,
-          'Demande acceptée',
-          `${driverWithName.firstName} ${driverWithName.lastName} a accepté votre demande de trajet`,
+          'Commande acceptée',
+          `${driverWithName.firstName} ${driverWithName.lastName} a accepté votre commande de trajet`,
           {
             type: 'trip_request_accepted',
             tripRequestId: tripRequest.id,
@@ -1779,7 +1791,7 @@ export class TripRequestsService {
 
     if (!tripRequest) {
       throw new NotFoundException(
-        "Demande de trajet non trouvée ou vous n'êtes pas le propriétaire",
+        "Commande de trajet non trouvée ou vous n'êtes pas le propriétaire",
       );
     }
 
@@ -1789,7 +1801,7 @@ export class TripRequestsService {
           where: { id: tripRequestId, passengerId }, lock: { mode: 'pessimistic_write' },
         });
         if (!locked || locked.selectedDriverId) {
-          throw new BadRequestException('Un conducteur vient de répondre. Actualisez la demande avant de l’annuler.');
+          throw new BadRequestException('Un conducteur vient de répondre. Actualisez la commande avant de l’annuler.');
         }
         await manager.getRepository(TripRequest).update(tripRequestId, { status: TripRequestStatus.CANCELLED });
         await manager.query(`UPDATE trip_request_dispatch_offers SET status = 'cancelled' WHERE "requestId" = $1 AND status = 'pending'`, [tripRequestId]);
@@ -1804,7 +1816,7 @@ export class TripRequestsService {
 
       if (trip.status !== TripStatus.PENDING || trip.startedAt) {
         throw new BadRequestException(
-          'Vous ne pouvez plus annuler cette demande car le trajet a déjà démarré',
+          'Vous ne pouvez plus annuler cette commande car le trajet a déjà démarré',
         );
       }
 
@@ -1846,7 +1858,7 @@ export class TripRequestsService {
 
     if (!tripRequest) {
       throw new NotFoundException(
-        "Demande de trajet non trouvée ou vous n'êtes pas le propriétaire",
+        "Commande de trajet non trouvée ou vous n'êtes pas le propriétaire",
       );
     }
 
@@ -1855,7 +1867,7 @@ export class TripRequestsService {
       !tripRequest.selectedDriverId
     ) {
       throw new BadRequestException(
-        "Cette demande n'a plus de conducteur sélectionné",
+        "Cette commande n'a plus de conducteur sélectionné",
       );
     }
 
@@ -1911,7 +1923,7 @@ export class TripRequestsService {
 
     if (!reopened) {
       throw new BadRequestException(
-        'La demande a changé entre-temps. Actualisez-la avant de réessayer.',
+        'La commande a changé entre-temps. Actualisez-la avant de réessayer.',
       );
     }
 
@@ -2185,7 +2197,7 @@ export class TripRequestsService {
     if (!request?.passenger || request.passengerId === driverId ||
       ![TripRequestStatus.PENDING, TripRequestStatus.OFFERS_RECEIVED].includes(request.status) ||
       this.hasAcceptedDriver(request)) {
-      throw new NotFoundException('Cette demande n’est plus disponible pour contacter le passager.');
+      throw new NotFoundException('Cette commande n’est plus disponible pour contacter le passager.');
     }
     let deadline = this.getRequestExpirationAt(request)?.getTime() ?? NaN;
     if (request.immediateDispatch) {
@@ -2195,7 +2207,7 @@ export class TripRequestsService {
     }
     const now = Date.now();
     if (!Number.isFinite(deadline) || deadline <= now) {
-      throw new NotFoundException('Cette demande n’est plus disponible pour contacter le passager.');
+      throw new NotFoundException('Cette commande n’est plus disponible pour contacter le passager.');
     }
     return {
       requestId: request.id,
@@ -2320,7 +2332,7 @@ export class TripRequestsService {
       throw new BadRequestException({
         error: 'Type de véhicule incompatible',
         code: 'TRIP_REQUEST_VEHICLE_TYPE_MISMATCH',
-        message: `Cette demande nécessite le type ${this.VEHICLE_TYPE_DISPLAY_NAMES[requestedType]}. Sélectionnez un véhicule actif correspondant.`,
+        message: `Cette commande nécessite le type ${this.VEHICLE_TYPE_DISPLAY_NAMES[requestedType]}. Sélectionnez un véhicule actif correspondant.`,
       });
     }
   }
@@ -2713,8 +2725,8 @@ export class TripRequestsService {
     try {
       await this.notificationService.sendNotificationToUser(
         tripRequest.passengerId,
-        'Demande de trajet expirée',
-        `Votre demande de trajet de ${tripRequest.departureLocation} à ${tripRequest.arrivalLocation} a expiré car aucun conducteur ne l'a acceptée.`,
+        'Commande de trajet expirée',
+        `Votre commande de trajet de ${tripRequest.departureLocation} à ${tripRequest.arrivalLocation} a expiré car aucun conducteur ne l'a acceptée.`,
         {
           type: 'trip_request_expired',
           presentation: 'push_only',
@@ -2818,7 +2830,7 @@ export class TripRequestsService {
         await this.notificationService.sendNotificationToUser(
           tripRequest.passengerId,
           'Votre prise en charge est en retard',
-          "L'heure maximale souhaitée est dépassée et vous n'avez pas encore été pris en charge. Vous pouvez attendre ou choisir un autre conducteur. Pensez aussi à ajuster la date et l'heure de votre demande.",
+          "L'heure maximale souhaitée est dépassée et vous n'avez pas encore été pris en charge. Vous pouvez attendre ou choisir un autre conducteur. Pensez aussi à ajuster la date et l'heure de votre commande.",
           {
             type: 'trip_request_driver_overdue',
             recipientUserId: tripRequest.passengerId,
@@ -2891,10 +2903,10 @@ export class TripRequestsService {
    * Cron job to notify passengers about upcoming trip request expiration
    * Runs every 15 minutes to check for trip requests expiring in the next 30 minutes
    */
-  @Cron('*/15 * * * *') // Every 15 minutes
+  @Cron('*/15 * * * *', { waitForCompletion: true })
   async notifyAboutUpcomingTripRequestExpiration() {
-    // Use setImmediate to ensure HTTP requests have priority
-    setImmediate(async () => {
+    // Await the work so database failures are handled by the scheduler.
+    await (async () => {
       this.logger.debug(
         'Running cron job to notify about upcoming trip request expiration',
       );
@@ -2962,7 +2974,7 @@ export class TripRequestsService {
       this.logger.log(
         `Successfully notified about ${requestsExpiringSoon.length} trip requests expiring soon`,
       );
-    });
+    })();
   }
 
   /**
@@ -2986,8 +2998,8 @@ export class TripRequestsService {
         (60 * 1000),
     );
 
-    const title = '⏰ Votre demande de trajet expire bientôt';
-    const body = `Votre demande de trajet ${tripRequest.departureLocation} → ${tripRequest.arrivalLocation} expire dans ${minutesUntilExpiration} minute(s) si aucun conducteur n'est confirmé.`;
+    const title = '⏰ Votre commande de trajet expire bientôt';
+    const body = `Votre commande de trajet ${tripRequest.departureLocation} → ${tripRequest.arrivalLocation} expire dans ${minutesUntilExpiration} minute(s) si aucun conducteur n'est confirmé.`;
 
     await this.notificationService.sendNotification(
       passenger.fcmToken,

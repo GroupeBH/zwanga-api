@@ -1,0 +1,6 @@
+[Unit]
+Description=Stop staging after two hours
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/shutdown -h now

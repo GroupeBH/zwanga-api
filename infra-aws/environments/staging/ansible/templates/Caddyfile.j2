@@ -1,0 +1,4 @@
+{{ staging_config.domain }} {
+    header X-Zwanga-Environment staging
+    reverse_proxy api:5200
+}

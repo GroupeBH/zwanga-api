@@ -184,6 +184,7 @@ export class UsersService {
     if (!id) return null;
     return this.userRepository.findOne({ where: { id }, select: [
       'id', 'email', 'phone', 'role', 'status', 'isActive', 'passwordChangeRequired',
+      'accessToken',
     ] });
   }
 

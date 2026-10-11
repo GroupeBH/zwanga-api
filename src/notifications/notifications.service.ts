@@ -6,7 +6,7 @@ import {
   type ServiceAccount,
 } from 'firebase-admin/app';
 import { getMessaging, type MulticastMessage } from 'firebase-admin/messaging';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { Injectable, OnModuleInit, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Cron, CronExpression } from '@nestjs/schedule';
@@ -16,7 +16,8 @@ import {
   Notification,
   NotificationStatus,
 } from './entities/notification.entity';
-import { User } from '../users/entities/user.entity';
+import { User, UserRole, UserStatus } from '../users/entities/user.entity';
+import { canReceiveDriverRequests, DRIVER_REQUEST_NOTIFICATION_TYPES, isDriverRequestNotification } from './driver-request-policy';
 import { DriverPayout } from '../driver-settlements/entities/driver-payout.entity';
 import { WalletWithdrawal } from '../wallet/entities/wallet-withdrawal.entity';
 import { ReferralWithdrawal } from '../referrals/entities/referral-withdrawal.entity';
@@ -37,7 +38,7 @@ const PUSH_DELIVERY_TIMEOUT_MS = 10_000;
 const CRITICAL_RETRY_DELAY_MS = 5 * 60 * 1000;
 const CRITICAL_RETRY_WINDOW_MS = 72 * 60 * 60 * 1000;
 const CRITICAL_RETRY_BATCH_SIZE = 25;
-const URGENT_NOTIFICATION_TYPES = ['new_booking', 'driver_dispatch_offer'];
+const URGENT_NOTIFICATION_TYPES = ['new_booking', 'driver_dispatch_offer', 'trip_request_nearby'];
 const EXPO_RECEIPT_DELAY_MS = 15 * 60 * 1000;
 const EXPO_RECEIPT_WINDOW_MS = 24 * 60 * 60 * 1000;
 const EXPO_RECEIPT_BATCH_SIZE = 100;
@@ -85,6 +86,7 @@ const ROUTINE_TRIP_NOTIFICATION_TYPES = [
   'trip_paused',
   'trip_recommendation',
   'trip_request',
+  'trip_request_nearby',
   'trip_request_accepted',
   'trip_request_expired',
   'trip_request_expiring',
@@ -237,31 +239,27 @@ export class NotificationService implements OnModuleInit {
       return false;
     }
 
-    const canSend = await this.canSendAutomaticNotification(userId);
-    if (!canSend) {
-      this.logger.debug(
-        `Automatic notification skipped for user ${userId}: weekly limit reached`,
-      );
-      return false;
-    }
-
-    return this.sendNotificationInternal(
-      fcmToken,
-      title,
-      body,
-      data,
-      userId,
-      true,
-    );
+    return this.notificationRepository.manager.transaction(async manager => {
+      await manager.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`zwanga:automatic-push:${userId}`]);
+      const notifications = manager.getRepository(Notification);
+      if (!await this.canSendAutomaticNotification(userId, notifications)) return false;
+      // Enqueue while holding the per-user lock; the existing outbox delivers after commit.
+      await notifications.save(notifications.create({
+        userId, fcmToken, title, body, data: data ?? null, isAutomatic: true,
+        status: NotificationStatus.PENDING, eventKey: `automatic:${userId}:${randomUUID()}`,
+      }));
+      return true;
+    });
   }
 
-  private async canSendAutomaticNotification(userId: string): Promise<boolean> {
+  private async canSendAutomaticNotification(userId: string, repository = this.notificationRepository): Promise<boolean> {
     const since = new Date(Date.now() - AUTOMATIC_NOTIFICATION_COOLDOWN_MS);
-    const existingNotification = await this.notificationRepository.findOne({
+    const existingNotification = await repository.findOne({
       where: {
         userId,
         isAutomatic: true,
-        status: In([NotificationStatus.PENDING, NotificationStatus.SENT]),
+        // Failed durable work is retried by the outbox, not duplicated by another cron.
+        status: In([NotificationStatus.PENDING, NotificationStatus.SENT, NotificationStatus.FAILED]),
         createdAt: MoreThan(since),
       },
       order: { createdAt: 'DESC' },
@@ -300,11 +298,21 @@ export class NotificationService implements OnModuleInit {
   private async deliverSavedNotification(
     savedNotification: Notification,
   ): Promise<boolean> {
+    const driverRequest = isDriverRequestNotification(savedNotification.data);
+    if (driverRequest && !savedNotification.userId) {
+      await this.suppressCriticalNotification(savedNotification, 'DRIVER_REQUEST_RECIPIENT_REQUIRED');
+      return false;
+    }
     // A queued token snapshot is not proof that the device still belongs to this account.
     if (savedNotification.userId) {
       const owner = await this.userRepository.findOne({
-        where: { id: savedNotification.userId }, select: ['id', 'fcmToken'],
+        where: { id: savedNotification.userId }, select: ['id', 'fcmToken', 'role', 'isActive', 'status'],
       });
+      // Recheck at delivery, including retries: eligibility may have changed since enqueueing.
+      if (driverRequest && !canReceiveDriverRequests(owner)) {
+        await this.suppressCriticalNotification(savedNotification, 'DRIVER_REQUEST_RECIPIENT_REQUIRED');
+        return false;
+      }
       savedNotification.fcmToken = owner?.fcmToken?.trim() ?? '';
     }
     const pushToken = savedNotification.fcmToken?.trim();
@@ -375,6 +383,8 @@ export class NotificationService implements OnModuleInit {
     }
     const passengerRing = notification.data?.type === 'trip_request_accepted' &&
       await this.ringClientVersion(notification, pushToken) === 2;
+    const nearbyRing = this.isNearbyRequestRing(notification) &&
+      await this.ringClientVersion(notification, pushToken) === 2;
     return getMessaging(this.firebaseApp).send({
       token: pushToken,
       notification: {
@@ -383,9 +393,10 @@ export class NotificationService implements OnModuleInit {
       },
       data: this.stringifyNotificationData(passengerRing
         ? { ...notification.data, ringAlert: 'request-accepted-v1' } : notification.data),
-      ...(passengerRing ? { android: { priority: 'high' as const, ttl: 60_000,
+      ...(passengerRing || nearbyRing ? { android: { priority: 'high' as const,
+        ttl: nearbyRing ? this.driverNotificationTtl(notification, this.driverRingUntil(notification)) * 1000 : 60_000,
         notification: { channelId: 'booking-ring-v2', sound: 'driver_ring',
-          tag: `request-accepted-${notification.data?.tripRequestId}`, visibility: 'private' as const } } } : {}),
+          tag: `${nearbyRing ? 'request-nearby' : 'request-accepted'}-${notification.data?.tripRequestId}`, visibility: 'private' as const } } } : {}),
     });
   }
 
@@ -397,13 +408,15 @@ export class NotificationService implements OnModuleInit {
     const driverActions = version > 0;
     const passengerRing = notification.data?.type === 'trip_request_accepted' &&
       await this.ringClientVersion(notification, pushToken) === 2;
+    const nearbyRing = this.isNearbyRequestRing(notification) &&
+      await this.ringClientVersion(notification, pushToken) === 2;
     // APNs can request a bundled sound independently of interactive JS support.
     // An older iOS binary without the file falls back to the system sound. Keep
     // categories and time-sensitive entitlement usage gated by client capability.
     const driverRing = this.isDriverRingInvitation(notification);
-    const longRing = driverRing || passengerRing;
-    const timeSensitive = version === 2 || passengerRing;
-    const ringUntil = driverRing ? this.driverRingUntil(notification) : undefined;
+    const longRing = driverRing || passengerRing || nearbyRing;
+    const timeSensitive = version === 2 || passengerRing || nearbyRing;
+    const ringUntil = driverRing || nearbyRing ? this.driverRingUntil(notification) : undefined;
     const response = await fetch(EXPO_PUSH_API_URL, {
       method: 'POST',
       headers: {
@@ -418,9 +431,10 @@ export class NotificationService implements OnModuleInit {
           ...(version === 2 ? { ringVersion: 'v2', ringUntil } : {}) }
           : passengerRing ? { ...notification.data, ringAlert: 'request-accepted-v1' } : notification.data ?? undefined,
         ...(driverActions ? { categoryId: version === 2 ? 'driver-offer-v2' : 'driver-offer-v1' } : {}),
-        ...(driverRing ? { ttl: this.driverNotificationTtl(notification, ringUntil) } : {}),
+        ...(driverRing || nearbyRing ? { ttl: this.driverNotificationTtl(notification, ringUntil) } : {}),
         ...(timeSensitive ? { interruptionLevel: 'time-sensitive' } : {}),
-        ...(passengerRing ? { channelId: 'booking-ring-v2', ttl: 60 } : {}),
+        ...(passengerRing ? { ttl: 60 } : {}),
+        ...(version === 2 || passengerRing || nearbyRing ? { channelId: 'booking-ring-v2' } : {}),
         sound: longRing ? 'driver_ring.wav' : 'default',
         priority: notification.data?.type === 'app_update' ? 'normal' : 'high',
       }),
@@ -451,7 +465,7 @@ export class NotificationService implements OnModuleInit {
 
   /** A stale booking stays actionable in-app, but must not ring an hour later. */
   private driverRingUntil(notification: Notification): string {
-    const expiry = Date.parse(String(notification.data?.expiresAt ?? ''));
+    const expiry = Date.parse(String(notification.data?.alertExpiresAt ?? notification.data?.expiresAt ?? ''));
     const deadline = Date.now() + 30_000;
     return new Date(Number.isFinite(expiry) ? Math.min(expiry, deadline) : deadline).toISOString();
   }
@@ -470,6 +484,12 @@ export class NotificationService implements OnModuleInit {
     return notification.data?.type === 'new_booking' ||
       (notification.data?.type === 'driver_dispatch_offer' &&
         this.configService.get<string>('DRIVER_DISPATCH_ENABLED') === 'true');
+  }
+
+  private isNearbyRequestRing(notification: Notification): boolean {
+    return notification.data?.type === 'trip_request_nearby' && notification.data.ringAlert === 'nearby-request-v1' &&
+      Boolean(notification.userId && notification.data.driverId === notification.userId) &&
+      this.configService.get<string>('DRIVER_DISPATCH_ENABLED') === 'true';
   }
 
   private async ringClientVersion(notification: Notification, pushToken: string): Promise<number> {
@@ -706,6 +726,14 @@ export class NotificationService implements OnModuleInit {
     notification: Notification,
   ): Promise<boolean> {
     const type = notification.data?.type;
+    if (type === 'trip_request_nearby') {
+      if (!this.isNearbyRequestRing(notification) ||
+          !(Date.parse(String(notification.data?.alertExpiresAt)) > Date.now())) return false;
+      const rows: unknown[] = await this.notificationRepository.manager.query(`SELECT 1 FROM trip_requests r
+        WHERE r.id = $1 AND r.status IN ('pending', 'offers_received') AND r."selectedDriverId" IS NULL
+          AND r."tripId" IS NULL AND r."departureDateMax" > now()`, [notification.data?.tripRequestId]);
+      return rows.length > 0;
+    }
     if (type === 'new_booking') {
       const rows: unknown[] = await this.notificationRepository.manager.query(`SELECT 1 FROM bookings b
         JOIN trips t ON t.id = b."tripId" WHERE b.id = $1 AND t."driverId" = $2
@@ -984,6 +1012,10 @@ export class NotificationService implements OnModuleInit {
     data?: Record<string, any>,
     userIds?: string[],
   ): Promise<void> {
+    if (isDriverRequestNotification(data) && !userIds?.length) {
+      this.logger.warn('Driver request alerts require identified recipients');
+      return;
+    }
     if ((!this.firebaseApp && !userIds?.length) || fcmTokens.length === 0) {
       this.logger.debug(
         'FCM not configured or no tokens provided, skipping multicast notification',
@@ -1126,7 +1158,18 @@ export class NotificationService implements OnModuleInit {
     const query = this.notificationRepository
       .createQueryBuilder('notification')
       .where('notification.userId = :userId', { userId })
-      .andWhere('notification.isActive = true');
+      .andWhere('notification.isActive = true')
+      .andWhere(
+        `(COALESCE(notification.data ->> 'type', '') NOT IN (:...driverRequestTypes)
+          OR EXISTS (SELECT 1 FROM users viewer WHERE viewer.id = :userId
+            AND viewer.role = :notificationDriverRole AND viewer."isActive" = true
+            AND viewer.status NOT IN (:...inactiveDriverStatuses)))`,
+        {
+          driverRequestTypes: [...DRIVER_REQUEST_NOTIFICATION_TYPES],
+          notificationDriverRole: UserRole.DRIVER,
+          inactiveDriverStatuses: [UserStatus.SUSPENDED, UserStatus.INACTIVE],
+        },
+      );
 
     if (scope === 'critical') {
       query

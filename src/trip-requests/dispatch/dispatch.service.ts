@@ -12,6 +12,7 @@ import { NotificationService } from '../../notifications/notifications.service';
 import { enqueueTransactionalNotification } from '../../notifications/transactional-notification';
 import { DriverPositionDto, DriverPresenceDto } from './dispatch.dto';
 import { boundedInteger, DispatchDecision, dispatchOfferIsActionable } from './dispatch-policy';
+import { enqueueScheduledRequestAlert } from './scheduled-request-alert';
 
 interface DispatchOffer {
   id: string; requestId: string; driverId: string; vehicleId: string;
@@ -30,6 +31,17 @@ export class DriverDispatchService {
   private get presenceSeconds() { return boundedInteger(this.config.get('DRIVER_DISPATCH_PRESENCE_SECONDS'), 90, 45, 180); }
   private get radiusMeters() { return boundedInteger(this.config.get('DRIVER_DISPATCH_RADIUS_METERS'), 5000, 500, 20000); }
   private get positionSeconds() { return boundedInteger(this.config.get('DRIVER_DISPATCH_POSITION_SECONDS'), 300, 60, 900); }
+
+  async notifyScheduledRequest(requestId: string): Promise<boolean> {
+    if (!this.enabled) return false;
+    const queued = await this.db.transaction(manager => enqueueScheduledRequestAlert(
+      manager, requestId, this.radiusMeters, driverId => this.isBusy(manager, driverId)));
+    // No network operation while holding the request's transaction lock.
+    if (queued) void this.notifications.dispatchTransactionalNotifications()
+      .catch(() => this.logger.warn('Nearby request push delivery deferred.'));
+    // A committed outbox entry remains queued even if delivery needs a retry.
+    return queued;
+  }
 
   async status(driverId: string) {
     if (!this.enabled) return { enabled: false, available: false, pendingOfferId: null };
@@ -97,7 +109,7 @@ export class DriverDispatchService {
       const vehicle = await manager.getRepository(Vehicle).findOneBy({ id: body.vehicleId, ownerId: driverId, isActive: true });
       if (!vehicle || (getVehicleMaxSeats(vehicle.type) ?? 20) < body.seats!)
         throw new BadRequestException('Choisissez un véhicule actif et un nombre de places compatible.');
-      if (await this.isBusy(manager, driverId)) throw new ConflictException('Vous avez déjà un trajet ou une demande à prendre en charge.');
+      if (await this.isBusy(manager, driverId)) throw new ConflictException('Vous avez déjà un trajet ou une commande à prendre en charge.');
       if (body.leaseId) {
         // A late heartbeat must never reactivate an offline/assigned driver or a newer vehicle selection.
         await manager.query(`UPDATE driver_dispatch_presence
@@ -141,7 +153,7 @@ export class DriverDispatchService {
     const [offer]: DispatchOffer[] = await this.db.query(`SELECT * FROM trip_request_dispatch_offers WHERE id = $1 AND "driverId" = $2`, [id, driverId]);
     if (!offer) throw new NotFoundException('Proposition introuvable.');
     const request = await this.db.getRepository(TripRequest).findOne({ where: { id: offer.requestId }, relations: ['passenger'] });
-    if (!request) throw new NotFoundException('Demande introuvable.');
+    if (!request) throw new NotFoundException('Commande introuvable.');
     const vehicle = await this.db.getRepository(Vehicle).findOneBy({ id: offer.vehicleId, ownerId: driverId });
     return { ...offer, serverNow: new Date().toISOString(),
       vehicleName: vehicle ? `${vehicle.brand} ${vehicle.model}` : null,
@@ -177,8 +189,8 @@ export class DriverDispatchService {
         const vehicle = await manager.getRepository(Vehicle).findOneBy({ id: offer.vehicleId, ownerId: driverId, isActive: true });
         if (!vehicle || vehicle.type !== request.vehicleType || offer.seats < request.numberOfSeats ||
             (getVehicleMaxSeats(vehicle.type) ?? 20) < offer.seats || await this.isBusy(manager, driverId, request.id))
-          throw new ConflictException('Vous ou votre véhicule ne pouvez plus prendre en charge cette demande.');
-        if (request.maxPricePerSeat === null) throw new ConflictException('Le tarif de la demande est indisponible.');
+          throw new ConflictException('Vous ou votre véhicule ne pouvez plus prendre en charge cette commande.');
+        if (request.maxPricePerSeat === null) throw new ConflictException('Le tarif de la commande est indisponible.');
         const offers = manager.getRepository(DriverOffer);
         await offers.save(offers.create({ tripRequestId: request.id, driverId, vehicleId: vehicle.id,
           availableSeats: offer.seats, pricePerSeat: request.maxPricePerSeat,
@@ -191,7 +203,7 @@ export class DriverDispatchService {
           selectedDriverRequiresPassengerKyc: false, selectedAt: new Date(), driverPickupOverdueNotifiedAt: null });
         await manager.query(`UPDATE driver_dispatch_presence SET "expiresAt" = now() WHERE "driverId" = $1`, [driverId]);
         await enqueueTransactionalNotification(manager, { eventKey: `dispatch-accepted:${id}`, userId: request.passengerId,
-          title: 'Conducteur trouvé', body: 'Un conducteur a accepté votre demande. Consultez les détails de la prise en charge.',
+          title: 'Conducteur trouvé', body: 'Un conducteur a accepté votre commande. Consultez les détails de la prise en charge.',
           data: { type: 'trip_request_accepted', tripRequestId: request.id, driverId } });
       }
       await manager.query(`UPDATE trip_request_dispatch_offers SET status = $2 WHERE id = $1`, [id, expected]);
@@ -273,7 +285,7 @@ export class DriverDispatchService {
         await manager.query(`INSERT INTO trip_request_dispatch_offers (id,"requestId","driverId","vehicleId",seats,"expiresAt")
           VALUES ($1,$2,$3,$4,$5,$6)`, [id, requestId, driver.id, candidate.vehicleId, candidate.seats, expiresAt]);
         await enqueueTransactionalNotification(manager, { eventKey: `dispatch-offer:${id}`, userId: driver.id,
-          title: 'Demande de trajet à proximité', body: `${request.departureLocation} → ${request.arrivalLocation} · ${request.numberOfSeats} place(s) · ${request.maxPricePerSeat} FC/place · ${vehicle.brand} ${vehicle.model}. Accepter ou refuser ?`,
+          title: 'Commande de trajet à proximité', body: `${request.departureLocation} → ${request.arrivalLocation} · ${request.numberOfSeats} place(s) · ${request.maxPricePerSeat} FC/place · ${vehicle.brand} ${vehicle.model}. Accepter ou refuser ?`,
           data: { type: 'driver_dispatch_offer', offerId: id, tripRequestId: requestId, driverId: driver.id,
             expiresAt: expiresAt.toISOString(), role: 'driver' } });
         return;

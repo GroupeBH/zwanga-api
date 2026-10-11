@@ -40,9 +40,38 @@ export function buildRedisClientOptions(
     socket: {
       tls: redisTls,
       connectTimeout: 5_000,
-      reconnectStrategy: false,
+      // Recover from a Valkey failover without building an offline request queue.
+      reconnectStrategy: (retries) =>
+        Math.min(100 * 2 ** Math.min(retries, 6), 5_000) + Math.floor(Math.random() * 100),
     },
   };
+}
+
+type ConnectableRedisClient = {
+  isOpen: boolean;
+  connect(): Promise<unknown>;
+  disconnect(): Promise<unknown>;
+};
+
+/** Runtime retries are unbounded, but an unavailable dependency must not hang boot. */
+export async function connectRedisWithDeadline(
+  client: ConnectableRedisClient,
+  timeoutMs = 10_000,
+): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      client.connect(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('Redis connection deadline exceeded')), timeoutMs);
+      }),
+    ]);
+  } catch (error) {
+    if (client.isOpen) await client.disconnect().catch(() => undefined);
+    throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 export function redisOptionsUseTls(options: RedisClientOptions): boolean {

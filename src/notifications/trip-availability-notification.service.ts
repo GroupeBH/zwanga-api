@@ -6,6 +6,7 @@ import { Trip, TripStatus } from '../trips/entities/trip.entity';
 import { Booking, BookingStatus } from '../bookings/entities/booking.entity';
 import { User } from '../users/entities/user.entity';
 import { NotificationService } from './notifications.service';
+import { activePushUsers } from './active-push-users';
 
 interface PreferredLocations {
   departures: string[];
@@ -32,18 +33,13 @@ export class TripAvailabilityNotificationService {
     private readonly notificationService: NotificationService,
   ) {}
 
-  @Cron(CronExpression.EVERY_HOUR)
+  @Cron(CronExpression.EVERY_HOUR, { waitForCompletion: true })
   async sendRecommendationNotifications() {
-    // Use setImmediate to ensure HTTP requests have priority
-    setImmediate(async () => {
+    // Keep failures attached to the promise observed by Nest's scheduler.
+    await (async () => {
       this.logger.debug('Running trip availability recommendation cron job');
 
-    const users = await this.userRepository.find({
-      where: { isActive: true },
-      select: ['id', 'firstName', 'fcmToken'],
-    });
-
-    for (const user of users) {
+    for await (const user of activePushUsers(this.userRepository)) {
       if (!user.fcmToken) {
         continue;
       }
@@ -65,7 +61,7 @@ export class TripAvailabilityNotificationService {
 
       await this.notifyUserAboutTrips(user, matchingTrips);
     }
-    });
+    })();
   }
 
   private async getPreferredLocations(

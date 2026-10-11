@@ -209,6 +209,17 @@ resource "aws_ecs_service" "backend" {
   deployment_maximum_percent         = var.ecs_deployment_maximum_percent
   wait_for_steady_state              = var.ecs_wait_for_steady_state
 
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+
+  # Terraform publishes configuration revisions; CI pins their image and deploys
+  # them after migrations. Applying Terraform must not roll back the deployed SHA.
+  lifecycle {
+    ignore_changes = [task_definition]
+  }
+
   network_configuration {
     subnets          = aws_subnet.public[*].id
     security_groups  = [aws_security_group.ecs_tasks.id]

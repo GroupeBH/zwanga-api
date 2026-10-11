@@ -134,6 +134,32 @@ export class PaymentsService {
     this.settlementRegistry?.register(purpose, handler);
   }
 
+  async reconcileFlexPayDeposit(paymentId: string): Promise<boolean> {
+    let payment = await this.paymentTransactionRepository.findOne({
+      where: { id: paymentId },
+    });
+    if (
+      !payment ||
+      payment.provider !== PaymentProvider.FLEXPAY ||
+      this.isPayoutTransaction(payment)
+    ) {
+      return true;
+    }
+    if (
+      !this.isTerminalPaymentStatus(payment.status) ||
+      (payment.purpose === PaymentPurpose.WALLET_TOP_UP &&
+        payment.status === PaymentStatus.SUCCEEDED &&
+        !hasVerifiedWalletTopUpProof(payment))
+    ) {
+      if (!payment.orderNumber) return false;
+      payment = await this.checkTransactionAndApply(payment);
+    }
+    if (!this.isTerminalPaymentStatus(payment.status)) return false;
+    // Mark the durable job complete only AFTER the domain has applied the result.
+    await this.settlementRegistry.apply(payment);
+    return true;
+  }
+
   listPaymentProviders() {
     const enabled = this.getEnabledProviders();
     const primary =
@@ -459,7 +485,7 @@ export class PaymentsService {
         transaction.providerMessage =
           'Notification de paiement reçue, mais le numéro de commande FlexPay est manquant';
         const savedTransaction =
-          await this.paymentTransactionRepository.save(transaction);
+          await this.saveFlexPayDepositCheck(transaction);
         this.logger.warn(
           `FlexPay callback cannot be verified without orderNumber: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, response=${formatPaymentLogPayload(this.formatPaymentLogResponse(savedTransaction))}`,
         );
@@ -476,7 +502,7 @@ export class PaymentsService {
         transaction.providerMessage =
           'Notification de paiement reçue. Vérification du paiement en cours';
         const savedTransaction =
-          await this.paymentTransactionRepository.save(transaction);
+          await this.saveFlexPayDepositCheck(transaction);
         this.logger.warn(
           `FlexPay callback verification pending response: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, response=${formatPaymentLogPayload(this.formatPaymentLogResponse(savedTransaction))}`,
         );
@@ -492,7 +518,7 @@ export class PaymentsService {
         callback.message,
       );
       const savedTransaction =
-        await this.paymentTransactionRepository.save(transaction);
+        await this.saveFlexPayDepositCheck(transaction);
       this.logger.warn(
         `Payment marked failed from FlexPay callback: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, previousStatus=${previousStatus}, code=${callback.code}, response=${formatPaymentLogPayload(this.formatPaymentLogResponse(savedTransaction))}`,
       );
@@ -503,7 +529,7 @@ export class PaymentsService {
     transaction.providerMessage = 'Paiement confirmé avec succès';
     transaction.paidAt = transaction.paidAt ?? new Date();
     const savedTransaction =
-      await this.paymentTransactionRepository.save(transaction);
+      await this.saveFlexPayDepositCheck(transaction);
     this.logger.warn(
       `Payment confirmed from FlexPay callback: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, previousStatus=${previousStatus}, status=${savedTransaction.status}, response=${formatPaymentLogPayload(this.formatPaymentLogResponse(savedTransaction))}`,
     );
@@ -848,6 +874,36 @@ export class PaymentsService {
     return this.applyFlexPayCheckResult(transaction, checkResult);
   }
 
+  private async saveFlexPayDepositCheck(
+    candidate: PaymentTransaction,
+  ): Promise<PaymentTransaction> {
+    return this.paymentTransactionRepository.manager.transaction(async (manager) => {
+      const current = await manager.findOne(PaymentTransaction, {
+        where: { id: candidate.id },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!current) throw new NotFoundException('Paiement introuvable');
+      // A delayed timeout/pending response must never undo confirmed success.
+      if (
+        current.status === PaymentStatus.SUCCEEDED &&
+        (candidate.status !== PaymentStatus.SUCCEEDED ||
+          (current.purpose === PaymentPurpose.WALLET_TOP_UP &&
+            hasVerifiedWalletTopUpProof(current)))
+      ) return current;
+      Object.assign(current, {
+        status: candidate.status,
+        providerStatusCode: candidate.providerStatusCode,
+        providerMessage: candidate.providerMessage,
+        providerReference: candidate.providerReference,
+        orderNumber: candidate.orderNumber,
+        rawCheckResponse: candidate.rawCheckResponse,
+        rawCallbackPayload: candidate.rawCallbackPayload,
+        paidAt: current.paidAt ?? candidate.paidAt,
+      });
+      return manager.save(PaymentTransaction, current);
+    });
+  }
+
   private async applyFlexPayCheckResult(
     transaction: PaymentTransaction,
     checkResult: FlexPayCheckTransactionResult,
@@ -867,7 +923,7 @@ export class PaymentsService {
         checkResult.message,
       );
       const savedTransaction =
-        await this.paymentTransactionRepository.save(transaction);
+        await this.saveFlexPayDepositCheck(transaction);
       this.logger.warn(
         `FlexPay check returned non-success code: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, code=${checkResult.code}, message=${checkResult.message ?? 'none'}, status=${savedTransaction.status}, providerResponse=${formatPaymentLogPayload(checkResult.raw)}, response=${formatPaymentLogPayload(this.formatPaymentLogResponse(savedTransaction))}`,
       );
@@ -880,7 +936,7 @@ export class PaymentsService {
         checkResult.message,
       );
       const savedTransaction =
-        await this.paymentTransactionRepository.save(transaction);
+        await this.saveFlexPayDepositCheck(transaction);
       this.logger.warn(
         `FlexPay check returned no transaction: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, orderNumber=${savedTransaction.orderNumber ?? 'none'}, providerResponse=${formatPaymentLogPayload(checkResult.raw)}, response=${formatPaymentLogPayload(this.formatPaymentLogResponse(savedTransaction))}`,
       );
@@ -935,7 +991,7 @@ export class PaymentsService {
       transaction.providerMessage = 'Paiement confirmé avec succès';
       transaction.paidAt = transaction.paidAt ?? new Date();
       const savedTransaction =
-        await this.paymentTransactionRepository.save(transaction);
+        await this.saveFlexPayDepositCheck(transaction);
       this.logger.warn(
         `Payment confirmed from FlexPay check: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, previousStatus=${previousStatus}, status=${savedTransaction.status}, providerStatus=${providerTransactionStatus}, response=${formatPaymentLogPayload(this.formatPaymentLogResponse(savedTransaction))}`,
       );
@@ -956,7 +1012,7 @@ export class PaymentsService {
     }
 
     const savedTransaction =
-      await this.paymentTransactionRepository.save(transaction);
+      await this.saveFlexPayDepositCheck(transaction);
     this.logger.warn(
       `Payment updated from FlexPay check: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, previousStatus=${previousStatus}, status=${savedTransaction.status}, providerStatus=${providerTransactionStatus ?? 'none'}, response=${formatPaymentLogPayload(this.formatPaymentLogResponse(savedTransaction))}`,
     );

@@ -1,0 +1,10 @@
+[Unit]
+Description=Maximum two-hour staging session
+
+[Timer]
+OnBootSec=2h
+AccuracySec=1min
+Unit=zwanga-staging-stop.service
+
+[Install]
+WantedBy=timers.target

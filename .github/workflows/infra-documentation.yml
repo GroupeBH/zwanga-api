@@ -4,7 +4,7 @@ on:
   pull_request:
     paths:
       - "infra-aws/**"
-      - ".github/workflows/deploy.yml"
+      - ".github/workflows/deploy*.yml"
       - ".github/workflows/infra-documentation.yml"
       - "Dockerfile"
       - "docker-compose.yml"
@@ -13,9 +13,10 @@ on:
   push:
     branches:
       - release
+      - staging
     paths:
       - "infra-aws/**"
-      - ".github/workflows/deploy.yml"
+      - ".github/workflows/deploy*.yml"
       - ".github/workflows/infra-documentation.yml"
       - "Dockerfile"
       - "docker-compose.yml"

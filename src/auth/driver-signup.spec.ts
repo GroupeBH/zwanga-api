@@ -21,7 +21,7 @@ function fixture() {
     }),
   );
   const jwt = { signAsync: jest.fn(async () => 'test-token') };
-  const vehicles = { create: jest.fn() };
+  const vehicles = { create: jest.fn(), createForRegistration: jest.fn() };
   const service = new AuthService(
     users as any,
     {} as any,
@@ -29,7 +29,7 @@ function fixture() {
     { get: jest.fn() } as any,
     {} as any,
     vehicles as any,
-    { assertReferralAttribution: jest.fn(), registerUser: jest.fn() } as any,
+    { assertReferralAttribution: jest.fn(), registerUser: jest.fn(), registerUserInTransaction: jest.fn() } as any,
     {} as any,
     {} as any,
   );
@@ -179,11 +179,19 @@ for (const provider of ['phone', 'google', 'apple'])
           driverOnboardingRequestedAt: expect.any(Date),
         }),
       );
-      expect(f.vehicles.create).toHaveBeenCalledWith('new-account', vehicle);
+      expect(f.vehicles.createForRegistration).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ id: 'new-account' }), vehicle);
       expect(f.jwt.signAsync).toHaveBeenCalledWith(
         expect.objectContaining({ role: UserRole.PASSENGER }),
         expect.anything(),
       );
+    });
+
+    it('does not issue tokens when vehicle creation aborts the signup transaction', async () => {
+      const f = fixture();
+      f.vehicles.createForRegistration.mockRejectedValue(new BadRequestException('duplicate plate'));
+      await expect(f.signup(provider, UserRole.DRIVER, true, { type: 'car' })).rejects.toThrow('duplicate plate');
+      expect(f.jwt.signAsync).not.toHaveBeenCalled();
+      expect(f.users.manager.transaction).toHaveBeenCalledTimes(1);
     });
 
     it.each([true, false])(

@@ -17,7 +17,7 @@ import {
   IsIn,
   MaxLength,
 } from 'class-validator';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import { ApiProperty } from '@nestjs/swagger';
 import { TripStatus } from '../entities/trip.entity';
 import { RecurringTripTemplateStatus } from '../entities/recurring-trip-template.entity';
@@ -161,6 +161,21 @@ export class TripDiscoveryPageDto {
   sort?: 'price' | 'date' | 'nearby';
 }
 
+// GET query arrays can arrive as CSV or repeated string parameters. Leave
+// malformed values intact so the usual validators reject them (never coerce
+// empty strings, booleans, null entries or objects to numeric coordinates).
+function parseSearchCoordinates(value: unknown): unknown {
+  const coordinates = typeof value === 'string' ? value.split(',') : value;
+  if (!Array.isArray(coordinates)) return coordinates;
+  return coordinates.map(coordinate => {
+    if (typeof coordinate !== 'string') return coordinate;
+    const decimal = coordinate.trim();
+    if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(decimal)) return coordinate;
+    const number = Number(decimal);
+    return Number.isFinite(number) ? number : coordinate;
+  });
+}
+
 export class SearchTripsDto extends TripDiscoveryPageDto {
   @ApiProperty({
     required: false,
@@ -183,9 +198,10 @@ export class SearchTripsDto extends TripDiscoveryPageDto {
   @ApiProperty({
     required: false,
     description:
-      'Coordonnées du point de départ [longitude, latitude]. Peut être utilisé seul ou avec arrivalCoordinates.',
+      'Coordonnées du point de départ [longitude, latitude], ou longitude,latitude en query string. Peut être utilisé seul ou avec arrivalCoordinates.',
     example: [15.2663, -4.325],
   })
+  @Transform(({ value }) => parseSearchCoordinates(value), { toClassOnly: true })
   @IsOptional()
   @IsArray()
   @ArrayMinSize(2)
@@ -206,9 +222,10 @@ export class SearchTripsDto extends TripDiscoveryPageDto {
   @ApiProperty({
     required: false,
     description:
-      "Coordonnées du point d'arrivée [longitude, latitude]. Peut être utilisé seul ou avec departureCoordinates.",
+      "Coordonnées du point d'arrivée [longitude, latitude], ou longitude,latitude en query string. Peut être utilisé seul ou avec departureCoordinates.",
     example: [15.3222, -4.4419],
   })
+  @Transform(({ value }) => parseSearchCoordinates(value), { toClassOnly: true })
   @IsOptional()
   @IsArray()
   @ArrayMinSize(2)

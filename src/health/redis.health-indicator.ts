@@ -13,7 +13,10 @@ export class RedisHealthIndicator {
 
   async pingCheck(key: string, timeout = 1_500) {
     const check = this.healthIndicatorService.check(key);
-    const client = createClient(buildRedisClientOptions(this.configService));
+    const options = buildRedisClientOptions(this.configService);
+    const client = createClient({ ...options, socket: { ...options.socket, reconnectStrategy: false } });
+    // A failed probe is reported below; EventEmitter errors must also be handled.
+    client.on('error', () => undefined);
     let timeoutRef: NodeJS.Timeout | undefined;
 
     try {
@@ -47,7 +50,7 @@ export class RedisHealthIndicator {
         clearTimeout(timeoutRef);
       }
       if (client.isOpen) {
-        await client.quit().catch(() => client.disconnect());
+        await client.disconnect().catch(() => undefined);
       }
     }
   }

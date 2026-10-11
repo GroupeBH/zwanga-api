@@ -63,7 +63,7 @@
     "@nestjs/typeorm": "^11.0.3",
     "@nestjs/websockets": "^11.0.1",
     "@socket.io/redis-adapter": "^8.3.0",
-    "axios": "^1.13.2",
+    "axios": "^1.20.0",
     "bcrypt": "^6.0.0",
     "cache-manager": "^5.7.6",
     "class-transformer": "^0.5.1",
@@ -71,9 +71,9 @@
     "firebase": "^12.5.0",
     "firebase-admin": "^14.1.0",
     "google-auth-library": "^10.5.0",
-    "joi": "^17.13.3",
+    "joi": "^17.13.8",
     "langchain": "^1.2.3",
-    "multer": "^1.4.5-lts.1",
+    "multer": "^2.4.0",
     "nest-winston": "^1.9.4",
     "passport": "^0.7.0",
     "passport-google-oauth20": "^2.0.0",
@@ -120,9 +120,14 @@
     "typescript-eslint": "^8.20.0"
   },
   "overrides": {
+    "multer": "$multer",
+    "engine.io": "6.6.11",
+    "proxy-addr": "2.0.8",
+    "handlebars": "4.7.10",
+    "js-yaml@^4.0.0": "4.3.2",
     "@opentelemetry/propagator-jaeger": "2.10.0",
     "pm2": {
-      "js-yaml": "4.3.1"
+      "js-yaml": "4.3.2"
     },
     "socket.io-parser": "4.2.7",
     "uuid@9.0.1": "11.1.1",

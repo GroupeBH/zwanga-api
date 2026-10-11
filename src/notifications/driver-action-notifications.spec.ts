@@ -53,6 +53,7 @@ describe('driver notification transport', () => {
         expect(payload.data.actionProtocol).toBe(version ? 'driver-v1' : undefined);
         expect(payload.ttl).toBeLessThanOrEqual(30);
         expect(payload.interruptionLevel).toBe(version === 2 ? 'time-sensitive' : undefined);
+        expect(payload.channelId).toBe(version === 2 ? 'booking-ring-v2' : undefined);
         if (version === 2) {
           expect(Date.parse(payload.data.ringUntil)).toBeGreaterThan(Date.now());
           expect(payload.ttl).toBeLessThanOrEqual(30);
@@ -169,6 +170,58 @@ describe('driver notification transport', () => {
     });
     await expect(service.registerNotifications('passenger', 2)).resolves.toEqual({ registered: true });
     expect(query).toHaveBeenCalledTimes(1);
+  });
+
+  const scheduled = () => ({ userId: 'driver', title: 'Commande programmée à proximité', body: 'Consultez la commande',
+    data: { type: 'trip_request_nearby', ringAlert: 'nearby-request-v1', tripRequestId: 'request', driverId: 'driver',
+      alertExpiresAt: new Date(Date.now() + 60_000).toISOString() } });
+  it('uses the long Android channel for scheduled requests without treating them as exclusive dispatch', async () => {
+    const { service, send, query } = fixture(true); query.mockResolvedValue([{ version: 2 }]);
+    await service.sendFirebaseNotification(scheduled(), 'fixture-token');
+    const payload = send.mock.calls[0][0];
+    expect(payload.notification.title).toBe('Commande programmée à proximité');
+    expect(payload.data).toMatchObject({ type: 'trip_request_nearby', ringAlert: 'nearby-request-v1' });
+    expect(payload.data.actionProtocol).toBeUndefined();
+    expect(payload.android).toMatchObject({ priority: 'high', notification: {
+      channelId: 'booking-ring-v2', sound: 'driver_ring', visibility: 'private', tag: 'request-nearby-request' } });
+    expect(payload.android.ttl).toBeGreaterThan(0); expect(payload.android.ttl).toBeLessThanOrEqual(30_000);
+  });
+  it('uses the bundled iOS sound and a bounded lifetime for scheduled requests', async () => {
+    const original = global.fetch;
+    const send = jest.fn().mockResolvedValue({ ok: true, json: async () => ({ data: { status: 'ok', id: 'ticket' } }) });
+    global.fetch = send;
+    try {
+      const { service, query } = fixture(true); query.mockResolvedValue([{ version: 2 }]);
+      const notification = scheduled(); notification.data.alertExpiresAt = new Date(Date.now() + 5000).toISOString();
+      await service.sendExpoPushNotification(notification, 'ExponentPushToken[test]');
+      const payload = JSON.parse(send.mock.calls[0][1].body);
+      expect(payload).toMatchObject({ sound: 'driver_ring.wav', priority: 'high', interruptionLevel: 'time-sensitive', channelId: 'booking-ring-v2' });
+      expect(payload.ttl).toBeGreaterThan(0); expect(payload.ttl).toBeLessThanOrEqual(5);
+      expect(payload.categoryId).toBeUndefined(); expect(payload.data.actionProtocol).toBeUndefined();
+    } finally { global.fetch = original; }
+  });
+  it.each(['old-client', 'disabled', 'foreign-recipient', 'unmarked'])('does not enable scheduled ringing for %s', async reason => {
+    const { service, send, query } = fixture(true); query.mockResolvedValue([{ version: reason === 'old-client' ? 1 : 2 }]);
+    if (reason === 'disabled') service.configService.get = () => 'false';
+    const notification = scheduled();
+    if (reason === 'foreign-recipient') notification.data.driverId = 'other-driver';
+    if (reason === 'unmarked') notification.data.ringAlert = '';
+    await service.sendFirebaseNotification(notification, 'fixture-token');
+    expect(send.mock.calls[0][0].android).toBeUndefined();
+    expect(send.mock.calls[0][0].data.actionProtocol).toBeUndefined();
+  });
+  it('checks the saved request before outbox delivery and suppresses expired or already handled alerts', async () => {
+    const { service, query } = fixture(true); const notification = scheduled();
+    await expect(service.isCriticalNotificationStillDeliverable(notification)).resolves.toBe(true);
+    expect(query.mock.calls[0][0]).toContain('r."selectedDriverId" IS NULL');
+    expect(query.mock.calls[0][0]).toContain('r."tripId" IS NULL');
+    expect(query.mock.calls[0][0]).toContain('r."departureDateMax" > now()');
+    expect(query.mock.calls[0][1]).toEqual(['request']);
+    query.mockResolvedValue([]);
+    await expect(service.isCriticalNotificationStillDeliverable(notification)).resolves.toBe(false);
+    query.mockClear(); notification.data.alertExpiresAt = new Date(0).toISOString();
+    await expect(service.isCriticalNotificationStillDeliverable(notification)).resolves.toBe(false);
+    expect(query).not.toHaveBeenCalled();
   });
 });
 

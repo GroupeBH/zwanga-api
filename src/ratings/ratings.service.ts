@@ -3,7 +3,9 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Rating } from './entities/rating.entity';
 import { User } from '../users/entities/user.entity';
+import { Booking, BookingStatus } from '../bookings/entities/booking.entity';
 import { CreateRatingDto } from './dto/rating.dto';
+import { HistoryPageDto, loadHistoryPage } from '../common/pagination/history-page';
 
 @Injectable()
 export class RatingsService {
@@ -16,48 +18,35 @@ export class RatingsService {
     private userRepository: Repository<User>,
   ) {}
 
-  async create(raterId: string, createRatingDto: CreateRatingDto): Promise<Rating> {
-    this.logger.log(`Creating rating: User ${raterId} rating user ${createRatingDto.ratedUserId} (Rating: ${createRatingDto.rating})`);
-    
-    if (raterId === createRatingDto.ratedUserId) {
-      this.logger.warn(`Rating creation failed: User ${raterId} tried to rate themselves`);
-      throw new BadRequestException("Vous ne pouvez pas vous attribuer une note.");
+  async create(raterId: string, dto: CreateRatingDto): Promise<Rating> {
+    if (raterId === dto.ratedUserId) throw new BadRequestException('Vous ne pouvez pas vous attribuer une note.');
+    if (!await this.userRepository.exists({ where: { id: dto.ratedUserId } })) {
+      throw new NotFoundException('La personne à évaluer est introuvable.');
     }
-
-    const ratedUser = await this.userRepository.findOne({
-      where: { id: createRatingDto.ratedUserId },
-    });
-
-    if (!ratedUser) {
-      this.logger.warn(`Rating creation failed: User ${createRatingDto.ratedUserId} not found`);
-      throw new NotFoundException("La personne à évaluer est introuvable.");
-    }
-
-    // Check if user already rated this user for the same trip
-    if (createRatingDto.tripId) {
-      const existingRating = await this.ratingRepository.findOne({
-        where: {
-          raterId,
-          ratedUserId: createRatingDto.ratedUserId,
-          tripId: createRatingDto.tripId,
-        },
-      });
-
-      if (existingRating) {
-        this.logger.warn(`Rating creation failed: User ${raterId} already rated user ${createRatingDto.ratedUserId} for trip ${createRatingDto.tripId}`);
-        throw new BadRequestException("Vous avez déjà évalué cette personne pour ce trajet.");
+    return this.ratingRepository.manager.transaction(async manager => {
+      // Serialize legacy requests without tripId too, before resolving an eligible ride.
+      await manager.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
+        `zwanga:rating:${raterId}:${dto.ratedUserId}`,
+      ]);
+      const bookings = manager.getRepository(Booking).createQueryBuilder('booking')
+        .innerJoin('booking.trip', 'trip')
+        .select('booking.tripId', 'tripId')
+        .where('booking.status = :completed', { completed: BookingStatus.COMPLETED })
+        .andWhere('((trip.driverId = :raterId AND booking.passengerId = :ratedUserId) OR (trip.driverId = :ratedUserId AND booking.passengerId = :raterId))',
+          { raterId, ratedUserId: dto.ratedUserId });
+      if (dto.tripId) bookings.andWhere('booking.tripId = :tripId', { tripId: dto.tripId });
+      else bookings.andWhere('NOT EXISTS (SELECT 1 FROM ratings r WHERE r."tripId" = booking."tripId" AND r."raterId" = :raterId AND r."ratedUserId" = :ratedUserId)');
+      const shared = await bookings.orderBy('booking.createdAt', 'DESC').addOrderBy('booking.id', 'DESC').limit(1).getRawOne<{ tripId: string }>();
+      if (!shared) throw new BadRequestException('Un trajet effectué ensemble et non encore évalué est requis.');
+      const ratings = manager.getRepository(Rating);
+      if (await ratings.exists({ where: { raterId, ratedUserId: dto.ratedUserId, tripId: shared.tripId } })) {
+        throw new BadRequestException('Vous avez déjà évalué cette personne pour ce trajet.');
       }
-    }
-
-    const rating = this.ratingRepository.create({
-      ...createRatingDto,
-      raterId,
+      const saved = await ratings.save(ratings.create({ ...dto, raterId, tripId: shared.tripId, verificationVersion: 1 }));
+      // Internal constraint marker is not part of the mobile response.
+      delete (saved as Partial<Rating>).verificationVersion;
+      return saved;
     });
-
-    const savedRating = await this.ratingRepository.save(rating);
-    
-    this.logger.log(`Rating created successfully: ${savedRating.id} - User ${raterId} rated user ${createRatingDto.ratedUserId} with ${createRatingDto.rating} stars`);
-    return savedRating;
   }
 
   async findByUser(userId: string): Promise<Rating[]> {
@@ -66,11 +55,27 @@ export class RatingsService {
     const ratings = await this.ratingRepository.find({
       where: { ratedUserId: userId },
       relations: ['rater'],
+      // The legacy endpoint keeps its array contract, but not private author data.
+      select: {
+        id: true, ratedUserId: true, raterId: true, tripId: true,
+        rating: true, comment: true, createdAt: true, updatedAt: true,
+        rater: { id: true, firstName: true, lastName: true, profilePicture: true },
+      },
       order: { createdAt: 'DESC' },
     });
 
     this.logger.debug(`Found ${ratings.length} ratings for user ${userId}`);
     return ratings;
+  }
+
+  async findPage(userId: string, options: HistoryPageDto) {
+    const query = this.ratingRepository.createQueryBuilder('entry')
+      .leftJoin('entry.rater', 'rater')
+      .select(['entry.id', 'entry.ratedUserId', 'entry.raterId', 'entry.tripId',
+        'entry.rating', 'entry.comment', 'entry.createdAt',
+        'rater.id', 'rater.firstName', 'rater.lastName', 'rater.profilePicture'])
+      .where('entry.ratedUserId = :userId', { userId });
+    return loadHistoryPage(query, options);
   }
 
   async getUserAverageRating(userId: string): Promise<number> {

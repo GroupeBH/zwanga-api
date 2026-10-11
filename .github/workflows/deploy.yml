@@ -52,6 +52,16 @@ jobs:
       - name: Install dependencies
         run: npm ci --legacy-peer-deps
 
+      - name: Enable disposable PostgreSQL integration tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y postgresql-16 postgresql-16-postgis-3
+          for suite in APP_UPDATES DISPATCH KYC_EVIDENCE DRIVER_FINANCE WALLET PAYOUT NOTIFICATIONS PIN_RESET PHONE_REGISTRATION PAWAPAY AUDIT; do
+            echo "${suite}_TEST_POSTGRES_BIN=/usr/lib/postgresql/16/bin" >> "${GITHUB_ENV}"
+          done
+
       - name: Run tests
         run: npm run test -- --runInBand
 
@@ -106,9 +116,33 @@ jobs:
           provenance: false
           sbom: false
 
+      - name: Register immutable application revision
+        id: revision
+        shell: bash
+        env:
+          PINNED_IMAGE: ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_REPOSITORY }}@${{ steps.docker-build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          umask 077
+          current="$(aws ecs describe-services --cluster "${ECS_CLUSTER}" --services "${ECS_SERVICE}" --query 'services[0].taskDefinition' --output text)"
+          [[ -n "${current}" && "${current}" != "None" ]]
+          family="${current##*/}"
+          family="${family%:*}"
+          # Latest family configuration also incorporates new SSM variables prepared by Terraform.
+          definition_file="$(mktemp "${RUNNER_TEMP}/zwanga-task.XXXXXX.json")"
+          trap 'rm -f -- "${definition_file}"' EXIT
+          aws ecs describe-task-definition --task-definition "${family}" --output json |
+            node infra-aws/scripts/pin-task-definition.cjs "${ECS_APP_CONTAINER}" "${PINNED_IMAGE}" > "${definition_file}"
+          revision="$(aws ecs register-task-definition --cli-input-json "file://${definition_file}" --query 'taskDefinition.taskDefinitionArn' --output text)"
+          [[ -n "${revision}" && "${revision}" != "None" ]]
+          echo "task_definition=${revision}" >> "${GITHUB_OUTPUT}"
+          echo "previous_task_definition=${current}" >> "${GITHUB_OUTPUT}"
+
       - name: Run TypeORM migrations on ECS
         id: migrations
         shell: bash
+        env:
+          PINNED_TASK_DEFINITION: ${{ steps.revision.outputs.task_definition }}
         run: |
           set -euo pipefail
 
@@ -118,7 +152,7 @@ jobs:
             --query 'services[0]' \
             --output json)"
 
-          task_definition="$(jq -r '.taskDefinition' <<< "${service_json}")"
+          task_definition="${PINNED_TASK_DEFINITION}"
           assign_public_ip="$(jq -r '.networkConfiguration.awsvpcConfiguration.assignPublicIp' <<< "${service_json}")"
           subnets="$(jq -r '.networkConfiguration.awsvpcConfiguration.subnets | join(",")' <<< "${service_json}")"
           security_groups="$(jq -r '.networkConfiguration.awsvpcConfiguration.securityGroups | join(",")' <<< "${service_json}")"
@@ -207,15 +241,18 @@ jobs:
 
           echo "Migrations completed successfully."
 
-      - name: Force ECS deployment
+      - name: Deploy the migrated immutable revision
         id: deploy
         shell: bash
+        env:
+          PINNED_TASK_DEFINITION: ${{ steps.revision.outputs.task_definition }}
         run: |
           set -euo pipefail
 
           deployment_id="$(aws ecs update-service \
             --cluster "${ECS_CLUSTER}" \
             --service "${ECS_SERVICE}" \
+            --task-definition "${PINNED_TASK_DEFINITION}" \
             --force-new-deployment \
             --query 'service.deployments[?status==`PRIMARY`].id | [0]' \
             --output text)"
@@ -224,12 +261,18 @@ jobs:
 
       - name: Wait for ECS stability
         shell: bash
+        env:
+          EXPECTED_DEPLOYMENT: ${{ steps.deploy.outputs.deployment_id }}
         run: |
           set -euo pipefail
 
           aws ecs wait services-stable \
             --cluster "${ECS_CLUSTER}" \
             --services "${ECS_SERVICE}"
+
+          # A successful automatic rollback is stable too, but is not a successful release.
+          aws ecs describe-services --cluster "${ECS_CLUSTER}" --services "${ECS_SERVICE}" --output json |
+            jq -e --arg expected "${EXPECTED_DEPLOYMENT}" '.services[0].deployments | any(.id == $expected and .status == "PRIMARY" and .rolloutState == "COMPLETED")'
 
           aws ecs describe-services \
             --cluster "${ECS_CLUSTER}" \
@@ -244,6 +287,8 @@ jobs:
             echo "- Image digest: \`${{ steps.docker-build.outputs.digest }}\`"
             echo "- Commit tag: \`${GITHUB_SHA}\`"
             echo "- Migration task: \`${{ steps.migrations.outputs.migration_task_arn }}\`"
+            echo "- Task definition: \`${{ steps.revision.outputs.task_definition }}\`"
+            echo "- Previous task definition: \`${{ steps.revision.outputs.previous_task_definition }}\`"
             echo "- ECS cluster: \`${ECS_CLUSTER}\`"
             echo "- ECS service: \`${ECS_SERVICE}\`"
             echo "- Deployment: \`${{ steps.deploy.outputs.deployment_id }}\`"
