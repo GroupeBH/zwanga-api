@@ -2,6 +2,183 @@
 
 Les entrées sont classées de la plus récente à la plus ancienne. Elles décrivent le code versionné et les opérations réellement exécutées sur AWS, sans inclure de valeur secrète.
 
+## INFRA-2026-10-10-002 — Correctifs de livraison après audit
+
+- **Autorisation :** demande de mise en place des correctifs sans casser l'existant ; code uniquement, aucun apply, push d'image ou déploiement AWS exécuté.
+- **Changements :** tests PostgreSQL/PostGIS isolés activés dans le workflow ; copie de la dernière configuration de la famille ECS et image API fixée au digest ; même révision pour migrations et service. Contrôle de stabilisation vérifiant que le déploiement attendu n'a pas été remplacé par un rollback.
+- **Terraform :** circuit breaker ECS avec rollback ; `task_definition` du service pilotée par le workflow après migration. Terraform continue de publier la configuration, que le prochain workflow reprend. Permissions OIDC de lecture des définitions et d'enregistrement des révisions ajoutées, `PassRole` toujours limité aux rôles existants.
+- **Ordre impératif :** relire/appliquer les changements IAM/ECS Terraform avant le premier workflow modifié. Après une modification Terraform/SSM, exécuter le workflow pour activer la configuration. Aucune transition financière `prepare` / `activate` réintroduite.
+- **Base :** migrations additives 67 (reprises de dépôts FlexPay) et 68 (unicité des nouveaux avis vérifiés). Pas de suppression des données historiques. L'identité RDS d'exécution reste à séparer du compte maître.
+- **Coût :** aucune augmentation des tailles ou du nombre de ressources. Les choix de haute disponibilité restent à valider séparément.
+- **Retour arrière :** dernière révision saine via ECS ; ne pas annuler les migrations en supprimant des travaux financiers. Les nouvelles protections applicatives cessent si l'ancienne image est remise en service.
+- **Guide :** [livraison et limites](../../docs/operations/audit-hardening-2026-10-10.md).
+
+## INFRA-2026-10-10-001 — Staging EC2 à la demande avec Ansible, Docker et Caddy
+
+- **Contexte/autorisation :** usage rare et court, budget privilégié ; choix EC2
+  à la demande confirmé par l'utilisateur puis demande explicite d'Ansible,
+  Caddy et Docker. La proposition managée de l'entrée précédente est remplacée.
+- **État : configuration validée localement, plan revu, pas d'apply AWS.** Lecture
+  STS : compte `046374119247` ; aucun EC2 staging et aucun objet state à
+  `zwanga/staging/terraform.tfstate` lors du contrôle. Initialisation du backend
+  S3 staging et premier plan réel sans verrou distant : **36 créations, 0
+  modification, 0 destruction**. Plan final régénéré après adaptation Ansible et
+  paramètre write-only : mêmes **36 créations, 0 modification, 0 destruction**.
+  Lecture du JSON du plan : cible DNS staging exacte, `t4g.medium`, user-data de
+  12 690 octets (sous la limite EC2 de 16 384). Aucun apply n'a été exécuté.
+  Aucun secret de production consulté, aucun export RDS lancé, aucune branche,
+  variable GitHub, image ECR ou ressource AWS créée par cette préparation.
+- **Fichiers :** racine `infra-aws/environments/staging/` désormais indépendante
+  (Terraform réseau/stockage/EC2/IAM/contrôleur/SSM), playbooks Ansible et template
+  Caddy, helpers Docker/DB et export schema-only, tests Python/PostgreSQL/Terraform.
+  `.github/workflows/deploy-staging.yml` remplacé par un workflow manuel uniquement.
+  `.gitignore`, garde documentaire, README et ce journal mis à jour. Les ajouts
+  antérieurs à `providers.tf`, `database.tf`, `variables.tf` de production sont
+  retirés : leurs contenus et le workflow de déploiement production sont inchangés.
+- **Architecture/coûts :** un EC2 ARM64 `t4g.medium`, Ubuntu 24.04, gp3 chiffré
+  30 GiB, VPC/subnet/IGW dédiés, aucun NAT/ALB/RDS/ElastiCache/EIP. Docker : backend,
+  PostgreSQL 18.3 + PostGIS construit en CI ARM64, Valkey 7.2.6, Caddy 2.10.2.
+  ECR/S3 privés staging, Lambda ARM64 128 MiB et EventBridge toutes les cinq
+  minutes, logs du contrôleur sept jours. Coût socle estimé 2,86 USD/mois éteint,
+  3,07 pour 5 h, 3,72 pour 20 h ; budget indicatif 5–8 USD avec petits volumes,
+  hors taxes/fournisseurs/traffic/sauvegardes additionnelles. Mode CPU Standard,
+  pas de coût Unlimited mais bridage possible. Les images taguées, artefacts et
+  backups locaux sont conservés : croissance à surveiller, pas de plafond garanti.
+- **Configuration/Ansible :** cloud-init installe Ansible et AWS CLI ; le playbook
+  local `configure.yml` gère Docker/Compose, Caddy, permissions et unités systemd.
+  SSM exécute `deploy.yml` sans SSH, depuis un bundle publié par la CI sous un SHA
+  Git validé. Les images sont immuables et construites avant de démarrer EC2.
+  Le premier boot installe puis arrête EC2 ; aucune API ne démarre sans bootstrap.
+- **IAM/isolation :** OIDC limité à `GroupeBH/zwanga-api:refs/heads/staging` ; CI
+  limitée aux ECR/bucket de releases, contrôleur et document/instance SSM staging.
+  Le rôle hôte n'utilise pas la politique SSM standard trop large en lecture de
+  paramètres : lecture d'un seul paramètre staging, des artefacts et de ses médias.
+  Le contrôleur ne peut démarrer/arrêter que cet EC2, ni modifier d'autre DNS que
+  l'enregistrement A exact du staging. Aucun port SSH/DB/cache/API direct public.
+  IMDSv2 obligatoire, hop limit 2 pour le SDK AWS dans Docker, aucun accès statique.
+- **Paramètres :** `/zwanga-api/staging/integrations`, SecureString JSON `{}` au
+  départ, initialisé via `value_wo` (Terraform >= 1.11) sans valeur conservée dans
+  le state. La version write-only reste fixée à 1 ; gestion des clés test dans SSM.
+  Allowlist des noms ; DB/JWT/AWS/domaine/URL pawaPay non remplaçables.
+  pawaPay sandbox et opérations désactivées, FlexPaie non configuré, Didit KYC
+  désactivé par défaut. Variables GitHub `STAGING_AWS_ROLE_ARN`, `STAGING_INSTANCE_ID`.
+  Mots de passe DB/cache/JWT générés sur disque root-only, pas dans le state.
+- **Données :** export explicite du schéma public et des métadonnées de migrations
+  dans un snapshot SQL read-only cohérent ; checksum, choix financier et SHA source
+  dans le manifeste. Aucun dump complet ni données personnelles. Import refusé
+  si données ou base non vide. Rôle propriétaire pour migrations distinct du compte
+  API non-superutilisateur. Backup local avant migration, pas de rollback SQL
+  automatique ; marqueur empêchant de reprendre une vieille API après échec.
+  Fixtures métier et clés externes restent à fournir avant recette fonctionnelle.
+- **Disponibilité :** sessions de deux heures, timer local + watchdog AWS (jusqu'à
+  cinq minutes de délai), arrêt sur échec CI. Pas d'IP fixe : DNS mis à jour au
+  start et neutralisé au stop ; arrêt hors workflow traité au prochain watchdog.
+  Aucun redémarrage automatique à l'arrivée d'une requête mobile ; pas de HA ni
+  validation équivalente des services managés de production. Interruption de
+  staging pendant sauvegarde/migrations ; production hors périmètre.
+- **Contrôles :** syntaxe Ansible valide sans exécution de configuration,
+  Terraform validate et test simulé après adaptation Ansible réussis. Les **19
+  tests Python/PostgreSQL sont verts**, dont export read-only réel puis import
+  sur PostgreSQL 18 jetable : aucun compte source copié, métadonnées conservées,
+  compte API autorisé en DML mais refusé en DDL, second bootstrap refusé. Cluster
+  arrêté et nettoyé. Le test a détecté et permis de corriger la tentative de recréer
+  `public` : seule cette entrée TOC est omise, aucune suppression de schéma.
+  Lanceur pg_ctl Windows corrigé pour ne pas hériter de pipes bloquants. YAML CI
+  et Compose généré valides ; Docker Desktop arrêté, pas de build/recette conteneur
+  locale. Garde documentaire normalisée LF et validée ; `git diff --check` réussi.
+  Comparaison Git explicite : aucun changement de contenu du workflow de production
+  ni de ses fichiers providers/database/variables. Plan final revu ; recette AWS,
+  construction des images ARM64 et parcours applicatifs encore non exécutés.
+- **Déploiement/rollback :** suivre le README : plan staging revu, apply, premier
+  arrêt, publication branche/workflow, variables GitHub, export approuvé et upload
+  bootstrap par l'opérateur, clés test, actions bootstrap/deploy et recette mobile.
+  Une modification des fichiers invalide le plan précédent. `stop` conserve EBS,
+  pas de destruction automatique ; suppression/replacement nécessite une revue
+  explicite des sauvegardes, `prevent_destroy` et du volume conservé. Aucune action
+  à mener sur ECS/RDS/SSM/state production. Un schéma avancé ne doit pas être rétrogradé.
+
+## INFRA-2026-10-09-001 — Préparation du staging isolé et arbitrage des coûts
+
+> Proposition initiale remplacée par le staging EC2/Ansible de l'entrée du 10 octobre.
+
+- **Date/environnement/statut :** 9 octobre 2026, Africa/Kinshasa ; staging,
+  configuration locale préparée, **aucune ressource AWS créée ou modifiée**.
+  Même compte `046374119247`, région `eu-central-1` et domaine
+  `staging.compute-api.zwanga-app.com` confirmés par l'utilisateur. La préparation
+  est ensuite interrompue pour comparer les coûts à sa demande ; ne pas confondre
+  cette entrée avec un staging déjà opérationnel.
+- **Avant/après local :** la production reste la racine Terraform et le workflow
+  `deploy.yml` historiques. Nouvelle racine `environments/staging/{main,variables,
+  outputs}.tf`, verrou providers et test `tests/isolation.tftest.hcl`. Réutilisation
+  du module commun, clé de state séparée, CIDR distinct, ECS/ECR/RDS/Valkey/SSM/KMS,
+  ALB/ACM et bucket privé propres au staging. Le provider OIDC et la zone DNS du
+  compte sont réutilisés sans reprendre le rôle CI/CD ni le domaine de production.
+- **Fichiers partagés :** `variables.tf`, `providers.tf` et `database.tf` ajoutent
+  une allowlist de compte et une version PostgreSQL facultatives, nulles par
+  défaut pour conserver le comportement production. `.gitignore` exclut les
+  variables et plans locaux staging. `README.md` explique les limites actuelles.
+- **CI/CD :** nouveau `deploy-staging.yml`, branche `staging`, variables GitHub
+  `STAGING_AWS_REGION`, `STAGING_AWS_ROLE_ARN`, `STAGING_ECR_REPOSITORY`,
+  `STAGING_ECS_CLUSTER`, `STAGING_ECS_SERVICE`. Vérification explicite des noms,
+  du rôle et du compte avant accès AWS, groupe de concurrence et cache distincts.
+  Le contrôle documentaire couvre désormais `deploy*.yml` et la branche staging.
+  Aucun paramètre GitHub, branche distante, image ou déploiement créé.
+- **Lecture AWS uniquement :** ECS 512 CPU/1024 MiB ARM64, une tâche ; RDS
+  PostgreSQL 18.3, `db.t4g.micro`, 20 GiB extensibles à 100, Single-AZ et sept jours
+  de sauvegardes ; Valkey 7.2.6 sur un `cache.t4g.micro` ; domaine Route53 et blocage
+  public du bucket de production confirmés. Aucune lecture de secrets, d'objets
+  S3 ou de données utilisateurs. Aucun `terraform plan` connecté ni `apply`.
+- **Sécurité/IAM/données :** nouveaux rôles staging limités à ses préfixes SSM,
+  bucket et ressources ECS/ECR ; nouvelles clés JWT et secrets DB/Redis générés
+  lors d'un futur apply. Aucun partage de base/cache ou de clé fournisseur avec
+  la production. Le service reste à zéro tâche jusqu'au bootstrap. Il manque la
+  procédure validée d'initialisation du schéma et des métadonnées de migrations
+  sans données personnelles, les clés test et la configuration GitHub. Le guide
+  PostgreSQL est utilisé pour cette séparation ; aucun dump/import n'est réalisé.
+- **Coûts estimés, pas une facture :** catalogue public AWS consulté le 9 octobre,
+  Francfort, 730 heures/mois, paiement à l'usage, hors taxes/crédits/remises et
+  consommations externes. Fargate ARM : 0,03725 USD/vCPU-h et 0,00409 USD/GiB-h,
+  soit environ 16,58 USD/mois pour la tâche. RDS : 0,019 USD/h, soit 13,87 hors
+  stockage. Valkey : 0,0144 USD/h, soit 10,51. ALB : 0,027 USD/h, soit 19,71 hors
+  LCU (0,008 USD/LCU-h). Trois IPv4 minimales indicatives : environ 10,95 USD/mois.
+  Ajouter stockage RDS/S3, sauvegardes, logs, KMS, trafic et audit. Budget indicatif
+  **80–110 USD/mois** pour la copie permanente ; **55–75 USD/mois** pour ECS/RDS
+  limités à 8 h × 22 jours avec ALB/Valkey conservés. Ces horaires ne sont pas codés.
+- **Alternative discutée, non implémentée :** un Lightsail Linux 4 Go/2 vCPU/80 Go
+  coûte 24 USD/mois avec IPv4 incluse ; prévoir environ **30–40 USD/mois** avec un
+  petit volume de sauvegardes/S3. Backend, PostgreSQL et Valkey en conteneurs sur
+  un serveur unique : parité applicative visée, mais pas de parité ECS/RDS/ElastiCache
+  ni de validation identique du réseau, des permissions et déploiements managés.
+  Ne pas mutualiser la base de production pour économiser. RDS peut être arrêté,
+  mais redémarre automatiquement après sept jours et son stockage reste facturé.
+- **Sources tarifaires :** [Fargate](https://aws.amazon.com/fargate/pricing/),
+  [RDS PostgreSQL](https://aws.amazon.com/rds/postgresql/pricing/),
+  [ElastiCache](https://aws.amazon.com/elasticache/pricing/),
+  [ALB](https://aws.amazon.com/elasticloadbalancing/pricing/),
+  [IPv4](https://aws.amazon.com/vpc/pricing/),
+  [Lightsail](https://aws.amazon.com/lightsail/pricing/).
+- **Validation :** `terraform fmt` et `terraform validate` staging réussis, avec
+  avertissement attendu de backend ignoré dans le module enfant : seul le backend
+  de la racine staging est utilisé. Accès au registre providers indisponible depuis
+  WSL ; initialisation hors backend avec les versions déjà installées (AWS 6.58.0,
+  random 3.9.0). Premier test simulé : défaut de valeur inconnue pour le bucket,
+  corrigé en utilisant son nom déterministe ; recontrôle réussi (**1 test simulé,
+  0 échec**). Syntaxe YAML du workflow staging et `git diff --check` également
+  validés. Ni pipeline GitHub ni parcours applicatif staging exécutés.
+- **Déploiement ultérieur :** choisir le budget/architecture, finaliser et tester
+  bootstrap et configuration de test, initialiser exclusivement la racine staging
+  avec son backend S3, revoir un plan ne visant que les nouvelles ressources,
+  approuver les coûts, appliquer, initialiser la base, fournir les secrets test,
+  configurer `STAGING_*`, puis démarrer une tâche et vérifier HTTPS/OTP/KYC/paiements
+  sandbox/notifications de test. Les clés réellement utilisables et les callbacks
+  de fournisseurs doivent être explicitement configurés avant de tester leurs flux.
+- **Surveillance/retour arrière :** surveiller budget, CPU/mémoire, erreurs HTTP,
+  connexions DB/cache, logs et absence d'appels fournisseurs de production. Avant
+  tout apply, abandonner cette préparation locale n'exige aucune action AWS. Après
+  création future, couper seulement le service staging ne supprimera pas la facture
+  ALB/RDS/Valkey ; toute destruction et sauvegarde nécessitera une revue de ses
+  protections, uniquement dans son state, jamais dans celui de production.
+
 ## INFRA-2026-10-08-007 — Conservation KYC sans expiration, préparée localement
 
 - **État : code local validé, 8 octobre 2026, Africa/Kinshasa ; aucun changement AWS.** L'utilisateur a choisi une conservation indéfinie après l'entrée 006. Aucun Terraform, CI/CD, IAM, secret, `.env` réel, tâche ECS ou configuration du dispatch modifié.

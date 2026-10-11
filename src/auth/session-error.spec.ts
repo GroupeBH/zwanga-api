@@ -26,8 +26,8 @@ describe('session error classification', () => {
   it('ordinary JWT identity lookup failure also returns 503', async () => {
     const strategy = Object.create(JwtStrategy.prototype);
     strategy.usersService = { findAuthIdentity: jest.fn().mockRejectedValue(new Error('database unavailable')) };
-    await expect(strategy.validate({ sub: 'synthetic-account' })).rejects.toMatchObject({ status: 503 });
+    await expect(strategy.validate({ headers: {} }, { sub: 'synthetic-account' })).rejects.toMatchObject({ status: 503 });
     strategy.usersService.findAuthIdentity.mockResolvedValue(null);
-    await expect(strategy.validate({ sub: 'synthetic-account' })).rejects.toMatchObject({ status: 401 });
+    await expect(strategy.validate({ headers: {} }, { sub: 'synthetic-account' })).rejects.toMatchObject({ status: 401 });
   });
 });

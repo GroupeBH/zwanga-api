@@ -18,7 +18,7 @@ export function assertRequestSnapshot(
       new Date(snapshot.updatedAt).getTime()
   ) {
     throw new ConflictException(
-      'La demande a changé. Actualisez-la avant de réessayer.',
+      'La commande a changé. Actualisez-la avant de réessayer.',
     );
   }
 }
@@ -43,7 +43,7 @@ export function assertUnassignedRequest(
         now)
   ) {
     throw new ConflictException(
-      'Cette demande est déjà prise en charge, annulée ou expirée.',
+      'Cette commande est déjà prise en charge, annulée ou expirée.',
     );
   }
 }

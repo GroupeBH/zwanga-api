@@ -147,10 +147,10 @@ describe('Trip request expiration scheduling', () => {
       driverOffers: [],
     });
     await expect(service.findOne('private', 'other-user')).rejects.toThrow(
-      'Demande de trajet non trouvée',
+      'Commande de trajet non trouvée',
     );
     await expect(service.findOne('private')).rejects.toThrow(
-      'Demande de trajet non trouvée',
+      'Commande de trajet non trouvée',
     );
   });
 
@@ -167,7 +167,7 @@ describe('Trip request expiration scheduling', () => {
     });
     await expect(
       service.startTripFromRequest('late-start', 'driver'),
-    ).rejects.toThrow('Cette demande a expiré');
+    ).rejects.toThrow('Cette commande a expiré');
     expect(notifications.sendNotificationToUser).not.toHaveBeenCalled();
   });
 

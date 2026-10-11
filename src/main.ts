@@ -17,6 +17,7 @@ import { createAdapter } from '@socket.io/redis-adapter';
 import { createClient } from 'redis';
 import {
   buildRedisClientOptions,
+  connectRedisWithDeadline,
   redisOptionsUseTls,
 } from './common/utils/redis-options';
 import type { Server, ServerOptions } from 'socket.io';
@@ -66,8 +67,8 @@ class RedisSocketIoAdapter extends ConfiguredIoAdapter {
   async dispose(): Promise<void> {
     await super.dispose();
     await Promise.allSettled([
-      this.subClient?.isOpen ? this.subClient.quit() : Promise.resolve(),
-      this.pubClient?.isOpen ? this.pubClient.quit() : Promise.resolve(),
+      this.subClient?.isOpen ? this.subClient.disconnect() : Promise.resolve(),
+      this.pubClient?.isOpen ? this.pubClient.disconnect() : Promise.resolve(),
     ]);
   }
 }
@@ -89,9 +90,12 @@ async function configureSocketIoRedisAdapter(
   });
 
   try {
-    await Promise.all([pubClient.connect(), subClient.connect()]);
+    await Promise.all([connectRedisWithDeadline(pubClient), connectRedisWithDeadline(subClient)]);
   } catch (error) {
-    await Promise.allSettled([subClient.quit(), pubClient.quit()]);
+    await Promise.allSettled([
+      subClient.isOpen ? subClient.disconnect() : Promise.resolve(),
+      pubClient.isOpen ? pubClient.disconnect() : Promise.resolve(),
+    ]);
     logger.error('Redis is unavailable; refusing to start Socket.IO.');
     throw error;
   }

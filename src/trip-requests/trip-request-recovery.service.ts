@@ -124,8 +124,8 @@ export class TripRequestRecoveryService {
     try {
       await this.notificationService.sendNotificationToUser(
         tripRequest.passengerId,
-        'Votre demande est de nouveau disponible',
-        'Le conducteur ne peut plus effectuer ce trajet. Votre demande est de nouveau visible par les conducteurs.',
+        'Votre commande est de nouveau disponible',
+        'Le conducteur ne peut plus effectuer ce trajet. Votre commande est de nouveau visible par les conducteurs.',
         {
           type: 'trip_request_reopened',
           tripRequestId: tripRequest.id,
@@ -149,8 +149,8 @@ export class TripRequestRecoveryService {
 
       await this.notificationService.sendToMultiple(
         driversWithTokens.map((driver) => driver.fcmToken!.trim()),
-        'Demande de trajet à nouveau disponible',
-        'Un passager cherche un trajet. Consultez la demande pour voir les points de départ et d’arrivée.',
+        'Commande de trajet à nouveau disponible',
+        'Un passager cherche un trajet. Consultez la commande pour voir les points de départ et d’arrivée.',
         {
           type: 'trip_request',
           tripRequestId: tripRequest.id,

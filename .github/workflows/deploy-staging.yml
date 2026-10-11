@@ -1,0 +1,184 @@
+name: Staging EC2 on demand
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "deploy = test/build/deploy; bootstrap = first schema import; start = last release"
+        type: choice
+        required: true
+        default: start
+        options: [start, deploy, bootstrap, stop, status]
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: zwanga-staging-ec2
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: eu-central-1
+  AWS_ROLE_ARN: ${{ vars.STAGING_AWS_ROLE_ARN }}
+  STAGING_INSTANCE_ID: ${{ vars.STAGING_INSTANCE_ID }}
+  REGISTRY: 046374119247.dkr.ecr.eu-central-1.amazonaws.com
+  ARTIFACT_BUCKET: zwanga-staging-artifacts-046374119247
+  CONTROL: zwanga-api-staging-control
+  ACTION: ${{ inputs.action }}
+
+jobs:
+  staging:
+    if: github.ref == 'refs/heads/staging'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate isolation and helper tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$AWS_ROLE_ARN" == 'arn:aws:iam::046374119247:role/ZwangaStagingGitHubActionsRole' ]]
+          [[ "$STAGING_INSTANCE_ID" =~ ^i-[a-f0-9]+$ ]]
+          [[ "$ACTION" =~ ^(start|stop|status|deploy|bootstrap)$ ]]
+          python3 -m unittest discover -s infra-aws/environments/staging/tests -p 'test_*.py'
+
+      - uses: actions/setup-node@v4
+        if: inputs.action == 'deploy' || inputs.action == 'bootstrap'
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Test and compile backend before starting the paid server
+        if: inputs.action == 'deploy' || inputs.action == 'bootstrap'
+        run: |
+          npm ci --legacy-peer-deps
+          npm run test -- --runInBand
+          npm run build
+
+      - uses: aws-actions/configure-aws-credentials@v6.2.3
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          allowed-account-ids: '046374119247'
+
+      - name: Check immutable images
+        id: images
+        if: inputs.action == 'deploy' || inputs.action == 'bootstrap'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for image in backend postgres; do
+            found="$(aws ecr list-images --repository-name "zwanga-api-staging-$image" --filter tagStatus=TAGGED --query "imageIds[?imageTag=='${GITHUB_SHA}'].imageTag" --output text)"
+            if [[ -z "$found" ]]; then echo "$image=true" >> "$GITHUB_OUTPUT"; else echo "$image=false" >> "$GITHUB_OUTPUT"; fi
+          done
+      - uses: aws-actions/amazon-ecr-login@v2
+        if: inputs.action == 'deploy' || inputs.action == 'bootstrap'
+      - uses: docker/setup-buildx-action@v3
+        if: inputs.action == 'deploy' || inputs.action == 'bootstrap'
+      - name: Build backend ARM64
+        if: steps.images.outputs.backend == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: production
+          platforms: linux/arm64
+          push: true
+          tags: ${{ env.REGISTRY }}/zwanga-api-staging-backend:${{ github.sha }}
+          cache-from: type=gha,scope=staging-backend
+          cache-to: type=gha,mode=max,scope=staging-backend
+          provenance: false
+          sbom: false
+      - name: Build PostgreSQL and PostGIS ARM64
+        if: steps.images.outputs.postgres == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: infra-aws/environments/staging/host
+          file: infra-aws/environments/staging/host/postgres.Dockerfile
+          platforms: linux/arm64
+          push: true
+          tags: ${{ env.REGISTRY }}/zwanga-api-staging-postgres:${{ github.sha }}
+          cache-from: type=gha,scope=staging-postgres
+          cache-to: type=gha,mode=max,scope=staging-postgres
+          provenance: false
+          sbom: false
+      - name: Check the PostgreSQL ARM64 image and PostGIS extension
+        if: inputs.action == 'deploy' || inputs.action == 'bootstrap'
+        run: |
+          set -euo pipefail
+          image="${REGISTRY}/zwanga-api-staging-postgres:${GITHUB_SHA}"
+          docker run --rm "$image" postgres --version | grep -E '^postgres [(]PostgreSQL[)] 18[.]3( |$)'
+          docker run --rm --entrypoint sh "$image" -c 'test -f /usr/share/postgresql/18/extension/postgis.control'
+
+      - name: Publish the Ansible configuration and runtime helpers
+        if: inputs.action == 'deploy' || inputs.action == 'bootstrap'
+        run: |
+          set -euo pipefail
+          root=infra-aws/environments/staging
+          aws s3 cp "$root/ansible/" "s3://${ARTIFACT_BUCKET}/releases/${GITHUB_SHA}/ansible/" --recursive --only-show-errors
+          for name in runtime.py zwanga-staging.service zwanga-staging-stop.service zwanga-staging-stop.timer; do
+            aws s3 cp "$root/host/$name" "s3://${ARTIFACT_BUCKET}/releases/${GITHUB_SHA}/ansible/files/$name" --only-show-errors
+          done
+
+      - name: Start, stop or inspect staging
+        id: control
+        shell: bash
+        run: |
+          set -euo pipefail
+          action="$ACTION"
+          [[ "$action" != deploy && "$action" != bootstrap ]] || action=start
+          payload="$(jq -nc --arg action "$action" '{action:$action}')"
+          aws lambda invoke --function-name "$CONTROL" --cli-binary-format raw-in-base64-out --payload "$payload" /tmp/staging-control.json >/dev/null
+          jq -e 'has("errorMessage") | not' /tmp/staging-control.json >/dev/null
+          cat /tmp/staging-control.json
+
+      - name: Wait for instance and SSM
+        if: inputs.action != 'stop' && inputs.action != 'status'
+        shell: bash
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 100); do
+            aws lambda invoke --function-name "$CONTROL" --cli-binary-format raw-in-base64-out --payload '{"action":"status"}' /tmp/staging-control.json >/dev/null
+            jq -e 'has("errorMessage") | not' /tmp/staging-control.json >/dev/null
+            if jq -e '.state == "running"' /tmp/staging-control.json >/dev/null; then
+              online="$(aws ssm describe-instance-information --filters "Key=InstanceIds,Values=$STAGING_INSTANCE_ID" --query 'InstanceInformationList[0].PingStatus' --output text)"
+              if [[ "$online" == Online ]]; then exit 0; fi
+            fi
+            sleep 6
+          done
+          echo 'Staging startup timed out.' >&2
+          exit 1
+
+      - name: Execute constrained staging operation
+        if: inputs.action != 'stop' && inputs.action != 'status'
+        shell: bash
+        run: |
+          set -euo pipefail
+          action="$ACTION"
+          [[ "$action" != start ]] || action=resume
+          parameters="$(jq -nc --arg action "$action" --arg release "$GITHUB_SHA" '{action:[$action],release:[$release]}')"
+          command_id="$(aws ssm send-command --document-name zwanga-api-staging-runtime --document-version '$LATEST' --instance-ids "$STAGING_INSTANCE_ID" --parameters "$parameters" --query 'Command.CommandId' --output text)"
+          for attempt in $(seq 1 100); do
+            status="$(aws ssm get-command-invocation --command-id "$command_id" --instance-id "$STAGING_INSTANCE_ID" --query Status --output text 2>/dev/null || true)"
+            case "$status" in
+              Success) exit 0 ;;
+              Failed|Cancelled|TimedOut|Cancelling) echo "Staging operation $status. Command: $command_id" >&2; exit 1 ;;
+            esac
+            sleep 10
+          done
+          echo "SSM timeout. Command: $command_id" >&2
+          exit 1
+
+      - name: Verify HTTPS
+        if: inputs.action == 'deploy' || inputs.action == 'start'
+        run: |
+          curl --fail --silent --show-error --retry 15 --retry-all-errors --retry-delay 5 --max-time 15 \
+            https://staging.compute-api.zwanga-app.com/health
+
+      - name: Stop staging after a failed startup or deployment
+        if: failure() && steps.control.outcome != 'skipped' && inputs.action != 'stop' && inputs.action != 'status'
+        run: |
+          aws lambda invoke --function-name "$CONTROL" --cli-binary-format raw-in-base64-out --payload '{"action":"stop"}' /tmp/staging-stop.json >/dev/null
+          jq -e 'has("errorMessage") | not' /tmp/staging-stop.json >/dev/null

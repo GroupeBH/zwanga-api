@@ -36,7 +36,9 @@ describe('welcome bonus repair migrations', () => {
   const replay = new AddPinResetReplayProtection1780000064000();
 
   it('registers both forward repairs after the existing migrations', () => {
-    expect(databaseMigrations.slice(-2)).toEqual([
+    const repairIndex = databaseMigrations.indexOf(IsolateWelcomeBonusFailures1780000063000);
+    expect(repairIndex).toBeGreaterThan(0);
+    expect(databaseMigrations.slice(repairIndex, repairIndex + 2)).toEqual([
       IsolateWelcomeBonusFailures1780000063000,
       AddPinResetReplayProtection1780000064000,
     ]);

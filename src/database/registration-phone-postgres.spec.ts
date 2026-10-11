@@ -225,6 +225,17 @@ const pgBin = process.env.PHONE_REGISTRATION_TEST_POSTGRES_BIN;
       expect(await users.count()).toBe(2);
     });
 
+    it('rolls back the account, released phone and dependent records on signup failure', async () => {
+      const old = await previous({ status: UserStatus.INACTIVE, isActive: false });
+      await expect(saveRegistrationWithPhone(users, fresh(), async (created, manager) => {
+        await manager.query('INSERT INTO registration_test_history VALUES ($1,$2,50)', [randomUUID(), created.id]);
+        throw new Error('vehicle or referral failed');
+      })).rejects.toThrow('vehicle or referral failed');
+      expect(await users.count()).toBe(1);
+      expect(await users.findOneByOrFail({ id: old.id })).toEqual(old);
+      expect(await source.query('SELECT * FROM registration_test_history')).toEqual([]);
+    });
+
     it('allows exactly one of two concurrent re-registrations', async () => {
       const old = await previous({
         status: UserStatus.SUSPENDED,

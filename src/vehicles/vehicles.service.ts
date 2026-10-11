@@ -6,7 +6,7 @@ import {
   InternalServerErrorException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, In, IsNull, MoreThanOrEqual } from 'typeorm';
+import { EntityManager, Repository, In, IsNull, MoreThanOrEqual } from 'typeorm';
 import {
   getVehicleMaxSeats,
   Vehicle,
@@ -187,6 +187,27 @@ export class VehiclesService {
       throw new InternalServerErrorException(
         "Une erreur inattendue s'est produite lors de la création du véhicule",
       );
+    }
+  }
+
+  /** Only used for a newly inserted user, within the signup transaction. */
+  async createForRegistration(manager: EntityManager, owner: User, data: Partial<Vehicle>): Promise<Vehicle> {
+    this.assertPublicOwnerCanRegisterVehicle(owner);
+    const sanitized = this.sanitizeVehicleData(data);
+    if (!sanitized.type || !sanitized.brand || !sanitized.model || !sanitized.color || !sanitized.licensePlate) {
+      throw new BadRequestException('Les informations du véhicule sont incomplètes');
+    }
+    const vehicles = manager.getRepository(Vehicle);
+    const existing = await vehicles.createQueryBuilder('vehicle').where(
+      "UPPER(REPLACE(REPLACE(vehicle.\"licensePlate\", ' ', ''), '-', '')) = :plate",
+      { plate: sanitized.licensePlate },
+    ).getOne();
+    if (existing) throw new BadRequestException("Cette plaque d'immatriculation est déjà utilisée");
+    try {
+      return await vehicles.save(vehicles.create({ ...sanitized, ownerId: owner.id, isActive: sanitized.isActive ?? true }));
+    } catch (error) {
+      if (this.isUniqueConstraintError(error)) throw new BadRequestException("Cette plaque d'immatriculation est déjà utilisée");
+      throw error;
     }
   }
 

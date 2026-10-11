@@ -44,6 +44,7 @@ function environment(providerPatch: Partial<FlexPayTransactionStatus> = {}) {
     delete (raw.transaction as Partial<typeof provider>).orderNumber;
   const result = { ...raw, transaction: provider, raw };
   const repository = {
+    manager: {} as any,
     findOne: jest.fn().mockImplementation(() => Promise.resolve(payment)),
     save: jest
       .fn()
@@ -51,6 +52,12 @@ function environment(providerPatch: Partial<FlexPayTransactionStatus> = {}) {
         Promise.resolve(value),
       ),
   };
+  const manager = {
+    transaction: async (work: any) => work(manager),
+    findOne: async () => ({ ...payment }),
+    save: async (_entity: unknown, value: PaymentTransaction) => repository.save(value),
+  };
+  repository.manager = manager;
   const config = { get: jest.fn().mockReturnValue(undefined) };
   const flexPay = {
     checkTransaction: jest

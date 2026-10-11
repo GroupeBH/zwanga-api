@@ -4,6 +4,7 @@ import {
   PaymentStatus,
 } from '../payments/entities/payment-transaction.entity';
 import {
+  Subscription,
   SubscriptionPlan,
   SubscriptionStatus,
 } from './entities/subscription.entity';
@@ -11,6 +12,7 @@ import { SubscriptionsService } from './subscriptions.service';
 
 describe('SubscriptionsService points payments', () => {
   let subscriptionRepository: {
+    manager: any;
     create: jest.Mock;
     save: jest.Mock;
     findOne: jest.Mock;
@@ -50,10 +52,12 @@ describe('SubscriptionsService points payments', () => {
   };
 
   beforeEach(() => {
+    let stored: any;
     subscriptionRepository = {
+      manager: {} as any,
       create: jest.fn((payload: unknown) => payload),
       save: jest.fn((payload: any) =>
-        Promise.resolve({
+        Promise.resolve(stored = {
           id: payload.id ?? 'subscription-1',
           ...payload,
         }),
@@ -62,6 +66,13 @@ describe('SubscriptionsService points payments', () => {
       find: jest.fn().mockResolvedValue([]),
       update: jest.fn().mockResolvedValue(undefined),
     };
+    const manager = {
+      transaction: async (work: any) => work(manager),
+      findOne: async (entity: unknown) => entity === Subscription ? { ...stored } : driver,
+      update: async (_entity: unknown, where: any, patch: any) => subscriptionRepository.update(where, patch),
+      save: async (_entity: unknown, value: any) => subscriptionRepository.save(value),
+    };
+    subscriptionRepository.manager = manager;
     documentFundingRequestRepository = {
       create: jest.fn((payload: unknown) => payload),
       save: jest.fn((payload: unknown) => Promise.resolve(payload)),
@@ -203,6 +214,7 @@ describe('SubscriptionsService points payments', () => {
       reference: 'SUB-1',
       status: PaymentStatus.INITIATED,
     };
+    await subscriptionRepository.save(subscription);
 
     await (service as any).applyPaymentToSubscription(
       { ...subscription },

@@ -6,7 +6,7 @@ import { Logger } from '@nestjs/common';
 import type { ConfigService } from '@nestjs/config';
 import { createClient } from 'redis';
 import type { Store } from 'cache-manager';
-import { buildRedisClientOptions, redisOptionsUseTls } from './redis-options';
+import { buildRedisClientOptions, connectRedisWithDeadline, redisOptionsUseTls } from './redis-options';
 
 type RedisClient = ReturnType<typeof createClient>;
 
@@ -41,7 +41,7 @@ export async function createRedisCacheStore(
     logger.error(`Redis cache client error: ${error.message}`);
   });
 
-  await client.connect();
+  await connectRedisWithDeadline(client);
   logger.log(
     `Redis cache connected${redisOptionsUseTls(redisOptions) ? ' with TLS' : ''}`,
   );

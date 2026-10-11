@@ -1,0 +1,101 @@
+---
+- name: Configure the isolated on-demand staging host
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+  vars:
+    staging_root: /opt/zwanga-staging
+    staging_config: "{{ lookup('ansible.builtin.file', staging_root + '/config.json') | from_json }}"
+  tasks:
+    - name: Refuse any host or configuration outside this staging architecture
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == 'Ubuntu'
+          - ansible_distribution_major_version == '24'
+          - ansible_architecture == 'aarch64'
+          - staging_config.region == 'eu-central-1'
+          - staging_config.domain == 'staging.compute-api.zwanga-app.com'
+          - staging_config.registry == '046374119247.dkr.ecr.eu-central-1.amazonaws.com'
+          - staging_config.artifacts == 'zwanga-staging-artifacts-046374119247'
+          - staging_config.media == 'zwanga-staging-media-046374119247'
+          - staging_config.parameter == '/zwanga-api/staging/integrations'
+        fail_msg: This playbook may configure only the isolated Ubuntu ARM64 staging host.
+
+    - name: Install Docker Engine, Compose and runtime tools
+      ansible.builtin.apt:
+        name: [docker.io, docker-compose-v2, awscli, python3, ca-certificates]
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Protect staging configuration and local credentials
+      ansible.builtin.file:
+        path: "{{ staging_root }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+
+    - name: Install the constrained staging runtime
+      ansible.builtin.copy:
+        src: runtime.py
+        dest: "{{ staging_root }}/runtime.py"
+        owner: root
+        group: root
+        mode: '0700'
+        validate: /usr/bin/python3 -m py_compile %s
+
+    - name: Configure Caddy HTTPS and WebSocket reverse proxy
+      ansible.builtin.template:
+        src: Caddyfile.j2
+        dest: "{{ staging_root }}/Caddyfile"
+        owner: root
+        group: root
+        mode: '0600'
+
+    - name: Install startup and two-hour shutdown units
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "/etc/systemd/system/{{ item }}"
+        owner: root
+        group: root
+        mode: '0644'
+      loop:
+        - zwanga-staging.service
+        - zwanga-staging-stop.service
+        - zwanga-staging-stop.timer
+      notify: Reload systemd
+
+    - name: Load installed units before enabling them
+      ansible.builtin.meta: flush_handlers
+
+    - name: Start Docker
+      ansible.builtin.systemd_service:
+        name: docker
+        enabled: true
+        state: started
+
+    - name: Enable resuming the last successful release on subsequent boots
+      ansible.builtin.systemd_service:
+        name: zwanga-staging.service
+        enabled: true
+
+    - name: Enable the two-hour safety stop without extending the current session
+      ansible.builtin.systemd_service:
+        name: zwanga-staging-stop.timer
+        enabled: true
+        state: started
+
+    - name: Mark host configuration complete
+      ansible.builtin.copy:
+        content: "Ansible configuration complete\n"
+        dest: "{{ staging_root }}/host-ready"
+        owner: root
+        group: root
+        mode: '0600'
+
+  handlers:
+    - name: Reload systemd
+      ansible.builtin.systemd_service:
+        daemon_reload: true

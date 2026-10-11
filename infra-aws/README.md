@@ -8,6 +8,14 @@ Chaque modification ou opération AWS doit être décrite dans le [journal déta
 
 ## Retour au déploiement historique — 8 octobre 2026
 
+**Mise à jour du 10 octobre :** les correctifs d'audit préparent maintenant une
+révision ECS par digest et un circuit breaker, sans réintroduire d'étapes de
+transition financière. Appliquer d'abord les nouvelles permissions IAM, puis
+lancer le workflow. Une modification Terraform/SSM nécessite ensuite un
+workflow pour être activée. Voir le [guide de livraison](../docs/operations/audit-hardening-2026-10-10.md).
+
+Historique du changement du 8 octobre :
+
 À la demande de l'utilisateur, le workflow de production et la configuration
 Terraform ont été remis à leur état du commit `6a45121`, avant l'orchestration
 de transition. Les fichiers de staging préparés localement ont été retirés.
@@ -32,6 +40,175 @@ relance. Ne pas lancer de régression des migrations pour restaurer le pipeline.
 Voir le [journal de ce retour](./docs/CHANGELOG.md#infra-2026-10-08-002--retour-au-cicd-et-à-linfrastructure-antérieurs).
 
 ## Architecture
+
+### Staging économique à la demande — 10 octobre 2026
+
+**Configuration préparée ; aucune ressource staging créée à ce stade.** Le choix
+retenu remplace la proposition ECS/RDS permanente : un EC2 `t4g.medium` ARM64,
+Ubuntu 24.04, disque gp3 chiffré de 30 GiB, arrêté entre les séances de test.
+Le workflow de production et ses ressources Terraform restent inchangés.
+
+- **Terraform** : racine indépendante `environments/staging/`, state
+  `zwanga/staging/terraform.tfstate`, compte `046374119247`, région `eu-central-1`,
+  réseau dédié `10.43.0.0/16`, rôles IAM, SSM, ECR et buckets privés staging.
+- **Ansible** : `ansible/configure.yml` installe Docker et Compose, configure
+  Caddy et les unités systemd. Cloud-init installe seulement les outils de
+  bootstrap et transmet les fichiers au playbook. SSM exécute Ansible **localement
+  sur EC2** ; aucun port SSH ni clé SSH n'est requis. Pas de connexion Ansible SSH.
+- **Docker Compose** : backend NestJS, PostgreSQL/PostGIS, Valkey 7.2.6 et Caddy.
+  Images backend/PostgreSQL construites en CI ARM64 et référencées par SHA Git
+  immuable, jamais `latest`. L'image PostGIS est construite sur `postgres:18.3-trixie`
+  car `postgis/postgis` ne fournit pas ARM64. Disques des conteneurs persistants.
+- **Caddy** : HTTPS automatique et proxy HTTP/WebSocket vers `api:5200`, sur
+  `staging.compute-api.zwanga-app.com`. Seuls 80/443 sont publics ; API en loopback,
+  PostgreSQL/Valkey sans publication de ports. Certificats conservés sur disque.
+- **Arrêt** : timer systemd à deux heures depuis le démarrage, doublé d'un contrôle
+  Lambda/EventBridge toutes les cinq minutes, indépendant de la santé du serveur.
+  Un nouvel appel `start` ne prolonge pas une séance active. Un échec GitHub
+  déclenche aussi un arrêt ; le watchdog couvre les runners interrompus.
+- **DNS** : pas d'Elastic IP facturée à l'arrêt. Le contrôleur met à jour uniquement
+  l'enregistrement A du staging au démarrage et le neutralise à l'arrêt. Après un
+  arrêt hors workflow, prévoir jusqu'à cinq minutes plus le TTL de 60 s pour cette
+  neutralisation. Aucun enregistrement de production n'est modifiable par ce rôle.
+
+Il n'y a ni ALB, ni NAT Gateway, ni RDS, ni ElastiCache supplémentaires. Les tests
+fonctionnels utilisent le même code applicatif, mais ne valident pas la parité
+d'infrastructure ECS/RDS/IAM/ALB. PostgreSQL/Valkey communiquent dans le réseau Docker
+local sans TLS, contrairement aux services managés. Pas de haute disponibilité.
+
+#### Budget et limites
+
+Tarifs relevés le 9 octobre 2026 à Francfort : EC2 0,0384 USD/h, gp3
+0,0952 USD/Go/mois et IPv4 0,005 USD/h. Socle disque/serveur/IP : environ
+2,86 USD/mois sans utilisation, 3,07 USD pour 5 h, 3,72 USD pour 20 h.
+Budget indicatif **5–8 USD/mois** avec peu de données et d'images : ce n'est pas
+un plafond. Hors taxes, trafic, sauvegardes supplémentaires et fournisseurs.
+Le disque, ECR/S3, les logs et le contrôle périodique restent facturables à l'arrêt.
+Les crédits CPU sont en mode Standard : pas de supplément Unlimited, mais une
+charge soutenue peut être bridée. Nettoyer manuellement les anciennes images
+taguées/artefacts et les sauvegardes locales après revue ; ne pas supprimer
+l'image de `last-release.json`. Pas de rétention automatique des données de test.
+
+#### Premier provisionnement
+
+Depuis la racine du dépôt, avec Terraform >= 1.11, après revue du code et du budget :
+
+```bash
+terraform -chdir=infra-aws/environments/staging init -reconfigure
+terraform -chdir=infra-aws/environments/staging validate
+terraform -chdir=infra-aws/environments/staging test
+terraform -chdir=infra-aws/environments/staging plan -out=tfplan
+# Examiner chaque action : seulement des ressources staging, aucun remplacement prod.
+terraform -chdir=infra-aws/environments/staging apply tfplan
+terraform -chdir=infra-aws/environments/staging output github_repository_variables
+```
+
+Ne jamais utiliser `-migrate-state`, copier le state production ou appliquer depuis
+`infra-aws/` pour créer le staging. Régénérer le plan après toute modification.
+Le premier démarrage installe Ansible/Docker, puis demande l'arrêt du serveur.
+Attendre cet arrêt et vérifier cloud-init/SSM avant de lancer une séance.
+
+Configurer les variables GitHub `STAGING_AWS_ROLE_ARN` et `STAGING_INSTANCE_ID`
+avec les outputs ; `STAGING_AWS_REGION` est fourni mais la région du workflow est
+volontairement fixée à `eu-central-1`. Publier le workflow sur la branche par défaut
+pour l'afficher dans Actions, et le code à tester sur `staging`. OIDC autorise
+**uniquement** `refs/heads/staging`. Aucun déploiement staging automatique au push.
+
+#### Initialiser une base sans données personnelles
+
+Les migrations sont incrémentales : elles ne créent pas le schéma initial.
+Ne pas activer `TYPEORM_SYNCHRONIZE`, importer un dump complet ou marquer toutes
+les migrations comme exécutées sur un schéma créé seulement à partir des entités.
+
+L'outil `environments/staging/export-baseline.cjs` exporte depuis un même snapshot
+**en lecture seule** : schéma `public`, historique `typeorm_migrations` et seul
+booléen `financial_rollout.enabled`. Aucun compte, portefeuille, paiement, KYC,
+session ou token push. Il ne charge aucun `.env` et ne contacte pas AWS.
+
+1. Fournir explicitement `STAGING_BASELINE_SOURCE_URL` dans l'environnement d'un
+   poste ayant accès à la source approuvée, sans coller sa valeur dans le terminal
+   ou le journal. Pour une source distante, fournir aussi `STAGING_BASELINE_CA_FILE`
+   (TLS vérifié). Installer `pg_dump` 18 ; `STAGING_BASELINE_PG_DUMP` permet de
+   préciser son chemin. Aucun accès réseau à RDS n'est ouvert automatiquement.
+2. Exécuter `node infra-aws/environments/staging/export-baseline.cjs
+   infra-aws/environments/staging/baseline-reviewed <SHA_COMPLET_IMAGE_SOURCE>`.
+   Le dossier de sortie doit être nouveau. Le SHA est celui du code réellement
+   associé au schéma source, pas arbitrairement le HEAD local.
+3. Revoir `schema.dump` avec `pg_restore --list` et, si nécessaire, sa version SQL ;
+   revoir le manifeste et son choix de politique financière. Un schéma contient
+   des fonctions exécutables : n'accepter qu'une source de confiance. Uploader
+   **uniquement** `schema.dump` et `manifest.json` sous `bootstrap/` du bucket
+   `zwanga-staging-artifacts-046374119247`. Le rôle GitHub n'a pas ce droit : cette
+   étape est réservée à l'opérateur de bootstrap. Ne pas committer ces artefacts.
+4. Lancer l'action GitHub `bootstrap` sur la branche `staging`, puis `deploy`.
+   L'import refuse un dump contenant des données et toute base non vide ; il
+   restaure en une transaction, puis installe les métadonnées et droits. En cas
+   d'import partiel, l'API reste bloquée : inspecter, ne pas relancer un nettoyage
+   destructeur ni effacer le marqueur aveuglément.
+5. Créer ensuite les comptes et paramètres métier **fictifs** nécessaires aux tests.
+   L'export ne copie pas les catalogues/configurations métier autres que le booléen
+   financier ; les fixtures et la recette restent nécessaires.
+
+Le compte API PostgreSQL n'est pas superutilisateur ; un propriétaire distinct
+exécute les migrations. Les secrets locaux (DB, cache, JWT) sont générés sur EC2,
+conservés dans des fichiers root-only sur EBS chiffré et réutilisés au redémarrage.
+Une sauvegarde locale précède chaque migration. Un échec de migration/santé pose
+un verrou de déploiement : le prochain boot ne relance pas une ancienne API contre
+un schéma potentiellement avancé. Corriger puis redéployer ; pas de rollback SQL
+automatique. Une sauvegarde sur le même disque n'est pas une sauvegarde hors site.
+
+#### Intégrations de test et utilisation
+
+Le seul paramètre `/zwanga-api/staging/integrations` est un `SecureString` JSON,
+initialement `{}`, créé avec `value_wo` pour ne pas stocker sa valeur dans le state.
+Ne pas incrémenter `value_wo_version` pour gérer les clés : cela réinitialiserait le
+JSON. Renseigner dans la console SSM les clés **de test** nécessaires :
+Didit (`DIDIT_OTP_API_KEY`, etc.), cartographie, Firebase (`FCM_CREDENTIALS_BASE64`
+ou `FCM_PROJECT_ID`/`FCM_CLIENT_EMAIL`/`FCM_PRIVATE_KEY`), pawaPay sandbox, bootstrap
+admin. Les noms autorisés figurent dans `host/runtime.py`. Les clés Firebase privées
+restent encodées en base64 comme attendu par le backend. Ne pas réutiliser les
+comptes/tokens push de production. La taille SSM Standard limite ce JSON à 4 KiB ;
+pour davantage de secrets, revoir le découpage avant activation.
+
+Les paramètres DB/JWT/AWS/domaine et l'URL pawaPay ne peuvent pas être remplacés
+par ce JSON. pawaPay reste borné au sandbox et ses opérations sont désactivées par
+défaut ; FlexPaie n'est pas configuré. Didit KYC est initialement désactivé, les OTP
+réels nécessitent un compte crédité. Rien ne simule automatiquement la réussite
+des fournisseurs. Configurer leurs callbacks staging avant de tester ces flux.
+
+Dans Actions → **Staging EC2 on demand**, choisir la branche `staging` :
+
+| Action | Effet |
+| --- | --- |
+| `bootstrap` | Test/build, démarrage, configuration Ansible et premier import revu ; aucune API activée |
+| `deploy` | Test/build avant démarrage, Ansible, sauvegarde, migrations, conteneurs puis contrôle HTTPS |
+| `start` | Démarre et reprend le dernier déploiement réussi sans reconstruire les images |
+| `stop` | Neutralise le DNS et arrête EC2, sans supprimer les données |
+| `status` | Affiche l'état et le temps restant sans démarrer le serveur |
+
+Configurer seulement l'application mobile **de développement** avec l'URL staging ;
+aucune modification des versions stores ou de leur API de production. Prévoir
+quelques minutes au démarrage et les premières émissions de certificats HTTPS.
+
+#### Vérifications et exploitation
+
+```bash
+python3 -m unittest discover -s infra-aws/environments/staging/tests -p 'test_*.py'
+ansible-playbook -i localhost, --syntax-check infra-aws/environments/staging/ansible/deploy.yml
+```
+
+Le test PostgreSQL réel est opt-in via `STAGING_TEST_POSTGRES_BIN` : nouveau cluster
+temporaire, port loopback aléatoire, arrêt/nettoyage en fin de test, aucune lecture
+du `.env`. La recette AWS doit vérifier Ansible, ARM64/PostGIS, redémarrage avec
+données/certificats, migrations, HTTPS/WebSocket, absence d'accès aux ressources
+de production et les deux mécanismes d'arrêt. Surveiller EBS, mémoire, CPU/crédits,
+logs Docker bornés, erreurs du contrôleur et facture AWS. `prevent_destroy` et la
+conservation EBS empêchent une suppression automatique du serveur/données ; un
+remplacement d'AMI nécessite sauvegarde et plan de restauration explicites.
+
+Voir le [journal du staging](./docs/CHANGELOG.md#infra-2026-10-10-001--staging-ec2-à-la-demande-avec-ansible-docker-et-caddy).
+
+### Architecture de production (inchangée)
 
 ```text
 Internet

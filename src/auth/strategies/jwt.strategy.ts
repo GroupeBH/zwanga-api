@@ -5,6 +5,8 @@ import { ConfigService } from '@nestjs/config';
 import { UsersService } from '../../users/users.service';
 import { UserStatus } from '../../users/entities/user.entity';
 import { rethrowSessionError } from '../session-error';
+import { Request } from 'express';
+import { matchesStoredToken } from '../token-fingerprint';
 
 interface JwtPayload {
   sub: string;
@@ -24,16 +26,24 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       secretOrKey: configService.get<string>('JWT_SECRET'),
       jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
       ignoreExpiration: false,
+      passReqToCallback: true,
     });
   }
 
-  async validate(payload: JwtPayload) {
+  async validate(request: Request, payload: JwtPayload) {
     try {
       // Vérifier que l'utilisateur existe toujours et est actif
       const user = await this.usersService.findAuthIdentity(payload.sub);
 
       if (!user) {
         throw new UnauthorizedException("Utilisateur introuvable.");
+      }
+
+      // Honour logout/PIN reset for HTTP as well as WebSocket sessions.
+      // The helper also accepts the raw token format stored by older releases.
+      const token = ExtractJwt.fromAuthHeaderAsBearerToken()(request);
+      if (!token || !matchesStoredToken(user.accessToken, token)) {
+        throw new UnauthorizedException('Session expirée. Veuillez vous reconnecter.');
       }
 
       if (user.status === UserStatus.SUSPENDED) {

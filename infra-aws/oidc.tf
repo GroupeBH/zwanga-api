@@ -95,6 +95,22 @@ data "aws_iam_policy_document" "github_actions_deploy" {
   }
 
   statement {
+    sid       = "ReadApplicationTaskDefinition"
+    effect    = "Allow"
+    actions   = ["ecs:DescribeTaskDefinition"]
+    resources = ["*"]
+  }
+
+  # Registration and service updates stay scoped to this application. AWS does
+  # not support resource-level authorization for DescribeTaskDefinition above.
+  statement {
+    sid       = "RegisterImmutableApplicationRevision"
+    effect    = "Allow"
+    actions   = ["ecs:RegisterTaskDefinition"]
+    resources = [local.ecs_task_definition_arn_pattern]
+  }
+
+  statement {
     sid    = "DescribeDatabaseMigrationTask"
     effect = "Allow"
     actions = [

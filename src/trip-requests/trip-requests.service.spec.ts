@@ -608,7 +608,7 @@ describe('TripRequestsService motorcycle capacity', () => {
       response: expect.objectContaining({
         code: 'TRIP_REQUEST_VEHICLE_TYPE_MISMATCH',
         message:
-          'Cette demande nécessite le type Voiture. Sélectionnez un véhicule actif correspondant.',
+          'Cette commande nécessite le type Voiture. Sélectionnez un véhicule actif correspondant.',
       }),
     });
 
@@ -703,7 +703,7 @@ describe('TripRequestsService unaccepted request expiration', () => {
     expect(notificationService.sendNotificationToUser).toHaveBeenCalledTimes(1);
     expect(notificationService.sendNotificationToUser).toHaveBeenCalledWith(
       request.passengerId,
-      'Demande de trajet expirée',
+      'Commande de trajet expirée',
       expect.stringContaining("aucun conducteur ne l'a acceptée"),
       expect.objectContaining({
         type: 'trip_request_expired',

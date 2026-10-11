@@ -3,6 +3,7 @@ import { Injectable, OnModuleInit, OnModuleDestroy, Logger } from '@nestjs/commo
 import { ConfigService } from '@nestjs/config';
 import {
   buildRedisClientOptions,
+  connectRedisWithDeadline,
   redisOptionsUseTls,
 } from '../utils/redis-options';
 
@@ -24,7 +25,7 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
       this.logger.log('Redis Client Connected');
     });
 
-    await this.client.connect();
+    await connectRedisWithDeadline(this.client);
     this.logger.log(
       `Redis connected${redisOptionsUseTls(redisOptions) ? ' with TLS' : ''}`,
     );
@@ -33,7 +34,7 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
   async onModuleDestroy() {
     this.logger.log('Disconnecting Redis client');
     if (this.client?.isOpen) {
-      await this.client.quit();
+      await this.client.disconnect();
     }
     this.logger.log('Redis client disconnected');
   }

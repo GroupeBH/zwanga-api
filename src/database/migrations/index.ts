@@ -66,6 +66,11 @@ import { KycEvidenceArchive1780000061000 } from './1780000061000-KycEvidenceArch
 import { KycEvidenceIndefiniteRetention1780000062000 } from './1780000062000-KycEvidenceIndefiniteRetention';
 import { IsolateWelcomeBonusFailures1780000063000 } from './1780000063000-IsolateWelcomeBonusFailures';
 import { AddPinResetReplayProtection1780000064000 } from './1780000064000-AddPinResetReplayProtection';
+import { IndexRatingPages1780000065000 } from './1780000065000-IndexRatingPages';
+import { IndexNearbyRequestAlerts1780000066000 } from './1780000066000-IndexNearbyRequestAlerts';
+
+import { ReconcileFlexPayDeposits1780000067000 } from './1780000067000-ReconcileFlexPayDeposits';
+import { VerifiedRatingInteractions1780000068000 } from './1780000068000-VerifiedRatingInteractions';
 
 export const databaseMigrations = [
   FillTotalSeats1780000000000,
@@ -132,4 +137,8 @@ export const databaseMigrations = [
   KycEvidenceIndefiniteRetention1780000062000,
   IsolateWelcomeBonusFailures1780000063000,
   AddPinResetReplayProtection1780000064000,
+  IndexRatingPages1780000065000,
+  IndexNearbyRequestAlerts1780000066000,
+  ReconcileFlexPayDeposits1780000067000,
+  VerifiedRatingInteractions1780000068000,
 ];

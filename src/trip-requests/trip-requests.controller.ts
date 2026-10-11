@@ -287,6 +287,6 @@ export class TripRequestsController {
   // @ApiBearerAuth()
   async cancel(@Request() req, @Param('id') id: string) {
     await this.tripRequestsService.cancel(req.user.userId, id);
-    return { message: "Demande de trajet annulée avec succès." };
+    return { message: "Commande de trajet annulée avec succès." };
   }
 }

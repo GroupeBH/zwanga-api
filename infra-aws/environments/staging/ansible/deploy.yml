@@ -1,0 +1,25 @@
+---
+- import_playbook: configure.yml
+
+- name: Operate the staging Docker containers
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Validate the operation supplied by the constrained SSM document
+      ansible.builtin.assert:
+        that:
+          - operation in ['deploy', 'bootstrap', 'resume', 'status']
+          - release is match('^[a-f0-9]{40}$')
+
+    - name: Run bootstrap, migrations or the last successful release
+      ansible.builtin.command:
+        argv:
+          - /usr/bin/python3
+          - /opt/zwanga-staging/runtime.py
+          - "{{ operation }}"
+          - "{{ release }}"
+      changed_when: operation != 'status'
+      # The runtime redacts command output too; secrets stay on the host.
+      no_log: true

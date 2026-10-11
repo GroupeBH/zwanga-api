@@ -206,6 +206,16 @@ export class ReferralsService implements OnModuleInit {
     return result.profile;
   }
 
+  async registerUserInTransaction(
+    manager: EntityManager,
+    userId: string,
+    attribution: ReferralRegistrationAttribution = {},
+  ): Promise<() => Promise<void>> {
+    const result = await this.registerUserInternal(userId, attribution, undefined, manager);
+    // Network notifications are sent only once the caller's transaction commits.
+    return () => this.afterReferralAssignment(userId, result);
+  }
+
   async attachAuthenticatedUser(
     userId: string,
     attribution: ReferralRegistrationAttribution,
@@ -262,6 +272,7 @@ export class ReferralsService implements OnModuleInit {
     userId: string,
     attribution: ReferralRegistrationAttribution = {},
     adminAssignment?: AdminReferralAssignment,
+    registrationManager?: EntityManager,
   ): Promise<ReferralRegistrationResult> {
     const normalizedCode = this.normalizeCode(attribution.referralCode);
     const normalizedToken = this.normalizeToken(attribution.referralToken);
@@ -270,7 +281,7 @@ export class ReferralsService implements OnModuleInit {
       normalizedToken,
     );
 
-    return this.dataSource.transaction(async (manager) => {
+    const work = async (manager: EntityManager): Promise<ReferralRegistrationResult> => {
       if (normalizedCode || normalizedToken || adminAssignment) {
         // Serialize graph changes, including mobile attribution, so two
         // simultaneous assignments cannot introduce a referral cycle.
@@ -396,7 +407,8 @@ export class ReferralsService implements OnModuleInit {
         referredFirstName: user.firstName,
         attributionBonusTokens,
       };
-    });
+    };
+    return registrationManager ? work(registrationManager) : this.dataSource.transaction(work);
   }
 
   private async assertNoReferralCycle(manager: EntityManager, userId: string, referrerUserId: string) {

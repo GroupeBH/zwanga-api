@@ -72,6 +72,7 @@ describe('User gender', () => {
       {
         assertReferralAttribution: jest.fn().mockResolvedValue(undefined),
         registerUser: jest.fn().mockResolvedValue(undefined),
+        registerUserInTransaction: jest.fn().mockResolvedValue(undefined),
       } as any,
       {} as any,
       {} as any,

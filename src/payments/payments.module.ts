@@ -10,6 +10,7 @@ import { PaymentsController } from './payments.controller';
 import { PaymentsService } from './payments.service';
 import { PawaPayOperationsController } from './pawapay-operations.controller';
 import { PawaPayOperationsService } from './pawapay-operations.service';
+import { PaymentReconciliationService } from './payment-reconciliation.service';
 
 @Module({
   imports: [
@@ -23,6 +24,7 @@ import { PawaPayOperationsService } from './pawapay-operations.service';
     PawaPayService,
     PawaPayOperationsService,
     PaymentSettlementRegistry,
+    PaymentReconciliationService,
   ],
   exports: [PaymentsService],
 })
