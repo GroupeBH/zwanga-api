@@ -1,4 +1,5 @@
 import { execFileSync } from 'child_process';
+import { postgresTestServerOptions } from '../../test/postgres-test-options';
 import { existsSync, mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join, resolve } from 'path';
@@ -57,7 +58,7 @@ const pgBin = process.env.WALLET_TEST_POSTGRES_BIN;
           '-l',
           join(directory, 'postgres.log'),
           '-o',
-          `-h 127.0.0.1 -p ${port}`,
+          postgresTestServerOptions(port),
           '-w',
           'start',
         ],

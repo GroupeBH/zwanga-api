@@ -1,4 +1,5 @@
 import { execFileSync } from 'child_process';
+import { postgresTestServerOptions } from '../../test/postgres-test-options';
 import { randomUUID } from 'crypto';
 import { existsSync, mkdtempSync, rmSync } from 'fs';
 import { createServer } from 'net';
@@ -60,7 +61,7 @@ const bin = process.env.KYC_EVIDENCE_TEST_POSTGRES_BIN;
           '-l',
           join(directory, 'postgres.log'),
           '-o',
-          `-h 127.0.0.1 -p ${port}`,
+          postgresTestServerOptions(port),
           '-w',
           'start',
         ],
