@@ -4,6 +4,7 @@ import { tmpdir } from 'os';
 import { join, resolve, sep } from 'path';
 import { createServer } from 'net';
 import { DataSource } from 'typeorm';
+import { postgresTestServerOptions } from './postgres-test-options';
 
 /** Explicit test binaries, fresh loopback cluster; never reads application configuration. */
 export class IsolatedPostgres {
@@ -47,7 +48,7 @@ export class IsolatedPostgres {
           '-l',
           join(this.directory, 'postgres.log'),
           '-o',
-          `-h 127.0.0.1 -p ${port}`,
+          postgresTestServerOptions(port),
           '-w',
           'start',
         ],

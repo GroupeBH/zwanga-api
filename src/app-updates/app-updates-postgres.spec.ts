@@ -1,4 +1,5 @@
 import { execFileSync } from 'child_process';
+import { postgresTestServerOptions } from '../../test/postgres-test-options';
 import { existsSync, mkdtempSync, rmSync } from 'fs';
 import { tmpdir } from 'os';
 import { join, resolve, sep } from 'path';
@@ -29,7 +30,7 @@ const pgBin = process.env.APP_UPDATES_TEST_POSTGRES_BIN;
         const value = (server.address() as { port: number }).port; server.close(() => done(value));
       });
     });
-    execFileSync(executable('pg_ctl'), ['-D', directory, '-l', join(directory, 'postgres.log'), '-o', `-h 127.0.0.1 -p ${port}`, '-w', 'start'],
+    execFileSync(executable('pg_ctl'), ['-D', directory, '-l', join(directory, 'postgres.log'), '-o', postgresTestServerOptions(port), '-w', 'start'],
       { windowsHide: true, stdio: 'ignore', timeout: 30000 });
     started = true;
     source = new DataSource({ type: 'postgres', host: '127.0.0.1', port, username: 'updates_test', database: 'postgres', synchronize: false, extra: { max: 6 } });

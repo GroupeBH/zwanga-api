@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { postgresTestServerOptions } from '../../../test/postgres-test-options';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
@@ -45,7 +46,7 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
         server.close(() => done(port));
       });
     });
-    execFileSync(executable('pg_ctl'), ['-D', directory, '-l', join(directory, 'postgres.log'), '-o', `-h 127.0.0.1 -p ${port}`, '-w', 'start'], { windowsHide: true, stdio: 'ignore', timeout: 30000 });
+    execFileSync(executable('pg_ctl'), ['-D', directory, '-l', join(directory, 'postgres.log'), '-o', postgresTestServerOptions(port), '-w', 'start'], { windowsHide: true, stdio: 'ignore', timeout: 30000 });
     started = true;
     source = new DataSource({ type: 'postgres', host: '127.0.0.1', port, username: 'dispatch_test', database: 'postgres', entities: typeOrmEntities, synchronize: false });
     await source.initialize();
