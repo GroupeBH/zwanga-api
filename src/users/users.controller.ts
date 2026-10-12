@@ -55,7 +55,7 @@ export class UsersController {
   @ApiOperation({
     summary: 'Get current user profile',
     description:
-      'profileState v1 exposes server-owned identity status, driver eligibility and nextAction. Reading it never activates a driver. user.isPhoneVerified and user.phoneVerificationRequired report optional phone OTP verification.',
+      'profileState v1 exposes server-owned identity status, driver eligibility and nextAction. Reading it never activates a driver. user.isPhoneVerified is factual; phoneVerificationRequired is false because OTP is only used for forgotten-PIN recovery in the app.',
   })
   async getProfile(@Request() req) {
     return this.usersService.getProfileSummary(req.user.userId);
@@ -220,27 +220,18 @@ export class UsersController {
   @HttpCode(HttpStatus.OK)
   @SensitiveThrottle(5, 60000) // 5 requests per minute per IP
   @ApiOperation({
-    summary: 'Send OTP code to phone number for verification',
+    summary: 'Retired phone verification endpoint',
+    deprecated: true,
     description:
-      'Registration rejects numbers reserved by enabled active/pending-KYC accounts. Inactive or suspended accounts do not block a new signup; their number is released only when the new account is created. Login/update require a usable account.',
+      'No SMS is sent. Signup and login do not use OTP. Forgotten PIN recovery uses /auth/pin/reset/request-otp.',
   })
   @ApiResponse({
-    status: 200,
-    description: 'OTP sent successfully',
-    schema: {
-      type: 'object',
-      properties: {
-        message: {
-          type: 'string',
-          example: 'Code de vérification envoyé avec succès',
-        },
-      },
-    },
+    status: 410,
+    description: 'Phone verification retired; use the updated signup or forgotten-PIN flow',
   })
   @ApiResponse({
     status: 400,
-    description:
-      'Bad request - Phone reserved by a usable account, or no usable account found for login/update',
+    description: 'Invalid request format',
   })
   async sendPhoneVerificationOtp(
     @Body() sendOtpDto: SendPhoneVerificationOtpDto,
@@ -252,17 +243,10 @@ export class UsersController {
   @Public()
   @HttpCode(HttpStatus.OK)
   @SensitiveThrottle(10, 60000) // 10 requests per minute per IP
-  @ApiOperation({ summary: 'Verify OTP code sent to phone number' })
+  @ApiOperation({ summary: 'Retired phone verification endpoint', deprecated: true })
   @ApiResponse({
-    status: 200,
-    description: 'OTP verified successfully',
-    schema: {
-      type: 'object',
-      properties: {
-        message: { type: 'string', example: 'Code OTP vérifié avec succès' },
-        valid: { type: 'boolean', example: true },
-      },
-    },
+    status: 410,
+    description: 'Phone verification retired; no OTP consumed and no user updated',
   })
   @ApiResponse({
     status: 400,

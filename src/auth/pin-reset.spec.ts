@@ -15,6 +15,14 @@ import {
 import { ChangePinDto } from '../users/dto/user.dto';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { UsersService } from '../users/users.service';
+import { HttpService } from '@nestjs/axios';
+import { ConfigService } from '@nestjs/config';
+import { of } from 'rxjs';
+import { RedisService } from '../common/services/redis.service';
+import { KeccelOtpService } from '../keccel-otp/keccel-otp.service';
+import { OTP_SMS_MESSAGES } from '../keccel-otp/otp-messages';
+import { DiditOtpService } from '../otp/didit-otp.service';
+import { OtpService } from '../otp/otp.service';
 
 describe('PIN reset security', () => {
   const userId = '123e4567-e89b-42d3-a456-426614174000';
@@ -184,6 +192,82 @@ describe('PIN reset security', () => {
       'pending',
       300,
     );
+  });
+
+  it('completes forgotten-PIN recovery through the real Keccel adapter without invoking Didit', async () => {
+    // Only HTTP and storage are simulated; AuthService, OtpService and Keccel's
+    // request/response handling run together. No real SMS or database writes.
+    const config = new ConfigService({
+      OTP_PROVIDER: 'didit',
+      OTP_PIN_RESET_PROVIDER: 'keccel',
+      KECCEL_TOKEN: 'test-token',
+      KECCEL_FROM: 'Zwanga',
+    });
+    const http = {
+      post: jest.fn(() => of({ data: { status: 'SENT' } })),
+      request: jest
+        .fn()
+        .mockReturnValueOnce(
+          of({ data: { success: 'true', statusOTP: 'INVALID' } }),
+        )
+        .mockReturnValue(of({ data: { success: 'true', statusOTP: 'VALID' } })),
+    };
+    const didit = { sendCode: jest.fn(), verifyCode: jest.fn() };
+    const router = new OtpService(
+      config,
+      {
+        get: async (key: string) => JSON.parse(values.get(key) ?? 'null'),
+        set: async (key: string, value: unknown) => {
+          values.set(key, JSON.stringify(value));
+        },
+        consumeIfValueMatches: async (key: string, value: unknown) => {
+          if (values.get(key) !== JSON.stringify(value)) return false;
+          values.delete(key);
+          return true;
+        },
+      } as unknown as RedisService,
+      new KeccelOtpService(http as unknown as HttpService, config),
+      didit as unknown as DiditOtpService,
+    );
+    otpService.sendOtp.mockImplementation(router.sendOtp.bind(router));
+    otpService.verifyOtp.mockImplementation(router.verifyOtp.bind(router));
+    values.clear();
+
+    await service.requestPinResetOtp({ phone: user.phone });
+    expect(http.post).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        to: '243831919710',
+        message: OTP_SMS_MESSAGES.pinReset,
+        length: 6,
+        lifetime: 300,
+      }),
+      expect.any(Object),
+    );
+    await expect(
+      service.verifyPinResetOtp({ phone: user.phone, otp: '000000' }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(values.has(`auth:pin-reset:${userId}`)).toBe(false);
+
+    const { resetToken } = await service.verifyPinResetOtp({
+      phone: user.phone,
+      otp: '123456',
+    });
+    expect(http.request).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ to: '243831919710', otp: '123456' }),
+      }),
+    );
+    await service.resetPin({ resetToken, newPin: '5678' });
+    expect(await bcrypt.compare('5678', user.password)).toBe(true);
+    expect(user.accessToken).toBeNull();
+    expect(user.refreshToken).toBeNull();
+    await expect(
+      service.verifyPinResetOtp({ phone: user.phone, otp: '123456' }),
+    ).rejects.toBeInstanceOf(BadRequestException);
+    expect(http.request).toHaveBeenCalledTimes(2);
+    expect(didit.sendCode).not.toHaveBeenCalled();
+    expect(didit.verifyCode).not.toHaveBeenCalled();
   });
 
   it('stores only a hash of the five-minute reset token', async () => {

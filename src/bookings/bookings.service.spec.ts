@@ -971,6 +971,36 @@ describe('BookingsService trip payments', () => {
     expect(result.paymentAmount).toBe(2000);
   });
 
+  it.each([
+    { discounted: true, paymentMode: TripPaymentMode.CASH, passengerAmount: 580, subsidyAmount: 870 },
+    { discounted: true, paymentMode: TripPaymentMode.POINTS, passengerAmount: 580, subsidyAmount: 870 },
+    { discounted: true, paymentMode: TripPaymentMode.ELECTRONIC, passengerAmount: 580, subsidyAmount: 870 },
+    { discounted: false, paymentMode: TripPaymentMode.POINTS, passengerAmount: 1450, subsidyAmount: 0 },
+  ])('keeps the server fare when paying a 1450 CDF trip in tokens: %j', async ({ discounted, paymentMode, passengerAmount, subsidyAmount }) => {
+    const source = {
+      ...booking, numberOfSeats: 1, status: BookingStatus.COMPLETED, droppedOff: true,
+      paymentMode, paymentAmount: passengerAmount, grossPaymentAmount: 1450,
+      firstTripSubsidyApplied: discounted, passengerPaymentRate: discounted ? 0.4 : null,
+      zwangaSubsidyAmount: subsidyAmount,
+      trip: { ...booking.trip, pricePerSeat: 1450 },
+    };
+    bookingRepository.findOne.mockResolvedValue(source);
+
+    const result = await service.updatePaymentMode(source.id, source.passengerId, TripPaymentMode.POINTS);
+
+    expect(walletService.payForBookingWithManager).toHaveBeenCalledTimes(1);
+    expect(walletService.payForBookingWithManager).toHaveBeenCalledWith(financialManager,
+      expect.objectContaining({ grossPaymentAmount: 1450, paymentAmount: passengerAmount }), passengerAmount);
+    expect(result).toEqual(expect.objectContaining({ paymentStatus: BookingPaymentStatus.SUCCEEDED,
+      paymentAmount: passengerAmount, grossPaymentAmount: 1450, zwangaSubsidyAmount: subsidyAmount }));
+    expect(driverSettlementsService.recordCompletedBookingEarningWithManager).toHaveBeenCalledWith(
+      financialManager, expect.objectContaining({ grossPaymentAmount: 1450, zwangaSubsidyAmount: subsidyAmount }));
+    expect(paymentsService.initiatePayment).not.toHaveBeenCalled();
+    await expect(service.updatePaymentMode(source.id, source.passengerId, TripPaymentMode.POINTS))
+      .rejects.toThrow('Impossible de changer un paiement déjà confirmé');
+    expect(walletService.payForBookingWithManager).toHaveBeenCalledTimes(1);
+  });
+
   it('fails the whole token settlement when the driver earning cannot be written', async () => {
     bookingRepository.findOne.mockResolvedValue({
       ...booking,
