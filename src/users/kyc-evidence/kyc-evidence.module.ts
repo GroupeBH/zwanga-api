@@ -15,6 +15,6 @@ import { KycEvidenceController } from './kyc-evidence.controller';
     KycEvidenceStorage,
     KycEvidenceTransport,
   ],
-  exports: [KycEvidenceRepository],
+  exports: [KycEvidenceRepository, KycEvidenceStorage],
 })
 export class KycEvidenceModule {}

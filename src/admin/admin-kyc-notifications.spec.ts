@@ -1,6 +1,8 @@
 import { AdminService } from './admin.service';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
-import { KycDocument, KycStatus } from '../users/entities/kyc-document.entity';
+import { KycDocument, KycProvider, KycStatus } from '../users/entities/kyc-document.entity';
+import { AwsKycSession } from '../users/aws-kyc/aws-kyc-session.entity';
+import { identityHash } from '../users/aws-kyc/aws-kyc.policy';
 
 describe('manual KYC decisions', () => {
   const fixture = () => {
@@ -93,5 +95,29 @@ describe('manual KYC decisions', () => {
     });
     await f.service.verifyKyc('kyc', 'admin', true);
     expect(f.users.update).not.toHaveBeenCalled();
+  });
+
+  it('blocks AWS approval until server checks and archived evidence are ready', async () => {
+    const f = fixture(); f.document.provider = KycProvider.AWS;
+    f.manager.getRepository.mockImplementation((entity) => entity === User ? f.users : entity === KycDocument ? f.documents : { findOne: jest.fn().mockResolvedValue({ state: 'liveness', checks: {} }) } as any);
+    await expect(f.service.verifyKyc('kyc', 'admin', true, 'Reviewed document')).rejects.toThrow('contrôles AWS');
+    expect(f.documents.save).not.toHaveBeenCalled();
+  });
+
+  it('requires an audited image consultation and review note, then reuses the approval notification path', async () => {
+    const f = fixture(); f.document.provider = KycProvider.AWS;
+    const account = { id: 'user', firstName: 'Test', lastName: 'Example', isActive: true, status: UserStatus.PENDING_KYC, role: UserRole.PASSENGER };
+    f.users.findOne.mockResolvedValue(account);
+    const sessions = { findOne: jest.fn().mockResolvedValue({ id: 'session', archiveId: 'archive', state: 'review', identityHash: identityHash('Test', 'Example'), checks: { liveness: 'passed', face: 'passed' } }), update: jest.fn() };
+    f.manager.getRepository.mockImplementation((entity) => entity === User ? f.users : entity === AwsKycSession ? sessions as any : f.documents);
+    const query = jest.fn().mockResolvedValue([]);
+    Object.assign(f.manager, { query });
+    await expect(f.service.verifyKyc('kyc', 'admin', true, 'Reviewed document')).rejects.toThrow('Consultez');
+    query.mockResolvedValue([{ id: 'proof' }]);
+    await expect(f.service.verifyKyc('kyc', 'admin', true)).rejects.toThrow('Consultez');
+    await f.service.verifyKyc('kyc', 'admin', true, 'Pièce RDC valide, noms contrôlés');
+    expect(f.documents.save).toHaveBeenCalledWith(expect.objectContaining({ status: KycStatus.APPROVED, reviewedBy: 'admin' }));
+    expect(sessions.update).toHaveBeenCalledWith('session', { reviewNote: 'Pièce RDC valide, noms contrôlés' });
+    expect(f.document.providerMetadata ?? {}).not.toHaveProperty('manualReviewNote');
   });
 });

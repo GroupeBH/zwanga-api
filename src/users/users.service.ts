@@ -11,7 +11,7 @@ import type { Point } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcrypt';
 import { User, UserStatus } from './entities/user.entity';
-import { KycDocument, KycStatus } from './entities/kyc-document.entity';
+import { KycDocument, KycProvider, KycStatus } from './entities/kyc-document.entity';
 import {
   FavoriteLocation,
   FavoriteLocationType,
@@ -544,6 +544,7 @@ export class UsersService {
     // 2. Existing KYC Check Logic (Allow RETRY if REJECTED)
     const existingKyc = await this.kycDocumentRepository.findOne({
       where: { userId },
+      order: LATEST_IDENTITY_ORDER,
     });
 
     if (existingKyc) {
@@ -610,7 +611,8 @@ export class UsersService {
 
     // Only perform KYC validation if AWS Rekognition is enabled
     const kycValidationEnabled =
-      this.configService.get<string>('AWS_REKOGNITION_KYC_ENABLED') === 'true';
+      this.configService.get<string>('AWS_REKOGNITION_KYC_ENABLED') === 'true' &&
+      this.configService.get<string>('AWS_KYC_ENABLED') !== 'true';
 
     this.logger.log(`[KYC Upload] ========================================`);
     this.logger.log(`[KYC Upload] Processing KYC upload for user: ${userId}`);
@@ -793,7 +795,15 @@ export class UsersService {
         lock: { mode: 'pessimistic_write' },
       });
       if (!lockedUser) throw new NotFoundException('Utilisateur introuvable');
+      // Serialize with AWS/Didit/admin. An old mobile upload must never replace
+      // a newer dossier after its long-running uploads/analysis complete.
+      const latestKyc = await queryRunner.manager.getRepository(KycDocument).findOne({
+        where: { userId }, order: LATEST_IDENTITY_ORDER,
+      });
+      if (latestKyc && (latestKyc.status !== KycStatus.REJECTED || latestKyc.id !== existingKyc?.id))
+        throw new BadRequestException('Votre dossier a changé. Actualisez votre statut KYC.');
       let kycDocument = existingKyc
+        && existingKyc.provider !== KycProvider.AWS
         ? this.kycDocumentRepository.merge(existingKyc, {})
         : this.kycDocumentRepository.create({
             userId, // <-- TypeORM BUG FIX: Pass the user object
@@ -807,6 +817,7 @@ export class UsersService {
           });
 
       kycDocument = queryRunner.manager.merge(KycDocument, kycDocument, {
+        provider: KycProvider.LEGACY,
         user: user, // <-- TypeORM BUG FIX: Pass the user object
         cniFrontUrl,
         cniFrontUrls, // Store array of CNI front URLs

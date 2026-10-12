@@ -27,7 +27,9 @@ import { Trip, TripStatus } from '../trips/entities/trip.entity';
 import { UpdateTripDto } from '../trips/dto/trip.dto';
 import { TripsService } from '../trips/trips.service';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
-import { KycDocument, KycStatus } from '../users/entities/kyc-document.entity';
+import { KycDocument, KycProvider, KycStatus } from '../users/entities/kyc-document.entity';
+import { AwsKycSession } from '../users/aws-kyc/aws-kyc-session.entity';
+import { identityHash } from '../users/aws-kyc/aws-kyc.policy';
 import { Vehicle } from '../vehicles/entities/vehicle.entity';
 import {
   ADMIN_USER_ROLES,
@@ -143,6 +145,19 @@ export class AdminService {
         where: { id: kycId }, lock: { mode: 'pessimistic_write' },
       });
       if (!current) throw new NotFoundException('Document de vérification introuvable');
+      const latest = await documents.findOne({ where: { userId: user.id }, order: { createdAt: 'DESC', id: 'DESC' } });
+      if (latest?.id !== kycId) throw new BadRequestException('Un dossier plus récent doit être examiné.');
+      if (approved && current.provider === KycProvider.AWS && current.status !== KycStatus.APPROVED) {
+        const session = await manager.getRepository(AwsKycSession).findOne({ where: { kycId }, lock: { mode: 'pessimistic_write' } });
+        if (!session || session.state !== 'review' || session.checks.liveness !== 'passed' || !['passed', 'review'].includes(session.checks.face) ||
+          identityHash(user.firstName, user.lastName) !== session.identityHash)
+          throw new BadRequestException('Les contrôles AWS doivent être terminés et les noms du profil inchangés avant approbation.');
+        const [archive] = await manager.query(`SELECT id FROM kyc_evidence_archives WHERE id=$1 AND state='ready' AND "expiresAt" IS NULL AND "objectKey" IS NOT NULL`, [session.archiveId]);
+        const [viewed] = await manager.query(`SELECT id FROM kyc_evidence_access_log WHERE "archiveId"=$1 AND "adminId"=$2 AND action='file' LIMIT 1`, [session.archiveId, adminId]);
+        if (!archive || !viewed || typeof reason !== 'string' || reason.trim().length < 10)
+          throw new BadRequestException('Consultez les preuves puis renseignez une note de contrôle de la pièce RDC autorisée, de sa validité et des noms (10 caractères minimum).');
+        await manager.getRepository(AwsKycSession).update(session.id, { reviewNote: reason.trim().slice(0, 1000) });
+      }
       const status = approved ? KycStatus.APPROVED : KycStatus.REJECTED;
       // A repeated/concurrent admin decision is not a new identity event.
       let saved = current;
@@ -155,6 +170,9 @@ export class AdminService {
           );
         }
         current.status = status;
+        if (current.provider === KycProvider.AWS) current.providerMetadata = {
+          ...current.providerMetadata, decision: approved ? 'manual_approved' : 'manual_rejected', manualReviewRequired: false,
+        };
         current.reviewedBy = adminId;
         current.rejectionReason = approved ? null : reason ?? null;
         saved = await documents.save(current);

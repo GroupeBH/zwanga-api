@@ -1,4 +1,5 @@
 import { User } from '../users/entities/user.entity';
+import { AwsKycSession } from '../users/aws-kyc/aws-kyc-session.entity';
 import { PRO_SERVICE_ENTITIES } from '../pro-services/pro-service.entities';
 import { KycDocument } from '../users/entities/kyc-document.entity';
 import { Vehicle } from '../vehicles/entities/vehicle.entity';
@@ -46,6 +47,7 @@ export const typeOrmEntities = [
   ...PRO_SERVICE_ENTITIES,
   User,
   KycDocument,
+  AwsKycSession,
   Vehicle,
   Trip,
   RecurringTripTemplate,

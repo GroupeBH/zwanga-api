@@ -140,6 +140,16 @@ describe('DiditKycService', () => {
     );
   });
 
+  it('does not let a late Didit decision overwrite a newer AWS dossier', async () => {
+    const aws = { ...kyc, provider: KycProvider.AWS, diditSessionId: null };
+    txKycRepository.findOne.mockResolvedValue(aws);
+    const saved = await (service as any).applyDiditState({ userId: user.id,
+      payload: { session_id: 'old-didit', status: 'Approved', vendor_data: user.id }, source: 'webhook' });
+    expect(saved).toBe(aws);
+    expect(txKycRepository.save).not.toHaveBeenCalled();
+    expect(txUserRepository.update).not.toHaveBeenCalled();
+  });
+
   afterEach(() => {
     jest.restoreAllMocks();
   });

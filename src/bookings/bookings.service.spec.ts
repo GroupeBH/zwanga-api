@@ -783,6 +783,35 @@ describe('BookingsService trip payments', () => {
     expect(paymentsService.initiatePayment).not.toHaveBeenCalled();
   });
 
+  it('allows payment after passenger-only arrival and reuses a pending transaction on retry', async () => {
+    const arrived = {
+      ...booking, trip: { ...booking.trip, status: TripStatus.ACTIVE },
+      status: BookingStatus.COMPLETED, pickedUp: true, droppedOff: true,
+      droppedOffConfirmedByPassenger: true, dropoffDetectionMethod: 'manual_passenger_confirmation',
+      rideDeclarations: { dropoff: { passenger: { decision: 'confirm' } } },
+    };
+    const payment = {
+      id: 'payment-arrival', method: PaymentMethod.MOBILE_MONEY, status: PaymentStatus.INITIATED,
+      reference: 'TRIP-ARRIVAL', orderNumber: 'ORDER-ARRIVAL', amount: 5000, currency: 'CDF', paidAt: null,
+    };
+    bookingRepository.findOne.mockResolvedValue(arrived);
+    paymentsService.initiatePayment.mockResolvedValue(payment);
+    const dto = { method: PaymentMethod.MOBILE_MONEY, phone: '+243000000000' };
+
+    const first = await service.initiateBookingPayment('booking-1', 'passenger-1', dto);
+    expect(first.booking.paymentStatus).toBe(BookingPaymentStatus.INITIATED);
+    expect(paymentsService.initiatePayment).toHaveBeenCalledWith(expect.objectContaining({ amount: 5000 }));
+    expect(arrived.rideDeclarations.dropoff).not.toHaveProperty('driver');
+
+    paymentsService.findTransactionById.mockResolvedValue(payment);
+    const retry = await service.initiateBookingPayment('booking-1', 'passenger-1', dto);
+    expect(retry.booking.paymentTransactionId).toBe(payment.id);
+    expect(paymentsService.initiatePayment).toHaveBeenCalledTimes(1);
+
+    await expect(service.initiateBookingPayment('booking-1', 'another-passenger', dto)).rejects.toThrow('Acces refuse');
+    expect(paymentsService.initiatePayment).toHaveBeenCalledTimes(1);
+  });
+
   it('lets a cash booking switch to mobile money payment', async () => {
     bookingRepository.findOne.mockResolvedValue({
       ...booking,

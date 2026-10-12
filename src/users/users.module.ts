@@ -15,6 +15,7 @@ import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
 import { DiditKycService } from './didit-kyc.service';
 import { OtpModule } from '../otp/otp.module';
 import { KycEvidenceModule } from './kyc-evidence/kyc-evidence.module';
+import { AwsKycModule } from './aws-kyc/aws-kyc.module';
 
 @Module({
   imports: [
@@ -31,6 +32,7 @@ import { KycEvidenceModule } from './kyc-evidence/kyc-evidence.module';
     ConfigModule,
     OtpModule,
     KycEvidenceModule,
+    AwsKycModule,
     SubscriptionsModule,
   ],
   controllers: [UsersController],

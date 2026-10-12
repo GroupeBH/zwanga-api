@@ -1,6 +1,6 @@
 import { ConflictException } from '@nestjs/common';
 import { recordDeclaration, NO_RIDE_DISPUTE_SQL } from './ride-declaration.policy';
-import { declarationStatus, pickupDeclarationStatus, hasRideDispute, RideEvidence } from './ride-declaration.model';
+import { dropoffDeclarationStatus, pickupDeclarationStatus, hasRideDispute, RideEvidence } from './ride-declaration.model';
 
 const evidence = (eventId: string, decision: 'confirm' | 'reject' = 'confirm'): RideEvidence => ({
   eventId, decision, occurredAt: '2026-09-14T12:00:00.000Z', receivedAt: '2026-09-14T12:01:00.000Z',
@@ -9,15 +9,17 @@ describe('manual ride declaration policy', () => {
   for (const stage of ['pickup', 'dropoff'] as const) {
     for (const first of ['passenger', 'driver'] as const) {
       const second = first === 'driver' ? 'passenger' : 'driver';
-      it(`${stage} needs both declarations, with ${first} first`, () => {
+      it(`${stage} respects its required actors, with ${first} first`, () => {
+        const status = stage === 'dropoff' ? dropoffDeclarationStatus : pickupDeclarationStatus;
+        const passengerArrival = stage === 'dropoff' && first === 'passenger';
         const one = recordDeclaration({}, stage, first, evidence('one'), false);
-        expect(one.ready).toBe(false);
+        expect(one.ready).toBe(passengerArrival);
         expect(one.declarations[stage]?.[second]).toBeUndefined();
-        expect(declarationStatus(one.declarations[stage], false)).toBe('awaiting_other');
-        expect(recordDeclaration(one.declarations, stage, first, evidence('one'), false).ready).toBe(false);
+        expect(status(one.declarations[stage], false)).toBe(passengerArrival ? 'ready' : 'awaiting_other');
+        expect(recordDeclaration(one.declarations, stage, first, evidence('one'), false).ready).toBe(passengerArrival);
         const two = recordDeclaration(one.declarations, stage, second, evidence('two'), false);
         expect(two.ready).toBe(true);
-        expect(pickupDeclarationStatus(two.declarations[stage], false)).toBe('ready');
+        expect(status(two.declarations[stage], false)).toBe('ready');
         const replay = recordDeclaration(two.declarations, stage, second, evidence('two'), false);
         expect(replay).toEqual({ declarations: two.declarations, changed: false, ready: true });
         expect(recordDeclaration(two.declarations, stage, second, evidence('two'), true).ready).toBe(false);
@@ -63,5 +65,20 @@ describe('manual ride declaration policy', () => {
     const result = recordDeclaration(old, 'pickup', 'passenger', evidence('new'), false);
     expect(result.ready).toBe(false);
     expect(pickupDeclarationStatus(result.declarations.pickup, false)).toBe('disputed');
+  });
+  it('a saved passenger arrival can be promoted on replay without inventing a driver receipt', () => {
+    const old = { dropoff: { passenger: evidence('existing') } };
+    for (const eventId of ['existing', 'fresh-id']) {
+      expect(recordDeclaration(old, 'dropoff', 'passenger', evidence(eventId), false))
+        .toEqual({ declarations: old, changed: false, ready: true });
+    }
+    expect(old.dropoff).not.toHaveProperty('driver');
+  });
+  it('a driver dispute still blocks a passenger arrival', () => {
+    const one = recordDeclaration({}, 'dropoff', 'driver', evidence('driver', 'reject'), false);
+    const two = recordDeclaration(one.declarations, 'dropoff', 'passenger', evidence('passenger'), false);
+    expect(two.ready).toBe(false);
+    expect(dropoffDeclarationStatus(two.declarations.dropoff, false)).toBe('disputed');
+    expect(hasRideDispute(two.declarations)).toBe(true);
   });
 });

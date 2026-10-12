@@ -24,12 +24,17 @@ export function declarationStatus(stage: StageDeclarations | undefined, applied:
   return 'none' as const;
 }
 
-/** Both parties must confirm a manual stage; automatic confirmations stay authoritative. */
+/** Boarding still needs both parties; automatic confirmations stay authoritative. */
 export function pickupDeclarationStatus(stage: StageDeclarations | undefined, applied: boolean) {
   return declarationStatus(stage, applied);
 }
 
-export const dropoffDeclarationStatus = pickupDeclarationStatus;
+/** The reservation holder can finish their own ride without waiting for the driver. */
+export function dropoffDeclarationStatus(stage: StageDeclarations | undefined, applied: boolean) {
+  const status = declarationStatus(stage, applied);
+  if (status === 'awaiting_other' && stage?.passenger?.decision === 'confirm') return 'ready' as const;
+  return status;
+}
 
 export function hasRideDispute(data?: RideDeclarations | null) {
   return (['pickup', 'dropoff'] as const).some(stage => declarationStatus(data?.[stage], false) === 'disputed');

@@ -61,12 +61,17 @@ export class RideDeclarationsService {
       const change = recordDeclaration(booking.rideDeclarations, dto.stage, actor, { ...dto, receivedAt: now.toISOString() }, applied);
       if (!change.changed && !change.ready) return this.view(booking, trip.driverId, userId);
       // Replaying ready receipts must not refresh their original evidence timestamps.
-      const occurredAt = Date.parse(change.declarations[dto.stage]?.[actor]?.occurredAt ?? dto.occurredAt);
-      if (!Number.isFinite(occurredAt) || occurredAt > now.getTime() + 5 * 60_000 || occurredAt < now.getTime() - 72 * 60 * 60_000) {
-        throw new ConflictException({ code: 'RIDE_EVENT_TIME', message: 'La date de cette confirmation ne permet pas de la valider. Vérifiez l’heure du téléphone ou contactez l’assistance.' });
-      }
-      if (trip.startedAt && occurredAt < new Date(trip.startedAt).getTime() - 5 * 60_000) {
-        throw new ConflictException({ code: 'RIDE_EVENT_TIME', message: 'Cette confirmation précède le démarrage du trajet. Vérifiez l’heure de votre téléphone.' });
+      const evidenceTimes = [change.declarations[dto.stage]?.[actor]?.occurredAt ?? dto.occurredAt];
+      // A fresh driver tap must not promote an expired historical passenger receipt.
+      if (dto.stage === 'dropoff' && change.ready) evidenceTimes.push(change.declarations.dropoff!.passenger!.occurredAt);
+      for (const timestamp of evidenceTimes) {
+        const occurredAt = Date.parse(timestamp);
+        if (!Number.isFinite(occurredAt) || occurredAt > now.getTime() + 5 * 60_000 || occurredAt < now.getTime() - 72 * 60 * 60_000) {
+          throw new ConflictException({ code: 'RIDE_EVENT_TIME', message: 'La date de cette confirmation ne permet pas de la valider. Vérifiez l’heure du téléphone ou contactez l’assistance.' });
+        }
+        if (trip.startedAt && occurredAt < new Date(trip.startedAt).getTime() - 5 * 60_000) {
+          throw new ConflictException({ code: 'RIDE_EVENT_TIME', message: 'Cette confirmation précède le démarrage du trajet. Vérifiez l’heure de votre téléphone.' });
+        }
       }
       if (trip.status !== TripStatus.ACTIVE || booking.status !== BookingStatus.ACCEPTED) {
         throw new ConflictException({ code: 'RIDE_STATE_CHANGED', message: 'Le trajet a changé depuis votre action. Actualisez son détail avant de continuer.' });
@@ -93,7 +98,8 @@ export class RideDeclarationsService {
         } : {
           status: BookingStatus.COMPLETED, droppedOff: true, droppedOffAt: now,
           droppedOffConfirmedByPassenger: true, droppedOffConfirmedAt: now,
-          dropoffDetectionMethod: 'manual_dual_confirmation',
+          dropoffDetectionMethod: change.declarations.dropoff?.driver?.decision === 'confirm'
+            ? 'manual_dual_confirmation' : 'manual_passenger_confirmation',
         });
       }
       await manager.update(Booking, bookingId, patch);

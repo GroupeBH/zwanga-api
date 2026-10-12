@@ -29,7 +29,7 @@ export type DriverProfileStatus =
 export interface ProfileState {
   version: 1;
   userId: string;
-  identity: { status: ProfileIdentityStatus; rejectionReason: string | null };
+  identity: { status: ProfileIdentityStatus; rejectionReason: string | null; provider?: KycProvider };
   driver: {
     status: DriverProfileStatus;
     nextAction: DriverProfileAction;
@@ -110,6 +110,7 @@ export function buildProfileState(user: User): ProfileState {
     userId: user.id,
     identity: {
       status: identityStatus,
+      ...(document?.provider === KycProvider.AWS ? { provider: KycProvider.AWS } : {}),
       rejectionReason:
         identityStatus === 'rejected'
           ? (document?.rejectionReason ?? null)

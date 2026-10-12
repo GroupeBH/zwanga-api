@@ -125,6 +125,10 @@ export class DiditKycService {
       });
     }
 
+    if (existingKyc?.provider === KycProvider.AWS && existingKyc.status === KycStatus.PENDING) {
+      throw new ConflictException('Une vérification AWS est déjà en cours. Reprenez ce parcours.');
+    }
+
     const payload = this.buildCreateSessionPayload(
       user,
       dto,
@@ -546,6 +550,12 @@ export class DiditKycService {
 
       let kycDocument: KycDocument | null = null;
 
+      // A delayed Didit callback must never overwrite a newer AWS dossier or its account status.
+      const latest = await kycRepository.findOne({ where: { userId: input.userId }, order: { createdAt: 'DESC' } });
+      if (latest?.provider === KycProvider.AWS && input.source !== 'session_created') return latest;
+      if (latest?.provider === KycProvider.AWS && latest.status !== KycStatus.REJECTED)
+        throw new ConflictException('Une vérification AWS est déjà en cours ou approuvée.');
+
       if (input.existingKyc?.id) {
         kycDocument = await kycRepository.findOne({
           where: { id: input.existingKyc.id },
@@ -574,7 +584,7 @@ export class DiditKycService {
         );
       }
 
-      if (!kycDocument) {
+      if (!kycDocument || kycDocument.provider === KycProvider.AWS) {
         kycDocument = kycRepository.create({
           userId: input.userId,
           user,

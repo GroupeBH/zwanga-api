@@ -54,13 +54,19 @@ export function tripResponseForViewer(trip: SanitizedTrip, viewerId: string,
   const visible = { ...publicTripResponse(currentTrip), isPrivate: access.isPrivate };
   if (!ownBookings.length) return visible;
   const canTrack = ownBookings.some(booking => booking.status === BookingStatus.ACCEPTED);
+  // Booking creation grants contact, not tracking or access to private vehicle data.
+  // Authorize from the fresh booking statuses, never those in the shared trip cache.
+  const canContactWhilePending = ownBookings.some(booking => booking.status === BookingStatus.PENDING) &&
+    (access.status === TripStatus.ACTIVE ||
+      (access.status === TripStatus.PENDING && !isExpiredDeparture(currentTrip)));
   return {
     ...visible,
     bookings: trip.bookings.flatMap(booking => {
       const current = ownBookings.find(own => own.id === booking.id);
       return current ? [{ ...booking, status: current.status }] : [];
     }),
-    driver: canTrack ? trip.driver : visible.driver,
+    driver: canTrack ? trip.driver : canContactWhilePending && visible.driver
+      ? { ...visible.driver, phone: trip.driver?.phone ?? null } : visible.driver,
     vehicle: canTrack ? trip.vehicle : visible.vehicle,
     startedAt: trip.startedAt, completedAt: trip.completedAt,
     currentLocation: canTrack && access.status === TripStatus.ACTIVE ? trip.currentLocation : null,
