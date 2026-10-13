@@ -67,6 +67,33 @@ describe('NotificationService critical push reliability', () => {
     jest.restoreAllMocks();
   });
 
+  it('reuses free urgent slots while another urgent send remains unresolved', async () => {
+    const f = buildService();
+    let resolveSlow!: (value: boolean) => void;
+    const slow = new Promise<boolean>(resolve => { resolveSlow = resolve; });
+    const rows = Array.from({ length: 6 }, (_, index) => ({ id: String(index), data: { type: 'new_booking' } }));
+    f.queryBuilder.getMany.mockResolvedValueOnce(rows as never[]).mockResolvedValueOnce([{ id: 'next' }] as never[]);
+    jest.spyOn(f.service as any, 'isCriticalNotificationStillDeliverable').mockResolvedValue(true);
+    const delivery = jest.spyOn(f.service as any, 'deliverSavedNotification').mockImplementation((...args: any[]) => args[0].id === '0' ? slow : Promise.resolve(true));
+    const first = f.service.dispatchUrgentNotifications();
+    await new Promise(resolve => setImmediate(resolve));
+    expect((f.service as any).urgentWorkers).toBe(1);
+    expect(delivery).toHaveBeenCalledWith(expect.objectContaining({ id: '5' }));
+    await f.service.dispatchUrgentNotifications();
+    expect(delivery).toHaveBeenCalledWith(expect.objectContaining({ id: 'next' }));
+    expect(f.queryBuilder.take).toHaveBeenLastCalledWith(8);
+    resolveSlow(true); await first;
+    expect((f.service as any).urgentWorkers).toBe(0);
+  });
+
+  it('releases the urgent claim gate when the database claim fails', async () => {
+    const f = buildService();
+    f.queryBuilder.getMany.mockRejectedValueOnce(new Error('unavailable')).mockResolvedValueOnce([]);
+    await expect(f.service.dispatchUrgentNotifications()).rejects.toThrow('unavailable');
+    await expect(f.service.dispatchUrgentNotifications()).resolves.toBeUndefined();
+    expect(f.queryBuilder.getMany).toHaveBeenCalledTimes(2);
+  });
+
   it('does not deliver private messages while an old duplicated push token has ambiguous ownership', async () => {
     const f = buildService();
     f.userRepository.findOne.mockResolvedValue({ fcmToken: 'ExpoPushToken[shared]' });

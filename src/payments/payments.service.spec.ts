@@ -103,6 +103,29 @@ describe('PaymentsService', () => {
 
   afterEach(() => jest.restoreAllMocks());
 
+  it('a topup retry returns the original payment without contacting the provider again', async () => {
+    const input = { userId: 'user', purpose: 'wallet_top_up', idempotencyKey: 'stable-key',
+      method: PaymentMethod.CARD, amount: 5000, currency: 'CDF', description: 'Synthetic topup' };
+    const first = await service.initiatePayment(input);
+    paymentTransactionRepository.save.mockRejectedValueOnce({ code: '23505' });
+    paymentTransactionRepository.findOne.mockResolvedValue(first);
+    expect(await service.initiatePayment(input)).toBe(first);
+    expect(flexPayService.initiatePayment).toHaveBeenCalledTimes(1);
+    expect(first.reference).toMatch(/^[A-Z0-9]{25}$/);
+  });
+
+  it('reads a pending topup by its internal reference with the account guard and no new debit', async () => {
+    const transaction = { id: 'pending', userId: 'user', purpose: 'wallet_top_up',
+      reference: 'WALPENDING', status: PaymentStatus.PENDING, orderNumber: null, providerReference: null };
+    paymentTransactionRepository.findOne.mockResolvedValue(transaction);
+    expect(await service.checkPaymentStatus('WALPENDING', 'user')).toBe(transaction);
+    expect(paymentTransactionRepository.findOne).toHaveBeenCalledWith(expect.objectContaining({
+      where: [{ orderNumber: 'WALPENDING', userId: 'user' }, { reference: 'WALPENDING', purpose: 'wallet_top_up', userId: 'user' }],
+    }));
+    expect(flexPayService.initiatePayment).not.toHaveBeenCalled();
+    expect(flexPayService.checkTransaction).not.toHaveBeenCalled();
+  });
+
   it('generates a FlexPay-compatible reference with at most 25 characters', async () => {
     const payment = await service.initiatePayment({
       userId: '123e4567-e89b-12d3-a456-426614174000',

@@ -11,6 +11,7 @@ locals {
       AWS_REGION                       = var.aws_region
       LOG_LEVEL                        = "warn"
       GPS_LOG_SAMPLE_RATE              = "0.01"
+      DIDIT_KYC_LAUNCH_MODE             = var.didit_kyc_launch_mode
     },
     var.runtime_environment_variables,
     var.enable_xray_tracing ? {
@@ -65,7 +66,7 @@ locals {
     }
 
     healthCheck = {
-      command     = ["CMD-SHELL", "wget -q -O - http://127.0.0.1:${var.ecs_container_port}${var.alb_health_check_path} >/dev/null || exit 1"]
+      command     = ["CMD-SHELL", "wget -q -O - http://127.0.0.1:${var.ecs_container_port}/health/live >/dev/null || exit 1"]
       interval    = 30
       timeout     = 5
       retries     = 3

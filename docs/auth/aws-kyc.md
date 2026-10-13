@@ -9,13 +9,16 @@ Pas de modification du CI/CD, de Terraform, d’ECS, des paramètres AWS réels 
 l’OTP. Didit est conservé ; aucune bascule automatique payante vers Didit après
 un échec AWS.
 
-Décision de lancement mobile : **Didit reste actif pour le moment**. L’application
-exige désormais `EXPO_PUBLIC_AWS_KYC_ENABLED=true` dans son bundle avant de
-consulter les capacités AWS. Sans ce flag, aucun appel à cet endpoint et aucun
-lancement du parcours AWS. L’activation backend `AWS_KYC_ENABLED=true` seule ne
-fait donc pas basculer le mobile. L’intégration native reste conservée pour une
-activation ultérieure après compilation et recette ; les actions internes
-d’approbation et notifications restent communes à Didit et AWS.
+Depuis le 13 octobre 2026, le bundle mobile choisit son fournisseur via
+`EXPO_PUBLIC_KYC_PROVIDER=didit|aws`. Didit est le défaut ; il ne consulte pas les
+capacités AWS. Le choix explicite est prioritaire sur l’ancien flag
+`EXPO_PUBLIC_AWS_KYC_ENABLED`, encore reconnu uniquement si le sélecteur est absent
+ou vide. Avec `aws`, l’application exige des capacités serveur activées et un
+binaire contenant le pont natif Liveness. Un backend désactivé/ancien ou une panne
+ne déclenche pas de session Didit de remplacement. L’activation backend
+`AWS_KYC_ENABLED=true` seule ne fait pas basculer le mobile. Les actions internes
+d’approbation et notifications restent communes à Didit et AWS. Guide mobile :
+`zwanga/docs/AWS_KYC.md` ; aucune configuration réelle de production modifiée.
 
 Mise à jour produit : **approbation automatique si tous les contrôles sont
 concluants, revue humaine en cas de doute**. La politique versionnée
@@ -228,15 +231,17 @@ avec des données réelles ni appel AWS payant n’a été effectué durant cett
 - Vérification PostgreSQL séparée : 37 tests passés (KYC et outbox), notamment
   activation avec/sans véhicule, propriétaire, deux approbations admin simultanées
   et rollback intégral de la décision/du rôle/du push.
-- Tests mobile ciblés après maintien de Didit par défaut : 55 passés, dont
-  sélection du fournisseur et parcours Didit sans appel AWS ; TypeScript et
+- Tests mobile ciblés après sélection explicite du fournisseur : 63 passés, dont
+  priorité de configuration, parcours Didit/AWS et refus des bascules implicites ; TypeScript et
   frontière réseau vérifiés séparément. Ce ne sont pas des essais caméra.
 - Compilation et essais iOS nécessitent macOS/Xcode ; validation physique Android
   et iOS obligatoire, notamment annulation, réseau lent, rotation, arrière-plan,
   refus caméra, double appui, reprise et notification après décision.
 - La compilation Android tentée a échoué sur les téléchargements des dépôts
   Google/Maven (AndroidX, Hermes, etc.), avant validation du module Kotlin.
-  Reprendre avec accès réseau aux dépôts officiels. Aucun succès natif revendiqué.
+  Nouvel essai mobile hors ligne le 13 octobre : dépendances AndroidX/Compose/Hermes
+  absentes du cache. Reprendre avec accès réseau aux dépôts officiels.
+  Aucun succès natif revendiqué.
 
 ## Références officielles vérifiées
 

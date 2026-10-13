@@ -169,7 +169,7 @@ async function bootstrap() {
 
   // Global prefix
   app.setGlobalPrefix(apiPrefix, {
-    exclude: ['health'],
+    exclude: ['health', 'health/live'],
   });
 
   // Global validation pipe

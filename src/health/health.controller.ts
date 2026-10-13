@@ -4,6 +4,7 @@ import { HealthCheck, HealthCheckService, TypeOrmHealthIndicator } from '@nestjs
 import { Public } from '../common/decorators/public.decorator';
 import { RedisHealthIndicator } from './redis.health-indicator';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
+import { SkipThrottle } from '@nestjs/throttler';
 
 @Controller('health')
 export class HealthController {
@@ -13,6 +14,14 @@ export class HealthController {
     private readonly redis: RedisHealthIndicator,
     private readonly source: DataSource,
   ) {}
+
+  // Liveness must not restart workers during a shared database/Redis outage.
+  @Get('live')
+  @Public()
+  @SkipThrottle()
+  live() {
+    return { status: 'ok', uptime: process.uptime() };
+  }
 
   @Get()
   @Public()

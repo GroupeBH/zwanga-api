@@ -1,6 +1,21 @@
 import { HealthController } from './health.controller';
+import { Reflector } from '@nestjs/core';
+import { IpThrottlerGuard } from '../common/guards/throttler.guard';
 
 describe('deployment readiness', () => {
+  it('liveness bypasses the Redis rate limiter, but readiness keeps its limits', async () => {
+    const storage = { increment: jest.fn().mockRejectedValue(new Error('Redis unavailable')) };
+    const guard = new IpThrottlerGuard([{ ttl: 60000, limit: 10 }], storage as any, new Reflector());
+    await guard.onModuleInit();
+    const context = { getType: () => 'http', getHandler: () => HealthController.prototype.live, getClass: () => HealthController };
+    expect(await guard.canActivate(context as any)).toBe(true);
+    expect(storage.increment).not.toHaveBeenCalled();
+    expect(Reflect.getMetadata('THROTTLER:SKIPdefault', HealthController.prototype.check)).not.toBe(true);
+  });
+  it('reports liveness without touching external dependencies', () => {
+    const service = new HealthController(undefined as any, undefined as any, undefined as any, undefined as any);
+    expect(service.live()).toMatchObject({ status: 'ok' });
+  });
   const fixture = (schema: any) => {
     const query = jest
       .fn()

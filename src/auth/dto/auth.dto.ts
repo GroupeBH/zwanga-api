@@ -17,7 +17,7 @@ import { UserGender, UserRole } from '../../users/entities/user.entity';
 import { SELF_SERVICE_USER_ROLES } from '../../users/user-role.policy';
 import { strictDriverBoolean } from '../../users/driver-boolean.transform';
 import { CreateVehicleDto } from '../../vehicles/dto/vehicle.dto';
-import { ReferralAttributionDto } from '../../referrals/dto/referral.dto';
+import { RegistrationCompatibilityDto } from './registration-compatibility.dto';
 import { normalizeLegalName } from '../../users/legal-identity.util';
 
 const toTrimmedString = ({ value }: TransformFnParams): unknown => {
@@ -36,7 +36,7 @@ const toNormalizedLegalName = ({ value }: TransformFnParams): unknown => {
   return typeof value === 'string' ? normalizeLegalName(value) : value;
 };
 
-export class RegisterDto extends ReferralAttributionDto {
+export class RegisterDto extends RegistrationCompatibilityDto {
   @ApiProperty({
     required: false,
     example: 'ZW7K9M2P4Q',
@@ -295,7 +295,7 @@ export class RefreshTokenDto {
   refreshToken: string;
 }
 
-export class GoogleMobileAuthDto extends ReferralAttributionDto {
+export class GoogleMobileAuthDto extends RegistrationCompatibilityDto {
   @ApiProperty({ required: false, example: 'ZW7K9M2P4Q' })
   @Transform(toTrimmedString)
   @IsString()
@@ -388,7 +388,7 @@ export class GoogleMobileAuthDto extends ReferralAttributionDto {
   vehicle?: CreateVehicleDto;
 }
 
-export class AppleMobileAuthDto extends ReferralAttributionDto {
+export class AppleMobileAuthDto extends RegistrationCompatibilityDto {
   @ApiProperty({ required: false, example: 'ZW7K9M2P4Q' })
   @Transform(toTrimmedString)
   @IsString()

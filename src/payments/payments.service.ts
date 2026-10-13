@@ -46,8 +46,10 @@ import { loadPaymentHistoryPage, loadPaymentHistorySummary } from './payment-his
 import { loadPaymentContext, PaymentContextDto } from './payment-context';
 import type { PaymentHistoryPageDto } from '../common/pagination/history-page';
 import { claimDriverPayoutPayment, commitFlexPayPayoutState } from './flexpay-payout-state';
+import { claimTopUpPayment, topUpReference } from './topup-payment-claim';
 
 export interface InitiatePaymentInput {
+  idempotencyKey?: string;
   userId?: string | null;
   purpose?: string;
   relatedEntityType?: string | null;
@@ -256,8 +258,13 @@ export class PaymentsService {
       paidAt: null,
     });
 
-    let savedTransaction =
-      await this.paymentTransactionRepository.save(transaction);
+    const isIdempotentTopUp = input.purpose === PaymentPurpose.WALLET_TOP_UP && input.userId && input.idempotencyKey;
+    if (isIdempotentTopUp) transaction.reference = topUpReference(input.userId!, input.idempotencyKey!);
+    const claim = isIdempotentTopUp
+      ? await claimTopUpPayment(this.paymentTransactionRepository, transaction)
+      : { payment: await this.paymentTransactionRepository.save(transaction), created: true };
+    if (!claim.created) return claim.payment;
+    let savedTransaction = claim.payment;
     this.logger.warn(
       `Payment transaction created: id=${savedTransaction.id}, reference=${savedTransaction.reference}, userId=${savedTransaction.userId ?? 'anonymous'}, purpose=${savedTransaction.purpose}, method=${savedTransaction.method}, amount=${savedTransaction.amount} ${savedTransaction.currency}, related=${savedTransaction.relatedEntityType ?? 'none'}:${savedTransaction.relatedEntityId ?? 'none'}`,
     );
@@ -848,6 +855,9 @@ export class PaymentsService {
   private async checkTransactionAndApply(
     transaction: PaymentTransaction,
   ): Promise<PaymentTransaction> {
+    // An initiation may still be in flight, or its provider response may be lost.
+    // Reconciliation is read-only; never manufacture a new payment reference.
+    if (transaction.purpose === PaymentPurpose.WALLET_TOP_UP && !transaction.orderNumber && !transaction.providerReference) return transaction;
     if (transaction.provider === PaymentProvider.PAWAPAY) {
       const saved = await this.checkPawaPayTransactionAndApply(transaction);
       await this.settlementRegistry?.apply?.(saved);
@@ -1133,10 +1143,14 @@ export class PaymentsService {
     userId?: string,
   ): Promise<PaymentTransaction> {
     const transaction = await this.paymentTransactionRepository.findOne({
-      where: {
+      where: [{
         orderNumber,
         ...(userId ? { userId } : {}),
-      },
+      }, {
+        reference: orderNumber,
+        purpose: PaymentPurpose.WALLET_TOP_UP,
+        ...(userId ? { userId } : {}),
+      }],
       order: { createdAt: 'DESC' },
     });
 

@@ -380,6 +380,17 @@ variable "alb_health_check_path" {
   default     = "/health"
 }
 
+variable "didit_kyc_launch_mode" {
+  description = "Didit client launch mode. hosted enables the existing mobile browser path while a native SDK issue is investigated."
+  type        = string
+  default     = "native"
+
+  validation {
+    condition     = contains(["native", "hosted"], var.didit_kyc_launch_mode)
+    error_message = "didit_kyc_launch_mode must be native or hosted."
+  }
+}
+
 variable "runtime_environment_variables" {
   description = "Additional ECS runtime environment variables. Every entry is stored as an encrypted SSM SecureString and injected into ECS from Parameter Store."
   type        = map(string)
@@ -404,7 +415,7 @@ variable "runtime_environment_variables" {
   validation {
     condition = length(setintersection(
       toset(keys(var.runtime_environment_variables)),
-      toset(["DATABASE_URL", "REDIS_URL", "REDIS_TLS", "JWT_SECRET", "JWT_REFRESH_SECRET", "AWS_S3_BUCKET_NAME", "AOT_CONFIG_CONTENT", "DIDIT_API_BASE_URL"]),
+      toset(["DATABASE_URL", "REDIS_URL", "REDIS_TLS", "JWT_SECRET", "JWT_REFRESH_SECRET", "AWS_S3_BUCKET_NAME", "AOT_CONFIG_CONTENT", "DIDIT_API_BASE_URL", "DIDIT_KYC_LAUNCH_MODE"]),
     )) == 0
     error_message = "Generated variables and the retired DIDIT_API_BASE_URL variable must not be set in runtime_environment_variables."
   }
@@ -443,6 +454,7 @@ variable "external_runtime_environment_variable_names" {
         "AWS_S3_BUCKET_NAME",
         "AOT_CONFIG_CONTENT",
         "DIDIT_API_BASE_URL",
+        "DIDIT_KYC_LAUNCH_MODE",
         "NODE_ENV",
         "HOST",
         "PORT",
