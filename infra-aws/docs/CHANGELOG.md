@@ -1,5 +1,54 @@
 # Journal détaillé des changements d'infrastructure AWS
 
+## INFRA-2026-10-13-004 — Configuration KYC AWS prête à livrer, activation séparée
+
+- Date/périmètre : 13 octobre 2026, configuration locale de production, non appliquée.
+  Le diagnostic avait trouvé une tâche sans AWS_KYC_* et le rôle de capture absent.
+- Appliqué dans les fichiers : `kyc.tf` gère huit SecureString via le KMS existant,
+  valide quotas/seuils et refuse les doubles déclarations ; `ssm.tf` ajoute leurs ARN
+  aux références générées/réservées. `ecs.tf` attend les deux policies KYC avant la
+  définition de tâche. `production.auto.tfvars` prépare IAM/SSM mais garde la capture
+  désactivée. Paramètres opérateur historiques/fournisseur et OTP non remplacés.
+- Sécurité/disponibilité : IAM limité à la capture et aux actions backend déjà
+  prévues ; pas de clé permanente ni rôle Cognito public. Le state reste sensible.
+  Pas de migration, suppression d'archive, nouveau bucket/serveur ni nouveau déploiement.
+  Préparation sans vérification payante ; les essais et usages futurs restent facturables.
+- Déploiement : nouveau plan relu, import préalable des éventuels paramètres
+  externes homonymes, application approuvée, recette native, puis activation et
+  livraison `release`. Pas de réutilisation de l'ancien plan Didit ni de push automatique.
+- Surveillance : santé ECS/ALB, erreurs par catégorie, quotas, expirations et coût.
+  Retour arrière par désactivation et remplacement des tâches ; `prevent_destroy`
+  protège les paramètres, sans promettre la poursuite des captures pendant l'arrêt.
+- Procédure et limites : [guide Amplify / AWS KYC](../../docs/operations/aws-kyc-amplify-rollout-2026-10-13.md).
+- Vérifications : format des quatre fichiers Terraform et `terraform validate`
+  réussis sous WSL (après un premier timeout du plugin pendant la compilation
+  native simultanée). 92 tests backend ciblés passent, 13 tests PostgreSQL optionnels
+  non exécutés dans cette commande. Compilation backend finale réussie ; les erreurs
+  d'un changement administratif concurrent ont disparu sans modification de ce
+  changement par ce correctif. Pas de preuve d'autorisation IAM réelle à ce stade.
+- Plan de production lu/sauvegardé, non appliqué : 12 créations, 0 modification,
+  1 suppression (ancienne définition de tâche uniquement). Service ECS actif
+  inchangé, pas de remplacement RDS/Redis/S3/KMS, activation désactivée confirmée
+  par lecture structurée. Régénérer le plan si l'environnement évolue avant apply.
+- Limite native : relance Android après rafraîchissement des dépendances, puis
+  blocage sur le compilateur hôte Hermes/`nmake` absent sous Windows. Aucun AAB
+  final ou test biométrique physique déclaré validé ; build EAS/Linux requis.
+
+## INFRA-2026-10-13-003 — Préparation IAM de la bascule KYC AWS
+
+- Nouveau `kyc.tf` : rôle STS de capture à permission unique, policy backend
+  Rekognition/Textract/AssumeRole et effacement des versions sous `kyc/evidence/`.
+  Trust limitée au rôle ECS et aux rôles de développement explicitement déclarés.
+- `enable_aws_kyc_permissions=false` par défaut : activation IAM séparée de
+  l'activation métier. Région de traitement `eu-west-1`, sans déplacer ECS/S3/RDS.
+  Sortie `aws_kyc_runtime_configuration` indicative ; aucune écriture SSM par ce fichier.
+- `terraform.tfvars.example` documente l'opt-in. Aucun changement de CI/CD,
+  `ecs.tf`, `oidc.tf` ou des variables réelles de production ; aucun apply exécuté.
+- `terraform fmt kyc.tf` et `terraform validate` exécutés avec succès dans WSL.
+  Pas de simulation d'autorisation IAM réelle ni de vérification biométrique facturée.
+- Procédure et limites : [KYC AWS](../../docs/auth/aws-kyc.md), notamment migration
+  existante, bucket privé, nouveau binaire natif et nouveaux paramètres SSM avant ECS.
+
 ## INFRA-2026-10-13-002 — Rectification du diagnostic Didit, sans changement AWS
 
 - Le workflow existait et fonctionnait avant la mise à jour mobile, selon le signalement

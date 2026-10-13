@@ -109,6 +109,14 @@ export class DiditKycService {
     userId: string,
     dto: CreateDiditKycSessionDto,
   ): Promise<DiditKycSessionResult> {
+    // Stop new billable Didit sessions after an explicit AWS cutover. Keep sync
+    // and signed webhooks available for historical sessions, including approvals.
+    if (this.configService.get<string>('KYC_PROVIDER') === 'aws') {
+      throw new BadRequestException({
+        code: 'KYC_APP_UPDATE_REQUIRED',
+        message: 'La vérification d’identité a changé. Mettez à jour Zwanga pour vérifier votre identité avec le nouveau parcours sécurisé.',
+      });
+    }
     const config = this.getRequiredDiditApiConfig();
     const user = await this.userRepository.findOne({ where: { id: userId } });
 
@@ -737,7 +745,7 @@ export class DiditKycService {
   } | null {
     const enabled =
       this.configService.get<string>('DIDIT_KYC_ENABLED') === 'true' ||
-      this.configService.get<string>('KYC_PROVIDER') === 'didit';
+      ['didit', 'aws'].includes(this.configService.get<string>('KYC_PROVIDER') ?? '');
 
     if (!enabled) {
       return null;

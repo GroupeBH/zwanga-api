@@ -3,6 +3,15 @@ import { AwsKycService } from './aws-kyc.service';
 import { AwsKycSession } from './aws-kyc-session.entity';
 
 describe('AWS KYC server-owned verification', () => {
+  it('capabilities reports disabled or incomplete configuration without provider calls', () => {
+    for (const [configuration, unavailableCode] of [
+      [{}, 'AWS_KYC_DISABLED'],
+      [{ AWS_KYC_ENABLED: 'true' }, 'AWS_KYC_CONFIGURATION_REQUIRED'],
+    ] as const) {
+      const service = new AwsKycService(new ConfigService(configuration), {} as any, {} as any, {} as any);
+      expect(service.capabilities()).toEqual(expect.objectContaining({ enabled: false, unavailableCode }));
+    }
+  });
   const fixture = () => {
     const repository = {
       owned: jest.fn().mockResolvedValue({}),

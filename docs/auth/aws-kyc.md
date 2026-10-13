@@ -1,5 +1,176 @@
 # KYC AWS — backend et application mobile
 
+## Livraison Amplify / SSM après diagnostic du 13 octobre
+
+Le [guide de livraison](../operations/aws-kyc-amplify-rollout-2026-10-13.md)
+complète la préparation ci-dessous : dépendances Android corrigées, huit paramètres
+AWS_KYC_* désormais gérés et injectés par Terraform, activation séparée et diagnostics
+publics sans configuration sensible. Pas d'application AWS exécutée.
+
+## Bascule complète préparée le 13 octobre 2026
+
+Le nouveau mobile choisit désormais AWS par défaut, et les profils EAS `dev`,
+`dev-device` et `production` fixent `EXPO_PUBLIC_KYC_PROVIDER=aws`. Une ancienne
+variable Expo explicite `didit` reste un choix de retour arrière : la supprimer
+ou la remplacer dans `.env.local`/l'environnement de compilation pour les tests.
+Le flag historique `EXPO_PUBLIC_AWS_KYC_ENABLED` ne sélectionne plus Didit.
+
+Avec **`KYC_PROVIDER=aws`** côté backend :
+
+- `POST /users/kyc/didit/session` retourne HTTP 400, code
+  `KYC_APP_UPDATE_REQUIRED`, avec un message demandant une mise à jour ; aucun
+  appel fournisseur ni création facturable, sans provoquer une déconnexion 401/403.
+  Attention : le présentateur d'erreurs du code mobile historique `1.0.16` masque
+  ce message derrière une erreur générique. La nouvelle version reconnaît le code
+  et affiche « Mise à jour nécessaire » ; le backend ne peut pas modifier ce rendu
+  d'un ancien binaire. Prévoir une communication support/store pour ces utilisateurs.
+- Les comptes déjà approuvés ne repassent pas le KYC. L'authentification, l'OTP,
+  les trajets, les paiements et les décisions précédentes ne changent pas.
+- Un utilisateur avec un dossier **Didit pending** peut commencer AWS. Le dossier
+  Didit reste dans l'historique ; le nouveau dossier devient le dernier au commit.
+  Les quotas et le verrou utilisateur restent applicables. Un double appui ne
+  crée pas deux dossiers AWS. Un dossier AWS en attente, un dossier manuel legacy
+  en attente ou une approbation existante restent bloquants.
+- Le profil mobile permet cette reprise (passager et parcours conducteur).
+  Les callbacks Didit tardifs ne remplacent pas le nouveau dossier AWS.
+- La synchronisation et les webhooks Didit historiques sont conservés : ne pas
+  retirer leurs clés ou secret pendant le traitement des anciens dossiers.
+  En mode AWS ils peuvent encore relire les résultats, même si l'ancien flag
+  `DIDIT_KYC_ENABLED` est désactivé. Seules les **nouvelles** sessions sont bloquées.
+- Pas de repli implicite vers Didit après une erreur AWS. Le SDK Didit reste dans
+  les sources pour compatibilité/retour arrière, mais n'est pas lancé en mode AWS.
+
+Cette préparation **n'active pas AWS en production** : aucun apply Terraform,
+changement SSM, déploiement ECS ou publication store effectué. Le `.env` backend
+local était encore désactivé, sans ARN de capture configuré ; il n'est pas activé
+avec un ARN fictif. Les anciennes versions sans module natif doivent être mises
+à jour pour un nouveau KYC (choix produit confirmé). Une mise à jour backend/OTA
+ne peut pas ajouter un module natif manquant.
+
+### 1. Préparer les permissions, sans basculer les utilisateurs
+
+`infra-aws/kyc.tf` ajoute des ressources **optionnelles**. Par défaut, le flag est
+`false`, donc aucun rôle/policy KYC supplémentaire n'est créé. Dans le fichier
+de variables de l'environnement à préparer :
+
+```hcl
+enable_aws_kyc_permissions = true
+manage_aws_kyc_runtime_configuration = true
+aws_kyc_enabled           = false
+aws_kyc_region            = "eu-west-1"
+# Facultatif pour un backend local : rôle de développement exact, du même compte.
+# Ne pas utiliser une identité mobile, un wildcard ou ajouter des clés permanentes.
+# aws_kyc_development_role_arns = ["arn:aws:iam::<ACCOUNT_ID>:role/<DEVELOPER_ROLE>"]
+```
+
+Puis, dans `infra-aws`, examiner un **nouveau** plan avant toute application :
+
+```sh
+terraform plan -out=aws-kyc-iam.tfplan
+terraform show -no-color aws-kyc-iam.tfplan
+# Uniquement après revue/accord : terraform apply aws-kyc-iam.tfplan
+terraform output -json aws_kyc_runtime_configuration
+```
+
+Ajouts attendus propres à ce fichier : un rôle de capture, sa policy limitée à
+`StartFaceLivenessSession`, une policy backend (Liveness/Textract/AssumeRole et
+archives privées). La région est imposée pour les nouvelles permissions d'analyse.
+Les anciennes permissions Rekognition/modération ne sont pas supprimées. Le rôle
+de capture ne peut pas lire les pièces ni les résultats. Les credentials émis par
+le backend durent 900 secondes et contiennent une policy de session restrictive.
+
+La préparation SSM ajoute les références ECS et attend les policies IAM KYC.
+`oidc.tf` et le workflow CI/CD restent inchangés.
+Le fichier ne crée pas de bucket, de serveur ni de base. Vérifier réellement Block
+Public Access et les policies du bucket : `AWS_S3_PUBLIC_BUCKET=false` ne change
+pas ses ACL/policies AWS. Ne pas activer sur un bucket exposant les preuves.
+
+### 2. Tester en local avec un nouveau binaire
+
+Utiliser une base locale de test, pas la base de production. Appliquer les
+migrations avec le mécanisme existant ; la migration 69 est déjà dans le dépôt,
+aucune nouvelle migration n'est introduite par cette bascule. Utiliser les
+identifiants temporaires du rôle de développement via la chaîne AWS habituelle ;
+il lui faut les droits backend et `sts:AssumeRole` sur le rôle de capture.
+Le simple ajout dans la trust policy ne lui accorde pas les droits Textract/S3.
+
+Dans le `.env` **backend**, après préparation IAM/stockage :
+
+```dotenv
+KYC_PROVIDER=aws
+AWS_KYC_ENABLED=true
+AWS_KYC_REGION=eu-west-1
+AWS_KYC_LIVENESS_ROLE_ARN=arn:aws:iam::<ACCOUNT_ID>:role/<LIVENESS_CAPTURE_ROLE>
+AWS_S3_PUBLIC_BUCKET=false
+AWS_KYC_DAILY_LIMIT=100
+AWS_KYC_MONTHLY_LIMIT=1000
+AWS_KYC_USER_DAILY_LIMIT=3
+AWS_KYC_LIVENESS_THRESHOLD=95
+AWS_KYC_FACE_THRESHOLD=95
+```
+
+Conserver `AWS_REGION` à la région réelle du bucket existant. Ne pas la remplacer
+par la région Liveness si elles diffèrent. Les quotas réservent des tentatives,
+pas un montant garanti de facture ; les appels réels sont facturables par AWS.
+Dans le mobile, `EXPO_PUBLIC_KYC_PROVIDER=aws` et une URL API pointant vers le PC.
+Recompiler Android/iOS avec le pont natif : pas Expo Go. Redémarrer le serveur
+local existant et Metro après changement de configuration, sans lancer de doublon.
+
+Recette : capacités activées → pièce recto/verso → OCR → selfie vidéo → résultat
+serveur → activation du bon rôle et notification. Vérifier aussi : ancien dossier
+Didit en attente, compte déjà approuvé, double appui, noms différents, caméra
+refusée, réseau coupé, expiration et reprise, revue manuelle puis push admin.
+Ne pas considérer les tests simulés comme une validation des vraies pièces RDC.
+
+### 3. Livraison après recette
+
+Les huit AWS_KYC_* sont gérés par Terraform quand la préparation runtime est
+sélectionnée ; ne pas les importer depuis un `.env` en parallèle. Les paramètres
+existants `KYC_PROVIDER` et `AWS_S3_PUBLIC_BUCKET` restent opérateur, **sans toucher
+aux paramètres OTP**. Ne pas
+mettre de credentials permanents dans le mobile. Le mécanisme Terraform existant
+découvre les noms SSM : refaire un plan pour que la nouvelle task definition les
+référence. Vérifier les éventuels paramètres déjà gérés par Terraform pour ne pas
+créer deux sources de vérité. L'ajout SSM seul ne met pas à jour une tâche ECS active.
+
+Publier le binaire natif testé, puis effectuer la bascule backend via le CI/CD
+existant et attendre le remplacement des tâches. `AWS_KYC_ENABLED=true` active le
+worker ; `KYC_PROVIDER=aws` ferme les nouvelles sessions Didit et autorise la
+reprise de ses dossiers pending. Les capacités ne testent pas IAM/S3 en direct :
+une vraie recette de capture reste nécessaire avant activation générale.
+
+Les logs AWS KYC exposent désormais seulement des catégories fixes :
+`ACCESS_DENIED`, `CREDENTIALS_UNAVAILABLE`, `AWS_LIMIT`, `RESOURCE_UNAVAILABLE`,
+`TIMEOUT`, `INVALID_PARAMETERS`, `PROCESSING_UNAVAILABLE`. Pas de documents,
+messages fournisseur bruts, credentials ou scores biométriques dans ces logs.
+
+Retour arrière : désactiver les nouvelles tentatives via `AWS_KYC_ENABLED=false`
+en tenant compte des captures en cours (elles expireront si le worker est arrêté).
+Ne pas supprimer le schéma ni les archives ; rétablir Didit exige un choix explicite
+côté backend/mobile et un compte fournisseur opérationnel. Aucun repli automatique.
+
+### Vérifications de cette bascule
+
+- Backend : suite complète, **170 suites / 1 932 tests réussis** (11 suites /
+  221 tests optionnels ignorés dans cette commande). Puis **71 tests KYC ciblés**
+  réussis après le dernier ajustement de lecture des dossiers Didit historiques.
+- PostgreSQL isolé : **13 tests réussis**, incluant reprise Didit, doublons
+  concurrents, approbation conservée et rollback d'une réservation hors quota.
+  Aucune connexion à la base applicative ou de production pour ces tests.
+- Mobile : **66 tests ciblés**, TypeScript et frontière réseau réussis. Suite
+  complète finale : **1 915 tests réussis**. Une première exécution sous charge
+  avait 2 échecs sur `activeRideResume`, sans lien de code avec KYC : ses 26 tests
+  passent isolément avec Didit puis AWS ; la suite complète relancée passe aussi.
+  Aucun changement de navigation de trajet effectué pour masquer ces échecs.
+- Terraform : formatage du nouveau fichier et validation réussis. Lecture IAM :
+  le rôle prévu `zwanga-api-production-KycCaptureRole` n'existe pas encore.
+  Aucun plan appliqué ; aucun paramètre réel remplacé.
+- Build Android tenté avec réseau : échec avant compilation du pont Kotlin,
+  artefacts AndroidX/Compose introuvables. Leurs adresses officielles Google Maven
+  renvoient aussi HTTP 404 aux lectures de diagnostic, y compris les chemins
+  officiels équivalents. Pas de miroir ajouté ni version abaissée au hasard.
+  iOS non compilé sous Windows ; **pas de test caméra/biométrique réel effectué**.
+
 ## Périmètre livré le 11 octobre 2026
 
 Parcours additionnel, désactivé par défaut : carte d’électeur, passeport et permis
@@ -9,7 +180,7 @@ Pas de modification du CI/CD, de Terraform, d’ECS, des paramètres AWS réels 
 l’OTP. Didit est conservé ; aucune bascule automatique payante vers Didit après
 un échec AWS.
 
-Depuis le 13 octobre 2026, le bundle mobile choisit son fournisseur via
+Avant la bascule complète décrite ci-dessus, le bundle mobile choisissait son fournisseur via
 `EXPO_PUBLIC_KYC_PROVIDER=didit|aws`. Didit est le défaut ; il ne consulte pas les
 capacités AWS. Le choix explicite est prioritaire sur l’ancien flag
 `EXPO_PUBLIC_AWS_KYC_ENABLED`, encore reconnu uniquement si le sélecteur est absent

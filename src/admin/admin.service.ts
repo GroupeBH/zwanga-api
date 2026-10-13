@@ -50,8 +50,11 @@ import { CreateAdminAccountDto } from './dto/admin-account.dto';
 import { provisionAdminAccount } from './admin-account.provisioning';
 import {
   AdminUserSegment,
+  USER_SEARCH_SQL,
+  normalizeUserSearch,
   parseAdminUserSegment,
   parseRegistrationRange,
+  userSearchLikePattern,
 } from './dto/admin-users.dto';
 import {
   buildUsersSpreadsheet,
@@ -189,6 +192,74 @@ export class AdminService {
     });
   }
 
+  async recordOfficeKyc(
+    userId: string,
+    adminId: string,
+    approved: boolean,
+    reason?: string,
+  ): Promise<KycDocument> {
+    await this.ensureAdmin(adminId, 'Only admins can verify KYC');
+    if (typeof approved !== 'boolean') {
+      throw new BadRequestException('Indiquez si le KYC est validé ou rejeté.');
+    }
+    const note = reason?.trim() ?? '';
+    if (note.length < 10 || note.length > 1000) {
+      throw new BadRequestException(
+        'Décrivez la vérification faite au bureau (10 caractères minimum).',
+      );
+    }
+
+    return this.userRepository.manager.transaction(async (manager) => {
+      const users = manager.getRepository(User);
+      const user = await users.findOne({
+        where: { id: userId },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!user) {
+        throw new NotFoundException('Utilisateur introuvable.');
+      }
+
+      const documents = manager.getRepository(KycDocument);
+      const latest = await documents.findOne({
+        where: { userId },
+        order: { createdAt: 'DESC', id: 'DESC' },
+      });
+      if (latest) {
+        throw new BadRequestException(
+          'Un dossier KYC existe déjà. Décidez sur ce dossier.',
+        );
+      }
+
+      const saved = await documents.save(
+        documents.create({
+          userId,
+          provider: KycProvider.LEGACY,
+          status: approved ? KycStatus.APPROVED : KycStatus.REJECTED,
+          rejectionReason: approved ? null : note,
+          reviewedBy: adminId,
+          reviewedAt: new Date(),
+          providerMetadata: {
+            channel: 'bureau',
+            decision: approved ? 'office_approved' : 'office_rejected',
+            note,
+          },
+        }),
+      );
+
+      if (
+        user.isActive &&
+        ![UserStatus.SUSPENDED, UserStatus.INACTIVE].includes(user.status)
+      ) {
+        await users.update(user.id, {
+          status: approved ? UserStatus.ACTIVE : UserStatus.PENDING_KYC,
+        });
+      }
+      await activateRequestedDriver(manager, user.id);
+      await this.evidence?.enqueue(manager, saved);
+      return saved;
+    });
+  }
+
   async getPendingKycs(): Promise<KycDocument[]> {
     this.logger.debug('Fetching pending KYC documents');
 
@@ -248,6 +319,7 @@ export class AdminService {
     role?: string,
     registeredFrom?: string,
     registeredTo?: string,
+    search?: string,
   ): Promise<{ users: Array<Record<string, unknown>>; total: number }> {
     const { pageNumber, pageSize } = this.normalizePagination(page, limit);
     const roleFilter = parseAdminUserSegment(role);
@@ -256,7 +328,7 @@ export class AdminService {
       `Fetching all users - Page: ${pageNumber}, Limit: ${pageSize}, Role: ${roleFilter ?? 'all'}`,
     );
 
-    const query = this.createUsersListQuery(roleFilter, registered)
+    const query = this.createUsersListQuery(roleFilter, registered, search)
       .orderBy('user.createdAt', 'DESC')
       .skip((pageNumber - 1) * pageSize)
       .take(pageSize);
@@ -273,6 +345,7 @@ export class AdminService {
     role?: string,
     registeredFrom?: string,
     registeredTo?: string,
+    search?: string,
   ): Promise<{
     buffer: Buffer;
     filename: string;
@@ -284,7 +357,7 @@ export class AdminService {
       `Exporting users spreadsheet - Role: ${roleFilter ?? 'all'}`,
     );
 
-    const users = await this.createUsersListQuery(roleFilter, registered)
+    const users = await this.createUsersListQuery(roleFilter, registered, search)
       .orderBy('user.createdAt', 'DESC')
       .getMany();
     const serialized = await this.serializeUsersWithDriverQualification(users);
@@ -682,6 +755,13 @@ export class AdminService {
       ),
       payments: payments.map((payment) => this.sanitizePayment(payment)),
       tripRequests: detailedTripRequests,
+      kycDocuments: (
+        await this.kycDocumentRepository.find({
+          where: { userId },
+          order: { createdAt: 'DESC', id: 'DESC' },
+          take: 8,
+        })
+      ).map((document) => this.sanitizeKycDocument(document)),
       stats: {
         trips: trips.length,
         bookingsAsPassenger: bookingsAsPassenger.length,
@@ -1061,6 +1141,7 @@ export class AdminService {
   private createUsersListQuery(
     roleFilter?: AdminUserSegment,
     registered?: { from?: Date; to?: Date },
+    search?: string,
   ) {
     const query = roleFilter
       ? applyAdminUserSegmentFilter(
@@ -1078,6 +1159,11 @@ export class AdminService {
       query.andWhere('user.createdAt < :registeredTo', {
         registeredTo: registered.to,
       });
+    }
+
+    const term = normalizeUserSearch(search);
+    if (term) {
+      query.andWhere(USER_SEARCH_SQL, { userSearch: userSearchLikePattern(term) });
     }
 
     return query;

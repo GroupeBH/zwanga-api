@@ -1,118 +1,118 @@
-# OTP dans l’application : SMS uniquement pour le PIN oublié
+# OTP : compatibilité des applications publiées, Keccel uniquement
 
-## Politique actuelle — 12 octobre 2026
+## Politique temporaire — 13 octobre 2026
 
-Cette section remplace les instructions historiques ci-dessous pour les parcours
-utilisateur. L’inscription classique, Google/Apple, la connexion et la modification
-du profil ne demandent plus d’OTP. Les routes `users/phone/send-otp` et
-`users/phone/verify` sont conservées pour répondre explicitement **410**, sans
-envoi, consommation de challenge ni modification d’un compte. Le profil retourne
-`phoneVerificationRequired: false`, sans falsifier `isPhoneVerified`.
+Toutes les demandes et validations OTP du backend passent par **SMS Keccel** :
+vérification du téléphone, PIN oublié et bootstrap administrateur.
+`OTP_PROVIDER` et `OTP_PIN_RESET_PROVIDER` sont ignorés, même si leurs valeurs
+déployées sont encore `didit`. Il n'y a aucun appel OTP Didit ni repli vers Didit
+en cas d'échec Keccel. L'adaptateur Didit reste dans les sources pour un éventuel
+retour ultérieur, mais n'est plus enregistré dans le module OTP.
 
-Les nouveaux codes du parcours `auth/pin/reset/*` sont envoyés par **SMS Keccel**,
-six chiffres, validité de cinq minutes. Le routage est fixe pour ce parcours :
-l’ancien réglage `OTP_PIN_RESET_PROVIDER` est ignoré. Aucun repli vers Didit à
-l’envoi. Les identifiants SMS doivent être disponibles au serveur; aucun secret
-réel ni paramètre de production n’a été modifié par cette intervention.
+Cette politique remplace celle du 12 octobre : les routes téléphoniques qui
+répondaient 410 sont rétablies pour les anciens clients. **L'OTP ne devient pas
+obligatoire à l'inscription**, à la connexion ou pour modifier le profil.
+`phoneVerificationRequired` reste à `false` ; `isPhoneVerified` ne devient vrai
+qu'après une vérification réussie pour un compte existant et utilisable.
 
-La consommation unique et les protections du reset restent inchangées. Pour ne
-pas casser un reset déjà commencé, seuls les challenges historiques déjà émis
-peuvent encore être vérifiés avec leur fournisseur d’origine jusqu’à expiration.
-La vérification d’identité et le bootstrap administratif sécurisé sont séparés
-des parcours OTP grand public et ne sont pas modifiés ici.
+Le KYC AWS/Didit, ses sessions et ses webhooks ne sont pas des OTP téléphoniques
+et ne sont pas modifiés par cette bascule. Ne pas supprimer les clés KYC au
+motif que l'OTP ne passe plus par Didit.
 
-L’application ne cite aucun fournisseur : « Code par SMS ». Les anciens brouillons
-à l’étape OTP d’inscription sont migrés vers la saisie du PIN ou du téléphone
-social. Coordonner la livraison mobile et backend : un ancien client configuré
-pour imposer l’OTP d’inscription devra être mis à jour. Les anciennes versions
-utilisant déjà l’inscription sans OTP continuent le parcours habituel.
+## Contrats mobiles conservés
 
-Les vérifications et limites de cette évolution sont consignées dans
-`../zwanga/docs/CHANGEMENTS_TECHNIQUES.md` (chemin depuis la racine du backend).
-Livraison SMS réelle et essais iOS/Android restent à vérifier; aucun déploiement
-n’a été réalisé pour cette évolution.
+Toutes les routes ci-dessous sont des `POST` sous `/api/v1`.
 
-## Archive — ancien routage configurable (ne plus appliquer à l’inscription ou au PIN oublié)
+| Route | Corps | Résultat |
+| --- | --- | --- |
+| `users/phone/send-otp` | `{ phone, context }` ; registration/login/update | `{ message }` ; SMS de 5 chiffres |
+| `users/phone/verify` | `{ phone, otp }` | `{ message, valid: true }` ; aucune autorisation de reset PIN |
+| `auth/pin/reset/request-otp` | `{ phone }` | `{ message }` générique ; SMS de 6 chiffres pour un compte éligible |
+| `auth/pin/reset/verify-otp` | `{ phone, otp }` | `{ resetToken, expiresInSeconds: 300 }` |
+| `auth/pin/reset` | `{ resetToken, newPin }` | Enregistre le PIN haché et révoque les sessions |
+| `auth/admin/bootstrap/send-otp` | Corps existant et secret de bootstrap | SMS de 6 chiffres |
+| `auth/admin/bootstrap/confirm` | Corps existant, OTP et secret de bootstrap | Contrat administrateur inchangé |
 
-Le backend conserve les endpoints mobiles existants pour la vérification du téléphone, la réinitialisation du PIN et le bootstrap administrateur. Depuis le 12 octobre 2026, **les nouveaux codes de récupération du PIN utilisent Keccel par défaut**, indépendamment de `OTP_PROVIDER`. `OTP_PROVIDER=didit` continue de sélectionner Didit pour la vérification du téléphone et le bootstrap administrateur ; `keccel` reste possible pour ces usages. Si cette variable est absente, ces usages restent aussi sur Keccel. **Il n'y a jamais de bascule automatique vers un autre fournisseur après un échec d'envoi**, qui pourrait provoquer un second message facturé. Infobip n'est plus un fournisseur OTP. Ses éventuels services WhatsApp de notification sont distincts. Le KYC Didit est indépendant et inchangé.
+Les routes mobiles présentes dans le code ne portent pas le nom de Didit :
+elles utilisaient Didit derrière le routeur OTP du backend. Elles utilisent
+désormais Keccel sans changer d'URL ni de corps. Aucun endpoint KYC
+`users/kyc/didit/*` n'est détourné en endpoint OTP. Les anciens écrans peuvent
+encore afficher « WhatsApp » ou « Didit » : le backend ne peut pas remplacer un
+texte compilé dans l'application, mais les codes sont envoyés **par SMS**.
 
-Le fournisseur ayant envoyé un code est conservé dans Redis pendant la durée du challenge, puis utilisé pour la vérification même si `OTP_PROVIDER` ou `OTP_PIN_RESET_PROVIDER` a changé entre-temps. Les codes Didit de récupération déjà envoyés restent ainsi vérifiables jusqu'à leur expiration, tant que leurs identifiants fournisseur restent configurés. Un nouvel envoi réussi remplace le challenge du même usage. Un OTP sans challenge ou déjà consommé est refusé. Les anciens codes Infobip ne sont plus pris en charge.
+Pour la vérification téléphonique, `registration` refuse un numéro réservé par
+un compte utilisable ; `login` et `update` exigent un compte utilisable.
+Un ancien compte désactivé/suspendu n'est jamais réactivé par l'OTP.
+Une vérification avant création du compte ne transmet pas de preuve à une
+inscription ultérieure : le nouveau compte conserve `isPhoneVerified=false`.
 
-## PIN oublié : Keccel (12 octobre 2026)
+## Codes en cours et sécurité
 
-Le routage est défini dans `src/otp/otp.service.ts`. La configuration cible est :
+- Validité inchangée : 300 secondes. Codes à usage unique, contrôles de compte,
+  preuve de reset et limites HTTP existantes conservés.
+- Un code **déjà envoyé par Didit est refusé** sans appeler le fournisseur :
+  demander un nouveau code, envoyé par Keccel. Il n'est pas techniquement
+  possible de faire valider un ancien code Didit par Keccel.
+- Un challenge Keccel déjà en cours reste accepté s'il n'est pas ambigu.
+- Une nouvelle demande d'envoi invalide les anciens challenges du même téléphone,
+  même si l'envoi échoue (un timeout peut survenir après génération chez Keccel).
+  Après réussite de cette demande, seul le nouveau code est utilisable dans
+  l'usage demandé. Ainsi un SMS de vérification
+  du téléphone ne peut pas servir à réinitialiser le PIN ou créer un admin.
+- Un verrou Redis par téléphone sérialise envois et validations entre les
+  nouvelles répliques. Une opération simultanée reçoit 409 et peut être
+  retentée. Le verrou expire automatiquement en cas d'arrêt du processus.
+- Un identifiant unique distingue les renvois ; une validation concurrente
+  ne peut pas consommer un challenge remplacé.
+- Pendant un déploiement progressif, les anciennes répliques n'ont pas encore
+  cette politique. Attendre la stabilisation du service puis demander un nouveau
+  code si un parcours commencé pendant le déploiement échoue.
+- Une absence de configuration Keccel donne 503 sur l'OTP, sans empêcher le
+  serveur de démarrer ni simuler une validation réussie.
 
-```dotenv
-OTP_PROVIDER=didit
-OTP_PIN_RESET_PROVIDER=keccel
+## Configuration et livraison
+
+Les seules valeurs indispensables à cette bascule sont `KECCEL_TOKEN` et
+`KECCEL_FROM`, avec un compte Keccel approvisionné et un expéditeur autorisé.
+Les URLs existantes sont utilisées par défaut :
+
+- `KECCEL_OTP_URL_GENERATE` : `https://api.keccel.com/otp/generate`
+- `KECCEL_OTP_URL_VALIDATE` : `https://api.keccel.com/otp/validate`
+
+Ces URLs sont celles de l'adaptateur existant, pas de nouvelles intégrations.
+`KECCEL_SMS_URL` n'est pas utilisé pour les OTP. `DEFAULT_COUNTRY_CODE` reste
+facultatif (défaut +243). Aucune migration SQL et aucun nouveau paramètre de
+bascule obligatoire. `OTP_PROVIDER=keccel` peut être conservé pour la lisibilité,
+mais une ancienne valeur `didit` ne change plus le routage.
+
+Pour AWS : vérifier que les deux identifiants sont **effectivement injectés dans
+le conteneur**, puis déployer le backend selon le processus habituel. Ajouter un
+paramètre SSM sans le référencer dans la définition de tâche ne suffit pas ; une
+tâche déjà démarrée ne relit pas automatiquement les paramètres.
+Cette modification n'applique aucun changement AWS, Terraform ou CI/CD et ne
+modifie aucun secret réel.
+
+## Vérifications avant production
+
+En local :
+
+```powershell
+npm.cmd test -- --runInBand --runTestsByPath src/otp/otp.service.spec.ts src/keccel-otp/keccel-otp.service.spec.ts src/users/users.service.otp.spec.ts src/auth/pin-reset.spec.ts
+npm.cmd run build
 ```
 
-`OTP_PIN_RESET_PROVIDER` est facultatif : sa valeur par défaut est `keccel`.
-Définir explicitement `didit` permet un retour manuel pour ce seul parcours,
-sans toucher aux autres OTP. Les valeurs non reconnues sont refusées au démarrage.
+Les tests simulés couvrent les anciens réglages Didit, les réponses mobiles,
+la séparation des usages, les codes invalides/expirés/rejoués, les appels
+concurrents et le reset complet du PIN avec le vrai adaptateur Keccel
+(HTTP et stockage simulés). Ils n'envoient aucun SMS.
 
-Les tâches du backend doivent disposer de **`KECCEL_TOKEN` et `KECCEL_FROM` valides**.
-Les endpoints existants de l'adaptateur Keccel sont utilisés ; les éventuelles
-surcharges sont `KECCEL_OTP_URL_GENERATE` et `KECCEL_OTP_URL_VALIDATE`.
-`KECCEL_SMS_URL` n'est pas utilisé par cet adaptateur OTP. Vérifier le crédit et
-l'autorisation de l'expéditeur chez Keccel avant de tester une livraison réelle.
-Si le fournisseur général reste Didit et les identifiants Keccel manquent, le
-backend peut démarrer, mais une demande de récupération éligible échoue en `503` :
-aucun code n'est accepté et aucun envoi Didit de remplacement n'est effectué.
+Vérification locale du 13 octobre : **201 tests réussis dans 11 suites** (OTP,
+reset PIN, compatibilité d'inscription, statut profil et limitation HTTP),
+**compilation backend réussie** et contrôle des espaces du diff réussi.
 
-Le contrat de l'application ne change pas :
-
-1. `POST /api/v1/auth/pin/reset/request-otp` avec `{ phone }` : SMS Keccel de
-   **6 chiffres**, valide **300 secondes**, pour un compte éligible.
-2. `POST /api/v1/auth/pin/reset/verify-otp` avec `{ phone, otp }` : vérification
-   auprès du fournisseur stocké et émission d'une preuve à usage unique de 5 minutes.
-3. `POST /api/v1/auth/pin/reset` avec `{ resetToken, newPin }` : enregistrement
-   du PIN haché et révocation des sessions, selon les protections existantes.
-
-Les réponses génériques pour les comptes inconnus/inéligibles, les limites de
-tentatives et la consommation unique sont conservées. Une vérification téléphonique
-Didit en cours n'empêche pas une récupération via Keccel : leurs challenges sont
-distincts. Aucune migration de base de données ni nouvelle route publique.
-
-Pour le déploiement, conserver `OTP_PROVIDER` actuel, rendre les identifiants
-Keccel accessibles au conteneur, puis déployer le backend. L'ajout de la variable
-facultative dans Parameter Store seul ne modifie pas une tâche ECS déjà lancée :
-elle doit être référencée par la définition de tâche si l'on souhaite surcharger
-le défaut. Aucune modification d'AWS, de Terraform, du CI/CD ou des secrets réels
-n'a été effectuée pour ce changement. Les anciennes applications appellent les
-mêmes routes ; leurs textes peuvent encore mentionner Didit/WhatsApp jusqu'à
-leur mise à jour mobile. Une livraison réelle doit être validée avant généralisation.
-
-Vérifications locales : **109 tests réussis dans 6 suites ciblées** (routage OTP,
-adaptateurs Didit/Keccel, normalisation téléphone, récupération du PIN et OTP users),
-et `npm run build` réussi. Le test de parcours complet utilise le vrai service
-de récupération, le routeur OTP et l'adaptateur Keccel, avec HTTP et stockage simulés.
-Il couvre le refus d'un mauvais code, l'enregistrement du nouveau PIN, la révocation
-des sessions et le refus de réutilisation. Aucun SMS réel ni test AWS n'a été exécuté.
-
-## Flux Didit
-
-Le backend utilise l'[API autonome Phone Verification](https://docs.didit.me/standalone-apis/phone-verification) : `POST https://verification.didit.me/v3/phone/send/` avec `x-api-key`, puis `POST /v3/phone/check/` avec le même numéro en format E.164 et le code. Didit associe les appels par application et numéro ; l'appel `check` **n'accepte pas `request_id` en entrée**. Le backend exige donc que la réponse finale `Approved` porte le `request_id`, le `vendor_data` opaque et le numéro du challenge qu'il a lui-même stocké. `Failed`, `Declined` et `Expired or Not Found` ne valident jamais un code. Les rapports détaillés Didit ne sont ni renvoyés au mobile ni journalisés.
-
-Le canal préféré est `whatsapp`, conformément au [comportement par défaut documenté par Didit](https://docs.didit.me/standalone-apis/phone-send). Didit peut utiliser SMS si le canal préféré n'est pas disponible pour le destinataire. `DIDIT_OTP_CHANNEL=sms` permet de demander SMS directement si la politique produit change. La langue est `fr`. La longueur reste compatible avec l'application : **5 chiffres** pour le téléphone, **6 chiffres** pour reset PIN et bootstrap admin. Le [schéma OpenAPI Didit](https://docs.didit.me/openapi-25.json) autorise 4 à 8 chiffres et la locale `fr`.
-
-Un envoi `Success` crée une vérification de cinq minutes. Un `Retry` réutilise le même `request_id` et la fenêtre **ne repart pas de zéro** ; le TTL Redis suit cette échéance initiale. Au plus un renvoi est lié à la même vérification ; un envoi ultérieur peut créer une nouvelle session Didit. Le backend n'autorise qu'un usage OTP Didit actif à la fois par numéro (téléphone, reset PIN ou bootstrap admin), car Didit ne distingue pas ces usages lors du `check`. Un `Blocked` ou une limite d'envoi donne `429` au client, et non une fausse panne `503`. Les tentatives de code erroné sont limitées par Didit à trois par vérification ; ses limites d'envoi s'appliquent également. Voir [Send Phone Code](https://docs.didit.me/standalone-apis/phone-send) et [Check Phone Code](https://docs.didit.me/standalone-apis/phone-check).
-
-| Variable | Rôle |
-| --- | --- |
-| `OTP_PROVIDER` | Téléphone et bootstrap admin : `didit` ou `keccel` ; défaut `keccel` |
-| `OTP_PIN_RESET_PROVIDER` | PIN oublié uniquement : `keccel` par défaut, `didit` pour retour manuel |
-| `KECCEL_TOKEN` / `KECCEL_FROM` | Identifiants de l'adaptateur Keccel requis pour le PIN oublié par défaut |
-| `DIDIT_OTP_API_KEY` | Clé Didit dédiée à l'OTP, prioritaire si renseignée |
-| `DIDIT_API_KEY` | Clé Didit existante (KYC), utilisée si la clé OTP dédiée est vide |
-| `DIDIT_OTP_CHANNEL` | `whatsapp` (défaut Didit) ou `sms` ; le repli de canal est géré par Didit |
-
-Une clé sandbox ne délivre aucun message et Didit renvoie un résultat `Approved` statique, sans les mêmes identifiants de corrélation qu'une vraie session. Le backend **refuse donc ce résultat comme preuve OTP réelle**. Pour un test d'intégration sans livraison, utiliser les tests automatisés ; pour tester la réception sur mobile, il faut une clé live et un numéro contrôlé.
-
-## Activation et coût
-
-Selon [Didit](https://docs.didit.me/standalone-apis/phone-send), l'envoi live est désactivé jusqu'au premier rechargement du compte (`403`). Un solde nul et une clé KYC valide ne suffisent donc pas. Didit peut facturer un envoi non bloqué même si la livraison n'a pas été confirmée ; les appels `check` sont gratuits. Le [tarif de base publié](https://docs.didit.me/getting-started/pricing) est de **0,04 $ plus frais opérateur** ; le [prix total dépend du pays et du canal](https://docs.didit.me/getting-started/phone-verification-pricing). Vérifier le montant pour la RDC dans le compte Didit avant l'activation. La documentation générale mentionne des vérifications gratuites, mais ne garantit pas clairement que ces crédits couvrent ce flux autonome : ne pas les supposer disponibles pour les OTP.
-
-En local, `.env` peut contenir `OTP_PROVIDER=didit` et une des clés Didit. Démarrer le backend avec `npm.cmd run start:dev`. Les endpoints mobiles restent `/api/v1/users/phone/send-otp`, `/api/v1/users/phone/verify`, `/api/v1/auth/pin/reset/request-otp`, `/api/v1/auth/pin/reset/verify-otp`, `/api/v1/auth/admin/bootstrap/send-otp` et `/api/v1/auth/admin/bootstrap/confirm`. Le parcours d'inscription n'exige toujours pas d'OTP ; pour régulariser un compte déjà créé, utiliser `context: "login"` avec l'endpoint d'envoi et vérifier le code reçu. Voir [le suivi des comptes à vérifier](phone-verification-tracker.md).
-
-En production AWS, activer Didit **seulement après** rechargement, essai réel sur un numéro autorisé et vérification du coût. Les paramètres SSM et une nouvelle définition de tâche ECS sont nécessaires pour exposer la clé et `OTP_PROVIDER=didit` au backend ; modifier `.env` local ou SSM seul ne met pas à jour les tâches déjà lancées. Aucun changement AWS n'est effectué par ce document.
+Avant de généraliser, faire un test autorisé sur un numéro contrôlé avec une
+version réellement publiée : demander un SMS, vérifier le code, enregistrer un
+nouveau PIN, puis se connecter avec ce PIN. Vérifier également l'ancien écran de
+vérification téléphonique s'il est encore utilisé. Les tests automatisés ne
+prouvent ni le crédit Keccel, ni la livraison opérateur, ni le comportement d'un
+binaire store qui n'a pas été exécuté.

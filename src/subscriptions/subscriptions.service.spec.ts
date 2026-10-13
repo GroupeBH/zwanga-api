@@ -8,7 +8,32 @@ import {
   SubscriptionPlan,
   SubscriptionStatus,
 } from './entities/subscription.entity';
-import { SubscriptionsService } from './subscriptions.service';
+import {
+  SubscriptionsService,
+  kinshasaCalendarMonth,
+  parseProSubscriptionMonth,
+} from './subscriptions.service';
+
+describe('pro subscription month filter', () => {
+  it('bounds the Kinshasa calendar month, end exclusive', () => {
+    expect(kinshasaCalendarMonth(new Date('2026-10-13T22:30:00.000Z'))).toEqual({
+      from: new Date('2026-10-01T00:00:00+01:00'),
+      to: new Date('2026-11-01T00:00:00+01:00'),
+    });
+    expect(kinshasaCalendarMonth(new Date('2026-10-31T23:30:00.000Z'))).toEqual({
+      from: new Date('2026-11-01T00:00:00+01:00'),
+      to: new Date('2026-12-01T00:00:00+01:00'),
+    });
+  });
+
+  it('accepts current, other and all', () => {
+    expect(parseProSubscriptionMonth('current')).toBe('current');
+    expect(parseProSubscriptionMonth('other')).toBe('other');
+    expect(parseProSubscriptionMonth('all')).toBeUndefined();
+    expect(parseProSubscriptionMonth('')).toBeUndefined();
+    expect(() => parseProSubscriptionMonth('octobre')).toThrow(BadRequestException);
+  });
+});
 
 describe('SubscriptionsService points payments', () => {
   let subscriptionRepository: {
@@ -258,6 +283,122 @@ describe('SubscriptionsService points payments', () => {
       expect.objectContaining({
         id: 'subscription-1',
         status: SubscriptionStatus.PAYMENT_FAILED,
+      }),
+    );
+  });
+
+  it('lists current pro subscriptions without regard to case', async () => {
+    const query = {
+      leftJoin: jest.fn(),
+      addSelect: jest.fn(),
+      where: jest.fn(),
+      andWhere: jest.fn(),
+      orderBy: jest.fn(),
+      addOrderBy: jest.fn(),
+      skip: jest.fn(),
+      take: jest.fn(),
+      getManyAndCount: jest.fn().mockResolvedValue([
+        [
+          {
+            id: 'sub-1',
+            userId: 'driver-1',
+            plan: SubscriptionPlan.PRO,
+            status: SubscriptionStatus.ACTIVE,
+            startDate: new Date('2026-10-01T00:00:00.000Z'),
+            endDate: new Date('2026-10-31T00:00:00.000Z'),
+            amount: '5000.00',
+            currency: 'CDF',
+            isTrial: false,
+            user: {
+              id: 'driver-1',
+              firstName: 'Aline',
+              lastName: 'Kabila',
+              phone: '+243810000000',
+              email: 'aline@example.com',
+              password: 'secret',
+            },
+          },
+        ],
+        1,
+      ]),
+    };
+    for (const method of [
+      'leftJoin',
+      'addSelect',
+      'where',
+      'andWhere',
+      'orderBy',
+      'addOrderBy',
+      'skip',
+      'take',
+    ] as const) {
+      query[method].mockReturnValue(query);
+    }
+    (subscriptionRepository as { createQueryBuilder?: jest.Mock }).createQueryBuilder =
+      jest.fn().mockReturnValue(query);
+
+    const result = await service.listActiveProSubscriptions(1, 25, 'aline');
+
+    expect(query.where).toHaveBeenCalledWith('subscription.plan = :plan', {
+      plan: SubscriptionPlan.PRO,
+    });
+    expect(query.andWhere).toHaveBeenCalledWith('subscription.status = :status', {
+      status: SubscriptionStatus.ACTIVE,
+    });
+    expect(query.andWhere).toHaveBeenCalledWith(
+      'subscription.endDate > :now',
+      expect.objectContaining({ now: expect.any(Date) }),
+    );
+    expect(query.andWhere).toHaveBeenCalledWith(
+      expect.stringContaining('ILIKE'),
+      { proSearch: '%aline%' },
+    );
+    expect(result).toMatchObject({ total: 1, page: 1, limit: 25 });
+    expect(result.subscriptions[0].amount).toBe(5000);
+    expect(result.subscriptions[0].user).toEqual({
+      id: 'driver-1',
+      firstName: 'Aline',
+      lastName: 'Kabila',
+      phone: '+243810000000',
+      email: 'aline@example.com',
+    });
+  });
+
+  it('limits the list to subscriptions started in the current Kinshasa month', async () => {
+    const query = {
+      leftJoin: jest.fn(),
+      addSelect: jest.fn(),
+      where: jest.fn(),
+      andWhere: jest.fn(),
+      orderBy: jest.fn(),
+      addOrderBy: jest.fn(),
+      skip: jest.fn(),
+      take: jest.fn(),
+      getManyAndCount: jest.fn().mockResolvedValue([[], 0]),
+    };
+    for (const method of [
+      'leftJoin',
+      'addSelect',
+      'where',
+      'andWhere',
+      'orderBy',
+      'addOrderBy',
+      'skip',
+      'take',
+    ] as const) {
+      query[method].mockReturnValue(query);
+    }
+    (subscriptionRepository as { createQueryBuilder?: jest.Mock }).createQueryBuilder =
+      jest.fn().mockReturnValue(query);
+    const month = kinshasaCalendarMonth(new Date('2026-10-13T12:00:00.000Z'));
+
+    await service.listActiveProSubscriptions(1, 25, undefined, 'current');
+
+    expect(query.andWhere).toHaveBeenCalledWith(
+      'subscription.startDate >= :monthFrom AND subscription.startDate < :monthTo',
+      expect.objectContaining({
+        monthFrom: month.from,
+        monthTo: month.to,
       }),
     );
   });

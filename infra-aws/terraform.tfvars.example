@@ -27,6 +27,15 @@ redis_num_cache_clusters = 1
 application_s3_bucket_name    = "medias-zwanga"
 enable_rekognition_permissions = true
 
+# AWS KYC is prepared separately; this flag grants IAM only, no runtime cutover.
+enable_aws_kyc_permissions = false
+manage_aws_kyc_runtime_configuration = false
+aws_kyc_enabled           = false
+aws_kyc_region            = "eu-west-1"
+
+# Production preparation uses the versioned production.auto.tfvars. Only enable
+# captures after native tests; managed AWS_KYC_* must not also appear below.
+
 # Economical always-on ECS profile for around 100 daily users.
 ecs_task_cpu    = "512"
 ecs_task_memory = "1024"

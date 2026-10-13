@@ -6,8 +6,10 @@ import {
 } from '../users/entities/user.entity';
 import { KycStatus } from '../users/entities/kyc-document.entity';
 import {
+  normalizeUserSearch,
   parseAdminUserSegment,
   parseRegistrationRange,
+  userSearchLikePattern,
 } from './dto/admin-users.dto';
 import { parseKycStatus } from './dto/admin-kyc.dto';
 import { AdminService } from './admin.service';
@@ -50,6 +52,20 @@ describe('parseAdminUserSegment', () => {
   it('rejects unsupported roles', () => {
     expect(() => parseAdminUserSegment('admin')).toThrow(BadRequestException);
     expect(() => parseAdminUserSegment('driver ')).toThrow(BadRequestException);
+  });
+});
+
+describe('normalizeUserSearch', () => {
+  it('folds case and accents before matching', () => {
+    expect(normalizeUserSearch('  JEAN ')).toBe('jean');
+    expect(normalizeUserSearch('Éric')).toBe('eric');
+    expect(normalizeUserSearch('   ')).toBeUndefined();
+  });
+
+  it('escapes LIKE wildcards in the folded term', () => {
+    expect(userSearchLikePattern(normalizeUserSearch('100%_!')!)).toBe(
+      '%100!%!_!!%',
+    );
   });
 });
 
@@ -192,6 +208,17 @@ describe('AdminService user listing and export', () => {
     );
     expect(usersQuery.skip).toHaveBeenCalledWith(0);
     expect(usersQuery.take).toHaveBeenCalledWith(10);
+  });
+
+  it('matches the list without regard to case', async () => {
+    usersQuery.getManyAndCount.mockResolvedValue([[], 0]);
+
+    await service.getAllUsers(1, 10, undefined, undefined, undefined, 'JEAN');
+
+    expect(usersQuery.andWhere).toHaveBeenCalledWith(
+      expect.stringContaining('lower('),
+      { userSearch: '%jean%' },
+    );
   });
 
   it('limits the list to the Kinshasa registration days requested', async () => {

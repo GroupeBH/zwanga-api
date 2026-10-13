@@ -3,7 +3,7 @@ export type OtpPurpose = 'phone_verification' | 'pin_reset' | 'admin_bootstrap';
 export type OtpProvider = 'keccel' | 'didit';
 
 export type OtpChallenge =
-  | { provider: 'keccel' }
+  | { provider: 'keccel'; requestId?: string }
   | { provider: 'didit'; requestId: string; vendorData: string };
 
 export interface DiditActiveOtp {

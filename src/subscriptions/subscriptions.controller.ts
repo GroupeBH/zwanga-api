@@ -148,6 +148,25 @@ export class SubscriptionsController {
     );
   }
 
+  @Get('admin/active')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'List current pro subscriptions (Admin)' })
+  listActiveProSubscriptions(
+    @Query('page') page?: number,
+    @Query('limit') limit?: number,
+    @Query('search') search?: string,
+    @Query('month') month?: string,
+  ) {
+    return this.subscriptionsService.listActiveProSubscriptions(
+      page,
+      limit,
+      search,
+      month,
+    );
+  }
+
   @Get('document-funding-requests')
   @Auth()
   @Roles(UserRole.ADMIN)

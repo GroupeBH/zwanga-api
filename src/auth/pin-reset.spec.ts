@@ -21,7 +21,6 @@ import { of } from 'rxjs';
 import { RedisService } from '../common/services/redis.service';
 import { KeccelOtpService } from '../keccel-otp/keccel-otp.service';
 import { OTP_SMS_MESSAGES } from '../keccel-otp/otp-messages';
-import { DiditOtpService } from '../otp/didit-otp.service';
 import { OtpService } from '../otp/otp.service';
 
 describe('PIN reset security', () => {
@@ -212,7 +211,6 @@ describe('PIN reset security', () => {
         )
         .mockReturnValue(of({ data: { success: 'true', statusOTP: 'VALID' } })),
     };
-    const didit = { sendCode: jest.fn(), verifyCode: jest.fn() };
     const router = new OtpService(
       config,
       {
@@ -220,6 +218,16 @@ describe('PIN reset security', () => {
         set: async (key: string, value: unknown) => {
           values.set(key, JSON.stringify(value));
         },
+        del: async (key: string) => {
+          values.delete(key);
+        },
+        getClient: () => ({
+          set: async (key: string, value: string) => {
+            if (values.has(key)) return null;
+            values.set(key, value);
+            return 'OK';
+          },
+        }),
         consumeIfValueMatches: async (key: string, value: unknown) => {
           if (values.get(key) !== JSON.stringify(value)) return false;
           values.delete(key);
@@ -227,7 +235,6 @@ describe('PIN reset security', () => {
         },
       } as unknown as RedisService,
       new KeccelOtpService(http as unknown as HttpService, config),
-      didit as unknown as DiditOtpService,
     );
     otpService.sendOtp.mockImplementation(router.sendOtp.bind(router));
     otpService.verifyOtp.mockImplementation(router.verifyOtp.bind(router));
@@ -266,8 +273,15 @@ describe('PIN reset security', () => {
       service.verifyPinResetOtp({ phone: user.phone, otp: '123456' }),
     ).rejects.toBeInstanceOf(BadRequestException);
     expect(http.request).toHaveBeenCalledTimes(2);
-    expect(didit.sendCode).not.toHaveBeenCalled();
-    expect(didit.verifyCode).not.toHaveBeenCalled();
+    expect(http.post).toHaveBeenCalledTimes(1);
+    expect(http.post).toHaveBeenCalledWith(
+      'https://api.keccel.com/otp/generate',
+      expect.any(Object),
+      expect.any(Object),
+    );
+    expect(http.request).toHaveBeenLastCalledWith(
+      expect.objectContaining({ url: 'https://api.keccel.com/otp/validate' }),
+    );
   });
 
   it('stores only a hash of the five-minute reset token', async () => {

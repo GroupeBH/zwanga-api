@@ -11,7 +11,7 @@ locals {
       AWS_REGION                       = var.aws_region
       LOG_LEVEL                        = "warn"
       GPS_LOG_SAMPLE_RATE              = "0.01"
-      DIDIT_KYC_LAUNCH_MODE             = var.didit_kyc_launch_mode
+      DIDIT_KYC_LAUNCH_MODE            = var.didit_kyc_launch_mode
     },
     var.runtime_environment_variables,
     var.enable_xray_tracing ? {
@@ -194,6 +194,8 @@ resource "aws_ecs_task_definition" "backend" {
   depends_on = [
     aws_iam_role_policy.ecs_task_execution_secrets,
     aws_iam_role_policy_attachment.ecs_task_execution,
+    aws_iam_role_policy.kyc_backend,
+    aws_iam_role_policy.kyc_capture,
   ]
 }
 

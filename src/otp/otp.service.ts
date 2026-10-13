@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'crypto';
 import {
   BadRequestException,
-  BadGatewayException,
+  ConflictException,
   Injectable,
   ServiceUnavailableException,
 } from '@nestjs/common';
@@ -9,105 +9,39 @@ import { ConfigService } from '@nestjs/config';
 import { RedisService } from '../common/services/redis.service';
 import { KeccelOtpService } from '../keccel-otp/keccel-otp.service';
 import { OTP_SMS_MESSAGES } from '../keccel-otp/otp-messages';
-import { DiditOtpService } from './didit-otp.service';
 import { normalizeOtpPhone } from './otp-phone.util';
 import {
   OtpChallenge,
-  DiditActiveOtp,
-  OtpProvider,
   OtpPurpose,
   SendOtpResponse,
   VerifyOtpResponse,
 } from './otp.types';
 
 const DEFAULT_OTP_TTL_SECONDS = 300;
+const OTP_PURPOSES: OtpPurpose[] = [
+  'phone_verification',
+  'pin_reset',
+  'admin_bootstrap',
+];
+// Keccel's adapter has two attempts bounded by 30 seconds each.
+const OPERATION_LOCK_SECONDS = 120;
 
 @Injectable()
 export class OtpService {
-  private readonly provider: OtpProvider;
-
   constructor(
     private readonly configService: ConfigService,
     private readonly redisService: RedisService,
     private readonly keccelOtpService: KeccelOtpService,
-    private readonly diditOtpService: DiditOtpService,
-  ) {
-    this.provider = this.readProvider('OTP_PROVIDER');
-  }
+  ) {}
 
   async sendOtp(
     phone: string,
     purpose: OtpPurpose = 'phone_verification',
   ): Promise<SendOtpResponse> {
     const normalizedPhone = this.normalizePhone(phone);
-    // User PIN recovery is SMS-only, even if an obsolete override selects Didit.
-    // The separate administrative bootstrap and KYC are not changed here.
-    // Verification below still uses the provider stored when the code was sent.
-    const provider =
-      purpose === 'pin_reset' ? 'keccel' : this.provider;
-    let challenge: OtpChallenge;
-    let response: SendOtpResponse;
-    let challengeTtl = DEFAULT_OTP_TTL_SECONDS;
-    if (provider === 'didit') {
-      const active = await this.redisService.get<DiditActiveOtp>(
-        this.diditActiveKey(normalizedPhone),
-      );
-      if (active && active.purpose !== purpose) {
-        throw new BadRequestException(
-          'Une autre vérification OTP est déjà en cours pour ce numéro',
-        );
-      }
-      const existing = await this.redisService.get<OtpChallenge>(
-        this.challengeKey(normalizedPhone, purpose),
-      );
-      const reusable =
-        existing?.provider === 'didit' &&
-        active?.purpose === purpose &&
-        active.requestId === existing.requestId &&
-        active.vendorData === existing.vendorData;
-      const vendorData =
-        reusable && existing?.provider === 'didit'
-          ? existing.vendorData
-          : randomUUID();
-      const sentAt = Date.now();
-      const sent = await this.diditOtpService.sendCode(
-        `+${normalizedPhone}`,
-        purpose,
-        vendorData,
-      );
-      if (
-        sent.status === 'Retry' &&
-        (!reusable || sent.requestId !== active?.requestId)
-      ) {
-        throw new BadGatewayException('Réponse incohérente du service OTP');
-      }
-      const expiresAt =
-        sent.status === 'Retry'
-          ? (active?.expiresAt ?? sentAt + 60_000)
-          : sentAt + DEFAULT_OTP_TTL_SECONDS * 1000;
-      const ttl = Math.max(1, Math.ceil((expiresAt - Date.now()) / 1000));
-      challengeTtl = ttl;
-      challenge = {
-        provider: 'didit',
-        requestId: sent.requestId,
-        vendorData,
-      };
-      await this.redisService.set(
-        this.diditActiveKey(normalizedPhone),
-        {
-          purpose,
-          requestId: sent.requestId,
-          vendorData,
-          expiresAt,
-        } satisfies DiditActiveOtp,
-        ttl,
-      );
-      response = {
-        success: true,
-        message: 'Code OTP envoyé avec succès',
-        status: 'SENT',
-      };
-    } else {
+    return this.withPhoneLock(normalizedPhone, async () => {
+      // Temporary backend-only cutover: even legacy OTP_PROVIDER=didit must
+      // use SMS. KYC configuration and endpoints are completely independent.
       const message =
         purpose === 'pin_reset'
           ? OTP_SMS_MESSAGES.pinReset
@@ -115,7 +49,14 @@ export class OtpService {
             ? OTP_SMS_MESSAGES.adminBootstrap
             : OTP_SMS_MESSAGES.verification;
       const length = purpose === 'phone_verification' ? 5 : 6;
-      response = await this.keccelOtpService.sendOtp(
+      // Invalidate before contacting Keccel: a timeout can happen after it has
+      // generated a code. Never leave that new code bound to an older purpose.
+      for (const previousPurpose of OTP_PURPOSES) {
+        await this.redisService.del(
+          this.challengeKey(normalizedPhone, previousPurpose),
+        );
+      }
+      const response = await this.keccelOtpService.sendOtp(
         phone,
         message,
         length,
@@ -126,15 +67,16 @@ export class OtpService {
           'Service OTP temporairement indisponible',
         );
       }
-      challenge = { provider: 'keccel' };
-    }
 
-    await this.redisService.set(
-      this.challengeKey(normalizedPhone, purpose),
-      challenge,
-      challengeTtl,
-    );
-    return response;
+      // Keccel validates by phone, not by business purpose. Only the latest
+      // successful send can be used, and never through another purpose's route.
+      await this.redisService.set(
+        this.challengeKey(normalizedPhone, purpose),
+        { provider: 'keccel', requestId: randomUUID() } satisfies OtpChallenge,
+        DEFAULT_OTP_TTL_SECONDS,
+      );
+      return response;
+    });
   }
 
   async verifyOtp(
@@ -146,61 +88,35 @@ export class OtpService {
       throw new BadRequestException('Code OTP invalide');
     }
     const normalizedPhone = this.normalizePhone(phone);
-    const key = this.challengeKey(normalizedPhone, purpose);
-    const stored = await this.redisService.get<OtpChallenge>(key);
+    return this.withPhoneLock(normalizedPhone, async () => {
+      const invalid: VerifyOtpResponse = { valid: false, status: 'INVALID' };
+      const key = this.challengeKey(normalizedPhone, purpose);
+      const stored = await this.redisService.get<OtpChallenge>(key);
 
-    if (
-      !stored ||
-      (stored.provider !== 'keccel' && stored.provider !== 'didit')
-    ) {
-      return { valid: false, status: 'INVALID' };
-    }
+      // A code issued by Didit cannot be validated by Keccel. Request a fresh
+      // SMS instead of consulting Didit or accepting an unbound provider code.
+      if (stored?.provider !== 'keccel') return invalid;
 
-    if (stored.provider === 'didit') {
-      const activeKey = this.diditActiveKey(normalizedPhone);
-      const active = await this.redisService.get<DiditActiveOtp>(activeKey);
-      if (
-        active?.purpose !== purpose ||
-        active.requestId !== stored.requestId ||
-        active.vendorData !== stored.vendorData
-      ) {
-        return { valid: false, status: 'INVALID' };
+      // Old replicas could have issued multiple Keccel purposes for one phone.
+      // Their provider response cannot distinguish those codes: fail closed.
+      for (const other of OTP_PURPOSES) {
+        if (other !== purpose) {
+          const challenge = await this.redisService.get<OtpChallenge>(
+            this.challengeKey(normalizedPhone, other),
+          );
+          if (challenge?.provider === 'keccel') return invalid;
+        }
       }
-      const valid = await this.diditOtpService.verifyCode(
-        `+${normalizedPhone}`,
-        otp.trim(),
-        stored.requestId,
-        stored.vendorData,
+
+      const result = await this.keccelOtpService.verifyOtp(phone, otp.trim());
+      if (!result.valid) return invalid;
+
+      const consumed = await this.redisService.consumeIfValueMatches(
+        key,
+        stored,
       );
-      if (!valid) return { valid: false, status: 'INVALID' };
-      const consumedActive = await this.redisService.consumeIfValueMatches(
-        activeKey,
-        active,
-      );
-      const consumedChallenge = consumedActive
-        ? await this.redisService.consumeIfValueMatches(key, stored)
-        : false;
-      return {
-        valid: consumedChallenge,
-        status: consumedChallenge ? 'VALID' : 'INVALID',
-      };
-    }
-
-    const valid = (await this.keccelOtpService.verifyOtp(phone, otp)).valid;
-    if (!valid) return { valid: false, status: 'INVALID' };
-
-    const consumed = await this.redisService.consumeIfValueMatches(key, stored);
-    return { valid: consumed, status: consumed ? 'VALID' : 'INVALID' };
-  }
-
-  private readProvider(key: string): OtpProvider {
-    const provider = (this.configService.get<string>(key) || 'keccel')
-      .trim()
-      .toLowerCase();
-    if (provider !== 'keccel' && provider !== 'didit') {
-      throw new Error(`${key} must be keccel or didit`);
-    }
-    return provider;
+      return { valid: consumed, status: consumed ? 'VALID' : 'INVALID' };
+    });
   }
 
   private normalizePhone(phone: string): string {
@@ -215,8 +131,28 @@ export class OtpService {
     return `otp:challenge:v1:${purpose}:${phoneHash}`;
   }
 
-  private diditActiveKey(phone: string): string {
+  private async withPhoneLock<T>(
+    phone: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
     const phoneHash = createHash('sha256').update(phone).digest('hex');
-    return `otp:didit:active:v1:${phoneHash}`;
+    const key = `otp:operation:v1:${phoneHash}`;
+    const token = randomUUID();
+    const acquired = await this.redisService
+      .getClient()
+      .set(key, JSON.stringify(token), {
+        NX: true,
+        EX: OPERATION_LOCK_SECONDS,
+      });
+    if (!acquired) {
+      throw new ConflictException(
+        'Une vérification OTP est en cours. Réessayez dans quelques instants.',
+      );
+    }
+    try {
+      return await operation();
+    } finally {
+      await this.redisService.consumeIfValueMatches(key, token);
+    }
   }
 }

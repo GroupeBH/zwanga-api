@@ -56,7 +56,7 @@ export function awsKycConfig(c: ConfigService) {
   const number = (key: string, fallback: number, min: number, max: number) => {
     const n = Number(c.get(key) ?? fallback);
     if (!Number.isInteger(n) || n < min || n > max)
-      throw new ServiceUnavailableException('Configuration KYC AWS invalide.');
+      throw new ServiceUnavailableException({ code: 'AWS_KYC_CONFIGURATION_REQUIRED', message: 'Configuration KYC AWS invalide.' });
     return n;
   };
   if (
@@ -71,19 +71,35 @@ export function awsKycConfig(c: ConfigService) {
     !c.get('AWS_S3_BUCKET_NAME') ||
     String(c.get('AWS_S3_PUBLIC_BUCKET')) === 'true'
   ) {
-    throw new ServiceUnavailableException(
-      'Stockage privé et rôle de capture KYC AWS requis.',
-    );
+    throw new ServiceUnavailableException({
+      code: 'AWS_KYC_CONFIGURATION_REQUIRED',
+      message: 'Stockage privé et rôle de capture KYC AWS requis.',
+    });
   }
   return {
     region,
     roleArn,
+    // Explicit cutover only: coexistence keeps an in-flight Didit dossier intact.
+    replacePendingDidit: c.get<string>('KYC_PROVIDER') === 'aws',
     daily: number('AWS_KYC_DAILY_LIMIT', 100, 1, 10000),
     monthly: number('AWS_KYC_MONTHLY_LIMIT', 1000, 1, 100000),
     perUser: number('AWS_KYC_USER_DAILY_LIMIT', 3, 1, 5),
     liveness: number('AWS_KYC_LIVENESS_THRESHOLD', 95, 90, 100),
     similarity: number('AWS_KYC_FACE_THRESHOLD', 95, 90, 100),
   };
+}
+
+// Configuration readiness only: this does not assert live IAM/S3 availability
+// or create a metered AWS session. Never expose configuration values here.
+export function awsKycAvailability(c: ConfigService) {
+  try {
+    return awsKycConfig(c)
+      ? { enabled: true, unavailableCode: null }
+      : { enabled: false, unavailableCode: 'AWS_KYC_DISABLED' };
+  } catch (error) {
+    if (!(error instanceof ServiceUnavailableException)) throw error;
+    return { enabled: false, unavailableCode: 'AWS_KYC_CONFIGURATION_REQUIRED' };
+  }
 }
 
 export const canonicalName = (value: string) =>

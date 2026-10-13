@@ -100,6 +100,27 @@ export class AdminController {
     );
   }
 
+  @Put('users/:userId/office-kyc')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({
+    summary: 'Record an in-office KYC decision when the user has no dossier',
+  })
+  recordOfficeKyc(
+    @Request() req: AuthenticatedAdminRequest,
+    @Param('userId', new ParseUUIDPipe()) userId: string,
+    @Body('approved') approved: boolean,
+    @Body('reason') reason?: string,
+  ) {
+    return this.adminService.recordOfficeKyc(
+      userId,
+      req.user.userId,
+      approved,
+      reason,
+    );
+  }
+
   @Get('users/stats')
   @Auth()
   @Roles(UserRole.ADMIN)
@@ -120,6 +141,7 @@ export class AdminController {
     @Query('role') role?: string,
     @Query('registeredFrom') registeredFrom?: string,
     @Query('registeredTo') registeredTo?: string,
+    @Query('search') search?: string,
   ) {
     return this.adminService.getAllUsers(
       page,
@@ -127,6 +149,7 @@ export class AdminController {
       role,
       registeredFrom,
       registeredTo,
+      search,
     );
   }
 
@@ -143,11 +166,13 @@ export class AdminController {
     @Query('role') role?: string,
     @Query('registeredFrom') registeredFrom?: string,
     @Query('registeredTo') registeredTo?: string,
+    @Query('search') search?: string,
   ) {
     const file = await this.adminService.exportUsersXls(
       role,
       registeredFrom,
       registeredTo,
+      search,
     );
     return this.sendSpreadsheet(res, file);
   }

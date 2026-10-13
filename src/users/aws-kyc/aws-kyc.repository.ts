@@ -77,7 +77,12 @@ export class AwsKycRepository {
       const latest = await m
         .getRepository(KycDocument)
         .findOne({ where: { userId }, order: { createdAt: 'DESC' } });
-      if (latest && latest.status !== KycStatus.REJECTED)
+      // Keep the old dossier for audit/webhooks. The new AWS dossier becomes the
+      // latest only on commit; quotas or upload reservation errors roll back.
+      // The user lock serializes this with Didit decisions and double submissions.
+      const replacingDidit = config.replacePendingDidit &&
+        latest?.provider === KycProvider.DIDIT && latest.status === KycStatus.PENDING;
+      if (latest && latest.status !== KycStatus.REJECTED && !replacingDidit)
         throw new ConflictException(
           'Un dossier est déjà en cours ou approuvé.',
         );
