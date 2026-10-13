@@ -54,6 +54,26 @@ export function parseRegistrationDay(value?: string | null): Date | undefined {
   return new Date(`${match[1]}-${match[2]}-${match[3]}T00:00:00+01:00`);
 }
 
+const USER_SEARCH_ACCENTS = 'àâäáãåçéèêëìíîïñòóôöõùúûüýÿ';
+const USER_SEARCH_FOLDED = 'aaaaaaceeeeiiiinooooouuuuyy';
+
+/** Case- and accent-folded text used on both sides of the user search. */
+export function normalizeUserSearch(value?: string | null): string | undefined {
+  const term = (value ?? '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .trim()
+    .slice(0, 160);
+  return term || undefined;
+}
+
+export function userSearchLikePattern(term: string): string {
+  return `%${term.replace(/[!%_]/g, '!$&')}%`;
+}
+
+export const USER_SEARCH_SQL = `translate(lower(concat_ws(' ', user.firstName, user.lastName, user.lastName, user.firstName, user.email, user.phone)), '${USER_SEARCH_ACCENTS}', '${USER_SEARCH_FOLDED}') LIKE :userSearch ESCAPE '!'`;
+
 export function parseRegistrationRange(
   from?: string | null,
   to?: string | null,

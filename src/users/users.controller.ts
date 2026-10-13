@@ -220,14 +220,13 @@ export class UsersController {
   @HttpCode(HttpStatus.OK)
   @SensitiveThrottle(5, 60000) // 5 requests per minute per IP
   @ApiOperation({
-    summary: 'Retired phone verification endpoint',
-    deprecated: true,
+    summary: 'Send an optional phone verification OTP by SMS',
     description:
-      'No SMS is sent. Signup and login do not use OTP. Forgotten PIN recovery uses /auth/pin/reset/request-otp.',
+      'Legacy mobile contract retained with Keccel SMS. Signup does not require OTP. Forgotten PIN recovery uses /auth/pin/reset/request-otp.',
   })
   @ApiResponse({
-    status: 410,
-    description: 'Phone verification retired; use the updated signup or forgotten-PIN flow',
+    status: 200,
+    description: 'Verification code sent',
   })
   @ApiResponse({
     status: 400,
@@ -243,10 +242,10 @@ export class UsersController {
   @Public()
   @HttpCode(HttpStatus.OK)
   @SensitiveThrottle(10, 60000) // 10 requests per minute per IP
-  @ApiOperation({ summary: 'Retired phone verification endpoint', deprecated: true })
+  @ApiOperation({ summary: 'Verify an optional phone OTP through Keccel' })
   @ApiResponse({
-    status: 410,
-    description: 'Phone verification retired; no OTP consumed and no user updated',
+    status: 200,
+    description: 'Phone verified; does not authorize resetting the PIN',
   })
   @ApiResponse({
     status: 400,

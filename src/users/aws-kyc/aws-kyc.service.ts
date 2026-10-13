@@ -17,10 +17,12 @@ import { KycEvidenceStorage } from '../kyc-evidence/kyc-evidence.storage';
 import { AwsKycRepository } from './aws-kyc.repository';
 import { AwsKycTransport } from './aws-kyc.transport';
 import { AwsKycSession } from './aws-kyc-session.entity';
+import { awsKycFailureCode } from './aws-kyc.diagnostics';
 import {
   AWS_DOCUMENT_TYPES,
   AWS_KYC_CONSENT,
   awsKycConfig,
+  awsKycAvailability,
   AwsDocumentType,
   inspectDocument,
   publicAwsSession,
@@ -38,9 +40,8 @@ export class AwsKycService {
   ) {}
 
   capabilities() {
-    const configured = awsKycConfig(this.config);
     return {
-      enabled: Boolean(configured),
+      ...awsKycAvailability(this.config),
       provider: 'aws',
       country: 'COD',
       documentTypes: [...AWS_DOCUMENT_TYPES],
@@ -54,7 +55,7 @@ export class AwsKycService {
     const c = awsKycConfig(this.config);
     if (!c)
       throw new ServiceUnavailableException(
-        'Le parcours KYC AWS n’est pas encore disponible.',
+        { code: 'AWS_KYC_DISABLED', message: 'Le parcours KYC AWS n’est pas encore disponible.' },
       );
     return c;
   }
@@ -119,7 +120,8 @@ export class AwsKycService {
         missing: ['selfie'],
       });
       await this.repository.transition(row, 'documents');
-    } catch {
+    } catch (error) {
+      this.logger.warn(`AWS KYC upload failed (${awsKycFailureCode(error)})`);
       await this.repository.transition(
         row,
         'failed',
@@ -164,7 +166,8 @@ export class AwsKycService {
         expiresAt: row.expiresAt,
         credentials,
       };
-    } catch {
+    } catch (error) {
+      this.logger.warn(`AWS KYC capture unavailable (${awsKycFailureCode(error)})`);
       // Same ClientRequestToken on recovery. Never silently create a second charged session.
       if (fresh) await this.repository.retry(row);
       throw new ServiceUnavailableException(
@@ -195,8 +198,8 @@ export class AwsKycService {
         if (!row) break;
         await this.process(row);
       }
-    } catch {
-      this.logger.warn('AWS KYC worker unavailable; no identity approved');
+    } catch (error) {
+      this.logger.warn(`AWS KYC worker unavailable (${awsKycFailureCode(error)}); no identity approved`);
     } finally {
       this.working = false;
     }
@@ -333,10 +336,10 @@ export class AwsKycService {
           face.passed ? null : face.reason,
         );
       }
-    } catch {
+    } catch (error) {
       // No provider payload, image, URL, names, STS credential or biometric score in logs.
       await this.repository.retry(row);
-      this.logger.warn('AWS KYC processing deferred');
+      this.logger.warn(`AWS KYC processing deferred (${awsKycFailureCode(error)})`);
     }
   }
   private async snapshot(row: AwsKycSession, bundle: EvidenceBundle) {

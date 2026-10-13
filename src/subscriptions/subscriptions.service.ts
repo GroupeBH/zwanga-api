@@ -70,6 +70,40 @@ export interface SubscriptionPaymentResponse {
   };
 }
 
+export type ProSubscriptionMonthFilter = 'current' | 'other';
+
+/** Inclusive start and exclusive end of the Kinshasa calendar month containing `now`. */
+export function kinshasaCalendarMonth(now = new Date()): { from: Date; to: Date } {
+  const [yearText, monthText] = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Africa/Kinshasa',
+    year: 'numeric',
+    month: '2-digit',
+  })
+    .format(now)
+    .split('-');
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const nextYear = month === 12 ? year + 1 : year;
+  const nextMonth = month === 12 ? 1 : month + 1;
+  return {
+    from: new Date(`${yearText}-${monthText}-01T00:00:00+01:00`),
+    to: new Date(
+      `${nextYear}-${String(nextMonth).padStart(2, '0')}-01T00:00:00+01:00`,
+    ),
+  };
+}
+
+export function parseProSubscriptionMonth(
+  value?: string | null,
+): ProSubscriptionMonthFilter | undefined {
+  const month = value?.trim() ?? '';
+  if (month === '' || month === 'all') return undefined;
+  if (month === 'current' || month === 'other') return month;
+  throw new BadRequestException(
+    'Le filtre de mois doit être current, other ou all.',
+  );
+}
+
 export interface FlexPayCallbackResponse {
   received: boolean;
   verified: boolean;
@@ -559,6 +593,71 @@ export class SubscriptionsService implements OnModuleInit {
     });
   }
 
+  async listActiveProSubscriptions(
+    page: number = 1,
+    limit: number = 25,
+    search?: string,
+    month?: string,
+  ) {
+    const pageNumber = Math.max(Number(page) || 1, 1);
+    const pageSize = Math.min(Math.max(Number(limit) || 25, 1), 100);
+    const query = this.subscriptionRepository
+      .createQueryBuilder('subscription')
+      .leftJoin('subscription.user', 'user')
+      .addSelect([
+        'user.id',
+        'user.firstName',
+        'user.lastName',
+        'user.phone',
+        'user.email',
+      ])
+      .where('subscription.plan = :plan', { plan: SubscriptionPlan.PRO })
+      .andWhere('subscription.status = :status', { status: SubscriptionStatus.ACTIVE })
+      .andWhere('subscription.endDate > :now', { now: new Date() });
+
+    const monthFilter = parseProSubscriptionMonth(month);
+    if (monthFilter) {
+      const { from, to } = kinshasaCalendarMonth();
+      query.andWhere(
+        monthFilter === 'current'
+          ? 'subscription.startDate >= :monthFrom AND subscription.startDate < :monthTo'
+          : '(subscription.startDate < :monthFrom OR subscription.startDate >= :monthTo)',
+        { monthFrom: from, monthTo: to },
+      );
+    }
+
+    const term = search?.trim().slice(0, 160);
+    if (term) {
+      query.andWhere(
+        `(
+          user.firstName ILIKE :proSearch ESCAPE '!'
+          OR user.lastName ILIKE :proSearch ESCAPE '!'
+          OR concat(user.firstName, ' ', user.lastName) ILIKE :proSearch ESCAPE '!'
+          OR concat(user.lastName, ' ', user.firstName) ILIKE :proSearch ESCAPE '!'
+          OR user.phone ILIKE :proSearch ESCAPE '!'
+          OR user.email ILIKE :proSearch ESCAPE '!'
+        )`,
+        { proSearch: `%${term.replace(/[!%_]/g, '!$&')}%` },
+      );
+    }
+
+    const [subscriptions, total] = await query
+      .orderBy('subscription.endDate', 'ASC')
+      .addOrderBy('subscription.id', 'ASC')
+      .skip((pageNumber - 1) * pageSize)
+      .take(pageSize)
+      .getManyAndCount();
+
+    return {
+      subscriptions: subscriptions.map((subscription) =>
+        this.serializeActiveProSubscription(subscription),
+      ),
+      total,
+      page: pageNumber,
+      limit: pageSize,
+    };
+  }
+
   async getDocumentFundingRequests(
     query: ListDocumentFundingRequestsQueryDto,
   ): Promise<DocumentFundingRequest[]> {
@@ -589,6 +688,30 @@ export class SubscriptionsService implements OnModuleInit {
     request.reviewedByAdminId = adminId;
 
     return this.documentFundingRequestRepository.save(request);
+  }
+
+  private serializeActiveProSubscription(subscription: Subscription) {
+    const user = subscription.user;
+    return {
+      id: subscription.id,
+      userId: subscription.userId,
+      plan: subscription.plan,
+      status: subscription.status,
+      startDate: subscription.startDate,
+      endDate: subscription.endDate,
+      amount: Number(subscription.amount),
+      currency: subscription.currency,
+      isTrial: subscription.isTrial,
+      user: user
+        ? {
+            id: user.id,
+            firstName: user.firstName,
+            lastName: user.lastName,
+            phone: user.phone ?? null,
+            email: user.email ?? null,
+          }
+        : null,
+    };
   }
 
   private ensurePaymentMethodIsUsable(dto: SubscribeDto): void {

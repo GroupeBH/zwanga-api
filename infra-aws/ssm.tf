@@ -108,9 +108,12 @@ locals {
     name => aws_ssm_parameter.ecs_environment[name].arn
   }
 
-  generated_runtime_environment_parameter_arns_by_env = var.application_s3_bucket_name == null ? {} : {
-    AWS_S3_BUCKET_NAME = aws_ssm_parameter.application_s3_bucket_name[0].arn
-  }
+  generated_runtime_environment_parameter_arns_by_env = merge(
+    var.application_s3_bucket_name == null ? {} : {
+      AWS_S3_BUCKET_NAME = aws_ssm_parameter.application_s3_bucket_name[0].arn
+    },
+    local.aws_kyc_environment_parameter_arns_by_env,
+  )
 
   otel_environment_parameter_arns_by_env = var.enable_xray_tracing ? {
     AOT_CONFIG_CONTENT = aws_ssm_parameter.otel_collector_config[0].arn

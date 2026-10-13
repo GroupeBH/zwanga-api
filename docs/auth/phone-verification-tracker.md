@@ -2,7 +2,7 @@
 
 L'inscription par PIN, Google ou Apple reste possible sans OTP téléphonique. Le champ persistant `users.isPhoneVerified` est la source de vérité : `false` signifie qu'aucune preuve OTP n'est attachée au compte. Il reste `false` par défaut à chaque inscription sans preuve ; aucun nouveau champ ou migration n'est nécessaire.
 
-`GET /api/v1/users/me` renvoie `user.isPhoneVerified` et le signal dérivé `user.phoneVerificationRequired`. L'application pourra plus tard utiliser ce signal pour demander la vérification, sans changer le contrat d'inscription actuel. Le backend **ne bloque pas encore** la connexion ni les autres parcours sur ce statut.
+`GET /api/v1/users/me` renvoie `user.isPhoneVerified` et `user.phoneVerificationRequired: false` : la vérification reste facultative. Le backend ne bloque pas la connexion ni les autres parcours sur ce statut. Depuis le 13 octobre 2026, les anciennes routes OTP sont de nouveau disponibles pour les applications déjà publiées, via Keccel uniquement ; voir [la politique OTP](otp-providers.md).
 
 Pour un compte existant et utilisable, `POST /api/v1/users/phone/send-otp` avec `context: "login"`, puis `POST /api/v1/users/phone/verify` avec le code reçu mettent `isPhoneVerified` à `true` uniquement après validation réussie chez le fournisseur OTP actif. Un code invalide ne modifie rien. Le contexte `registration` refuse un numéro réservé à un compte utilisable (`isActive=true`, statut ni `inactive` ni `suspended`), y compris un compte `pending_kyc` ; il ne doit pas être utilisé pour régulariser un compte existant. Les contextes `login` et `update` n'envoient pas de code aux comptes indisponibles.
 

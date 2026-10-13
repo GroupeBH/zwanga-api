@@ -1,6 +1,7 @@
 import { ConfigService } from '@nestjs/config';
 import {
   awsKycConfig,
+  awsKycAvailability,
   awsKycDecision,
   identityHash,
   inspectDocument,
@@ -16,6 +17,15 @@ describe('AWS KYC conservative document policy', () => {
     'Prénom: Émile',
     'Nom: Mbala',
   ];
+  it('reports preparation safely without weakening configuration validation', () => {
+    expect(awsKycAvailability(new ConfigService({}))).toEqual({ enabled: false, unavailableCode: 'AWS_KYC_DISABLED' });
+    const invalid = new ConfigService({ AWS_KYC_ENABLED: 'true', AWS_KYC_LIVENESS_ROLE_ARN: 'private-config-value' });
+    expect(awsKycAvailability(invalid)).toEqual({ enabled: false, unavailableCode: 'AWS_KYC_CONFIGURATION_REQUIRED' });
+    expect(() => awsKycConfig(invalid)).toThrow();
+    const configured = new ConfigService({ AWS_KYC_ENABLED: 'true', AWS_S3_BUCKET_NAME: 'private', AWS_KYC_LIVENESS_ROLE_ARN: 'arn:aws:iam::123456789012:role/kyc' });
+    expect(awsKycAvailability(configured)).toEqual({ enabled: true, unavailableCode: null });
+    expect(JSON.stringify(awsKycAvailability(invalid))).not.toContain('private-config-value');
+  });
   it('defaults to disabled and rejects unsupported region/public storage', () => {
     expect(awsKycConfig(new ConfigService({}))).toBeNull();
     expect(() =>
@@ -26,6 +36,13 @@ describe('AWS KYC conservative document policy', () => {
         }),
       ),
     ).toThrow();
+  });
+  it('allows taking over a pending Didit dossier only for an explicit AWS cutover', () => {
+    const configured = { AWS_KYC_ENABLED: 'true', AWS_S3_BUCKET_NAME: 'private',
+      AWS_KYC_LIVENESS_ROLE_ARN: 'arn:aws:iam::123456789012:role/kyc' };
+    expect(awsKycConfig(new ConfigService(configured))?.replacePendingDidit).toBe(false);
+    expect(awsKycConfig(new ConfigService({ ...configured, KYC_PROVIDER: 'didit' }))?.replacePendingDidit).toBe(false);
+    expect(awsKycConfig(new ConfigService({ ...configured, KYC_PROVIDER: 'aws' }))?.replacePendingDidit).toBe(true);
   });
   it('accepts confident labeled names with accents as eligible for automatic review', () => {
     expect(inspectDocument(lines(id), 'voter_card', 'Emile', 'MBALA')).toEqual(

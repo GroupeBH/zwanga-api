@@ -1,14 +1,15 @@
 import { PhoneVerificationContext } from './dto/user.dto';
 import { UserRole, UserStatus } from './entities/user.entity';
+import { In, Not } from 'typeorm';
 import { UsersService } from './users.service';
 
-describe('UsersService retired phone OTP routes', () => {
+describe('UsersService OTP routes', () => {
   it.each([
     PhoneVerificationContext.REGISTRATION,
     PhoneVerificationContext.LOGIN,
     PhoneVerificationContext.UPDATE,
   ])(
-    'does not send a code for %s, including for older clients',
+    'sends through the OTP service for %s and preserves the app response',
     async (context) => {
       const sendOtp = jest.fn().mockResolvedValue({ success: true });
       const service = {
@@ -25,15 +26,23 @@ describe('UsersService retired phone OTP routes', () => {
         otpService: { sendOtp },
       } as unknown as UsersService;
 
-      await expect(UsersService.prototype.sendPhoneVerificationOtp.call(service, {
+      const result: unknown =
+        await UsersService.prototype.sendPhoneVerificationOtp.call(service, {
           phone: '+243891234567',
           context,
-        })).rejects.toMatchObject({ status: 410, response: { code: 'PHONE_VERIFICATION_RETIRED' } });
-      expect(sendOtp).not.toHaveBeenCalled();
+        });
+
+      expect(sendOtp).toHaveBeenCalledWith(
+        '+243891234567',
+        'phone_verification',
+      );
+      expect(result).toEqual({
+        message: 'Code de vérification envoyé avec succès',
+      });
     },
   );
 
-  it('never consumes a reset OTP or invents phone ownership via the retired verification route', async () => {
+  it('keeps a new account pending until a phone OTP is verified', async () => {
     const verifyOtp = jest.fn().mockResolvedValue({ valid: true });
     const update = jest.fn().mockResolvedValue({ affected: 1 });
     const service = {
@@ -47,9 +56,21 @@ describe('UsersService retired phone OTP routes', () => {
         phone: '+243891234567',
         otp: '12345',
       }),
-    ).rejects.toMatchObject({ status: 410, response: { code: 'PHONE_VERIFICATION_RETIRED' } });
-    expect(update).not.toHaveBeenCalled();
-    expect(verifyOtp).not.toHaveBeenCalled();
+    ).resolves.toMatchObject({ valid: true });
+    expect(verifyOtp).toHaveBeenCalledWith(
+      '+243891234567',
+      '12345',
+      'phone_verification',
+    );
+    expect(update).toHaveBeenCalledWith(
+      {
+        phone: '+243891234567',
+        isPhoneVerified: false,
+        isActive: true,
+        status: Not(In([UserStatus.INACTIVE, UserStatus.SUSPENDED])),
+      },
+      { isPhoneVerified: true },
+    );
   });
 
   it('does not clear the pending flag for an invalid OTP', async () => {
@@ -65,7 +86,7 @@ describe('UsersService retired phone OTP routes', () => {
         phone: '+243891234567',
         otp: '00000',
       }),
-    ).rejects.toMatchObject({ status: 410 });
+    ).rejects.toThrow('Code OTP invalide ou expiré');
     expect(update).not.toHaveBeenCalled();
   });
 
@@ -75,7 +96,7 @@ describe('UsersService retired phone OTP routes', () => {
     { status: UserStatus.SUSPENDED, isActive: true },
     { status: UserStatus.ACTIVE, isActive: false },
   ])(
-    'does not send registration OTP for an unavailable account (%j) or change it',
+    'allows registration OTP for an unavailable account (%j) without changing it',
     async (account) => {
       const sendOtp = jest.fn().mockResolvedValue({ success: true });
       const update = jest.fn();
@@ -92,14 +113,19 @@ describe('UsersService retired phone OTP routes', () => {
           phone: ' +243891234567 ',
           context: PhoneVerificationContext.REGISTRATION,
         }),
-      ).rejects.toMatchObject({ status: 410 });
-      expect(sendOtp).not.toHaveBeenCalled();
+      ).resolves.toMatchObject({
+        message: 'Code de vérification envoyé avec succès',
+      });
+      expect(sendOtp).toHaveBeenCalledWith(
+        '+243891234567',
+        'phone_verification',
+      );
       expect(update).not.toHaveBeenCalled();
     },
   );
 
   it.each([UserStatus.ACTIVE, UserStatus.PENDING_KYC])(
-    'does not disclose an enabled %s account through the retired OTP route',
+    'keeps the phone reserved for an enabled %s account',
     async (status) => {
       const sendOtp = jest.fn();
       const service = {
@@ -116,8 +142,7 @@ describe('UsersService retired phone OTP routes', () => {
           phone: '+243891234567',
           context: PhoneVerificationContext.REGISTRATION,
         }),
-      ).rejects.toMatchObject({ status: 410 });
-      expect(service['userRepository'].findOne).not.toHaveBeenCalled();
+      ).rejects.toThrow('déjà utilisé');
       expect(sendOtp).not.toHaveBeenCalled();
     },
   );
@@ -129,12 +154,10 @@ describe('UsersService retired phone OTP routes', () => {
       const service = {
         logger: { log: jest.fn(), warn: jest.fn() },
         userRepository: {
-          findOne: jest
-            .fn()
-            .mockResolvedValue({
-              isActive: false,
-              status: UserStatus.SUSPENDED,
-            }),
+          findOne: jest.fn().mockResolvedValue({
+            isActive: false,
+            status: UserStatus.SUSPENDED,
+          }),
         },
         otpService: { sendOtp },
       } as unknown as UsersService;
@@ -143,12 +166,12 @@ describe('UsersService retired phone OTP routes', () => {
           phone: '+243891234567',
           context,
         }),
-      ).rejects.toMatchObject({ status: 410 });
+      ).rejects.toThrow('Aucun compte');
       expect(sendOtp).not.toHaveBeenCalled();
     },
   );
 
-  it('no longer requests phone verification in the private profile and does not fabricate proof', async () => {
+  it('keeps verification optional in the private profile without fabricating proof', async () => {
     const user = {
       id: 'user-1',
       phone: '+243891234567',
@@ -186,7 +209,7 @@ describe('UsersService retired phone OTP routes', () => {
     });
   });
 
-  it('invalidates the old ownership proof when a verified account changes phone', async () => {
+  it('invalidates ownership proof when a verified account changes phone', async () => {
     const user = {
       id: 'user-1',
       phone: '+243891234567',

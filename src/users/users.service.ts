@@ -4,7 +4,6 @@ import {
   BadRequestException,
   Logger,
   UnauthorizedException,
-  GoneException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DeepPartial, Not, In, DataSource } from 'typeorm';
@@ -21,6 +20,7 @@ import {
   UpdateProfileDto,
   UploadKycDto,
   SendPhoneVerificationOtpDto,
+  PhoneVerificationContext,
   VerifyPhoneOtpDto,
   ChangePinDto,
   PublicUserInfoDto,
@@ -43,6 +43,7 @@ import { UserRole } from './entities/user.entity';
 import { SubscriptionsService } from '../subscriptions/subscriptions.service';
 import { assertSelfServiceUserRole, isAdminRole } from './user-role.policy';
 import { activateRequestedDriver } from './driver-activation';
+import { accountReservesPhone } from './registration-phone.policy';
 import { buildProfileState, LATEST_IDENTITY_ORDER } from './profile-state';
 import {
   areLegalNamesEquivalent,
@@ -932,15 +933,29 @@ export class UsersService {
   }
 
   /**
-   * Retired public phone verification route (kept for older clients).
+   * Optional phone verification, retained for applications already in stores.
    * @param sendOtpDto DTO containing phone number and context
    * @returns Success message
    */
   async sendPhoneVerificationOtp(
-    _sendOtpDto: SendPhoneVerificationOtpDto,
+    sendOtpDto: SendPhoneVerificationOtpDto,
   ): Promise<{ message: string }> {
-    throw new GoneException({ code: 'PHONE_VERIFICATION_RETIRED',
-      message: 'La vérification du numéro n’est plus nécessaire. Continuez l’inscription dans la dernière version de l’application. Pour réinitialiser votre PIN, utilisez « PIN oublié ».' });
+    const phone = sendOtpDto.phone.trim();
+    const existingUser = await this.userRepository.findOne({
+      where: { phone },
+      select: ['id', 'isActive', 'status'],
+    });
+    if (sendOtpDto.context === PhoneVerificationContext.REGISTRATION) {
+      if (accountReservesPhone(existingUser)) {
+        throw new BadRequestException('Ce numéro de téléphone est déjà utilisé');
+      }
+    } else if (!accountReservesPhone(existingUser)) {
+      throw new BadRequestException(
+        'Aucun compte trouvé avec ce numéro de téléphone',
+      );
+    }
+    await this.otpService.sendOtp(phone, 'phone_verification');
+    return { message: 'Code de vérification envoyé avec succès' };
   }
 
   /**
@@ -949,10 +964,32 @@ export class UsersService {
    * @returns Verification result
    */
   async verifyPhoneOtp(
-    _verifyOtpDto: VerifyPhoneOtpDto,
+    verifyOtpDto: VerifyPhoneOtpDto,
   ): Promise<{ message: string; valid: boolean }> {
-    throw new GoneException({ code: 'PHONE_VERIFICATION_RETIRED',
-      message: 'La vérification du numéro n’est plus nécessaire. Pour réinitialiser votre PIN, utilisez « PIN oublié ».' });
+    const phone = verifyOtpDto.phone.trim();
+    const verification = await this.otpService.verifyOtp(
+      phone,
+      verifyOtpDto.otp,
+      'phone_verification',
+    );
+    if (!verification.valid) {
+      throw new BadRequestException(
+        'Code OTP invalide ou expiré. Demandez un nouveau code par SMS.',
+      );
+    }
+    // Keep eligibility in the UPDATE: a concurrent suspension/deactivation
+    // must not be bypassed after the provider call. A pre-registration OTP
+    // does not create a proof for an account that does not yet exist.
+    await this.userRepository.update(
+      {
+        phone,
+        isPhoneVerified: false,
+        isActive: true,
+        status: Not(In([UserStatus.INACTIVE, UserStatus.SUSPENDED])),
+      },
+      { isPhoneVerified: true },
+    );
+    return { message: 'Code OTP vérifié avec succès', valid: true };
   }
 
   // ==================== PIN Management Methods ====================

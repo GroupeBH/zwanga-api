@@ -99,8 +99,8 @@ describe('OTP SMS wording and encoding (no real SMS)', () => {
     expect(post.mock.calls[0][1].message).toBe(message);
   });
 
-  it.each(['didit'])(
-    'does not require Keccel credentials when %s is selected',
+  it.each(['didit', 'keccel', undefined])(
+    'keeps the API bootable but refuses unconfigured OTP when legacy provider is %s',
     async (provider) => {
       const inactiveKeccel = new KeccelOtpService(
         { post } as unknown as HttpService,

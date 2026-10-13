@@ -154,6 +154,24 @@ describe('DiditKycService', () => {
     jest.restoreAllMocks();
   });
 
+  it('blocks new Didit sessions after AWS cutover even with the old Didit flag and key present', async () => {
+    const awsService = new DiditKycService(userRepository, kycRepository,
+      createConfigService({ ...baseConfig, KYC_PROVIDER: 'aws' }) as any, dataSource, evidence as any);
+    await expect(awsService.createSession(user.id, {})).rejects.toMatchObject({
+      response: { code: 'KYC_APP_UPDATE_REQUIRED', message: expect.stringContaining('Mettez à jour Zwanga') },
+    });
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(dataSource.transaction).not.toHaveBeenCalled();
+  });
+
+  it.each(['true', 'false', undefined])('still synchronizes historical Didit after cutover with the old flag %s', async (enabled) => {
+    const awsService = new DiditKycService(userRepository, kycRepository,
+      createConfigService({ ...baseConfig, KYC_PROVIDER: 'aws', DIDIT_KYC_ENABLED: enabled }) as any, dataSource, evidence as any);
+    await awsService.syncSession(user.id, { sessionId: 'session-1' });
+    expect(global.fetch).toHaveBeenCalledWith(
+      'https://verification.didit.me/v3/session/session-1/decision/', expect.objectContaining({ method: 'GET' }));
+  });
+
   it('creates a hosted Didit session with the Zwanga user id as vendor_data', async () => {
     user.firstName = '  Eugène  ';
     user.lastName = 'Bosuku   Buania';

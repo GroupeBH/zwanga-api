@@ -3,7 +3,7 @@ import { DataSource, Table } from 'typeorm';
 import { IsolatedPostgres } from '../../test/isolated-postgres';
 import { typeOrmEntities } from './entities';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
-import { KycDocument, KycStatus } from '../users/entities/kyc-document.entity';
+import { KycDocument, KycProvider, KycStatus } from '../users/entities/kyc-document.entity';
 import { Vehicle } from '../vehicles/entities/vehicle.entity';
 import { Notification } from '../notifications/entities/notification.entity';
 import { TransactionalNotificationsSubscriber } from '../notifications/transactional-notifications.subscriber';
@@ -27,6 +27,7 @@ const bin = process.env.AUDIT_TEST_POSTGRES_BIN;
       monthly: 2,
       liveness: 95,
       similarity: 95,
+      replacePendingDidit: false,
     };
     beforeAll(async () => {
       cluster = new IsolatedPostgres(bin!);
@@ -92,6 +93,43 @@ const bin = process.env.AUDIT_TEST_POSTGRES_BIN;
       ).id;
     const reserve = (id: string, request = randomUUID()) =>
       repo.reserve(id, request, 'passport', 'aws-kyc-v1', config);
+    const cutover = (id: string, request = randomUUID()) =>
+      repo.reserve(id, request, 'passport', 'aws-kyc-v1', { ...config, replacePendingDidit: true });
+    const diditDossier = (userId: string, status = KycStatus.PENDING) =>
+      db.getRepository(KycDocument).save({ userId, provider: KycProvider.DIDIT, status });
+
+    it('restarts a pending Didit dossier on AWS only after explicit cutover and keeps its history', async () => {
+      const id = await user();
+      const old = await diditDossier(id);
+      await expect(reserve(id)).rejects.toThrow('déjà en cours');
+      const { row } = await cutover(id);
+      expect((await repo.owned(id, row.id)).kyc.provider).toBe(KycProvider.AWS);
+      expect((await db.getRepository(KycDocument).findOneByOrFail({ id: old.id })).status).toBe(KycStatus.PENDING);
+      expect(await db.getRepository(KycDocument).countBy({ userId: id })).toBe(2);
+      expect(await db.getRepository(Notification).count()).toBe(0);
+      await expect(cutover(id)).rejects.toThrow('déjà en cours');
+    });
+
+    it('never replaces an approved Didit dossier during cutover', async () => {
+      const id = await user();
+      await diditDossier(id, KycStatus.APPROVED);
+      await expect(cutover(id)).rejects.toThrow('déjà en cours');
+      expect(await db.getRepository(AwsKycSession).count()).toBe(0);
+    });
+
+    it('serializes concurrent cutover attempts and rolls back a denied quota without changing Didit', async () => {
+      const id = await user();
+      await diditDossier(id);
+      const attempts = await Promise.allSettled([cutover(id), cutover(id)]);
+      expect(attempts.filter(r => r.status === 'fulfilled')).toHaveLength(1);
+      expect(await db.getRepository(AwsKycSession).count()).toBe(1);
+      await reserve(await user()); // Exhaust the two-attempt global budget.
+      const blocked = await user();
+      const old = await diditDossier(blocked);
+      await expect(cutover(blocked)).rejects.toThrow('Limite');
+      expect(await db.getRepository(KycDocument).countBy({ userId: blocked })).toBe(1);
+      expect((await db.getRepository(KycDocument).findOneByOrFail({ id: old.id })).status).toBe(KycStatus.PENDING);
+    });
     const successfulChecks = {
       document: 'consistent',
       names: 'match',

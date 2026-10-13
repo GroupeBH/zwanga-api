@@ -42,21 +42,10 @@ export class KeccelOtpService {
     private readonly httpService: HttpService,
     private readonly configService: ConfigService,
   ) {
-    const token = this.configService.get<string>('KECCEL_TOKEN');
-    const keccelEnabled =
-      (this.configService.get<string>('OTP_PROVIDER') || 'keccel')
-        .trim()
-        .toLowerCase() === 'keccel';
-    if (!token && keccelEnabled) {
-      throw new Error('KECCEL_TOKEN is not defined in environment variables');
-    }
-    this.token = token || '';
-
-    const from = this.configService.get<string>('KECCEL_FROM');
-    if (!from && keccelEnabled) {
-      throw new Error('KECCEL_FROM is not defined in environment variables');
-    }
-    this.from = from || '';
+    // Missing SMS credentials must fail OTP requests closed, not prevent the
+    // entire API from starting. Legacy provider settings no longer route OTP.
+    this.token = this.configService.get<string>('KECCEL_TOKEN')?.trim() || '';
+    this.from = this.configService.get<string>('KECCEL_FROM')?.trim() || '';
 
     this.generateUrl =
       this.configService.get<string>('KECCEL_OTP_URL_GENERATE') ||
