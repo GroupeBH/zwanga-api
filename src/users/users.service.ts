@@ -4,6 +4,7 @@ import {
   BadRequestException,
   Logger,
   UnauthorizedException,
+  GoneException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DeepPartial, Not, In, DataSource } from 'typeorm';
@@ -11,7 +12,7 @@ import type { Point } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcrypt';
 import { User, UserStatus } from './entities/user.entity';
-import { KycDocument, KycStatus } from './entities/kyc-document.entity';
+import { KycDocument, KycProvider, KycStatus } from './entities/kyc-document.entity';
 import {
   FavoriteLocation,
   FavoriteLocationType,
@@ -21,7 +22,6 @@ import {
   UploadKycDto,
   SendPhoneVerificationOtpDto,
   VerifyPhoneOtpDto,
-  PhoneVerificationContext,
   ChangePinDto,
   PublicUserInfoDto,
 } from './dto/user.dto';
@@ -43,7 +43,6 @@ import { UserRole } from './entities/user.entity';
 import { SubscriptionsService } from '../subscriptions/subscriptions.service';
 import { assertSelfServiceUserRole, isAdminRole } from './user-role.policy';
 import { activateRequestedDriver } from './driver-activation';
-import { accountReservesPhone } from './registration-phone.policy';
 import { buildProfileState, LATEST_IDENTITY_ORDER } from './profile-state';
 import {
   areLegalNamesEquivalent,
@@ -227,7 +226,8 @@ export class UsersService {
       profileState: buildProfileState(user),
       user: {
         ...this.toSafeUser(enrichedUser),
-        phoneVerificationRequired: Boolean(user.phone) && !user.isPhoneVerified,
+        // Phone ownership remains factual; it is no longer an onboarding step.
+        phoneVerificationRequired: false,
         isPremium: premium.isPremium,
         premiumBadge: premium.premiumBadgeEnabled,
       },
@@ -544,6 +544,7 @@ export class UsersService {
     // 2. Existing KYC Check Logic (Allow RETRY if REJECTED)
     const existingKyc = await this.kycDocumentRepository.findOne({
       where: { userId },
+      order: LATEST_IDENTITY_ORDER,
     });
 
     if (existingKyc) {
@@ -610,7 +611,8 @@ export class UsersService {
 
     // Only perform KYC validation if AWS Rekognition is enabled
     const kycValidationEnabled =
-      this.configService.get<string>('AWS_REKOGNITION_KYC_ENABLED') === 'true';
+      this.configService.get<string>('AWS_REKOGNITION_KYC_ENABLED') === 'true' &&
+      this.configService.get<string>('AWS_KYC_ENABLED') !== 'true';
 
     this.logger.log(`[KYC Upload] ========================================`);
     this.logger.log(`[KYC Upload] Processing KYC upload for user: ${userId}`);
@@ -793,7 +795,15 @@ export class UsersService {
         lock: { mode: 'pessimistic_write' },
       });
       if (!lockedUser) throw new NotFoundException('Utilisateur introuvable');
+      // Serialize with AWS/Didit/admin. An old mobile upload must never replace
+      // a newer dossier after its long-running uploads/analysis complete.
+      const latestKyc = await queryRunner.manager.getRepository(KycDocument).findOne({
+        where: { userId }, order: LATEST_IDENTITY_ORDER,
+      });
+      if (latestKyc && (latestKyc.status !== KycStatus.REJECTED || latestKyc.id !== existingKyc?.id))
+        throw new BadRequestException('Votre dossier a changé. Actualisez votre statut KYC.');
       let kycDocument = existingKyc
+        && existingKyc.provider !== KycProvider.AWS
         ? this.kycDocumentRepository.merge(existingKyc, {})
         : this.kycDocumentRepository.create({
             userId, // <-- TypeORM BUG FIX: Pass the user object
@@ -807,6 +817,7 @@ export class UsersService {
           });
 
       kycDocument = queryRunner.manager.merge(KycDocument, kycDocument, {
+        provider: KycProvider.LEGACY,
         user: user, // <-- TypeORM BUG FIX: Pass the user object
         cniFrontUrl,
         cniFrontUrls, // Store array of CNI front URLs
@@ -921,101 +932,27 @@ export class UsersService {
   }
 
   /**
-   * Send OTP for phone verification
+   * Retired public phone verification route (kept for older clients).
    * @param sendOtpDto DTO containing phone number and context
    * @returns Success message
    */
   async sendPhoneVerificationOtp(
-    sendOtpDto: SendPhoneVerificationOtpDto,
+    _sendOtpDto: SendPhoneVerificationOtpDto,
   ): Promise<{ message: string }> {
-    this.logger.log(
-      `Sending phone verification OTP to: ${sendOtpDto.phone} (context: ${sendOtpDto.context})`,
-    );
-
-    const phone = sendOtpDto.phone.trim();
-    // An inactive/suspended historical account must not block a fresh signup.
-    // The phone is released atomically at registration, not during this check.
-    const existingUser = await this.userRepository.findOne({
-      where: { phone },
-    });
-
-    // Different logic based on context
-    if (sendOtpDto.context === PhoneVerificationContext.REGISTRATION) {
-      if (accountReservesPhone(existingUser)) {
-        this.logger.warn(
-          `Registration failed: Phone ${sendOtpDto.phone} already exists`,
-        );
-        throw new BadRequestException(
-          'Ce numéro de téléphone est déjà utilisé',
-        );
-      }
-    } else if (
-      sendOtpDto.context === PhoneVerificationContext.LOGIN ||
-      sendOtpDto.context === PhoneVerificationContext.UPDATE
-    ) {
-      // Login/update cannot verify or reactivate an unavailable old account.
-      if (!accountReservesPhone(existingUser)) {
-        this.logger.warn(
-          `Login/Update failed: Phone ${sendOtpDto.phone} not found`,
-        );
-        throw new BadRequestException(
-          'Aucun compte trouvé avec ce numéro de téléphone',
-        );
-      }
-    }
-
-    // The configured OTP provider sends the code; registration remains optional.
-    await this.otpService.sendOtp(phone);
-
-    this.logger.log(
-      `Phone verification OTP sent successfully to ${sendOtpDto.phone} (context: ${sendOtpDto.context})`,
-    );
-    return { message: 'Code de vérification envoyé avec succès' };
+    throw new GoneException({ code: 'PHONE_VERIFICATION_RETIRED',
+      message: 'La vérification du numéro n’est plus nécessaire. Continuez l’inscription dans la dernière version de l’application. Pour réinitialiser votre PIN, utilisez « PIN oublié ».' });
   }
 
   /**
-   * Verify OTP and record proof for an existing account.
+   * A signup/login code must never consume a forgotten-PIN challenge.
    * @param verifyOtpDto DTO containing phone number and OTP code
    * @returns Verification result
    */
   async verifyPhoneOtp(
-    verifyOtpDto: VerifyPhoneOtpDto,
+    _verifyOtpDto: VerifyPhoneOtpDto,
   ): Promise<{ message: string; valid: boolean }> {
-    this.logger.log(`Verifying phone OTP for: ${verifyOtpDto.phone}`);
-
-    // A successful provider check is the only path that clears the pending flag.
-    const verificationResult = await this.otpService.verifyOtp(
-      verifyOtpDto.phone,
-      verifyOtpDto.otp,
-    );
-
-    if (!verificationResult.valid) {
-      this.logger.warn(
-        `Phone verification failed: Invalid OTP for phone ${verifyOtpDto.phone}`,
-      );
-      throw new BadRequestException('Code OTP invalide ou expiré');
-    }
-
-    // A registration OTP may be checked before the account exists. It cannot
-    // prove a later signup without a bound proof token, so keep that signup
-    // pending until its account completes a phone OTP verification.
-    await this.userRepository.update(
-      {
-        phone: verifyOtpDto.phone.trim(),
-        isPhoneVerified: false,
-        isActive: true,
-        status: Not(In([UserStatus.INACTIVE, UserStatus.SUSPENDED])),
-      },
-      { isPhoneVerified: true },
-    );
-
-    this.logger.log(
-      `Phone OTP verified successfully for: ${verifyOtpDto.phone}`,
-    );
-    return {
-      message: 'Code OTP vérifié avec succès',
-      valid: true,
-    };
+    throw new GoneException({ code: 'PHONE_VERIFICATION_RETIRED',
+      message: 'La vérification du numéro n’est plus nécessaire. Pour réinitialiser votre PIN, utilisez « PIN oublié ».' });
   }
 
   // ==================== PIN Management Methods ====================

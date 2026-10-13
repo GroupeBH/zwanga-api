@@ -1,5 +1,76 @@
 # Journal détaillé des changements d'infrastructure AWS
 
+## INFRA-2026-10-13-002 — Rectification du diagnostic Didit, sans changement AWS
+
+- Le workflow existait et fonctionnait avant la mise à jour mobile, selon le signalement
+  utilisateur. L'historique backend confirme l'absence de précontrôle de publication.
+  Le `503 KYC_WORKFLOW_NOT_PUBLISHED` provenait d'une nouvelle dépendance ajoutée au
+  diagnostic, pas d'une réponse observée de l'API de création de sessions.
+- `DiditKycService.createSession` retrouve l'appel direct à `POST /v3/session/` avec
+  le workflow configuré inchangé. L'API Didit reste souveraine pour accepter/refuser
+  la session ; les contrôles d'expiration, d'URL, de propriétaire et de décision restent.
+- Le mode `hosted` est conservé. Le diagnostic administratif et son option explicite
+  de publication restent séparés, mais ne sont plus des prérequis de livraison ou de
+  recette. Ne pas publier automatiquement le workflow pour résoudre le message SDK.
+- Aucun changement Terraform, CI/CD, paramètre AWS ou workflow Didit effectué dans
+  cette rectification. Aucune session fournisseur créée par les tests unitaires.
+- L'entrée 001 ci-dessous décrit la préparation initiale ; ses consignes de blocage
+  et de publication préalable sont remplacées par cette entrée et le
+  [guide corrigé](../../docs/operations/didit-kyc-recovery-2026-10-13.md).
+
+## INFRA-2026-10-13-001 — Préparation de la continuité KYC Didit
+
+- **Statut / date / périmètre :** code et configuration préparés localement le
+  13 octobre 2026 (Africa/Kinshasa), après diagnostic en lecture seule. Aucun apply,
+  déploiement ECS, écriture SSM ou publication Didit exécuté dans cette livraison.
+- **Contexte / preuves :** message d’expiration après photo sur Android, déclaré
+  général. API/ALB saine ; workflow référencé en brouillon, sans publication de son
+  groupe ; dossiers récents non expirés au moment du contrôle. L’origine exacte du
+  message SDK demeure à confirmer ; une durée longue n’est pas une preuve de jeton valide.
+- **Code préparé :** `src/users/didit-workflow-guard.ts` et intégration service
+  empêchent la création sur workflow non publié et refusent les sessions inutilisables.
+  `didit-session-launch.ts` ajoute un mode hébergé strictement limité au lien Didit de
+  la même session, compatible avec les anciennes apps sans nouveau build.
+  `didit-kyc-preflight.ts` fournit un contrôle en lecture seule et une option explicite
+  de publication ciblée, sans choisir un autre workflow ou créer de dossier facturable.
+- **Infrastructure / variables :** `variables.tf`, `ecs.tf`, `production.auto.tfvars`
+  ajoutent `didit_kyc_launch_mode` (`native` par défaut, `hosted` préparé en production).
+  Nom SSM `DIDIT_KYC_LAUNCH_MODE`, produit via le mécanisme existant et réservé à
+  Terraform. Les clés et références Didit existantes sont conservées, sans valeur dans
+  la documentation. Future révision ECS seulement ; pas de ressource ni permission IAM nouvelle.
+- **Disponibilité / sécurité / données :** le mode web évite le SDK défaillant sous
+  réserve de recette Android/iOS ; mêmes contrôles d’identité et propriétaire, signatures
+  de webhook et statut serveur. Aucune approbation forcée, nouvelle dépendance ou migration.
+  Le contrôle publication conserve un cache de succès de 60 s et mutualise les lectures ;
+  pagination bornée, origine HTTP fixée. Les autres fonctionnalités et correctifs déjà
+  présents ne sont pas supprimés.
+- **Coûts :** pas de coût structurel nouvellement engagé ici. Lectures fournisseur
+  additionnelles bornées. Les vérifications de recette et d’utilisateurs restent
+  soumises à la facturation Didit ; le préflight n’en crée aucune.
+- **Livraison / surveillance / rollback :** procédure et commandes dans
+  [le guide de continuité](../../docs/operations/didit-kyc-recovery-2026-10-13.md).
+  Revoir/publier le workflow configuré, vérifier le préflight, appliquer le plan
+  Terraform approuvé, puis livrer l’image via le workflow `release` existant. Contrôler
+  paramètres injectés, santé ECS/ALB et vraie capture Android/iOS. Retour au mode natif
+  par plan et remplacement des tâches après recette ; aucun rollback de base. Une
+  publication Didit se restaure par son versionnement, pas par une régression de statut.
+- **Validation :** résultats de tests, compilation, contrôle réel en lecture seule
+  et limites Terraform sont consignés dans `docs/CHANGEMENTS_TECHNIQUES.md` du dépôt
+  mobile. Aucune disparition du blocage sur appareil annoncée avant livraison/recette.
+
+## INFRA-2026-10-12-001 — Séparer vitalité et disponibilité
+
+- **Statut / périmètre :** correctif dans le code local uniquement, le 12 octobre 2026 (Africa/Kinshasa). Aucun changement appliqué à AWS, aucun secret ni paramètre SSM modifié.
+- **Constat vérifié :** `ecs.tf` et `Dockerfile` utilisaient la même sonde `/health` que le routage ALB. Cette sonde dépend de PostgreSQL, Redis et du contrat financier. Une panne partagée pouvait donc entraîner des redémarrages de processus sains ; amplification non reproduite en production.
+- **Avant / après :** `src/health/health.controller.ts` expose `/health/live` sans accès externe ; `src/main.ts` l'exclut du préfixe API. `infra-aws/ecs.tf` et `Dockerfile` utilisent cette sonde pour la vitalité. ALB conserve `/health` et refuse toujours les requêtes sur dépendances ou schéma indisponibles. Les contrôles au démarrage restent inchangés.
+- **Ressources / variables :** future révision de tâche ECS uniquement ; `ecs_container_port` reste utilisé, `alb_health_check_path` reste réservé à ALB. Ni ressource créée, ni IAM, redimensionnement, migration ou écriture de données. Aucun nouveau coût structurel attendu.
+- **Limitation de débit :** seule la sonde `/health/live`, sans données métier et à coût constant, contourne le throttling Redis. Sans cette exemption, une panne Redis rendrait aussi la sonde de vitalité indisponible. La readiness et les routes métier gardent leurs limites.
+- **Déploiement à faire :** publier d'abord une image avec `/health/live`, vérifier `/health` et `/health/live`, puis `terraform plan` dans `infra-aws`, examiner le plan et appliquer seulement après accord. Ne pas pointer une ancienne image vers la nouvelle sonde.
+- **Vérifications locales :** test unitaire de vitalité sans dépendance ajouté dans `src/health/health.controller.spec.ts`, tests de readiness conservés. Aucun test de panne AWS ou appareil physique ; validations Terraform consignées dans le journal applicatif.
+- **Surveillance après déploiement :** vérifier les cibles ALB, les tâches/redémarrages ECS, latences API et erreurs Redis/PostgreSQL pendant au moins 30 minutes, puis pendant une fenêtre de charge normale. Liveness seule ne garantit pas la disponibilité du service.
+- **Retour arrière :** avant de revenir à une ancienne image, rétablir la sonde conteneur `/health` (ancienne définition ECS) ; examiner le plan et suivre la stabilisation. Aucune restauration de données nécessaire.
+
+
 Les entrées sont classées de la plus récente à la plus ancienne. Elles décrivent le code versionné et les opérations réellement exécutées sur AWS, sans inclure de valeur secrète.
 
 ## INFRA-2026-10-10-002 — Correctifs de livraison après audit

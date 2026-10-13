@@ -279,6 +279,7 @@ export class WalletService implements OnModuleInit {
     const payment = await this.paymentsService.initiatePayment({
       userId,
       purpose: PaymentPurpose.WALLET_TOP_UP,
+      idempotencyKey: dto.idempotencyKey,
       relatedEntityType: this.TOP_UP_RELATED_ENTITY_TYPE,
       relatedEntityId: userId,
       method: dto.method,
@@ -1389,7 +1390,7 @@ export class WalletService implements OnModuleInit {
         transactionId: payment?.id ?? null,
         method: payment?.method ?? null,
         reference: payment?.reference ?? null,
-        orderNumber: payment?.orderNumber ?? null,
+        orderNumber: payment?.orderNumber ?? (payment?.purpose === PaymentPurpose.WALLET_TOP_UP ? payment.reference : null),
         status: payment?.status ?? null,
         statusCode: payment?.providerStatusCode ?? null,
         message: payment

@@ -36,6 +36,12 @@ export class RequestWalletWithdrawalDto {
 }
 
 export class InitiateWalletTopUpDto {
+  // Optional for backwards compatibility with already published mobile clients.
+  @ApiProperty({ required: false })
+  @IsOptional()
+  @IsUUID('4')
+  idempotencyKey?: string;
+
   @ApiProperty({
     minimum: 1,
     example: 50,

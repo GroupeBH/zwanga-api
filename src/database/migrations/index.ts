@@ -71,6 +71,7 @@ import { IndexNearbyRequestAlerts1780000066000 } from './1780000066000-IndexNear
 
 import { ReconcileFlexPayDeposits1780000067000 } from './1780000067000-ReconcileFlexPayDeposits';
 import { VerifiedRatingInteractions1780000068000 } from './1780000068000-VerifiedRatingInteractions';
+import { AwsKycSessions1780000069000 } from './1780000069000-AwsKycSessions';
 
 export const databaseMigrations = [
   FillTotalSeats1780000000000,
@@ -141,4 +142,5 @@ export const databaseMigrations = [
   IndexNearbyRequestAlerts1780000066000,
   ReconcileFlexPayDeposits1780000067000,
   VerifiedRatingInteractions1780000068000,
+  AwsKycSessions1780000069000,
 ];

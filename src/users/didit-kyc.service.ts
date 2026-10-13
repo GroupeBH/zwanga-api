@@ -29,6 +29,8 @@ import { normalizeLegalName } from './legal-identity.util';
 import { activateRequestedDriver } from './driver-activation';
 import { LATEST_IDENTITY_ORDER } from './profile-state';
 import { KycEvidenceRepository } from './kyc-evidence/kyc-evidence.repository';
+import { assertDiditSessionUsable } from './didit-workflow-guard';
+import { diditLaunchMode, diditSessionLaunch } from './didit-session-launch';
 
 type DiditHttpMethod = 'GET' | 'POST';
 type DiditPayload = Record<string, unknown>;
@@ -51,6 +53,8 @@ type DiditSessionResponse = {
   workflowId?: string | null;
   decision?: unknown;
   data?: unknown;
+  expires_at?: string | null;
+  expiresAt?: string | null;
 };
 
 type DiditKycSessionResult = {
@@ -67,6 +71,8 @@ type DiditKycSessionResult = {
   vendor_data: string | null;
   workflowId: string | null;
   workflow_id: string | null;
+  expiresAt: string | null;
+  expires_at: string | null;
 };
 
 type DiditWebhookHandlingResult = {
@@ -125,6 +131,14 @@ export class DiditKycService {
       });
     }
 
+    if (existingKyc?.provider === KycProvider.AWS && existingKyc.status === KycStatus.PENDING) {
+      throw new ConflictException('Une vérification AWS est déjà en cours. Reprenez ce parcours.');
+    }
+
+    const launchMode = diditLaunchMode(this.configService.get('DIDIT_KYC_LAUNCH_MODE'));
+    // Preserve the existing integration: the session API decides whether the
+    // configured workflow can create a session. A Management API publication
+    // check must not add a new blocking dependency or replace the configured ID.
     const payload = this.buildCreateSessionPayload(
       user,
       dto,
@@ -156,6 +170,10 @@ export class DiditKycService {
       });
     }
 
+    const expiresAt = assertDiditSessionUsable(
+      this.asNullableString(diditSession.status), diditSession.expires_at ?? diditSession.expiresAt,
+    );
+    const launch = diditSessionLaunch(launchMode, sessionToken, verificationUrl);
     await this.applyDiditState({
       userId,
       existingKyc,
@@ -170,15 +188,17 @@ export class DiditKycService {
       session_id: sessionId,
       sessionNumber: this.extractSessionNumber(diditSession),
       session_number: this.extractSessionNumber(diditSession),
-      sessionToken,
-      session_token: sessionToken,
-      url: verificationUrl ?? '',
-      verification_url: verificationUrl ?? '',
+      sessionToken: launch.sessionToken,
+      session_token: launch.sessionToken,
+      url: launch.url,
+      verification_url: launch.url,
       status: this.asNullableString(diditSession.status),
       vendorData: this.extractVendorData(diditSession) ?? userId,
       vendor_data: this.extractVendorData(diditSession) ?? userId,
       workflowId: this.extractWorkflowId(diditSession) ?? config.workflowId,
       workflow_id: this.extractWorkflowId(diditSession) ?? config.workflowId,
+      expiresAt,
+      expires_at: expiresAt,
     };
   }
 
@@ -546,6 +566,12 @@ export class DiditKycService {
 
       let kycDocument: KycDocument | null = null;
 
+      // A delayed Didit callback must never overwrite a newer AWS dossier or its account status.
+      const latest = await kycRepository.findOne({ where: { userId: input.userId }, order: { createdAt: 'DESC' } });
+      if (latest?.provider === KycProvider.AWS && input.source !== 'session_created') return latest;
+      if (latest?.provider === KycProvider.AWS && latest.status !== KycStatus.REJECTED)
+        throw new ConflictException('Une vérification AWS est déjà en cours ou approuvée.');
+
       if (input.existingKyc?.id) {
         kycDocument = await kycRepository.findOne({
           where: { id: input.existingKyc.id },
@@ -574,7 +600,7 @@ export class DiditKycService {
         );
       }
 
-      if (!kycDocument) {
+      if (!kycDocument || kycDocument.provider === KycProvider.AWS) {
         kycDocument = kycRepository.create({
           userId: input.userId,
           user,

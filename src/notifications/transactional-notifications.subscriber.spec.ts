@@ -9,7 +9,7 @@ import { KycDocument, KycStatus } from '../users/entities/kyc-document.entity';
 import { DriverPayout } from '../driver-settlements/entities/driver-payout.entity';
 import { PaymentTransaction } from '../payments/entities/payment-transaction.entity';
 import { PawaPayRefund } from '../payments/entities/pawapay-refund.entity';
-import { User, UserRole } from '../users/entities/user.entity';
+import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import {
   ProServiceCase,
   ProServiceLedger,
@@ -26,6 +26,13 @@ const fixture = () => {
     execute: jest.fn().mockResolvedValue({}),
   };
   const manager = {
+    queryRunner: { isTransactionActive: true },
+    getRepository: jest.fn((entity) => entity === User ? {
+      findOne: jest.fn().mockResolvedValue({ id: 'user', role: UserRole.PASSENGER, isActive: true, status: UserStatus.ACTIVE }),
+      update: jest.fn(),
+    } : entity === KycDocument ? {
+      findOne: jest.fn().mockResolvedValue({ id: 'kyc', status: KycStatus.APPROVED }),
+    } : { exists: jest.fn().mockResolvedValue(false) }),
     createQueryBuilder: jest.fn(() => builder),
     findOneBy: jest.fn(),
     findOne: jest.fn(),

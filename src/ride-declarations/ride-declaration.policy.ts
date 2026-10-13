@@ -1,5 +1,5 @@
 import { ConflictException } from '@nestjs/common';
-import { pickupDeclarationStatus, type RideActor, type RideDeclarations, type RideEvidence, type RideStage } from './ride-declaration.model';
+import { dropoffDeclarationStatus, pickupDeclarationStatus, type RideActor, type RideDeclarations, type RideEvidence, type RideStage } from './ride-declaration.model';
 
 /** Bounded receipts, one immutable declaration per person and stage. */
 export function recordDeclaration(
@@ -10,8 +10,9 @@ export function recordDeclaration(
   applied: boolean,
 ): { declarations: RideDeclarations; changed: boolean; ready: boolean } {
   const declarations = current ?? {};
+  const stageStatus = stage === 'dropoff' ? dropoffDeclarationStatus : pickupDeclarationStatus;
   const replayReady = !applied &&
-    pickupDeclarationStatus(declarations[stage], false) === 'ready';
+    stageStatus(declarations[stage], false) === 'ready';
   for (const [savedStage, votes] of Object.entries(declarations)) {
     for (const [savedActor, vote] of Object.entries(votes ?? {})) {
       if (vote?.eventId !== evidence.eventId) continue;
@@ -41,7 +42,7 @@ export function recordDeclaration(
   return {
     declarations: { ...declarations, [stage]: votes },
     changed: true,
-    ready: pickupDeclarationStatus(votes, false) === 'ready',
+    ready: stageStatus(votes, false) === 'ready',
   };
 }
 

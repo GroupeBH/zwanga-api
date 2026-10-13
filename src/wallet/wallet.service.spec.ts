@@ -530,6 +530,24 @@ describe('WalletService', () => {
     expect(manager.save).not.toHaveBeenCalled();
   });
 
+  it.each([
+    { amount: 580, tokens: 5.8, remaining: 14.2 },
+    { amount: 1450, tokens: 14.5, remaining: 5.5 },
+  ])('debits exactly $tokens tokens for a passenger share of $amount CDF', async ({ amount, tokens, remaining }) => {
+    manager.findOne.mockImplementation(async (entity: unknown) =>
+      entity === WalletAccount ? { ...account, balance: 20 } : null);
+
+    const entry = await service.payForBooking({ id: 'booking-fare', passengerId: 'passenger-1',
+      paymentCurrency: 'CDF', paymentAmount: amount, grossPaymentAmount: 1450 } as any, amount);
+
+    expect(service.convertMoneyToPoints(amount, 'CDF')).toBe(tokens);
+    expect(service.convertPointsToMoney(tokens, 'CDF')).toBe(amount);
+    expect(entry).toEqual(expect.objectContaining({ type: WalletLedgerEntryType.BOOKING_PAYMENT,
+      amount: -tokens, balanceAfter: remaining, relatedEntityId: 'booking-fare' }));
+    expect(manager.save).toHaveBeenCalledWith(expect.objectContaining({ id: 'wallet-1', balance: remaining }));
+    expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+  });
+
   it('never captures a booking again after an immutable refund', async () => {
     manager.findOne.mockImplementation((entity: unknown) => {
       if (entity === WalletAccount) {

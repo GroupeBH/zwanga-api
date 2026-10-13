@@ -119,6 +119,7 @@ export class NotificationService implements OnModuleInit {
   private firebaseApp: App;
   private dispatchingTransactionalNotifications = false;
   private dispatchingUrgentNotifications = false;
+  private urgentWorkers = 0;
 
   constructor(
     private configService: ConfigService,
@@ -574,12 +575,13 @@ export class NotificationService implements OnModuleInit {
 
   private async dispatchNotificationLane(urgent: boolean): Promise<void> {
     if (urgent) {
-      if (this.dispatchingUrgentNotifications) return;
+      if (this.dispatchingUrgentNotifications || this.urgentWorkers >= 5) return;
       this.dispatchingUrgentNotifications = true;
     } else {
       if (this.dispatchingTransactionalNotifications) return;
       this.dispatchingTransactionalNotifications = true;
     }
+    let claimReleased = false;
     try {
       const notifications =
         await this.notificationRepository.manager.transaction(
@@ -604,7 +606,7 @@ export class NotificationService implements OnModuleInit {
               .orderBy(urgent ? "CASE WHEN notification.data ->> 'type' = 'driver_dispatch_offer' THEN 0 ELSE 1 END" : 'notification.createdAt', 'ASC')
               .addOrderBy('notification.createdAt', 'ASC')
               .addOrderBy('notification.id', 'ASC')
-              .take(urgent ? 10 : CRITICAL_RETRY_BATCH_SIZE)
+              .take(urgent ? (5 - this.urgentWorkers) * 2 : CRITICAL_RETRY_BATCH_SIZE)
               .setLock('pessimistic_write')
               .setOnLocked('skip_locked')
               .getMany();
@@ -615,10 +617,21 @@ export class NotificationService implements OnModuleInit {
             return rows.length ? repository.save(rows) : rows;
           },
         );
-      // At most five simultaneous requests, all outside the claim transaction.
-      for (let index = 0; index < notifications.length; index += 5) {
-        await Promise.all(
-          notifications.slice(index, index + 5).map(async (notification) => {
+      // Release the urgent claim gate before HTTP: the next tick can use free
+      // slots while a previous provider request is slow. Never race a timeout
+      // against an uncancelled send, which could duplicate delivery.
+      const workerCount = Math.min(urgent ? 5 - this.urgentWorkers : 5, notifications.length);
+      if (urgent) {
+        this.urgentWorkers += workerCount;
+        this.dispatchingUrgentNotifications = false;
+        claimReleased = true;
+      }
+      let next = 0;
+      await Promise.all(Array.from({ length: workerCount }, async () => {
+        try {
+          while (next < notifications.length) {
+            const notification = notifications[next++];
+            const deliveryStartedAt = Date.now();
             try {
               if (
                 !(await this.isCriticalNotificationStillDeliverable(
@@ -629,7 +642,7 @@ export class NotificationService implements OnModuleInit {
                   notification,
                   'Notification transactionnelle remplacée par un état plus récent',
                 );
-                return;
+                continue;
               }
               await this.deliverSavedNotification(notification);
             } catch (error) {
@@ -637,13 +650,21 @@ export class NotificationService implements OnModuleInit {
               this.logger.error(
                 `TRANSACTIONAL_PUSH_FAILED notificationId=${notification.id}: ${this.getErrorMessage(error)}`,
               );
+            } finally {
+              const elapsedMs = Date.now() - deliveryStartedAt;
+              if (elapsedMs >= PUSH_DELIVERY_TIMEOUT_MS) this.logger.warn(`TRANSACTIONAL_PUSH_SLOW urgent=${urgent} elapsedMs=${elapsedMs}`);
             }
-          }),
-        );
-      }
+          }
+        } finally {
+          if (urgent) this.urgentWorkers -= 1;
+        }
+      }));
     } finally {
-      if (urgent) this.dispatchingUrgentNotifications = false;
-      else this.dispatchingTransactionalNotifications = false;
+      // Only release our claim gate on a failed claim. Once delivery starts,
+      // another tick may own the gate, so do not overwrite it here.
+      if (urgent) {
+        if (!claimReleased) this.dispatchingUrgentNotifications = false;
+      } else this.dispatchingTransactionalNotifications = false;
     }
   }
 

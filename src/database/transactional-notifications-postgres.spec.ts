@@ -99,7 +99,10 @@ const pgBin = process.env.NOTIFICATIONS_TEST_POSTGRES_BIN;
       await source.initialize();
       await source.query(`CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
       CREATE TABLE users (id uuid PRIMARY KEY, "firstName" varchar DEFAULT 'Test', "fcmToken" varchar,
-        "isActive" boolean DEFAULT true, status varchar DEFAULT 'active', "updatedAt" timestamp DEFAULT now());
+        "isActive" boolean DEFAULT true, status varchar DEFAULT 'active', "updatedAt" timestamp DEFAULT now(),
+        role varchar DEFAULT 'passenger', "isDriver" boolean DEFAULT false,
+        "driverOnboardingRequestedAt" timestamp, "driverActivatedAt" timestamp);
+      CREATE TABLE vehicles (id uuid PRIMARY KEY DEFAULT uuid_generate_v4(), "ownerId" uuid REFERENCES users(id), "isActive" boolean DEFAULT true);
       CREATE TABLE driver_notification_clients ("userId" uuid PRIMARY KEY, "tokenHash" varchar);
       CREATE TABLE app_update_clients ("userId" uuid PRIMARY KEY, "tokenHash" varchar);
       CREATE TABLE trips (id uuid PRIMARY KEY, "driverId" uuid, status varchar, "tripRequestId" uuid);

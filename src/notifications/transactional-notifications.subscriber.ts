@@ -19,6 +19,7 @@ import {
   PawaPayRefundStatus,
 } from '../payments/entities/pawapay-refund.entity';
 import { KycDocument, KycStatus } from '../users/entities/kyc-document.entity';
+import { applyKycApprovalHook } from '../users/kyc-approval.hook';
 import {
   ProServiceCase,
   ProServiceLedger,
@@ -215,6 +216,10 @@ export class TransactionalNotificationsSubscriber
             kyc.reviewedBy && manualReviewChanged))
       ) {
         const approved = kyc.status === KycStatus.APPROVED;
+        // This is the internal approval event, including manual admin decisions.
+        // Account activation and the push outbox share the exact decision transaction.
+        const account = approved ? await applyKycApprovalHook(event.manager, kyc) : null;
+        if (approved && !account) return; // stale/removed identity is not authority
         notification = {
           eventKey: `kyc:${kyc.id}:${kyc.status}:${kyc.reviewedAt ? new Date(kyc.reviewedAt).toISOString() : 'manual'}`,
           userId: kyc.userId,
@@ -227,7 +232,9 @@ export class TransactionalNotificationsSubscriber
           data: {
             type: `kyc_${kyc.status}`,
             kycId: kyc.id,
+            userId: kyc.userId,
             status: kyc.status,
+            ...(account ? { role: account.role } : {}),
             reviewedAt: kyc.reviewedAt
               ? new Date(kyc.reviewedAt).toISOString()
               : null,

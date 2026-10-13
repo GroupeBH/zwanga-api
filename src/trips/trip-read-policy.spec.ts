@@ -24,6 +24,43 @@ describe('Trip read privacy', () => {
   it('preserves the driver’s management data', () => {
     expect(tripResponseForViewer(trip, 'driver', trip)).toEqual({ ...trip, isExpired: false });
   });
+  it.each(['upcoming', 'ongoing'])('shares only the driver phone with a pending passenger of an %s trip', status => {
+    const pending = { ...trip, status, departureDate: new Date('2099-01-01'),
+      driver: { ...trip.driver, email: 'private@example.invalid' },
+      lastLocationUpdateAt: new Date(),
+      bookings: [{ ...trip.bookings[0], status: BookingStatus.PENDING }, trip.bookings[1]],
+    } as SanitizedTrip;
+    const result = tripResponseForViewer(pending, 'passenger', pending);
+    expect(result.driver).toHaveProperty('phone', 'private-number');
+    expect(result.driver).not.toHaveProperty('email');
+    expect(result.vehicle).not.toHaveProperty('licensePlate');
+    expect(result.currentLocation).toBeNull();
+    expect(result.lastLocationUpdateAt).toBeNull();
+    expect(result.bookings).toEqual([pending.bookings[0]]);
+    expect(result.bookings[0].status).toBe(BookingStatus.PENDING);
+    expect(JSON.stringify(publicTripResponse(pending))).not.toContain('private-number');
+    const publicAccess = { ...pending, isPrivate: false };
+    expect(tripResponseForViewer(pending, 'outsider', publicAccess).driver).not.toHaveProperty('phone');
+  });
+  it.each([BookingStatus.CANCELLED, BookingStatus.REJECTED, BookingStatus.EXPIRED, BookingStatus.NO_SHOW,
+    BookingStatus.COMPLETED])('does not restore contact from a cached pending booking after %s', status => {
+    const cached = { ...trip, bookings: [{ ...trip.bookings[0], status: BookingStatus.PENDING }] };
+    const access = { ...cached, bookings: [{ ...trip.bookings[0], status }] };
+    expect(tripResponseForViewer(cached, 'passenger', access).driver).not.toHaveProperty('phone');
+  });
+  it.each(['completed', 'cancelled'])('does not grant pending contact on a %s trip', status => {
+    const pending = { ...trip, status, bookings: [{ ...trip.bookings[0], status: BookingStatus.PENDING }] } as SanitizedTrip;
+    expect(tripResponseForViewer(pending, 'passenger', pending).driver).not.toHaveProperty('phone');
+  });
+  it('does not grant pending contact for an expired departure or require the new booking in the shared cache', () => {
+    const access = { ...trip, status: 'upcoming', startedAt: null,
+      departureDate: new Date('2099-01-01'),
+      bookings: [{ ...trip.bookings[0], status: BookingStatus.PENDING }] } as SanitizedTrip;
+    const cached = { ...trip, bookings: [] };
+    expect(tripResponseForViewer(cached, 'passenger', access).driver).toHaveProperty('phone', 'private-number');
+    expect(tripResponseForViewer(cached, 'passenger', { ...access,
+      departureDate: new Date('2000-01-01') }).driver).not.toHaveProperty('phone');
+  });
   it('checks fresh ownership before reading a potentially privileged cached detail', async () => {
     const service: any = Object.create(TripsService.prototype);
     service.tripRepository = { findOne: jest.fn().mockResolvedValue({ ...trip, bookings: [] }) };

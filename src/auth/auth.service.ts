@@ -71,7 +71,7 @@ const PIN_RESET_KEY_PREFIX = 'auth:pin-reset:';
 const PIN_RESET_OTP_KEY_PREFIX = 'auth:pin-reset-otp:';
 const PIN_RESET_OTP_PENDING_VALUE = 'pending';
 const PIN_RESET_GENERIC_MESSAGE =
-  'Si ce compte peut être réinitialisé, un code OTP a été envoyé.';
+  'Si ce compte peut être réinitialisé, vous recevrez un code par SMS.';
 
 interface MulterFile {
   fieldname: string;

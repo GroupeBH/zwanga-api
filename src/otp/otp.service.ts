@@ -32,15 +32,7 @@ export class OtpService {
     private readonly keccelOtpService: KeccelOtpService,
     private readonly diditOtpService: DiditOtpService,
   ) {
-    const provider = (
-      this.configService.get<string>('OTP_PROVIDER') || 'keccel'
-    )
-      .trim()
-      .toLowerCase();
-    if (provider !== 'keccel' && provider !== 'didit') {
-      throw new Error('OTP_PROVIDER must be keccel or didit');
-    }
-    this.provider = provider;
+    this.provider = this.readProvider('OTP_PROVIDER');
   }
 
   async sendOtp(
@@ -48,10 +40,15 @@ export class OtpService {
     purpose: OtpPurpose = 'phone_verification',
   ): Promise<SendOtpResponse> {
     const normalizedPhone = this.normalizePhone(phone);
+    // User PIN recovery is SMS-only, even if an obsolete override selects Didit.
+    // The separate administrative bootstrap and KYC are not changed here.
+    // Verification below still uses the provider stored when the code was sent.
+    const provider =
+      purpose === 'pin_reset' ? 'keccel' : this.provider;
     let challenge: OtpChallenge;
     let response: SendOtpResponse;
     let challengeTtl = DEFAULT_OTP_TTL_SECONDS;
-    if (this.provider === 'didit') {
+    if (provider === 'didit') {
       const active = await this.redisService.get<DiditActiveOtp>(
         this.diditActiveKey(normalizedPhone),
       );
@@ -194,6 +191,16 @@ export class OtpService {
 
     const consumed = await this.redisService.consumeIfValueMatches(key, stored);
     return { valid: consumed, status: consumed ? 'VALID' : 'INVALID' };
+  }
+
+  private readProvider(key: string): OtpProvider {
+    const provider = (this.configService.get<string>(key) || 'keccel')
+      .trim()
+      .toLowerCase();
+    if (provider !== 'keccel' && provider !== 'didit') {
+      throw new Error(`${key} must be keccel or didit`);
+    }
+    return provider;
   }
 
   private normalizePhone(phone: string): string {

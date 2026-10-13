@@ -19,6 +19,7 @@ export enum KycStatus {
 export enum KycProvider {
   LEGACY = 'legacy',
   DIDIT = 'didit',
+  AWS = 'aws',
 }
 
 @Entity('kyc_documents')

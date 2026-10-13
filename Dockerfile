@@ -42,7 +42,7 @@ USER node
 EXPOSE 5200
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-  CMD wget -q -O - http://127.0.0.1:5200/health >/dev/null || exit 1
+  CMD wget -q -O - http://127.0.0.1:5200/health/live >/dev/null || exit 1
 
 ENTRYPOINT ["dumb-init", "--"]
 CMD ["node", "dist/main.js"]

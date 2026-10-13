@@ -140,6 +140,16 @@ describe('DiditKycService', () => {
     );
   });
 
+  it('does not let a late Didit decision overwrite a newer AWS dossier', async () => {
+    const aws = { ...kyc, provider: KycProvider.AWS, diditSessionId: null };
+    txKycRepository.findOne.mockResolvedValue(aws);
+    const saved = await (service as any).applyDiditState({ userId: user.id,
+      payload: { session_id: 'old-didit', status: 'Approved', vendor_data: user.id }, source: 'webhook' });
+    expect(saved).toBe(aws);
+    expect(txKycRepository.save).not.toHaveBeenCalled();
+    expect(txUserRepository.update).not.toHaveBeenCalled();
+  });
+
   afterEach(() => {
     jest.restoreAllMocks();
   });
@@ -204,6 +214,133 @@ describe('DiditKycService', () => {
     expect(result.sessionToken).toBe('didit-session-token');
     expect(result.session_token).toBe('didit-session-token');
     expect(result.url).toBe('');
+  });
+
+  it('uses the hosted flow for old mobile builds when the operational override is enabled', async () => {
+    service = new DiditKycService(userRepository, kycRepository,
+      createConfigService({ ...baseConfig, DIDIT_KYC_LAUNCH_MODE: 'hosted' }) as any, dataSource);
+    (global.fetch as jest.Mock).mockResolvedValueOnce(createFetchResponse({
+      session_id: 'session-web', session_token: 'private-test-token',
+      url: 'https://verify.didit.me/session/test-session', status: 'Not Started',
+      expires_at: new Date(Date.now() + 3600000).toISOString(),
+    }) as any);
+    const result = await service.createSession(user.id, {
+      language: 'fr', callbackUrl: 'zwanga://kyc/didit-return',
+    });
+    expect(result.sessionId).toBe('session-web');
+    expect(result.session_id).toBe(result.sessionId);
+    expect(result.sessionToken).toBeNull();
+    expect(result.session_token).toBeNull();
+    expect(result.url).toBe('https://verify.didit.me/session/test-session');
+    expect(result.verification_url).toBe(result.url);
+    expect(result.expiresAt).toBe(result.expires_at);
+    expect(JSON.stringify(result)).not.toContain('private-test-token');
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(JSON.parse((global.fetch as jest.Mock).mock.calls[0][1].body)).toEqual(
+      expect.objectContaining({ callback: 'zwanga://kyc/didit-return' }),
+    );
+    expect(txKycRepository.save).toHaveBeenCalledWith(expect.objectContaining({ status: KycStatus.PENDING }));
+  });
+
+  it.each([undefined, 'https://other.example/session/test', 'http://verify.didit.me/session/test'])
+  ('never falls back to the broken native SDK or a second session when hosted URL is unusable (%s)', async (url) => {
+    service = new DiditKycService(userRepository, kycRepository,
+      createConfigService({ ...baseConfig, DIDIT_KYC_LAUNCH_MODE: 'hosted' }) as any, dataSource);
+    (global.fetch as jest.Mock).mockResolvedValueOnce(createFetchResponse({
+      session_id: 'session-web', session_token: 'private-test-token', url, status: 'Not Started',
+    }) as any);
+
+    await expect(service.createSession(user.id, {})).rejects.toMatchObject({
+      response: { code: 'KYC_HOSTED_URL_UNAVAILABLE' },
+    });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(txKycRepository.save).not.toHaveBeenCalled();
+    expect(txUserRepository.update).not.toHaveBeenCalled();
+  });
+
+  it('does not trust an Approved browser callback while Didit still reports a pending hosted session', async () => {
+    service = new DiditKycService(userRepository, kycRepository,
+      createConfigService({ ...baseConfig, DIDIT_KYC_LAUNCH_MODE: 'hosted' }) as any, dataSource);
+    (global.fetch as jest.Mock).mockResolvedValueOnce(createFetchResponse({
+      session_id: 'session-1', status: 'In Review', vendor_data: user.id,
+    }) as any);
+
+    const result = await service.syncSession(user.id, { sessionId: 'session-1', status: 'Approved' });
+
+    expect(result?.status).toBe(KycStatus.PENDING);
+    expect(user.status).toBe(UserStatus.PENDING_KYC);
+    expect(txUserRepository.update).not.toHaveBeenCalled();
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect((global.fetch as jest.Mock).mock.calls[0][1].method).toBe('GET');
+  });
+
+  it('rejects an invalid launch mode before calling Didit', async () => {
+    service = new DiditKycService(userRepository, kycRepository,
+      createConfigService({ ...baseConfig, DIDIT_KYC_LAUNCH_MODE: 'invalid' }) as any, dataSource);
+    await expect(service.createSession(user.id, {})).rejects.toMatchObject({
+      response: { code: 'KYC_LAUNCH_MODE_INVALID' },
+    });
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(txKycRepository.save).not.toHaveBeenCalled();
+  });
+
+  it.each(['native', 'hosted'])
+  ('keeps the configured workflow and uses only the session API in %s mode', async (mode) => {
+    service = new DiditKycService(userRepository, kycRepository,
+      createConfigService({ ...baseConfig, DIDIT_KYC_LAUNCH_MODE: mode }) as any, dataSource);
+    (global.fetch as jest.Mock).mockImplementation(async (url, options) => {
+      // A session-capable key must not also require workflow-management access.
+      if (url !== 'https://verification.didit.me/v3/session/' || options.method !== 'POST') {
+        throw new Error('Unexpected workflow management request');
+      }
+      return createFetchResponse({
+        session_id: 'session-compatible', session_token: 'test-token',
+        url: 'https://verify.didit.me/fr/session/test-token', status: 'Not Started',
+      });
+    });
+
+    const result = await service.createSession(user.id, {});
+
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(JSON.parse((global.fetch as jest.Mock).mock.calls[0][1].body)).toMatchObject({
+      workflow_id: baseConfig.DIDIT_WORKFLOW_ID, vendor_data: user.id,
+    });
+    expect(result.workflowId).toBe(baseConfig.DIDIT_WORKFLOW_ID);
+    expect(result.workflow_id).toBe(baseConfig.DIDIT_WORKFLOW_ID);
+    expect(result.sessionToken).toBe(mode === 'hosted' ? null : 'test-token');
+    expect(result.session_token).toBe(result.sessionToken);
+    expect(result.url).toBe('https://verify.didit.me/fr/session/test-token');
+    expect(txKycRepository.save).toHaveBeenCalledWith(expect.objectContaining({ status: KycStatus.PENDING }));
+  });
+
+  it.each([
+    [400, 'KYC_PROVIDER_REJECTED_REQUEST'],
+    [403, 'KYC_PROVIDER_AUTHENTICATION_FAILED'],
+    [503, 'KYC_PROVIDER_UNAVAILABLE'],
+  ])('still refuses a session rejected by Didit (%s) without changing the workflow', async (status, code) => {
+    service = new DiditKycService(userRepository, kycRepository,
+      createConfigService({ ...baseConfig, DIDIT_KYC_LAUNCH_MODE: 'hosted' }) as any, dataSource);
+    (global.fetch as jest.Mock).mockResolvedValueOnce(
+      createFetchResponse({ detail: 'Workflow unavailable' }, false, Number(status)),
+    );
+
+    await expect(service.createSession(user.id, {})).rejects.toMatchObject({ response: { code } });
+
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect((global.fetch as jest.Mock).mock.calls[0][1].method).toBe('POST');
+    expect(txKycRepository.save).not.toHaveBeenCalled();
+    expect(txUserRepository.update).not.toHaveBeenCalled();
+  });
+
+  it('does not persist or approve an unusable provider session', async () => {
+    (global.fetch as jest.Mock).mockResolvedValueOnce(createFetchResponse({
+      session_id: 'expired', url: 'https://verify.didit.me/session/test', status: 'Expired',
+    }) as any);
+    await expect(service.createSession(user.id, {})).rejects.toMatchObject({
+      response: { code: 'KYC_PROVIDER_UNUSABLE_SESSION' },
+    });
+    expect(txKycRepository.save).not.toHaveBeenCalled();
+    expect(txUserRepository.update).not.toHaveBeenCalled();
   });
 
   it('returns a stable service-unavailable error when Didit cannot be reached', async () => {
