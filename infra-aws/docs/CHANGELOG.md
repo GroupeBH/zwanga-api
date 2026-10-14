@@ -1,5 +1,43 @@
 # Journal détaillé des changements d'infrastructure AWS
 
+## INFRA-2026-10-14-002 — Surveillance et sondes après audit de résilience
+
+- Préparé localement uniquement : aucun `plan`, `apply`, changement SSM ou déploiement.
+- Alarmes Redis corrigées avec `CacheClusterId` et `CacheNodeId`, pour chaque nœud.
+  Les blocs `moved` conservent les trois alarmes existantes à l'indice zéro ; leurs
+  noms restent inchangés. L'alarme d'évictions ne considère plus une absence de
+  métriques comme un succès. Le tableau de bord affiche aussi les répliques.
+- Ajout d'une alarme RDS `FreeableMemory` (128 Mio par défaut, configurable) et
+  affichage mémoire/swap. Aucun redimensionnement ni changement de pool en AWS.
+- Le chemin ALB par défaut devient `/health/live`, sans dépendance à Redis/RDS.
+  **Déployer d'abord le backend qui valide `/health` avant `listen()`**, puis
+  appliquer ce changement de sonde après lecture du plan. `/health` reste la
+  sonde approfondie pour diagnostiquer DB/Redis/schéma. Une valeur explicite de
+  `alb_health_check_path` dans les tfvars prime sur le nouveau défaut.
+- Le CI/CD, `ecs.tf`, `oidc.tf`, les tailles et nombres de ressources ne changent
+  pas dans ce lot. Le changement Didit décrit ci-dessous est préexistant et doit
+  être examiné séparément dans le plan global.
+- Vérification locale : `terraform fmt` sur les fichiers modifiés et
+  `terraform validate` réussis avec les fournisseurs installés. Aucun état AWS
+  n'a été modifié pour cette validation.
+
+## INFRA-2026-10-14-001 — Retour du KYC Didit au SDK natif
+
+- Date/périmètre : 14 octobre 2026, configuration locale uniquement. La nouvelle
+  application utilise Didit par défaut sans parcours navigateur ; le mode hébergé
+  préparé en production supprimait le token nécessaire au SDK.
+- Appliqué : `production.auto.tfvars` sélectionne désormais le lancement natif.
+  Les clés fournisseur, le workflow, les contrôles KYC et les permissions AWS
+  restent inchangés. Aucune migration, suppression de dossier ou nouvelle session.
+- Livraison restante : relire le plan Terraform avant application et renouveler
+  les tâches ECS ; vérifier que le paramètre opérateur `KYC_PROVIDER` sélectionne
+  Didit. Aucun apply, changement SSM ou déploiement effectué ici.
+- Vérifications : 11 tests backend `didit-session-launch` réussis ; suite mobile
+  complète réussie. Changement limité à une valeur déjà admise par la validation
+  Terraform existante. Pas de validate/plan/apply ni d'essai sur téléphone physique.
+  Le retour au SDK ne démontre pas la résolution des expirations ou crashs Android.
+- Recette : [guide mobile du retour SDK](../../../zwanga/docs/KYC_DIDIT_NATIVE_20261014.md).
+
 ## INFRA-2026-10-13-004 — Configuration KYC AWS prête à livrer, activation séparée
 
 - Date/périmètre : 13 octobre 2026, configuration locale de production, non appliquée.

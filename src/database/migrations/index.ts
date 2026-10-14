@@ -75,6 +75,7 @@ import { AwsKycSessions1780000069000 } from './1780000069000-AwsKycSessions';
 import { TokenValue25Cdf1780000070000 } from './1780000070000-TokenValue25Cdf';
 import { WelcomeBonus25CdfCopy1780000071000 } from './1780000071000-WelcomeBonus25CdfCopy';
 import { WelcomeBonus200Tokens1780000072000 } from './1780000072000-WelcomeBonus200Tokens';
+import { AddMarketerRole1780000073000 } from './1780000073000-AddMarketerRole';
 
 export const databaseMigrations = [
   FillTotalSeats1780000000000,
@@ -149,4 +150,5 @@ export const databaseMigrations = [
   TokenValue25Cdf1780000070000,
   WelcomeBonus25CdfCopy1780000071000,
   WelcomeBonus200Tokens1780000072000,
+  AddMarketerRole1780000073000,
 ];

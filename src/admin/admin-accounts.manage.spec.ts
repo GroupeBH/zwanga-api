@@ -79,6 +79,56 @@ describe('AdminService back-office account management', () => {
     expect(userRepository.save).not.toHaveBeenCalled();
   });
 
+  it('lets an admin create a marketer and refuses an administrator account', async () => {
+    const admin = {
+      id: 'admin-1',
+      role: UserRole.ADMIN,
+    };
+    userRepository.findOne.mockResolvedValue(admin);
+    (userRepository as { manager?: unknown }).manager = {
+      transaction: async (work: (manager: {
+        getRepository: () => {
+          findOne: () => Promise<null>;
+          create: (data: object) => object;
+          save: (user: object) => Promise<object>;
+        };
+      }) => Promise<unknown>) =>
+        work({
+          getRepository: () => ({
+            findOne: async () => null,
+            create: (data) => data,
+            save: async (user) => ({
+              ...user,
+              id: 'marketer-1',
+              email: null,
+              createdAt: new Date('2026-10-14T00:00:00.000Z'),
+              updatedAt: new Date('2026-10-14T00:00:00.000Z'),
+              lastLoginAt: null,
+            }),
+          }),
+        }),
+    };
+
+    const created = await service.createAdminAccount('admin-1', {
+      phone: '+243810000099',
+      firstName: 'Mina',
+      lastName: 'Market',
+      defaultPassword: 'Temporaire-2026!',
+      role: UserRole.MARKETER,
+    });
+
+    expect(created.role).toBe(UserRole.MARKETER);
+    await expect(
+      service.createAdminAccount('admin-1', {
+        phone: '+243810000098',
+        firstName: 'Nora',
+        lastName: 'Admin',
+        defaultPassword: 'Temporaire-2026!',
+        role: UserRole.ADMIN,
+      }),
+    ).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
   it('refuses to alter another super admin from this list', async () => {
     userRepository.findOne
       .mockResolvedValueOnce(superAdmin)

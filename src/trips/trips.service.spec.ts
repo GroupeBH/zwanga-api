@@ -335,10 +335,7 @@ describe('TripsService daily trip publication quota', () => {
       departurePoint: { type: 'Point', coordinates: [15.3, -4.3] },
       arrivalPoint: { type: 'Point', coordinates: [15.4, -4.4] },
     };
-    jest.spyOn(service, 'verifyTripParticipant').mockResolvedValue({
-      trip: activeTrip,
-      isDriver: true,
-    });
+    tripRepository.findOne.mockResolvedValueOnce(activeTrip);
     const recordedAt = new Date().toISOString();
 
     const result = await service.updateDriverLocation(
@@ -364,6 +361,7 @@ describe('TripsService daily trip publication quota', () => {
       }),
     );
     expect(tripRepository.save).not.toHaveBeenCalled();
+    expect(tripRepository.findOne).toHaveBeenCalledWith({ where: { id: 'trip-1' } });
     expect(result).toEqual(
       expect.objectContaining({
         tripId: 'trip-1',
@@ -861,7 +859,7 @@ describe('TripsService started trip ETA expiration', () => {
       find: jest.fn(),
       findOne: jest.fn(),
       save: jest.fn().mockImplementation(async (trip) => trip),
-      update: jest.fn().mockResolvedValue(undefined),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
       increment: jest.fn().mockResolvedValue(undefined),
     };
     bookingRepository = {
@@ -977,7 +975,8 @@ describe('TripsService started trip ETA expiration', () => {
         region: 'CD',
       }),
     );
-    expect(tripRepository.save).toHaveBeenCalledWith(
+    expect(tripRepository.update).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'trip-1', driverId: 'driver-1', status: TripStatus.PENDING, startedAt: expect.anything() }),
       expect.objectContaining({
         status: TripStatus.ACTIVE,
         startedAt: now,
@@ -1004,7 +1003,8 @@ describe('TripsService started trip ETA expiration', () => {
 
     await service.startTrip('trip-1', 'driver-1');
 
-    expect(tripRepository.save).toHaveBeenCalledWith(
+    expect(tripRepository.update).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'trip-1', status: TripStatus.PENDING }),
       expect.objectContaining({
         estimatedArrivalDate: new Date('2026-05-20T12:42:00.000Z'),
       }),
@@ -1019,6 +1019,16 @@ describe('TripsService started trip ETA expiration', () => {
     expect(tripRepository.find).toHaveBeenCalledTimes(1);
     expect(tripRepository.update).not.toHaveBeenCalled();
     expect(bookingRepository.update).not.toHaveBeenCalled();
+  });
+  it('does not start or notify a trip whose expiry won the concurrent transition', async () => {
+    const trip = buildPendingTrip();
+    tripRepository.findOne.mockResolvedValueOnce(trip).mockResolvedValueOnce(null);
+    tripRepository.update.mockResolvedValueOnce({ affected: 0 });
+    const notify = jest.spyOn(service, 'notifyDriverEmergencyContacts').mockResolvedValue(undefined);
+    await expect(service.startTrip('trip-1', 'driver-1')).rejects.toThrow('statut du trajet a changé');
+    expect(notify).not.toHaveBeenCalled();
+    expect(cacheService.del).not.toHaveBeenCalled();
+    expect(tripRepository.save).not.toHaveBeenCalled();
   });
 
   it('does not expire a started trip even once six hours have passed after its estimated arrival', async () => {

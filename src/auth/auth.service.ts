@@ -6,6 +6,7 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
+import { withDeadline } from '../common/utils/with-deadline';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EntityManager, Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
@@ -47,7 +48,7 @@ import { VehiclesService } from '../vehicles/vehicles.service';
 import { ReferralsService } from '../referrals/referrals.service';
 import {
   assertSelfServiceUserRole,
-  isAdminRole,
+  isBackOfficeRole,
   resolveSelfServiceDriverState,
 } from '../users/user-role.policy';
 import { OtpService } from '../otp/otp.service';
@@ -135,6 +136,7 @@ export class AuthService {
   private readonly googleClient: OAuth2Client;
   private applePublicKeys: AppleJwk[] = [];
   private applePublicKeysExpiresAt = 0;
+  private applePublicKeysRequest?: Promise<AppleJwk[]>;
 
   constructor(
     @InjectRepository(User)
@@ -541,7 +543,7 @@ export class AuthService {
   private canUseSelfServicePinReset(user: User | null): user is User {
     return Boolean(
       user &&
-      !isAdminRole(user.role) &&
+      !isBackOfficeRole(user.role) &&
       user.isActive &&
       user.status !== UserStatus.SUSPENDED &&
       user.status !== UserStatus.INACTIVE,
@@ -611,7 +613,7 @@ export class AuthService {
 
     this.assertUserCanAuthenticate(user);
 
-    if (!isAdminRole(user.role)) {
+    if (!isBackOfficeRole(user.role)) {
       this.logger.warn(`Admin login rejected for non-admin user ${user.id}`);
       throw new UnauthorizedException(
         "Ce compte n'a pas accès à l'interface admin",
@@ -658,7 +660,7 @@ export class AuthService {
 
     this.assertUserCanAuthenticate(user);
 
-    if (!isAdminRole(user.role)) {
+    if (!isBackOfficeRole(user.role)) {
       throw new UnauthorizedException(
         "Ce compte n'a pas accès à l'interface admin",
       );
@@ -1240,8 +1242,10 @@ export class AuthService {
       return this.applePublicKeys;
     }
 
-    try {
-      const response = await fetch(APPLE_PUBLIC_KEYS_URL);
+    if (this.applePublicKeysRequest) return this.applePublicKeysRequest;
+    const controller = new AbortController();
+    this.applePublicKeysRequest = withDeadline(async () => {
+      const response = await fetch(APPLE_PUBLIC_KEYS_URL, { signal: controller.signal });
       if (!response.ok) {
         throw new Error(
           `Apple keys request failed with status ${response.status}`,
@@ -1249,6 +1253,7 @@ export class AuthService {
       }
 
       const jwks = (await response.json()) as AppleJwksResponse;
+      controller.signal.throwIfAborted();
       if (!Array.isArray(jwks.keys) || jwks.keys.length === 0) {
         throw new Error('Apple keys response did not include keys');
       }
@@ -1256,11 +1261,16 @@ export class AuthService {
       this.applePublicKeys = jwks.keys;
       this.applePublicKeysExpiresAt = now + APPLE_KEYS_CACHE_MS;
       return this.applePublicKeys;
-    } catch (error) {
+    }, 5000, () => controller.abort()).catch(error => {
       this.logger.error('Unable to fetch Apple public keys', error);
-      throw new UnauthorizedException(
+      throw new ServiceUnavailableException(
         'La connexion avec Apple est temporairement indisponible. Réessayez plus tard.',
       );
+    });
+    try {
+      return await this.applePublicKeysRequest;
+    } finally {
+      this.applePublicKeysRequest = undefined;
     }
   }
 

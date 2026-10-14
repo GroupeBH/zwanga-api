@@ -1,5 +1,7 @@
 # Livraison des correctifs de fiabilité et de sécurité
 
+Les sections initiales décrivent la livraison du 10 octobre. Le [complément du 14 octobre](#complément-du-14-octobre-2026--performance-et-résilience) décrit un nouveau lot **applicatif uniquement**, sans modification du CI/CD ni de Terraform.
+
 Les correctifs conservent les routes existantes et les réponses en tableau utilisées par les anciens clients. Ils ajoutent deux migrations, la reprise durable des dépôts FlexPay et un déploiement ECS par digest. Aucun déploiement ni changement de données AWS n'a été effectué pendant leur préparation.
 
 ## Prérequis de livraison
@@ -90,3 +92,145 @@ Ces contrôles locaux utilisent Node 24 et PostgreSQL 18 ; la validation Linux/N
 ## Références techniques
 
 Les versions des dépendances corrigent notamment les dénis de service publiés par [Multer](https://github.com/expressjs/multer/security/advisories/GHSA-wc9g-mqfw-jrwm) et [Engine.IO](https://github.com/socketio/socket.io/security/advisories/GHSA-2gc4-cqfq-p2gv). Le comportement de retour arrière et les droits ECS suivent la documentation [circuit breaker](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/deployment-circuit-breaker.html) et [autorisations ECS](https://docs.aws.amazon.com/service-authorization/latest/reference/list_ecs.html).
+
+## Complément du 14 octobre 2026 : performance et résilience
+
+Ce lot corrige les risques applicatifs de l'audit suivant. Aucun déploiement, changement de paramètres AWS, modification de Terraform, du CI/CD ou de l'application mobile n'est effectué. Il n'ajoute **ni migration ni variable d'environnement obligatoire** ; les migrations déjà présentes dans la branche restent nécessaires au reste de la version.
+
+### Correctifs
+
+| Risque | Changement |
+| --- | --- |
+| Expiration et démarrage concurrents | `expire-pending-trip.ts` regroupe transition du trajet, expiration des réservations et restitution des places dans une transaction. Seule une transition depuis `pending`, sans démarrage, avec départ dépassé de deux heures, peut réussir. `startTrip` fait aussi une mise à jour conditionnelle et ne réécrit plus un ancien compteur de places. |
+| Double restitution de places | Seul le traitement ayant effectivement expiré le trajet restitue les places des réservations **acceptées**, pas celles encore en attente. Le compteur ne dépasse pas `totalSeats`. Une erreur SQL annule l'ensemble. |
+| Cron volumineux ou chevauchant | Le cron horaire est attendu avec `waitForCompletion`. Lecture des identifiants par lots de 100, pagination par identifiant sans `OFFSET`, puis traitement individuel ; il continue au-delà de 100 trajets dans la même exécution. Un échec isolé ne bloque pas les suivants. Les caches de trajet et de réservations concernées sont invalidés après commit. |
+| Arrêt d'une réplique affectant les autres | Le signal `server_restart` et la déconnexion du tracking utilisent l'opérateur Socket.IO `local`. La destruction du gestionnaire de sessions nettoie ses minuteries sans envoyer de faux `session_expired` pendant le drainage. Les vérifications normales de révocation et d'expiration restent actives hors arrêt. |
+| Prestataire de messagerie bloqué | Les POST de `MessagingService` ont un délai HTTP de 5 s et une borne RxJS de 5,5 s par tentative. Pas de nouvel essai de payload après timeout, erreur réseau, 401, 429 ou 5xx, car le message pourrait déjà être parti. Les variantes restent possibles après rejet explicite 400/415/422. Les services OTP distincts ne sont pas changés. |
+| Cache de lecture indisponible | Les erreurs du cache optionnel ne transforment plus une écriture métier réussie en erreur HTTP. Lecture manquée puis chemin de chargement habituel, délai de 600 ms par commande, suivi local borné des invalidations échouées. Aucun vidage global de Redis et aucun contournement des contrôles d'authentification. |
+| Occurrences récurrentes en double | Relecture des couples modèle/date sous le verrou existant du conducteur, avant insertion ; déduplication dans le lot également. Le curseur du modèle avance par mise à jour partielle monotone, sans réécrire son statut ou ses paramètres depuis une ancienne copie. |
+| Régression de l'historique GPS | Comparaison et écriture atomiques Redis par script Lua. En cas de concurrence, reconstruction depuis le dernier état, au plus trois tentatives. Un point plus ancien ne remplace pas un point récent. |
+| Accumulation des évaluations GPS | Une évaluation active et une seule évaluation supplémentaire en attente par trajet/processus. Les appels suivants partagent le résultat sans republier ses événements. L'autorisation d'une position conducteur lit le trajet sans charger tous ses passagers. |
+
+Le guide `supabase-postgres-best-practices` a orienté les transactions courtes : verrouillage ordonné des réservations puis du trajet, cohérent avec les mises à jour existantes, et aucun appel HTTP, push ou Redis sous ces verrous. Les routes et formats des réponses mobiles ne changent pas. Le démarrage ayant perdu une course avec une autre transition renvoie une erreur demandant d'actualiser, sans nouvelle notification de démarrage.
+
+### Validation de ce lot
+
+- Compilation de production `npm run build` : réussie.
+- Suite générale finale : **180 suites et 2 066 tests réussis** ; 14 suites et 243 tests optionnels ignorés. Les tests SQL ignorés ne sont pas assimilés à des tests réussis. Les exécutions ciblées déjà incluses dans ces 2 066 tests ne s'additionnent pas à ce total.
+- PostgreSQL 18 isolé : 3 suites et 22 tests réussis, dont les 4 nouveaux scénarios de concurrence/rollback et les 18 tests existants de valeur des jetons et bonus de bienvenue. Les clusters sont temporaires, écoutent uniquement sur la boucle locale et sont nettoyés ; aucune configuration de base applicative n'est lue.
+- La nouvelle suite SQL utilise les véritables helpers TypeORM mais des tables de test minimales : elle ne remplace pas une validation de l'ensemble des migrations et triggers de production.
+- Le contrôle TypeScript global incluant tous les fichiers de tests signale encore des erreurs de typage dans des fixtures hors périmètre de ce lot. Il n'est pas déclaré réussi ; la compilation applicative et les suites Jest sont des contrôles distincts.
+
+Rejouer les contrôles sous PowerShell (adapter le chemin aux binaires installés) :
+
+```powershell
+npm.cmd run build
+npm.cmd test -- --runInBand --silent
+$env:RESILIENCE_TEST_POSTGRES_BIN = 'C:/Program Files/PostgreSQL/18/bin'
+$env:TOKEN_VALUE_TEST_POSTGRES_BIN = 'C:/Program Files/PostgreSQL/18/bin'
+$env:WELCOME_BONUS_TEST_POSTGRES_BIN = 'C:/Program Files/PostgreSQL/18/bin'
+npm.cmd test -- --runInBand --silent resilience-postgres.spec.ts token-value-postgres.spec.ts welcome-bonus-200-postgres.spec.ts
+```
+
+Ces trois variables servent **uniquement aux tests locaux**, pas à Parameter Store. Le CI existant n'a pas été modifié pour activer la nouvelle suite SQL. Aucun SMS, paiement ou push réel n'a été envoyé par ces tests.
+
+### Limites et contrôles après livraison
+
+- **Haute disponibilité AWS inchangée** : ajouter une seconde tâche ECS, la redondance Redis/RDS ou corriger les alarmes CloudWatch demande un lot d'infrastructure distinct et un arbitrage de coût.
+- Pendant un déploiement progressif, les anciens processus n'appliquent pas ces nouvelles protections. Attendre leur remplacement complet avant de conclure à la protection entre tous les workers. Les doublons récurrents historiques ne sont pas supprimés.
+- Le suivi des invalidations échouées est local au processus. Une autre réplique peut conserver une projection jusqu'à expiration de son TTL. Au-delà de 1 000 clés en échec, le cache de lecture du processus est désactivé jusqu'au redémarrage ; la charge peut alors se reporter sur PostgreSQL ou les services amont. Aucune garantie de cohérence distribuée forte n'est ajoutée.
+- La limitation des évaluations GPS est par processus ; elle n'est pas un verrou distribué. En cas de forte contention Redis, un échantillon peut être abandonné après trois tentatives, sans écraser le plus récent. Le script Redis et les reconnexions de vrais appareils doivent encore être éprouvés en environnement représentatif.
+- Les notifications d'expiration restent envoyées après le commit : un arrêt entre commit et notification peut empêcher leur émission. Ce lot ne transforme pas tous ces envois en file transactionnelle durable.
+- Vérifier après livraison : démarrage/expiration, réservation acceptée et compteur de places, publication récurrente, reconnexion du tracking pendant un redéploiement, latences HTTP/GPS et taux d'erreur Redis/messagerie. Les tests locaux ne garantissent pas l'absence de régression ni un gain de latence chiffré en production.
+
+## Complément du 14 octobre 2026 — dernier audit, correctifs locaux
+
+### Code et compatibilité
+
+- Les rappels de départ n'enregistrent plus une ancienne entité `Trip` complète.
+  La modification ciblée du drapeau et l'insertion dans l'outbox existante sont
+  atomiques. Une clé par type de rappel, trajet, date de départ et destinataire
+  déduplique les workers ; le rappel d'expiration proche n'est plus répété à
+  chaque passage de cron pour une même date. Les envois ont lieu après commit.
+- Ces deux crons lisent par lots de 100. Une erreur isolée n'arrête pas le lot.
+  Avant livraison, un rappel est supprimé si le trajet a commencé, a été annulé,
+  a été reprogrammé, ou si la réservation concernée n'est plus acceptée.
+- La création d'une réservation et l'expiration partagent un verrou consultatif
+  transactionnel par trajet, acquis avant les verrous de lignes. La création
+  relit/verrouille le trajet et revérifie statut, places, tarif, mode de paiement
+  et réservation existante juste avant l'insertion. Le géocodage reste hors
+  transaction ; aucune réservation n'est insérée après une expiration gagnante.
+- Le repli de la réduction première course utilise un savepoint en transaction :
+  une violation d'unicité ne laisse plus le retry dans une transaction PostgreSQL
+  déjà annulée. La création d'une demande en attente ne réécrit plus le compteur
+  de places après commit ; elle ne consomme pas de place.
+- Le cron de détection d'un téléphone éteint attend la fin du travail, traite par
+  lots et déduplique sous verrou par utilisateur/trajet/réservation. L'alerte et
+  sa notification sont enregistrées ensemble. Cela n'ajoute **pas** de SMS ou
+  d'appel aux contacts : cette partie était et reste un TODO dans le flux existant.
+- `POST /app-updates/client` reste authentifié. Quand les annonces sont
+  désactivées, il renvoie une réponse 2xx `{ registered: false, enabled: false }`
+  sans consulter la base. Les routes administratives restent protégées/désactivées.
+- Les commandes du client Redis métier sont bornées par
+  `REDIS_COMMAND_TIMEOUT_MS` (défaut 2000 ms, de 100 à 10000 ms). Une échéance
+  force la récupération de la connexion et rejette la file bloquée ; aucun retry
+  automatique d'écriture ambiguë ni contournement de l'authentification.
+  La file du client est plafonnée à 1000 commandes. Le cache optionnel conserve
+  son délai plus court et son comportement de repli déjà en place.
+- Un échec temporaire DB/Redis ferme les WebSockets avec le signal existant
+  `server_restart` (`reason=dependency_unavailable`, `retryAfterSeconds=5`), pas
+  `session_expired`. Les sessions réellement révoquées/expirées restent refusées.
+- La récupération des clés Apple est mutualisée entre appels concurrents,
+  bornée à cinq secondes y compris le corps HTTP, annulée à l'échéance et renvoie
+  503 en cas d'indisponibilité. Les contrôles cryptographiques ne changent pas.
+
+Le guide `supabase-postgres-best-practices` a orienté les transactions courtes,
+l'ordre des verrous et l'absence d'appels externes sous verrou. Aucune nouvelle
+migration n'est nécessaire pour ce complément ; l'outbox et sa contrainte
+`eventKey` doivent déjà être présentes via les migrations existantes.
+
+### Ordre de livraison ultérieure
+
+1. Livrer le backend avec le CI/CD existant, attendre la fin du remplacement des
+   anciennes tâches, puis tester les parcours métier. Les anciens workers ne
+   participent pas aux nouveaux verrous : la période mixte n'offre pas toutes
+   ces garanties.
+2. Lire le plan Terraform séparément. Le backend vérifie DB, Redis et contrat du
+   schéma après `app.init()` et **avant d'écouter**. Ensuite seulement, passer la
+   sonde ALB à `/health/live`, tout en conservant `/health` pour les diagnostics.
+   Un incident partagé DB/Redis peut encore rendre les opérations indisponibles,
+   mais ne doit plus provoquer le remplacement de tous les processus sains.
+3. Appliquer séparément les corrections d'alarmes et vérifier qu'elles reçoivent
+   bien des métriques. L'alarme mémoire peut légitimement passer en ALARM sur le
+   petit RDS actuel ; elle ne déclenche aucun redimensionnement automatique.
+4. Avant deux tâches ECS, prévoir le budget de connexions pour les tâches
+   supplémentaires d'un déploiement : avec un pool de 10, deux tâches permettent
+   20 connexions API, et quatre tâches temporairement 40, hors autres clients.
+   Un pool de 5 par tâche ramène ces plafonds à 10/20 ; le valider sous charge avant
+   de le choisir. Le défaut et les paramètres AWS existants sont conservés ici.
+5. La redondance ECS/Valkey/RDS et une éventuelle augmentation de mémoire RDS
+   restent des opérations d'infrastructure à réaliser explicitement. Aucun
+   changement de capacité, de CI/CD, d'`ecs.tf` ou d'`oidc.tf` dans ce complément.
+
+`RESILIENCE_TEST_POSTGRES_BIN` reste une variable de test local uniquement. Les
+tests utilisent un cluster temporaire sur loopback, arrêté et nettoyé ensuite.
+Ne pas utiliser une URL de production pour les tests. Les délais et contrôles
+ajoutés ne remplacent pas un test de bascule ou de charge représentatif. L'outbox
+déduplique les événements à la création ; elle ne promet pas un envoi push
+exactement une fois si le fournisseur accepte un envoi puis que son accusé est perdu.
+
+### Vérifications de ce complément
+
+- Suite générale : 182 suites / 2 075 tests réussis ; 14 suites / 250 tests
+  optionnels ignorés lors de ce passage (dont la suite PostgreSQL isolée).
+- Six tests supplémentaires de livraison des rappels, ajoutés après le lancement
+  global, passent. Le rejeu ciblé réservations + santé + rappels passe également
+  (75 tests). Ne pas additionner ces 75 aux tests globaux : ils se recouvrent.
+- PostgreSQL 18 isolé : 12 tests réussis, dont la création concurrente face à
+  l'expiration, la déduplication des rappels/alertes, le rollback de l'outbox et le
+  savepoint après conflit de réduction première course. Le premier lancement
+  dans le bac à sable n'autorisait pas le démarrage du cluster ; le rejeu avec
+  autorisation locale réussit. Le cluster de test est arrêté et nettoyé.
+- `npm run build`, TypeScript applicatif sans émission, `git diff --check`,
+  `terraform fmt` et `terraform validate` passent. Pas de test de charge ni de
+  bascule réelle AWS, et aucun envoi réel OTP/push/paiement dans ces tests.

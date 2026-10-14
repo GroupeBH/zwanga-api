@@ -14,6 +14,11 @@ describe('LocationHistoryService', () => {
         store.set(key, value);
         return Promise.resolve();
       }),
+      compareAndSet: jest.fn(async (key: string, expected: unknown, value: unknown) => {
+        if (JSON.stringify(store.get(key) ?? null) !== JSON.stringify(expected)) return false;
+        store.set(key, value);
+        return true;
+      }),
     };
     return {
       service: new LocationHistoryService(
@@ -145,5 +150,39 @@ describe('LocationHistoryService', () => {
       'trip:trip-1:driver:driver-1:passenger:passenger-1:boarding-candidate',
       'trip:trip-1:driver:driver-1:passenger:passenger-2:boarding-candidate',
     ]);
+  });
+  it('keeps the newest concurrent update and the bounded history', async () => {
+    const { service, redisService } = createService();
+    await Promise.all(Array.from({ length: 12 }, (_, i) => service.recordDriverLocation(
+      'trip', -4.3, 15.3 + i * 0.001, new Date(Date.UTC(2026, 9, 14, 10, 0, i)),
+    )));
+    // A final newest observation can always be retried without regressing state.
+    await service.recordDriverLocation('trip', -4.3, 15.4, new Date('2026-10-14T10:01:00Z'));
+    await service.recordDriverLocation('trip', -4.3, 15.2, new Date('2026-10-14T09:59:00Z'));
+    expect((await service.getDriverLocationHistory('trip'))?.current?.longitude).toBe(15.4);
+    expect(redisService.compareAndSet).toHaveBeenCalled();
+  });
+
+  it('cannot overwrite a newer sample committed after its snapshot was read', async () => {
+    const { service, redisService } = createService();
+    const compareAndSet = redisService.compareAndSet.getMockImplementation()!;
+    let release!: () => void;
+    let read!: () => void;
+    const paused = new Promise<void>(resolve => { release = resolve; });
+    const snapshotRead = new Promise<void>(resolve => { read = resolve; });
+    redisService.compareAndSet.mockImplementationOnce(async (...args) => {
+      read();
+      await paused;
+      return compareAndSet(...args);
+    });
+    const older = service.recordDriverLocation('trip', -4.3, 15.3, new Date('2026-10-14T10:00:00Z'));
+    await snapshotRead;
+    await service.recordDriverLocation('trip', -4.3, 15.4, new Date('2026-10-14T10:01:00Z'));
+    release();
+    await older;
+    const history = await service.getDriverLocationHistory('trip');
+    expect(history?.current?.longitude).toBe(15.4);
+    expect(history?.samples).toHaveLength(1);
+    expect(redisService.set).not.toHaveBeenCalled();
   });
 });

@@ -9,6 +9,7 @@ import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { ConfigService } from '@nestjs/config';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { ConfiguredIoAdapter } from './common/configured-io.adapter';
+import { HealthController } from './health/health.controller';
 import { createCorsOptions } from './common/cors-policy';
 import { WINSTON_MODULE_NEST_PROVIDER } from 'nest-winston';
 import { join } from 'path';
@@ -259,6 +260,10 @@ async function bootstrap() {
 
   const port = configService.get<number>('PORT') || 5200;
   const host = configService.get<string>('HOST') || '0.0.0.0';
+  // ALB liveness must not recycle every worker during a shared dependency
+  // outage. Verify readiness/schema once before accepting any HTTP traffic.
+  await app.init();
+  await app.get(HealthController).check();
   await app.listen(port, host);
 
   console.log(

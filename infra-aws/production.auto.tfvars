@@ -8,7 +8,7 @@ github_branch     = "release"
 
 application_s3_bucket_name     = "medias-zwanga"
 enable_rekognition_permissions = true
-didit_kyc_launch_mode          = "hosted"
+didit_kyc_launch_mode          = "native"
 
 # Prepare AWS KYC for the next native build; this does NOT enable captures.
 enable_aws_kyc_permissions           = true

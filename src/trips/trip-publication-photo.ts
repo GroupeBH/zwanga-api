@@ -1,5 +1,5 @@
 import { BadRequestException, NotFoundException } from '@nestjs/common';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { User } from '../users/entities/user.entity';
 import { Trip } from './entities/trip.entity';
 
@@ -36,6 +36,25 @@ export async function savePublicationsWithPhotoPolicy(
     });
     if (!driver) throw new NotFoundException('Conducteur non trouvé');
     const publications = manager.getRepository(Trip);
+    // Re-read occurrences under the owner lock: generation's earlier read may
+    // predate a concurrent worker's publication of exactly the same occurrence.
+    const recurring = trips.filter(trip => !trip.id && trip.recurringTemplateId && trip.recurringOccurrenceDate);
+    if (recurring.length) {
+      const existing = await publications.find({
+        where: { driverId, recurringTemplateId: In([...new Set(recurring.map(trip => trip.recurringTemplateId!))]),
+          recurringOccurrenceDate: In([...new Set(recurring.map(trip => trip.recurringOccurrenceDate!))]) },
+        select: ['recurringTemplateId', 'recurringOccurrenceDate'],
+      });
+      const seen = new Set(existing.map(trip => `${trip.recurringTemplateId}:${trip.recurringOccurrenceDate}`));
+      trips = trips.filter(trip => {
+        if (trip.id || !trip.recurringTemplateId || !trip.recurringOccurrenceDate) return true;
+        const key = `${trip.recurringTemplateId}:${trip.recurringOccurrenceDate}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+      if (!trips.length) return [];
+    }
     const alreadyPublished = driver.hasPublishedTrip || (
       !driver.profilePicture?.trim() && await publications.existsBy({ driverId, isPrivate: false })
     );

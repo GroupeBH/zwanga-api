@@ -121,6 +121,15 @@ export class AdminController {
     );
   }
 
+  @Get('stats')
+  @Auth()
+  @Roles(UserRole.ADMIN, UserRole.MARKETER)
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'Platform counts for the marketing dashboard' })
+  getMarketingStats(@Request() req: AuthenticatedAdminRequest) {
+    return this.adminService.getMarketingStats(req.user.userId);
+  }
+
   @Get('users/stats')
   @Auth()
   @Roles(UserRole.ADMIN)
@@ -192,9 +201,12 @@ export class AdminController {
 
   @Post('accounts')
   @Auth()
-  @Roles(UserRole.SUPER_ADMIN)
+  @Roles(UserRole.ADMIN)
   @SensitiveThrottle(5, 60000)
-  @ApiOperation({ summary: 'Create a back-office administrator account' })
+  @ApiOperation({
+    summary:
+      'Create a marketer account. A super admin can also create an administrator account.',
+  })
   async createAdminAccount(
     @Request() req: AuthenticatedAdminRequest,
     @Body() dto: CreateAdminAccountDto,

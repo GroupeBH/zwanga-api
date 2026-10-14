@@ -252,16 +252,51 @@ resource "aws_cloudwatch_metric_alarm" "rds_low_storage" {
   ok_actions          = [aws_sns_topic.alerts.arn]
 }
 
+resource "aws_cloudwatch_metric_alarm" "rds_low_memory" {
+  alarm_name          = "${local.name_prefix}-rds-low-memory"
+  alarm_description   = "RDS available memory is low; review pools and instance capacity before scaling ECS"
+  namespace           = "AWS/RDS"
+  metric_name         = "FreeableMemory"
+  dimensions          = { DBInstanceIdentifier = aws_db_instance.postgres.identifier }
+  comparison_operator = "LessThanOrEqualToThreshold"
+  threshold           = var.rds_free_memory_alarm_threshold_bytes
+  evaluation_periods  = var.alarm_evaluation_periods
+  datapoints_to_alarm = var.alarm_evaluation_periods
+  period              = 300
+  statistic           = "Average"
+  treat_missing_data  = "missing"
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  ok_actions          = [aws_sns_topic.alerts.arn]
+}
+
 # -----------------------------------------------------------------------------
 # ElastiCache Redis alarms
 # -----------------------------------------------------------------------------
 
+# Keep existing alarm identities when expanding monitoring to every replica.
+moved {
+  from = aws_cloudwatch_metric_alarm.redis_high_cpu
+  to   = aws_cloudwatch_metric_alarm.redis_high_cpu[0]
+}
+moved {
+  from = aws_cloudwatch_metric_alarm.redis_high_memory
+  to   = aws_cloudwatch_metric_alarm.redis_high_memory[0]
+}
+moved {
+  from = aws_cloudwatch_metric_alarm.redis_evictions
+  to   = aws_cloudwatch_metric_alarm.redis_evictions[0]
+}
+
 resource "aws_cloudwatch_metric_alarm" "redis_high_cpu" {
-  alarm_name          = "${local.name_prefix}-redis-high-engine-cpu"
-  alarm_description   = "Redis engine CPU utilization is above the configured threshold"
-  namespace           = "AWS/ElastiCache"
-  metric_name         = "EngineCPUUtilization"
-  dimensions          = { ReplicationGroupId = aws_elasticache_replication_group.redis.replication_group_id }
+  count             = var.redis_num_cache_clusters
+  alarm_name        = "${local.name_prefix}-redis-high-engine-cpu${count.index == 0 ? "" : "-node-${count.index + 1}"}"
+  alarm_description = "Redis engine CPU utilization is above the configured threshold"
+  namespace         = "AWS/ElastiCache"
+  metric_name       = "EngineCPUUtilization"
+  dimensions = {
+    CacheClusterId = sort(tolist(aws_elasticache_replication_group.redis.member_clusters))[count.index]
+    CacheNodeId    = "0001"
+  }
   comparison_operator = "GreaterThanOrEqualToThreshold"
   threshold           = var.redis_cpu_alarm_threshold
   evaluation_periods  = var.alarm_evaluation_periods
@@ -274,11 +309,15 @@ resource "aws_cloudwatch_metric_alarm" "redis_high_cpu" {
 }
 
 resource "aws_cloudwatch_metric_alarm" "redis_high_memory" {
-  alarm_name          = "${local.name_prefix}-redis-high-memory"
-  alarm_description   = "Redis database memory usage is above the configured threshold"
-  namespace           = "AWS/ElastiCache"
-  metric_name         = "DatabaseMemoryUsagePercentage"
-  dimensions          = { ReplicationGroupId = aws_elasticache_replication_group.redis.replication_group_id }
+  count             = var.redis_num_cache_clusters
+  alarm_name        = "${local.name_prefix}-redis-high-memory${count.index == 0 ? "" : "-node-${count.index + 1}"}"
+  alarm_description = "Redis database memory usage is above the configured threshold"
+  namespace         = "AWS/ElastiCache"
+  metric_name       = "DatabaseMemoryUsagePercentage"
+  dimensions = {
+    CacheClusterId = sort(tolist(aws_elasticache_replication_group.redis.member_clusters))[count.index]
+    CacheNodeId    = "0001"
+  }
   comparison_operator = "GreaterThanOrEqualToThreshold"
   threshold           = var.redis_memory_alarm_threshold
   evaluation_periods  = var.alarm_evaluation_periods
@@ -291,17 +330,21 @@ resource "aws_cloudwatch_metric_alarm" "redis_high_memory" {
 }
 
 resource "aws_cloudwatch_metric_alarm" "redis_evictions" {
-  alarm_name          = "${local.name_prefix}-redis-evictions"
-  alarm_description   = "Redis evicted at least one key during the evaluation period"
-  namespace           = "AWS/ElastiCache"
-  metric_name         = "Evictions"
-  dimensions          = { ReplicationGroupId = aws_elasticache_replication_group.redis.replication_group_id }
+  count             = var.redis_num_cache_clusters
+  alarm_name        = "${local.name_prefix}-redis-evictions${count.index == 0 ? "" : "-node-${count.index + 1}"}"
+  alarm_description = "Redis evicted at least one key during the evaluation period"
+  namespace         = "AWS/ElastiCache"
+  metric_name       = "Evictions"
+  dimensions = {
+    CacheClusterId = sort(tolist(aws_elasticache_replication_group.redis.member_clusters))[count.index]
+    CacheNodeId    = "0001"
+  }
   comparison_operator = "GreaterThanOrEqualToThreshold"
   threshold           = 1
   evaluation_periods  = 1
   period              = 300
   statistic           = "Sum"
-  treat_missing_data  = "notBreaching"
+  treat_missing_data  = "missing"
   alarm_actions       = [aws_sns_topic.alerts.arn]
   ok_actions          = [aws_sns_topic.alerts.arn]
 }
@@ -372,6 +415,8 @@ resource "aws_cloudwatch_dashboard" "operations" {
             ["AWS/RDS", "CPUUtilization", "DBInstanceIdentifier", aws_db_instance.postgres.identifier, { label = "CPU %" }],
             [".", "DatabaseConnections", ".", ".", { label = "Connections", yAxis = "right" }],
             [".", "FreeStorageSpace", ".", ".", { label = "Free storage", yAxis = "right" }],
+            [".", "FreeableMemory", ".", ".", { label = "Available RAM", yAxis = "right" }],
+            [".", "SwapUsage", ".", ".", { label = "Swap used", yAxis = "right" }],
           ]
         }
       },
@@ -386,11 +431,17 @@ resource "aws_cloudwatch_dashboard" "operations" {
           region = var.aws_region
           period = 300
           stat   = "Average"
-          metrics = [
-            ["AWS/ElastiCache", "EngineCPUUtilization", "ReplicationGroupId", aws_elasticache_replication_group.redis.replication_group_id, { label = "Engine CPU %" }],
-            [".", "DatabaseMemoryUsagePercentage", ".", ".", { label = "Memory %" }],
-            [".", "CurrConnections", ".", ".", { label = "Connections", yAxis = "right" }],
-          ]
+          metrics = concat(
+            [for member in sort(tolist(aws_elasticache_replication_group.redis.member_clusters)) :
+              ["AWS/ElastiCache", "EngineCPUUtilization", "CacheClusterId", member, "CacheNodeId", "0001", { label = "${member} CPU %" }]
+            ],
+            [for member in sort(tolist(aws_elasticache_replication_group.redis.member_clusters)) :
+              ["AWS/ElastiCache", "DatabaseMemoryUsagePercentage", "CacheClusterId", member, "CacheNodeId", "0001", { label = "${member} memory %" }]
+            ],
+            [for member in sort(tolist(aws_elasticache_replication_group.redis.member_clusters)) :
+              ["AWS/ElastiCache", "CurrConnections", "CacheClusterId", member, "CacheNodeId", "0001", { label = "${member} connections", yAxis = "right" }]
+            ],
+          )
         }
       },
       {

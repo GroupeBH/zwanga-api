@@ -37,14 +37,15 @@ export class TrackingShutdownService
       next(new Error('server_restarting'));
     });
 
-    server.emit('server_restart', {
+    // The Redis adapter broadcasts across replicas unless explicitly local.
+    server.local.emit('server_restart', {
       reason: 'deployment',
       reconnect: true,
       retryAfterSeconds: 10,
     });
 
     await delay(10_000);
-    server.disconnectSockets(true);
+    server.local.disconnectSockets(true);
     this.logger.warn('Socket.IO tracking shutdown completed');
   }
 

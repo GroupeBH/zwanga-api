@@ -375,9 +375,19 @@ variable "alb_stickiness_cookie_duration_seconds" {
 }
 
 variable "alb_health_check_path" {
-  description = "Application health check path used by the ALB target group."
+  description = "Process health used by ALB/ECS replacement. Deploy startup readiness validation before changing from /health to /health/live; /health remains the deep dependency diagnostic."
   type        = string
-  default     = "/health"
+  default     = "/health/live"
+}
+
+variable "rds_free_memory_alarm_threshold_bytes" {
+  description = "Available RDS RAM alert threshold; a warning, not automatic resizing."
+  type        = number
+  default     = 134217728
+  validation {
+    condition     = var.rds_free_memory_alarm_threshold_bytes > 0
+    error_message = "The RDS available memory threshold must be positive."
+  }
 }
 
 variable "didit_kyc_launch_mode" {

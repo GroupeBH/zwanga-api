@@ -1,7 +1,7 @@
 import { SelectQueryBuilder } from 'typeorm';
 import { KycStatus } from '../users/entities/kyc-document.entity';
 import { UserRole } from '../users/entities/user.entity';
-import { ADMIN_USER_ROLES, isAdminRole } from '../users/user-role.policy';
+import { BACK_OFFICE_USER_ROLES, isAdminRole } from '../users/user-role.policy';
 import { AdminUserSegment } from './dto/admin-users.dto';
 
 export type DriverQualification = {
@@ -14,7 +14,7 @@ const quoteIdent = (identifier: string) =>
   `"${identifier.replaceAll('"', '')}"`;
 
 const adminRoleParams = {
-  adminRoles: [...ADMIN_USER_ROLES],
+  adminRoles: [...BACK_OFFICE_USER_ROLES],
 };
 
 const approvedKycParams = {

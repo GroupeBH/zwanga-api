@@ -12,6 +12,14 @@ export const ADMIN_USER_ROLES = [UserRole.ADMIN, UserRole.SUPER_ADMIN] as const;
 
 export type AdminUserRole = (typeof ADMIN_USER_ROLES)[number];
 
+export const BACK_OFFICE_USER_ROLES = [
+  UserRole.ADMIN,
+  UserRole.SUPER_ADMIN,
+  UserRole.MARKETER,
+] as const;
+
+export type BackOfficeUserRole = (typeof BACK_OFFICE_USER_ROLES)[number];
+
 type DriverRoleResolutionInput = {
   role?: SelfServiceUserRole | null;
   isDriver?: boolean | null;
@@ -32,6 +40,14 @@ export function isSelfServiceUserRole(
 
 export function isAdminRole(role: unknown): role is AdminUserRole {
   return ADMIN_USER_ROLES.some((allowedRole) => allowedRole === role);
+}
+
+export function isMarketerRole(role: unknown): role is UserRole.MARKETER {
+  return role === UserRole.MARKETER;
+}
+
+export function isBackOfficeRole(role: unknown): role is BackOfficeUserRole {
+  return BACK_OFFICE_USER_ROLES.some((allowedRole) => allowedRole === role);
 }
 
 export function isSuperAdminRole(role: unknown): role is UserRole.SUPER_ADMIN {
@@ -68,7 +84,7 @@ export function normalizeUserDriverFlags(
   const currentRole = user.role;
   const currentIsDriver = user.isDriver;
 
-  if (isAdminRole(user.role)) {
+  if (isBackOfficeRole(user.role)) {
     user.isDriver = false;
     return currentIsDriver !== user.isDriver;
   }
