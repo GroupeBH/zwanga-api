@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { WalletService } from '../wallet/wallet.service';
+import { TOKEN_VALUE_CDF } from '../wallet/token-value.policy';
 import { SubscriptionsService } from '../subscriptions/subscriptions.service';
 import { Trip } from '../trips/entities/trip.entity';
 import { Booking, BookingStatus } from '../bookings/entities/booking.entity';
@@ -53,7 +54,7 @@ export class DriverFinanceService {
           100,
       ),
       blocked: Boolean(account?.withdrawalsBlocked),
-      moneyPerToken: 100,
+      moneyPerToken: TOKEN_VALUE_CDF,
       debtLimitTokens: DRIVER_FINANCE.cashDebtLimitTokens,
     };
   }
@@ -97,7 +98,12 @@ export class DriverFinanceService {
   private async options(trip: Trip, amount: number, booking?: Booking) {
     const accepted = normalizeAcceptedPaymentModes(trip.acceptedPaymentModes);
     const state = await this.reserveState(trip.driverId);
-    const tokens = cashCommissionTokens(amount, state.moneyPerToken);
+    const tokens = cashCommissionTokens(
+      amount,
+      Number(booking?.cashCommissionTokenValue) > 0
+        ? Number(booking!.cashCommissionTokenValue)
+        : state.moneyPerToken,
+    );
     const credit =
       booking && booking.cashCommissionPolicyVersion < 2
         ? 0

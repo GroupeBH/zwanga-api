@@ -37,7 +37,7 @@ export class WalletController {
   @Auth()
   @SensitiveThrottle(5, 60000)
   @ApiOperation({
-    summary: 'Withdraw purchased tokens to Mobile Money (KYC required)',
+    summary: 'Token cash withdrawals disabled; returns 403 without reserving funds',
   })
   requestWithdrawal(@Request() req, @Body() dto: RequestWalletWithdrawalDto) {
     return this.withdrawals.request(req.user.userId, dto);

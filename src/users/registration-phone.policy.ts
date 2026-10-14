@@ -36,7 +36,10 @@ export async function saveRegistrationWithPhone(
       lock: { mode: 'pessimistic_write' },
     });
     if (accountReservesPhone(previous)) {
-      throw new BadRequestException('Ce numéro de téléphone est déjà utilisé');
+      throw new BadRequestException({
+        code: 'PHONE_ALREADY_REGISTERED',
+        message: 'Ce numéro de téléphone est déjà utilisé',
+      });
     }
     if (previous) {
       await repository.update(previous.id, {

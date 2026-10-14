@@ -19,6 +19,7 @@ import {
   BookingStatus,
 } from '../bookings/entities/booking.entity';
 import { TripPaymentMode } from '../payments/enums/trip-payment-mode.enum';
+import { TOKEN_WITHDRAWAL_DISABLED } from '../payments/token-withdrawal.policy';
 
 describe('WalletService', () => {
   let accountRepository: {
@@ -63,6 +64,7 @@ describe('WalletService', () => {
     id: 'payment-1',
     userId: 'passenger-1',
     purpose: PaymentPurpose.WALLET_TOP_UP,
+    tokenQuantity: 50,
     relatedEntityType: 'wallet_top_up',
     relatedEntityId: 'passenger-1',
     method: PaymentMethod.MOBILE_MONEY,
@@ -164,7 +166,32 @@ describe('WalletService', () => {
     );
   });
 
-  it('initiates a FlexPay purchase where one point costs 100 CDF', async () => {
+  it('reports every token as non-withdrawable without changing the account or spending balance', async () => {
+    const getConfig = configService.get.getMockImplementation()!;
+    configService.get.mockImplementation((key: string) =>
+      key === 'WALLET_WITHDRAWALS_ENABLED' ? 'true' : getConfig(key),
+    );
+    const stored = { ...account, withdrawableBalance: 400, reservedWithdrawalBalance: 20 };
+    accountRepository.findOne.mockResolvedValue(stored);
+    const summary = await service.getSummary('passenger-1');
+    expect(summary.withdrawal).toEqual({
+      enabled: false,
+      blocked: true,
+      disabledReason: TOKEN_WITHDRAWAL_DISABLED,
+      availableMoney: 0,
+      nonWithdrawableTokens: 1000,
+      currency: 'CDF',
+      moneyPerToken: 25,
+      minimumTokens: 1,
+    });
+    expect(summary.account).toEqual({
+      ...account, withdrawableBalance: 400, reservedWithdrawalBalance: 20,
+    });
+    expect(accountRepository.save).not.toHaveBeenCalled();
+    expect(dataSource.transaction).not.toHaveBeenCalled();
+  });
+
+  it('initiates a FlexPay purchase where one point costs 25 CDF despite stale configuration', async () => {
     paymentsService.initiatePayment.mockResolvedValue(topUpPayment);
 
     const result = await service.initiateTopUp('passenger-1', {
@@ -179,7 +206,8 @@ describe('WalletService', () => {
         purpose: PaymentPurpose.WALLET_TOP_UP,
         relatedEntityType: 'wallet_top_up',
         relatedEntityId: 'passenger-1',
-        amount: 5000,
+        amount: 1250,
+        tokenQuantity: 50,
         currency: 'CDF',
         description: 'Achat de 50 jetons Zwanga',
         callbackUrl:
@@ -230,6 +258,26 @@ describe('WalletService', () => {
           'Ajustement par admin admin-1: Regularisation ticket SUP-1042',
       }),
     );
+  });
+
+  it('converts 200 tokens to the unchanged 5000 CDF Pro price', () => {
+    expect(service.convertMoneyToPoints(5000, 'CDF')).toBe(200);
+    expect(service.convertPointsToMoney(1000, 'CDF')).toBe(25000);
+  });
+
+  it.each([
+    { tokenQuantity: 50, description: null },
+    { tokenQuantity: null, description: 'Achat de 50 jetons Zwanga' },
+  ])('honors the original quantity of a pending topup purchased at the old rate: %j', async (quote) => {
+    paymentsService.checkPaymentStatus.mockResolvedValue({ ...topUpPayment, ...quote, status: PaymentStatus.SUCCEEDED });
+    await service.checkTopUpPaymentStatus('passenger-1', 'ORDER123');
+    expect(manager.save).toHaveBeenCalledWith(expect.objectContaining({ type: WalletLedgerEntryType.TOP_UP, amount: 50 }));
+  });
+
+  it('does not invent a quantity for a legacy topup without a recoverable quote', async () => {
+    paymentsService.checkPaymentStatus.mockResolvedValue({ ...topUpPayment, tokenQuantity: null, description: null, status: PaymentStatus.SUCCEEDED });
+    await expect(service.checkTopUpPaymentStatus('passenger-1', 'ORDER123')).rejects.toThrow('quantité de jetons');
+    expect(manager.save).not.toHaveBeenCalled();
   });
 
   it('does not apply the same admin adjustment request twice', async () => {
@@ -359,6 +407,7 @@ describe('WalletService', () => {
         id: 'booking',
         passengerId: 'passenger-1',
         paymentCurrency: 'CDF',
+        cashCommissionTokenValue: 100,
       } as any,
       3000,
     );
@@ -473,6 +522,7 @@ describe('WalletService', () => {
         id: 'booking-atomic',
         passengerId: 'passenger-1',
         paymentCurrency: 'CDF',
+        cashCommissionTokenValue: 100, // Existing quote remains valid.
       } as any,
       2500,
     );
@@ -522,6 +572,7 @@ describe('WalletService', () => {
         id: 'booking-retry',
         passengerId: 'passenger-1',
         paymentCurrency: 'CDF',
+        cashCommissionTokenValue: 100,
       } as any,
       2500,
     );
@@ -531,11 +582,11 @@ describe('WalletService', () => {
   });
 
   it.each([
-    { amount: 580, tokens: 5.8, remaining: 14.2 },
-    { amount: 1450, tokens: 14.5, remaining: 5.5 },
+    { amount: 580, tokens: 23.2, remaining: 76.8 },
+    { amount: 1450, tokens: 58, remaining: 42 },
   ])('debits exactly $tokens tokens for a passenger share of $amount CDF', async ({ amount, tokens, remaining }) => {
     manager.findOne.mockImplementation(async (entity: unknown) =>
-      entity === WalletAccount ? { ...account, balance: 20 } : null);
+      entity === WalletAccount ? { ...account, balance: 100 } : null);
 
     const entry = await service.payForBooking({ id: 'booking-fare', passengerId: 'passenger-1',
       paymentCurrency: 'CDF', paymentAmount: amount, grossPaymentAmount: 1450 } as any, amount);
@@ -626,13 +677,13 @@ describe('WalletService', () => {
     );
 
     expect(manager.save).toHaveBeenCalledWith(
-      expect.objectContaining({ balance: 1015 }),
+      expect.objectContaining({ balance: 1060 }),
     );
     expect(manager.save).toHaveBeenCalledWith(
       expect.objectContaining({
         type: WalletLedgerEntryType.BOOKING_FARE_ADJUSTMENT,
-        amount: 15,
-        balanceAfter: 1015,
+        amount: 60,
+        balanceAfter: 1060,
         relatedEntityType: 'booking',
         relatedEntityId: 'booking-1',
         paymentTransactionId: 'payment-1',
@@ -930,9 +981,9 @@ describe('WalletService', () => {
     expect(manager.save).toHaveBeenCalledWith(
       expect.objectContaining({
         type: WalletLedgerEntryType.LOYALTY_REWARD,
-        amount: 0.5,
+        amount: 2,
         relatedEntityType: 'trip_loyalty_bonus',
-        balanceAfter: 1001.5,
+        balanceAfter: 1003,
       }),
     );
   });

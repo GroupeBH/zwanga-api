@@ -1,4 +1,4 @@
-import { BadRequestException } from '@nestjs/common';
+import { TOKEN_WITHDRAWAL_DISABLED } from '../payments/token-withdrawal.policy';
 import { WalletWithdrawalsService } from './wallet-withdrawals.service';
 import { WalletWithdrawal } from './entities/wallet-withdrawal.entity';
 import { WalletAccount } from './entities/wallet-account.entity';
@@ -166,81 +166,120 @@ function fixture() {
   return { service, state, payments, request, config, manager };
 }
 
-describe('purchased-token withdrawals', () => {
-  it('reserves only purchased tokens and submits once on concurrent double tap and retry', async () => {
-    const f = fixture();
-    const [first, second] = await Promise.all([
-      f.service.request('user', f.request),
-      f.service.request('user', f.request),
-    ]);
-    expect(first.id).toBe(second.id);
-    await f.service.request('user', f.request);
-    expect(f.payments.initiatePayout).toHaveBeenCalledTimes(1);
-    expect(f.state.account).toMatchObject({
-      balance: 60,
-      withdrawableBalance: 20,
-      reservedWithdrawalBalance: 40,
-    });
-    expect(f.state.ledger).toHaveLength(1);
-    expect(f.payments.initiatePayout).toHaveBeenCalledWith(
-      expect.objectContaining({
-        purpose: PaymentPurpose.WALLET_PAYOUT,
-        amount: 4000,
-        phone: '243891234567',
-      }),
-    );
+// Existing provider transfers must still settle after new withdrawals are disabled.
+function seedHistoricalWithdrawal(f: ReturnType<typeof fixture>) {
+  const withdrawal = {
+    id: 'historical-withdrawal',
+    userId: 'user',
+    ...f.request,
+    phone: '243891234567',
+    amount: 4000,
+    currency: 'CDF',
+    moneyPerToken: 100,
+    status: PaymentStatus.INITIATED,
+    paymentTransactionId: 'payment',
+    processedAt: null,
+    releasedAt: null,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+  Object.assign(f.state.account, {
+    balance: 60,
+    withdrawableBalance: 20,
+    reservedWithdrawalBalance: 40,
   });
-  it('rejects competing withdrawals exceeding the purchased balance, not the total wallet', async () => {
-    const f = fixture();
-    const results = await Promise.allSettled([
-      f.service.request('user', f.request),
-      f.service.request('user', {
-        ...f.request,
-        idempotencyKey: '9663310e-88fa-4bcc-9ebf-394c40bf462f',
-      }),
-    ]);
-    expect(
-      results.filter((result) => result.status === 'fulfilled'),
-    ).toHaveLength(1);
-    expect(f.payments.initiatePayout).toHaveBeenCalledTimes(1);
-    expect(f.state.account.withdrawableBalance).toBe(20);
+  f.state.withdrawals.push(withdrawal);
+  f.state.payments.push({
+    id: 'payment',
+    userId: 'user',
+    purpose: PaymentPurpose.WALLET_PAYOUT,
+    relatedEntityType: 'wallet_withdrawal',
+    relatedEntityId: withdrawal.id,
+    amount: withdrawal.amount,
+    currency: withdrawal.currency,
+    phone: withdrawal.phone,
+    status: PaymentStatus.INITIATED,
+    orderNumber: 'order',
   });
-  it.each(['kyc', 'active'])(
-    'requires an active account and approved KYC (%s)',
-    async (field) => {
+  f.state.ledger.push({
+    id: 'historical-debit',
+    amount: -40,
+    withdrawableAmount: -40,
+    type: 'withdrawal',
+  });
+  return withdrawal;
+}
+
+describe('disabled token withdrawals and historical settlement', () => {
+  it.each([undefined, 'false', 'true'])(
+    'blocks new requests even with WALLET_WITHDRAWALS_ENABLED=%s',
+    async (flag) => {
       const f = fixture();
-      f.state[field] = false;
-      await expect(f.service.request('user', f.request)).rejects.toThrow();
+      f.config.get.mockReturnValue(flag);
+      const before = structuredClone(f.state);
+      await expect(f.service.request('user', f.request)).rejects.toMatchObject({
+        status: 403,
+        response: TOKEN_WITHDRAWAL_DISABLED,
+      });
+      expect(f.state).toEqual(before);
+      expect(f.manager.findOne).not.toHaveBeenCalled();
+      expect(f.manager.save).not.toHaveBeenCalled();
+      expect(f.payments.initiatePayout).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([0, 60, 100])(
+    'blocks every token origin, with a purchased balance of %s',
+    async (withdrawableBalance) => {
+      const f = fixture();
+      f.state.account.withdrawableBalance = withdrawableBalance;
+      await expect(f.service.request('user', f.request)).rejects.toMatchObject({
+        status: 403,
+        response: TOKEN_WITHDRAWAL_DISABLED,
+      });
+      expect(f.state.account.balance).toBe(100);
+      expect(f.state.account.withdrawableBalance).toBe(withdrawableBalance);
+      expect(f.state.account.reservedWithdrawalBalance).toBe(0);
       expect(f.state.ledger).toHaveLength(0);
       expect(f.payments.initiatePayout).not.toHaveBeenCalled();
     },
   );
-  it('refuses all-loyalty balances and blocks rollouts by default', async () => {
+
+  it('rejects concurrent retries without reserving tokens or sending money', async () => {
     const f = fixture();
-    f.state.account.withdrawableBalance = 0;
-    await expect(f.service.request('user', f.request)).rejects.toThrow(
-      'retirables insuffisant',
-    );
-    f.config.get.mockReturnValue(undefined);
-    await expect(f.service.request('user', f.request)).rejects.toThrow(
-      'activé',
-    );
+    const results = await Promise.allSettled([
+      f.service.request('user', f.request),
+      f.service.request('user', f.request),
+      f.service.request('user', {
+        ...f.request,
+        idempotencyKey: 'another-key',
+      }),
+    ]);
+    expect(results.every((result) => result.status === 'rejected')).toBe(true);
+    expect(f.state.account.reservedWithdrawalBalance).toBe(0);
+    expect(f.state.withdrawals).toHaveLength(0);
     expect(f.state.ledger).toHaveLength(0);
+    expect(f.payments.initiatePayout).not.toHaveBeenCalled();
   });
-  it('does not change destination or amount under an existing idempotency key', async () => {
+
+  it('blocks POST retries of an old withdrawal while preserving its GET status', async () => {
     const f = fixture();
-    await f.service.request('user', f.request);
-    await expect(
-      f.service.request('user', { ...f.request, tokens: 41 }),
-    ).rejects.toThrow('autre montant');
-    await expect(
-      f.service.request('user', { ...f.request, phone: '+243899999999' }),
-    ).rejects.toThrow('autre montant');
-    expect(f.payments.initiatePayout).toHaveBeenCalledTimes(1);
+    const withdrawal = seedHistoricalWithdrawal(f);
+    const before = structuredClone(f.state);
+    await expect(f.service.request('user', f.request)).rejects.toMatchObject({
+      status: 403,
+      response: TOKEN_WITHDRAWAL_DISABLED,
+    });
+    expect(f.state).toEqual(before);
+    expect((await f.service.get('user', withdrawal.id)).status).toBe(
+      'initiated',
+    );
+    expect(f.payments.initiatePayout).not.toHaveBeenCalled();
   });
-  it('settles a successful payout once and ignores stale failure notifications', async () => {
+
+  it('settles a historical successful payout once and ignores stale failures', async () => {
     const f = fixture();
-    const withdrawal = await f.service.request('user', f.request);
+    const withdrawal = seedHistoricalWithdrawal(f);
     f.state.payments[0].status = PaymentStatus.SUCCEEDED;
     await f.service.callback({} as any);
     await f.service.callback({} as any);
@@ -254,61 +293,64 @@ describe('purchased-token withdrawals', () => {
       'succeeded',
     );
     expect(f.state.ledger).toHaveLength(1);
+    expect(f.payments.initiatePayout).not.toHaveBeenCalled();
   });
-  it('restores purchased origin once on a verified failure', async () => {
-    const f = fixture();
-    await f.service.request('user', f.request);
-    f.state.payments[0].status = PaymentStatus.FAILED;
-    await f.service.callback({} as any);
-    await f.service.callback({} as any);
-    expect(f.state.account).toMatchObject({
-      balance: 100,
-      withdrawableBalance: 60,
-      reservedWithdrawalBalance: 0,
-    });
-    expect(f.state.ledger).toHaveLength(2);
-    expect(f.state.ledger[1]).toMatchObject({
-      amount: 40,
-      withdrawableAmount: 40,
-      type: 'withdrawal_refund',
-    });
-  });
-  it('keeps unknown delivery reserved even after an app restart/retry', async () => {
-    const f = fixture();
-    f.payments.initiatePayout.mockImplementation(async (input) => {
-      f.state.payments.push({
-        ...input,
-        id: 'payment',
-        status: PaymentStatus.PENDING,
-        orderNumber: null,
+
+  it.each([PaymentStatus.FAILED, PaymentStatus.CANCELLED])(
+    'restores purchased tokens once on a verified historical %s payout',
+    async (status) => {
+      const f = fixture();
+      seedHistoricalWithdrawal(f);
+      f.state.payments[0].status = status;
+      await f.service.callback({} as any);
+      await f.service.callback({} as any);
+      expect(f.state.account).toMatchObject({
+        balance: 100,
+        withdrawableBalance: 60,
+        reservedWithdrawalBalance: 0,
       });
-      throw new Error('Lost response');
-    });
-    const first = await f.service.request('user', f.request);
-    expect(first.status).toBe('pending');
-    await f.service.request('user', f.request);
+      expect(f.state.ledger).toHaveLength(2);
+      expect(f.state.ledger[1]).toMatchObject({
+        amount: 40,
+        withdrawableAmount: 40,
+        type: 'withdrawal_refund',
+      });
+      await expect(f.service.request('user', f.request)).rejects.toMatchObject({
+        status: 403,
+        response: TOKEN_WITHDRAWAL_DISABLED,
+      });
+    },
+  );
+
+  it('keeps an uncertain historical transfer reserved without resending it', async () => {
+    const f = fixture();
+    const withdrawal = seedHistoricalWithdrawal(f);
+    f.state.payments[0].status = PaymentStatus.PENDING;
+    f.state.payments[0].orderNumber = null;
+    expect((await f.service.get('user', withdrawal.id)).status).toBe('pending');
+    await f.service.get('user', withdrawal.id);
     expect(f.state.account.reservedWithdrawalBalance).toBe(40);
-    expect(f.payments.initiatePayout).toHaveBeenCalledTimes(1);
+    expect(f.payments.checkPaymentStatus).not.toHaveBeenCalled();
+    expect(f.payments.initiatePayout).not.toHaveBeenCalled();
   });
-  it('releases only a proven unsent failure and never resubmits that key', async () => {
+
+  it('does not release or resend an orphaned historical reservation automatically', async () => {
     const f = fixture();
-    f.payments.initiatePayout.mockRejectedValue(
-      new BadRequestException('Not configured'),
-    );
-    await expect(f.service.request('user', f.request)).rejects.toThrow(
-      'Not configured',
-    );
-    expect(f.state.account).toMatchObject({
-      balance: 100,
-      withdrawableBalance: 60,
-      reservedWithdrawalBalance: 0,
+    const withdrawal = seedHistoricalWithdrawal(f);
+    f.state.payments = [];
+    Object.assign(withdrawal, {
+      status: 'pending',
+      paymentTransactionId: null,
     });
-    expect((await f.service.request('user', f.request)).status).toBe('failed');
-    expect(f.payments.initiatePayout).toHaveBeenCalledTimes(1);
+    expect((await f.service.get('user', withdrawal.id)).status).toBe('pending');
+    expect(f.state.account.reservedWithdrawalBalance).toBe(40);
+    expect(f.state.ledger).toHaveLength(1);
+    expect(f.payments.initiatePayout).not.toHaveBeenCalled();
   });
-  it('holds the wallet for manual reconciliation on success after a refunded failure', async () => {
+
+  it('holds the wallet for reconciliation on late success after a refunded failure', async () => {
     const f = fixture();
-    await f.service.request('user', f.request);
+    seedHistoricalWithdrawal(f);
     f.state.payments[0].status = PaymentStatus.FAILED;
     await f.service.callback({} as any);
     f.state.payments[0].status = PaymentStatus.SUCCEEDED;
@@ -318,11 +360,15 @@ describe('purchased-token withdrawals', () => {
     expect(f.state.ledger).toHaveLength(2);
     await expect(
       f.service.request('user', { ...f.request, idempotencyKey: 'new' }),
-    ).rejects.toThrow('vérification');
+    ).rejects.toMatchObject({
+      status: 403,
+      response: TOKEN_WITHDRAWAL_DISABLED,
+    });
   });
-  it('rejects foreign users and mismatched payment amounts without changing balances', async () => {
+
+  it('rejects foreign users and mismatched historical payment amounts', async () => {
     const f = fixture();
-    const withdrawal = await f.service.request('user', f.request);
+    const withdrawal = seedHistoricalWithdrawal(f);
     await expect(f.service.get('other', withdrawal.id)).rejects.toThrow(
       'introuvable',
     );

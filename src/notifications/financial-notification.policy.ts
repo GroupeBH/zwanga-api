@@ -33,15 +33,22 @@ export function walletMovementNotification(
     entry.type === WalletType.LOYALTY_REWARD &&
     entry.relatedEntityType === 'welcome_bonus'
   ) {
+    const driverWelcomeCopy =
+      recipientRole === UserRole.DRIVER &&
+      ['PTS', 'POINTS'].includes(entry.currency)
+        ? Number(entry.amount) === 200
+          ? 'Bienvenue chez Zwanga ! 5 000 FC vous sont offerts sous forme de 200 jetons Zwanga pour vous permettre de payer votre abonnement Pro.'
+          : Number(entry.amount) === 50
+            ? 'Bienvenue chez Zwanga ! 1 250 FC vous sont offerts sous forme de 50 jetons Zwanga pour contribuer au paiement de votre abonnement Pro.'
+            : null
+        : null;
     return {
       eventKey: `wallet:${entry.id}`,
       userId: entry.userId,
       title: 'Bonus de bienvenue reçu',
       body:
-        recipientRole === UserRole.DRIVER &&
-        entry.currency === 'PTS' && Number(entry.amount) === 50
-          ? 'Bienvenue chez Zwanga ! 5 000 FC vous sont offerts sous forme de jetons Zwanga pour vous permettre de payer votre abonnement Pro.'
-          : `Votre identité et votre compte sont validés. ${amount} de bienvenue ont été ajoutés à votre portefeuille.`,
+        driverWelcomeCopy ??
+        `Votre identité et votre compte sont validés. ${amount} de bienvenue ont été ajoutés à votre portefeuille.`,
       data: {
         type: 'wallet_loyalty_reward', // Compatible with already-published mobile versions.
         ledgerEntryId: entry.id,

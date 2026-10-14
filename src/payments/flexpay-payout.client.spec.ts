@@ -8,6 +8,7 @@ import { validate } from 'class-validator';
 import { FlexPayService } from './flexpay.service';
 import { PaymentsService } from './payments.service';
 import {
+  PaymentProvider,
   PaymentPurpose,
   PaymentStatus,
   PaymentTransaction,
@@ -95,7 +96,17 @@ describe('FlexPaie payout v1.03 (mocked HTTP)', () => {
     data: Record<string, unknown>,
     purpose = PaymentPurpose.DRIVER_PAYOUT,
   ) {
-    const payment = await payments.initiatePayout({ ...input, purpose });
+    // Token withdrawals can no longer be initiated, but historical provider
+    // transfers must keep their authenticated status reconciliation.
+    const payment = purpose === PaymentPurpose.DRIVER_PAYOUT
+      ? await payments.initiatePayout({ ...input, purpose })
+      : await repository.save({
+          ...input,
+          purpose,
+          provider: PaymentProvider.FLEXPAY,
+          status: PaymentStatus.INITIATED,
+          orderNumber: 'ORDER123',
+        });
     repository.findOne.mockResolvedValue(payment);
     http.get.mockReturnValue(
       of({
@@ -275,7 +286,7 @@ describe('FlexPaie payout v1.03 (mocked HTTP)', () => {
     ).toHaveLength(2);
   });
 
-  it.each([PaymentPurpose.DRIVER_PAYOUT, PaymentPurpose.REFERRAL_PAYOUT])(
+  it.each([PaymentPurpose.DRIVER_PAYOUT, PaymentPurpose.REFERRAL_PAYOUT, PaymentPurpose.WALLET_PAYOUT])(
     'confirms %s with the flat payout check response, not the collection endpoint',
     async (purpose) => {
       const payment = await initiateAndCheck(
@@ -290,6 +301,9 @@ describe('FlexPaie payout v1.03 (mocked HTTP)', () => {
       expect(payment.status).toBe(PaymentStatus.SUCCEEDED);
       expect(payment.providerReference).toBe('OPERATOR123');
       expect(payment.paidAt).toBeInstanceOf(Date);
+      if (purpose !== PaymentPurpose.DRIVER_PAYOUT) {
+        expect(http.post.mock.calls.filter(([url]) => url.endsWith('/pay'))).toHaveLength(0);
+      }
       expect(http.get).toHaveBeenCalledWith(
         'https://payout.example.invalid/api/rest/v1/check/ORDER123',
         expect.objectContaining({

@@ -97,6 +97,10 @@ export class PaymentTransaction {
   @Column({ type: 'decimal', precision: 10, scale: 2 })
   amount: number;
 
+  // Immutable top-up quote: never reprice a pending purchase at settlement.
+  @Column({ type: 'decimal', precision: 12, scale: 2, nullable: true, update: false })
+  tokenQuantity: number | null;
+
   @Column({ type: 'varchar', length: 8 })
   currency: string;
 

@@ -34,4 +34,9 @@ describe('topup idempotency using the existing unique reference index', () => {
     await expect(claimTopUpPayment(repository as any, candidate())).rejects.toThrow('offline');
     expect(repository.findOne).not.toHaveBeenCalled();
   });
+
+  it('refuses changing a token quantity even for the same monetary amount', async () => {
+    const repository = { save: jest.fn().mockRejectedValue({ code: '23505' }), findOne: jest.fn().mockResolvedValue({ ...candidate(), tokenQuantity: 4 }) };
+    await expect(claimTopUpPayment(repository as any, { ...candidate(), tokenQuantity: 1 })).rejects.toMatchObject({ status: 409 });
+  });
 });

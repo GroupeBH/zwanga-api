@@ -1,5 +1,49 @@
 # Livraison du correctif KYC Didit — 13 octobre 2026
 
+## 14 octobre 2026 — Reprise d'un KYC déjà approuvé et d'un compte existant
+
+Le diagnostic en lecture seule a confirmé des réponses `409` à la création de
+session parce que l'identité était déjà vérifiée, et des refus d'inscription pour
+un numéro déjà enregistré. Le message mobile générique masquait ces états métier.
+Ces observations ne démontrent pas une indisponibilité générale de l'inscription.
+
+Correctifs locaux :
+
+- `src/users/didit-kyc.service.ts` conserve `409 KYC_ALREADY_APPROVED`, désormais
+  prioritaire sur la configuration Didit et la bascule AWS. Aucun dossier approuvé
+  n'est réinitialisé ; aucun fournisseur n'est appelé pour le recréer. Les nouvelles
+  vérifications restent soumises à la configuration et aux contrôles existants.
+- `src/auth/auth.service.ts` et `src/users/registration-phone.policy.ts` ajoutent
+  `PHONE_ALREADY_REGISTERED` aux refus existants, y compris lors de la vérification
+  concurrente. Les statuts HTTP historiques (401/400), messages et règles de
+  réutilisation des numéros des comptes indisponibles restent inchangés.
+- Dans le dépôt mobile `zwanga`, le flux lit `/users/kyc/status` sans préférence
+  pour le cache avant de choisir un fournisseur. Si le statut est `approved`, il
+  invalide les caches du profil, recharge le compte et poursuit sans SDK ni navigateur.
+  Un `KYC_ALREADY_APPROVED` reçu après cette première lecture provoque une nouvelle
+  lecture serveur : un autre conflit, un statut en attente ou un échec réseau ne
+  vaut jamais approbation. Un changement de compte interrompt la reprise.
+- L'inscription mobile propose « Se connecter » (numéro conservé, PIN et contexte
+  d'inscription effacés) ou « Modifier le numéro ». La récupération du PIN reste
+  accessible par le bouton existant de connexion, avec ses contrôles OTP inchangés.
+  Le refus métier 401 ne provoque plus de renouvellement de session/rejeu du POST.
+
+Compatibilité et livraison : aucune migration, variable d'environnement, modification
+Terraform/CI/CD ou opération AWS. Les contrats de création/synchronisation Didit restent
+compatibles ; aucune fausse URL ou réponse 200 sans session n'est introduite. **Le
+backend seul ne change pas le message des anciennes applications : le nouveau parcours
+nécessite de livrer aussi les changements mobiles.** Le nouveau mobile reconnaît les
+anciens messages de doublon en attendant la livraison du backend.
+
+Vérifications locales : 422 tests backend réussis (30 suites auth/users/filtre),
+compilation backend réussie ; 99 tests mobiles ciblés et suite JavaScript mobile
+complète réussis (`node --test --test-reporter=dot --test-concurrency=4 tests/*.test.js`),
+contrôle TypeScript et contrôles de frontière réseau/taille des sources réussis. Fournisseurs et entrées/
+sorties natives simulés ; aucun SMS, dossier Didit/AWS, compte réel ou déploiement créé.
+Les essais Android/iOS réels restent à faire : compte déjà validé (Didit ou AWS),
+nouveau compte sans KYC, validation manuelle pendant le démarrage du parcours,
+numéro déjà utilisé puis connexion/récupération du PIN, erreur réseau sans faux succès.
+
 ## Ce qui est prêt et ce qui reste à livrer
 
 Le code local appelle directement `POST /v3/session/` avec le workflow configuré,

@@ -195,6 +195,35 @@ describe('ReferralsService', () => {
 
   const paymentPaidAt = new Date('2026-08-24T10:00:00Z');
 
+  it('rejects referral withdrawals below 1000 tokens before releasing rewards or reserving a balance', async () => {
+    const { service, account, dataSource, manager, kycRepository } = buildService();
+    account.availableTokens = 1000;
+    kycRepository.exists.mockResolvedValue(true);
+    const release = jest.spyOn(service as any, 'releaseMatureRewardsForUser');
+    await expect(service.requestWithdrawal('referrer-1', {
+      tokens: 50, phone: '+243891234567',
+    })).rejects.toMatchObject({ status: 400 });
+    expect(release).not.toHaveBeenCalled();
+    expect(dataSource.transaction).not.toHaveBeenCalled();
+    expect(manager.save).not.toHaveBeenCalled();
+    expect(account.availableTokens).toBe(1000);
+    expect(account.reservedTokens).toBe(0);
+  });
+
+  it('marks referral withdrawals unavailable while preserving the earned token balance', async () => {
+    const { service, account, kycRepository } = buildService();
+    account.availableTokens = 100;
+    kycRepository.exists.mockResolvedValue(true);
+    const summary = await service.getSummary('referrer-1');
+    expect(summary.withdrawal).toMatchObject({
+      enabled: true, blocked: true, minimumTokens: 1000, moneyPerToken: 25,
+      kycApproved: true,
+    });
+    expect(summary.balances.availableTokens).toBe(100);
+    expect(summary.balances.availableAmount).toBe(2500);
+    expect(account.reservedTokens).toBe(0);
+  });
+
   it('uses the supplied batch transaction and keeps both ledger entries without a second credit', async () => {
     const { service, manager, account, dataSource } = buildService();
     const reward = { id: 'mature-reward', referrerUserId: account.userId, rewardTokens: 2.5,
@@ -256,12 +285,12 @@ describe('ReferralsService', () => {
         sourceType: ReferralRewardSourceType.SUBSCRIPTION_PAYMENT,
         grossAmount: 5000,
         rewardAmount: 250,
-        rewardTokens: 2.5,
+        rewardTokens: 10,
         rate: 0.05,
         status: ReferralRewardStatus.PENDING,
       }),
     );
-    expect(account.pendingTokens).toBe(2.5);
+    expect(account.pendingTokens).toBe(10);
     expect(profile.qualifiedAt).toEqual(paymentPaidAt);
     expect(profile.rewardWindowEndsAt?.toISOString()).toBe(
       '2027-08-24T10:00:00.000Z',
@@ -348,13 +377,13 @@ describe('ReferralsService', () => {
         sourceType: ReferralRewardSourceType.BOOKING_PAYMENT,
         grossAmount: 10000,
         rewardAmount: 100,
-        rewardTokens: 1,
+        rewardTokens: 4,
         rate: 0.01,
         paymentTransactionId: 'payment-booking-1',
         status: ReferralRewardStatus.PENDING,
       }),
     );
-    expect(account.pendingTokens).toBe(1);
+    expect(account.pendingTokens).toBe(4);
   });
 
   it('caps trip referral rewards at 1 percent even if the booking rate is misconfigured at 5 percent', async () => {
@@ -381,11 +410,11 @@ describe('ReferralsService', () => {
         sourceType: ReferralRewardSourceType.BOOKING_PAYMENT,
         grossAmount: 10000,
         rewardAmount: 100,
-        rewardTokens: 1,
+        rewardTokens: 4,
         rate: 0.01,
       }),
     );
-    expect(account.pendingTokens).toBe(1);
+    expect(account.pendingTokens).toBe(4);
   });
 
   it('exposes trip rewards as a 1 percent share funded from the 5 percent Zwanga commission', async () => {
@@ -431,13 +460,13 @@ describe('ReferralsService', () => {
         sourceType: ReferralRewardSourceType.BOOKING_PAYMENT,
         grossAmount: 10000,
         rewardAmount: 100,
-        rewardTokens: 1,
+        rewardTokens: 4,
         rate: 0.01,
         paymentTransactionId: null,
         status: ReferralRewardStatus.PENDING,
       }),
     );
-    expect(account.pendingTokens).toBe(1);
+    expect(account.pendingTokens).toBe(4);
   });
 
   it('calculates referral rewards for a subsidized first trip on the amount paid by the filleul only', async () => {
@@ -469,13 +498,13 @@ describe('ReferralsService', () => {
         sourceType: ReferralRewardSourceType.BOOKING_PAYMENT,
         grossAmount: 4000,
         rewardAmount: 40,
-        rewardTokens: 0.4,
+        rewardTokens: 1.6,
         rate: 0.01,
         paymentTransactionId: 'payment-booking-subsidized',
         status: ReferralRewardStatus.PENDING,
       }),
     );
-    expect(account.pendingTokens).toBe(0.4);
+    expect(account.pendingTokens).toBe(1.6);
   });
 
   it('resolves an active referrer from an opaque link token', async () => {
@@ -864,7 +893,7 @@ describe('ReferralsService', () => {
           pendingTokens: 1.5,
           releasedTokens: 4,
           reversedTokens: 2,
-          earnedAmount: 550,
+          earnedAmount: 137.5,
           currency: 'CDF',
         },
       }),

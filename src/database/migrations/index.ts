@@ -72,6 +72,9 @@ import { IndexNearbyRequestAlerts1780000066000 } from './1780000066000-IndexNear
 import { ReconcileFlexPayDeposits1780000067000 } from './1780000067000-ReconcileFlexPayDeposits';
 import { VerifiedRatingInteractions1780000068000 } from './1780000068000-VerifiedRatingInteractions';
 import { AwsKycSessions1780000069000 } from './1780000069000-AwsKycSessions';
+import { TokenValue25Cdf1780000070000 } from './1780000070000-TokenValue25Cdf';
+import { WelcomeBonus25CdfCopy1780000071000 } from './1780000071000-WelcomeBonus25CdfCopy';
+import { WelcomeBonus200Tokens1780000072000 } from './1780000072000-WelcomeBonus200Tokens';
 
 export const databaseMigrations = [
   FillTotalSeats1780000000000,
@@ -143,4 +146,7 @@ export const databaseMigrations = [
   ReconcileFlexPayDeposits1780000067000,
   VerifiedRatingInteractions1780000068000,
   AwsKycSessions1780000069000,
+  TokenValue25Cdf1780000070000,
+  WelcomeBonus25CdfCopy1780000071000,
+  WelcomeBonus200Tokens1780000072000,
 ];

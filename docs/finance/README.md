@@ -1,6 +1,10 @@
 # Documentation financière de Zwanga
 
-Dernière mise à jour : 17 septembre 2026
+Dernière mise à jour : 14 octobre 2026
+
+Règle actuelle : **1 jeton = 25 FC**, sans multiplication des soldes existants. Retrait du portefeuille interdit ; parrainage retirable dès **1 000 jetons = 25 000 FC** ; gains conducteur conservés. [Migrations, historique et précautions mobiles](./purchased-token-withdrawals.md).
+
+Bonus de bienvenue : **200 jetons = 5 000 FC** pour les futures attributions éligibles. Les anciens bonus de 50 restent inchangés, sans complément ni second crédit. L'abonnement Pro n'est pas activé automatiquement.
 
 ## Objectif
 
@@ -29,9 +33,9 @@ Les montants CDF ou USD encaissés ou décaissés par FlexPay représentent de l
 
 Les jetons sont une unité interne du portefeuille `POINTS`. Les identifiants `points` et `PTS` sont conservés pour la compatibilité technique, mais l'appellation visible est « jetons Zwanga ». Leur valeur monétaire est configurable et ne doit jamais être supposée à partir du nom de l'unité.
 
-La configuration livrée indique `1 jeton = 100 CDF`. La configuration effective de chaque environnement doit tout de même être vérifiée avant un déploiement financier.
+La règle courante impose `1 jeton = 25 CDF`. Les devis historiques déjà enregistrés conservent leur taux ; les configurations d'environnement doivent être alignées avant le déploiement financier.
 
-Les [jetons achetés sont retirables](./purchased-token-withdrawals.md) après migration et activation ; fidélité et bonus ne le sont pas. L'origine est conservée lors des paiements, transferts et remboursements. Les revenus conducteur et gains de parrainage gardent leurs comptes séparés.
+Les [jetons du portefeuille ne sont pas retirables](./purchased-token-withdrawals.md), même lorsqu'ils ont été achetés. L'origine est conservée lors des paiements, transferts et remboursements. Les revenus conducteur et gains de parrainage gardent leurs comptes séparés et leurs propres règles de retrait.
 
 ### Gains de parrainage
 

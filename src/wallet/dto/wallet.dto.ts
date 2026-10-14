@@ -45,7 +45,7 @@ export class InitiateWalletTopUpDto {
   @ApiProperty({
     minimum: 1,
     example: 50,
-    description: 'Nombre de jetons Zwanga a acheter. 1 jeton = 100 FC/CDF.',
+    description: 'Nombre de jetons Zwanga a acheter. 1 jeton = 25 FC/CDF.',
   })
   @Type(() => Number)
   @IsNumber()

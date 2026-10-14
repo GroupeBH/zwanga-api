@@ -4,7 +4,7 @@ Identifiant : `FIN-BOOKING-001`
 
 Statut : implémenté dans le code, migration non encore appliquée en production.
 
-Dernière mise à jour : 21 août 2026.
+Dernière mise à jour : 14 octobre 2026.
 
 Complément de fiabilité : le règlement en jetons, le statut payé et le revenu conducteur sont désormais atomiques. Voir [`FIN-BOOKING-002`](./atomic-token-trip-settlement.md).
 
@@ -305,3 +305,63 @@ npm run lint
 - Le système ne peut pas prouver un paiement en espèces.
 - Le partage en arrière-plan dépend des permissions et restrictions d'énergie du téléphone.
 - Les seuils de 10 minutes et 150 mètres sont des règles métier codées en constantes ; toute modification future doit créer une nouvelle entrée financière documentée.
+
+## 16. Correctif du calcul de proximité — 14 octobre 2026
+
+Le calcul de distance utilisait `booking.passengerCurrentLocation::geography`
+et `booking.passengerDestinationPoint::geography`. TypeORM ne remplaçait pas ces
+références accolées au cast `::` par des identifiants protégés. PostgreSQL cherchait
+alors une colonne entièrement en minuscules, d'où l'erreur « colonne inexistante ».
+
+Correctifs dans `src/bookings/bookings.service.ts` :
+
+- les deux colonnes camelCase sont explicitement protégées dans `ST_Distance` ;
+- le filtre paramétré par identifiant de réservation est conservé ; aucune nouvelle
+  colonne, migration ou connexion n'est nécessaire ;
+- une distance de **0 mètre** est valide, contrairement à `null` ou `undefined` ;
+- les résultats non numériques, infinis ou négatifs sont ignorés, sans notification ;
+- le marqueur en mémoire `destinationProximityNotified` ne devient vrai qu'après
+  une mise à jour conditionnelle réussie en base. Le contrôle existant empêche deux
+  requêtes concurrentes de déclencher toutes les deux la notification.
+
+La notification de proximité ne vaut **ni embarquement ni arrivée confirmée** et
+ne déclenche aucun nouveau règlement. Le seuil de notification reste de 1 km.
+
+### Position conducteur ancienne et erreur 409
+
+Le correctif SQL ne répare pas une absence de transmission GPS. Une position
+conducteur ancienne reste refusée par la détection automatique (`LOCATION_STALE`),
+même si le passager transmet une position récente. Une précision conducteur absente
+reste insuffisante pour une validation automatique (`GPS_ACCURACY_TOO_LOW`). Les
+horodatages ne sont jamais rafraîchis artificiellement à la lecture de la position.
+
+Les transports REST et Socket.IO transmettent déjà les métadonnées de précision
+et de date lorsqu'elles sont fournies. Ce changement ne modifie pas le code mobile
+ni ses tâches GPS. Il ne démontre pas pourquoi le téléphone conducteur avait cessé
+de transmettre des mesures exploitables.
+
+Pour une réservation déjà bloquée, reprendre les émissions GPS réelles ou utiliser
+le parcours manuel existant : confirmation `pickup` du passager **et** du conducteur,
+puis confirmation `dropoff` du passager. Les contrôles d'identité, d'autorisation,
+d'état du trajet et de litige restent applicables. `RIDE_PICKUP_REQUIRED` reste une
+réponse 409 attendue tant que l'embarquement n'est pas validé ; cette protection
+n'est pas supprimée pour contourner une panne de GPS.
+
+### Vérifications
+
+- Nouvelle suite `src/bookings/destination-proximity.spec.ts` : 24 tests, dont la
+  génération SQL avec les vraies métadonnées TypeORM, les distances nulles/zéro,
+  les résultats invalides, le seuil et les tentatives concurrentes. Dix tests
+  échouaient sur le code initial et passent avec le correctif.
+- Régressions ajoutées dans `boarding-detection.spec.ts` et
+  `ride-declarations.service.spec.ts` : conducteur ancien de 75 minutes, précision
+  absente, reprise sur nouvelles mesures exploitables et double confirmation
+  manuelle sans GPS récent, sans modifier les anciennes positions.
+- **228 tests réussis dans 9 suites**, incluant réservations, trajets, paiement à
+  proximité, déclarations, suivi Socket.IO et historique de positions.
+- **Compilation backend réussie** (`npm.cmd run build`) et contrôle du diff réussi.
+
+La génération SQL est testée sans connexion PostgreSQL ; réponses de distance,
+écritures et notifications sont simulées. Aucun test PostGIS réel, aucune push
+réelle ni aucun essai sur téléphone physique n'a été effectué. Aucun changement
+AWS, CI/CD, donnée utilisateur ou configuration de production.

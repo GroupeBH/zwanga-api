@@ -147,6 +147,28 @@ describe('manual ride transaction', () => {
     expect(h.booking.rideEffectsPending).toEqual(['pickup', 'dropoff']);
     expect(h.bookings.finishManualRideEffects).not.toHaveBeenCalled();
   });
+  it('allows dual manual boarding with stale GPS, but never skips pickup to accept arrival', async () => {
+    const h = harness();
+    const oldLocationTimestamp = new Date(Date.now() - 4_533_000);
+    h.trip.lastLocationUpdateAt = oldLocationTimestamp;
+    h.trip.currentLocation = null;
+    h.booking.passengerCurrentLocation = null;
+
+    await expect(h.service.declare('booking', 'passenger', h.dto('dropoff')))
+      .rejects.toMatchObject({ status: 409, response: { code: 'RIDE_PICKUP_REQUIRED' } });
+    expect(h.manager.update).not.toHaveBeenCalled();
+    await h.service.declare('booking', 'passenger', h.dto('pickup'));
+    expect(h.booking.pickedUp).toBe(false);
+    await h.service.declare('booking', 'driver', h.dto('pickup', 'confirm', 'driver'));
+    expect(h.booking.pickedUp).toBe(true);
+    expect(h.booking.pickupDetectionMethod).toBe('manual_dual_confirmation');
+    await h.service.declare('booking', 'passenger', h.dto('dropoff'));
+    expect(h.booking.status).toBe(BookingStatus.COMPLETED);
+    expect(h.trip.lastLocationUpdateAt).toEqual(oldLocationTimestamp);
+    expect(h.trip.currentLocation).toBeNull();
+    expect(h.bookings.finishManualRideEffects).not.toHaveBeenCalled();
+  });
+
   it('a fresh driver arrival cannot promote an expired passenger receipt', async () => {
     const h = harness(); h.booking.pickedUp = true;
     h.booking.rideDeclarations = { dropoff: { passenger: {

@@ -1,5 +1,6 @@
 import { enqueueTransactionalNotification } from '../notifications/transactional-notification';
 import { trustedContactMessagesEnabled } from '../safety/trusted-contact-policy';
+import { TOKEN_VALUE_CDF } from '../wallet/token-value.policy';
 import {
   Injectable,
   NotFoundException,
@@ -1343,7 +1344,7 @@ export class BookingsService implements OnModuleInit {
       grossPaymentAmount,
       paymentCurrency,
       paymentMode,
-      cashCommissionTokenValue: paymentCurrency === 'CDF' ? 100 : this.walletService.convertPointsToMoney(1, paymentCurrency),
+      cashCommissionTokenValue: paymentCurrency === 'CDF' ? TOKEN_VALUE_CDF : this.walletService.convertPointsToMoney(1, paymentCurrency),
     });
 
     await this.applyFirstTripSubsidyPolicy(booking, trip);
@@ -6348,20 +6349,31 @@ export class BookingsService implements OnModuleInit {
     }
 
     try {
-      // Utiliser PostGIS ST_Distance pour calculer la distance en mètres
+      // Quote camelCase identifiers explicitly: TypeORM does not substitute
+      // property names followed directly by PostgreSQL's :: cast operator.
       const result = await this.bookingRepository
         .createQueryBuilder('booking')
         .select(
           `ST_Distance(
-            booking.passengerCurrentLocation::geography,
-            booking.passengerDestinationPoint::geography
+            "booking"."passengerCurrentLocation"::geography,
+            "booking"."passengerDestinationPoint"::geography
           )`,
           'distance',
         )
         .where('booking.id = :id', { id: booking.id })
-        .getRawOne();
+        .getRawOne<{ distance: number | string | null }>();
 
-      return result?.distance ? Math.round(result.distance) : null;
+      const rawDistance = result?.distance;
+      if (
+        typeof rawDistance !== 'number' &&
+        (typeof rawDistance !== 'string' || rawDistance.trim() === '')
+      ) {
+        return null;
+      }
+      const distance = Number(rawDistance);
+      return Number.isFinite(distance) && distance >= 0
+        ? Math.round(distance)
+        : null;
     } catch (error) {
       this.logger.error(
         `Error calculating distance to destination: ${error.message}`,
@@ -6402,12 +6414,12 @@ export class BookingsService implements OnModuleInit {
     );
 
     // Marquer comme notifié et envoyer les notifications
-    booking.destinationProximityNotified = true;
     const update = await this.bookingRepository.update(
       { id: booking.id, status: BookingStatus.ACCEPTED, destinationProximityNotified: false },
       { destinationProximityNotified: true },
     );
     if (update.affected !== 1) return;
+    booking.destinationProximityNotified = true;
 
     // Envoyer les notifications au conducteur et au passager
     await this.notifyDestinationProximity(booking, distance);

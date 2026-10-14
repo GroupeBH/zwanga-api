@@ -1,4 +1,8 @@
 import {
+  REFERRAL_MIN_WITHDRAWAL_TOKENS,
+  TOKEN_VALUE_CDF,
+} from '../wallet/token-value.policy';
+import {
   BadRequestException,
   ForbiddenException,
   Injectable,
@@ -107,8 +111,6 @@ export class ReferralsService implements OnModuleInit {
   private readonly DEFAULT_PLATFORM_COMMISSION_RATE = 0.05;
   private readonly DEFAULT_HOLD_DAYS = 7;
   private readonly DEFAULT_PROGRAM_MONTHS = 12;
-  private readonly DEFAULT_MIN_WITHDRAWAL_TOKENS = 50;
-  private readonly DEFAULT_MONEY_PER_TOKEN_CDF = 100;
   private readonly DEFAULT_ATTRIBUTION_DAYS = 30;
   private readonly DEFAULT_SHARE_LINK_REFRESH_DAYS = 330;
 
@@ -512,6 +514,10 @@ export class ReferralsService implements OnModuleInit {
         payoutCurrency,
       },
       withdrawal: {
+        enabled: true,
+        blocked:
+          !kycApproved ||
+          Number(account.availableTokens) < this.getMinimumWithdrawalTokens(),
         kycApproved,
         minimumTokens: this.getMinimumWithdrawalTokens(),
         moneyPerToken: payoutMoneyPerToken,
@@ -819,13 +825,17 @@ export class ReferralsService implements OnModuleInit {
     userId: string,
     dto: RequestReferralWithdrawalDto,
   ): Promise<ReferralWithdrawal> {
-    await this.releaseMatureRewardsForUser(userId);
-    const tokens = this.normalizePositiveAmount(dto.tokens);
-    if (tokens < this.getMinimumWithdrawalTokens()) {
+    // Check the unrounded request as well: 999.999 must not round up to 1,000.
+    if (
+      !Number.isFinite(dto.tokens) ||
+      dto.tokens < this.getMinimumWithdrawalTokens()
+    ) {
       throw new BadRequestException(
-        `Le retrait minimum est de ${this.getMinimumWithdrawalTokens()} jetons`,
+        `Le retrait minimum est de ${this.getMinimumWithdrawalTokens()} jetons de parrainage (25 000 FC)`,
       );
     }
+    const tokens = this.normalizePositiveAmount(dto.tokens);
+    await this.releaseMatureRewardsForUser(userId);
     const kycApproved = await this.kycRepository.exists({
       where: { userId, status: KycStatus.APPROVED },
     });
@@ -872,10 +882,21 @@ export class ReferralsService implements OnModuleInit {
         referencePrefix: 'REF',
       });
     } catch (error) {
-      await this.failWithdrawal(
-        withdrawal.id,
-        error instanceof Error ? error.message : String(error),
-      );
+      // A local error after provider submission must not release spendable
+      // tokens while that same transfer can still succeed.
+      const recorded =
+        await this.paymentsService.findLatestTransactionForRelatedEntity(
+          this.WITHDRAWAL_RELATED_ENTITY_TYPE,
+          withdrawal.id,
+          userId,
+        );
+      if (recorded) return this.applyPaymentToWithdrawal(recorded, userId);
+      if (
+        error instanceof BadRequestException ||
+        error instanceof ForbiddenException
+      ) {
+        await this.failWithdrawal(withdrawal.id, error.message);
+      }
       throw error;
     }
 
@@ -1782,10 +1803,7 @@ export class ReferralsService implements OnModuleInit {
   }
 
   private getMinimumWithdrawalTokens(): number {
-    return this.positiveConfig(
-      'REFERRAL_MIN_WITHDRAWAL_TOKENS',
-      this.DEFAULT_MIN_WITHDRAWAL_TOKENS,
-    );
+    return REFERRAL_MIN_WITHDRAWAL_TOKENS;
   }
 
   private getAttributionDays(): number {
@@ -1810,14 +1828,13 @@ export class ReferralsService implements OnModuleInit {
   }
 
   private getPayoutCurrency(): string {
-    return (
-      this.configService.get<string>('REFERRAL_PAYOUT_CURRENCY')?.trim() ||
-      'CDF'
-    ).toUpperCase();
+    // The approved withdrawal threshold is denominated in Congolese francs.
+    return 'CDF';
   }
 
   private getMoneyPerToken(currency: string): number {
     const normalizedCurrency = currency.toUpperCase();
+    if (normalizedCurrency === 'CDF') return TOKEN_VALUE_CDF;
     const legacyCurrency = this.configService
       .get<string>('ZWANGA_POINT_VALUE_CURRENCY')
       ?.trim()
@@ -1833,10 +1850,7 @@ export class ReferralsService implements OnModuleInit {
       this.configService.get<string | number>(
         `ZWANGA_POINT_VALUE_${normalizedCurrency}`,
       ) ??
-      legacyGenericValue ??
-      (normalizedCurrency === 'CDF'
-        ? this.DEFAULT_MONEY_PER_TOKEN_CDF
-        : undefined);
+      legacyGenericValue;
     const value = Number(configured);
     if (!Number.isFinite(value) || value <= 0) {
       throw new BadRequestException(

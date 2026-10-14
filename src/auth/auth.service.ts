@@ -199,7 +199,12 @@ export class AuthService {
     });
 
     if (accountReservesPhone(existingUser)) {
-      throw new UnauthorizedException('Ce numéro de téléphone existe déjà');
+      // Preserve the historical status/message for released clients; newer
+      // clients can offer login/PIN recovery using this stable business code.
+      throw new UnauthorizedException({
+        code: 'PHONE_ALREADY_REGISTERED',
+        message: 'Ce numéro de téléphone existe déjà',
+      });
     }
 
     await this.referralsService.assertReferralAttribution(referralAttribution);
