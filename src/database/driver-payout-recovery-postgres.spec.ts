@@ -97,6 +97,8 @@ const pgBin = process.env.PAYOUT_TEST_POSTGRES_BIN;
         extra: { max: 5 },
       });
       await source.initialize();
+      // Queries load the current PaymentTransaction entity, including the nullable
+      // top-up quote added by TokenValue25Cdf (unused and null for driver payouts).
       await source.query(`CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
       CREATE TABLE users (id uuid PRIMARY KEY);
       CREATE TABLE payment_transactions (
@@ -104,6 +106,7 @@ const pgBin = process.env.PAYOUT_TEST_POSTGRES_BIN;
         "relatedEntityType" varchar(80), "relatedEntityId" varchar(80), provider varchar(20), method varchar(20),
         status varchar(20), reference varchar(120) UNIQUE, "orderNumber" varchar(120), "providerReference" varchar(120),
         "providerStatusCode" varchar(32), "providerMessage" varchar(500), amount numeric(10,2), currency varchar(8),
+        "tokenQuantity" numeric(12,2),
         description varchar(500), phone varchar(30), "paymentUrl" varchar(1000), "callbackUrl" varchar(1000),
         "rawInitiationResponse" jsonb, "rawCallbackPayload" jsonb, "rawCheckResponse" jsonb, "paidAt" timestamp,
         "createdAt" timestamp DEFAULT now(), "updatedAt" timestamp DEFAULT now());

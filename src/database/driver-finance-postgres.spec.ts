@@ -10,9 +10,7 @@ import { DriverCashCommissions1780000050000 } from './migrations/1780000050000-D
 import { AddVerifiedWelcomeBonus1780000052000 } from './migrations/1780000052000-AddVerifiedWelcomeBonus';
 import { PrioritizeDriverWelcomeBonus1780000054000 } from './migrations/1780000054000-PrioritizeDriverWelcomeBonus';
 import { DriverWelcomeBonusCopy1780000059000 } from './migrations/1780000059000-DriverWelcomeBonusCopy';
-import { UserRole } from '../users/entities/user.entity';
 import { CashCommissionCredit1780000053000 } from './migrations/1780000053000-CashCommissionCredit';
-import { walletMovementNotification } from '../notifications/financial-notification.policy';
 import { cashAllTokenOriginsCases } from '../../test/cash-all-token-origins-postgres';
 import { financialRolloutCases } from '../../test/financial-rollout-postgres';
 import { publicationRequestUuidCases } from '../../test/publication-request-uuid-postgres';
@@ -283,7 +281,7 @@ const pgBin = process.env.DRIVER_FINANCE_TEST_POSTGRES_BIN;
           `SELECT * FROM wallet_ledger_entries WHERE "relatedEntityType"='welcome_bonus'`,
         );
 
-      it('credits exactly 50 promotional tokens and enqueues one compatible notification', async () => {
+      it('preserves the historical 50-token grant and notification contract through migration 59', async () => {
         const [document] = await kyc();
         expect(await account()).toMatchObject({
           balance: '150.00',
@@ -306,11 +304,24 @@ const pgBin = process.env.DRIVER_FINANCE_TEST_POSTGRES_BIN;
           },
         ]);
         const [notice] = await db.query('SELECT * FROM notifications');
+        // This fixture stops at migration 59, before the token value/bonus changes.
+        // Assert its immutable historical copy, not today's application policy.
+        // The current 200-token policy is covered by welcome-bonus-200-postgres.spec.ts.
         expect(notice).toMatchObject({
-          ...walletMovementNotification({
-            ...entry,
+          eventKey: `wallet:${entry.id}`,
+          userId: driver,
+          title: 'Bonus de bienvenue reçu',
+          body: 'Bienvenue chez Zwanga ! 5 000 FC vous sont offerts sous forme de jetons Zwanga pour vous permettre de payer votre abonnement Pro.',
+          data: {
+            type: 'wallet_loyalty_reward',
+            ledgerEntryId: entry.id,
+            amount: 50,
+            currency: 'PTS',
+            balanceAfter: 150,
+            relatedEntityType: 'welcome_bonus',
+            relatedEntityId: driver,
             paymentTransactionId: null,
-          }, UserRole.DRIVER),
+          },
           status: 'pending',
           fcmToken: '',
           isAutomatic: false,
