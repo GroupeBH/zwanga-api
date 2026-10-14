@@ -23,6 +23,10 @@ export async function claimTopUpPayment(repository: Repository<PaymentTransactio
       existing.phone !== candidate.phone) {
       throw new ConflictException('Cette reference de recharge correspond deja a une autre operation.');
     }
+    if (existing.tokenQuantity != null && candidate.tokenQuantity != null &&
+      Math.round(Number(existing.tokenQuantity) * 100) !== Math.round(Number(candidate.tokenQuantity) * 100)) {
+      throw new ConflictException('Cette reference de recharge correspond deja a une autre quantite de jetons.');
+    }
     // Even pending/uncertain payments must never initiate a second provider debit.
     return { payment: existing, created: false };
   }

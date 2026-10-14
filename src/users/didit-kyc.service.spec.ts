@@ -154,6 +154,22 @@ describe('DiditKycService', () => {
     jest.restoreAllMocks();
   });
 
+  it.each([baseConfig, { KYC_PROVIDER: 'aws' }, {}])(
+    'returns the existing approval before provider configuration/cutover checks (%j)',
+    async (config) => {
+      kyc.status = KycStatus.APPROVED;
+      const configured = new DiditKycService(userRepository, kycRepository,
+        createConfigService(config) as any, dataSource, evidence as any);
+      await expect(configured.createSession(user.id, {})).rejects.toMatchObject({
+        status: 409, response: { code: 'KYC_ALREADY_APPROVED' },
+      });
+      expect(kycRepository.findOne).toHaveBeenCalledWith(expect.objectContaining({ where: { userId: user.id } }));
+      expect(global.fetch).not.toHaveBeenCalled();
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+      expect(kyc.status).toBe(KycStatus.APPROVED);
+    },
+  );
+
   it('blocks new Didit sessions after AWS cutover even with the old Didit flag and key present', async () => {
     const awsService = new DiditKycService(userRepository, kycRepository,
       createConfigService({ ...baseConfig, KYC_PROVIDER: 'aws' }) as any, dataSource, evidence as any);

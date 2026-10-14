@@ -6,6 +6,8 @@ import {
   assertSelfServiceUserRole,
   assertSuperAdminRole,
   isAdminRole,
+  isBackOfficeRole,
+  isMarketerRole,
   normalizeUserDriverFlags,
   resolveSelfServiceDriverState,
   isSelfServiceUserRole,
@@ -33,6 +35,10 @@ describe('self-service user role policy', () => {
     expect(() => assertSelfServiceUserRole(UserRole.SUPER_ADMIN)).toThrow(
       BadRequestException,
     );
+    expect(isSelfServiceUserRole(UserRole.MARKETER)).toBe(false);
+    expect(() => assertSelfServiceUserRole(UserRole.MARKETER)).toThrow(
+      BadRequestException,
+    );
   });
 
   it('treats super admins as admins and preserves super admin-only checks', () => {
@@ -43,6 +49,14 @@ describe('self-service user role policy', () => {
     expect(isSuperAdminRole(UserRole.SUPER_ADMIN)).toBe(true);
     expect(roleHasAccess(UserRole.SUPER_ADMIN, UserRole.ADMIN)).toBe(true);
     expect(roleHasAccess(UserRole.ADMIN, UserRole.SUPER_ADMIN)).toBe(false);
+    expect(isAdminRole(UserRole.MARKETER)).toBe(false);
+    expect(isMarketerRole(UserRole.MARKETER)).toBe(true);
+    expect(isBackOfficeRole(UserRole.MARKETER)).toBe(true);
+    expect(isBackOfficeRole(UserRole.ADMIN)).toBe(true);
+    expect(isBackOfficeRole(UserRole.PASSENGER)).toBe(false);
+    expect(roleHasAccess(UserRole.MARKETER, UserRole.MARKETER)).toBe(true);
+    expect(roleHasAccess(UserRole.MARKETER, UserRole.ADMIN)).toBe(false);
+    expect(roleHasAccess(UserRole.ADMIN, UserRole.MARKETER)).toBe(false);
     expect(() => assertAdminRole(UserRole.SUPER_ADMIN)).not.toThrow();
     expect(() => assertSuperAdminRole(UserRole.ADMIN)).toThrow();
   });

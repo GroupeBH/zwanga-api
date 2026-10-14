@@ -73,6 +73,21 @@ function fixture() {
   return { users, jwt, vehicles, signup };
 }
 
+it.each([UserStatus.ACTIVE, UserStatus.PENDING_KYC])(
+  'preserves the duplicate phone response and adds an actionable code (%s)',
+  async (status) => {
+    const f = fixture();
+    f.users.findOne.mockResolvedValue({ id: 'existing', status, isActive: true } as any);
+    await expect(f.signup('phone', UserRole.PASSENGER, false)).rejects.toMatchObject({
+      status: 401,
+      response: { code: 'PHONE_ALREADY_REGISTERED', message: 'Ce numéro de téléphone existe déjà' },
+    });
+    expect(f.users.save).not.toHaveBeenCalled();
+    expect(f.users.update).not.toHaveBeenCalled();
+    expect(f.jwt.signAsync).not.toHaveBeenCalled();
+  },
+);
+
 for (const provider of ['phone', 'google', 'apple'])
   describe(`${provider} signup`, () => {
     it.each([

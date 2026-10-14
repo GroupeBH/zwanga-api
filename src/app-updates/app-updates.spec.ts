@@ -26,6 +26,7 @@ describe('app update policy and boundaries', () => {
     const db = { query: jest.fn() }, config = { get: () => 'false' };
     const service = new AppUpdatesService(db as any, config as any);
     expect(await service.latest({ platform: 'ios', version: '1', build: '1' })).toEqual({ enabled: false, release: null });
+    expect(await service.register('test', { platform: 'ios', version: '1', build: '1' })).toEqual({ registered: false, enabled: false });
     await expect(service.list()).rejects.toThrow('pas encore');
     await new AppUpdateDispatchService(db as any, config as any).enqueueUpdates();
     expect(db.query).not.toHaveBeenCalled();

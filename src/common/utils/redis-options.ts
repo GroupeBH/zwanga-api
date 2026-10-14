@@ -37,6 +37,7 @@ export function buildRedisClientOptions(
   return {
     url: redisUrl,
     disableOfflineQueue: true,
+    commandsQueueMaxLength: 1000,
     socket: {
       tls: redisTls,
       connectTimeout: 5_000,

@@ -109,15 +109,6 @@ export class DiditKycService {
     userId: string,
     dto: CreateDiditKycSessionDto,
   ): Promise<DiditKycSessionResult> {
-    // Stop new billable Didit sessions after an explicit AWS cutover. Keep sync
-    // and signed webhooks available for historical sessions, including approvals.
-    if (this.configService.get<string>('KYC_PROVIDER') === 'aws') {
-      throw new BadRequestException({
-        code: 'KYC_APP_UPDATE_REQUIRED',
-        message: 'La vérification d’identité a changé. Mettez à jour Zwanga pour vérifier votre identité avec le nouveau parcours sécurisé.',
-      });
-    }
-    const config = this.getRequiredDiditApiConfig();
     const user = await this.userRepository.findOne({ where: { id: userId } });
 
     if (!user) {
@@ -138,6 +129,16 @@ export class DiditKycService {
           'Votre identité est déjà vérifiée. Contactez le support si une nouvelle vérification est nécessaire.',
       });
     }
+
+    // An existing approval needs neither provider configuration nor a new SDK.
+    // Only new verifications are gated by the explicit AWS cutover.
+    if (this.configService.get<string>('KYC_PROVIDER') === 'aws') {
+      throw new BadRequestException({
+        code: 'KYC_APP_UPDATE_REQUIRED',
+        message: 'La vérification d’identité a changé. Mettez à jour Zwanga pour vérifier votre identité avec le nouveau parcours sécurisé.',
+      });
+    }
+    const config = this.getRequiredDiditApiConfig();
 
     if (existingKyc?.provider === KycProvider.AWS && existingKyc.status === KycStatus.PENDING) {
       throw new ConflictException('Une vérification AWS est déjà en cours. Reprenez ce parcours.');

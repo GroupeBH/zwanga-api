@@ -1,11 +1,14 @@
 import { ApiProperty } from '@nestjs/swagger';
 import {
+  IsIn,
   IsNotEmpty,
+  IsOptional,
   IsString,
   Matches,
   MaxLength,
   MinLength,
 } from 'class-validator';
+import { UserRole } from '../../users/entities/user.entity';
 import { Transform, TransformFnParams } from 'class-transformer';
 
 const toTrimmedString = ({ value }: TransformFnParams): unknown => {
@@ -49,6 +52,17 @@ export class CreateAdminAccountDto {
   @MinLength(8)
   @MaxLength(128)
   defaultPassword: string;
+
+  @ApiProperty({
+    enum: [UserRole.ADMIN, UserRole.MARKETER],
+    default: UserRole.ADMIN,
+    required: false,
+  })
+  @IsOptional()
+  @IsIn([UserRole.ADMIN, UserRole.MARKETER], {
+    message: 'Le rôle doit être admin ou marketer',
+  })
+  role?: UserRole.ADMIN | UserRole.MARKETER;
 }
 
 export class ResetAdminAccountPasswordDto {

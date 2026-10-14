@@ -2,9 +2,9 @@ import * as bcrypt from 'bcrypt';
 import { type FindOneOptions, Repository } from 'typeorm';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import {
-  isAdminRole,
+  isBackOfficeRole,
   isSelfServiceUserRole,
-  type AdminUserRole,
+  type BackOfficeUserRole,
 } from '../users/user-role.policy';
 
 export type ExistingAdminAccountStrategy = 'reject' | 'promote_self_service';
@@ -15,7 +15,7 @@ export interface AdminProvisioningInput {
   lastName: string;
   password?: string;
   pin?: string;
-  role?: AdminUserRole;
+  role?: BackOfficeUserRole;
   passwordChangeRequired?: boolean;
   isPhoneVerified?: boolean;
   existingAccountStrategy?: ExistingAdminAccountStrategy;
@@ -27,7 +27,7 @@ interface NormalizedAdminProvisioningInput {
   firstName: string;
   lastName: string;
   password: string;
-  role: AdminUserRole;
+  role: BackOfficeUserRole;
   passwordChangeRequired: boolean;
   isPhoneVerified: boolean;
 }
@@ -67,8 +67,8 @@ export function normalizeAdminProvisioningInput(
   }
 
   const role = input.role ?? UserRole.ADMIN;
-  if (!isAdminRole(role)) {
-    throw new Error('Le rôle doit être admin ou super_admin');
+  if (!isBackOfficeRole(role)) {
+    throw new Error('Le rôle doit être admin, super_admin ou marketer');
   }
 
   return {

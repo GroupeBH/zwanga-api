@@ -1,4 +1,6 @@
 import { trustedContactMessagesEnabled } from '../safety/trusted-contact-policy';
+import { expirePendingTrip } from './expire-pending-trip';
+import { enqueueTripReminder, TripReminderKind } from './trip-reminders';
 import { cancelEmptyRequestTrip } from './cancel-empty-request-trip';
 import { saveRequestTrip } from './save-request-trip';
 import { canReprogramTrip } from './trip-reprogram-policy';
@@ -1735,7 +1737,22 @@ export class TripsService {
       trip,
       startedAt,
     );
-    await this.tripRepository.save(trip);
+    const started = await this.tripRepository.update(
+      { id: tripId, driverId, status: TripStatus.PENDING, startedAt: IsNull() },
+      {
+        status: TripStatus.ACTIVE,
+        startedAt,
+        currentLocation: null,
+        lastLocationUpdateAt: null,
+        destinationApproachNotifiedAt: null,
+        destinationReachedAt: null,
+        estimatedArrivalDate: trip.estimatedArrivalDate,
+      },
+    );
+    if (started.affected !== 1)
+      throw new BadRequestException(
+        'Le statut du trajet a changé. Actualisez-le avant de réessayer.',
+      );
     this.logTripStateChange({
       tripId,
       driverId,
@@ -2788,9 +2805,15 @@ export class TripsService {
       tripsToCreate,
     );
 
+    let publishedCount = 0;
     if (publishableTrips.length > 0) {
-      await savePublicationsWithPhotoPolicy(this.tripRepository, template.driverId, publishableTrips);
-      await this.invalidateTripCaches();
+      const saved = await savePublicationsWithPhotoPolicy(
+        this.tripRepository,
+        template.driverId,
+        publishableTrips,
+      );
+      publishedCount = saved.length;
+      if (publishedCount) await this.invalidateTripCaches();
     }
 
     if (publishableTrips.length < tripsToCreate.length) {
@@ -2802,9 +2825,20 @@ export class TripsService {
       template.lastGeneratedDate = toDate;
     }
 
-    await this.recurringTripTemplateRepository.save(template);
+    // Do not save the stale template snapshot (which can undo a concurrent
+    // pause/edit), and never move a newer generation cursor backwards.
+    if (template.lastGeneratedDate)
+      await this.recurringTripTemplateRepository
+        .createQueryBuilder()
+        .update(RecurringTripTemplate)
+        .set({
+          lastGeneratedDate: () => 'GREATEST("lastGeneratedDate", :through)',
+        })
+        .where('id = :id', { id: template.id })
+        .setParameter('through', template.lastGeneratedDate)
+        .execute();
 
-    return publishableTrips.length;
+    return publishedCount;
   }
 
   private async buildRecurringTripFutureMeta(
@@ -3684,12 +3718,11 @@ export class TripsService {
     coordinates: [number, number],
     metadata: LocationObservationMetadata & { recordedAt?: string } = {},
   ) {
-    const { trip, isDriver } = await this.verifyTripParticipant(
-      tripId,
-      driverId,
-    );
-
-    if (!isDriver) {
+    // Driver GPS never needs to hydrate every passenger/booking to authorize
+    // its owner. Keep the authoritative database check on every update.
+    const trip = await this.tripRepository.findOne({ where: { id: tripId } });
+    if (!trip) throw new NotFoundException('Trajet non trouvé');
+    if (trip.driverId !== driverId) {
       throw new ForbiddenException(
         'Seul le conducteur peut mettre à jour la localisation',
       );
@@ -3810,130 +3843,100 @@ export class TripsService {
    * - ONGOING trips never expire automatically while they are in progress
    * Runs every hour.
    */
-  @Cron(CronExpression.EVERY_HOUR)
+  @Cron(CronExpression.EVERY_HOUR, { waitForCompletion: true })
   async markExpiredTrips() {
-    // Use setImmediate to ensure HTTP requests have priority
-    setImmediate(() => {
-      this.markExpiredTripsNow().catch((error) => {
-        const message = error instanceof Error ? error.message : String(error);
-        this.logger.error(
-          `Error marking expired trips: ${message}`,
-          error.stack,
-        );
-      });
-    });
+    await this.markExpiredTripsNow();
   }
 
   private async markExpiredTripsNow(now = new Date()): Promise<void> {
     this.logger.debug('Running cron job to mark expired trips');
 
-    // Calculate thresholds
     const twoHoursAgo = new Date(now.getTime() - 2 * 60 * 60 * 1000);
-    // 1) PENDING trips that should expire 2 hours after departure
-    //    Only trips that have NEVER been started (startedAt IS NULL)
-    const pendingTripsToExpire = await this.tripRepository.find({
-      where: {
-        status: TripStatus.PENDING,
-        startedAt: IsNull(),
-        departureDate: LessThan(twoHoursAgo),
-      },
-      relations: ['driver', 'bookings', 'bookings.passenger', 'vehicle'],
-    });
+    let expired = 0;
+    let afterId: string | undefined;
+    while (true) {
+      // Keyset batches bound memory without limiting expiry to 100 trips/hour.
+      // Advance even past failed candidates; one bad row cannot starve the rest.
+      const candidates = await this.tripRepository.find({
+        where: {
+          status: TripStatus.PENDING,
+          startedAt: IsNull(),
+          departureDate: LessThan(twoHoursAgo),
+          ...(afterId ? { id: MoreThan(afterId) } : {}),
+        },
+        select: ['id'],
+        order: { id: 'ASC' },
+        take: 100,
+      });
+      if (!candidates.length) break;
 
-    const tripsToExpire = pendingTripsToExpire;
+      for (const candidate of candidates) {
+        try {
+          const transition = await expirePendingTrip(
+            this.tripRepository,
+            candidate.id,
+            twoHoursAgo,
+            now,
+          );
+          if (!transition) continue;
+          expired++;
+          // External notifications and Redis stay outside the database transaction.
+          await this.cacheService.del(CacheService.getTripKey(candidate.id));
+          const trip = await this.tripRepository.findOne({
+            where: { id: candidate.id },
+            relations: ['driver', 'bookings', 'bookings.passenger', 'vehicle'],
+          });
+          if (!trip) continue;
+          this.logTripStateChange({
+            tripId: trip.id,
+            driverId: trip.driverId,
+            from: TripStatus.PENDING,
+            to: TripStatus.COMPLETED,
+            reason: 'auto_expired_trip',
+            acceptedBookings: trip.bookings?.length ?? 0,
+            availableSeats: trip.availableSeats,
+          });
 
-    if (tripsToExpire.length === 0) {
-      this.logger.debug('No expired trips found');
-      return;
+          const expiredIds = new Set(transition.bookingIds);
+          const expiredBookings =
+            trip.bookings?.filter((booking) => expiredIds.has(booking.id)) ||
+            [];
+          for (const booking of expiredBookings) {
+            await this.cacheService.del(CacheService.getBookingKey(booking.id));
+            await this.cacheService.del(
+              CacheService.getBookingsByPassengerKey(booking.passengerId),
+            );
+          }
+          await this.cacheService.del(
+            CacheService.getBookingsByTripKey(trip.id),
+          );
+          const bookingsMissingDropoff = expiredBookings.filter(
+            (booking) =>
+              (booking.pickedUp || booking.pickedUpConfirmedByPassenger) &&
+              !booking.droppedOff &&
+              !booking.droppedOffConfirmedByPassenger,
+          );
+          await this.notifyDriverAboutTripExpiration(trip);
+          await this.notifyPassengersAboutTripExpiration(trip, expiredBookings);
+          await this.notifyEmergencyContactsForMissingDropoff(
+            trip,
+            bookingsMissingDropoff,
+          );
+        } catch (error) {
+          this.logger.error(
+            `Trip expiry failed for ${candidate.id}; other trips will continue`,
+            error instanceof Error ? error.stack : undefined,
+          );
+        }
+      }
+      afterId = candidates[candidates.length - 1].id;
+      if (candidates.length < 100) break;
     }
 
-    this.logger.log(
-      `Found ${tripsToExpire.length} trips to auto-complete as expired ` +
-        `(pending: ${pendingTripsToExpire.length}, ongoing: 0)`,
-    );
-
-    for (const trip of tripsToExpire) {
-      // Mark trip as completed
-      const previousStatus = trip.status;
-      await this.tripRepository.update(trip.id, {
-        status: TripStatus.COMPLETED,
-        completedAt: now,
-      });
-      this.logTripStateChange({
-        tripId: trip.id,
-        driverId: trip.driverId,
-        from: previousStatus,
-        to: TripStatus.COMPLETED,
-        reason: 'auto_expired_trip',
-        acceptedBookings: trip.bookings?.length ?? 0,
-        availableSeats: trip.availableSeats,
-      });
-
-      // Mark all pending and accepted bookings as expired
-      const bookingsToExpire =
-        trip.bookings?.filter(
-          (booking) =>
-            booking.status === BookingStatus.PENDING ||
-            booking.status === BookingStatus.ACCEPTED,
-        ) || [];
-
-      const bookingsMissingDropoff = bookingsToExpire.filter(
-        (booking) =>
-          (booking.pickedUp || booking.pickedUpConfirmedByPassenger) &&
-          !booking.droppedOff &&
-          !booking.droppedOffConfirmedByPassenger,
-      );
-
-      if (bookingsToExpire.length > 0) {
-        const bookingIds = bookingsToExpire.map((b) => b.id);
-        await this.bookingRepository.update(
-          { id: In(bookingIds) },
-          { status: BookingStatus.EXPIRED },
-        );
-        this.logger.log(
-          `Marked ${bookingsToExpire.length} bookings as expired for trip ${trip.id}`,
-        );
-      }
-
-      // Restore available seats for expired bookings
-      const totalSeatsToRestore = bookingsToExpire.reduce(
-        (sum, booking) => sum + booking.numberOfSeats,
-        0,
-      );
-
-      if (totalSeatsToRestore > 0) {
-        await this.tripRepository.increment(
-          { id: trip.id },
-          'availableSeats',
-          totalSeatsToRestore,
-        );
-        this.logger.log(
-          `Restored ${totalSeatsToRestore} seats for trip ${trip.id}`,
-        );
-      }
-
-      // Notify driver about trip expiration
-      await this.notifyDriverAboutTripExpiration(trip);
-
-      // Notify passengers about trip expiration
-      await this.notifyPassengersAboutTripExpiration(trip, bookingsToExpire);
-
-      // Notify selected emergency contacts when a picked-up passenger has no dropoff confirmation.
-      await this.notifyEmergencyContactsForMissingDropoff(
-        trip,
-        bookingsMissingDropoff,
-      );
-
-      // Invalidate cache for this trip
-      await this.cacheService.del(CacheService.getTripKey(trip.id));
-    }
-
-    // Invalidate trips list cache
-    await this.cacheService.del(CacheService.getTripsListKey());
-    await this.cacheService.del(CacheService.getTripsListKey('all'));
+    if (expired) await this.invalidateTripCaches();
 
     this.logger.log(
-      `Successfully marked ${tripsToExpire.length} trips and their bookings as expired`,
+      `Successfully marked ${expired} trips and their bookings as expired`,
     );
   }
 
@@ -3943,149 +3946,31 @@ export class TripsService {
    */
   @Cron('*/15 * * * *', { waitForCompletion: true })
   async notifyAboutUpcomingTripDeparture() {
-    // Await the work so database failures are handled by the scheduler.
-    await (async () => {
-      this.logger.debug(
-        'Running cron job to notify about upcoming trip departure',
-      );
-
-      const now = new Date();
-      const thirtyMinutesFromNow = new Date(now.getTime() + 30 * 60 * 1000); // 30 minutes from now
-
-      // Find all pending trips starting in the next 30 minutes that haven't been notified yet
-      const tripsStartingSoon = await this.tripRepository.find({
-        where: {
-          status: TripStatus.PENDING,
-          departureReminderNotified: false,
-          departureDate: Between(now, thirtyMinutesFromNow),
-        },
-        relations: ['driver', 'bookings', 'bookings.passenger'],
-      });
-
-      if (tripsStartingSoon.length === 0) {
-        this.logger.debug('No trips starting soon found');
-        return;
-      }
-
-      this.logger.log(`Found ${tripsStartingSoon.length} trips starting soon`);
-
-      for (const trip of tripsStartingSoon) {
-        // Notify driver and passengers
-        await this.notifyAboutTripDeparture(trip);
-
-        // Mark as notified
-        trip.departureReminderNotified = true;
-        await this.tripRepository.save(trip);
-      }
-
-      this.logger.log(
-        `Successfully notified about ${tripsStartingSoon.length} trips starting soon`,
-      );
-    })();
+    await this.enqueueUpcomingTripReminders('departure');
   }
 
-  /**
-   * Notify driver and passengers about upcoming trip departure
-   */
-  private async notifyAboutTripDeparture(trip: Trip): Promise<void> {
-    try {
-      // Notify driver
-      if (trip.driver?.fcmToken) {
-        const minutesUntilDeparture = Math.round(
-          (trip.departureDate.getTime() - new Date().getTime()) / (60 * 1000),
-        );
-
-        const title = '⏰ Départ du trajet proche';
-        const body = `Votre trajet de ${trip.departureLocation} à ${trip.arrivalLocation} commence dans ${minutesUntilDeparture} minute${minutesUntilDeparture > 1 ? 's' : ''}.`;
-
-        const data = {
-          type: 'trip_departure_reminder',
-          tripId: trip.id,
-          departureLocation: trip.departureLocation,
-          driverId: trip.driver.id,
-          arrivalLocation: trip.arrivalLocation,
-          departureDate: trip.departureDate.toISOString(),
-          minutesUntilDeparture,
-        };
-
-        await this.notificationService.sendNotification(
-          trip.driver.fcmToken,
-          title,
-          body,
-          data,
-          trip.driverId,
-        );
-        this.logger.log(
-          `Notified driver ${trip.driverId} about trip ${trip.id} departure`,
-        );
-      }
-
-      // Notify passengers with accepted bookings
-      const acceptedBookings =
-        trip.bookings?.filter(
-          (booking) => booking.status === BookingStatus.ACCEPTED,
-        ) || [];
-
-      if (acceptedBookings.length === 0) {
-        this.logger.debug(`No accepted bookings to notify for trip ${trip.id}`);
-        return;
-      }
-
-      const passengerIds = acceptedBookings.map(
-        (booking) => booking.passengerId,
-      );
-      const passengers = await this.userRepository.find({
+  private async enqueueUpcomingTripReminders(kind: TripReminderKind): Promise<void> {
+    const now = new Date();
+    const end = new Date(now.getTime() + (kind === 'departure' ? 30 : 60) * 60_000);
+    let afterId: string | undefined;
+    for (;;) {
+      const batch = await this.tripRepository.find({
         where: {
-          id: In(passengerIds),
+          status: TripStatus.PENDING, departureDate: Between(now, end),
+          ...(kind === 'departure' ? { departureReminderNotified: false } : {}),
+          ...(afterId ? { id: MoreThan(afterId) } : {}),
         },
-        select: ['id', 'fcmToken', 'firstName', 'lastName'],
+        select: ['id'], order: { id: 'ASC' }, take: 100,
       });
-
-      const passengersWithTokens = passengers.filter(
-        (passenger) => passenger.fcmToken,
-      );
-
-      if (passengersWithTokens.length === 0) {
-        this.logger.debug(
-          'No passengers with FCM tokens found, skipping notifications',
-        );
-        return;
+      for (const candidate of batch) {
+        try {
+          await enqueueTripReminder(this.tripRepository, candidate.id, kind, now);
+        } catch (error) {
+          this.logger.error(`Unable to enqueue ${kind} reminder for trip ${candidate.id}`, error instanceof Error ? error.stack : undefined);
+        }
       }
-
-      const minutesUntilDeparture = Math.round(
-        (trip.departureDate.getTime() - new Date().getTime()) / (60 * 1000),
-      );
-
-      const fcmTokens = passengersWithTokens.map((p) => p.fcmToken!);
-      const userIds = passengersWithTokens.map((p) => p.id);
-
-      const title = '⏰ Départ du trajet proche';
-      const body = `Le trajet de ${trip.departureLocation} à ${trip.arrivalLocation} commence dans ${minutesUntilDeparture} minute${minutesUntilDeparture > 1 ? 's' : ''}. Préparez-vous !`;
-
-      const data = {
-        type: 'trip_departure_reminder',
-        tripId: trip.id,
-        departureLocation: trip.departureLocation,
-        arrivalLocation: trip.arrivalLocation,
-        departureDate: trip.departureDate.toISOString(),
-        minutesUntilDeparture,
-      };
-
-      await this.notificationService.sendToMultiple(
-        fcmTokens,
-        title,
-        body,
-        data,
-        userIds,
-      );
-      this.logger.log(
-        `Notified ${fcmTokens.length} passengers about trip ${trip.id} departure`,
-      );
-    } catch (error: any) {
-      this.logger.error(
-        `Error notifying about trip departure ${trip.id}: ${error.message}`,
-        error.stack,
-      );
+      if (batch.length < 100) break;
+      afterId = batch[batch.length - 1].id;
     }
   }
 
@@ -4095,53 +3980,7 @@ export class TripsService {
    */
   @Cron('*/15 * * * *', { waitForCompletion: true })
   async notifyAboutUpcomingTripExpiration() {
-    // Await the work so database failures are handled by the scheduler.
-    await (async () => {
-      this.logger.debug(
-        'Running cron job to notify about upcoming trip expiration',
-      );
-
-      const now = new Date();
-      const oneHourFromNow = new Date(now.getTime() + 60 * 60 * 1000); // 1 hour from now
-
-      // Find all pending trips expiring in the next hour
-      const tripsExpiringSoon = await this.tripRepository.find({
-        where: {
-          status: TripStatus.PENDING,
-          departureDate: Between(now, oneHourFromNow),
-        },
-        relations: ['driver', 'bookings', 'bookings.passenger'],
-      });
-
-      if (tripsExpiringSoon.length === 0) {
-        this.logger.debug('No trips expiring soon found');
-        return;
-      }
-
-      this.logger.log(`Found ${tripsExpiringSoon.length} trips expiring soon`);
-
-      for (const trip of tripsExpiringSoon) {
-        // Notify driver about upcoming expiration
-        await this.notifyDriverAboutUpcomingExpiration(trip);
-
-        // Notify passengers with accepted bookings
-        const acceptedBookings =
-          trip.bookings?.filter(
-            (booking) => booking.status === BookingStatus.ACCEPTED,
-          ) || [];
-
-        if (acceptedBookings.length > 0) {
-          await this.notifyPassengersAboutUpcomingExpiration(
-            trip,
-            acceptedBookings,
-          );
-        }
-      }
-
-      this.logger.log(
-        `Successfully notified about ${tripsExpiringSoon.length} trips expiring soon`,
-      );
-    })();
+    await this.enqueueUpcomingTripReminders('expiration');
   }
 
   /**
@@ -4510,121 +4349,5 @@ export class TripsService {
     );
   }
 
-  /**
-   * Notify driver about upcoming trip expiration
-   */
-  private async notifyDriverAboutUpcomingExpiration(trip: Trip): Promise<void> {
-    try {
-      if (!trip.driver?.fcmToken) {
-        this.logger.debug(
-          `Driver ${trip.driverId} has no FCM token, skipping notification`,
-        );
-        return;
-      }
 
-      const timeUntilDeparture = Math.round(
-        (trip.departureDate.getTime() - new Date().getTime()) / (1000 * 60),
-      ); // minutes
-
-      const title = 'Trajet expirant bientôt';
-      const body = `Votre trajet de ${trip.departureLocation} à ${trip.arrivalLocation} part dans ${timeUntilDeparture} minute(s).`;
-
-      const data = {
-        type: 'trip_expiring_soon',
-        tripId: trip.id,
-        driverId: trip.driver.id,
-        role: 'driver',
-        departureLocation: trip.departureLocation,
-        arrivalLocation: trip.arrivalLocation,
-        departureDate: trip.departureDate.toISOString(),
-      };
-
-      await this.notificationService.sendNotification(
-        trip.driver.fcmToken,
-        title,
-        body,
-        data,
-        trip.driverId,
-      );
-
-      this.logger.log(
-        `Notified driver ${trip.driverId} about upcoming expiration for trip ${trip.id}`,
-      );
-    } catch (error: any) {
-      this.logger.error(
-        `Error notifying driver about upcoming expiration: ${error.message}`,
-        error.stack,
-      );
-    }
-  }
-
-  /**
-   * Notify passengers about upcoming trip expiration
-   */
-  private async notifyPassengersAboutUpcomingExpiration(
-    trip: Trip,
-    bookings: Booking[],
-  ): Promise<void> {
-    try {
-      const passengersWithTokens = bookings
-        .filter((booking) => booking.passenger?.fcmToken)
-        .map((booking) => ({
-          id: booking.passengerId,
-          fcmToken: booking.passenger!.fcmToken!,
-        }));
-
-      if (passengersWithTokens.length === 0) {
-        this.logger.debug(
-          'No passengers with FCM tokens found, skipping notifications',
-        );
-        return;
-      }
-
-      const fcmTokens = passengersWithTokens.map((p) => p.fcmToken);
-      const passengerIds = passengersWithTokens.map((p) => p.id);
-
-      const timeUntilDeparture = Math.round(
-        (trip.departureDate.getTime() - new Date().getTime()) / (1000 * 60),
-      ); // minutes
-
-      const title = 'Trajet expirant bientôt';
-      const body = `Le trajet de ${trip.departureLocation} à ${trip.arrivalLocation} auquel vous avez réservé part dans ${timeUntilDeparture} minute(s).`;
-
-      const data = {
-        type: 'trip_expiring_soon',
-        tripId: trip.id,
-        bookingId: bookings[0]?.id || null,
-        departureLocation: trip.departureLocation,
-        arrivalLocation: trip.arrivalLocation,
-        departureDate: trip.departureDate.toISOString(),
-      };
-
-      if (fcmTokens.length === 1) {
-        await this.notificationService.sendNotification(
-          fcmTokens[0],
-          title,
-          body,
-          data,
-          passengerIds[0],
-        );
-      } else {
-        await this.notificationService.sendToMultiple(
-          fcmTokens,
-          title,
-          body,
-          data,
-          passengerIds,
-        );
-      }
-
-      this.logger.log(
-        `Notified ${fcmTokens.length} passengers about upcoming expiration for trip ${trip.id}`,
-      );
-    } catch (error: any) {
-      this.logger.error(
-        `Error notifying passengers about upcoming expiration: ${error.message}`,
-        error.stack,
-      );
-    }
-  }
 }

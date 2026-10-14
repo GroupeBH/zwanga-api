@@ -3,12 +3,14 @@ import { BadGatewayException, Logger } from '@nestjs/common';
 import {
   PaymentMethod,
   PaymentProvider,
+  PaymentPurpose,
   PaymentStatus,
   PaymentTransaction,
 } from './entities/payment-transaction.entity';
 import { DriverPayout } from '../driver-settlements/entities/driver-payout.entity';
 import { PaymentsService } from './payments.service';
 import { PaymentSettlementRegistry } from './payment-settlement.registry';
+import { TOKEN_WITHDRAWAL_DISABLED } from './token-withdrawal.policy';
 
 describe('PaymentsService', () => {
   let paymentTransactionRepository: {
@@ -102,6 +104,40 @@ describe('PaymentsService', () => {
   });
 
   afterEach(() => jest.restoreAllMocks());
+
+  it.each([
+    [PaymentPurpose.WALLET_PAYOUT, PaymentProvider.FLEXPAY],
+    [PaymentPurpose.WALLET_PAYOUT, PaymentProvider.PAWAPAY],
+    [PaymentPurpose.REFERRAL_PAYOUT, PaymentProvider.FLEXPAY],
+    [PaymentPurpose.REFERRAL_PAYOUT, PaymentProvider.PAWAPAY],
+  ])('rejects wallet or unbound referral payouts (%s through %s) before persistence', async (purpose, preferredProvider) => {
+    const pawaPay = { isConfigured: jest.fn().mockReturnValue(true), initiatePayout: jest.fn() };
+    const guardedService = new PaymentsService(
+      paymentTransactionRepository as any,
+      configService as any,
+      flexPayService as any,
+      pawaPay as any,
+      new PaymentSettlementRegistry(),
+    );
+    await expect(guardedService.initiatePayout({
+      userId: 'user-1', purpose, preferredProvider,
+      phone: '+243891234567', amount: 5000, currency: 'CDF',
+      description: 'Token withdrawal',
+    })).rejects.toMatchObject({ status: 403, response: TOKEN_WITHDRAWAL_DISABLED });
+    expect(paymentTransactionRepository.create).not.toHaveBeenCalled();
+    expect(paymentTransactionRepository.save).not.toHaveBeenCalled();
+    expect(flexPayService.initiatePayout).not.toHaveBeenCalled();
+    expect(pawaPay.initiatePayout).not.toHaveBeenCalled();
+    expect(pawaPay.isConfigured).not.toHaveBeenCalled();
+  });
+
+  it('allows an explicitly bound referral withdrawal of 1000 tokens at 25 CDF', async () => {
+    const input = { userId: 'referrer', purpose: PaymentPurpose.REFERRAL_PAYOUT,
+      relatedEntityType: 'referral_withdrawal', relatedEntityId: 'withdrawal-1',
+      phone: '+243891234567', amount: 25000, currency: 'CDF', description: 'Retrait de parrainage' };
+    await expect(service.initiatePayout(input)).resolves.toMatchObject({ purpose: PaymentPurpose.REFERRAL_PAYOUT, amount: 25000 });
+    expect(flexPayService.initiatePayout).toHaveBeenCalledTimes(1);
+  });
 
   it('a topup retry returns the original payment without contacting the provider again', async () => {
     const input = { userId: 'user', purpose: 'wallet_top_up', idempotencyKey: 'stable-key',

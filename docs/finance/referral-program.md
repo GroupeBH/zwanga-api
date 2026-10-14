@@ -1,5 +1,13 @@
 # FIN-REF-001 — Parrainage, commissions et retraits FlexPay
 
+## Mise à jour du 14 octobre 2026 — retrait dès 1 000 jetons, à 25 FC
+
+Les montants/seuils ci-dessous documentent le fonctionnement initial. La règle actuelle autorise `POST /referrals/me/withdrawals` dès **1 000 jetons par demande**, soit **25 000 CDF**, avec KYC et solde disponible suffisants. La valeur est de **25 FC pour tous les jetons Zwanga**. Le résumé indique `withdrawal.enabled=true`, `minimumTokens=1000`, `moneyPerToken=25`, et `blocked=true` si le KYC ou le solde est insuffisant. Une ancienne configuration à 50 jetons/100 FC ne contourne pas ces règles.
+
+Les soldes acquis gardent leur nombre de jetons ; aucun crédit multiplicateur. Les taux de récompense restent inchangés, les nouvelles récompenses sont converties à 25 FC/jeton. Les anciens retraits déjà transmis gardent leur taux/montant enregistré. Les gains conducteur restent retirables ; les jetons du portefeuille d'usage restent non retirables. Voir [la politique actuelle, ses migrations et les limites mobiles](purchased-token-withdrawals.md).
+
+## Spécification initiale (historique)
+
 Date : 25 août 2026  
 Statut : implémenté dans le code ; migration à appliquer  
 Périmètre : inscription, abonnements, courses, paiements FlexPay, jetons retirables, KYC, retraits et application mobile

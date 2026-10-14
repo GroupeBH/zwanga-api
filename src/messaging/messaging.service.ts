@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { HttpService } from '@nestjs/axios';
-import { firstValueFrom } from 'rxjs';
+import { firstValueFrom, timeout } from 'rxjs';
 
 export interface MessagingMessage {
   to: string; // Numero au format international (ex: +243900000000)
@@ -203,7 +203,7 @@ export class MessagingService {
           )} meta=${JSON.stringify(metadata ?? {})}`,
         );
         const response = await firstValueFrom(
-          this.httpService.post(this.apiUrl, payload, { headers }),
+          this.httpService.post(this.apiUrl, payload, { headers, timeout: 5000 }).pipe(timeout(5500)),
         );
 
         const info =
@@ -233,6 +233,9 @@ export class MessagingService {
         return true;
       } catch (error) {
         lastError = error;
+        // A lost response may already have sent the message. Retry only when
+        // the provider explicitly rejects the encoding, never on timeout/5xx.
+        if (!this.canRetryPayload(error)) break;
         const parsedError = this.parseInfobipError(error);
         this.logger.warn(
           `[WA][RETRY] variant=${index + 1}/${payloadVariants.length} to=${this.maskPhone(
@@ -306,7 +309,8 @@ export class MessagingService {
         const response = await firstValueFrom(
           this.httpService.post(this.keccelSmsUrl, variant.body, {
             headers: variant.headers,
-          }),
+            timeout: 5000,
+          }).pipe(timeout(5500)),
         );
 
         const data = response?.data ?? {};
@@ -335,6 +339,7 @@ export class MessagingService {
         return true;
       } catch (error) {
         lastError = error;
+        if (!this.canRetryPayload(error)) break;
         const parsedError = this.parseKeccelSmsError(error);
         this.logger.warn(
           `[SMS][RETRY] variant=${variant.label} to=${this.maskPhone(to)} reason="${
@@ -360,6 +365,10 @@ export class MessagingService {
       lastError?.stack,
     );
     return false;
+  }
+
+  private canRetryPayload(error: any): boolean {
+    return [400, 415, 422].includes(error?.response?.status);
   }
 
   private isKeccelSmsSuccess(data: any): boolean {

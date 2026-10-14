@@ -50,7 +50,7 @@ export class Booking {
   @Column({ type: 'smallint', default: 2, update: false })
   cashCommissionPolicyVersion: number;
 
-  @Column({ type: 'numeric', precision: 12, scale: 4, default: 100, update: false })
+  @Column({ type: 'numeric', precision: 12, scale: 4, default: 25, update: false })
   cashCommissionTokenValue: number;
 
   @PrimaryGeneratedColumn('uuid')

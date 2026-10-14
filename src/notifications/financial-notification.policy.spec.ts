@@ -21,6 +21,36 @@ import {
 import { UserRole } from '../users/entities/user.entity';
 
 describe('financial notification coverage', () => {
+  it.each(['PTS', 'POINTS'])('presents the new 200-token welcome offer in %s', currency => {
+    const result = walletMovementNotification({
+      id: 'welcome', userId: 'driver', type: WalletLedgerEntryType.LOYALTY_REWARD,
+      relatedEntityType: 'welcome_bonus', amount: 200, currency, balanceAfter: 270,
+    } as WalletLedgerEntry, UserRole.DRIVER)!;
+    expect(result.body).toBe(
+      'Bienvenue chez Zwanga ! 5 000 FC vous sont offerts sous forme de 200 jetons Zwanga pour vous permettre de payer votre abonnement Pro.',
+    );
+    expect(result.body).not.toContain('abonnement activé');
+    expect(result.data).toMatchObject({ amount: 200, currency, balanceAfter: 270,
+      type: 'wallet_loyalty_reward', relatedEntityType: 'welcome_bonus' });
+  });
+
+  it('does not promise tokens or Pro when the denomination is not tokens', () => {
+    const result = walletMovementNotification({
+      id: 'welcome', userId: 'driver', type: WalletLedgerEntryType.LOYALTY_REWARD,
+      relatedEntityType: 'welcome_bonus', amount: 200, currency: 'CDF', balanceAfter: 200,
+    } as WalletLedgerEntry, UserRole.DRIVER)!;
+    expect(result.body).not.toMatch(/5 000 FC|abonnement Pro/);
+  });
+
+  it.each([UserRole.PASSENGER, undefined])('describes an actual new passenger grant (%s)', role => {
+    const result = walletMovementNotification({
+      id: 'welcome', userId: 'passenger', type: WalletLedgerEntryType.LOYALTY_REWARD,
+      relatedEntityType: 'welcome_bonus', amount: 200, currency: 'PTS', balanceAfter: 200,
+    } as WalletLedgerEntry, role)!;
+    expect(result.body).toContain('200 jetons de bienvenue');
+    expect(result.body).not.toContain('abonnement Pro');
+  });
+
   it('presents the driver welcome bonus in FC for Pro without changing the mobile payload', () => {
     const result = walletMovementNotification({
       id: 'welcome', userId: 'driver',
@@ -29,9 +59,9 @@ describe('financial notification coverage', () => {
       balanceAfter: 150, currency: 'PTS',
     } as WalletLedgerEntry, UserRole.DRIVER)!;
     expect(result.body).toBe(
-      'Bienvenue chez Zwanga ! 5 000 FC vous sont offerts sous forme de jetons Zwanga pour vous permettre de payer votre abonnement Pro.',
+      'Bienvenue chez Zwanga ! 1 250 FC vous sont offerts sous forme de 50 jetons Zwanga pour contribuer au paiement de votre abonnement Pro.',
     );
-    expect(result.body).not.toMatch(/50 jetons|abonnement activé/);
+    expect(result.body).not.toMatch(/5 000 FC|abonnement activé/);
     expect(result.data).toMatchObject({ amount: 50, currency: 'PTS', balanceAfter: 150,
       type: 'wallet_loyalty_reward', relatedEntityType: 'welcome_bonus' });
   });

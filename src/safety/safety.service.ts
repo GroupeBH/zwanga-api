@@ -1,6 +1,7 @@
 import { Injectable, Logger, NotFoundException, BadRequestException, ForbiddenException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, MoreThan, LessThan, IsNull } from 'typeorm';
+import { Repository, MoreThan, Between } from 'typeorm';
+import { createPhoneShutdownAlert } from './phone-shutdown-alert';
 import { EmergencyContact } from './entities/emergency-contact.entity';
 import { SafetyAlert, SafetyAlertType, SafetyAlertStatus } from './entities/safety-alert.entity';
 import { UserReport, ReportReason, ReportStatus } from './entities/user-report.entity';
@@ -382,140 +383,31 @@ export class SafetyService {
     return this.sanitizeSafetyAlert(updated);
   }
 
-  // Job cron pour détecter les téléphones éteints brusquement
-  @Cron(CronExpression.EVERY_MINUTE)
+  // Await work so local ticks cannot overlap; the transaction coordinates replicas.
+  @Cron(CronExpression.EVERY_MINUTE, { waitForCompletion: true })
   async checkForPhoneShutdowns() {
-    // Use setImmediate to ensure HTTP requests have priority
-    setImmediate(() => {
-      void this.runPhoneShutdownCheck().catch((error: any) => {
-        this.logger.error(
-          `Error checking for phone shutdowns: ${error.message}`,
-          error.stack,
-        );
-      });
-    });
-  }
-
-  private async runPhoneShutdownCheck(): Promise<void> {
-    this.logger.debug('Checking for phone shutdowns during active trips');
-
-    // Trouver toutes les alertes actives avec une dernière mise à jour de position
-    const activeAlerts = await this.safetyAlertRepository.find({
-      where: {
-        status: SafetyAlertStatus.ACTIVE,
-        lastLocationUpdate: MoreThan(new Date(Date.now() - 24 * 60 * 60 * 1000)), // Dans les dernières 24h
-      },
-      relations: ['trip', 'booking'],
-    });
-
     const now = new Date();
-
-    for (const alert of activeAlerts) {
-      // Vérifier si la dernière mise à jour est trop ancienne
-      if (alert.lastLocationUpdate) {
-        const timeSinceLastUpdate = now.getTime() - alert.lastLocationUpdate.getTime();
-
-        // Si plus de 5 minutes sans mise à jour et qu'il y a un trip/booking actif
-        if (timeSinceLastUpdate > this.LOCATION_UPDATE_TIMEOUT) {
-          // Vérifier si le trip ou booking est toujours actif
-          const isTripActive = alert.tripId
-            ? await this.isTripActive(alert.tripId)
-            : false;
-          const isBookingActive = alert.bookingId
-            ? await this.isBookingActive(alert.bookingId)
-            : false;
-
-          if (isTripActive || isBookingActive) {
-            // Vérifier s'il n'y a pas déjà une alerte de type PHONE_SHUTDOWN
-            const whereCondition: any = {
-              userId: alert.userId,
-              type: SafetyAlertType.PHONE_SHUTDOWN,
-              status: SafetyAlertStatus.ACTIVE,
-            };
-
-            // Ajouter tripId et bookingId seulement s'ils ne sont pas null
-            if (alert.tripId !== null) {
-              whereCondition.tripId = alert.tripId;
-            } else {
-              whereCondition.tripId = IsNull();
-            }
-
-            if (alert.bookingId !== null) {
-              whereCondition.bookingId = alert.bookingId;
-            } else {
-              whereCondition.bookingId = IsNull();
-            }
-
-            const existingShutdownAlert = await this.safetyAlertRepository.findOne({
-              where: whereCondition,
-            });
-
-            if (!existingShutdownAlert) {
-              this.logger.warn(
-                `Detected potential phone shutdown for user ${alert.userId} during trip/booking`,
-              );
-
-              // Créer une alerte de téléphone éteint
-              const shutdownAlert = this.safetyAlertRepository.create({
-                userId: alert.userId,
-                tripId: alert.tripId,
-                bookingId: alert.bookingId,
-                type: SafetyAlertType.PHONE_SHUTDOWN,
-                status: SafetyAlertStatus.ACTIVE,
-                message: 'Téléphone éteint brusquement pendant une course active',
-                latitude: alert.latitude,
-                longitude: alert.longitude,
-                batteryLevel: alert.batteryLevel,
-                lastLocationUpdate: alert.lastLocationUpdate,
-              });
-
-              const saved = await this.safetyAlertRepository.save(shutdownAlert);
-
-              // Notifier les contacts d'urgence
-              await this.notifyEmergencyContacts(alert.userId, saved);
-            }
-          }
+    let afterId: string | undefined;
+    for (;;) {
+      const batch = await this.safetyAlertRepository.find({
+        where: {
+          status: SafetyAlertStatus.ACTIVE,
+          lastLocationUpdate: Between(new Date(now.getTime() - 24 * 60 * 60_000),
+            new Date(now.getTime() - this.LOCATION_UPDATE_TIMEOUT)),
+          ...(afterId ? { id: MoreThan(afterId) } : {}),
+        },
+        order: { id: 'ASC' }, take: 100,
+      });
+      for (const candidate of batch) {
+        try {
+          await createPhoneShutdownAlert(this.safetyAlertRepository, candidate, now, this.LOCATION_UPDATE_TIMEOUT);
+        } catch (error) {
+          this.logger.error('Unable to process phone shutdown candidate', error instanceof Error ? error.stack : undefined);
         }
       }
+      if (batch.length < 100) break;
+      afterId = batch[batch.length - 1].id;
     }
-  }
-
-  private async isTripActive(tripId: string): Promise<boolean> {
-    const trip = await this.tripRepository.findOne({
-      where: { id: tripId },
-    });
-
-    if (!trip) {
-      return false;
-    }
-
-    // Un trip est actif si la date de départ est passée et le trip n'est pas encore complété
-    const now = new Date();
-    return (
-      trip.departureDate <= now &&
-      trip.status === TripStatus.ACTIVE &&
-      !trip.completedAt
-    );
-  }
-
-  private async isBookingActive(bookingId: string): Promise<boolean> {
-    const booking = await this.bookingRepository.findOne({
-      where: { id: bookingId },
-      relations: ['trip'],
-    });
-
-    if (!booking || !booking.trip) {
-      return false;
-    }
-
-    // Un booking est actif si le trip est actif et le booking est accepté
-    const now = new Date();
-    return (
-      booking.status === BookingStatus.ACCEPTED &&
-      booking.trip.departureDate <= now &&
-      booking.trip.status === TripStatus.ACTIVE &&
-      !booking.trip.completedAt
-    );
   }
 
   private isTripInProgress(trip: Trip): boolean {

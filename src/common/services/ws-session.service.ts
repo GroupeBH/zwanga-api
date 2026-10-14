@@ -17,6 +17,7 @@ export class WsSessionService implements OnModuleInit, OnModuleDestroy {
   private readonly inFlight = new Map<string, number>();
   private sweepTimer?: NodeJS.Timeout;
   private sweeping = false;
+  private stopping = false;
   constructor(private readonly dataSource: DataSource, private readonly redis: RedisService) {}
 
   onModuleInit() {
@@ -24,8 +25,12 @@ export class WsSessionService implements OnModuleInit, OnModuleDestroy {
     this.sweepTimer.unref();
   }
   onModuleDestroy() {
+    this.stopping = true;
     clearInterval(this.sweepTimer);
-    for (const socket of this.sessions.keys()) this.close(socket);
+    // Nest destroys modules before the tracking shutdown/drain hook. Do not
+    // turn a deployment into a session revocation or disconnect other replicas.
+    for (const session of this.sessions.values()) clearTimeout(session.timer);
+    this.sessions.clear();
   }
   private allowed(user: User | undefined | null, token: string) {
     return !!user && user.isActive && ![UserStatus.INACTIVE, UserStatus.SUSPENDED].includes(user.status)
@@ -35,15 +40,25 @@ export class WsSessionService implements OnModuleInit, OnModuleDestroy {
     return this.dataSource.getRepository(User).find({ where: { id: In(ids) },
       select: ['id', 'isActive', 'status', 'accessToken'] });
   }
-  private close(socket: Socket) {
+  private close(socket: Socket, temporarilyUnavailable = false) {
+    if (this.stopping) return;
     const session = this.sessions.get(socket);
     if (session) clearTimeout(session.timer);
     this.sessions.delete(socket);
-    socket.emit('session_expired', { message: 'Votre session doit être renouvelée.' });
+    if (temporarilyUnavailable) {
+      // Keep existing clients' reconnect signal, without pretending their JWT
+      // was revoked. Still disconnect: unverifiable sessions never stay open.
+      socket.emit('server_restart', {
+        reason: 'dependency_unavailable', reconnect: true, retryAfterSeconds: 5,
+      });
+    } else {
+      socket.emit('session_expired', { message: 'Votre session doit être renouvelée.' });
+    }
     socket.disconnect();
   }
   async connect(socket: Socket, jwt: JwtService, config: ConfigService): Promise<boolean> {
     try {
+      if (this.stopping) { socket.disconnect(); return false; }
       if (this.sessions.size >= 2000 || !(await authenticateSocket(socket, jwt, config))) {
         socket.disconnect();
         return false;
@@ -58,6 +73,7 @@ export class WsSessionService implements OnModuleInit, OnModuleDestroy {
       if (this.sessions.size >= 2000 || [...this.sessions.keys()].filter(client => client.data.userId === userId).length >= 6) {
         socket.disconnect(); return false;
       }
+      if (this.stopping) { socket.disconnect(); return false; }
       // Expiry also disconnects passive subscribers: checking incoming messages is insufficient.
       const timer = setTimeout(() => this.close(socket), Math.min(2_147_483_647,
         Math.max(0, Number(socket.data.authExpiresAt) - Date.now())));
@@ -69,23 +85,24 @@ export class WsSessionService implements OnModuleInit, OnModuleDestroy {
       });
       return true;
     } catch {
-      this.close(socket);
+      this.close(socket, true);
       return false;
     }
   }
   async validateSessions() {
-    if (this.sweeping || !this.sessions.size) return;
+    if (this.stopping || this.sweeping || !this.sessions.size) return;
     this.sweeping = true;
     try {
       const ids = [...new Set([...this.sessions.keys()].map(socket => socketUserId(socket)))];
       const users = new Map((await this.users(ids)).map(user => [user.id, user]));
+      if (this.stopping) return;
       for (const [socket, session] of this.sessions) {
         if (!this.allowed(users.get(socketUserId(socket)), session.token)) this.close(socket);
       }
       await pruneTrackingRooms(this.dataSource, [...this.sessions.keys()]);
     } catch {
       // Fail closed if server-owned account/session state cannot be checked.
-      for (const socket of this.sessions.keys()) this.close(socket);
+      if (!this.stopping) for (const socket of this.sessions.keys()) this.close(socket, true);
     } finally { this.sweeping = false; }
   }
   async begin(socket: Socket): Promise<() => void> {

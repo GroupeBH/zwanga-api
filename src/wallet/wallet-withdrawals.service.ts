@@ -30,6 +30,7 @@ import {
 import { WalletWithdrawal } from './entities/wallet-withdrawal.entity';
 import { RequestWalletWithdrawalDto } from './dto/wallet.dto';
 import { applyTokenMovement, tokenCents } from './wallet-origin';
+import { assertPayoutPurposeAllowed } from '../payments/token-withdrawal.policy';
 
 const RELATED_TYPE = 'wallet_withdrawal';
 
@@ -55,6 +56,9 @@ export class WalletWithdrawalsService implements OnModuleInit {
   }
 
   async request(userId: string, dto: RequestWalletWithdrawalDto) {
+    // Reject before even an idempotent lookup or token reservation. GET status
+    // and provider callbacks still reconcile withdrawals submitted earlier.
+    assertPayoutPurposeAllowed({ purpose: PaymentPurpose.WALLET_PAYOUT });
     const phone = dto.phone?.replace(/^\+/, '');
     if (
       !/^243\d{9}$/.test(phone ?? '') ||

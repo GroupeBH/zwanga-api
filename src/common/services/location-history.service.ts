@@ -95,47 +95,57 @@ export class LocationHistoryService {
     }
 
     try {
-      const existing =
-        await this.redisService.get<LocationHistorySnapshot>(key);
-      const existingSamples = this.getSamples(existing);
-      const existingCurrentTimestamp = existing?.current
-        ? new Date(existing.current.recordedAt).getTime()
-        : Number.NEGATIVE_INFINITY;
-      const currentTimestamp = new Date(current.recordedAt).getTime();
-      if (currentTimestamp < existingCurrentTimestamp) {
-        this.logger.debug(
-          `Ignoring out-of-order location history update for ${key}`,
-        );
-        return;
-      }
+      // Rebuild from the winning snapshot on contention; retries are bounded.
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const existing =
+          await this.redisService.get<LocationHistorySnapshot>(key);
+        const existingSamples = this.getSamples(existing);
+        const existingCurrentTimestamp = existing?.current
+          ? new Date(existing.current.recordedAt).getTime()
+          : Number.NEGATIVE_INFINITY;
+        const currentTimestamp = new Date(current.recordedAt).getTime();
+        if (currentTimestamp < existingCurrentTimestamp) {
+          this.logger.debug(
+            `Ignoring out-of-order location history update for ${key}`,
+          );
+          return;
+        }
 
-      if (this.isDuplicateCurrentLocation(existing?.current, current)) {
-        const samples = [...existingSamples.slice(0, -1), current].slice(
+        if (this.isDuplicateCurrentLocation(existing?.current, current)) {
+          const samples = [...existingSamples.slice(0, -1), current].slice(
+            -this.LOCATION_WINDOW_SIZE,
+          );
+          const saved = await this.redisService.compareAndSet(
+            key,
+            existing,
+            {
+              previous: samples.at(-2) ?? existing?.previous ?? null,
+              current,
+              samples,
+            },
+            this.LOCATION_HISTORY_TTL_SECONDS,
+          );
+          if (saved) return;
+          continue;
+        }
+
+        const samples = [...existingSamples, current].slice(
           -this.LOCATION_WINDOW_SIZE,
         );
-        await this.redisService.set(
+        const saved = await this.redisService.compareAndSet(
           key,
+          existing,
           {
-            previous: samples.at(-2) ?? existing?.previous ?? null,
+            previous: samples.at(-2) ?? existing?.current ?? null,
             current,
             samples,
           },
           this.LOCATION_HISTORY_TTL_SECONDS,
         );
-        return;
+        if (saved) return;
       }
-
-      const samples = [...existingSamples, current].slice(
-        -this.LOCATION_WINDOW_SIZE,
-      );
-      await this.redisService.set(
-        key,
-        {
-          previous: samples.at(-2) ?? existing?.current ?? null,
-          current,
-          samples,
-        },
-        this.LOCATION_HISTORY_TTL_SECONDS,
+      this.logger.debug(
+        'Location history contention: skipped a sample without overwriting newer GPS',
       );
     } catch (error) {
       this.logger.warn(

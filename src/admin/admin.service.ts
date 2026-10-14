@@ -33,8 +33,10 @@ import { identityHash } from '../users/aws-kyc/aws-kyc.policy';
 import { Vehicle } from '../vehicles/entities/vehicle.entity';
 import {
   ADMIN_USER_ROLES,
+  BACK_OFFICE_USER_ROLES,
   assertSuperAdminRole,
   isAdminRole,
+  isBackOfficeRole,
   isSuperAdminRole,
 } from '../users/user-role.policy';
 import {
@@ -369,6 +371,33 @@ export class AdminService {
     };
   }
 
+  async getMarketingStats(actorId: string) {
+    const actor = await this.userRepository.findOne({ where: { id: actorId } });
+    if (!actor || !isBackOfficeRole(actor.role)) {
+      throw new ForbiddenException('Action réservée au back-office');
+    }
+
+    const now = new Date();
+    const [users, trips, tripRequests, subscriptionRows] = await Promise.all([
+      this.userRepository.count({
+        where: { role: In([UserRole.PASSENGER, UserRole.DRIVER]) },
+      }),
+      this.tripRepository.count(),
+      this.tripRequestRepository.count(),
+      this.userRepository.manager.query(
+        `SELECT COUNT(*)::int AS count
+         FROM subscriptions
+         WHERE plan = 'pro'
+           AND status = 'active'
+           AND "endDate" > $1`,
+        [now],
+      ),
+    ]);
+    const subscriptions = Number(subscriptionRows?.[0]?.count ?? 0);
+
+    return { users, trips, subscriptions, tripRequests };
+  }
+
   async getUserStats(): Promise<{
     totalUsers: number;
     drivers: number;
@@ -378,7 +407,7 @@ export class AdminService {
       this.userRepository
         .createQueryBuilder('user')
         .where('user.role NOT IN (:...adminRoles)', {
-          adminRoles: [...ADMIN_USER_ROLES],
+          adminRoles: [...BACK_OFFICE_USER_ROLES],
         })
         .getCount(),
       applyAdminUserSegmentFilter(
@@ -406,7 +435,7 @@ export class AdminService {
     const { pageNumber, pageSize } = this.normalizePagination(page, limit);
 
     const [accounts, total] = await this.userRepository.findAndCount({
-      where: { role: In([...ADMIN_USER_ROLES]) },
+      where: { role: In([...ADMIN_USER_ROLES, UserRole.MARKETER]) },
       skip: (pageNumber - 1) * pageSize,
       take: pageSize,
       order: { createdAt: 'DESC' },
@@ -424,10 +453,17 @@ export class AdminService {
     adminId: string,
     dto: CreateAdminAccountDto,
   ) {
-    await this.ensureSuperAdmin(
+    const actor = await this.ensureAdmin(
       adminId,
-      'Only super admins can create back-office accounts',
+      'Seul un administrateur peut créer un compte marketeur.',
     );
+    const requestedRole =
+      dto.role === UserRole.MARKETER ? UserRole.MARKETER : UserRole.ADMIN;
+    if (requestedRole === UserRole.ADMIN && !isSuperAdminRole(actor.role)) {
+      throw new ForbiddenException(
+        'Seul un super administrateur peut créer un compte administrateur.',
+      );
+    }
 
     try {
       const admin = await this.userRepository.manager.transaction(
@@ -437,7 +473,7 @@ export class AdminService {
             firstName: dto.firstName,
             lastName: dto.lastName,
             password: dto.defaultPassword,
-            role: UserRole.ADMIN,
+            role: requestedRole,
             passwordChangeRequired: true,
             isPhoneVerified: false,
             existingAccountStrategy: 'promote_self_service',
@@ -446,7 +482,7 @@ export class AdminService {
       );
 
       this.logger.warn(
-        `Super admin ${adminId} created or promoted admin account ${admin.id}`,
+        `${actor.role} ${adminId} created or promoted ${requestedRole} account ${admin.id}`,
       );
 
       return this.serializeAdminAccount(admin);
@@ -1126,7 +1162,7 @@ export class AdminService {
     }
 
     const account = await this.userRepository.findOne({ where: { id: userId } });
-    if (!account || !isAdminRole(account.role)) {
+    if (!account || !isBackOfficeRole(account.role)) {
       throw new NotFoundException('Compte administrateur introuvable.');
     }
     if (isSuperAdminRole(account.role)) {

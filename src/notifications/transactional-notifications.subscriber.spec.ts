@@ -48,6 +48,20 @@ const fixture = () => {
 };
 
 describe('transactional notification subscriber', () => {
+  it.each([UserRole.DRIVER, UserRole.PASSENGER])('enqueues the new welcome amount for the persisted role (%s)', async role => {
+    const f = fixture();
+    f.manager.findOne.mockResolvedValue({ role });
+    await f.subscriber.afterInsert(f.event(WalletLedgerEntry, {
+      id: 'welcome200', userId: 'recipient', type: WalletLedgerEntryType.LOYALTY_REWARD,
+      relatedEntityType: 'welcome_bonus', amount: 200, currency: 'PTS', balanceAfter: 200,
+    }));
+    const row = f.builder.values.mock.calls[0][0];
+    expect(row.body).toContain(role === UserRole.DRIVER ? '5 000 FC' : '200 jetons');
+    expect(row.data).toMatchObject({ amount: 200, currency: 'PTS', type: 'wallet_loyalty_reward' });
+    expect(row.eventKey).toBe('wallet:welcome200');
+    expect(row.status).toBe('pending');
+  });
+
   it.each([UserRole.DRIVER, UserRole.PASSENGER])('uses the persisted recipient role for welcome copy (%s)', async role => {
     const f = fixture();
     f.manager.findOne.mockResolvedValue({ role });
@@ -59,7 +73,7 @@ describe('transactional notification subscriber', () => {
       where: { id: 'recipient' }, select: { role: true },
     });
     const row = f.builder.values.mock.calls[0][0];
-    expect(row.body).toContain(role === UserRole.DRIVER ? '5 000 FC' : '50 jetons');
+    expect(row.body).toContain(role === UserRole.DRIVER ? '1 250 FC' : '50 jetons');
     expect(row.data).toMatchObject({ amount: 50, currency: 'PTS' });
     expect(row.eventKey).toBe('wallet:welcome');
   });

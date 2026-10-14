@@ -22,6 +22,7 @@ export enum UserRole {
   PASSENGER = 'passenger',
   ADMIN = 'admin',
   SUPER_ADMIN = 'super_admin',
+  MARKETER = 'marketer',
 }
 
 export enum UserGender {

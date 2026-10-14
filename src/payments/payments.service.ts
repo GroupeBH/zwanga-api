@@ -1,3 +1,4 @@
+import { assertPayoutPurposeAllowed } from './token-withdrawal.policy';
 import {
   BadGatewayException,
   BadRequestException,
@@ -49,6 +50,7 @@ import { claimDriverPayoutPayment, commitFlexPayPayoutState } from './flexpay-pa
 import { claimTopUpPayment, topUpReference } from './topup-payment-claim';
 
 export interface InitiatePaymentInput {
+  tokenQuantity?: number;
   idempotencyKey?: string;
   userId?: string | null;
   purpose?: string;
@@ -243,6 +245,7 @@ export class PaymentsService {
       providerStatusCode: null,
       providerMessage: null,
       amount: input.amount,
+      tokenQuantity: input.purpose === PaymentPurpose.WALLET_TOP_UP ? input.tokenQuantity ?? null : null,
       currency: input.currency.toUpperCase(),
       description: input.description,
       phone: input.method === PaymentMethod.MOBILE_MONEY ? input.phone : null,
@@ -316,6 +319,9 @@ export class PaymentsService {
   async initiatePayout(
     input: InitiatePayoutInput,
   ): Promise<PaymentTransaction> {
+    // Defense in depth for every provider and every internal caller: a token
+    // balance must never reach FlexPay/PawaPay as a new cash withdrawal.
+    assertPayoutPurposeAllowed(input);
     this.ensurePayoutInputIsUsable(input);
     const providers = this.resolveProviders(
       PaymentMethod.MOBILE_MONEY,

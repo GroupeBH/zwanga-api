@@ -1,6 +1,6 @@
 # FIN-WALLET-001 — Jetons Zwanga et bonus d'abonnement
 
-Date : 20 août 2026  
+Dernière mise à jour : 14 octobre 2026
 Statut : implémenté dans le code ; migration à appliquer  
 Périmètre : portefeuille, registre comptable, paiements d'abonnement et application mobile
 
@@ -61,12 +61,12 @@ Un abonnement payé avec le portefeuille reçoit aussi le bonus, car il s'agit b
 mouvementNet = -prixAbonnementEnJetons + 25
 ```
 
-Exemple avec un prix de 50 jetons :
+Exemple actuel : Pro à 5 000 FC, soit 200 jetons à 25 FC :
 
 ```text
-débit abonnement = -50
+débit abonnement = -200
 bonus abonnement = +25
-mouvement net = -25 jetons
+mouvement net = -175 jetons
 ```
 
 Deux écritures distinctes sont conservées. Le bonus ne réduit pas ou ne modifie pas rétroactivement le prix de l'abonnement.
@@ -92,14 +92,14 @@ Le solde et l'écriture sont enregistrés dans une transaction avec verrou pessi
 
 ## 6. Valeur financière
 
-La configuration actuelle conserve la valeur historique par défaut :
+Depuis le 14 octobre 2026, la règle CDF est commune au portefeuille et au parrainage :
 
 ```text
-1 jeton = 100 CDF
-25 jetons = 2 500 CDF de valeur d'usage configurée
+1 jeton = 25 CDF
+25 jetons = 625 CDF de valeur d'usage
 ```
 
-Le changement ne modifie ni `ZWANGA_POINT_VALUE_CDF`, ni les taux de fidélité, ni le prix des courses, ni le prix de l'abonnement.
+Le nombre de jetons existants est conservé sans multiplication, ainsi que les taux de fidélité et les prix monétaires des courses/abonnements. Le backend impose 25 en CDF malgré d'anciennes variables à 100 ; les variables documentées sont alignées. Les transactions déjà engagées conservent leurs devis. Voir [la procédure de migration et les limites mobiles](purchased-token-withdrawals.md).
 
 Les jetons promotionnels restent une unité interne utilisable selon les fonctionnalités actuelles et ne deviennent pas retirables. `FIN-REF-001` implémente un compte séparé pour les gains de parrainage retirables ; le bonus de 25 jetons n'y est jamais versé.
 

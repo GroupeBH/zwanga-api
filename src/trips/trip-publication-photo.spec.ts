@@ -11,6 +11,7 @@ function setup(overrides: Partial<User> = {}, history = false) {
     update: jest.fn(async (_id, patch) => Object.assign(driver, patch)),
   };
   const trips = {
+    find: jest.fn().mockResolvedValue([]),
     existsBy: jest.fn(async () => history),
     save: jest.fn(async (items: Trip[]) => items.map((item, i) => ({ ...item, id: String(i) }))),
   };
@@ -89,5 +90,26 @@ describe('driver photo publication policy', () => {
       await expect(savePublicationsWithPhotoPolicy(ctx.repository, 'driver', [payload])).rejects.toThrow('expects public trips');
     }
     expect(ctx.trips.save).not.toHaveBeenCalled();
+  });
+
+  it('filters existing and repeated occurrences only after acquiring the owner lock', async () => {
+    const ctx = setup({ profilePicture: 'photo.jpg' });
+    const occurrence = (date: string) => ({ ...trip(), recurringTemplateId: 'template', recurringOccurrenceDate: date });
+    ctx.trips.find.mockResolvedValueOnce([occurrence('2026-10-15')]);
+    const saved = await savePublicationsWithPhotoPolicy(ctx.repository, 'driver', [
+      occurrence('2026-10-15'), occurrence('2026-10-16'), occurrence('2026-10-16'), trip(),
+    ]);
+    expect(saved).toHaveLength(2);
+    expect(saved[0].recurringOccurrenceDate).toBe('2026-10-16');
+    expect(ctx.users.findOne.mock.invocationCallOrder[0]).toBeLessThan(ctx.trips.find.mock.invocationCallOrder[0]);
+  });
+
+  it('does not reject a retried occurrence for lack of a photo or consume a publication', async () => {
+    const ctx = setup({ hasPublishedTrip: true });
+    const occurrence = { ...trip(), recurringTemplateId: 'template', recurringOccurrenceDate: '2026-10-15' };
+    ctx.trips.find.mockResolvedValueOnce([occurrence]);
+    expect(await savePublicationsWithPhotoPolicy(ctx.repository, 'driver', [occurrence])).toEqual([]);
+    expect(ctx.trips.save).not.toHaveBeenCalled();
+    expect(ctx.users.update).not.toHaveBeenCalled();
   });
 });

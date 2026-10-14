@@ -26,6 +26,15 @@ describe('Server-owned WebSocket sessions', () => {
     expect(socket.disconnect).toHaveBeenCalled();
     service.onModuleDestroy();
   });
+  it('cleans timers without revoking sessions before the deployment drain', async () => {
+    const { service, socket } = create();
+    expect(await service.connect(socket, jwt, config)).toBe(true);
+    service.onModuleDestroy();
+    await service.validateSessions();
+    expect(socket.emit).not.toHaveBeenCalledWith('session_expired', expect.anything());
+    expect(socket.disconnect).not.toHaveBeenCalled();
+    await expect(service.begin(socket)).rejects.toThrow('Authentification');
+  });
   it('disconnects passive subscribers when their JWT expires', async () => {
     jest.useFakeTimers();
     const { service, socket } = create();
@@ -49,5 +58,27 @@ describe('Server-owned WebSocket sessions', () => {
       expect(socket.disconnect).toHaveBeenCalled();
       await expect(service.begin(socket)).rejects.toThrow('Authentification');
     } finally { service.onModuleDestroy(); }
+  });
+  it('disconnects on a database outage without falsely expiring the token', async () => {
+    const { service, socket, find } = create();
+    try {
+      await service.connect(socket, jwt, config);
+      find.mockRejectedValue(new Error('database unavailable'));
+      await service.validateSessions();
+      expect(socket.disconnect).toHaveBeenCalled();
+      expect(socket.emit).not.toHaveBeenCalledWith('session_expired', expect.anything());
+      expect(socket.emit).toHaveBeenCalledWith('server_restart', {
+        reason: 'dependency_unavailable', reconnect: true, retryAfterSeconds: 5,
+      });
+      await expect(service.begin(socket)).rejects.toThrow('Authentification');
+    } finally { service.onModuleDestroy(); }
+  });
+  it('fails closed on Redis connection failure without revoking valid credentials', async () => {
+    const { service, socket, evalMock } = create();
+    evalMock.mockRejectedValue(new Error('offline'));
+    expect(await service.connect(socket, jwt, config)).toBe(false);
+    expect(socket.disconnect).toHaveBeenCalled();
+    expect(socket.emit).not.toHaveBeenCalledWith('session_expired', expect.anything());
+    service.onModuleDestroy();
   });
 });

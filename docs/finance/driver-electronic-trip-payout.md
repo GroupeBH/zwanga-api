@@ -5,6 +5,8 @@ Statut : implémenté dans le backend et l'application ; migration et déploieme
 
 Complément du 15 septembre 2026 : [normalisation, refus et suivi des versements](driver-payout-corrections.md).
 
+Complément du 14 octobre 2026 : les retraits du portefeuille de jetons sont interdits ; ceux du parrainage sont autorisés dès 1 000 jetons à 25 FC/jeton ([politique actuelle](purchased-token-withdrawals.md)). Le présent parcours ne change pas : les revenus de trajets comptabilisés dans le solde conducteur restent retirables avec les contrôles de solde, KYC, réservation et idempotence existants. Cela inclut les revenus d'une course réellement payée en jetons ; ce n'est pas une conversion directe du portefeuille personnel du conducteur.
+
 ## 1. Besoin métier
 
 Après la fin d'une course, le passager paie le montant calculé par le serveur. Quand ce paiement électronique est réellement confirmé, Zwanga doit :

@@ -435,6 +435,25 @@ describe('boarding detection', () => {
     );
   });
 
+  it('does not treat a fresh passenger sample as a refresh of a 75-minute-old driver fix', () => {
+    const driverLocations = makePath().map(sample => ({
+      ...sample,
+      recordedAt: new Date(Date.parse(sample.recordedAt) - 4_533_000).toISOString(),
+      accuracyMeters: null,
+    }));
+    const result = evaluate({ driverLocations });
+    expectRejected(result, BoardingRejectionReason.LOCATION_STALE);
+    expect(result.metrics.driverLocationAge).toBe(4_533_000);
+    expect(result.metrics.passengerLocationAge).toBe(0);
+    // Recovery needs new, accurate driver samples, not changed server dates.
+    expectConfirmed(evaluate());
+  });
+
+  it('requires real driver accuracy even after fresh driver samples resume', () => {
+    const driverLocations = makePath().map(sample => ({ ...sample, accuracyMeters: null }));
+    expectRejected(evaluate({ driverLocations }), BoardingRejectionReason.GPS_ACCURACY_TOO_LOW);
+  });
+
   it('rejects strongly desynchronized positions', () => {
     const passengerLocations = makePath({
       lateralMeters: 2,

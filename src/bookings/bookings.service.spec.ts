@@ -29,6 +29,7 @@ describe('BookingsService trip payments', () => {
     findOne: jest.Mock;
     save: jest.Mock;
     update: jest.Mock;
+    manager?: unknown;
   };
   let userRepository: { findOne: jest.Mock };
   let cacheService: { del: jest.Mock };
@@ -75,6 +76,8 @@ describe('BookingsService trip payments', () => {
     findOne: jest.Mock;
     count: jest.Mock;
     save: jest.Mock;
+    query: jest.Mock;
+    transaction: jest.Mock;
   };
   let dataSource: {
     transaction: jest.Mock;
@@ -194,6 +197,8 @@ describe('BookingsService trip payments', () => {
 
     let lockedBooking: any = null;
     financialManager = {
+      query: jest.fn().mockResolvedValue([]),
+      transaction: jest.fn(work => work(financialManager)),
       findOne: jest.fn(async (entity: unknown, options: unknown) => {
         if (entity === Booking) {
           lockedBooking = await bookingRepository.findOne(options);
@@ -223,6 +228,7 @@ describe('BookingsService trip payments', () => {
       ),
       query: jest.fn().mockResolvedValue([]),
     };
+    tripRepository.manager = dataSource;
     service = new BookingsService(
       bookingRepository as any,
       tripRepository as any,

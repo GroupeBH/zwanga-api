@@ -1,4 +1,5 @@
 import { isAppUpdateDeliverable } from '../app-updates/app-update-dispatch.service';
+import { isTripReminderDeliverable } from './trip-reminder-delivery';
 import {
   cert,
   initializeApp,
@@ -747,6 +748,9 @@ export class NotificationService implements OnModuleInit {
     notification: Notification,
   ): Promise<boolean> {
     const type = notification.data?.type;
+    if (notification.eventKey && ['trip_departure_reminder', 'trip_expiring_soon'].includes(type)) {
+      return isTripReminderDeliverable(this.notificationRepository.manager, notification);
+    }
     if (type === 'trip_request_nearby') {
       if (!this.isNearbyRequestRing(notification) ||
           !(Date.parse(String(notification.data?.alertExpiresAt)) > Date.now())) return false;

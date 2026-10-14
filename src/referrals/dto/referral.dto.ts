@@ -105,10 +105,10 @@ export class AttachReferralAttributionDto {
 }
 
 export class RequestReferralWithdrawalDto {
-  @ApiProperty({ minimum: 50, example: 50 })
+  @ApiProperty({ minimum: 1000, example: 1000 })
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 2 })
-  @Min(0.01)
+  @Min(1000)
   tokens: number;
 
   @ApiProperty({ required: false, example: '+243891234567' })

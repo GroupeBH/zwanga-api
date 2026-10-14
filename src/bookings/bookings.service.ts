@@ -1,5 +1,8 @@
 import { enqueueTransactionalNotification } from '../notifications/transactional-notification';
 import { trustedContactMessagesEnabled } from '../safety/trusted-contact-policy';
+import { TOKEN_VALUE_CDF } from '../wallet/token-value.policy';
+import { CoalescedRideProgress } from './coalesced-ride-progress';
+import { withBookableTrip } from './bookable-trip-transaction';
 import {
   Injectable,
   NotFoundException,
@@ -218,10 +221,7 @@ export class BookingsService implements OnModuleInit {
     BookingStatus.BOARDING_UNCERTAIN,
   ];
   private readonly boardingDetectionConfig: BoardingDetectionConfig;
-  private readonly automaticRideProgressQueues = new Map<
-    string,
-    Promise<void>
-  >();
+  private readonly automaticRideProgressQueues = new CoalescedRideProgress<AutomaticRideProgressResult>();
   private financialReconciliationRunning = false;
 
   constructor(
@@ -811,8 +811,7 @@ export class BookingsService implements OnModuleInit {
     const availableSeats = Math.max(0, trip.totalSeats - acceptedSeats);
 
     if (trip.availableSeats !== availableSeats) {
-      trip.availableSeats = availableSeats;
-      await tripRepository.save(trip);
+      await tripRepository.update(trip.id, { availableSeats });
     }
 
     return availableSeats;
@@ -1343,17 +1342,28 @@ export class BookingsService implements OnModuleInit {
       grossPaymentAmount,
       paymentCurrency,
       paymentMode,
-      cashCommissionTokenValue: paymentCurrency === 'CDF' ? 100 : this.walletService.convertPointsToMoney(1, paymentCurrency),
+      cashCommissionTokenValue: paymentCurrency === 'CDF' ? TOKEN_VALUE_CDF : this.walletService.convertPointsToMoney(1, paymentCurrency),
     });
 
     await this.applyFirstTripSubsidyPolicy(booking, trip);
-    const savedBooking = await this.saveBookingWithFirstTripSubsidyRaceFallback(
-      booking,
-      trip,
+    const savedBooking = await withBookableTrip(
+      this.tripRepository, trip.id, booking.numberOfSeats,
+      async (manager, currentTrip) => {
+        if (Number(currentTrip.pricePerSeat) !== Number(trip.pricePerSeat) ||
+            (grossPaymentAmount > 0 && currentTrip.acceptedPaymentModes &&
+             !currentTrip.acceptedPaymentModes.includes(paymentMode))) {
+          throw new BadRequestException('Ce trajet a changé. Actualisez-le avant de réserver.');
+        }
+        if (await manager.findOne(Booking, { where: {
+          tripId: trip.id, passengerId,
+          status: In([BookingStatus.PENDING, BookingStatus.ACCEPTED]),
+        } })) throw new BadRequestException('Vous avez déjà une réservation en attente ou acceptée pour ce trajet');
+        return this.saveBookingWithFirstTripSubsidyRaceFallback(booking, currentTrip, manager);
+      },
     );
 
-    await this.recalculateAvailableSeatsForTrip(trip.id);
-
+    // Pending requests do not consume seats. Recalculating after commit could
+    // overwrite a concurrent acceptance's seat count from an older snapshot.
     // Invalidate cache
     await this.cacheService.del(
       CacheService.getBookingsByTripKey(createBookingDto.tripId),
@@ -3284,7 +3294,11 @@ export class BookingsService implements OnModuleInit {
   ): Promise<Booking> {
     try {
       return await (manager
-        ? manager.save(booking)
+        ? booking.firstTripSubsidyApplied
+          // A uniqueness error aborts a PostgreSQL transaction. Isolate the
+          // discounted attempt in a savepoint before retrying the normal fare.
+          ? manager.transaction(inner => inner.save(booking))
+          : manager.save(booking)
         : this.bookingRepository.save(booking));
     } catch (error) {
       if (
@@ -4103,34 +4117,9 @@ export class BookingsService implements OnModuleInit {
   async evaluateAutomaticRideProgressForTrip(
     tripId: string,
   ): Promise<AutomaticRideProgressResult> {
-    return this.runAutomaticRideProgressSerially(tripId, () =>
+    return this.automaticRideProgressQueues.run(tripId, () =>
       this.evaluateAutomaticRideProgressForTripUnlocked(tripId),
     );
-  }
-
-  private async runAutomaticRideProgressSerially<T>(
-    tripId: string,
-    operation: () => Promise<T>,
-  ): Promise<T> {
-    const previous = this.automaticRideProgressQueues.get(tripId);
-    let releaseCurrent!: () => void;
-    const current = new Promise<void>((resolve) => {
-      releaseCurrent = resolve;
-    });
-    const queueTail = (previous ?? Promise.resolve())
-      .catch(() => undefined)
-      .then(() => current);
-    this.automaticRideProgressQueues.set(tripId, queueTail);
-
-    await previous?.catch(() => undefined);
-    try {
-      return await operation();
-    } finally {
-      releaseCurrent();
-      if (this.automaticRideProgressQueues.get(tripId) === queueTail) {
-        this.automaticRideProgressQueues.delete(tripId);
-      }
-    }
   }
 
   private async evaluateAutomaticRideProgressForTripUnlocked(
@@ -6348,20 +6337,31 @@ export class BookingsService implements OnModuleInit {
     }
 
     try {
-      // Utiliser PostGIS ST_Distance pour calculer la distance en mètres
+      // Quote camelCase identifiers explicitly: TypeORM does not substitute
+      // property names followed directly by PostgreSQL's :: cast operator.
       const result = await this.bookingRepository
         .createQueryBuilder('booking')
         .select(
           `ST_Distance(
-            booking.passengerCurrentLocation::geography,
-            booking.passengerDestinationPoint::geography
+            "booking"."passengerCurrentLocation"::geography,
+            "booking"."passengerDestinationPoint"::geography
           )`,
           'distance',
         )
         .where('booking.id = :id', { id: booking.id })
-        .getRawOne();
+        .getRawOne<{ distance: number | string | null }>();
 
-      return result?.distance ? Math.round(result.distance) : null;
+      const rawDistance = result?.distance;
+      if (
+        typeof rawDistance !== 'number' &&
+        (typeof rawDistance !== 'string' || rawDistance.trim() === '')
+      ) {
+        return null;
+      }
+      const distance = Number(rawDistance);
+      return Number.isFinite(distance) && distance >= 0
+        ? Math.round(distance)
+        : null;
     } catch (error) {
       this.logger.error(
         `Error calculating distance to destination: ${error.message}`,
@@ -6402,12 +6402,12 @@ export class BookingsService implements OnModuleInit {
     );
 
     // Marquer comme notifié et envoyer les notifications
-    booking.destinationProximityNotified = true;
     const update = await this.bookingRepository.update(
       { id: booking.id, status: BookingStatus.ACCEPTED, destinationProximityNotified: false },
       { destinationProximityNotified: true },
     );
     if (update.affected !== 1) return;
+    booking.destinationProximityNotified = true;
 
     // Envoyer les notifications au conducteur et au passager
     await this.notifyDestinationProximity(booking, distance);

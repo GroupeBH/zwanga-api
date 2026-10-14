@@ -27,7 +27,9 @@ export class AppUpdatesService {
     return { enabled: true, release: rows[0] ?? null };
   }
   async register(userId: string, input: AppUpdateClientDto) {
-    this.requireEnabled();
+    // Older store clients register on every launch, even when announcements are
+    // disabled. This is an expected no-op, not a service outage.
+    if (!this.enabled()) return { registered: false, enabled: false };
     const value = this.normalize(input);
     // Do not bind a device version to a different device's current push token.
     // A missing/rejected push permission still permits in-app announcements.

@@ -1,5 +1,27 @@
 # Journal des modifications financières
 
+## 2026-10-14 — Bonus de bienvenue : 200 jetons pour conserver l'offre de 5 000 FC
+
+- Décision confirmée : seules les futures attributions passent à **200 jetons**, avec la valeur commune de 25 FC. Les anciens bonus de 50 restent inchangés et ne donnent droit à aucun complément.
+- Migration 72 ajoutée après les migrations 70/71, sans modifier leurs fichiers historiques. Le crédit, le journal et le montant de la notification sont alignés ; la récupération d'un ancien crédit conserve son montant réel, sans rejouer de crédit ni de push.
+- Éligibilité KYC/compte actif, conducteurs et passagers, unicité, cron de rattrapage et isolation des échecs conservés. Les jetons restent promotionnels et non retirables. Le conducteur reçoit une notification proposant de payer Pro, sans activation automatique de l'abonnement.
+- Recommandations PostgreSQL appliquées : transaction et verrous bornés, aucun recalcul de l'historique. Aucun changement AWS, CI/CD, Terraform, fichier d'environnement réel ou application mobile. [Déploiement et contrôles](purchased-token-withdrawals.md#bonus-de-bienvenue--activation-et-contrôle).
+- Vérifications : 880 tests ciblés dans 63 suites, 15 tests PostgreSQL réels sur cluster jetable, compilation et contrôle du diff réussis. Aucun push ou paiement réel envoyé.
+
+## 2026-10-14 — Valeur de 25 FC et exception parrainage dès 1 000 jetons
+
+- Nouvelle décision remplaçant l'interdiction totale du parrainage ci-dessous : retrait autorisé dès 1 000 jetons, à 25 FC/jeton, soit 25 000 FC. KYC, solde et réserve conservés ; portefeuille d'usage toujours non retirable ; gains conducteur inchangés.
+- Valeur CDF commune à tous les jetons, sans multiplication des soldes existants. Pro coûte 200 jetons pour 5 000 FC. Commissions cash actualisées, plafond maintenu à 25 jetons.
+- Migrations 70/71 : quantité de recharge figée, défaut des nouveaux devis à 25, correction du texte du bonus 50 jetons à 1 250 FC. Aucun ancien solde, paiement, bonus ou journal n'est réécrit/rejoué. L'augmentation des futurs bonus à 200 jetons a ensuite été confirmée, voir la migration 72 ci-dessus.
+- Backend local uniquement : aucune modification AWS, CI/CD, Terraform ou mobile. Les estimations mobiles encore à 100 devront être harmonisées. [Détails, historique et précautions de déploiement](purchased-token-withdrawals.md).
+
+## 2026-10-14 — Blocage des nouveaux retraits de jetons
+
+- Interdiction des conversions en argent du portefeuille et du parrainage, même si `WALLET_WITHDRAWALS_ENABLED=true`. Refus **403 `TOKEN_WITHDRAWALS_DISABLED`** avant toute réservation et deuxième contrôle dans le service de paiement commun à FlexPay/PawaPay.
+- Les gains de trajets du solde conducteur restent retirables ; recharges, dépenses, abonnements, commissions et transferts de jetons ne changent pas.
+- Résumés portefeuille/parrainage : retrait désactivé et motif explicite, sans suppression de soldes ni d'historique. Les anciens transferts continuent leur suivi et leur règlement, sans annulation ou restitution arbitraire.
+- Correctif local à déployer sur toutes les instances pour effet en production. Pas de modification AWS, CI/CD ou Terraform, ni nouvelle migration ou variable requise. Détails : [politique de retrait](purchased-token-withdrawals.md).
+
 ## 2026-10-09 — Réinitialisation du PIN et isolation du bonus de bienvenue
 
 - Incident diagnostiqué en lecture seule dans AWS : `WELCOME_BONUS_INVALID_WALLET_CURRENCY`

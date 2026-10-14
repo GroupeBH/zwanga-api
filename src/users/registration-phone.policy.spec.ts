@@ -86,7 +86,10 @@ describe('Phone ownership during registration', () => {
     });
     await expect(
       saveRegistrationWithPhone(f.repository as any, f.fresh),
-    ).rejects.toThrow('déjà utilisé');
+    ).rejects.toMatchObject({
+      status: 400,
+      response: { code: 'PHONE_ALREADY_REGISTERED', message: 'Ce numéro de téléphone est déjà utilisé' },
+    });
     expect(f.users.update).not.toHaveBeenCalled();
     expect(f.users.save).not.toHaveBeenCalled();
   });

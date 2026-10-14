@@ -49,6 +49,8 @@ import { applyTokenMovement, refundablePurchasedTokens } from './wallet-origin';
 import { hasVerifiedWalletTopUpProof } from '../payments/wallet-topup-proof';
 import { loadWalletLedgerPage } from './wallet-ledger-page';
 import type { HistoryPageDto } from '../common/pagination/history-page';
+import { TOKEN_WITHDRAWAL_DISABLED } from '../payments/token-withdrawal.policy';
+import { TOKEN_VALUE_CDF } from './token-value.policy';
 
 export interface WalletSummary {
   account: WalletAccount;
@@ -61,6 +63,7 @@ export interface WalletSummary {
     availableMoney: number;
     nonWithdrawableTokens: number;
     blocked: boolean;
+    disabledReason?: { code: string; message: string };
   };
 }
 
@@ -105,7 +108,6 @@ export class WalletService implements OnModuleInit {
   private readonly SUBSCRIPTION_RELATED_ENTITY_TYPE = 'subscription';
   private readonly TRANSFER_RELATED_ENTITY_TYPE = 'wallet_transfer';
   private readonly DEFAULT_POINTS_CURRENCY = 'PTS';
-  private readonly DEFAULT_POINT_VALUE_CDF = 100;
   private readonly DEFAULT_LOYALTY_RATE = 0.01;
   private readonly DEFAULT_LOYALTY_POINTS_PER_KM = 0.5;
   private readonly DEFAULT_LOYALTY_MIN_REWARD = 1;
@@ -146,20 +148,14 @@ export class WalletService implements OnModuleInit {
       account,
       recentEntries,
       withdrawal: {
-        enabled:
-          this.configService.get<string>('WALLET_WITHDRAWALS_ENABLED') ===
-          'true',
+        enabled: false,
         currency,
         moneyPerToken: this.convertPointsToMoney(1, currency),
         minimumTokens: 1,
-        availableMoney: this.convertPointsToMoney(
-          Math.max(0, Math.min(Number(account.withdrawableBalance ?? 0), Number(account.balance) - Number(account.reservedCashCommissionBalance ?? 0))),
-          currency,
-        ),
-        nonWithdrawableTokens: this.roundMoney(
-          Number(account.balance) - Number(account.withdrawableBalance ?? 0),
-        ),
-        blocked: Boolean(account.withdrawalsBlocked),
+        availableMoney: 0,
+        nonWithdrawableTokens: this.roundMoney(Number(account.balance)),
+        blocked: true,
+        disabledReason: TOKEN_WITHDRAWAL_DISABLED,
       },
     };
   }
@@ -285,6 +281,7 @@ export class WalletService implements OnModuleInit {
       method: dto.method,
       phone: dto.phone,
       amount: paymentAmount,
+      tokenQuantity: pointsAmount,
       currency,
       description: `Achat de ${pointsAmount} jetons Zwanga`,
       callbackUrl: this.getTopUpFlexPayCallbackUrl(),
@@ -347,10 +344,7 @@ export class WalletService implements OnModuleInit {
     booking: Booking,
     amount: number,
   ): Promise<WalletLedgerEntry | null> {
-    const pointsAmount = this.convertMoneyToPoints(
-      amount,
-      booking.paymentCurrency,
-    );
+    const pointsAmount = this.convertBookingMoneyToPoints(booking, amount);
     if (pointsAmount <= 0) {
       return null;
     }
@@ -454,10 +448,12 @@ export class WalletService implements OnModuleInit {
     booking: Booking,
     amount: number,
   ): Promise<WalletLedgerEntry | null> {
-    const pointsAmount = this.convertMoneyToPoints(
-      amount,
-      booking.paymentCurrency,
-    );
+    // Return original tokens for a token debit; a monetary fare credit from
+    // an electronic payment is converted at today's denomination instead.
+    const pointsAmount =
+      booking.paymentMode === TripPaymentMode.POINTS
+        ? this.convertBookingMoneyToPoints(booking, amount)
+        : this.convertMoneyToPoints(amount, booking.paymentCurrency);
     if (pointsAmount <= 0) {
       return null;
     }
@@ -843,6 +839,18 @@ export class WalletService implements OnModuleInit {
     );
   }
 
+  private convertBookingMoneyToPoints(booking: Booking, amount: number): number {
+    // The existing immutable booking quote was captured for every payment mode,
+    // not only cash. Preserve it for retries/refunds of pre-change bookings.
+    const quotedValue = Number(booking.cashCommissionTokenValue);
+    if (Number.isFinite(quotedValue) && quotedValue > 0) {
+      return this.roundMoney(
+        this.normalizeNonNegativeAmount(amount) / quotedValue,
+      );
+    }
+    return this.convertMoneyToPoints(amount, booking.paymentCurrency);
+  }
+
   public convertPointsToMoney(
     points: number,
     currency?: string | null,
@@ -981,10 +989,7 @@ export class WalletService implements OnModuleInit {
 
     await this.changeBalance({
       userId: payment.userId,
-      amount: this.convertMoneyToPoints(
-        Number(payment.amount),
-        payment.currency,
-      ),
+      amount: this.getPurchasedTokenQuantity(payment),
       type: WalletLedgerEntryType.TOP_UP,
       relatedEntityType: this.TOP_UP_RELATED_ENTITY_TYPE,
       relatedEntityId: payment.userId,
@@ -993,6 +998,21 @@ export class WalletService implements OnModuleInit {
     });
 
     return this.getOrCreateAccount(payment.userId);
+  }
+
+  private getPurchasedTokenQuantity(payment: PaymentTransaction): number {
+    // New purchases carry a structured quote. The exact, server-generated
+    // legacy description preserves pending purchases made before this change.
+    const legacy = /^Achat de (\d+(?:\.\d{1,2})?) jetons Zwanga$/.exec(
+      payment.description ?? '',
+    );
+    const quantity = Number(payment.tokenQuantity ?? legacy?.[1]);
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      throw new BadRequestException(
+        'La quantité de jetons de cette recharge doit être vérifiée avant son crédit.',
+      );
+    }
+    return this.roundMoney(quantity);
   }
 
   private async getOrCreateAccount(userId: string): Promise<WalletAccount> {
@@ -1334,12 +1354,14 @@ export class WalletService implements OnModuleInit {
     const normalizedCurrency = (
       currency?.trim() || this.getPointValueCurrency()
     ).toUpperCase();
+    if (normalizedCurrency === 'CDF') return TOKEN_VALUE_CDF;
     const raw =
       this.configService.get<string | number>(
         `ZWANGA_POINT_VALUE_${normalizedCurrency}`,
       ) ??
-      this.configService.get<string | number>('ZWANGA_POINT_VALUE') ??
-      (normalizedCurrency === 'CDF' ? this.DEFAULT_POINT_VALUE_CDF : undefined);
+      (normalizedCurrency === this.getPointValueCurrency()
+        ? this.configService.get<string | number>('ZWANGA_POINT_VALUE')
+        : undefined);
     const pointValue = Number(raw);
     if (!Number.isFinite(pointValue) || pointValue <= 0) {
       throw new BadRequestException(
