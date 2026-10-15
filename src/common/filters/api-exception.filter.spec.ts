@@ -105,6 +105,16 @@ describe('ApiExceptionFilter', () => {
     expect(response.json).not.toHaveBeenCalled();
   });
 
+  it('recognizes the Node incoming-body reset without masking generic upstream resets', () => {
+    const { host, response } = createHttpHost();
+    filter.catch(Object.assign(new Error('aborted'), { code: 'ECONNRESET' }), host);
+    expect(response.status).toHaveBeenCalledWith(400);
+    expect(response.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'REQUEST_ABORTED' }));
+    const upstream = createHttpHost();
+    filter.catch(Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }), upstream.host);
+    expect(upstream.response.status).toHaveBeenCalledWith(500);
+  });
+
   it('maps malformed JSON to an actionable validation error', () => {
     const { host, response } = createHttpHost();
     const error = Object.assign(new SyntaxError('Unexpected token'), {
