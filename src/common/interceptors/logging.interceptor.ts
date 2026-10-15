@@ -4,10 +4,12 @@ import {
   ExecutionContext,
   CallHandler,
   Logger,
+  HttpException,
 } from '@nestjs/common';
 import { Observable } from 'rxjs';
 import { tap } from 'rxjs/operators';
 import type { Socket } from 'socket.io';
+import { isHttpRequestAborted } from '../http-request-abort';
 
 const GPS_EVENTS = new Set([
   'driver_location_update',
@@ -64,21 +66,30 @@ export class LoggingInterceptor implements NestInterceptor {
             this.logger.log(`HTTP ${method} ${url}`, logData);
           }
         },
-        error: (error) => {
+        error: (error: unknown) => {
+          // The global filter already coalesces these warnings and never writes
+          // to a closed socket. Do not invent a 500 or log the same abort twice.
+          if (isHttpRequestAborted(error)) return;
+          const candidate = error instanceof HttpException ? error.getStatus() :
+            (error as { status?: unknown; statusCode?: unknown } | null)?.status ??
+            (error as { statusCode?: unknown } | null)?.statusCode;
+          const statusCode = typeof candidate === 'number' && Number.isInteger(candidate) &&
+            candidate >= 400 && candidate <= 599 ? candidate : 500;
           const responseTime = Date.now() - now;
           const logData = {
             method,
             url,
-            statusCode: error.status || 500,
+            statusCode,
             responseTime: `${responseTime}ms`,
             ip,
             userAgent,
             userId: user?.userId || 'anonymous',
-            error: error.message,
-            stack: error.stack,
+            error: error instanceof Error ? error.message : 'Unknown error',
+            stack: statusCode >= 500 && error instanceof Error ? error.stack : undefined,
           };
 
-          this.logger.error(`HTTP ${method} ${url}`, logData);
+          if (statusCode >= 500) this.logger.error(`HTTP ${method} ${url}`, logData);
+          else this.logger.warn(`HTTP ${method} ${url}`, logData);
         },
       }),
     );

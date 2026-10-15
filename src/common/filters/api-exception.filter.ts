@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import type { Request, Response } from 'express';
+import { isHttpRequestAborted } from '../http-request-abort';
 
 type ApiErrorMessage = string | string[];
 
@@ -104,7 +105,7 @@ export class ApiExceptionFilter implements ExceptionFilter {
       return { statusCode: HttpStatus.CONFLICT, error: 'Paiement indisponible', code: database.message, message: financeMessages[database.message] };
     }
 
-    if (this.isRequestAborted(technicalError)) {
+    if (isHttpRequestAborted(exception)) {
       return {
         statusCode: HttpStatus.BAD_REQUEST,
         error: 'Requête incomplète',
@@ -256,19 +257,6 @@ export class ApiExceptionFilter implements ExceptionFilter {
     return (
       messages[statusCode] ||
       "Une erreur est survenue. Transmettez l'identifiant de la requête au support si elle persiste."
-    );
-  }
-
-  private isRequestAborted(error: TransportError | null): boolean {
-    if (!error) {
-      return false;
-    }
-
-    const message = error.message.toLowerCase();
-    return (
-      error.code === 'ECONNABORTED' ||
-      error.type === 'request.aborted' ||
-      message === 'request aborted'
     );
   }
 
