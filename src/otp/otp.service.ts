@@ -10,6 +10,7 @@ import { RedisService } from '../common/services/redis.service';
 import { KeccelOtpService } from '../keccel-otp/keccel-otp.service';
 import { OTP_SMS_MESSAGES } from '../keccel-otp/otp-messages';
 import { normalizeOtpPhone } from './otp-phone.util';
+import { reserveOtpSend } from './otp-send-budget';
 import {
   OtpChallenge,
   OtpPurpose,
@@ -23,7 +24,7 @@ const OTP_PURPOSES: OtpPurpose[] = [
   'pin_reset',
   'admin_bootstrap',
 ];
-// Keccel's adapter has two attempts bounded by 30 seconds each.
+// Exceeds the provider's bounded request duration, including Redis bookkeeping.
 const OPERATION_LOCK_SECONDS = 120;
 
 @Injectable()
@@ -40,6 +41,8 @@ export class OtpService {
   ): Promise<SendOtpResponse> {
     const normalizedPhone = this.normalizePhone(phone);
     return this.withPhoneLock(normalizedPhone, async () => {
+      // A denied resend must not invalidate the still-usable previous code.
+      await reserveOtpSend(this.redisService, this.configService, normalizedPhone);
       // Temporary backend-only cutover: even legacy OTP_PROVIDER=didit must
       // use SMS. KYC configuration and endpoints are completely independent.
       const message =

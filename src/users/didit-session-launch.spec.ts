@@ -6,6 +6,11 @@ describe('Didit session launch compatibility', () => {
     expect(diditSessionLaunch('native', 'test-token', null)).toEqual({ sessionToken: 'test-token', url: '' });
   });
 
+  it.each([null, '', '  '])('refuses a native session without its SDK token (%s)', token => {
+    expect(() => diditSessionLaunch('native', token, 'https://verify.didit.me/session/test'))
+      .toThrow(expect.objectContaining({ response: expect.objectContaining({ code: 'KYC_SDK_TOKEN_UNAVAILABLE' }) }));
+  });
+
   it('rejects an invalid mode instead of silently launching the wrong flow', () => {
     expect(diditLaunchMode(' HOSTED ')).toBe('hosted');
     expect(() => diditLaunchMode('browser-typo')).toThrow();

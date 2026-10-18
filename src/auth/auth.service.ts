@@ -827,12 +827,19 @@ export class AuthService {
 
       this.assertUserCanAuthenticate(user);
 
-      const tokens = await this.generateTokens(user);
-
-      return {
-        accessToken: tokens.accessToken,
-        refreshToken: tokens.refreshToken,
-      };
+      const tokens = await this.signTokens(user);
+      // Compare-and-swap: a concurrent logout, PIN reset, rotation or account
+      // restriction must win over this stale snapshot. Never revive its session.
+      const rotated = await this.userRepository.update(
+        { id: user.id, refreshToken: user.refreshToken!, isActive: true,
+          status: user.status, role: user.role },
+        { accessToken: tokenFingerprint(tokens.accessToken),
+          refreshToken: tokenFingerprint(tokens.refreshToken) },
+      );
+      if (rotated.affected !== 1) {
+        throw new UnauthorizedException('Token de rafraîchissement invalide');
+      }
+      return tokens;
     } catch (error) {
       rethrowSessionError(error);
     }
@@ -1597,6 +1604,16 @@ export class AuthService {
   }
 
   private async generateTokens(user: User, manager?: EntityManager) {
+    const tokens = await this.signTokens(user);
+    user.accessToken = tokenFingerprint(tokens.accessToken);
+    user.refreshToken = tokenFingerprint(tokens.refreshToken);
+    await (manager?.getRepository(User) ?? this.userRepository).update(user.id, {
+      accessToken: user.accessToken, refreshToken: user.refreshToken,
+    });
+    return tokens;
+  }
+
+  private async signTokens(user: User) {
     const payload = {
       // A logout followed by a login in the same second must not revive a JWT.
       jti: randomUUID(),
@@ -1612,18 +1629,11 @@ export class AuthService {
       expiresIn: this.configService.get<string>('JWT_EXPIRES_IN') || '1d',
     });
 
-    // Refresh token: 3 weeks (21d)
+    // Preserve the existing refresh lifetime for installed clients.
     const refreshToken = await this.jwtService.signAsync(payload, {
       secret: this.configService.get<string>('JWT_REFRESH_SECRET'),
       expiresIn:
         this.configService.get<string>('JWT_REFRESH_EXPIRES_IN') || '90d',
-    });
-
-    // Save tokens to user
-    user.accessToken = tokenFingerprint(accessToken);
-    user.refreshToken = tokenFingerprint(refreshToken);
-    await (manager?.getRepository(User) ?? this.userRepository).update(user.id, {
-      accessToken: user.accessToken, refreshToken: user.refreshToken,
     });
 
     return { accessToken, refreshToken };

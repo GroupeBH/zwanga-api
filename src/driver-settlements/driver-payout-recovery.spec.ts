@@ -23,6 +23,7 @@ describe('Driver payout reservation and recovery', () => {
     manager = {
       findOne: jest.fn(async (entity) => entity === User ? { id: 'driver-A', phone: driverPhone } : entity === PaymentTransaction ? payment : saved),
       exists: jest.fn(async (entity) => entity === DriverPayout ? Boolean(saved?.recoveryBlocked) : approved),
+      getRepository: jest.fn(() => ({ findOne: jest.fn(async () => ({ status: approved ? 'approved' : 'pending' })) })),
       create: jest.fn((_entity, data) => ({ ...data, id: 'payout-A' })),
       save: jest.fn(async (data) => { saved = { ...data, paymentTransaction: payment }; return saved; }),
       createQueryBuilder: jest.fn(() => ({

@@ -2,7 +2,7 @@ import { HttpService } from '@nestjs/axios';
 import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AxiosRequestConfig } from 'axios';
-import { Observable, of } from 'rxjs';
+import { Observable, of, defer, throwError } from 'rxjs';
 import { KeccelOtpGenerateResponse } from './dto/keccel-otp.dto';
 import { KeccelOtpService } from './keccel-otp.service';
 import { OTP_SMS_MESSAGES } from './otp-messages';
@@ -29,6 +29,13 @@ describe('OTP SMS wording and encoding (no real SMS)', () => {
   });
 
   afterEach(() => jest.restoreAllMocks());
+
+  it.each([408, 429, 500])('does not repeat an ambiguous or refused send (%s)', async status => {
+    const attempts = jest.fn(() => throwError(() => Object.assign(new Error('synthetic failure'), { response: { status } })));
+    post.mockReturnValue(defer(attempts));
+    await expect(service.sendOtp('+243891234567')).rejects.toBeDefined();
+    expect(attempts).toHaveBeenCalledTimes(1);
+  });
 
   it.each(Object.entries(OTP_SMS_MESSAGES))(
     'sends the %s template without characters that can turn into mojibake',

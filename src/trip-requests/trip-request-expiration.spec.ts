@@ -4,6 +4,8 @@ import { TripRequestsService } from './trip-requests.service';
 import { TripRequestStatus } from './entities/trip-request.entity';
 import { DriverOfferStatus } from './entities/driver-offer.entity';
 import { FindOperator, LessThanOrEqual } from 'typeorm';
+import { enqueueTransactionalNotification } from '../notifications/transactional-notification';
+jest.mock('../notifications/transactional-notification', () => ({ enqueueTransactionalNotification: jest.fn() }));
 
 type ServiceDependencies = ConstructorParameters<typeof TripRequestsService>;
 
@@ -12,6 +14,7 @@ const buildService = () => {
     find: jest.fn().mockResolvedValue([]),
     findOne: jest.fn(),
     update: jest.fn().mockResolvedValue({ affected: 1 }),
+    manager: { transaction: jest.fn(async work => work({ getRepository: () => repository })) },
   };
   const notifications = {
     sendNotificationToUser: jest.fn().mockResolvedValue(true),
@@ -34,6 +37,7 @@ const buildService = () => {
 };
 
 describe('Trip request expiration scheduling', () => {
+  beforeEach(() => jest.mocked(enqueueTransactionalNotification).mockReset());
   afterEach(() => jest.useRealTimers());
 
   it('checks every thirty seconds without overlapping runs on one instance', () => {
@@ -84,11 +88,13 @@ describe('Trip request expiration scheduling', () => {
     await service.markExpiredTripRequests();
     expect(repository.find).toHaveBeenCalledWith(
       expect.objectContaining({
-        where: expect.objectContaining({
+        take: 100,
+        relations: ['driverOffers'],
+        where: expect.arrayContaining([expect.objectContaining({
           departureDateMax: LessThanOrEqual(
             new Date('2026-09-12T20:00:00.000Z'),
           ),
-        }) as unknown,
+        })]),
       }),
     );
     expect(repository.update).toHaveBeenCalledTimes(3);
@@ -105,10 +111,11 @@ describe('Trip request expiration scheduling', () => {
       }),
       { status: TripRequestStatus.EXPIRED },
     );
-    expect(notifications.sendNotificationToUser).toHaveBeenCalledTimes(2);
+    expect(enqueueTransactionalNotification).toHaveBeenCalledTimes(2);
+    expect(notifications.sendNotificationToUser).not.toHaveBeenCalled();
     await service.markExpiredTripRequests();
     expect(repository.update).toHaveBeenCalledTimes(3);
-    expect(notifications.sendNotificationToUser).toHaveBeenCalledTimes(2);
+    expect(enqueueTransactionalNotification).toHaveBeenCalledTimes(2);
   });
 
   it('preserves accepted requests up to the last millisecond of the two-hour grace period', async () => {
@@ -243,5 +250,16 @@ describe('Trip request expiration scheduling', () => {
     await service.markExpiredTripRequests();
     expect(request.status).toBe(TripRequestStatus.PENDING);
     expect(notifications.sendNotificationToUser).not.toHaveBeenCalled();
+    expect(enqueueTransactionalNotification).not.toHaveBeenCalled();
+  });
+
+  it('keeps the caller snapshot unchanged when transactional outbox persistence fails', async () => {
+    const { service, repository } = buildService();
+    const request = { id: 'rollback', passengerId: 'passenger', status: TripRequestStatus.PENDING,
+      departureDateMax: new Date('2020-01-01'), driverOffers: [] };
+    repository.find.mockResolvedValue([request]);
+    jest.mocked(enqueueTransactionalNotification).mockRejectedValueOnce(new Error('outbox unavailable'));
+    await expect(service.markExpiredTripRequests()).rejects.toThrow('outbox unavailable');
+    expect(request.status).toBe(TripRequestStatus.PENDING);
   });
 });

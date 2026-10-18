@@ -222,6 +222,7 @@ describe('PIN reset security', () => {
           values.delete(key);
         },
         getClient: () => ({
+          eval: async () => 0, // Send budgets are covered by otp-send-budget.spec.ts.
           set: async (key: string, value: string) => {
             if (values.has(key)) return null;
             values.set(key, value);

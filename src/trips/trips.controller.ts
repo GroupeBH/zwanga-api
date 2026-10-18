@@ -75,7 +75,9 @@ export class TripsController {
       "Recherche flexible par coordonnées : vous pouvez fournir uniquement departureCoordinates, uniquement arrivalCoordinates, ou les deux. Le rayon de recherche (departureRadiusKm, arrivalRadiusKm) est optionnel pour chaque point (défaut: 50 km). Si aucun critère n'est fourni, retourne tous les trajets disponibles.",
   })
   async findAll(@Query() searchTripsDto: SearchTripsDto) {
-    if (Object.keys(searchTripsDto).length > 0) {
+    // ES2023 DTO class fields exist even when the client supplied no query.
+    // Keep explicit falsy filters (maxPrice=0, isFree=false) on the search path.
+    if (Object.values(searchTripsDto).some((value) => value !== undefined)) {
       return (await this.tripsService.search(searchTripsDto)).map(publicTripResponse);
     }
     return (await this.tripsService.findAll()).map(publicTripResponse);

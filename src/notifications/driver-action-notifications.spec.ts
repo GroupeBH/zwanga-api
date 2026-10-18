@@ -3,6 +3,7 @@ import { NotificationService } from './notifications.service';
 import { BookingsService } from '../bookings/bookings.service';
 import { Booking } from '../bookings/entities/booking.entity';
 import { DriverDispatchService } from '../trip-requests/dispatch/dispatch.service';
+import { createHash } from 'node:crypto';
 
 jest.mock('firebase-admin/messaging', () => ({ getMessaging: jest.fn() }));
 
@@ -38,6 +39,21 @@ describe('driver notification transport', () => {
     await service.sendFirebaseNotification({ userId: 'driver', title: 'Message', body: 'Texte', data: { type: 'message' } }, 'fixture-token');
     expect(query).not.toHaveBeenCalled();
     expect(send.mock.calls[0][0].data.actionProtocol).toBeUndefined();
+  });
+  it('GPS reminders remain ordinary notifications and are suppressed after recovery or dispatch shutdown', async () => {
+    const { service, send, query } = fixture(true);
+    const notification = { userId: 'driver', title: 'Position', body: 'Ouvrez Zwanga',
+      data: { type: 'driver_location_stale', driverId: 'driver', locationUpdatedAt: new Date(Date.now() - 7 * 3600000).toISOString() } };
+    await service.sendFirebaseNotification(notification, 'synthetic-token');
+    expect(query).not.toHaveBeenCalled();
+    expect(send.mock.calls[0][0].data.actionProtocol).toBeUndefined();
+    expect(send.mock.calls[0][0].data.ringUntil).toBeUndefined();
+    expect(await service.isCriticalNotificationStillDeliverable(notification)).toBe(true);
+    query.mockResolvedValue([]);
+    expect(await service.isCriticalNotificationStillDeliverable(notification)).toBe(false);
+    service.configService.get = () => 'false'; query.mockClear();
+    expect(await service.isCriticalNotificationStillDeliverable(notification)).toBe(false);
+    expect(query).not.toHaveBeenCalled();
   });
   it('requests the iOS sound without capability registration but gates categories and time-sensitive', async () => {
     const original = global.fetch;
@@ -171,10 +187,45 @@ describe('driver notification transport', () => {
     await expect(service.registerNotifications('passenger', 2)).resolves.toEqual({ registered: true });
     expect(query).toHaveBeenCalledTimes(1);
   });
+  it('binds v3 capability to the current push token without changing the table schema', async () => {
+    const query = jest.fn();
+    const service = Object.assign(Object.create(DriverDispatchService.prototype), {
+      db: { query, getRepository: () => ({ findOne: async () => ({ id: 'driver', fcmToken: 'synthetic-token' }) }) },
+    });
+    await expect(service.registerNotifications('driver', 3)).resolves.toEqual({ registered: true });
+    expect(query.mock.calls[0][1]).toEqual(['driver', createHash('sha256').update('synthetic-token:driver-v3').digest('hex')]);
+    expect(query.mock.calls[0][0]).toContain('ON CONFLICT ("userId")');
+  });
 
   const scheduled = () => ({ userId: 'driver', title: 'Commande programmée à proximité', body: 'Consultez la commande',
     data: { type: 'trip_request_nearby', ringAlert: 'nearby-request-v1', tripRequestId: 'request', driverId: 'driver',
       alertExpiresAt: new Date(Date.now() + 60_000).toISOString() } });
+  it('v3 scheduled orders use data-only delivery so the native timeout bounds the phone ringtone', async () => {
+    const { service, send, query } = fixture(true); query.mockResolvedValue([{ version: 3 }]);
+    await service.sendFirebaseNotification(scheduled(), 'fixture-token');
+    const payload = send.mock.calls[0][0];
+    expect(payload.notification).toBeUndefined();
+    expect(payload.android.notification).toBeUndefined();
+    expect(payload.data).toMatchObject({ delivery: 'driver-phone-v3', ringAlert: 'nearby-request-v1' });
+    expect(payload.data.actionProtocol).toBeUndefined();
+    expect(payload.android.ttl).toBeGreaterThan(0);
+    expect(payload.android.ttl).toBeLessThanOrEqual(30000);
+    expect(Date.parse(payload.data.ringUntil)).toBeLessThanOrEqual(Date.now() + 30000);
+  });
+  it.each(['new_booking', 'driver_dispatch_offer'])('v3 %s retains the existing actions and 30s deadline', async type => {
+    const { service, send, query } = fixture(true); query.mockResolvedValue([{ version: 3 }]);
+    await service.sendFirebaseNotification({ userId: 'driver', body: 'Test', data: { type, driverId: 'driver' } }, 'token');
+    const payload = send.mock.calls[0][0];
+    expect(payload.notification).toBeUndefined();
+    expect(payload.data).toMatchObject({ actionProtocol: 'driver-v1', ringVersion: 'v2' });
+    expect(payload.android.ttl).toBeLessThanOrEqual(30000);
+  });
+  it('v3 does not turn the passenger acceptance into a driver phone ringtone', async () => {
+    const { service, send, query } = fixture(true); query.mockResolvedValue([{ version: 3 }]);
+    await service.sendFirebaseNotification({ userId: 'passenger', body: 'Test', data: { type: 'trip_request_accepted' } }, 'token');
+    expect(send.mock.calls[0][0].android.notification.channelId).toBe('booking-ring-v2');
+    expect(send.mock.calls[0][0].data.delivery).toBeUndefined();
+  });
   it('uses the long Android channel for scheduled requests without treating them as exclusive dispatch', async () => {
     const { service, send, query } = fixture(true); query.mockResolvedValue([{ version: 2 }]);
     await service.sendFirebaseNotification(scheduled(), 'fixture-token');

@@ -67,6 +67,33 @@ describe('NotificationService critical push reliability', () => {
     jest.restoreAllMocks();
   });
 
+  it('drains a 50-driver broadcast in one tick with at most five sends in flight', async () => {
+    const f = buildService();
+    for (let batch = 0; batch < 5; batch++) {
+      f.queryBuilder.getMany.mockResolvedValueOnce(Array.from({ length: 10 }, (_, index) => ({ id: `${batch}:${index}` })) as never[]);
+    }
+    jest.spyOn(f.service as any, 'isCriticalNotificationStillDeliverable').mockResolvedValue(true);
+    let active = 0, peak = 0;
+    const delivery = jest.spyOn(f.service as any, 'deliverSavedNotification').mockImplementation(async () => {
+      active++; peak = Math.max(peak, active);
+      await new Promise(resolve => setImmediate(resolve));
+      active--; return true;
+    });
+    await f.service.dispatchUrgentNotifications();
+    expect(delivery).toHaveBeenCalledTimes(50);
+    expect(peak).toBe(5);
+    expect(f.queryBuilder.getMany).toHaveBeenCalledTimes(6);
+  });
+
+  it('bounds a continuously full urgent queue to six batches per tick', async () => {
+    const f = buildService();
+    f.queryBuilder.getMany.mockResolvedValue(Array.from({ length: 10 }, (_, index) => ({ id: String(index) })) as never[]);
+    jest.spyOn(f.service as any, 'isCriticalNotificationStillDeliverable').mockResolvedValue(true);
+    jest.spyOn(f.service as any, 'deliverSavedNotification').mockResolvedValue(true);
+    await f.service.dispatchUrgentNotifications();
+    expect(f.queryBuilder.getMany).toHaveBeenCalledTimes(6);
+  });
+
   it('reuses free urgent slots while another urgent send remains unresolved', async () => {
     const f = buildService();
     let resolveSlow!: (value: boolean) => void;

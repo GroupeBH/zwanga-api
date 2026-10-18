@@ -7,6 +7,7 @@ import {
   Param,
   Delete,
   Request,
+  Query,
   Header,
   ParseUUIDPipe,
 } from '@nestjs/common';
@@ -25,6 +26,7 @@ import { Auth } from '../auth/decorators/auth.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { UserRole } from '../users/entities/user.entity';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
+import { HistoryPageQuery } from '../common/history-page';
 
 @ApiTags('Trip Requests')
 @Controller('trip-requests')
@@ -113,6 +115,30 @@ export class TripRequestsController {
   })
   async getVehicleOptions(@Body() payload: TripRequestVehicleOptionsDto) {
     return this.tripRequestsService.getVehicleOptions(payload);
+  }
+
+  @Get('pages/available')
+  @Header('Cache-Control', 'private, no-store')
+  @Auth()
+  @Roles(UserRole.DRIVER)
+  @SensitiveThrottle(30, 60000)
+  async availablePage(@Request() req, @Query() options: HistoryPageQuery) {
+    return this.tripRequestsService.findRequestPage(req.user.userId, false, options);
+  }
+
+  @Get('pages/my-requests')
+  @Header('Cache-Control', 'private, no-store')
+  @Auth()
+  async ownPage(@Request() req, @Query() options: HistoryPageQuery) {
+    return this.tripRequestsService.findRequestPage(req.user.userId, true, options);
+  }
+
+  @Get('pages/my-offers')
+  @Header('Cache-Control', 'private, no-store')
+  @Auth()
+  @Roles(UserRole.DRIVER)
+  async offersPage(@Request() req, @Query() options: HistoryPageQuery) {
+    return this.tripRequestsService.findOfferPage(req.user.userId, options);
   }
 
   @Get(':id')

@@ -15,6 +15,8 @@ import {
   In,
   IsNull,
   Raw,
+  Not,
+  EntityManager,
 } from 'typeorm';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { TripRequest, TripRequestStatus } from './entities/trip-request.entity';
@@ -51,6 +53,9 @@ import { KycStatus } from '../users/entities/kyc-document.entity';
 import { assertDriverCanOperate } from '../users/driver-activation';
 import { DriverDispatchService } from './dispatch/dispatch.service';
 import { ACCEPTED_REQUEST_EXPIRATION_MS, UNACCEPTED_REQUEST_EXPIRATION_MS, assertRequestSnapshot, assertUnassignedRequest } from './request-edit-policy';
+import { enqueueTransactionalNotification } from '../notifications/transactional-notification';
+import { HistoryPageQuery, orderHistory } from '../common/history-page';
+import { requestPageIds, offerPageIds } from './request-pages';
 
 export interface SanitizedUser {
   id: string;
@@ -305,19 +310,18 @@ export class TripRequestsService {
     const saved = await this.tripRequestRepository.save(tripRequest);
     this.logger.log(`Trip request created: ${saved.id}`);
 
-    // Immediate invitations keep their exclusive accept/decline flow. A scheduled
+    // Immediate invitations broadcast accept/decline offers (first acceptance wins). A scheduled
     // nearby alert only opens the existing request; it does not reserve the driver.
     if (saved.immediateDispatch) void this.driverDispatch?.tick();
     else {
       let nearbyAlertQueued = false;
       if (this.driverDispatch?.enabled) {
         try { nearbyAlertQueued = await this.driverDispatch.notifyScheduledRequest(saved.id); }
-        catch { this.logger.warn('Nearby scheduled-request alert could not be queued; falling back to legacy delivery.'); }
+        catch { this.logger.warn('Nearby scheduled-request alert deferred to the dispatch worker.'); }
       }
-      // Store versions without compatible nearby alerts must still receive the
-      // existing notification when no alert could be queued. Never broadcast
-      // an immediate/exclusive invitation or duplicate a committed nearby alert.
-      if (!nearbyAlertQueued) await this.notifyDriversAboutTripRequest(saved);
+      // When geographic dispatch is enabled, its cron continues the bounded
+      // broadcast. Never fall back to drivers with no recent position/outside 5 km.
+      if (!nearbyAlertQueued && !this.driverDispatch?.enabled) await this.notifyDriversAboutTripRequest(saved);
     }
 
     return this.findOne(saved.id, passengerId);
@@ -785,6 +789,32 @@ export class TripRequestsService {
         this.sanitizeTripRequest(tr, driverId, true),
       ),
     );
+  }
+
+  async findRequestPage(userId: string, own: boolean, options: HistoryPageQuery) {
+    if (!own) await this.assertDriverViewer(userId);
+    const page = await requestPageIds(this.tripRequestRepository, userId, own, options);
+    if (!page.ids.length) return { data: [], total: page.total, nextCursor: page.nextCursor };
+    const requests = await this.tripRequestRepository.find({ where: { id: In(page.ids) },
+      relations: ['passenger', 'selectedDriver', 'selectedVehicle', 'driverOffers', 'driverOffers.driver', 'driverOffers.vehicle'] });
+    await this.expireRequests(requests);
+    // Recheck after hydration: an acceptance/cancellation can race the ID page.
+    const visible = orderHistory(page.ids, requests).filter(request => own
+      ? request.passengerId === userId
+      : !request.immediateDispatch && !this.hasAcceptedDriver(request) &&
+        [TripRequestStatus.PENDING, TripRequestStatus.OFFERS_RECEIVED].includes(request.status));
+    return { data: await Promise.all(visible.map(request => this.sanitizeTripRequest(request, userId, !own))),
+      total: page.total, nextCursor: page.nextCursor };
+  }
+
+  async findOfferPage(driverId: string, options: HistoryPageQuery) {
+    await this.assertDriverViewer(driverId);
+    const page = await offerPageIds(this.driverOfferRepository, driverId, options);
+    const offers = page.ids.length ? await this.driverOfferRepository.find({
+      where: { id: In(page.ids), driverId }, relations: ['driver', 'vehicle', 'tripRequest', 'tripRequest.passenger'],
+    }) : [];
+    return { data: await Promise.all(orderHistory(page.ids, offers).map(offer => this.sanitizeDriverOfferWithTripRequest(offer, driverId))),
+      total: page.total, nextCursor: page.nextCursor };
   }
 
   async findOne(id: string, userId?: string): Promise<SanitizedTripRequest> {
@@ -2648,15 +2678,11 @@ export class TripRequestsService {
       return [];
     }
 
-    const acceptedRequestIds = new Set(
-      expiredRequests
-        .filter((request) => this.hasAcceptedDriver(request))
-        .map((request) => request.id),
-    );
-
-    const expirationAttempts = await Promise.all(
-      expiredRequests.map(async (request) => {
-        const result = await this.tripRequestRepository.update(
+    const expiredIds: string[] = [];
+    // Bounded DB concurrency even when a legacy history read supplies many rows.
+    for (const request of expiredRequests) {
+      const changed = await this.tripRequestRepository.manager.transaction(async manager => {
+        const result = await manager.getRepository(TripRequest).update(
           {
             id: request.id,
             // Match the snapshot: an acceptance, release or schedule edit that
@@ -2681,27 +2707,17 @@ export class TripRequestsService {
           { status: TripRequestStatus.EXPIRED },
         );
 
-        return result.affected === 1 ? request : null;
-      }),
-    );
-
-    const successfullyExpiredRequests = expirationAttempts.filter(
-      (request): request is TripRequest => request !== null,
-    );
-    successfullyExpiredRequests.forEach((request) => {
-      request.status = TripRequestStatus.EXPIRED;
-    });
-
-    await Promise.all(
-      successfullyExpiredRequests.map((request) =>
-        this.notifyPassengerAboutExpiredRequest(
-          request,
-          acceptedRequestIds.has(request.id),
-        ),
-      ),
-    );
-
-    return successfullyExpiredRequests.map((request) => request.id);
+        if (result.affected !== 1) return false;
+        await this.notifyPassengerAboutExpiredRequest(manager, request, this.hasAcceptedDriver(request));
+        return true;
+      });
+      // Do not change the caller's snapshot if the outbox INSERT rolls back.
+      if (changed) {
+        request.status = TripRequestStatus.EXPIRED;
+        expiredIds.push(request.id);
+      }
+    }
+    return expiredIds;
   }
 
   /**
@@ -2709,6 +2725,7 @@ export class TripRequestsService {
    * triggered by the trip_request_driver_overdue notification type.
    */
   private async notifyPassengerAboutExpiredRequest(
+    manager: EntityManager,
     tripRequest: TripRequest,
     wasAccepted: boolean,
   ): Promise<void> {
@@ -2722,27 +2739,19 @@ export class TripRequestsService {
       return;
     }
 
-    try {
-      await this.notificationService.sendNotificationToUser(
-        tripRequest.passengerId,
-        'Commande de trajet expirée',
-        `Votre commande de trajet de ${tripRequest.departureLocation} à ${tripRequest.arrivalLocation} a expiré car aucun conducteur ne l'a acceptée.`,
-        {
-          type: 'trip_request_expired',
-          presentation: 'push_only',
-          tripRequestId: tripRequest.id,
-          status: TripRequestStatus.EXPIRED,
-          reason: 'no_driver_accepted',
-        },
-      );
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const stack = error instanceof Error ? error.stack : undefined;
-      this.logger.error(
-        `Unable to notify passenger about expired unaccepted trip request ${tripRequest.id}: ${message}`,
-        stack,
-      );
-    }
+    await enqueueTransactionalNotification(manager, {
+      eventKey: `trip-request-expired:${tripRequest.id}:${new Date(tripRequest.updatedAt ?? tripRequest.departureDateMax).getTime()}`,
+      userId: tripRequest.passengerId,
+      title: 'Commande de trajet expirée',
+      body: `Votre commande de trajet de ${tripRequest.departureLocation} à ${tripRequest.arrivalLocation} a expiré car aucun conducteur ne l'a acceptée.`,
+      data: {
+        type: 'trip_request_expired',
+        presentation: 'push_only',
+        tripRequestId: tripRequest.id,
+        status: TripRequestStatus.EXPIRED,
+        reason: 'no_driver_accepted',
+      },
+    });
   }
 
   // ==================== Cron Jobs ====================
@@ -2753,7 +2762,7 @@ export class TripRequestsService {
    * Le timestamp persistant permet également au mobile d'afficher la modale
    * après un redémarrage, même si la notification push n'a pas été ouverte.
    */
-  @Cron(CronExpression.EVERY_MINUTE)
+  @Cron(CronExpression.EVERY_MINUTE, { waitForCompletion: true })
   async notifyPassengersAboutOverdueDriverPickup(
     now = new Date(),
   ): Promise<void> {
@@ -2806,32 +2815,32 @@ export class TripRequestsService {
         continue;
       }
 
+      const selectedDriverId = tripRequest.selectedDriverId;
       const notifiedAt = new Date();
-      const claim = await this.tripRequestRepository.update(
-        {
-          id: tripRequest.id,
-          passengerId: tripRequest.passengerId,
-          status: TripRequestStatus.DRIVER_SELECTED,
-          selectedDriverId: tripRequest.selectedDriverId,
-          driverPickupOverdueNotifiedAt: IsNull(),
-          departureDateMax: Between(
-            new Date(now.getTime() - this.ACCEPTED_REQUEST_EXPIRATION_MS + 1),
-            now,
-          ),
-        },
-        { driverPickupOverdueNotifiedAt: notifiedAt },
-      );
-
-      if (claim.affected !== 1) {
-        continue;
-      }
-
-      try {
-        await this.notificationService.sendNotificationToUser(
-          tripRequest.passengerId,
-          'Votre prise en charge est en retard',
-          "L'heure maximale souhaitée est dépassée et vous n'avez pas encore été pris en charge. Vous pouvez attendre ou choisir un autre conducteur. Pensez aussi à ajuster la date et l'heure de votre commande.",
+      await this.tripRequestRepository.manager.transaction(async manager => {
+        const claim = await manager.getRepository(TripRequest).update(
           {
+            id: tripRequest.id,
+            passengerId: tripRequest.passengerId,
+            status: TripRequestStatus.DRIVER_SELECTED,
+            selectedDriverId,
+            driverPickupOverdueNotifiedAt: IsNull(),
+            departureDateMax: Between(
+              new Date(now.getTime() - this.ACCEPTED_REQUEST_EXPIRATION_MS + 1),
+              now,
+            ),
+          },
+          { driverPickupOverdueNotifiedAt: notifiedAt },
+        );
+
+        if (claim.affected !== 1) return;
+
+        await enqueueTransactionalNotification(manager, {
+          eventKey: `trip-request-overdue:${tripRequest.id}:${new Date(tripRequest.selectedAt ?? tripRequest.departureDateMax).getTime()}:${new Date(tripRequest.departureDateMax).getTime()}`,
+          userId: tripRequest.passengerId,
+          title: 'Votre prise en charge est en retard',
+          body: "L'heure maximale souhaitée est dépassée et vous n'avez pas encore été pris en charge. Vous pouvez attendre ou choisir un autre conducteur. Pensez aussi à ajuster la date et l'heure de votre commande.",
+          data: {
             type: 'trip_request_driver_overdue',
             recipientUserId: tripRequest.passengerId,
             tripRequestId: tripRequest.id,
@@ -2842,15 +2851,8 @@ export class TripRequestsService {
             driverPickupOverdueNotifiedAt: notifiedAt.toISOString(),
             suggestScheduleUpdate: 'true',
           },
-        );
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        const stack = error instanceof Error ? error.stack : undefined;
-        this.logger.error(
-          `Unable to notify passenger about overdue pickup for trip request ${tripRequest.id}: ${message}`,
-          stack,
-        );
-      }
+        });
+      });
     }
   }
 
@@ -2868,20 +2870,24 @@ export class TripRequestsService {
     this.logger.debug('Running cron job to mark expired trip requests');
 
     const now = new Date();
-    const latestAcceptedDepartureCutoff = new Date(
-      now.getTime() - Math.min(this.UNACCEPTED_REQUEST_EXPIRATION_MS, this.ACCEPTED_REQUEST_EXPIRATION_MS),
-    );
-
+    const active = In([TripRequestStatus.PENDING, TripRequestStatus.OFFERS_RECEIVED, TripRequestStatus.DRIVER_SELECTED]);
+    const acceptedCutoff = LessThanOrEqual(new Date(now.getTime() - this.ACCEPTED_REQUEST_EXPIRATION_MS));
+    // Filter both deadlines before LIMIT: unaccepted requests still in their
+    // third hour must not starve accepted requests whose two hours have elapsed.
     const expirationCandidates = await this.tripRequestRepository.find({
-      where: {
-        status: In([
-          TripRequestStatus.PENDING,
-          TripRequestStatus.OFFERS_RECEIVED,
-          TripRequestStatus.DRIVER_SELECTED,
-        ]),
-        departureDateMax: LessThanOrEqual(latestAcceptedDepartureCutoff),
-      },
-      relations: ['passenger', 'driverOffers'],
+      where: [
+        { status: active, departureDateMax: LessThanOrEqual(new Date(now.getTime() - this.UNACCEPTED_REQUEST_EXPIRATION_MS)) },
+        { status: TripRequestStatus.DRIVER_SELECTED, departureDateMax: acceptedCutoff },
+        { status: active, departureDateMax: acceptedCutoff, selectedDriverId: Not(IsNull()) },
+        { status: active, departureDateMax: acceptedCutoff, tripId: Not(IsNull()) },
+        { status: active, departureDateMax: acceptedCutoff, driverOffers: { status: DriverOfferStatus.ACCEPTED } },
+      ],
+      relations: ['driverOffers'],
+      select: { id: true, passengerId: true, status: true, departureDateMax: true, updatedAt: true,
+        selectedDriverId: true, tripId: true, departureLocation: true, arrivalLocation: true,
+        driverOffers: { id: true, status: true } },
+      order: { departureDateMax: 'ASC', id: 'ASC' },
+      take: 100,
     });
 
     const expiredRequestIds = await this.expireRequests(

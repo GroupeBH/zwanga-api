@@ -158,17 +158,30 @@ const bin = process.env.AUDIT_TEST_POSTGRES_BIN;
     };
 
     it.each([false, true])(
-      'automatically approves and activates the correct role with a single durable push (vehicle=%s)',
+      'requires authenticity review, then activates the correct role with one durable push (vehicle=%s)',
       async (hasVehicle) => {
         const id = await user();
         if (hasVehicle) await vehicle(id);
         const { row } = await reserve(id);
-        const saved = await finishChecks(row);
-        expect(saved.kyc.status).toBe(KycStatus.APPROVED);
-        expect(saved.kyc.providerMetadata).toMatchObject({
-          decision: 'automatic',
-          manualReviewRequired: false,
+        const pending = await finishChecks(row);
+        expect(pending.kyc.status).toBe(KycStatus.PENDING);
+        expect(pending.kyc.providerMetadata).toMatchObject({
+          decision: 'manual_review',
+          manualReviewRequired: true,
         });
+        expect(pending.user.role).toBe(UserRole.PASSENGER);
+        expect(await db.getRepository(Notification).count()).toBe(0);
+        const admin = await user();
+        await db.getRepository(User).update(admin, { role: UserRole.ADMIN });
+        await db.query('INSERT INTO kyc_evidence_access_log ("archiveId","adminId",action) VALUES ($1,$2,\'file\')', [row.archiveId, admin]);
+        const service = Object.assign(Object.create(AdminService.prototype), {
+          userRepository: db.getRepository(User), kycDocumentRepository: db.getRepository(KycDocument),
+          logger: { log: jest.fn(), warn: jest.fn() },
+        }) as AdminService;
+        await service.verifyKyc(row.kycId, admin, true, 'Authenticité de la pièce et selfie contrôlés');
+        const saved = await repo.owned(id, row.id);
+        expect(saved.kyc.status).toBe(KycStatus.APPROVED);
+        expect(saved.kyc.providerMetadata?.decision).toBe('manual_approved');
         expect(saved.user.status).toBe(UserStatus.ACTIVE);
         expect(saved.user.role).toBe(
           hasVehicle ? UserRole.DRIVER : UserRole.PASSENGER,

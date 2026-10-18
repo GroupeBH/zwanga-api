@@ -11,9 +11,6 @@ import {
   firstValueFrom,
   catchError,
   throwError,
-  retryWhen,
-  concatMap,
-  timer,
 } from 'rxjs';
 import { AxiosError } from 'axios';
 import {
@@ -133,16 +130,8 @@ export class KeccelOtpService {
             },
           })
           .pipe(
-            retryWhen((errors) =>
-              errors.pipe(
-                concatMap((error, index: number) => {
-                  if (index >= 1) {
-                    return throwError(() => error);
-                  }
-                  return timer(1000);
-                }),
-              ),
-            ),
+            // A lost response does not prove the SMS was not sent. Keccel has
+            // no idempotency key here: never automatically repeat generation.
             catchError((error: AxiosError) => {
               this.logger.error(
                 `Keccel OTP Generate API error: ${error.message}`,
@@ -255,16 +244,7 @@ export class KeccelOtpService {
             },
           })
           .pipe(
-            retryWhen((errors) =>
-              errors.pipe(
-                concatMap((error, index) => {
-                  if (index >= 1) {
-                    return throwError(() => error);
-                  }
-                  return timer(1000);
-                }),
-              ),
-            ),
+            // Validation can consume a proof/attempt; do not replay ambiguously.
             catchError((error: AxiosError) => {
               this.logger.error(
                 `Keccel OTP Validate API error: ${error.message}`,

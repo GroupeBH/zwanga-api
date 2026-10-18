@@ -7,6 +7,8 @@ import { TripStatus } from '../trips/entities/trip.entity';
 import { TripRequestsService } from './trip-requests.service';
 import { KycDocument, KycStatus } from '../users/entities/kyc-document.entity';
 import { UserRole, UserStatus } from '../users/entities/user.entity';
+import { enqueueTransactionalNotification } from '../notifications/transactional-notification';
+jest.mock('../notifications/transactional-notification', () => ({ enqueueTransactionalNotification: jest.fn() }));
 
 const attachEditTransaction = (repository: any, request: any) => {
   request.updatedAt = new Date();
@@ -617,12 +619,13 @@ describe('TripRequestsService motorcycle capacity', () => {
 });
 
 describe('TripRequestsService unaccepted request expiration', () => {
+  beforeEach(() => jest.mocked(enqueueTransactionalNotification).mockReset());
   const buildService = (
     tripRequestRepository: Record<string, jest.Mock>,
     notificationService: Record<string, jest.Mock> = {},
   ) =>
     new TripRequestsService(
-      tripRequestRepository as any,
+      { ...tripRequestRepository, manager: { transaction: async work => work({ getRepository: () => tripRequestRepository }) } } as any,
       {} as any,
       {
         findOne: jest.fn().mockResolvedValue({ id: 'driver-1', role: UserRole.DRIVER }),
@@ -700,18 +703,17 @@ describe('TripRequestsService unaccepted request expiration', () => {
 
     await service.findByPassenger(request.passengerId);
 
-    expect(notificationService.sendNotificationToUser).toHaveBeenCalledTimes(1);
-    expect(notificationService.sendNotificationToUser).toHaveBeenCalledWith(
-      request.passengerId,
-      'Commande de trajet expirée',
-      expect.stringContaining("aucun conducteur ne l'a acceptée"),
-      expect.objectContaining({
+    expect(enqueueTransactionalNotification).toHaveBeenCalledTimes(1);
+    expect(enqueueTransactionalNotification).toHaveBeenCalledWith(
+      expect.anything(), expect.objectContaining({ userId: request.passengerId,
+      title: 'Commande de trajet expirée', body: expect.stringContaining("aucun conducteur ne l'a acceptée"),
+      data: expect.objectContaining({
         type: 'trip_request_expired',
         presentation: 'push_only',
         tripRequestId: request.id,
         status: TripRequestStatus.EXPIRED,
         reason: 'no_driver_accepted',
-      }),
+      }) }),
     );
     expect(notificationService.sendNotificationToUser).not.toHaveBeenCalledWith(
       expect.anything(),
@@ -815,6 +817,7 @@ describe('TripRequestsService unaccepted request expiration', () => {
     const tripRequestRepository = {
       findOne: jest.fn().mockResolvedValue(tripRequest),
       update: jest.fn().mockResolvedValue({ affected: 1 }),
+      manager: { transaction: async work => work({ getRepository: () => tripRequestRepository }) },
     };
     const driverOfferRepository = {
       findOne: jest.fn(),
@@ -1197,6 +1200,7 @@ describe('TripRequestsService overdue selected driver recovery', () => {
     const tripRequestRepository = {
       createQueryBuilder: jest.fn().mockReturnValue(queryBuilder),
       update: jest.fn().mockResolvedValue({ affected: 1 }),
+      manager: { transaction: async work => work({ getRepository: () => tripRequestRepository }) },
     };
     const notificationService = {
       sendNotificationToUser: jest.fn().mockResolvedValue(true),
@@ -1227,16 +1231,15 @@ describe('TripRequestsService overdue selected driver recovery', () => {
       }),
       { driverPickupOverdueNotifiedAt: expect.any(Date) },
     );
-    expect(notificationService.sendNotificationToUser).toHaveBeenCalledWith(
-      request.passengerId,
-      expect.any(String),
-      expect.stringContaining("l'heure"),
-      expect.objectContaining({
+    expect(enqueueTransactionalNotification).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ userId: request.passengerId, data: expect.objectContaining({
         type: 'trip_request_driver_overdue',
         recipientUserId: request.passengerId,
         tripRequestId: request.id,
-      }),
+      }) }),
     );
+    expect(notificationService.sendNotificationToUser).not.toHaveBeenCalled();
   });
 
   it('lets the passenger release an overdue driver and returns the reopened request', async () => {

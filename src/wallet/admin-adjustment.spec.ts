@@ -98,13 +98,18 @@ describe('Admin wallet adjustment safeguards', () => {
     ).rejects.toThrow('insuffisant');
     expect(f.manager.save).not.toHaveBeenCalled();
   });
-  it('refuses debits on a blocked wallet', async () => {
+  it('lets an admin remove tokens from a wallet under review', async () => {
     const f = fixture();
     f.account!.withdrawalsBlocked = true;
-    await expect(
-      f.service.applyAdminAdjustment('admin', 'user', -1, reason, requestId),
-    ).rejects.toThrow('vérification');
-    expect(f.manager.save).not.toHaveBeenCalled();
+    const result = await f.service.applyAdminAdjustment(
+      'admin',
+      'user',
+      -1,
+      reason,
+      requestId,
+    );
+    expect(result.balance).toBe(99);
+    expect(f.manager.save).toHaveBeenCalled();
   });
   it.each([0, NaN, Infinity, 1.001, 1000001, -1000001])(
     'refuses invalid amount %s',

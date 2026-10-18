@@ -63,7 +63,7 @@ describe('Informational driver cash receipts', () => {
       { createQueryBuilder: () => earningsQuery } as any,
       payouts as any,
       { findOne: jest.fn().mockResolvedValue(null) } as any,
-      { exists: jest.fn().mockResolvedValue(true) } as any,
+      { findOne: jest.fn().mockResolvedValue({ status: 'approved' }) } as any,
       { createQueryBuilder: () => cashQuery } as any,
       {} as any,
       { get: jest.fn() } as any,

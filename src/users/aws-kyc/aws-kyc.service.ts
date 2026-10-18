@@ -46,8 +46,9 @@ export class AwsKycService {
       country: 'COD',
       documentTypes: [...AWS_DOCUMENT_TYPES],
       consentVersion: AWS_KYC_CONSENT,
-      manualReviewRequired: false,
+      manualReviewRequired: true,
       reviewPolicy: 'automatic_with_manual_fallback',
+      documentAuthenticity: 'manual_review_required',
       maxImageBytes: 5 * 1024 * 1024,
     };
   }
