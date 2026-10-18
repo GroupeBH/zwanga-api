@@ -16,7 +16,7 @@ describe('request creation alert routing', () => {
     });
     return { dto, repository, driverDispatch, service, run: () => service.create('passenger', dto) };
   };
-  it('routes immediate intent to exclusive dispatch without a broadcast', async () => {
+  it('routes immediate intent to geographic dispatch without a non-geographic fallback', async () => {
     const f = fixture(true, true); await f.run();
     expect(f.repository.create.mock.calls[0][0].immediateDispatch).toBe(true);
     expect(f.driverDispatch.tick).toHaveBeenCalledTimes(1);
@@ -42,11 +42,10 @@ describe('request creation alert routing', () => {
     await expect(f.run()).rejects.toThrow('recherche immédiate');
     expect(f.repository.save).not.toHaveBeenCalled();
   });
-  it('falls back to legacy delivery when no nearby compatible driver can be alerted', async () => {
+  it('does not notify outside the geographic selection when no eligible driver is found', async () => {
     const f = fixture(true, false); f.driverDispatch.notifyScheduledRequest.mockResolvedValue(false);
     await expect(f.run()).resolves.toEqual({ id: 'created' });
-    expect(f.service.notifyDriversAboutTripRequest).toHaveBeenCalledTimes(1);
-    expect(f.service.notifyDriversAboutTripRequest).toHaveBeenCalledWith(expect.objectContaining({ id: 'created', immediateDispatch: false }));
+    expect(f.service.notifyDriversAboutTripRequest).not.toHaveBeenCalled();
     expect(f.driverDispatch.tick).not.toHaveBeenCalled();
   });
   it('keeps legacy delivery when dispatch is not injected', async () => {
@@ -58,17 +57,17 @@ describe('request creation alert routing', () => {
     const f = fixture(true, false); f.driverDispatch.notifyScheduledRequest.mockRejectedValue(new Error('offline'));
     await expect(f.run()).resolves.toEqual({ id: 'created' });
     expect(f.service.logger.warn).toHaveBeenCalledTimes(1);
-    expect(f.service.notifyDriversAboutTripRequest).toHaveBeenCalledTimes(1);
+    expect(f.service.notifyDriversAboutTripRequest).not.toHaveBeenCalled();
     expect(f.driverDispatch.tick).not.toHaveBeenCalled();
   });
-  it('does not report a saved request as failed even if legacy delivery also fails', async () => {
-    const f = fixture(true, false); f.driverDispatch.notifyScheduledRequest.mockRejectedValue(new Error('offline'));
+  it('preserves legacy-disabled-dispatch creation even if its notification fails', async () => {
+    const f = fixture(false, false);
     f.service.userRepository.find = jest.fn().mockRejectedValue(new Error('legacy delivery unavailable'));
     f.service.notifyDriversAboutTripRequest.mockImplementation(
       TripRequestsService.prototype['notifyDriversAboutTripRequest'].bind(f.service),
     );
     await expect(f.run()).resolves.toEqual({ id: 'created' });
-    expect(f.service.logger.warn).toHaveBeenCalledTimes(1);
+    expect(f.service.logger.warn).not.toHaveBeenCalled();
     expect(f.service.logger.error).toHaveBeenCalledTimes(1);
   });
 });

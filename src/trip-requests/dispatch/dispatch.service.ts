@@ -9,10 +9,13 @@ import { getVehicleMaxSeats, Vehicle } from '../../vehicles/entities/vehicle.ent
 import { TripRequest, TripRequestStatus } from '../entities/trip-request.entity';
 import { DriverOffer, DriverOfferStatus } from '../entities/driver-offer.entity';
 import { NotificationService } from '../../notifications/notifications.service';
-import { enqueueTransactionalNotification } from '../../notifications/transactional-notification';
+import { enqueueTransactionalNotification, enqueueTransactionalNotifications } from '../../notifications/transactional-notification';
 import { DriverPositionDto, DriverPresenceDto } from './dispatch.dto';
 import { boundedInteger, DispatchDecision, dispatchOfferIsActionable } from './dispatch-policy';
 import { enqueueScheduledRequestAlert } from './scheduled-request-alert';
+import { ELIGIBLE_NEARBY_DRIVER_SQL, NEARBY_DRIVER_BATCH_SIZE, NEARBY_DRIVER_RADIUS_METERS,
+  nearbyNotificationCapabilitySql } from './nearby-driver-policy';
+import { enqueueStaleLocationReminders } from './stale-location-reminder';
 
 interface DispatchOffer {
   id: string; requestId: string; driverId: string; vehicleId: string;
@@ -29,8 +32,10 @@ export class DriverDispatchService {
   get enabled() { return this.config.get<string>('DRIVER_DISPATCH_ENABLED') === 'true'; }
   private get responseSeconds() { return boundedInteger(this.config.get('DRIVER_DISPATCH_RESPONSE_SECONDS'), 30, 10, 120); }
   private get presenceSeconds() { return boundedInteger(this.config.get('DRIVER_DISPATCH_PRESENCE_SECONDS'), 90, 45, 180); }
-  private get radiusMeters() { return boundedInteger(this.config.get('DRIVER_DISPATCH_RADIUS_METERS'), 5000, 500, 20000); }
-  private get positionSeconds() { return boundedInteger(this.config.get('DRIVER_DISPATCH_POSITION_SECONDS'), 300, 60, 900); }
+  private get radiusMeters() { return NEARBY_DRIVER_RADIUS_METERS; }
+  // Leave time for the 3-minute discovery heartbeat and its delivery. A legacy
+  // shorter setting must not make drivers disappear between normal samples.
+  private get positionSeconds() { return boundedInteger(this.config.get('DRIVER_DISPATCH_POSITION_SECONDS'), 300, 300, 900); }
 
   async notifyScheduledRequest(requestId: string): Promise<boolean> {
     if (!this.enabled) return false;
@@ -78,7 +83,8 @@ export class DriverDispatchService {
         ("driverId", "vehicleId", seats, position, "expiresAt", "leaseId", "updatedAt")
         VALUES ($1,$2,$3,ST_SetSRID(ST_MakePoint($4,$5),4326)::geography,$6,$7,$8)
         ON CONFLICT ("driverId") DO UPDATE SET "vehicleId" = EXCLUDED."vehicleId", seats = EXCLUDED.seats,
-          position = EXCLUDED.position, "expiresAt" = EXCLUDED."expiresAt", "updatedAt" = EXCLUDED."updatedAt"
+          position = EXCLUDED.position, "expiresAt" = EXCLUDED."expiresAt", "updatedAt" = EXCLUDED."updatedAt",
+          "locationReminderSentAt" = NULL
         WHERE driver_dispatch_presence."updatedAt" <= EXCLUDED."updatedAt"`,
         [driverId, vehicle.id, getVehicleMaxSeats(vehicle.type) ?? 4, body.longitude, body.latitude,
           new Date(recordedAt.getTime() + this.positionSeconds * 1000), randomUUID(), recordedAt]);
@@ -92,7 +98,7 @@ export class DriverDispatchService {
     if (!user?.fcmToken) return { registered: false };
     await this.db.query(`INSERT INTO driver_notification_clients ("userId", "tokenHash") VALUES ($1, $2)
       ON CONFLICT ("userId") DO UPDATE SET "tokenHash" = EXCLUDED."tokenHash"`,
-      [userId, createHash('sha256').update(user.fcmToken + (version === 2 ? ':driver-v2' : '')).digest('hex')]);
+      [userId, createHash('sha256').update(user.fcmToken + (version === 3 ? ':driver-v3' : version === 2 ? ':driver-v2' : '')).digest('hex')]);
     return { registered: true };
   }
 
@@ -114,7 +120,7 @@ export class DriverDispatchService {
         // A late heartbeat must never reactivate an offline/assigned driver or a newer vehicle selection.
         await manager.query(`UPDATE driver_dispatch_presence
           SET position = ST_SetSRID(ST_MakePoint($3,$4),4326)::geography,
-          "expiresAt" = now() + $5 * interval '1 second', "updatedAt" = now()
+          "expiresAt" = now() + $5 * interval '1 second', "updatedAt" = now(), "locationReminderSentAt" = NULL
           WHERE "driverId" = $1 AND "leaseId" = $2 AND "expiresAt" > now()`,
           [driverId, body.leaseId, body.longitude, body.latitude, this.presenceSeconds]);
         return;
@@ -123,7 +129,8 @@ export class DriverDispatchService {
         ("driverId", "vehicleId", seats, position, "expiresAt", "leaseId")
         VALUES ($1,$2,$3,ST_SetSRID(ST_MakePoint($4,$5),4326)::geography,now() + $6 * interval '1 second', $7)
         ON CONFLICT ("driverId") DO UPDATE SET "vehicleId" = EXCLUDED."vehicleId", seats = EXCLUDED.seats,
-        position = EXCLUDED.position, "expiresAt" = EXCLUDED."expiresAt", "updatedAt" = now(), "leaseId" = EXCLUDED."leaseId"`,
+        position = EXCLUDED.position, "expiresAt" = EXCLUDED."expiresAt", "updatedAt" = now(), "leaseId" = EXCLUDED."leaseId",
+        "locationReminderSentAt" = NULL`,
         [driverId, vehicle.id, body.seats, body.longitude, body.latitude, this.presenceSeconds, randomUUID()]);
     });
     return this.status(driverId);
@@ -201,6 +208,10 @@ export class DriverDispatchService {
         await requests.update(request.id, { status: TripRequestStatus.DRIVER_SELECTED, selectedDriverId: driverId,
           selectedVehicleId: vehicle.id, selectedPricePerSeat: request.maxPricePerSeat,
           selectedDriverRequiresPassengerKyc: false, selectedAt: new Date(), driverPickupOverdueNotifiedAt: null });
+        // First acceptance wins. Every other invitation loses its actionability;
+        // queued pushes are revalidated before delivery and retries cannot reassign.
+        await manager.query(`UPDATE trip_request_dispatch_offers SET status = 'cancelled'
+          WHERE "requestId" = $1 AND id <> $2 AND status = 'pending'`, [request.id, id]);
         await manager.query(`UPDATE driver_dispatch_presence SET "expiresAt" = now() WHERE "driverId" = $1`, [driverId]);
         await enqueueTransactionalNotification(manager, { eventKey: `dispatch-accepted:${id}`, userId: request.passengerId,
           title: 'Conducteur trouvé', body: 'Un conducteur a accepté votre commande. Consultez les détails de la prise en charge.',
@@ -221,15 +232,30 @@ export class DriverDispatchService {
       // Release deadlines even if no driver is currently available; batches remain bounded.
       await this.db.query(`UPDATE trip_request_dispatch_offers SET status = 'expired' WHERE id IN
         (SELECT id FROM trip_request_dispatch_offers WHERE status = 'pending' AND "expiresAt" <= now() LIMIT 100)`);
-      const requests: { id: string }[] = await this.db.query(`SELECT r.id FROM trip_requests r
-        WHERE r."immediateDispatch" = true AND r.status = 'pending' AND r."departureDateMax" > now()
-        AND NOT EXISTS (SELECT 1 FROM trip_request_dispatch_offers o WHERE o."requestId" = r.id AND o.status = 'pending')
+      const requests: { id: string; immediateDispatch: boolean }[] = await this.db.query(`SELECT r.id, r."immediateDispatch" FROM trip_requests r
+        WHERE r.status IN ('pending', 'offers_received') AND r."departureDateMax" > now()
+        AND r."selectedDriverId" IS NULL AND r."tripId" IS NULL
         ORDER BY r."dispatchCheckedAt" NULLS FIRST, r."createdAt" LIMIT 25`);
-      for (const request of requests) await this.allocate(request.id);
+      for (const request of requests) {
+        if (request.immediateDispatch) await this.allocate(request.id);
+        else await this.db.transaction(manager => enqueueScheduledRequestAlert(
+          manager, request.id, this.radiusMeters, driverId => this.isBusy(manager, driverId)));
+      }
       void this.notifications.dispatchTransactionalNotifications().catch(() => this.logger.warn('Dispatch push delivery deferred.'));
     } catch (error) {
       this.logger.error('Driver dispatch cycle failed', error instanceof Error ? error.stack : undefined);
     } finally { this.ticking = false; }
+  }
+
+  @Cron('0 */5 * * * *')
+  async remindStaleLocations(): Promise<void> {
+    if (!this.enabled) return;
+    try {
+      const count = await this.db.transaction(manager => enqueueStaleLocationReminders(manager));
+      if (count) await this.notifications.dispatchTransactionalNotifications();
+    } catch {
+      this.logger.warn('Driver location reminder deferred.');
+    }
   }
 
   @Cron('0 0 * * * *')
@@ -248,10 +274,8 @@ export class DriverDispatchService {
       if (!request || !request.departurePoint) return;
       // Dispatch scheduling is not a user edit. Keep the form's optimistic version stable.
       await manager.getRepository(TripRequest).update(request.id, { dispatchCheckedAt: new Date(), updatedAt: () => '"updatedAt"' });
-      const [pending] = await manager.query(`SELECT id FROM trip_request_dispatch_offers WHERE "requestId" = $1 AND status = 'pending'`, [requestId]);
-      if (pending) return;
-      const candidates: { driverId: string; vehicleId: string; seats: number }[] = await manager.query(`
-        SELECT p."driverId", v.id AS "vehicleId", CASE WHEN v.id = p."vehicleId" THEN p.seats
+      const candidates: { driverId: string; vehicleId: string; seats: number; brand: string; model: string }[] = await manager.query(`
+        SELECT p."driverId", v.id AS "vehicleId", v.brand, v.model, CASE WHEN v.id = p."vehicleId" THEN p.seats
           WHEN v.type = 'motorcycle_2_wheels' THEN 2 WHEN v.type = 'motorcycle_3_wheels' THEN 3 ELSE 4 END AS seats
         FROM driver_dispatch_presence p
         JOIN LATERAL (SELECT v.* FROM vehicles v WHERE v."ownerId" = p."driverId"
@@ -261,35 +285,36 @@ export class DriverDispatchService {
         AND (CASE WHEN v.id = p."vehicleId" THEN p.seats WHEN v.type = 'motorcycle_2_wheels' THEN 2
           WHEN v.type = 'motorcycle_3_wheels' THEN 3 ELSE 4 END) >= $3
         AND ST_DWithin(p.position, ST_SetSRID(ST_MakePoint($4,$5),4326)::geography, $6)
+        AND ${ELIGIBLE_NEARBY_DRIVER_SQL}
+        AND ${nearbyNotificationCapabilitySql(true)}
         AND NOT EXISTS (SELECT 1 FROM trip_request_dispatch_offers o WHERE
           (o."requestId" = $7 AND o."driverId" = p."driverId") OR (o."driverId" = p."driverId" AND o.status = 'pending'))
         ORDER BY ST_Distance(p.position, ST_SetSRID(ST_MakePoint($4,$5),4326)::geography), p."driverId"
-        LIMIT 20 FOR UPDATE OF p SKIP LOCKED`, [request.passengerId, request.vehicleType, request.numberOfSeats,
+        LIMIT ${NEARBY_DRIVER_BATCH_SIZE} FOR UPDATE OF p SKIP LOCKED`, [request.passengerId, request.vehicleType, request.numberOfSeats,
         request.departurePoint.coordinates[0], request.departurePoint.coordinates[1], this.radiusMeters, requestId, this.responseSeconds + 5]);
-      for (const candidate of candidates) {
-        const driver = await manager.getRepository(User).findOneBy({ id: candidate.driverId });
-        if (!driver?.fcmToken || await this.isBusy(manager, candidate.driverId)) continue;
-        try { await assertDriverCanOperate(manager, driver); } catch (error) {
-          if (error instanceof BadRequestException || (error as { status?: number }).status === 403) continue;
-          throw error;
-        }
-        const [capability] = await manager.query(`SELECT 1 FROM driver_notification_clients WHERE "userId" = $1 AND "tokenHash" IN ($2,$3)`,
-          [driver.id, createHash('sha256').update(driver.fcmToken).digest('hex'),
-            createHash('sha256').update(driver.fcmToken + ':driver-v2').digest('hex')]);
-        if (!capability) continue;
-        const id = randomUUID();
-        const vehicle = await manager.getRepository(Vehicle).findOneByOrFail({ id: candidate.vehicleId, ownerId: driver.id });
-        await manager.query('UPDATE driver_dispatch_presence SET "vehicleId" = $2, seats = $3 WHERE "driverId" = $1',
-          [driver.id, candidate.vehicleId, candidate.seats]);
-        const expiresAt = new Date(Math.min(Date.now() + this.responseSeconds * 1000, request.departureDateMax.getTime()));
-        await manager.query(`INSERT INTO trip_request_dispatch_offers (id,"requestId","driverId","vehicleId",seats,"expiresAt")
-          VALUES ($1,$2,$3,$4,$5,$6)`, [id, requestId, driver.id, candidate.vehicleId, candidate.seats, expiresAt]);
-        await enqueueTransactionalNotification(manager, { eventKey: `dispatch-offer:${id}`, userId: driver.id,
-          title: 'Commande de trajet à proximité', body: `${request.departureLocation} → ${request.arrivalLocation} · ${request.numberOfSeats} place(s) · ${request.maxPricePerSeat} FC/place · ${vehicle.brand} ${vehicle.model}. Accepter ou refuser ?`,
-          data: { type: 'driver_dispatch_offer', offerId: id, tripRequestId: requestId, driverId: driver.id,
-            expiresAt: expiresAt.toISOString(), role: 'driver' } });
-        return;
-      }
+      if (!candidates.length) return;
+      // Eligibility, current KYC, vehicle and client capability are already
+      // filtered in the candidate SQL. Delivery and acceptance revalidate them.
+      // Keep a constant number of round trips, not ~10 queries per driver.
+      const offers = candidates.map(candidate => ({ ...candidate, id: randomUUID() }));
+      const batch = JSON.stringify(offers);
+      await manager.query(`UPDATE driver_dispatch_presence p SET "vehicleId" = b."vehicleId", seats = b.seats
+        FROM jsonb_to_recordset($1::jsonb) AS b("driverId" uuid, "vehicleId" uuid, seats integer)
+        WHERE p."driverId" = b."driverId"`, [batch]);
+      // Start the shared deadline after candidate selection/presence updates.
+      const expiresAt = new Date(Math.min(Date.now() + this.responseSeconds * 1000, request.departureDateMax.getTime()));
+      if (expiresAt.getTime() <= Date.now()) return;
+      await manager.query(`INSERT INTO trip_request_dispatch_offers (id,"requestId","driverId","vehicleId",seats,"expiresAt")
+        SELECT b.id,$2,b."driverId",b."vehicleId",b.seats,$3
+        FROM jsonb_to_recordset($1::jsonb) AS b(id uuid,"driverId" uuid,"vehicleId" uuid,seats integer)`,
+        [batch, requestId, expiresAt]);
+      await enqueueTransactionalNotifications(manager, offers.map(offer => ({
+        eventKey: `dispatch-offer:${offer.id}`, userId: offer.driverId,
+        title: 'Commande de trajet à proximité',
+        body: `${request.departureLocation} → ${request.arrivalLocation} · ${request.numberOfSeats} place(s) · ${request.maxPricePerSeat} FC/place · ${offer.brand} ${offer.model}. Accepter ou refuser ?`,
+        data: { type: 'driver_dispatch_offer', offerId: offer.id, tripRequestId: requestId, driverId: offer.driverId,
+          expiresAt: expiresAt.toISOString(), role: 'driver' },
+      })));
     });
   }
 }

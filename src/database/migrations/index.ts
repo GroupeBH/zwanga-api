@@ -76,6 +76,8 @@ import { TokenValue25Cdf1780000070000 } from './1780000070000-TokenValue25Cdf';
 import { WelcomeBonus25CdfCopy1780000071000 } from './1780000071000-WelcomeBonus25CdfCopy';
 import { WelcomeBonus200Tokens1780000072000 } from './1780000072000-WelcomeBonus200Tokens';
 import { AddMarketerRole1780000073000 } from './1780000073000-AddMarketerRole';
+import { BroadcastDriverRequests1780000074000 } from './1780000074000-BroadcastDriverRequests';
+import { IndexRequestsAndTransfers1780000075000 } from './1780000075000-IndexRequestsAndTransfers';
 
 export const databaseMigrations = [
   FillTotalSeats1780000000000,
@@ -151,4 +153,6 @@ export const databaseMigrations = [
   WelcomeBonus25CdfCopy1780000071000,
   WelcomeBonus200Tokens1780000072000,
   AddMarketerRole1780000073000,
+  BroadcastDriverRequests1780000074000,
+  IndexRequestsAndTransfers1780000075000,
 ];

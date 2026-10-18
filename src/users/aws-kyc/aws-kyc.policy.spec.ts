@@ -44,19 +44,19 @@ describe('AWS KYC conservative document policy', () => {
     expect(awsKycConfig(new ConfigService({ ...configured, KYC_PROVIDER: 'didit' }))?.replacePendingDidit).toBe(false);
     expect(awsKycConfig(new ConfigService({ ...configured, KYC_PROVIDER: 'aws' }))?.replacePendingDidit).toBe(true);
   });
-  it('accepts confident labeled names with accents as eligible for automatic review', () => {
+  it('extracts confident names without mistaking OCR consistency for authenticity', () => {
     expect(inspectDocument(lines(id), 'voter_card', 'Emile', 'MBALA')).toEqual(
       expect.objectContaining({
         document: 'consistent',
         names: 'match',
-        manualReviewRequired: false,
+        manualReviewRequired: true,
       }),
     );
     expect(identityHash('Émile', 'Mbala')).toBe(
       identityHash('emile', ' mbala '),
     );
   });
-  it('requires every independent check before automatic approval', () => {
+  it('requires authenticity review even when every automated check passes', () => {
     const checks = {
       document: 'consistent',
       names: 'match',
@@ -65,7 +65,9 @@ describe('AWS KYC conservative document policy', () => {
       liveness: 'passed',
       face: 'passed',
     };
-    expect(awsKycDecision(checks)).toEqual({ mode: 'automatic', reasons: [] });
+    expect(awsKycDecision(checks)).toEqual({ mode: 'manual_review', reasons: ['DOCUMENT_AUTHENTICITY_UNVERIFIED'] });
+    // A client/persisted string must never impersonate a trusted attestation.
+    expect(awsKycDecision({ ...checks, authenticity: 'verified' }).mode).toBe('manual_review');
     for (const key of Object.keys(checks)) {
       expect(awsKycDecision({ ...checks, [key]: 'uncertain' }).mode).toBe(
         'manual_review',
@@ -143,7 +145,7 @@ describe('AWS KYC conservative document policy', () => {
           now,
         );
         expect(result.validity).toBe(validity);
-        expect(result.manualReviewRequired).toBe(validity !== 'valid');
+        expect(result.manualReviewRequired).toBe(true);
       }
     },
   );

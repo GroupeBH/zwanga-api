@@ -29,6 +29,8 @@ export enum WalletLedgerEntryType {
 }
 
 @Entity('wallet_ledger_entries')
+@Index('UQ_wallet_transfer_direction', ['relatedEntityId', 'type'], { unique: true,
+  where: `"relatedEntityType" = 'wallet_transfer' AND type IN ('transfer_out', 'transfer_in')` })
 @Index(['userId', 'createdAt'])
 @Index('IDX_wallet_ledger_entries_account_created', ['accountId', 'createdAt'])
 @Index(['relatedEntityType', 'relatedEntityId'])

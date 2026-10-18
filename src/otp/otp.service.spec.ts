@@ -54,6 +54,7 @@ describe('OtpService Keccel-only compatibility routing', () => {
         values.delete(key);
       }),
       getClient: jest.fn(() => ({
+        eval: jest.fn().mockResolvedValue(0),
         set: jest.fn(async (key: string, value: string) => {
           if (values.has(key)) return null;
           values.set(key, value);

@@ -12,7 +12,15 @@ export function diditLaunchMode(value: unknown): DiditLaunchMode {
 }
 
 export function diditSessionLaunch(mode: DiditLaunchMode, token: string | null, url: string | null) {
-  if (mode === 'native') return { sessionToken: token, url: url ?? '' };
+  if (mode === 'native') {
+    if (!token?.trim()) {
+      throw new BadGatewayException({
+        code: 'KYC_SDK_TOKEN_UNAVAILABLE',
+        message: 'Le service de vérification n’a pas fourni de session utilisable dans l’application. Réessayez plus tard.',
+      });
+    }
+    return { sessionToken: token.trim(), url: url ?? '' };
+  }
   try {
     const parsed = new URL(url ?? '');
     if (parsed.protocol !== 'https:' || parsed.hostname !== 'verify.didit.me' ||

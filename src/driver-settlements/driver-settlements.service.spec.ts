@@ -36,7 +36,7 @@ describe('DriverSettlementsService', () => {
     createQueryBuilder: jest.Mock;
   };
   let configService: { get: jest.Mock };
-  let kycRepository: { exists: jest.Mock };
+  let kycRepository: { findOne: jest.Mock };
   let bookingRepository: { find: jest.Mock };
   let tripRepository: { findOne: jest.Mock };
   let userRepository: { findOne: jest.Mock };
@@ -86,7 +86,7 @@ describe('DriverSettlementsService', () => {
         return undefined;
       }),
     };
-    kycRepository = { exists: jest.fn().mockResolvedValue(true) };
+    kycRepository = { findOne: jest.fn().mockResolvedValue({ status: 'approved' }) };
     bookingRepository = { find: jest.fn().mockResolvedValue([]) };
     tripRepository = { findOne: jest.fn() };
     userRepository = { findOne: jest.fn() };
@@ -113,6 +113,7 @@ describe('DriverSettlementsService', () => {
     dataSource = {
       transaction: jest.fn(async (work) => work(manager)),
     };
+    Object.assign(manager, { getRepository: () => kycRepository });
 
     service = new DriverSettlementsService(
       earningRepository as any,

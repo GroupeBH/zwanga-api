@@ -10,6 +10,7 @@ import { Observable } from 'rxjs';
 import { tap } from 'rxjs/operators';
 import type { Socket } from 'socket.io';
 import { isHttpRequestAborted } from '../http-request-abort';
+import { safeRequestPath, safeRequestError } from '../safe-request-log';
 
 const GPS_EVENTS = new Set([
   'driver_location_update',
@@ -37,7 +38,8 @@ export class LoggingInterceptor implements NestInterceptor {
     }
 
     const request = context.switchToHttp().getRequest();
-    const { method, url, ip, headers } = request;
+    const { method, ip, headers } = request;
+    const url = safeRequestPath(request);
     const userAgent = headers['user-agent'] || '';
     const user = request.user;
 
@@ -84,8 +86,8 @@ export class LoggingInterceptor implements NestInterceptor {
             ip,
             userAgent,
             userId: user?.userId || 'anonymous',
-            error: error instanceof Error ? error.message : 'Unknown error',
-            stack: statusCode >= 500 && error instanceof Error ? error.stack : undefined,
+            error: error instanceof Error ? safeRequestError(error.message, request) : 'Unknown error',
+            stack: statusCode >= 500 && error instanceof Error ? safeRequestError(error.stack, request) : undefined,
           };
 
           if (statusCode >= 500) this.logger.error(`HTTP ${method} ${url}`, logData);

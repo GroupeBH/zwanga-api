@@ -161,7 +161,7 @@ describe('ReferralsService', () => {
       findOne: jest.fn().mockResolvedValue(options?.bookingPayment ?? null),
     };
     const kycRepository = {
-      exists: jest.fn().mockResolvedValue(false),
+      findOne: jest.fn().mockResolvedValue(null),
     };
 
     const service = new ReferralsService(
@@ -198,7 +198,7 @@ describe('ReferralsService', () => {
   it('rejects referral withdrawals below 1000 tokens before releasing rewards or reserving a balance', async () => {
     const { service, account, dataSource, manager, kycRepository } = buildService();
     account.availableTokens = 1000;
-    kycRepository.exists.mockResolvedValue(true);
+    kycRepository.findOne.mockResolvedValue({ status: 'approved' });
     const release = jest.spyOn(service as any, 'releaseMatureRewardsForUser');
     await expect(service.requestWithdrawal('referrer-1', {
       tokens: 50, phone: '+243891234567',
@@ -213,7 +213,7 @@ describe('ReferralsService', () => {
   it('marks referral withdrawals unavailable while preserving the earned token balance', async () => {
     const { service, account, kycRepository } = buildService();
     account.availableTokens = 100;
-    kycRepository.exists.mockResolvedValue(true);
+    kycRepository.findOne.mockResolvedValue({ status: 'approved' });
     const summary = await service.getSummary('referrer-1');
     expect(summary.withdrawal).toMatchObject({
       enabled: true, blocked: true, minimumTokens: 1000, moneyPerToken: 25,

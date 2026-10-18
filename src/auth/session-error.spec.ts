@@ -17,9 +17,10 @@ describe('session error classification', () => {
       jwtService: { verifyAsync: jest.fn().mockResolvedValue({ sub: 'synthetic-account' }) },
       configService: { get: () => 'synthetic-config' },
       userRepository: { findOne: phase === 'read' ? jest.fn().mockRejectedValue(new Error('database unavailable')) :
-        jest.fn().mockResolvedValue({ refreshToken: 'synthetic-refresh' }) },
+        jest.fn().mockResolvedValue({ refreshToken: 'synthetic-refresh' }),
+        update: jest.fn().mockRejectedValue(new Error('write unavailable')) },
       assertUserCanAuthenticate: jest.fn(),
-      generateTokens: jest.fn().mockRejectedValue(new Error('write unavailable')),
+      signTokens: jest.fn().mockResolvedValue({ accessToken: 'new-access', refreshToken: 'new-refresh' }),
     });
     await expect(service.refreshToken({ refreshToken: 'synthetic-refresh' })).rejects.toMatchObject({ status: 503 });
   });

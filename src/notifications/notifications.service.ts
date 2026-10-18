@@ -1,5 +1,6 @@
 import { isAppUpdateDeliverable } from '../app-updates/app-update-dispatch.service';
 import { isTripReminderDeliverable } from './trip-reminder-delivery';
+import { isStaleLocationReminderDeliverable } from '../trip-requests/dispatch/stale-location-reminder';
 import {
   cert,
   initializeApp,
@@ -374,7 +375,7 @@ export class NotificationService implements OnModuleInit {
     }
     const version = await this.driverActionVersion(notification, pushToken);
     if (version > 0) {
-      const ringUntil = version === 2 ? this.driverRingUntil(notification) : undefined;
+      const ringUntil = version >= 2 ? this.driverRingUntil(notification) : undefined;
       // No title/message fields: Expo must treat this as headless and let Notifee display it once.
       const data = { ...notification.data, actionProtocol: 'driver-v1', invitationText: notification.body,
         ...(ringUntil ? { ringVersion: 'v2', ringUntil } : {}) };
@@ -384,9 +385,20 @@ export class NotificationService implements OnModuleInit {
       });
     }
     const passengerRing = notification.data?.type === 'trip_request_accepted' &&
-      await this.ringClientVersion(notification, pushToken) === 2;
-    const nearbyRing = this.isNearbyRequestRing(notification) &&
-      await this.ringClientVersion(notification, pushToken) === 2;
+      await this.ringClientVersion(notification, pushToken) >= 2;
+    const nearbyVersion = this.isNearbyRequestRing(notification)
+      ? await this.ringClientVersion(notification, pushToken) : 0;
+    const nearbyRing = nearbyVersion >= 2;
+    if (nearbyVersion === 3) {
+      // Local Notifee owns the ringtone + native 30s timeout. FCM alert sound has
+      // no playback timeout (TTL only bounds delivery), so never play it twice.
+      const ringUntil = this.driverRingUntil(notification);
+      return getMessaging(this.firebaseApp).send({ token: pushToken,
+        data: this.stringifyNotificationData({ ...notification.data,
+          delivery: 'driver-phone-v3', invitationText: notification.body, ringUntil }),
+        android: { priority: 'high', ttl: this.driverNotificationTtl(notification, ringUntil) * 1000 },
+      });
+    }
     return getMessaging(this.firebaseApp).send({
       token: pushToken,
       notification: {
@@ -409,15 +421,15 @@ export class NotificationService implements OnModuleInit {
     const version = await this.driverActionVersion(notification, pushToken);
     const driverActions = version > 0;
     const passengerRing = notification.data?.type === 'trip_request_accepted' &&
-      await this.ringClientVersion(notification, pushToken) === 2;
+      await this.ringClientVersion(notification, pushToken) >= 2;
     const nearbyRing = this.isNearbyRequestRing(notification) &&
-      await this.ringClientVersion(notification, pushToken) === 2;
+      await this.ringClientVersion(notification, pushToken) >= 2;
     // APNs can request a bundled sound independently of interactive JS support.
     // An older iOS binary without the file falls back to the system sound. Keep
     // categories and time-sensitive entitlement usage gated by client capability.
     const driverRing = this.isDriverRingInvitation(notification);
     const longRing = driverRing || passengerRing || nearbyRing;
-    const timeSensitive = version === 2 || passengerRing || nearbyRing;
+    const timeSensitive = version >= 2 || passengerRing || nearbyRing;
     const ringUntil = driverRing || nearbyRing ? this.driverRingUntil(notification) : undefined;
     const response = await fetch(EXPO_PUSH_API_URL, {
       method: 'POST',
@@ -430,13 +442,13 @@ export class NotificationService implements OnModuleInit {
         title: notification.title,
         body: notification.body,
         data: driverActions ? { ...notification.data, actionProtocol: 'driver-v1',
-          ...(version === 2 ? { ringVersion: 'v2', ringUntil } : {}) }
+          ...(version >= 2 ? { ringVersion: 'v2', ringUntil } : {}) }
           : passengerRing ? { ...notification.data, ringAlert: 'request-accepted-v1' } : notification.data ?? undefined,
-        ...(driverActions ? { categoryId: version === 2 ? 'driver-offer-v2' : 'driver-offer-v1' } : {}),
+        ...(driverActions ? { categoryId: version >= 2 ? 'driver-offer-v2' : 'driver-offer-v1' } : {}),
         ...(driverRing || nearbyRing ? { ttl: this.driverNotificationTtl(notification, ringUntil) } : {}),
         ...(timeSensitive ? { interruptionLevel: 'time-sensitive' } : {}),
         ...(passengerRing ? { ttl: 60 } : {}),
-        ...(version === 2 || passengerRing || nearbyRing ? { channelId: 'booking-ring-v2' } : {}),
+        ...(version >= 2 || passengerRing || nearbyRing ? { channelId: 'booking-ring-v2' } : {}),
         sound: longRing ? 'driver_ring.wav' : 'default',
         priority: notification.data?.type === 'app_update' ? 'normal' : 'high',
       }),
@@ -497,11 +509,12 @@ export class NotificationService implements OnModuleInit {
   private async ringClientVersion(notification: Notification, pushToken: string): Promise<number> {
     if (!notification.userId) return 0;
     const rows: { version: number }[] = await this.notificationRepository.manager.query(
-      `SELECT CASE WHEN "tokenHash" = $3 THEN 2 ELSE 1 END AS version FROM driver_notification_clients
-        WHERE "userId" = $1 AND "tokenHash" IN ($2,$3)`,
+      `SELECT CASE WHEN "tokenHash" = $4 THEN 3 WHEN "tokenHash" = $3 THEN 2 ELSE 1 END AS version FROM driver_notification_clients
+        WHERE "userId" = $1 AND "tokenHash" IN ($2,$3,$4)`,
       [notification.userId, createHash('sha256').update(pushToken).digest('hex'),
-        createHash('sha256').update(pushToken + ':driver-v2').digest('hex')]);
-    return rows.length > 0 ? (rows[0].version === 2 ? 2 : 1) : 0;
+        createHash('sha256').update(pushToken + ':driver-v2').digest('hex'),
+        createHash('sha256').update(pushToken + ':driver-v3').digest('hex')]);
+    return rows.length > 0 ? (rows[0].version === 3 ? 3 : rows[0].version === 2 ? 2 : 1) : 0;
   }
 
   private stringifyNotificationData(
@@ -566,20 +579,26 @@ export class NotificationService implements OnModuleInit {
   /** Deliver newly committed outbox rows without holding business/database locks over HTTP. */
   @Cron(CronExpression.EVERY_10_SECONDS)
   async dispatchTransactionalNotifications(): Promise<void> {
-    await Promise.all([this.dispatchNotificationLane(false), this.dispatchNotificationLane(true)]);
+    await Promise.all([this.dispatchNotificationLane(false), this.dispatchUrgentNotifications()]);
   }
 
   @Cron('*/5 * * * * *')
   async dispatchUrgentNotifications(): Promise<void> {
-    await this.dispatchNotificationLane(true);
+    // Drain a broadcast promptly when the provider is fast, without increasing
+    // the five-worker cap or claiming a large backlog behind a slow request.
+    const startedAt = Date.now();
+    for (let batch = 0; batch < 6; batch += 1) {
+      const processed = await this.dispatchNotificationLane(true);
+      if (processed < 10 || Date.now() - startedAt >= 2_000) break;
+    }
   }
 
-  private async dispatchNotificationLane(urgent: boolean): Promise<void> {
+  private async dispatchNotificationLane(urgent: boolean): Promise<number> {
     if (urgent) {
-      if (this.dispatchingUrgentNotifications || this.urgentWorkers >= 5) return;
+      if (this.dispatchingUrgentNotifications || this.urgentWorkers >= 5) return 0;
       this.dispatchingUrgentNotifications = true;
     } else {
-      if (this.dispatchingTransactionalNotifications) return;
+      if (this.dispatchingTransactionalNotifications) return 0;
       this.dispatchingTransactionalNotifications = true;
     }
     let claimReleased = false;
@@ -660,6 +679,7 @@ export class NotificationService implements OnModuleInit {
           if (urgent) this.urgentWorkers -= 1;
         }
       }));
+      return notifications.length;
     } finally {
       // Only release our claim gate on a failed claim. Once delivery starts,
       // another tick may own the gate, so do not overwrite it here.
@@ -748,6 +768,10 @@ export class NotificationService implements OnModuleInit {
     notification: Notification,
   ): Promise<boolean> {
     const type = notification.data?.type;
+    if (type === 'driver_location_stale') {
+      if (this.configService.get<string>('DRIVER_DISPATCH_ENABLED') !== 'true') return false;
+      return isStaleLocationReminderDeliverable(this.notificationRepository.manager, notification);
+    }
     if (notification.eventKey && ['trip_departure_reminder', 'trip_expiring_soon'].includes(type)) {
       return isTripReminderDeliverable(this.notificationRepository.manager, notification);
     }

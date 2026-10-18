@@ -1,13 +1,9 @@
-import { BadRequestException, ForbiddenException } from '@nestjs/common';
-import { createHash } from 'node:crypto';
 import type { EntityManager } from 'typeorm';
 import { TripRequest, TripRequestStatus } from '../entities/trip-request.entity';
-import { assertDriverCanOperate } from '../../users/driver-activation';
-import { enqueueTransactionalNotification } from '../../notifications/transactional-notification';
+import { enqueueTransactionalNotifications } from '../../notifications/transactional-notification';
 import { enqueueScheduledRequestAlert } from './scheduled-request-alert';
 
-jest.mock('../../users/driver-activation', () => ({ assertDriverCanOperate: jest.fn() }));
-jest.mock('../../notifications/transactional-notification', () => ({ enqueueTransactionalNotification: jest.fn() }));
+jest.mock('../../notifications/transactional-notification', () => ({ enqueueTransactionalNotifications: jest.fn() }));
 
 describe('scheduled nearby request alert', () => {
   const fixture = () => {
@@ -16,73 +12,71 @@ describe('scheduled nearby request alert', () => {
       departurePoint: { type: 'Point', coordinates: [15.3, -4.3] }, vehicleType: 'car', numberOfSeats: 2,
       departureLocation: 'Départ', arrivalLocation: 'Arrivée',
       departureDateMin: new Date(Date.now() + 86_400_000), departureDateMax: new Date(Date.now() + 90_000_000) };
-    const query = jest.fn().mockImplementation(async (sql: string) => sql.includes('driver_notification_clients')
-      ? [{}] : [{ driverId: 'nearest' }, { driverId: 'next' }]);
+    const query = jest.fn().mockImplementation(async (sql: string) => sql.includes('FROM driver_dispatch_presence')
+      ? [{ driverId: 'nearest' }, { driverId: 'next' }] : [{}]);
     const drivers = jest.fn().mockImplementation(async ({ id }: { id: string }) => ({ id, fcmToken: `test-${id}` }));
     const findRequest = jest.fn().mockResolvedValue(request);
     const manager = { query, getRepository: (entity: unknown) => entity === TripRequest
-      ? { findOne: findRequest } : { findOneBy: drivers } } as unknown as EntityManager;
+      ? { findOne: findRequest, update: jest.fn().mockResolvedValue({}) } : { findOneBy: drivers } } as unknown as EntityManager;
     const busy = jest.fn().mockResolvedValue(false);
     return { request, query, drivers, findRequest, manager, busy,
       run: () => enqueueScheduledRequestAlert(manager, request.id, 5000, busy) };
   };
   beforeEach(() => jest.resetAllMocks());
 
-  it('queues one deduplicated alert for the nearest eligible driver without assigning the future trip', async () => {
+  it('queues a deduplicated alert for every eligible nearby driver without assigning the future trip', async () => {
     const f = fixture(); const before = structuredClone(f.request);
     await expect(f.run()).resolves.toBe(true);
     const [sql, parameters] = f.query.mock.calls[0];
     expect(sql).toContain('ST_DWithin'); expect(sql).toContain('ORDER BY ST_Distance');
-    expect(sql).toContain('LIMIT 20'); expect(sql).toContain('v."isActive" = true');
+    expect(sql).toContain('LIMIT 50'); expect(sql).toContain('v."isActive" = true');
     expect(sql).toContain('v.type = $5'); expect(sql).toContain('>= $6');
     expect(sql).toContain('p."expiresAt" > now()'); expect(sql).toContain('NOT EXISTS');
-    expect(parameters).toEqual(['passenger', 15.3, -4.3, 5000, 'car', 2]);
-    expect(f.findRequest).toHaveBeenCalledWith({ where: { id: 'request' }, lock: { mode: 'pessimistic_read' } });
-    expect(assertDriverCanOperate).toHaveBeenCalledWith(f.manager, { id: 'nearest', fcmToken: 'test-nearest' });
-    expect(f.query.mock.calls[1][1]).toEqual(['nearest', createHash('sha256').update('test-nearest:driver-v2').digest('hex')]);
-    expect(enqueueTransactionalNotification).toHaveBeenCalledTimes(1);
-    expect(enqueueTransactionalNotification).toHaveBeenCalledWith(f.manager, expect.objectContaining({
-      eventKey: 'nearby-scheduled-request:request', userId: 'nearest', title: 'Commande programmée à proximité',
+    expect(parameters).toEqual(['passenger', 15.3, -4.3, 5000, 'car', 2, 'request']);
+    expect(f.findRequest).toHaveBeenCalledWith({ where: { id: 'request' }, lock: { mode: 'pessimistic_write' } });
+    expect(f.query).toHaveBeenCalledTimes(1);
+    expect(enqueueTransactionalNotifications).toHaveBeenCalledTimes(1);
+    expect(enqueueTransactionalNotifications).toHaveBeenCalledWith(f.manager, [expect.objectContaining({
+      eventKey: 'nearby-scheduled-request:request:nearest', userId: 'nearest', title: 'Commande programmée à proximité',
       data: expect.objectContaining({ type: 'trip_request_nearby', ringAlert: 'nearby-request-v1',
         tripRequestId: 'request', driverId: 'nearest', role: 'driver' }),
-    }));
-    expect(f.request).toEqual(before); expect(f.drivers).toHaveBeenCalledTimes(1);
+    }), expect.objectContaining({
+      eventKey: 'nearby-scheduled-request:request:next', userId: 'next',
+    })]);
+    expect(f.request).toEqual(before); expect(f.drivers).not.toHaveBeenCalled();
   });
 
-  it.each(['busy', 'no-token', 'identity', 'forbidden', 'old-client'])('skips the nearest if %s and tries the next eligible driver', async reason => {
+  it.each(['FROM trips', 'u."fcmToken" IS NOT NULL', 'kyc_documents', "u.status NOT IN ('suspended', 'inactive')", 'driver_notification_clients'])('filters %s before the bounded selection', async predicate => {
     const f = fixture();
-    if (reason === 'busy') f.busy.mockResolvedValueOnce(true);
-    if (reason === 'no-token') f.drivers.mockResolvedValueOnce({ id: 'nearest', fcmToken: null });
-    if (reason === 'identity') (assertDriverCanOperate as jest.Mock).mockRejectedValueOnce(new BadRequestException());
-    if (reason === 'forbidden') (assertDriverCanOperate as jest.Mock).mockRejectedValueOnce(new ForbiddenException());
-    if (reason === 'old-client') f.query.mockResolvedValueOnce([{ driverId: 'nearest' }, { driverId: 'next' }]).mockResolvedValueOnce([]);
+    f.query.mockResolvedValueOnce([{ driverId: 'next' }]);
     await expect(f.run()).resolves.toBe(true);
-    expect(enqueueTransactionalNotification).toHaveBeenCalledTimes(1);
-    expect(enqueueTransactionalNotification).toHaveBeenCalledWith(f.manager, expect.objectContaining({ userId: 'next' }));
+    expect(f.query.mock.calls[0][0]).toContain(predicate);
+    expect(enqueueTransactionalNotifications).toHaveBeenCalledWith(f.manager, [expect.objectContaining({ userId: 'next' })]);
   });
 
   it.each([{ immediateDispatch: true }, { status: TripRequestStatus.DRIVER_SELECTED }, { selectedDriverId: 'driver' },
     { tripId: 'trip' }, { departurePoint: null }, { departureDateMax: new Date(0) }])('ignores unavailable request %j', async patch => {
     const f = fixture(); Object.assign(f.request, patch);
     await expect(f.run()).resolves.toBe(false);
-    expect(f.query).not.toHaveBeenCalled(); expect(enqueueTransactionalNotification).not.toHaveBeenCalled();
+    expect(f.query).not.toHaveBeenCalled(); expect(enqueueTransactionalNotifications).not.toHaveBeenCalled();
   });
   it('does not broadcast if no eligible driver has a recent compatible position', async () => {
     const f = fixture(); f.query.mockResolvedValue([]);
     await expect(f.run()).resolves.toBe(false);
-    expect(enqueueTransactionalNotification).not.toHaveBeenCalled();
+    expect(enqueueTransactionalNotifications).not.toHaveBeenCalled();
   });
-  it('returns false for legacy-only clients so creation can use the compatible notification', async () => {
+  it('returns false for legacy-only clients without sending an incompatible ringing alert', async () => {
     const f = fixture();
-    f.query.mockImplementation(async (sql: string) => sql.includes('driver_notification_clients')
-      ? [] : [{ driverId: 'nearest' }, { driverId: 'next' }]);
+    f.query.mockResolvedValue([]);
     await expect(f.run()).resolves.toBe(false);
-    expect(f.drivers).toHaveBeenCalledTimes(2);
-    expect(enqueueTransactionalNotification).not.toHaveBeenCalled();
+    const sql = f.query.mock.calls[0][0];
+    expect(sql).toContain(':driver-v2'); expect(sql).toContain(':driver-v3');
+    expect(f.drivers).not.toHaveBeenCalled();
+    expect(enqueueTransactionalNotifications).not.toHaveBeenCalled();
   });
   it('propagates database errors so the caller can roll back the outbox transaction', async () => {
-    const f = fixture(); (assertDriverCanOperate as jest.Mock).mockRejectedValue(new Error('database unavailable'));
+    const f = fixture(); f.query.mockRejectedValue(new Error('database unavailable'));
     await expect(f.run()).rejects.toThrow('database unavailable');
-    expect(enqueueTransactionalNotification).not.toHaveBeenCalled();
+    expect(enqueueTransactionalNotifications).not.toHaveBeenCalled();
   });
 });

@@ -26,7 +26,7 @@ import { FlexPayCallbackDto } from '../payments/dto/payment.dto';
 import { PaymentsService } from '../payments/payments.service';
 import { TripPaymentMode } from '../payments/enums/trip-payment-mode.enum';
 import { Trip, TripStatus } from '../trips/entities/trip.entity';
-import { KycDocument, KycStatus } from '../users/entities/kyc-document.entity';
+import { KycDocument } from '../users/entities/kyc-document.entity';
 import { User } from '../users/entities/user.entity';
 import {
   DriverEarning,
@@ -44,6 +44,7 @@ import { loadHistoryPage, type HistoryPageDto } from '../common/pagination/histo
 import { DriverPayoutEvent } from './entities/driver-payout-event.entity';
 import { payoutRecoveryState, payoutReviewDelay } from './driver-payout-recovery.policy';
 import { DRIVER_FINANCE } from '../driver-finance/driver-finance.policy';
+import { hasCurrentApprovedIdentity } from '../users/current-identity';
 
 export interface DriverSettlementSummary {
   availableBalance: number;
@@ -140,9 +141,7 @@ export class DriverSettlementsService implements OnModuleInit {
         DriverPayoutStatus.INITIATED,
       ]),
       this.sumPayouts(driverId, [DriverPayoutStatus.SUCCEEDED]),
-      this.kycRepository.exists({
-        where: { userId: driverId, status: KycStatus.APPROVED },
-      }),
+      hasCurrentApprovedIdentity(this.kycRepository, driverId),
       this.userRepository.findOne({ where: { id: driverId } }),
       sumConfirmedDriverCash(this.bookingRepository, driverId, currency),
     ]);
@@ -1056,9 +1055,7 @@ export class DriverSettlementsService implements OnModuleInit {
           message: 'Un versement nécessite un rapprochement par l’assistance avant tout nouveau retrait.' });
       }
 
-      const kycApproved = await manager.exists(KycDocument, {
-        where: { userId: driverId, status: KycStatus.APPROVED },
-      });
+      const kycApproved = await hasCurrentApprovedIdentity(manager.getRepository(KycDocument), driverId);
       if (!kycApproved) {
         throw new BadRequestException(
           'Votre identité doit être vérifiée avant le versement de vos gains',

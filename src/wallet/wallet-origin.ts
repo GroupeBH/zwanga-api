@@ -20,6 +20,7 @@ export function applyTokenMovement(
   amount: number,
   purchasedCredit = 0,
   purchasedOnly = false,
+  bypassWithdrawalBlock = false,
 ): number {
   const total = tokenCents(account.balance);
   const purchased = tokenCents(account.withdrawableBalance ?? 0);
@@ -30,7 +31,7 @@ export function applyTokenMovement(
     throw new BadRequestException('Solde de jetons incohérent');
   }
   if (delta < 0) {
-    if (account.withdrawalsBlocked) {
+    if (account.withdrawalsBlocked && !bypassWithdrawalBlock) {
       throw new BadRequestException(
         'Votre portefeuille nécessite une vérification. Contactez le support.',
       );

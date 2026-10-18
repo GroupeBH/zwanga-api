@@ -7,6 +7,7 @@ import {
   OnModuleInit,
 } from '@nestjs/common';
 import { randomUUID } from 'crypto';
+import { walletTransferId } from './transfer-idempotency';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import {
@@ -243,7 +244,13 @@ export class WalletService implements OnModuleInit {
         throw new BadRequestException('Solde de jetons insuffisant');
       }
 
-      const withdrawableAmount = applyTokenMovement(account, amount);
+      const withdrawableAmount = applyTokenMovement(
+        account,
+        amount,
+        0,
+        false,
+        true,
+      );
       await manager.save(account);
       await this.createLedgerEntryWithManager(manager, {
         account,
@@ -529,7 +536,7 @@ export class WalletService implements OnModuleInit {
       );
     }
 
-    const transferId = randomUUID();
+    const transferId = dto.idempotencyKey ? walletTransferId(senderUserId, dto.idempotencyKey) : randomUUID();
     const note = dto.note?.trim();
 
     return this.dataSource.transaction(async (manager) => {
@@ -548,6 +555,31 @@ export class WalletService implements OnModuleInit {
 
       if (!senderAccount || !recipientAccount) {
         throw new NotFoundException('Compte de jetons introuvable');
+      }
+
+      // All transfers from this sender share its account row lock, including on
+      // separate API workers. Read the ledger AFTER acquiring the ordered locks.
+      if (dto.idempotencyKey) {
+        const senderEntry = await manager.findOne(WalletLedgerEntry, { where: {
+          userId: senderUserId, relatedEntityType: this.TRANSFER_RELATED_ENTITY_TYPE,
+          relatedEntityId: transferId, type: WalletLedgerEntryType.TRANSFER_OUT,
+        } });
+        if (senderEntry) {
+          const recipientEntry = await manager.findOne(WalletLedgerEntry, { where: {
+            relatedEntityType: this.TRANSFER_RELATED_ENTITY_TYPE,
+            relatedEntityId: transferId, type: WalletLedgerEntryType.TRANSFER_IN,
+          } });
+          const description = note ? `Partage de jetons vers ${recipient.id}: ${note}` : `Partage de jetons vers ${recipient.id}`;
+          if (!recipientEntry || recipientEntry.userId !== recipient.id ||
+              Number(senderEntry.amount) !== -amount || senderEntry.description !== description) {
+            throw new BadRequestException('Cette référence correspond déjà à un autre transfert. Vérifiez votre historique.');
+          }
+          return { transferId, amount, currency: senderAccount.currency, senderAccount,
+            recipientAccount, senderEntry, recipientEntry, recipient: {
+              id: recipient.id, firstName: recipient.firstName, lastName: recipient.lastName,
+              phone: recipient.phone ?? null, email: recipient.email ?? null,
+            } };
+        }
       }
 
       const senderNextBalance = this.roundMoney(

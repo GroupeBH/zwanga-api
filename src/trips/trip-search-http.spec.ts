@@ -5,6 +5,7 @@ import request from 'supertest';
 import { BookingsService } from '../bookings/bookings.service';
 import { TripsController } from './trips.controller';
 import { TripsService } from './trips.service';
+import { SearchTripsDto } from './dto/trip.dto';
 
 describe('Trip search coordinate compatibility over HTTP', () => {
   let app: INestApplication;
@@ -38,6 +39,31 @@ describe('Trip search coordinate compatibility over HTTP', () => {
 
   afterAll(async () => { await app?.close(); });
   beforeEach(() => jest.clearAllMocks());
+
+  it('uses the cached listing for an empty query after DTO transformation', async () => {
+    await request(server).get('/api/v1/trips').expect(200, []);
+    expect(service.findAll).toHaveBeenCalledTimes(1);
+    expect(service.search).not.toHaveBeenCalled();
+  });
+
+  it('ignores initialized undefined fields but preserves false and zero filters', async () => {
+    const controller = new TripsController(service as any, {} as any);
+    const query = Object.assign(new SearchTripsDto(), { minSeats: undefined, limit: undefined });
+    await controller.findAll(query);
+    expect(service.findAll).toHaveBeenCalledTimes(1);
+    expect(service.search).not.toHaveBeenCalled();
+    await controller.findAll(Object.assign(new SearchTripsDto(), { isFree: false }));
+    await controller.findAll(Object.assign(new SearchTripsDto(), { maxPrice: 0 }));
+    expect(service.search).toHaveBeenNthCalledWith(1, expect.objectContaining({ isFree: false }));
+    expect(service.search).toHaveBeenNthCalledWith(2, expect.objectContaining({ maxPrice: 0 }));
+  });
+
+  it.each(['limit=20', 'sort=date', 'maxPrice=0', 'direction=next', 'cursor=opaque'])
+    ('does not serve the default cache for explicit query %s', async query => {
+      await request(server).get(`/api/v1/trips?${query}`).expect(200, []);
+      expect(service.search).toHaveBeenCalledTimes(1);
+      expect(service.findAll).not.toHaveBeenCalled();
+    });
 
   it('accepts the exact GET query from the reported mobile error', async () => {
     await request(server)

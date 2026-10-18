@@ -28,12 +28,16 @@ export type AwsKycState =
   | 'review'
   | 'failed';
 export type OcrLine = { text: string; confidence: number };
-export const AWS_KYC_DECISION_VERSION = 'aws-kyc-auto-v1';
+export const AWS_KYC_DECISION_VERSION = 'aws-kyc-authenticity-review-v2';
 
 // Eligibility is not an authenticity certificate. Missing/old checks fail closed
 // into manual review, never into approval. Scores and reasons remain server-side.
 export function awsKycDecision(checks: Record<string, string>) {
   const reasons = [
+    // No trusted document-authentication integration exists for these RDC
+    // documents yet. OCR/liveness (or a supplied "authenticity" flag) cannot
+    // attest authenticity. Keep automatic analysis, require an admin decision.
+    'DOCUMENT_AUTHENTICITY_UNVERIFIED',
     ...(checks.document !== 'consistent' ? ['DOCUMENT_UNCERTAIN'] : []),
     ...(checks.names !== 'match' ? ['NAMES_UNCERTAIN'] : []),
     ...(!['valid', 'not_required'].includes(checks.validity)
@@ -244,8 +248,7 @@ export function inspectDocument(
     validity,
     ocr,
     extracted: { firstName, lastName, expiration: expiration.value },
-    manualReviewRequired:
-      document !== 'consistent' || names !== 'match' || ocr !== 'confident',
+    manualReviewRequired: true,
   };
 }
 

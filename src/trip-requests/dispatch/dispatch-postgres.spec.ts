@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { postgresTestServerOptions } from '../../../test/postgres-test-options';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 import { createServer } from 'node:net';
@@ -9,12 +9,14 @@ import { DataSource } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import { typeOrmEntities } from '../../database/entities';
 import { AddDriverDispatch1780000048000 } from '../../database/migrations/1780000048000-AddDriverDispatch';
+import { BroadcastDriverRequests1780000074000 } from '../../database/migrations/1780000074000-BroadcastDriverRequests';
+import { enqueueStaleLocationReminders, isStaleLocationReminderDeliverable } from './stale-location-reminder';
 import { IndexNearbyRequestAlerts1780000066000 } from '../../database/migrations/1780000066000-IndexNearbyRequestAlerts';
 import { DriverDispatchService } from './dispatch.service';
 import { User, UserRole, UserStatus } from '../../users/entities/user.entity';
 import { KycDocument, KycStatus } from '../../users/entities/kyc-document.entity';
 import { Vehicle, VehicleType } from '../../vehicles/entities/vehicle.entity';
-import { TripRequest } from '../entities/trip-request.entity';
+import { TripRequest, TripRequestStatus } from '../entities/trip-request.entity';
 import { DriverOffer } from '../entities/driver-offer.entity';
 import { TripRequestsService } from '../trip-requests.service';
 import { boundedInteger, dispatchOfferIsActionable } from './dispatch-policy';
@@ -22,6 +24,12 @@ import { NotificationService } from '../../notifications/notifications.service';
 import { Notification } from '../../notifications/entities/notification.entity';
 
 describe('dispatch policy', () => {
+  it.each([undefined, '60', '180', '300', '600', '900', '901'])(
+    'keeps a presence window compatible with the 3-minute heartbeat (%s)', value => {
+      const service = new DriverDispatchService({} as any,
+        { get: () => value } as any, {} as any);
+      expect(service['positionSeconds']).toBe(value === '600' ? 600 : value === '900' ? 900 : 300);
+    });
   it('bounds configuration and treats the exact deadline as expired', () => {
     expect(boundedInteger(undefined, 30, 10, 120)).toBe(30);
     expect(boundedInteger('0', 30, 10, 120)).toBe(30);
@@ -46,7 +54,12 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
         server.close(() => done(port));
       });
     });
-    execFileSync(executable('pg_ctl'), ['-D', directory, '-l', join(directory, 'postgres.log'), '-o', postgresTestServerOptions(port), '-w', 'start'], { windowsHide: true, stdio: 'ignore', timeout: 30000 });
+    try {
+      execFileSync(executable('pg_ctl'), ['-D', directory, '-l', join(directory, 'postgres.log'), '-o', postgresTestServerOptions(port), '-w', 'start'], { windowsHide: true, stdio: 'ignore', timeout: 30000 });
+    } catch {
+      const log = join(directory, 'postgres.log');
+      throw new Error(`Disposable PostgreSQL failed to start: ${existsSync(log) ? readFileSync(log, 'utf8') : 'no server log'}`);
+    }
     started = true;
     source = new DataSource({ type: 'postgres', host: '127.0.0.1', port, username: 'dispatch_test', database: 'postgres', entities: typeOrmEntities, synchronize: false });
     await source.initialize();
@@ -54,7 +67,10 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     await source.synchronize();
     await source.query('ALTER TABLE trip_requests DROP COLUMN "immediateDispatch"');
     const runner = source.createQueryRunner();
-    try { await new AddDriverDispatch1780000048000().up(runner); } finally { await runner.release(); }
+    try {
+      await new AddDriverDispatch1780000048000().up(runner);
+      await new BroadcastDriverRequests1780000074000().up(runner);
+    } finally { await runner.release(); }
     service = new DriverDispatchService(source, new ConfigService({ DRIVER_DISPATCH_ENABLED: 'true' }),
       { dispatchTransactionalNotifications: jest.fn().mockResolvedValue(undefined) } as never);
   }, 60000);
@@ -105,7 +121,7 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     expect((await inbox.findAllByUser(owner.id)).total).toBe(2);
   });
 
-  it('alerts the nearest compatible current v2 driver for tomorrow without assigning or blocking them', async () => {
+  it('alerts all compatible current v2 drivers for tomorrow without assigning or blocking them', async () => {
     await driver(15.31, VehicleType.MOTORCYCLE_TWO_WHEELS, 2);
     await driver(15.311, VehicleType.CAR, 1);
     await driver(15.312); // Legacy installation: not a long-ring target.
@@ -116,8 +132,8 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
       departureDateMin: new Date(Date.now() + 86_400_000), departureDateMax: new Date(Date.now() + 90_000_000),
     });
     await Promise.all([service.notifyScheduledRequest(r.id), service.notifyScheduledRequest(r.id)]);
-    const rows = await source.query('SELECT * FROM notifications WHERE "eventKey" = $1', [`nearby-scheduled-request:${r.id}`]);
-    expect(rows).toHaveLength(1); expect(rows[0].userId).toBe(near.user.id);
+    const rows = await source.query('SELECT * FROM notifications WHERE "eventKey" LIKE $1', [`nearby-scheduled-request:${r.id}:%`]);
+    expect(rows).toHaveLength(2); expect(rows.map(row => row.userId).sort()).toEqual([near.user.id, far.user.id].sort());
     expect(rows[0].data).toMatchObject({ type: 'trip_request_nearby', ringAlert: 'nearby-request-v1' });
     expect(await offers(r.id)).toHaveLength(0);
     expect(await source.getRepository(TripRequest).findOneByOrFail({ id: r.id })).toMatchObject({ status: 'pending', selectedDriverId: null });
@@ -129,7 +145,7 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     await service.registerNotifications(stale.user.id, 2); await service.registerNotifications(distant.user.id, 2);
     await service.setPresence(stale.user.id, { available: false });
     const r = await request(false); await service.notifyScheduledRequest(r.id);
-    expect(await source.query('SELECT id FROM notifications WHERE "eventKey" = $1', [`nearby-scheduled-request:${r.id}`])).toHaveLength(0);
+    expect(await source.query('SELECT id FROM notifications WHERE "eventKey" LIKE $1', [`nearby-scheduled-request:${r.id}:%`])).toHaveLength(0);
   });
 
   it('migrates and rolls back the urgent index without altering notification rows', async () => {
@@ -155,6 +171,61 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     jest.spyOn(edits as any, 'sanitizeDriverOffer').mockImplementation(async offer => offer);
     return edits;
   };
+
+  it('expires concurrent requests with one durable outbox event and no HTTP inside the transaction', async () => {
+    const r = await request(false);
+    await source.getRepository(TripRequest).update(r.id, { departureDateMax: new Date(Date.now() - 4 * 3600_000) });
+    await Promise.all([editor().markExpiredTripRequests(), editor().markExpiredTripRequests()]);
+    expect((await source.getRepository(TripRequest).findOneByOrFail({ id: r.id })).status).toBe('expired');
+    const events = await source.query(`SELECT * FROM notifications WHERE data ->> 'tripRequestId' = $1`, [r.id]);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ status: 'pending', data: { type: 'trip_request_expired' } });
+  });
+
+  it.each(['expiration', 'overdue'])('rolls back %s state when the outbox cannot be persisted', async kind => {
+    const r = await request(false), d = await driver();
+    const overdue = kind === 'overdue';
+    await source.getRepository(TripRequest).update(r.id, {
+      departureDateMax: new Date(Date.now() - (overdue ? 5 * 60_000 : 4 * 3600_000)),
+      status: overdue ? TripRequestStatus.DRIVER_SELECTED : TripRequestStatus.PENDING,
+      selectedDriverId: overdue ? d.user.id : null,
+    });
+    await source.query(`ALTER TABLE notifications ADD CONSTRAINT audit_fail_outbox CHECK (false) NOT VALID`);
+    const run = () => overdue ? editor().notifyPassengersAboutOverdueDriverPickup() : editor().markExpiredTripRequests();
+    try {
+      await expect(run()).rejects.toThrow();
+      const current = await source.getRepository(TripRequest).findOneByOrFail({ id: r.id });
+      expect(current.status).toBe(overdue ? 'driver_selected' : 'pending');
+      expect(current.driverPickupOverdueNotifiedAt).toBeNull();
+      expect(await source.getRepository(Notification).count()).toBe(0);
+    } finally { await source.query('ALTER TABLE notifications DROP CONSTRAINT audit_fail_outbox'); }
+    await run(); await run();
+    expect(await source.getRepository(Notification).count()).toBe(1);
+  });
+
+  it('bounds each expiration tick to 100 requests and processes the remainder on the next tick', async () => {
+    const base = await request(false), repository = source.getRepository(TripRequest);
+    await repository.save(Array.from({ length: 100 }, () => repository.create({ ...base, id: randomUUID() })));
+    await repository.update({ passengerId: base.passengerId }, { departureDateMax: new Date(Date.now() - 4 * 3600_000) });
+    await editor().markExpiredTripRequests();
+    expect(await repository.countBy({ status: TripRequestStatus.EXPIRED })).toBe(100);
+    expect(await source.getRepository(Notification).count()).toBe(100);
+    await editor().markExpiredTripRequests();
+    expect(await repository.countBy({ status: TripRequestStatus.EXPIRED })).toBe(101);
+  });
+
+  it('does not let unaccepted requests in their third hour starve accepted requests past two hours', async () => {
+    const base = await request(false), repository = source.getRepository(TripRequest);
+    await repository.save(Array.from({ length: 100 }, () => repository.create({ ...base, id: randomUUID() })));
+    await repository.update({ passengerId: base.passengerId }, { departureDateMax: new Date(Date.now() - 150 * 60_000) });
+    const accepted = await request(false), d = await driver();
+    await repository.update(accepted.id, { status: TripRequestStatus.DRIVER_SELECTED, selectedDriverId: d.user.id,
+      departureDateMax: new Date(Date.now() - 135 * 60_000) });
+    await editor().markExpiredTripRequests();
+    expect(await repository.countBy({ status: TripRequestStatus.EXPIRED })).toBe(1);
+    expect((await repository.findOneByOrFail({ id: accepted.id })).status).toBe('expired');
+    expect(await repository.countBy({ status: TripRequestStatus.PENDING })).toBe(101);
+  });
 
   it('editing cancels an old dispatch invitation atomically, and stale acceptance is refused', async () => {
     const d = await driver(); const r = await request(); await service.tick();
@@ -203,14 +274,13 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     expect((await source.getRepository(DriverOffer).findOneByOrFail({ id: offer.id })).status).toBe('rejected');
   });
 
-  it('chooses the closest compatible driver, then the next after decline', async () => {
+  it('broadcasts to both drivers immediately and a decline does not withdraw the other offer', async () => {
     const near = await driver(); const far = await driver(15.32); const r = await request();
-    await service.tick(); const [first] = await offers(r.id);
-    expect(first.driverId).toBe(near.user.id);
+    await service.tick(); const invitations = await offers(r.id);
+    expect(invitations).toHaveLength(2);
+    const first = invitations.find(offer => offer.driverId === near.user.id);
     await service.respond(near.user.id, first.id, 'decline');
-    // respond starts a bounded cycle asynchronously; wait for its DB operations, not a fixed sleep.
-    for (let i = 0; i < 30 && (await offers(r.id)).length < 2; i++) await new Promise(done => setTimeout(done, 10));
-    expect((await offers(r.id))[1].driverId).toBe(far.user.id);
+    expect((await offers(r.id)).find(offer => offer.driverId === far.user.id).status).toBe('pending');
     expect((await source.getRepository(TripRequest).findOneByOrFail({ id: r.id })).status).toBe('pending');
   });
   it('a recent position automatically makes a v2 driver eligible, without availability or vehicle setup', async () => {
@@ -260,17 +330,109 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     await expect(service.respond(d.user.id, offer.id, 'decline')).rejects.toThrow('traitée');
     expect((await service.status(d.user.id)).available).toBe(false);
   });
-  it('expired offer cannot be accepted, and the next driver receives a distinct offer', async () => {
+  it('one expired offer cannot be accepted and does not invalidate another driver’s invitation', async () => {
     const near = await driver(); const far = await driver(15.32); const r = await request();
-    await service.tick(); const [first] = await offers(r.id);
+    await service.tick(); const first = (await offers(r.id)).find(o => o.driverId === near.user.id);
     await source.query('UPDATE trip_request_dispatch_offers SET "expiresAt" = now() - interval \'1 second\' WHERE id = $1', [first.id]);
     await expect(service.respond(near.user.id, first.id, 'accept')).rejects.toThrow('expiré');
-    await service.tick(); expect((await offers(r.id))[1].driverId).toBe(far.user.id);
+    await service.tick();
+    expect((await offers(r.id)).find(o => o.driverId === far.user.id).status).toBe('pending');
+    expect((await offers(r.id)).find(o => o.driverId === near.user.id).status).toBe('expired');
   });
   it('a late heartbeat cannot reactivate a driver who went offline', async () => {
     const d = await driver(); const leaseId = d.presence.presence.leaseId;
     await service.setPresence(d.user.id, { available: false });
     await service.setPresence(d.user.id, { available: true, vehicleId: d.vehicle.id, seats: 4, latitude: -4.3, longitude: 15.31, leaseId });
     expect((await service.status(d.user.id)).available).toBe(false);
+  });
+
+  it('only one driver wins concurrent broadcast acceptance; all other offers are cancelled', async () => {
+    const a = await driver(), b = await driver(15.32), r = await request();
+    await Promise.all([service['allocate'](r.id), service['allocate'](r.id)]);
+    const invitations = await offers(r.id);
+    expect(invitations).toHaveLength(2);
+    const results = await Promise.allSettled(invitations.map(o => service.respond(o.driverId, o.id, 'accept')));
+    expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1);
+    const current = await offers(r.id);
+    expect(current.filter(o => o.status === 'accepted')).toHaveLength(1);
+    expect(current.filter(o => o.status === 'cancelled')).toHaveLength(1);
+    const selected = await source.getRepository(TripRequest).findOneByOrFail({ id: r.id });
+    expect([a.user.id, b.user.id]).toContain(selected.selectedDriverId);
+    expect(await source.getRepository(DriverOffer).countBy({ tripRequestId: r.id })).toBe(1);
+  });
+
+  it.each([true, false])('continues beyond a 50-driver batch without duplicate alerts (immediate=%s)', async immediate => {
+    for (let i = 0; i < 52; i++) {
+      const d = await driver(15.31 + i * 0.00001); await service.registerNotifications(d.user.id, 2);
+    }
+    const r = await request(immediate);
+    const run = () => immediate ? service['allocate'](r.id) : service.notifyScheduledRequest(r.id);
+    await run(); await run(); await run();
+    if (immediate) expect(await offers(r.id)).toHaveLength(52);
+    const notifications = await source.query(`SELECT * FROM notifications WHERE data ->> 'tripRequestId' = $1`, [r.id]);
+    expect(notifications).toHaveLength(52);
+    expect(new Set(notifications.map(n => n.userId)).size).toBe(52);
+  }, 30000);
+
+  it('includes just inside 5 km, excludes just outside and ignores former radius overrides', async () => {
+    const inside = await driver(), outside = await driver();
+    for (const [d, distance] of [[inside, 4999], [outside, 5001]] as const) {
+      await source.query(`UPDATE driver_dispatch_presence SET position = ST_Project(
+        ST_SetSRID(ST_MakePoint(15.31, -4.3),4326)::geography,$2::double precision,0::double precision)
+        WHERE "driverId" = $1`, [d.user.id, distance]);
+    }
+    const r = await request(); await service['allocate'](r.id);
+    expect((await offers(r.id)).map(o => o.driverId)).toEqual([inside.user.id]);
+    const overridden = new DriverDispatchService(source, new ConfigService({ DRIVER_DISPATCH_RADIUS_METERS: '20000' }), {} as never);
+    expect(overridden['radiusMeters']).toBe(5000);
+  });
+
+  it('reminds only after 6 hours, once across workers, resets on fresh GPS and suppresses stale pushes', async () => {
+    const d = await driver();
+    const queue = () => source.transaction(manager => enqueueStaleLocationReminders(manager));
+    expect(await queue()).toBe(0);
+    await source.query(`UPDATE driver_dispatch_presence SET "updatedAt" = now() - interval '5 hours 59 minutes',
+      "expiresAt" = now() - interval '5 hours' WHERE "driverId" = $1`, [d.user.id]);
+    expect(await queue()).toBe(0);
+    await source.query(`UPDATE driver_dispatch_presence SET "updatedAt" = now() - interval '6 hours 1 minute' WHERE "driverId" = $1`, [d.user.id]);
+    const runs = await Promise.all([queue(), queue()]); expect(runs.reduce((a, b) => a + b)).toBe(1);
+    expect(await queue()).toBe(0);
+    const [notification] = await source.getRepository(Notification).findBy({ userId: d.user.id });
+    expect(notification.data).toMatchObject({ type: 'driver_location_stale', driverId: d.user.id });
+    expect(notification.data).not.toHaveProperty('latitude'); expect(notification.data).not.toHaveProperty('ringAlert');
+    expect(await isStaleLocationReminderDeliverable(source.manager, notification)).toBe(true);
+    await service.recordPosition(d.user.id, { latitude: -4.3, longitude: 15.31, accuracy: 20, recordedAt: new Date().toISOString() });
+    expect(await isStaleLocationReminderDeliverable(source.manager, notification)).toBe(false);
+    expect(await queue()).toBe(0);
+    await source.query(`UPDATE driver_dispatch_presence SET "updatedAt" = now() - interval '7 hours',
+      "expiresAt" = now() - interval '6 hours' WHERE "driverId" = $1`, [d.user.id]);
+    expect(await queue()).toBe(1);
+    expect(await source.getRepository(Notification).countBy({ userId: d.user.id })).toBe(2);
+  });
+
+  it('does not remind a passenger, suspended driver, driver without a token or driver on a trip', async () => {
+    const riders = [await driver(), await driver(), await driver(), await driver()];
+    await source.query(`UPDATE driver_dispatch_presence SET "updatedAt" = now() - interval '7 hours'`);
+    await source.getRepository(User).update(riders[0].user.id, { role: UserRole.PASSENGER });
+    await source.getRepository(User).update(riders[1].user.id, { status: UserStatus.SUSPENDED });
+    await source.getRepository(User).update(riders[2].user.id, { fcmToken: '' });
+    const r = await request();
+    await source.query(`UPDATE trip_requests SET status = 'driver_selected', "selectedDriverId" = $2 WHERE id = $1`, [r.id, riders[3].user.id]);
+    expect(await source.transaction(manager => enqueueStaleLocationReminders(manager))).toBe(0);
+  });
+
+  it('refuses destructive rollback with live broadcasts, then restores/reapplies the schema without deleting offers', async () => {
+    await driver(); await driver(15.32); const r = await request(); await service['allocate'](r.id);
+    const migration = new BroadcastDriverRequests1780000074000(), runner = source.createQueryRunner();
+    try {
+      await runner.startTransaction();
+      await expect(migration.down(runner)).rejects.toThrow('Broadcast invitations still pending');
+      await runner.rollbackTransaction();
+      expect(await offers(r.id)).toHaveLength(2);
+      await source.query(`UPDATE trip_request_dispatch_offers SET status = 'expired' WHERE "requestId" = $1`, [r.id]);
+      await runner.startTransaction(); await migration.down(runner); await runner.commitTransaction();
+      await runner.startTransaction(); await migration.up(runner); await runner.commitTransaction();
+      expect(await offers(r.id)).toHaveLength(2);
+    } finally { if (runner.isTransactionActive) await runner.rollbackTransaction(); await runner.release(); }
   });
 });

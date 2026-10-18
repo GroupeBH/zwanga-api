@@ -30,7 +30,7 @@ function fixture() {
     },
     WITHDRAWAL_RELATED_ENTITY_TYPE: 'referral_withdrawal',
     releaseMatureRewardsForUser: jest.fn(),
-    kycRepository: { exists: jest.fn().mockResolvedValue(true) },
+    kycRepository: { findOne: jest.fn().mockResolvedValue({ status: 'approved' }) },
     userRepository: {
       findOne: jest
         .fn()
@@ -96,7 +96,7 @@ describe('referral withdrawal threshold and CDF denomination', () => {
 
   it('still requires approved KYC', async () => {
     const { service, payments } = fixture();
-    service.kycRepository.exists.mockResolvedValue(false);
+    service.kycRepository.findOne.mockResolvedValue({ status: 'rejected' });
     await expect(
       service.requestWithdrawal('user', { tokens: 1000 }),
     ).rejects.toThrow('vérifiée');

@@ -32,7 +32,7 @@ describe('Scheduled request enqueue acknowledgement', () => {
     expect(f.notifications.dispatchTransactionalNotifications).not.toHaveBeenCalled();
   });
 
-  it('returns false to allow legacy fallback when no nearby alert was queued', async () => {
+  it('returns false when no nearby alert was queued; later ticks may find new drivers', async () => {
     const f = fixture(); enqueue.mockResolvedValue(false);
     await expect(f.service.notifyScheduledRequest('request')).resolves.toBe(false);
     expect(enqueue).toHaveBeenCalledWith(f.manager, 'request', 5000, expect.any(Function));
@@ -57,7 +57,7 @@ describe('Scheduled request enqueue acknowledgement', () => {
     expect(f.warn).toHaveBeenCalledWith('Nearby request push delivery deferred.');
   });
 
-  it('propagates enqueue failures so creation can use legacy delivery', async () => {
+  it('propagates enqueue failures so creation can defer to the next dispatch tick', async () => {
     const f = fixture(); enqueue.mockRejectedValue(new Error('queue unavailable'));
     await expect(f.service.notifyScheduledRequest('request')).rejects.toThrow('queue unavailable');
     expect(f.notifications.dispatchTransactionalNotifications).not.toHaveBeenCalled();

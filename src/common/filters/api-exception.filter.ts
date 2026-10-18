@@ -9,6 +9,7 @@ import {
 import { randomUUID } from 'crypto';
 import type { Request, Response } from 'express';
 import { isHttpRequestAborted } from '../http-request-abort';
+import { safeRequestPath, safeRequestError } from '../safe-request-log';
 
 type ApiErrorMessage = string | string[];
 
@@ -55,7 +56,7 @@ export class ApiExceptionFilter implements ExceptionFilter {
       const error = this.asError(exception);
       this.logger.error(
         `${request.method} ${this.getPath(request)} failed with ${descriptor.statusCode} (${descriptor.code}); requestId=${requestId}`,
-        error?.stack,
+        safeRequestError(error?.stack, request),
       );
     }
 
@@ -306,7 +307,7 @@ export class ApiExceptionFilter implements ExceptionFilter {
   }
 
   private getPath(request: Request): string {
-    return request.originalUrl || request.url || '/';
+    return safeRequestPath(request);
   }
 
   private logAbortedRequest(request: Request, requestId: string): void {

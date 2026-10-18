@@ -106,6 +106,12 @@ export class InitiateWalletTopUpDto {
 }
 
 export class TransferWalletPointsDto {
+  // Optional for the store versions already distributed. New clients must reuse it on retry.
+  @ApiProperty({ required: false, description: 'UUID stable pour un seul transfert et ses reprises.' })
+  @IsOptional()
+  @IsUUID('4')
+  idempotencyKey?: string;
+
   @ApiProperty({
     minimum: 1,
     example: 2500,

@@ -353,49 +353,20 @@ export class TripsService {
 
     if (cached) {
       this.logger.debug(`Returning ${cached.length} trips from cache`);
-      return cached;
+      // A departure can expire between cache creation and this read. Keep the
+      // same time/visibility predicate as the database without a DB round trip.
+      const nowMs = Date.now();
+      return cached.filter((trip) => !trip.isPrivate && (
+        (trip.status === TripStatus.PENDING && new Date(trip.departureDate).getTime() > nowMs) ||
+        (trip.status === TripStatus.ACTIVE && trip.availableSeats > 0)
+      ));
     }
 
-    const now = new Date();
-    // Include PENDING trips with future departure dates OR ACTIVE trips with available seats
-    // Exclude private trips (created from trip requests)
-    const trips = await this.tripRepository.find({
-      where: [
-        {
-          status: TripStatus.PENDING,
-          departureDate: MoreThan(now),
-          isPrivate: false, // Exclude private trips
-        },
-        {
-          status: TripStatus.ACTIVE,
-          availableSeats: MoreThan(0),
-          isPrivate: false, // Exclude private trips
-        },
-      ],
-      // Discovery remains explicitly public, bounded, and cached separately from detail.
-      take: 50,
-      relations: ['driver', 'vehicle'],
-      order: {
-        departureDate: 'ASC',
-      },
-    });
-
-    const userIds = this.collectTripUserIds(trips);
-    const userRatingsMap = await this.buildUserRatingsMap(userIds);
-    const userPremiumMap =
-      await this.subscriptionsService.getPremiumFeaturesForUsers(userIds);
-    const sanitized = this.sortSanitizedTripsByPremium(
-      await Promise.all(
-        trips.map((trip) =>
-          this.sanitizeTrip(trip, userRatingsMap, userPremiumMap),
-        ),
-      ),
-    );
-
+    // Preserve the actual public contract of search({}): default limit 30 and
+    // premium precedence before pagination, not a date-only window of 50.
+    const sanitized = await this.search({});
     await this.cacheService.set(cacheKey, sanitized, this.CACHE_TTL);
-    this.logger.log(
-      `Fetched ${trips.length} trips from database (${trips.filter((t) => t.status === TripStatus.PENDING).length} pending, ${trips.filter((t) => t.status === TripStatus.ACTIVE).length} active)`,
-    );
+    this.logger.log(`Cached ${sanitized.length} public discovery trips`);
     return sanitized;
   }
 
@@ -437,8 +408,6 @@ export class TripsService {
     const now = new Date();
     const queryBuilder = this.tripRepository
       .createQueryBuilder('trip')
-      .leftJoinAndSelect('trip.driver', 'driver')
-      .leftJoinAndSelect('trip.vehicle', 'vehicle')
       .where('trip.isPrivate = :isPrivate', { isPrivate: false })
       .andWhere(
         new Brackets((qb) => {
@@ -518,7 +487,7 @@ export class TripsService {
       });
     }
 
-    // If coordinates are provided, calculate distance (simplified - in production use PostGIS)
+    // PostGIS radius filtering; preserve the fresh-GPS rule for ongoing trips.
     const departureSearchCoordinates = normalizeLngLatCoordinates(
       searchTripsDto.departureCoordinates,
     );
@@ -1686,6 +1655,12 @@ export class TripsService {
       );
     }
 
+    // A repeated start for the same driver must not replay notifications.
+    if (trip.status === TripStatus.ACTIVE) {
+      await this.cacheService.del(CacheService.getTripKey(tripId));
+      return this.findOne(tripId);
+    }
+
     if (trip.status !== TripStatus.PENDING) {
       this.logger.warn(
         `Trip start failed: Trip ${tripId} is not in PENDING status (current: ${trip.status})`,
@@ -1724,35 +1699,51 @@ export class TripsService {
     );
     const hasAvailableSeats = trip.availableSeats > 0;
 
-    // Update trip status to ACTIVE and set startedAt
+    // A direct pause before pickup keeps startedAt. It is not a new trip.
+    // Formal interruptions are handled above and must retain their passenger choices.
+    const originalStartedAt = trip.startedAt;
+    if (originalStartedAt && acceptedBookings.some(
+      (booking) => this.hasBookingEmbarked(booking) && !this.hasBookingBeenDroppedOff(booking),
+    )) {
+      throw new BadRequestException('La reprise doit être confirmée par les passagers à bord.');
+    }
+
     const previousStatus = trip.status;
-    const startedAt = new Date();
-    trip.status = TripStatus.ACTIVE;
-    trip.startedAt = startedAt;
-    trip.currentLocation = null;
-    trip.lastLocationUpdateAt = null;
-    trip.destinationApproachNotifiedAt = null;
-    trip.destinationReachedAt = null;
-    trip.estimatedArrivalDate = await this.calculateEstimatedArrivalDate(
+    const resumedAt = new Date();
+    const estimatedArrivalDate = await this.calculateEstimatedArrivalDate(
       trip,
-      startedAt,
+      resumedAt,
     );
-    const started = await this.tripRepository.update(
-      { id: tripId, driverId, status: TripStatus.PENDING, startedAt: IsNull() },
-      {
-        status: TripStatus.ACTIVE,
-        startedAt,
+    const updates = {
+      status: TripStatus.ACTIVE,
+      estimatedArrivalDate,
+      ...(!originalStartedAt ? {
+        startedAt: resumedAt,
         currentLocation: null,
         lastLocationUpdateAt: null,
         destinationApproachNotifiedAt: null,
         destinationReachedAt: null,
-        estimatedArrivalDate: trip.estimatedArrivalDate,
+      } : {}),
+    };
+    const started = await this.tripRepository.update(
+      {
+        id: tripId, driverId, status: TripStatus.PENDING,
+        startedAt: originalStartedAt ? Not(IsNull()) : IsNull(),
       },
+      updates,
     );
-    if (started.affected !== 1)
-      throw new BadRequestException(
-        'Le statut du trajet a changé. Actualisez-le avant de réessayer.',
-      );
+    if (started.affected !== 1) {
+      const current = await this.tripRepository.findOne({ where: { id: tripId, driverId } });
+      if (current?.status === TripStatus.ACTIVE) {
+        await this.cacheService.del(CacheService.getTripKey(tripId));
+        return this.findOne(tripId);
+      }
+      throw new BadRequestException({
+        code: 'TRIP_START_STATE_CHANGED',
+        message: 'Le statut du trajet a changé. Actualisez-le avant de réessayer.',
+      });
+    }
+    Object.assign(trip, updates);
     this.logTripStateChange({
       tripId,
       driverId,

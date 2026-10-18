@@ -1,3 +1,4 @@
+import { hasCurrentApprovedIdentity } from '../users/current-identity';
 import {
   REFERRAL_MIN_WITHDRAWAL_TOKENS,
   TOKEN_VALUE_CDF,
@@ -39,7 +40,7 @@ import { TripPaymentMode } from '../payments/enums/trip-payment-mode.enum';
 import { PaymentsService } from '../payments/payments.service';
 import { NotificationService } from '../notifications/notifications.service';
 import { Subscription } from '../subscriptions/entities/subscription.entity';
-import { KycDocument, KycStatus } from '../users/entities/kyc-document.entity';
+import { KycDocument } from '../users/entities/kyc-document.entity';
 import { User, UserStatus } from '../users/entities/user.entity';
 import { isAdminRole } from '../users/user-role.policy';
 import { RequestReferralWithdrawalDto } from './dto/referral.dto';
@@ -475,9 +476,7 @@ export class ReferralsService implements OnModuleInit {
     const [referralCount, rewardCount, kycApproved] = await Promise.all([
       this.profileRepository.count({ where: { referredByUserId: userId } }),
       this.rewardRepository.count({ where: { referrerUserId: userId } }),
-      this.kycRepository.exists({
-        where: { userId, status: KycStatus.APPROVED },
-      }),
+      hasCurrentApprovedIdentity(this.kycRepository, userId),
     ]);
     const payoutCurrency = this.getPayoutCurrency();
     const payoutMoneyPerToken = this.getMoneyPerToken(payoutCurrency);
@@ -836,9 +835,7 @@ export class ReferralsService implements OnModuleInit {
     }
     const tokens = this.normalizePositiveAmount(dto.tokens);
     await this.releaseMatureRewardsForUser(userId);
-    const kycApproved = await this.kycRepository.exists({
-      where: { userId, status: KycStatus.APPROVED },
-    });
+    const kycApproved = await hasCurrentApprovedIdentity(this.kycRepository, userId);
     if (!kycApproved) {
       throw new BadRequestException(
         "Votre identité doit être vérifiée avant tout retrait.",
@@ -1197,6 +1194,14 @@ export class ReferralsService implements OnModuleInit {
     phone: string;
   }): Promise<ReferralWithdrawal> {
     return this.dataSource.transaction(async (manager) => {
+      // Same user-first ordering as KYC decisions; recheck inside reservation.
+      const user = await manager.findOne(User, { where: { id: input.userId }, lock: { mode: 'pessimistic_write' } });
+      if (!user || !this.isUserEligibleAsReferrer(user)) {
+        throw new BadRequestException('Ce compte ne peut pas demander de retrait.');
+      }
+      if (!(await hasCurrentApprovedIdentity(manager.getRepository(KycDocument), input.userId))) {
+        throw new BadRequestException('Votre identité doit être vérifiée avant tout retrait.');
+      }
       const account = await this.getOrCreateAccount(
         manager,
         input.userId,

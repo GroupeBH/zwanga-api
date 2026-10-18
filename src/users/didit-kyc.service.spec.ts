@@ -132,6 +132,7 @@ describe('DiditKycService', () => {
       createFetchResponse({
         session_id: 'session-1',
         session_number: 42,
+        session_token: 'synthetic-sdk-token',
         url: 'https://verify.didit.test/session-1',
         status: 'Not Started',
         vendor_data: user.id,
@@ -188,7 +189,7 @@ describe('DiditKycService', () => {
       'https://verification.didit.me/v3/session/session-1/decision/', expect.objectContaining({ method: 'GET' }));
   });
 
-  it('creates a hosted Didit session with the Zwanga user id as vendor_data', async () => {
+  it('creates a native Didit session with the Zwanga user id as vendor_data', async () => {
     user.firstName = '  Eugène  ';
     user.lastName = 'Bosuku   Buania';
     const result = await service.createSession(user.id, {
@@ -198,6 +199,7 @@ describe('DiditKycService', () => {
     });
 
     expect(result.sessionId).toBe('session-1');
+    expect(result.sessionToken).toBe('synthetic-sdk-token');
     expect(result.url).toBe('https://verify.didit.test/session-1');
     const requestBody: unknown = JSON.parse(
       (global.fetch as jest.Mock).mock.calls[0][1].body,
@@ -224,6 +226,18 @@ describe('DiditKycService', () => {
         status: KycStatus.PENDING,
       }),
     );
+  });
+
+  it('does not persist an unusable native session when only a hosted URL is returned', async () => {
+    (global.fetch as jest.Mock).mockResolvedValueOnce(createFetchResponse({
+      session_id: 'no-sdk-token', url: 'https://verify.didit.me/session/test', status: 'Not Started',
+    }));
+    await expect(service.createSession(user.id, {})).rejects.toMatchObject({
+      response: { code: 'KYC_SDK_TOKEN_UNAVAILABLE' },
+    });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(dataSource.transaction).not.toHaveBeenCalled();
+    expect(txKycRepository.save).not.toHaveBeenCalled();
   });
 
   it('creates a native SDK Didit session when Didit returns a session token without hosted URL', async () => {
