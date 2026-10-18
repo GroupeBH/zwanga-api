@@ -1,5 +1,119 @@
 # Journal des changements techniques
 
+## 18 octobre 2026 — Dernière position conducteur durable et analyse GPS mobile
+
+- **Demande et périmètre :** accepter une localisation ancienne et utiliser la
+  dernière position connue pour les demandes immédiates et programmées ; analyser
+  les envois mobiles en arrière-plan. Modifications backend locales uniquement :
+  aucun déploiement, aucune modification AWS, Terraform, CI/CD, `.env` ou mobile.
+- **Implémentation :** `src/trip-requests/dispatch/dispatch.service.ts` ne refuse
+  plus un GPS pour son ancienneté. Les dates invalides ou de plus de cinq secondes
+  dans le futur restent refusées, avec le code explicite
+  `DRIVER_POSITION_TIMESTAMP_INVALID`. Un envoi retardé ne remplace pas une position
+  horodatée plus récemment. Une position peut être enregistrée pendant une prise
+  en charge, mais le conducteur reste exclu des nouvelles propositions tant qu'il
+  est occupé. La précision et les coordonnées restent validées par le DTO.
+- **Sélection et acceptation :** `driver-location-policy.ts` centralise le critère
+  de position utilisable, partagé par les demandes immédiates, programmées et le
+  contrôle d'acceptation. Une position durable reste utilisable même si son ancien
+  `expiresAt` est passé. Suppression du cron qui effaçait les positions âgées de
+  plus d'un jour. Une seule position par conducteur est conservée, pas un historique.
+  Les suppressions utilisateur/véhicule continuent d'appliquer leurs clés étrangères.
+  Les réponses de statut conservent leurs anciens champs et ajoutent
+  `locationPolicy: last_known`, `positionExpires` et les métadonnées de position.
+  `positionFreshSeconds` et `expiresAt` restent des informations de compatibilité,
+  pas un délai d'exclusion pour les positions durables.
+- **Migration additive :** `1780000076000-RetainDriverLastLocation.ts`, enregistrée
+  dans `src/database/migrations/index.ts`, ajoute `discoveryEnabled` nullable.
+  `true` autorise la sélection sans limite d'âge ; `false` mémorise une
+  désactivation explicite par l'API de présence ; `NULL` conserve la règle des
+  anciennes lignes. Pas de backfill ni réécriture des coordonnées. Les anciens
+  `expiresAt` ne permettent pas de distinguer une expiration d'un arrêt volontaire :
+  une ligne historique expirée attend donc une nouvelle remontée GPS acceptée pour
+  devenir durable. Cette remontée peut elle-même être ancienne, mais ne doit pas
+  remplacer un point plus récent. Les positions déjà purgées ne sont pas recréées.
+  Un heartbeat retardé ou un nouveau GPS ne réactive pas un `false` explicite ; une
+  nouvelle activation volontaire via l'API de présence est nécessaire.
+- **Garanties conservées :** rayon 5 km basé sur le point connu, KYC approuvé,
+  compte conducteur actif, jeton push, véhicule/type/places compatibles, exclusions
+  des engagements en cours, diffusion par lots de 50 et déduplication. La durée
+  de validité des invitations et alertes push est inchangée : seule la localisation
+  cesse d'expirer. Le rappel GPS après six heures reste informatif, avec un texte
+  adapté ; il n'est plus créé pour une présence explicitement désactivée.
+  Les règles PostgreSQL ont conduit à garder la migration additive, les transactions
+  courtes et l'index spatial existant, sans index booléen ni appel réseau sous verrou.
+
+### Analyse de l'application mobile actuelle, sans modification
+
+Les sources examinées sont dans le dépôt voisin `zwanga`, pas nécessairement le
+binaire actuellement distribué sur les stores.
+
+1. `components/DriverPresenceCoordinator.tsx` démarre le suivi quand un conducteur
+   authentifié ouvre l'app et que le dispatch est actif. Il tente le service natif
+   ou, à défaut, un relevé au premier plan toutes les 180 secondes. Si le service
+   natif est déclaré démarré, le coordinateur ne force pas de premier relevé HTTP :
+   il attend le prochain callback natif.
+2. `services/nearbyDriverLocation.ts` utilise `expo-location` et une tâche
+   `TaskManager` déclarée au niveau du module. Autorisation arrière-plan, GPS actif
+   et compte correspondant sont requis. Profil équilibré, `timeInterval` et
+   `deferredUpdatesInterval` à 180 000 ms, distance minimale nulle. Les callbacks
+   peuvent envoyer en veille ; le démarrage du service exige l'app au premier plan.
+3. Android utilise une notification de service persistante mais configure
+   `killServiceOnDestroy: true` pour la proximité. iOS a le mode natif `location`
+   et demande l'autorisation « Toujours ». Manifest Android et Info.plist déclarent
+   les permissions nécessaires. Déclaration native ne signifie pas autorisation
+   effectivement accordée sur le téléphone. Le système peut retarder les relevés ;
+   une app terminée ne garantit pas la poursuite du suivi
+   ([documentation Expo Location](https://docs.expo.dev/versions/latest/sdk/location/#background-location)).
+4. **Restriction mobile encore présente :** `nearbyDriverLocationPolicy.ts` rejette
+   avant envoi les points de plus de 30 secondes, de précision supérieure à 250 m,
+   simulés, invalides ou datés de plus de cinq secondes dans le futur. Le callback
+   ne conserve que le point le plus récent d'un lot. Le correctif serveur ne peut
+   pas récupérer les points éliminés côté mobile. Une harmonisation de cette
+   règle nécessite une modification mobile distincte, non réalisée ici.
+5. `nearbyDriverPositionDelivery.ts` envoie latitude, longitude, précision et date
+   par `PUT /driver-dispatch/position`, avec transport authentifié, renouvellement
+   de session et délai HTTP de dix secondes. Un seul envoi à la fois ; aucune file
+   persistante de GPS. Échec réseau/429 : attente croissante de 30 secondes à cinq
+   minutes, puis nouvel essai sur un prochain point. 401/403/404 : arrêt du suivi
+   natif jusqu'à une réconciliation ultérieure. Les erreurs GPS sont peu visibles.
+6. Un trajet actif suspend cette tâche de proximité. Le suivi de trajet utilise
+   une autre tâche et un autre endpoint, environ toutes les huit secondes, avec
+   `killServiceOnDestroy: false` sur Android. Il n'alimente pas directement la
+   présence de proximité : après un trajet, la dernière position de découverte
+   peut rester celle d'avant le départ jusqu'à la reprise des relevés de proximité.
+7. Le bouton mobile « Désactiver la localisation en veille » arrête la collecte
+   native et mémorise le choix localement ; il n'appelle pas l'API de désactivation
+   des propositions. Le premier plan peut encore fournir un GPS. Avec la nouvelle
+   règle, arrêter cette collecte ne retire donc pas la dernière position déjà connue
+   du serveur. Refuser les alertes et refuser la collecte en veille sont deux choix
+   différents ; la désactivation explicite de présence backend reste respectée.
+
+### Vérification et déploiement restant
+
+- Compilation de production : `tsc --project tsconfig.build.json --noEmit
+  --incremental false` réussie.
+- Backend : **70 tests** dans les quatre suites dispatch ciblées, dont une base
+  PostgreSQL 18/PostGIS jetable sur loopback ; **96 tests** supplémentaires de
+  notifications et demandes de trajet. Cas couverts : position de 90 jours,
+  sélection immédiate/programmée, acceptation, ordre des GPS, refus volontaire,
+  conducteur occupé, transition legacy, migration aller/retour et concurrence.
+- Mobile : **42 tests JavaScript existants** réussis (`nearbyDriverLocation`,
+  `nearbyDriverDelivery`, `nearbyDriverPermission`, `driverAvailability`). Ces tests
+  confirment les règles actuelles ; ce ne sont pas des essais natifs sur téléphone.
+- Le premier essai PostgreSQL a été bloqué au démarrage par le sandbox ; la relance
+  avec l'autorisation locale adaptée a réussi, avec arrêt/nettoyage du cluster jetable.
+  Aucun accès à une base applicative ni envoi de push réel pendant ces tests.
+- Avant mise en service : exécuter la migration enregistrée avec le mécanisme
+  habituel **avant** de lancer le nouveau backend. Aucun nouveau paramètre AWS
+  nécessaire. Vérifier ensuite un conducteur de test, une position reçue et une
+  alerte réellement affichée sur Android/iOS. Ne pas interpréter ces tests locaux
+  comme une preuve de correction des incidents de production précédents.
+- Risque produit accepté : un conducteur ayant quitté la zone peut être sollicité
+  selon son ancienne position. L'ancienneté du GPS ne bloque plus la sélection,
+  mais ne constitue toujours pas une preuve de sa présence réelle ni de la
+  disponibilité de son téléphone.
+
 ## 18 octobre 2026 — Diffusion à tous les conducteurs proches et push de secours
 
 - **Périmètre et problème :** une nouvelle commande peut ne produire aucun push

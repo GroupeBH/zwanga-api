@@ -31,7 +31,8 @@ describe('scheduled nearby request alert', () => {
     expect(sql).toContain('ST_DWithin'); expect(sql).toContain('ORDER BY ST_Distance');
     expect(sql).toContain('LIMIT 50'); expect(sql).toContain('v."isActive" = true');
     expect(sql).toContain('v.type = $5'); expect(sql).toContain('>= $6');
-    expect(sql).toContain('p."expiresAt" > now()'); expect(sql).toContain('NOT EXISTS');
+    expect(sql).toContain('p."discoveryEnabled" = true');
+    expect(sql).toContain('p."discoveryEnabled" IS NULL AND p."expiresAt" > now()'); expect(sql).toContain('NOT EXISTS');
     expect(parameters).toEqual(['passenger', 15.3, -4.3, 5000, 'car', 2, 'request']);
     expect(f.findRequest).toHaveBeenCalledWith({ where: { id: 'request' }, lock: { mode: 'pessimistic_write' } });
     expect(f.query).toHaveBeenCalledTimes(1);
@@ -60,7 +61,7 @@ describe('scheduled nearby request alert', () => {
     await expect(f.run()).resolves.toBe(false);
     expect(f.query).not.toHaveBeenCalled(); expect(enqueueTransactionalNotifications).not.toHaveBeenCalled();
   });
-  it('does not broadcast if no eligible driver has a recent compatible position', async () => {
+  it('does not broadcast if no eligible driver has a compatible known position', async () => {
     const f = fixture(); f.query.mockResolvedValue([]);
     await expect(f.run()).resolves.toBe(false);
     expect(enqueueTransactionalNotifications).not.toHaveBeenCalled();

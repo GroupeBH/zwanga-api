@@ -15,6 +15,7 @@ import { boundedInteger, DispatchDecision, dispatchOfferIsActionable } from './d
 import { enqueueScheduledRequestAlert } from './scheduled-request-alert';
 import { ELIGIBLE_NEARBY_DRIVER_SQL, NEARBY_DRIVER_BATCH_SIZE, NEARBY_DRIVER_RADIUS_METERS } from './nearby-driver-policy';
 import { enqueueStaleLocationReminders } from './stale-location-reminder';
+import { hasUsableDriverLocation, USABLE_DRIVER_LOCATION_SQL } from './driver-location-policy';
 
 interface DispatchOffer {
   id: string; requestId: string; driverId: string; vehicleId: string;
@@ -32,8 +33,7 @@ export class DriverDispatchService {
   private get responseSeconds() { return boundedInteger(this.config.get('DRIVER_DISPATCH_RESPONSE_SECONDS'), 30, 10, 120); }
   private get presenceSeconds() { return boundedInteger(this.config.get('DRIVER_DISPATCH_PRESENCE_SECONDS'), 90, 45, 180); }
   private get radiusMeters() { return NEARBY_DRIVER_RADIUS_METERS; }
-  // Leave time for the 3-minute discovery heartbeat and its delivery. A legacy
-  // shorter setting must not make drivers disappear between normal samples.
+  // Compatibility/freshness metadata only. Durable positions do not expire.
   private get positionSeconds() { return boundedInteger(this.config.get('DRIVER_DISPATCH_POSITION_SECONDS'), 300, 300, 900); }
 
   async notifyScheduledRequest(requestId: string): Promise<boolean> {
@@ -49,40 +49,43 @@ export class DriverDispatchService {
 
   async status(driverId: string) {
     if (!this.enabled) return { enabled: false, available: false, pendingOfferId: null };
-    const [presence] = await this.db.query(`SELECT "vehicleId", "leaseId", seats, "expiresAt"
-      FROM driver_dispatch_presence WHERE "driverId" = $1 AND "expiresAt" > now()`, [driverId]);
+    const [presence] = await this.db.query(`SELECT "vehicleId", "leaseId", seats, "expiresAt", "updatedAt", "discoveryEnabled"
+      FROM driver_dispatch_presence p WHERE "driverId" = $1 AND ${USABLE_DRIVER_LOCATION_SQL}`, [driverId]);
     const [offer] = await this.db.query(`SELECT o.id FROM trip_request_dispatch_offers o
       JOIN trip_requests r ON r.id = o."requestId"
       WHERE o."driverId" = $1 AND o.status = 'pending' AND o."expiresAt" > now()
       AND r.status = 'pending' LIMIT 1`, [driverId]);
-    return { enabled: true, available: Boolean(presence), presence: presence ?? null,
+    const available = Boolean(presence) && !(await this.isBusy(this.db.manager, driverId));
+    return { enabled: true, available, presence: presence ?? null,
       pendingOfferId: offer?.id ?? null, responseSeconds: this.responseSeconds,
-      automatic: true, positionFreshSeconds: this.positionSeconds };
+      automatic: true, positionFreshSeconds: this.positionSeconds,
+      locationPolicy: 'last_known', positionExpires: presence?.discoveryEnabled !== true };
   }
 
-  /** A recent GPS fix is enough; no product-level availability/vehicle confirmation. */
+  /** Keep the latest known GPS fix, regardless of age, without re-enabling an opt-out. */
   async recordPosition(driverId: string, body: DriverPositionDto) {
     if (!this.enabled) return this.status(driverId);
     const recordedAt = new Date(body.recordedAt);
     const age = Date.now() - recordedAt.getTime();
-    if (!Number.isFinite(age) || age < -5000 || age > 30000)
-      throw new BadRequestException('La position est trop ancienne.');
+    if (!Number.isFinite(age) || age < -5000)
+      throw new BadRequestException({ code: 'DRIVER_POSITION_TIMESTAMP_INVALID',
+        message: 'La date de la position est invalide ou dans le futur. Vérifiez l’heure du téléphone.' });
     await this.db.transaction(async manager => {
       const driver = await manager.getRepository(User).findOneBy({ id: driverId });
       if (!driver) throw new NotFoundException('Conducteur introuvable.');
       await assertDriverCanOperate(manager, driver);
       const [previous] = await manager.query('SELECT * FROM driver_dispatch_presence WHERE "driverId" = $1 FOR UPDATE', [driverId]);
-      if (await this.isBusy(manager, driverId)) return;
       // Preserve the proposed vehicle while an invitation is awaiting a reply.
       const vehicle = (previous && await manager.getRepository(Vehicle).findOneBy({
         id: previous.vehicleId, ownerId: driverId, isActive: true,
       })) || await manager.getRepository(Vehicle).findOne({ where: { ownerId: driverId, isActive: true }, order: { updatedAt: 'DESC', id: 'ASC' } });
       if (!vehicle) return;
       await manager.query(`INSERT INTO driver_dispatch_presence
-        ("driverId", "vehicleId", seats, position, "expiresAt", "leaseId", "updatedAt")
-        VALUES ($1,$2,$3,ST_SetSRID(ST_MakePoint($4,$5),4326)::geography,$6,$7,$8)
+        ("driverId", "vehicleId", seats, position, "expiresAt", "leaseId", "updatedAt", "discoveryEnabled")
+        VALUES ($1,$2,$3,ST_SetSRID(ST_MakePoint($4,$5),4326)::geography,$6,$7,$8,true)
         ON CONFLICT ("driverId") DO UPDATE SET "vehicleId" = EXCLUDED."vehicleId", seats = EXCLUDED.seats,
           position = EXCLUDED.position, "expiresAt" = EXCLUDED."expiresAt", "updatedAt" = EXCLUDED."updatedAt",
+          "discoveryEnabled" = COALESCE(driver_dispatch_presence."discoveryEnabled", true),
           "locationReminderSentAt" = NULL
         WHERE driver_dispatch_presence."updatedAt" <= EXCLUDED."updatedAt"`,
         [driverId, vehicle.id, getVehicleMaxSeats(vehicle.type) ?? 4, body.longitude, body.latitude,
@@ -104,7 +107,7 @@ export class DriverDispatchService {
   async setPresence(driverId: string, body: DriverPresenceDto) {
     if (!this.enabled) throw new BadRequestException('Les propositions de proximité ne sont pas encore activées.');
     if (!body.available) {
-      await this.db.query(`UPDATE driver_dispatch_presence SET "expiresAt" = now() WHERE "driverId" = $1`, [driverId]);
+      await this.db.query(`UPDATE driver_dispatch_presence SET "expiresAt" = now(), "discoveryEnabled" = false WHERE "driverId" = $1`, [driverId]);
       return this.status(driverId);
     }
     await this.db.transaction(async (manager) => {
@@ -119,17 +122,19 @@ export class DriverDispatchService {
         // A late heartbeat must never reactivate an offline/assigned driver or a newer vehicle selection.
         await manager.query(`UPDATE driver_dispatch_presence
           SET position = ST_SetSRID(ST_MakePoint($3,$4),4326)::geography,
-          "expiresAt" = now() + $5 * interval '1 second', "updatedAt" = now(), "locationReminderSentAt" = NULL
-          WHERE "driverId" = $1 AND "leaseId" = $2 AND "expiresAt" > now()`,
+          "expiresAt" = now() + $5 * interval '1 second', "updatedAt" = now(), "locationReminderSentAt" = NULL,
+          "discoveryEnabled" = true
+          WHERE "driverId" = $1 AND "leaseId" = $2 AND "discoveryEnabled" IS DISTINCT FROM false
+            AND ("discoveryEnabled" = true OR "expiresAt" > now())`,
           [driverId, body.leaseId, body.longitude, body.latitude, this.presenceSeconds]);
         return;
       }
       await manager.query(`INSERT INTO driver_dispatch_presence
-        ("driverId", "vehicleId", seats, position, "expiresAt", "leaseId")
-        VALUES ($1,$2,$3,ST_SetSRID(ST_MakePoint($4,$5),4326)::geography,now() + $6 * interval '1 second', $7)
+        ("driverId", "vehicleId", seats, position, "expiresAt", "leaseId", "discoveryEnabled")
+        VALUES ($1,$2,$3,ST_SetSRID(ST_MakePoint($4,$5),4326)::geography,now() + $6 * interval '1 second', $7,true)
         ON CONFLICT ("driverId") DO UPDATE SET "vehicleId" = EXCLUDED."vehicleId", seats = EXCLUDED.seats,
         position = EXCLUDED.position, "expiresAt" = EXCLUDED."expiresAt", "updatedAt" = now(), "leaseId" = EXCLUDED."leaseId",
-        "locationReminderSentAt" = NULL`,
+        "locationReminderSentAt" = NULL, "discoveryEnabled" = true`,
         [driverId, vehicle.id, body.seats, body.longitude, body.latitude, this.presenceSeconds, randomUUID()]);
     });
     return this.status(driverId);
@@ -187,7 +192,7 @@ export class DriverDispatchService {
         throw new ConflictException('Cette proposition a expiré ou a déjà été traitée.');
       if (decision === 'accept') {
         const [presence] = await manager.query(`SELECT * FROM driver_dispatch_presence WHERE "driverId" = $1 FOR UPDATE`, [driverId]);
-        if (!presence || new Date(presence.expiresAt).getTime() <= Date.now() || presence.vehicleId !== offer.vehicleId)
+        if (!hasUsableDriverLocation(presence) || presence.vehicleId !== offer.vehicleId)
           throw new ConflictException('Votre position ou votre véhicule ne sont plus valides. Rouvrez l’application pour actualiser votre position.');
         const driver = await manager.getRepository(User).findOneBy({ id: driverId });
         if (!driver) throw new NotFoundException('Conducteur introuvable.');
@@ -257,13 +262,8 @@ export class DriverDispatchService {
     }
   }
 
-  @Cron('0 0 * * * *')
-  async prunePresence(): Promise<void> {
-    if (!this.enabled) return;
-    // Bounded hourly retention cleanup; the five-second allocation loop does not scan old GPS rows.
-    await this.db.query(`DELETE FROM driver_dispatch_presence WHERE "driverId" IN
-      (SELECT "driverId" FROM driver_dispatch_presence WHERE "expiresAt" < now() - interval '1 day' LIMIT 1000)`);
-  }
+  // No age-based presence cleanup: retain one last-known point per driver.
+  // Existing foreign keys still remove it when its user/vehicle is deleted.
 
   private async allocate(requestId: string) {
     await this.db.transaction(async (manager) => {
@@ -280,7 +280,7 @@ export class DriverDispatchService {
         JOIN LATERAL (SELECT v.* FROM vehicles v WHERE v."ownerId" = p."driverId"
           AND v."isActive" = true AND v.type = $2
           ORDER BY (v.id = p."vehicleId") DESC, v."updatedAt" DESC, v.id LIMIT 1) v ON true
-        WHERE p."expiresAt" > now() + $8 * interval '1 second' AND p."driverId" <> $1::uuid
+        WHERE ${USABLE_DRIVER_LOCATION_SQL} AND p."driverId" <> $1::uuid
         AND (CASE WHEN v.id = p."vehicleId" THEN p.seats WHEN v.type = 'motorcycle_2_wheels' THEN 2
           WHEN v.type = 'motorcycle_3_wheels' THEN 3 ELSE 4 END) >= $3
         AND ST_DWithin(p.position, ST_SetSRID(ST_MakePoint($4,$5),4326)::geography, $6)
@@ -289,7 +289,7 @@ export class DriverDispatchService {
           (o."requestId" = $7 AND o."driverId" = p."driverId") OR (o."driverId" = p."driverId" AND o.status = 'pending'))
         ORDER BY ST_Distance(p.position, ST_SetSRID(ST_MakePoint($4,$5),4326)::geography), p."driverId"
         LIMIT ${NEARBY_DRIVER_BATCH_SIZE} FOR UPDATE OF p SKIP LOCKED`, [request.passengerId, request.vehicleType, request.numberOfSeats,
-        request.departurePoint.coordinates[0], request.departurePoint.coordinates[1], this.radiusMeters, requestId, this.responseSeconds + 5]);
+        request.departurePoint.coordinates[0], request.departurePoint.coordinates[1], this.radiusMeters, requestId]);
       if (!candidates.length) return;
       // Eligibility, current KYC and vehicle are already
       // filtered in the candidate SQL. Delivery and acceptance revalidate them.
