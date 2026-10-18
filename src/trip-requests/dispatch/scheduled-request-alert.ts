@@ -2,6 +2,7 @@ import type { EntityManager } from 'typeorm';
 import { TripRequest, TripRequestStatus } from '../entities/trip-request.entity';
 import { enqueueTransactionalNotifications } from '../../notifications/transactional-notification';
 import { ELIGIBLE_NEARBY_DRIVER_SQL, NEARBY_DRIVER_BATCH_SIZE } from './nearby-driver-policy';
+import { USABLE_DRIVER_LOCATION_SQL } from './driver-location-policy';
 
 /** Notification only: never creates an exclusive offer or changes a driver's availability. */
 export async function enqueueScheduledRequestAlert(manager: EntityManager, requestId: string,
@@ -15,7 +16,7 @@ export async function enqueueScheduledRequestAlert(manager: EntityManager, reque
   await manager.getRepository(TripRequest).update(request.id, { dispatchCheckedAt: new Date(), updatedAt: () => '"updatedAt"' });
   const candidates: { driverId: string }[] = await manager.query(`
     SELECT p."driverId" FROM driver_dispatch_presence p
-    WHERE p."expiresAt" > now() + interval '30 seconds' AND p."driverId" <> $1::uuid
+    WHERE ${USABLE_DRIVER_LOCATION_SQL} AND p."driverId" <> $1::uuid
     AND ST_DWithin(p.position, ST_SetSRID(ST_MakePoint($2,$3),4326)::geography, $4)
     AND ${ELIGIBLE_NEARBY_DRIVER_SQL}
     AND EXISTS (SELECT 1 FROM vehicles v WHERE v."ownerId" = p."driverId" AND v."isActive" = true

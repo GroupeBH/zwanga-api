@@ -10,6 +10,7 @@ import { ConfigService } from '@nestjs/config';
 import { typeOrmEntities } from '../../database/entities';
 import { AddDriverDispatch1780000048000 } from '../../database/migrations/1780000048000-AddDriverDispatch';
 import { BroadcastDriverRequests1780000074000 } from '../../database/migrations/1780000074000-BroadcastDriverRequests';
+import { RetainDriverLastLocation1780000076000 } from '../../database/migrations/1780000076000-RetainDriverLastLocation';
 import { enqueueStaleLocationReminders, isStaleLocationReminderDeliverable } from './stale-location-reminder';
 import { IndexNearbyRequestAlerts1780000066000 } from '../../database/migrations/1780000066000-IndexNearbyRequestAlerts';
 import { DriverDispatchService } from './dispatch.service';
@@ -81,6 +82,7 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     try {
       await new AddDriverDispatch1780000048000().up(runner);
       await new BroadcastDriverRequests1780000074000().up(runner);
+      await new RetainDriverLastLocation1780000076000().up(runner);
     } finally { await runner.release(); }
     service = new DriverDispatchService(source, new ConfigService({ DRIVER_DISPATCH_ENABLED: 'true' }),
       { dispatchTransactionalNotifications: jest.fn().mockResolvedValue(undefined) } as never);
@@ -160,7 +162,7 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     expect((await service.status(near.user.id)).available).toBe(true);
   });
 
-  it('does not ring a stale or out-of-radius position for a scheduled request', async () => {
+  it('does not ring an explicitly disabled or out-of-radius position for a scheduled request', async () => {
     const stale = await driver(15.31), distant = await driver(16.3);
     await service.registerNotifications(stale.user.id, 2); await service.registerNotifications(distant.user.id, 2);
     await service.setPresence(stale.user.id, { available: false });
@@ -364,10 +366,81 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     expect('presence' in state && state.presence.vehicleId).toBe(car.id);
     await expect(service.respond(d.user.id, offer.id, 'accept')).resolves.toMatchObject({ status: 'accepted' });
   });
-  it('rejects stale automatic GPS instead of renewing a position while the app is asleep', async () => {
+  it.each([true, false])('uses an old received position for dispatch without an age limit (immediate=%s)', async immediate => {
     const d = await driver();
-    await expect(service.recordPosition(d.user.id, { latitude: -4.3, longitude: 15.31,
-      accuracy: 20, recordedAt: new Date(Date.now() - 60000).toISOString() })).rejects.toThrow('trop ancienne');
+    await source.query('DELETE FROM driver_dispatch_presence WHERE "driverId" = $1', [d.user.id]);
+    const recordedAt = new Date(Date.now() - 90 * 86_400_000).toISOString();
+    const state = await service.recordPosition(d.user.id, { latitude: -4.3, longitude: 15.31, accuracy: 20, recordedAt });
+    expect(state).toMatchObject({ available: true, locationPolicy: 'last_known', positionExpires: false });
+    const r = await request(immediate);
+    if (immediate) {
+      await service['allocate'](r.id);
+      const [offer] = await offers(r.id);
+      expect(offer.driverId).toBe(d.user.id);
+      await expect(service.respond(d.user.id, offer.id, 'accept')).resolves.toMatchObject({ status: 'accepted' });
+      expect((await service.status(d.user.id)).available).toBe(false); // Busy, not expired GPS.
+    } else {
+      await expect(service.notifyScheduledRequest(r.id)).resolves.toBe(true);
+      const rows = await source.query('SELECT "userId" FROM notifications WHERE data ->> \'tripRequestId\' = $1', [r.id]);
+      expect(rows.map(row => row.userId)).toEqual([d.user.id]);
+    }
+  });
+
+  it('does not replace a newer known position with a delayed older sample', async () => {
+    const d = await driver();
+    await source.query('DELETE FROM driver_dispatch_presence WHERE "driverId" = $1', [d.user.id]);
+    const latest = new Date(Date.now() - 86_400_000).toISOString();
+    await service.recordPosition(d.user.id, { latitude: -4.3, longitude: 15.31, accuracy: 20, recordedAt: latest });
+    await service.recordPosition(d.user.id, { latitude: -4.3, longitude: 16.3, accuracy: 20,
+      recordedAt: new Date(Date.now() - 2 * 86_400_000).toISOString() });
+    const [row] = await source.query('SELECT ST_X(position::geometry) AS longitude, "updatedAt" FROM driver_dispatch_presence WHERE "driverId" = $1', [d.user.id]);
+    expect(row.longitude).toBe(15.31);
+    expect(row.updatedAt.toISOString()).toBe(latest);
+  });
+
+  it('preserves an explicit opt-out across GPS updates and late legacy heartbeats', async () => {
+    const d = await driver();
+    const leaseId = 'presence' in d.presence ? d.presence.presence.leaseId : '';
+    await service.setPresence(d.user.id, { available: false });
+    await service.recordPosition(d.user.id, { latitude: -4.3, longitude: 15.31, accuracy: 20, recordedAt: new Date().toISOString() });
+    await service.setPresence(d.user.id, { available: true, leaseId, vehicleId: d.vehicle.id, seats: 4, latitude: -4.3, longitude: 15.31 });
+    expect((await service.status(d.user.id)).available).toBe(false);
+    const r = await request(); await service['allocate'](r.id);
+    expect(await offers(r.id)).toHaveLength(0);
+    await service.setPresence(d.user.id, { available: true, vehicleId: d.vehicle.id, seats: 4, latitude: -4.3, longitude: 15.31 });
+    expect((await service.status(d.user.id)).available).toBe(true);
+  });
+
+  it('preserves legacy expired rows until a subsequent GPS update, without a blanket reactivation', async () => {
+    const d = await driver();
+    await source.query(`UPDATE driver_dispatch_presence SET "discoveryEnabled" = NULL,
+      "updatedAt" = now() - interval '8 days', "expiresAt" = now() - interval '7 days' WHERE "driverId" = $1`, [d.user.id]);
+    expect((await service.status(d.user.id)).available).toBe(false);
+    await service.recordPosition(d.user.id, { latitude: -4.3, longitude: 15.31, accuracy: 20,
+      recordedAt: new Date(Date.now() - 86_400_000).toISOString() });
+    expect((await service.status(d.user.id)).available).toBe(true);
+  });
+
+  it('keeps locations but does not invite a driver while already assigned to a request', async () => {
+    const d = await driver(), assigned = await request();
+    await source.query(`UPDATE trip_requests SET status = 'driver_selected', "selectedDriverId" = $2 WHERE id = $1`, [assigned.id, d.user.id]);
+    await service.recordPosition(d.user.id, { latitude: -4.3, longitude: 15.312, accuracy: 20, recordedAt: new Date().toISOString() });
+    const [row] = await source.query('SELECT ST_X(position::geometry) AS longitude FROM driver_dispatch_presence WHERE "driverId" = $1', [d.user.id]);
+    expect(row.longitude).toBe(15.312);
+    const next = await request(); await service['allocate'](next.id);
+    expect(await offers(next.id)).toHaveLength(0);
+  });
+
+  it('applies and rolls back the additive location migration without changing stored positions', async () => {
+    const d = await driver(), migration = new RetainDriverLastLocation1780000076000();
+    const runner = source.createQueryRunner();
+    try {
+      await migration.down(runner);
+      const [before] = await source.query('SELECT "updatedAt", ST_AsText(position) AS point FROM driver_dispatch_presence WHERE "driverId" = $1', [d.user.id]);
+      await migration.up(runner);
+      const [after] = await source.query('SELECT "updatedAt", ST_AsText(position) AS point, "discoveryEnabled" FROM driver_dispatch_presence WHERE "driverId" = $1', [d.user.id]);
+      expect(after).toEqual({ ...before, discoveryEnabled: null });
+    } finally { await runner.release(); }
   });
   it('does not dispatch scheduled requests, stale positions or incompatible vehicles', async () => {
     await driver(15.31, VehicleType.MOTORCYCLE_TWO_WHEELS, 2);
