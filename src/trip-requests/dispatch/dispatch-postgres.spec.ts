@@ -44,6 +44,17 @@ describe('dispatch policy', () => {
 const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
 (pgBin ? describe : describe.skip)('dispatch on real PostgreSQL/PostGIS', () => {
   let directory: string, started = false, source: DataSource, service: DriverDispatchService;
+  let dispatchCycles: jest.SpyInstance<Promise<void>, []>;
+  const waitForDispatchCycles = async () => {
+    // respond() deliberately starts tick() without awaiting it. Calling tick()
+    // again cannot drain that work: its single-flight guard returns immediately.
+    // Keep the real implementation and wait for every promise it already returned.
+    const results = await Promise.allSettled((dispatchCycles?.mock.results ?? [])
+      .filter(result => result.type === 'return').map(result => result.value));
+    dispatchCycles?.mockClear();
+    const rejected = results.find(result => result.status === 'rejected');
+    if (rejected?.status === 'rejected') throw rejected.reason;
+  };
   const executable = (name: string) => join(pgBin!, process.platform === 'win32' ? `${name}.exe` : name);
   beforeAll(async () => {
     directory = mkdtempSync(join(tmpdir(), 'zwanga-dispatch-test-'));
@@ -73,11 +84,20 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     } finally { await runner.release(); }
     service = new DriverDispatchService(source, new ConfigService({ DRIVER_DISPATCH_ENABLED: 'true' }),
       { dispatchTransactionalNotifications: jest.fn().mockResolvedValue(undefined) } as never);
+    dispatchCycles = jest.spyOn(service, 'tick');
   }, 60000);
-  beforeEach(async () => { await source.query('TRUNCATE users CASCADE'); });
+  beforeEach(async () => {
+    await waitForDispatchCycles();
+    await source.query('TRUNCATE users CASCADE');
+  });
+  afterEach(waitForDispatchCycles);
   afterAll(async () => {
-    try { if (source?.isInitialized) await source.destroy(); }
+    try {
+      try { await waitForDispatchCycles(); }
+      finally { if (source?.isInitialized) await source.destroy(); }
+    }
     finally {
+      dispatchCycles?.mockRestore();
       if (started || (directory && existsSync(join(directory, 'postmaster.pid'))))
         execFileSync(executable('pg_ctl'), ['-D', directory, '-m', 'fast', '-w', 'stop'], { windowsHide: true, stdio: 'ignore', timeout: 30000 });
       if (directory && resolve(directory).startsWith(resolve(tmpdir()) + sep) && directory.includes('zwanga-dispatch-test-'))
@@ -282,6 +302,43 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     await service.respond(near.user.id, first.id, 'decline');
     expect((await offers(r.id)).find(offer => offer.driverId === far.user.id).status).toBe('pending');
     expect((await source.getRepository(TripRequest).findOneByOrFail({ id: r.id })).status).toBe('pending');
+  });
+  it('waits for the detached dispatch cycle after a response before allowing fixture cleanup', async () => {
+    const d = await driver(), r = await request();
+    await service.tick();
+    await waitForDispatchCycles();
+    const [offer] = await offers(r.id);
+    let releaseAllocation!: () => void, allocationStarted!: () => void;
+    const gate = new Promise<void>(resolve => { releaseAllocation = resolve; });
+    const started = new Promise<void>(resolve => { allocationStarted = resolve; });
+    const allocate = service['allocate'].bind(service);
+    const allocation = jest.spyOn(service as any, 'allocate').mockImplementation(async (id: string) => {
+      allocationStarted();
+      await gate;
+      return allocate(id);
+    });
+    let drained: Promise<void> | undefined;
+    try {
+      await expect(service.respond(d.user.id, offer.id, 'decline')).resolves.toMatchObject({ status: 'declined' });
+      await started;
+      // A second tick resolves immediately even though the original is still busy.
+      await service.tick();
+      expect(service['ticking']).toBe(true);
+      let cleanupAllowed = false;
+      drained = waitForDispatchCycles().then(() => { cleanupAllowed = true; });
+      await Promise.resolve();
+      expect(cleanupAllowed).toBe(false);
+      releaseAllocation();
+      await drained;
+      expect(cleanupAllowed).toBe(true);
+      expect(service['ticking']).toBe(false);
+      expect(allocation).toHaveBeenCalledWith(r.id);
+      expect((await offers(r.id))[0].status).toBe('declined');
+    } finally {
+      releaseAllocation();
+      try { await drained; await waitForDispatchCycles(); }
+      finally { allocation.mockRestore(); }
+    }
   });
   it('a recent position automatically makes a v2 driver eligible, without availability or vehicle setup', async () => {
     const d = await driver();

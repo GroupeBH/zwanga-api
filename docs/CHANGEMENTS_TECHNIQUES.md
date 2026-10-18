@@ -1,5 +1,149 @@
 # Journal des changements techniques
 
+## 18 octobre 2026 — Synchronisation du test PostgreSQL de dispatch
+
+- Le déploiement GitHub Actions #61 s'est arrêté sur un unique `deadlock detected`
+  dans le `beforeEach` de `dispatch-postgres.spec.ts`, avant les étapes AWS.
+  `respond()` lance intentionnellement un cycle avec `void this.tick()` ; le
+  nettoyage `TRUNCATE users CASCADE` pouvait commencer pendant ce cycle.
+- Correction limitée au test : espion Jest avec implémentation réelle conservée,
+  suivi des promesses retournées par `tick()`, attente avec `Promise.allSettled`
+  après chaque cas, avant le nettoyage et avant la fermeture de la connexion.
+  Une éventuelle promesse rejetée reste un échec après attente des autres cycles.
+  Relancer simplement `tick()` ne suffirait pas : son garde anti-chevauchement
+  retourne immédiatement lorsqu'un cycle est déjà actif.
+- Régression ajoutée : une allocation est retenue par une barrière explicite,
+  la réponse au conducteur reste immédiate, et la préparation du nettoyage doit
+  attendre la fin du cycle d'arrière-plan. Pas de délai arbitraire, de retry du
+  `TRUNCATE`, de test désactivé ni de changement du service applicatif.
+- Vérification : **37 tests réussis lors de chacun des trois passages** sur
+  PostgreSQL 18/PostGIS local jetable (environ 66 s, 44 s et 49 s). Rapports :
+  `tmp/dispatch-sync-1.json`, `tmp/dispatch-sync-2.json`, `tmp/dispatch-sync-3.json`.
+  Le contrôle `tsc -p tsconfig.build.json --noEmit --incremental false` passe.
+  Le contrôle TypeScript global, incluant toutes les suites de tests, échoue
+  sur des erreurs dans d'autres fichiers de tests non modifiés ; aucune erreur
+  signalée dans le fichier corrigé. Aucun succès global de typage n'est revendiqué.
+- Le guide PostgreSQL a orienté la correction vers la séparation du nettoyage
+  et des transactions actives, sans modifier les verrous métier. Aucun changement
+  CI/CD, Terraform ou AWS, aucun push ni redéploiement ; la validation distante
+  PostgreSQL 16/Linux ARM64 reste à effectuer après publication du correctif.
+
+## 18 octobre 2026 — Diagnostic mémoire RDS en lecture seule
+
+Complément au précontrôle ci-dessous, sans lancer le test de charge ni changer
+AWS, Terraform, le CI/CD, le backend ou les paramètres PostgreSQL. Aucun secret
+récupéré, aucune connexion SQL ouverte, aucune requête HTTP applicative envoyée.
+
+- **Périmètre mesuré :** sept jours de métriques CloudWatch jusqu'au 18 octobre
+  vers 11 h 38, heure de Kinshasa, par périodes de dix minutes ; 360 mesures
+  Enhanced Monitoring à la minute sur les six dernières heures ; compteurs
+  agrégés sur 11 888 événements PostgreSQL exportés, environ 2,73 Mo analysés.
+  Les séries CloudWatch sont complètes et la pagination des journaux système
+  a été épuisée. Rapport local filtré, sans messages SQL ni noms de processus
+  applicatifs : `tmp/rds-memory-diagnosis/2026-10-18T10-38-27-216Z/report.json`.
+- **Mémoire disponible CloudWatch :** moyenne d'environ **64,2 Mio**, minimum
+  **22,6 Mio**, dernière moyenne sur dix minutes **70,3 Mio**. Les moyennes
+  journalières restent entre environ 59 et 68 Mio : faible marge durable, sans
+  diminution continue démontrée sur cette semaine.
+- **Swap :** les maxima par période culminent à **170,5 Mio** sur la semaine,
+  dernier maximum **116,8 Mio**. Les mesures système distinctes sur six heures
+  passent d'environ **128,3 à 122,5 Mio** de swap utilisé. Les compteurs système
+  montrent des échanges non nuls, mais l'attente d'I/O CPU reste en moyenne à
+  **0,97 %**, au maximum **2,7 %**, sans tâche bloquée dans les échantillons.
+  Ce n'est pas une preuve de saturation disque ni de swap complètement inactif.
+- **Autres ressources :** CPU RDS maximal **27,4 %** sur sept jours, connexions
+  réseau clientes généralement **10**, pics ponctuels à **20**. Crédits CPU
+  au minimum **287,2**, stockage libre au minimum **16,81 Gio**, profondeur de
+  file disque maximale **0,30**. Les moyennes de latence disque par période
+  sont d'environ **0,72 ms en lecture / 0,67 ms en écriture** sur la semaine ;
+  elles ne mesurent pas les temps des requêtes SQL ou de l'application.
+- **Pas d'incident mémoire identifié dans les journaux examinés :** aucun des
+  motifs recherchés pour OOM, échec d'allocation, signal 9, épuisement des
+  connexions, réinitialisation, deadlock ou statement timeout. Cela ne garantit
+  pas l'absence de tout incident : la portée dépend des journaux exportés et
+  des motifs recherchés. Les événements RDS consultés ne montrent que des
+  sauvegardes sur sept jours, pas de redémarrage signalé.
+- **Répartition système :** environ **921 Mio** visibles par l'OS ; groupe
+  agrégé « RDS processes » entre **406 et 444 Mio** de RSS ; cache de fichiers
+  entre **170 et 235 Mio**. Ces mesures ne forment pas une comptabilité additive
+  (pages partagées, agrégats). `memory.free` système et `FreeableMemory`
+  CloudWatch ne sont pas interchangeables : cette dernière reflète
+  `MemAvailable`. Ne pas ajouter arbitrairement le cache à la marge disponible.
+- **Configuration :** instance `db.t4g.micro`, PostgreSQL 18.3, `available`,
+  Single-AZ, groupe `default.postgres18` synchronisé, aucune modification en
+  attente. Enhanced Monitoring est déjà actif à 60 secondes ; Performance
+  Insights n'est pas activé. Les paramètres du groupe exposent les formules
+  AWS par défaut, pas nécessairement les valeurs effectives de `pg_settings`.
+  Le code local plafonne le pool API à 10 par défaut, mais sa configuration
+  effectivement déployée n'a pas été certifiée par une connexion SQL.
+
+**Conclusion :** marge mémoire structurellement faible, sans fuite ni panne
+mémoire démontrée. Le refus de charge reste une précaution du banc (128 Mio),
+pas la preuve d'une interruption imminente. L'attribution exacte aux requêtes
+nécessiterait des statistiques SQL supplémentaires via un accès autorisé.
+Le guide PostgreSQL a orienté le contrôle du pool et l'interprétation prudente
+des mesures ; aucune augmentation aveugle des connexions ou de `work_mem`.
+
+**Suite recommandée, non appliquée :** fiabiliser les alarmes mémoire et Redis,
+envisager `db.t4g.small` (2 Gio au lieu de 1 Gio) pour davantage de réserve,
+puis remesurer avant toute charge. Le redimensionnement doit être approuvé et
+planifié avec une interruption potentielle, particulièrement en Single-AZ ;
+ni le gain de capacité ni une absence de coupure ne sont garantis par cet audit.
+
+Références : [définitions des métriques RDS](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/rds-metrics.html),
+[interprétation de la mémoire PostgreSQL par AWS](https://aws.amazon.com/blogs/database/understand-memory-management-in-amazon-rds-for-postgresql-to-avoid-out-of-memory/),
+[caractéristiques des classes RDS](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Concepts.DBInstanceClass.Summary.html).
+
+## 18 octobre 2026 — Précontrôle du test de charge en production : charge non lancée
+
+- Autorisation : test bref et plafonné sur les lectures, sans changement AWS.
+  Vérifications vers **11 h 26–11 h 30, heure de Kinshasa (UTC+1)**. Deux passages
+  de précontrôle AWS seulement ; **zéro requête HTTP applicative de test envoyée**.
+  Le second rapport indique `preflight_refused`, pas un test réussi ou une capacité
+  mesurée : `tmp/production-load-results/2026-10-18T10-29-49-048Z/report.json`.
+- **Motif de refus préventif :** RDS `db.t4g.micro`, PostgreSQL 18.3, présente
+  environ **60–78 Mio de mémoire disponible** sur les quinze minutes précédentes
+  (70 Mio au dernier point), avec **116–118 Mio de swap utilisé**. Le seuil local
+  de sécurité du banc est 128 Mio ; ce n'est pas un seuil universel imposé par AWS.
+  La lecture complémentaire sur une heure confirme une faible marge persistante.
+  Un niveau de swap non nul ne prouve pas à lui seul une panne ni des échanges
+  disque actifs ; aucun diagnostic de fuite mémoire n'est établi ici.
+- La base est `available`, CPU maximal **5,84 %**, **10 connexions**, environ
+  **16,8 Gio de stockage disponible**, crédits CPU non épuisés. ECS a une tâche
+  active et stable, cible ALB `healthy`, CPU maximal **10,41 %**, mémoire maximale
+  **18,95 %** sur la fenêtre. Redis est disponible, CPU moteur inférieur à 0,49 %,
+  mémoire autour de 3,64 %. Ces observations ne prouvent pas une tenue sous charge.
+- **Supervision à corriger ultérieurement :** aucune alarme retournée pour
+  `AWS/RDS / FreeableMemory` avec la dimension de cette base. Les alarmes Redis
+  CPU/mémoire sont `INSUFFICIENT_DATA` avec la dimension `ReplicationGroupId` ; les
+  métriques existent bien avec `CacheClusterId` + `CacheNodeId`. Les dimensions des
+  alarmes sont donc à vérifier. Aucun correctif d'alarme/Terraform appliqué.
+- Version observée : définition ECS `zwanga-api-production-api:20`, image API
+  `sha256:20d44b95608708ddef28595ce3458d0bfa0f3d32adac37d1217eb5325cad25bc`,
+  tag ECR `30ef4d254c96e0fca198abd69272b7867d4b9c40`, publiée le 15 octobre.
+  Le checkout local est `d5e3268c9c6992ea0e87d108392f8f6d7146947e` ; le commit du
+  tag de production n'est pas disponible localement pour une comparaison source.
+  Les performances du code local ne sont pas une mesure de cette image déployée.
+- Banc séparé ajouté dans `test/load/production-readonly.cjs` : cible HTTPS fixe,
+  liste blanche de trois GET (health, liste et recherche de trajets), rafales de
+  1/2/4 lectures, 42 lectures métier prévues, au plus 24/minute pour le même handler,
+  arrêt dur avant cinq minutes. Pas de JWT, de faux `X-Forwarded-For`, de retry,
+  de redirection automatique ni de réponse utilisateur enregistrée. Les quotas,
+  erreurs, latences, états ECS/ALB et métriques peuvent arrêter le test. CloudWatch
+  étant différé, ses alertes ne garantissent pas une réaction instantanée à toute
+  dégradation. Les seuils du banc n'ont pas été abaissés pour forcer son exécution.
+- Réexécuter **uniquement les lectures AWS** :
+  `node test/load/production-readonly.cjs --preflight`.
+  Le mode actif exige un argument explicite et une autorisation opérateur ; il
+  n'a **pas été exécuté** pendant cette intervention. Six tests hors réseau du
+  banc et deux tests de l'isolation locale passent ; aucun changement backend,
+  secret, CI/CD, infrastructure, migration ou ressource distante créée.
+- Suite proposée : examiner la consommation et le dimensionnement mémoire RDS,
+  fiabiliser les alarmes, puis refaire le précontrôle avant toute montée en charge.
+  Le guide PostgreSQL a conduit à mesurer cette marge sans augmenter le pool.
+  Voir les définitions de [FreeableMemory et SwapUsage](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/rds-metrics.html)
+  et les [recommandations AWS sur la mémoire RDS](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_Troubleshooting.html#CHAP_Troubleshooting.FreeableMemory).
+
 ## 18 octobre 2026 — Pagination des commandes et transferts rejoués : préparation mobile
 
 Ajout d’endpoints paginés authentifiés (commandes disponibles/personnelles et offres),
