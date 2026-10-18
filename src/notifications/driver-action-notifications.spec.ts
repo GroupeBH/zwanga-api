@@ -29,10 +29,15 @@ describe('driver notification transport', () => {
     expect(payload.data.actionProtocol).toBe('driver-v1');
     expect(payload.android.priority).toBe('high');
   });
-  it('keeps notification+data for an older installation', async () => {
+  it.each(['new_booking', 'driver_dispatch_offer'])('keeps a visible %s notification for an older installation', async type => {
     const { service, send } = fixture(false);
-    await service.sendFirebaseNotification({ userId: 'driver', title: 'Titre', body: 'Texte', data: { type: 'new_booking' } }, 'fixture-token');
+    await service.sendFirebaseNotification({ userId: 'driver', title: 'Titre', body: 'Texte',
+      data: { type, driverId: 'driver', bookingId: 'booking', offerId: 'offer', expiresAt: new Date(Date.now() + 5000).toISOString() } }, 'fixture-token');
     expect(send.mock.calls[0][0].notification).toEqual({ title: 'Titre', body: 'Texte' });
+    expect(send.mock.calls[0][0].android).toMatchObject({ priority: 'high', notification: { channelId: 'zwanga_default', sound: 'default' } });
+    expect(send.mock.calls[0][0].android.ttl).toBeGreaterThan(0);
+    expect(send.mock.calls[0][0].android.ttl).toBeLessThanOrEqual(5000);
+    expect(send.mock.calls[0][0].data.actionProtocol).toBeUndefined();
   });
   it('does not change message notifications or query driver capabilities for them', async () => {
     const { service, send, query } = fixture(true);
@@ -258,8 +263,34 @@ describe('driver notification transport', () => {
     if (reason === 'foreign-recipient') notification.data.driverId = 'other-driver';
     if (reason === 'unmarked') notification.data.ringAlert = '';
     await service.sendFirebaseNotification(notification, 'fixture-token');
-    expect(send.mock.calls[0][0].android).toBeUndefined();
+    if (reason === 'old-client') {
+      expect(send.mock.calls[0][0].android).toMatchObject({ priority: 'high',
+        notification: { channelId: 'zwanga_default', sound: 'default' } });
+    } else expect(send.mock.calls[0][0].android).toBeUndefined();
     expect(send.mock.calls[0][0].data.actionProtocol).toBeUndefined();
+  });
+  it.each([0, 1])('sends an ordinary visible nearby push without long-ring support (capability=%s)', async version => {
+    const { service, send, query } = fixture(false); query.mockResolvedValue(version ? [{ version }] : []);
+    const notification = scheduled(); notification.data.alertExpiresAt = new Date(Date.now() + 5000).toISOString();
+    await service.sendFirebaseNotification(notification, 'fixture-token');
+    const payload = send.mock.calls[0][0];
+    expect(payload.notification).toEqual({ title: notification.title, body: notification.body });
+    expect(payload.android).toMatchObject({ priority: 'high', notification: { channelId: 'zwanga_default', sound: 'default' } });
+    expect(payload.android.ttl).toBeGreaterThan(0); expect(payload.android.ttl).toBeLessThanOrEqual(5000);
+    expect(payload.data.delivery).toBeUndefined(); expect(payload.data.actionProtocol).toBeUndefined();
+  });
+  it('keeps a bounded ordinary iOS alert when sound capability is absent', async () => {
+    const original = global.fetch;
+    const send = jest.fn().mockResolvedValue({ ok: true, json: async () => ({ data: { status: 'ok', id: 'ticket' } }) });
+    global.fetch = send;
+    try {
+      const { service } = fixture(false);
+      await service.sendExpoPushNotification(scheduled(), 'ExponentPushToken[test]');
+      const payload = JSON.parse(send.mock.calls[0][1].body);
+      expect(payload).toMatchObject({ sound: 'default', priority: 'high' });
+      expect(payload.ttl).toBeGreaterThan(0); expect(payload.ttl).toBeLessThanOrEqual(30);
+      expect(payload.categoryId).toBeUndefined(); expect(payload.data.actionProtocol).toBeUndefined();
+    } finally { global.fetch = original; }
   });
   it('checks the saved request before outbox delivery and suppresses expired or already handled alerts', async () => {
     const { service, query } = fixture(true); const notification = scheduled();

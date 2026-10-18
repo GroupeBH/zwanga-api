@@ -46,7 +46,7 @@ describe('scheduled nearby request alert', () => {
     expect(f.request).toEqual(before); expect(f.drivers).not.toHaveBeenCalled();
   });
 
-  it.each(['FROM trips', 'u."fcmToken" IS NOT NULL', 'kyc_documents', "u.status NOT IN ('suspended', 'inactive')", 'driver_notification_clients'])('filters %s before the bounded selection', async predicate => {
+  it.each(['FROM trips', 'u."fcmToken" IS NOT NULL', 'kyc_documents', "u.status NOT IN ('suspended', 'inactive')"])('filters %s before the bounded selection', async predicate => {
     const f = fixture();
     f.query.mockResolvedValueOnce([{ driverId: 'next' }]);
     await expect(f.run()).resolves.toBe(true);
@@ -65,14 +65,15 @@ describe('scheduled nearby request alert', () => {
     await expect(f.run()).resolves.toBe(false);
     expect(enqueueTransactionalNotifications).not.toHaveBeenCalled();
   });
-  it('returns false for legacy-only clients without sending an incompatible ringing alert', async () => {
+  it('queues all eligible nearby recipients even when sound capability registration is absent', async () => {
     const f = fixture();
-    f.query.mockResolvedValue([]);
-    await expect(f.run()).resolves.toBe(false);
+    await expect(f.run()).resolves.toBe(true);
     const sql = f.query.mock.calls[0][0];
-    expect(sql).toContain(':driver-v2'); expect(sql).toContain(':driver-v3');
+    expect(sql).not.toContain('driver_notification_clients');
     expect(f.drivers).not.toHaveBeenCalled();
-    expect(enqueueTransactionalNotifications).not.toHaveBeenCalled();
+    expect(enqueueTransactionalNotifications).toHaveBeenCalledWith(f.manager, [
+      expect.objectContaining({ userId: 'nearest' }), expect.objectContaining({ userId: 'next' }),
+    ]);
   });
   it('propagates database errors so the caller can roll back the outbox transaction', async () => {
     const f = fixture(); f.query.mockRejectedValue(new Error('database unavailable'));

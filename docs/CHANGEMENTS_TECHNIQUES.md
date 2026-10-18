@@ -1,5 +1,72 @@
 # Journal des changements techniques
 
+## 18 octobre 2026 — Diffusion à tous les conducteurs proches et push de secours
+
+- **Périmètre et problème :** une nouvelle commande peut ne produire aucun push
+  chez un conducteur. La demande est de notifier tous les conducteurs éligibles
+  à 5 km, pour les départs immédiats comme programmés. Le backend possédait déjà
+  une diffusion par lots de 50, continuée aux cycles suivants, mais les deux
+  sélections exigeaient un enregistrement `driver_notification_clients` lié au
+  jeton courant. Une inscription incomplète, un ancien client ou une rotation de
+  jeton pouvait donc exclure le conducteur avant même la préparation d’un push.
+  Le cas programmé exigeait même une capacité de sonnerie v2/v3. Ce défaut est
+  établi dans le code ; son lien avec un essai utilisateur particulier n’a pas
+  été prouvé par une trace de livraison.
+- **Solution appliquée :** `dispatch/scheduled-request-alert.ts` et
+  `dispatch/dispatch.service.ts` sélectionnent désormais les destinataires sans
+  filtre de capacité sonore. Le générateur SQL devenu inutilisé est retiré de
+  `dispatch/nearby-driver-policy.ts` (chemins sous `src/trip-requests/`). La
+  capacité sert seulement à choisir le transport dans
+  `src/notifications/notifications.service.ts` : Android v3 conserve le message
+  de données traité par Notifee, les versions compatibles conservent leur son
+  existant ; sans capacité suffisante, le serveur envoie un push visible avec
+  titre/corps, priorité élevée et canal `zwanga_default` avec son standard. Ce
+  secours utilise aussi un délai de livraison borné à l’échéance de l’alerte,
+  au plus 30 secondes. Sur iOS, le push ordinaire reste visible quand la capacité
+  manque et reçoit désormais cette même durée de validité bornée.
+- **Comportements conservés :** rayon géographique de 5 km, position récente,
+  conducteur actif avec KYC approuvé et jeton push, véhicule et places adaptés,
+  exclusions des trajets/prises en charge en cours et du demandeur. La limite
+  de 50 borne un lot, pas le nombre total de destinataires. Clés de déduplication,
+  reprise des lots, outbox transactionnelle, contrôle du destinataire et de
+  l’état de la commande avant livraison conservés. Pour l’immédiat, la première
+  acceptation gagne et invalide les autres offres ; une commande programmée ne
+  réserve pas les conducteurs. Aucun nouveau canal de sonnerie, consentement
+  contourné, volume forcé, dépendance ou schéma ajouté. Les migrations de
+  diffusion déjà présentes restent un prérequis du déploiement habituel.
+- **Vérifications AWS en lecture seule :** service ECS actif/stable lors du
+  contrôle, activation du dispatch confirmée, référence des identifiants FCM
+  présente. Aucun secret d’authentification, token ou contenu utilisateur affiché
+  ou copié ici. Sur 1 042 lignes du flux courant, dans une fenêtre maximale de
+  six heures, aucun des marqueurs recherchés de création de commande/envoi push
+  n’apparaissait. Cet échantillon ne démontre ni la réception d’un téléphone,
+  ni un échec FCM, ni la cause de l’essai signalé. Aucune modification AWS/RDS,
+  exécution de tâche distante, notification réelle ou migration n’a été lancée.
+- **Tests :** `scheduled-request-alert.spec.ts`, `scheduled-request-delivery.spec.ts`
+  et `driver-action-notifications.spec.ts` : **52 tests réussis**, avec transport
+  ordinaire de secours pour capacités absentes/anciennes et durée de validité.
+  `notifications.service.spec.ts`, `driver-request-policy.spec.ts` et
+  `automatic-notification.spec.ts` : **47 tests réussis**, dont protection des
+  passagers, propriété des jetons, erreurs transport et reprises. Compilation
+  `tsc -p tsconfig.build.json --noEmit --incremental false` réussie. La suite
+  PostgreSQL/PostGIS comporte deux nouveaux cas immédiat/programmé : cinq
+  conducteurs de capacités différentes, absence d’inscription, jeton renouvelé,
+  véhicule incompatible, position périmée/hors rayon et appels concurrents.
+  **39 tests réussis sur PostgreSQL 18/PostGIS local jetable** (environ 43 s),
+  dont diffusion à 52 conducteurs en plusieurs lots et première acceptation
+  concurrente unique. Premier lancement dans le bac à sable : démarrage local
+  de PostgreSQL impossible, avant tout test SQL. La relance autorisée a permis
+  de vérifier le SQL réel ; les assertions de l’ancien cas excluant le client
+  historique ont été adaptées au nouveau comportement et la capacité de places
+  de la moto de test corrigée. Le cluster temporaire est arrêté et nettoyé par
+  la suite ; aucune base applicative n’a été utilisée. `git diff --check` validé.
+- **Précautions et limites :** le guide PostgreSQL a orienté la conservation de
+  `ST_DWithin`, des lots bornés sans `OFFSET`, des transactions et verrous
+  existants. Aucun gain de performance chiffré n’est revendiqué. Modifications
+  locales uniquement, sans fusion de `master`, commit/push ou déploiement. La
+  réception FCM/APNs et la sonnerie réelle restent à vérifier sur appareil après
+  livraison du backend, avec plusieurs conducteurs géolocalisés à proximité.
+
 ## 18 octobre 2026 — Synchronisation du test PostgreSQL de dispatch
 
 - Le déploiement GitHub Actions #61 s'est arrêté sur un unique `deadlock detected`

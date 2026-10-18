@@ -14,11 +14,3 @@ export const ELIGIBLE_NEARBY_DRIVER_SQL = `
       t."departureDate" BETWEEN now() - interval '2 hours' AND now() + interval '30 minutes')))
   AND NOT EXISTS (SELECT 1 FROM trip_requests assigned WHERE assigned."selectedDriverId" = p."driverId"
     AND assigned.status = 'driver_selected' AND assigned."departureDateMax" > now() - interval '2 hours')`;
-
-/** Filter before LIMIT so incompatible installations cannot starve later recipients. */
-export function nearbyNotificationCapabilitySql(legacy: boolean): string {
-  const suffixes = legacy ? ['', ':driver-v2', ':driver-v3'] : [':driver-v2', ':driver-v3'];
-  return `EXISTS (SELECT 1 FROM driver_notification_clients c JOIN users u ON u.id = c."userId"
-    WHERE c."userId" = p."driverId" AND c."tokenHash" IN (${suffixes.map(suffix =>
-      `encode(sha256(convert_to(u."fcmToken" || '${suffix}', 'UTF8')), 'hex')`).join(',')}))`;
-}
