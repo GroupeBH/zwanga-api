@@ -141,10 +141,10 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     expect((await inbox.findAllByUser(owner.id)).total).toBe(2);
   });
 
-  it('alerts all compatible current v2 drivers for tomorrow without assigning or blocking them', async () => {
+  it('alerts legacy and current compatible drivers for tomorrow without assigning or blocking them', async () => {
     await driver(15.31, VehicleType.MOTORCYCLE_TWO_WHEELS, 2);
     await driver(15.311, VehicleType.CAR, 1);
-    await driver(15.312); // Legacy installation: not a long-ring target.
+    const legacy = await driver(15.312); // Receives an ordinary push, not exclusion.
     const near = await driver(15.313), far = await driver(15.32);
     await service.registerNotifications(near.user.id, 2); await service.registerNotifications(far.user.id, 2);
     const r = await request(false, 2);
@@ -153,7 +153,7 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     });
     await Promise.all([service.notifyScheduledRequest(r.id), service.notifyScheduledRequest(r.id)]);
     const rows = await source.query('SELECT * FROM notifications WHERE "eventKey" LIKE $1', [`nearby-scheduled-request:${r.id}:%`]);
-    expect(rows).toHaveLength(2); expect(rows.map(row => row.userId).sort()).toEqual([near.user.id, far.user.id].sort());
+    expect(rows).toHaveLength(3); expect(rows.map(row => row.userId).sort()).toEqual([legacy.user.id, near.user.id, far.user.id].sort());
     expect(rows[0].data).toMatchObject({ type: 'trip_request_nearby', ringAlert: 'nearby-request-v1' });
     expect(await offers(r.id)).toHaveLength(0);
     expect(await source.getRepository(TripRequest).findOneByOrFail({ id: r.id })).toMatchObject({ status: 'pending', selectedDriverId: null });
@@ -430,6 +430,24 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     expect(notifications).toHaveLength(52);
     expect(new Set(notifications.map(n => n.userId)).size).toBe(52);
   }, 30000);
+
+  it.each([true, false])('notifies every nearby eligible driver independently of sound registration (immediate=%s)', async immediate => {
+    const clients = [await driver(), await driver(15.312), await driver(15.313), await driver(15.314), await driver(15.315)];
+    await source.query('DELETE FROM driver_notification_clients WHERE "userId" = $1', [clients[0].user.id]);
+    await service.registerNotifications(clients[2].user.id, 2);
+    await service.registerNotifications(clients[3].user.id, 3);
+    // Rotation invalidates the previous capability hash, not ordinary delivery.
+    await source.getRepository(User).update(clients[4].user.id, { fcmToken: `rotated-${randomUUID()}` });
+    const outside = await driver(16.3), incompatible = await driver(15.31, VehicleType.MOTORCYCLE_TWO_WHEELS, 2), stale = await driver();
+    await service.setPresence(stale.user.id, { available: false });
+    const r = await request(immediate);
+    const run = () => immediate ? service['allocate'](r.id) : service.notifyScheduledRequest(r.id);
+    await Promise.all([run(), run()]);
+    const rows = await source.query('SELECT "userId" FROM notifications WHERE data ->> \'tripRequestId\' = $1', [r.id]);
+    expect(rows.map(row => row.userId).sort()).toEqual(clients.map(client => client.user.id).sort());
+    for (const excluded of [outside, incompatible, stale]) expect(rows.map(row => row.userId)).not.toContain(excluded.user.id);
+    expect(await offers(r.id)).toHaveLength(immediate ? clients.length : 0);
+  });
 
   it('includes just inside 5 km, excludes just outside and ignores former radius overrides', async () => {
     const inside = await driver(), outside = await driver();

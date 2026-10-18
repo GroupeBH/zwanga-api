@@ -389,6 +389,9 @@ export class NotificationService implements OnModuleInit {
     const nearbyVersion = this.isNearbyRequestRing(notification)
       ? await this.ringClientVersion(notification, pushToken) : 0;
     const nearbyRing = nearbyVersion >= 2;
+    // Capability registration may be delayed, or invalidated by token rotation.
+    // Preserve an OS-visible alert for those devices instead of relying on JS.
+    const ordinaryDriverAlert = this.isDriverRingInvitation(notification) || this.isNearbyRequestRing(notification);
     if (nearbyVersion === 3) {
       // Local Notifee owns the ringtone + native 30s timeout. FCM alert sound has
       // no playback timeout (TTL only bounds delivery), so never play it twice.
@@ -410,7 +413,11 @@ export class NotificationService implements OnModuleInit {
       ...(passengerRing || nearbyRing ? { android: { priority: 'high' as const,
         ttl: nearbyRing ? this.driverNotificationTtl(notification, this.driverRingUntil(notification)) * 1000 : 60_000,
         notification: { channelId: 'booking-ring-v2', sound: 'driver_ring',
-          tag: `${nearbyRing ? 'request-nearby' : 'request-accepted'}-${notification.data?.tripRequestId}`, visibility: 'private' as const } } } : {}),
+          tag: `${nearbyRing ? 'request-nearby' : 'request-accepted'}-${notification.data?.tripRequestId}`, visibility: 'private' as const } } }
+        : ordinaryDriverAlert ? { android: { priority: 'high' as const,
+          ttl: this.driverNotificationTtl(notification, this.driverRingUntil(notification)) * 1000,
+          notification: { channelId: 'zwanga_default', sound: 'default', visibility: 'private' as const,
+            tag: `${notification.data?.type}-${notification.data?.offerId ?? notification.data?.bookingId ?? notification.data?.tripRequestId}` } } } : {}),
     });
   }
 
@@ -422,7 +429,8 @@ export class NotificationService implements OnModuleInit {
     const driverActions = version > 0;
     const passengerRing = notification.data?.type === 'trip_request_accepted' &&
       await this.ringClientVersion(notification, pushToken) >= 2;
-    const nearbyRing = this.isNearbyRequestRing(notification) &&
+    const nearbyAlert = this.isNearbyRequestRing(notification);
+    const nearbyRing = nearbyAlert &&
       await this.ringClientVersion(notification, pushToken) >= 2;
     // APNs can request a bundled sound independently of interactive JS support.
     // An older iOS binary without the file falls back to the system sound. Keep
@@ -430,7 +438,7 @@ export class NotificationService implements OnModuleInit {
     const driverRing = this.isDriverRingInvitation(notification);
     const longRing = driverRing || passengerRing || nearbyRing;
     const timeSensitive = version >= 2 || passengerRing || nearbyRing;
-    const ringUntil = driverRing || nearbyRing ? this.driverRingUntil(notification) : undefined;
+    const ringUntil = driverRing || nearbyAlert ? this.driverRingUntil(notification) : undefined;
     const response = await fetch(EXPO_PUSH_API_URL, {
       method: 'POST',
       headers: {
@@ -445,7 +453,7 @@ export class NotificationService implements OnModuleInit {
           ...(version >= 2 ? { ringVersion: 'v2', ringUntil } : {}) }
           : passengerRing ? { ...notification.data, ringAlert: 'request-accepted-v1' } : notification.data ?? undefined,
         ...(driverActions ? { categoryId: version >= 2 ? 'driver-offer-v2' : 'driver-offer-v1' } : {}),
-        ...(driverRing || nearbyRing ? { ttl: this.driverNotificationTtl(notification, ringUntil) } : {}),
+        ...(driverRing || nearbyAlert ? { ttl: this.driverNotificationTtl(notification, ringUntil) } : {}),
         ...(timeSensitive ? { interruptionLevel: 'time-sensitive' } : {}),
         ...(passengerRing ? { ttl: 60 } : {}),
         ...(version >= 2 || passengerRing || nearbyRing ? { channelId: 'booking-ring-v2' } : {}),

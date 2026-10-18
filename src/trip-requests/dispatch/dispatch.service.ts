@@ -13,8 +13,7 @@ import { enqueueTransactionalNotification, enqueueTransactionalNotifications } f
 import { DriverPositionDto, DriverPresenceDto } from './dispatch.dto';
 import { boundedInteger, DispatchDecision, dispatchOfferIsActionable } from './dispatch-policy';
 import { enqueueScheduledRequestAlert } from './scheduled-request-alert';
-import { ELIGIBLE_NEARBY_DRIVER_SQL, NEARBY_DRIVER_BATCH_SIZE, NEARBY_DRIVER_RADIUS_METERS,
-  nearbyNotificationCapabilitySql } from './nearby-driver-policy';
+import { ELIGIBLE_NEARBY_DRIVER_SQL, NEARBY_DRIVER_BATCH_SIZE, NEARBY_DRIVER_RADIUS_METERS } from './nearby-driver-policy';
 import { enqueueStaleLocationReminders } from './stale-location-reminder';
 
 interface DispatchOffer {
@@ -286,15 +285,15 @@ export class DriverDispatchService {
           WHEN v.type = 'motorcycle_3_wheels' THEN 3 ELSE 4 END) >= $3
         AND ST_DWithin(p.position, ST_SetSRID(ST_MakePoint($4,$5),4326)::geography, $6)
         AND ${ELIGIBLE_NEARBY_DRIVER_SQL}
-        AND ${nearbyNotificationCapabilitySql(true)}
         AND NOT EXISTS (SELECT 1 FROM trip_request_dispatch_offers o WHERE
           (o."requestId" = $7 AND o."driverId" = p."driverId") OR (o."driverId" = p."driverId" AND o.status = 'pending'))
         ORDER BY ST_Distance(p.position, ST_SetSRID(ST_MakePoint($4,$5),4326)::geography), p."driverId"
         LIMIT ${NEARBY_DRIVER_BATCH_SIZE} FOR UPDATE OF p SKIP LOCKED`, [request.passengerId, request.vehicleType, request.numberOfSeats,
         request.departurePoint.coordinates[0], request.departurePoint.coordinates[1], this.radiusMeters, requestId, this.responseSeconds + 5]);
       if (!candidates.length) return;
-      // Eligibility, current KYC, vehicle and client capability are already
+      // Eligibility, current KYC and vehicle are already
       // filtered in the candidate SQL. Delivery and acceptance revalidate them.
+      // A missing sound capability uses an ordinary visible push, not exclusion.
       // Keep a constant number of round trips, not ~10 queries per driver.
       const offers = candidates.map(candidate => ({ ...candidate, id: randomUUID() }));
       const batch = JSON.stringify(offers);
