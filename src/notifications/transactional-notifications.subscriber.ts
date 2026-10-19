@@ -1,6 +1,7 @@
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { Booking, BookingStatus } from '../bookings/entities/booking.entity';
 import { Trip } from '../trips/entities/trip.entity';
+import { rideSpeechData } from './ride-speech-data';
 import {
   DataSource,
   EntitySubscriberInterface,
@@ -158,6 +159,9 @@ export class TransactionalNotificationsSubscriber
           title: 'Nouvelle réservation',
           body: 'Un passager souhaite réserver votre trajet. Accepter ou refuser ?',
           data: { type: 'new_booking', bookingId: booking.id, tripId: trip.id,
+            ...rideSpeechData({ departure: booking.passengerOrigin || trip.departureLocation,
+              arrival: booking.passengerDestination || trip.arrivalLocation, seats: booking.numberOfSeats,
+              departureAt: trip.departureDate }),
             driverId: trip.driverId, role: 'driver' },
         };
       }

@@ -3,6 +3,7 @@ import { TripRequest, TripRequestStatus } from '../entities/trip-request.entity'
 import { enqueueTransactionalNotifications } from '../../notifications/transactional-notification';
 import { ELIGIBLE_NEARBY_DRIVER_SQL, NEARBY_DRIVER_BATCH_SIZE } from './nearby-driver-policy';
 import { USABLE_DRIVER_LOCATION_SQL } from './driver-location-policy';
+import { rideSpeechData } from '../../notifications/ride-speech-data';
 
 /** Notification only: never creates an exclusive offer or changes a driver's availability. */
 export async function enqueueScheduledRequestAlert(manager: EntityManager, requestId: string,
@@ -42,6 +43,8 @@ export async function enqueueScheduledRequestAlert(manager: EntityManager, reque
       title: 'Commande programmée à proximité',
       body: `${departure} · ${request.departureLocation} → ${request.arrivalLocation} · ${request.numberOfSeats} place(s). Consultez la commande.`,
       data: { type: 'trip_request_nearby', ringAlert: 'nearby-request-v1', tripRequestId: request.id,
+        ...rideSpeechData({ departure: request.departureLocation, arrival: request.arrivalLocation,
+          seats: request.numberOfSeats, departureAt: request.departureDateMin }),
         driverId: candidate.driverId, role: 'driver', vehicleType: request.vehicleType, alertExpiresAt },
     })));
   return candidates.length > 0;

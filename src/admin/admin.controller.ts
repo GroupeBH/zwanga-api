@@ -12,7 +12,7 @@ import {
   Res,
   StreamableFile,
 } from '@nestjs/common';
-import { ApiTags, ApiOperation } from '@nestjs/swagger';
+import { ApiTags, ApiOperation, ApiQuery } from '@nestjs/swagger';
 import type { Response } from 'express';
 import { AdminService } from './admin.service';
 import { Auth } from '../auth/decorators/auth.decorator';
@@ -28,6 +28,7 @@ import { AdminReferralsService } from './admin-referrals.service';
 import { TripStatementService } from './trip-statement.service';
 import { CreateAdminAccountDto, ResetAdminAccountPasswordDto } from './dto/admin-account.dto';
 import { spreadsheetHeaders, type SpreadsheetFile } from './spreadsheet';
+import { VehicleType } from '../vehicles/entities/vehicle.entity';
 
 interface AuthenticatedAdminRequest {
   user: { userId: string };
@@ -144,6 +145,10 @@ export class AdminController {
   @Roles(UserRole.ADMIN)
   @SensitiveThrottle(30, 60000) // 30 requests per minute per IP
   @ApiOperation({ summary: 'Get all users (paginated)' })
+  @ApiQuery({
+    name: 'vehicleType', enum: VehicleType, required: false,
+    description: 'Users owning an active vehicle of this type; activeVehicleType reflects the matching type.',
+  })
   async getAllUsers(
     @Query('page') page: number = 1,
     @Query('limit') limit: number = 10,
@@ -151,6 +156,7 @@ export class AdminController {
     @Query('registeredFrom') registeredFrom?: string,
     @Query('registeredTo') registeredTo?: string,
     @Query('search') search?: string,
+    @Query('vehicleType') vehicleType?: string,
   ) {
     return this.adminService.getAllUsers(
       page,
@@ -159,6 +165,7 @@ export class AdminController {
       registeredFrom,
       registeredTo,
       search,
+      vehicleType,
     );
   }
 
@@ -168,7 +175,11 @@ export class AdminController {
   @SensitiveThrottle(10, 60000)
   @ApiOperation({
     summary:
-      'Export users as an Excel .xls spreadsheet, optionally filtered by driver role',
+      'Export users as an Excel .xls spreadsheet, with the same filters as the user list',
+  })
+  @ApiQuery({
+    name: 'vehicleType', enum: VehicleType, required: false,
+    description: 'Users owning an active vehicle of this type.',
   })
   async exportUsers(
     @Res({ passthrough: true }) res: Response,
@@ -176,12 +187,14 @@ export class AdminController {
     @Query('registeredFrom') registeredFrom?: string,
     @Query('registeredTo') registeredTo?: string,
     @Query('search') search?: string,
+    @Query('vehicleType') vehicleType?: string,
   ) {
     const file = await this.adminService.exportUsersXls(
       role,
       registeredFrom,
       registeredTo,
       search,
+      vehicleType,
     );
     return this.sendSpreadsheet(res, file);
   }

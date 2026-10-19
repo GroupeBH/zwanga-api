@@ -97,6 +97,16 @@ describe('transactional notification subscriber', () => {
     await f.subscriber.afterInsert(f.event(Booking, { id: 'accepted', tripId: 'trip', status: 'accepted' }));
     expect(f.builder.execute).not.toHaveBeenCalled();
   });
+  it.each([true, false])('includes passenger endpoints in the driver voice payload, falling back to trip endpoints (%s)', async custom => {
+    const f = fixture();
+    f.manager.findOneBy.mockResolvedValue({ id: 'trip', driverId: 'driver', tripRequestId: null,
+      departureLocation: 'Départ trajet', arrivalLocation: 'Arrivée trajet', departureDate: new Date('2026-10-21T09:00:00Z') });
+    await f.subscriber.afterInsert(f.event(Booking, { id: 'booking', tripId: 'trip', status: 'pending', numberOfSeats: 2,
+      passengerOrigin: custom ? 'Départ passager' : null, passengerDestination: custom ? 'Arrivée passager' : null }));
+    expect(f.builder.values.mock.calls[0][0].data).toMatchObject({ rideSpeechVersion: '1', rideSeats: '2',
+      rideDeparture: custom ? 'Départ passager' : 'Départ trajet', rideArrival: custom ? 'Arrivée passager' : 'Arrivée trajet',
+      rideDepartureAt: '2026-10-21T09:00:00.000Z' });
+  });
   it('registers with Nest data source and unregisters on shutdown', () => {
     const f = fixture();
     expect(f.dataSource.subscribers).toContain(f.subscriber);

@@ -5,14 +5,18 @@ import {
   UserStatus,
 } from '../users/entities/user.entity';
 import { KycStatus } from '../users/entities/kyc-document.entity';
+import { Vehicle, VehicleType } from '../vehicles/entities/vehicle.entity';
 import {
   normalizeUserSearch,
   parseAdminUserSegment,
+  parseAdminVehicleType,
   parseRegistrationRange,
   userSearchLikePattern,
 } from './dto/admin-users.dto';
 import { parseKycStatus } from './dto/admin-kyc.dto';
 import { AdminService } from './admin.service';
+import { AdminController } from './admin.controller';
+import { ROLES_KEY } from '../common/guards/roles.guard';
 import { QUALIFIED_DRIVER_CONDITION } from './qualified-driver';
 import {
   buildUsersSpreadsheet,
@@ -20,7 +24,15 @@ import {
 } from './users-spreadsheet';
 
 function createUsersQueryMock() {
+  const vehicleQuery = {
+    select: jest.fn().mockReturnThis(),
+    from: jest.fn().mockReturnThis(),
+    where: jest.fn().mockReturnThis(),
+    andWhere: jest.fn().mockReturnThis(),
+    getQuery: jest.fn().mockReturnValue('(active-vehicle-subquery)'),
+  };
   const query = {
+    subQuery: jest.fn().mockReturnValue(vehicleQuery),
     andWhere: jest.fn(),
     orderBy: jest.fn(),
     skip: jest.fn(),
@@ -34,6 +46,92 @@ function createUsersQueryMock() {
   }
   return query;
 }
+
+describe('parseAdminVehicleType', () => {
+  it.each(Object.values(VehicleType))('accepts %s', (type) => {
+    expect(parseAdminVehicleType(type)).toBe(type);
+  });
+
+  it.each([undefined, null, ''])('treats %s as no filter', (value) => {
+    expect(parseAdminVehicleType(value)).toBeUndefined();
+  });
+
+  it.each([
+    'truck',
+    'all',
+    'CAR',
+    'car ',
+    ' ',
+    'car,motorcycle_2_wheels',
+    "car' OR 1=1--",
+    ['car'],
+    { type: 'car' },
+  ])('rejects unsupported or malformed values: %j', (value) => {
+    expect(() => parseAdminVehicleType(value as any)).toThrow(
+      BadRequestException,
+    );
+  });
+});
+
+describe('AdminController user vehicle filter contract', () => {
+  it('forwards the optional filter to both endpoints without changing admin access', async () => {
+    const service = {
+      getAllUsers: jest.fn().mockResolvedValue({ users: [], total: 0 }),
+      exportUsersXls: jest.fn().mockResolvedValue({
+        buffer: Buffer.from('spreadsheet'),
+        filename: 'users.xls',
+        contentType: 'application/vnd.ms-excel',
+      }),
+    };
+    const controller = new AdminController(
+      service as any,
+      {} as any,
+      {} as any,
+    );
+    await controller.getAllUsers(
+      2,
+      15,
+      'driver',
+      '2026-10-01',
+      '2026-10-19',
+      'JEAN',
+      'car',
+    );
+    expect(service.getAllUsers).toHaveBeenCalledWith(
+      2,
+      15,
+      'driver',
+      '2026-10-01',
+      '2026-10-19',
+      'JEAN',
+      'car',
+    );
+    const response = { set: jest.fn() };
+    await controller.exportUsers(
+      response as any,
+      'driver',
+      '2026-10-01',
+      '2026-10-19',
+      'JEAN',
+      'car',
+    );
+    expect(service.exportUsersXls).toHaveBeenCalledWith(
+      'driver',
+      '2026-10-01',
+      '2026-10-19',
+      'JEAN',
+      'car',
+    );
+    expect(response.set).toHaveBeenCalledWith(
+      expect.objectContaining({ 'Cache-Control': 'no-store' }),
+    );
+    for (const method of ['getAllUsers', 'exportUsers'] as const) {
+      expect(
+        Reflect.getMetadata(ROLES_KEY, AdminController.prototype[method]),
+      ).toEqual([UserRole.ADMIN]);
+    }
+  });
+});
 
 describe('parseAdminUserSegment', () => {
   it('accepts driver, passenger and verified passenger filters', () => {
@@ -208,6 +306,125 @@ describe('AdminService user listing and export', () => {
     );
     expect(usersQuery.skip).toHaveBeenCalledWith(0);
     expect(usersQuery.take).toHaveBeenCalledWith(10);
+    expect(usersQuery.subQuery).not.toHaveBeenCalled();
+  });
+
+  it.each(Object.values(VehicleType))(
+    'shares the active-vehicle filter between list and export: %s',
+    async (type) => {
+      usersQuery.getManyAndCount.mockResolvedValue([[], 0]);
+      usersQuery.getMany.mockResolvedValue([]);
+      await service.getAllUsers(
+        2,
+        5,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        type,
+      );
+      await service.exportUsersXls(
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        type,
+      );
+      const vehicleQuery = usersQuery.subQuery();
+      expect(vehicleQuery.from).toHaveBeenCalledWith(Vehicle, 'activeVehicle');
+      expect(vehicleQuery.where).toHaveBeenCalledWith(
+        'activeVehicle.ownerId = user.id',
+      );
+      expect(vehicleQuery.andWhere).toHaveBeenCalledWith(
+        'activeVehicle.isActive = :adminVehicleActive',
+        { adminVehicleActive: true },
+      );
+      expect(vehicleQuery.andWhere).toHaveBeenCalledWith(
+        'activeVehicle.type = :adminVehicleType',
+        { adminVehicleType: type },
+      );
+      expect(usersQuery.andWhere).toHaveBeenCalledTimes(2);
+      expect(usersQuery.andWhere).toHaveBeenCalledWith(
+        'EXISTS (active-vehicle-subquery)',
+      );
+      expect(usersQuery.skip).toHaveBeenCalledWith(5);
+      expect(usersQuery.take).toHaveBeenCalledWith(5);
+    },
+  );
+
+  it('rejects invalid vehicle types before querying either endpoint', async () => {
+    await expect(
+      service.getAllUsers(
+        1,
+        10,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        'truck',
+      ),
+    ).rejects.toThrow(BadRequestException);
+    await expect(
+      service.exportUsersXls(
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        'truck',
+      ),
+    ).rejects.toThrow(BadRequestException);
+    expect(userRepository.createQueryBuilder).not.toHaveBeenCalled();
+  });
+
+  it('returns the latest active type or null in one batched lookup, preferring a matching type when filtered', async () => {
+    usersQuery.getManyAndCount.mockResolvedValue([
+      [
+        { id: 'multi', role: UserRole.DRIVER, password: 'secret' },
+        { id: 'none', role: UserRole.PASSENGER },
+      ],
+      2,
+    ]);
+    userRepository.manager.find.mockResolvedValue([
+      {
+        id: 'newest',
+        ownerId: 'multi',
+        type: VehicleType.MOTORCYCLE_TWO_WHEELS,
+      },
+      { id: 'older', ownerId: 'multi', type: VehicleType.CAR },
+    ]);
+    let result = await service.getAllUsers();
+    expect(result.users[0]).toEqual(
+      expect.objectContaining({
+        activeVehicleType: VehicleType.MOTORCYCLE_TWO_WHEELS,
+        hasActiveVehicle: true,
+      }),
+    );
+    expect(result.users[0]).not.toHaveProperty('password');
+    expect(result.users[1]).toEqual(
+      expect.objectContaining({
+        activeVehicleType: null,
+        hasActiveVehicle: false,
+      }),
+    );
+    expect(userRepository.manager.find).toHaveBeenCalledTimes(1);
+    expect(userRepository.manager.find).toHaveBeenCalledWith(
+      Vehicle,
+      expect.objectContaining({
+        where: expect.objectContaining({ isActive: true }),
+        select: ['id', 'ownerId', 'type'],
+        order: { createdAt: 'DESC', id: 'DESC' },
+      }),
+    );
+    result = await service.getAllUsers(
+      1,
+      10,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      'car',
+    );
+    expect(result.users[0].activeVehicleType).toBe('car');
   });
 
   it('matches the list without regard to case', async () => {

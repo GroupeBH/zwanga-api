@@ -24,12 +24,17 @@ import { ReferralReward } from '../referrals/entities/referral-reward.entity';
 import { ReferralWithdrawal } from '../referrals/entities/referral-withdrawal.entity';
 import { DriverEarning } from '../driver-settlements/entities/driver-earning.entity';
 import { TripStatementService } from './trip-statement.service';
+import { Vehicle } from '../vehicles/entities/vehicle.entity';
+import { VehiclesModule } from '../vehicles/vehicles.module';
+import { AdminVehiclesController } from './admin-vehicles.controller';
+import { AdminVehiclesService } from './admin-vehicles.service';
 
 @Module({
   imports: [
     KycEvidenceModule,
     TypeOrmModule.forFeature([
       User,
+      Vehicle,
       KycDocument,
       Trip,
       Booking,
@@ -49,9 +54,15 @@ import { TripStatementService } from './trip-statement.service';
     TripRequestsModule,
     WalletModule,
     ReferralsModule,
+    VehiclesModule,
   ],
-  controllers: [AdminController],
-  providers: [AdminService, AdminReferralsService, TripStatementService],
+  controllers: [AdminController, AdminVehiclesController],
+  providers: [
+    AdminService,
+    AdminReferralsService,
+    TripStatementService,
+    AdminVehiclesService,
+  ],
   exports: [AdminService],
 })
 export class AdminModule {}

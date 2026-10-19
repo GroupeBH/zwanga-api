@@ -1,4 +1,17 @@
 import { BadRequestException } from '@nestjs/common';
+import { VehicleType } from '../../vehicles/entities/vehicle.entity';
+
+export function parseAdminVehicleType(
+  value?: string | null,
+): VehicleType | undefined {
+  if (value == null || value === '') return undefined;
+  if (Object.values(VehicleType).includes(value as VehicleType)) {
+    return value as VehicleType;
+  }
+  throw new BadRequestException(
+    'vehicleType doit être car, motorcycle_2_wheels ou motorcycle_3_wheels.',
+  );
+}
 
 export const ADMIN_USER_SEGMENTS = [
   'driver',
