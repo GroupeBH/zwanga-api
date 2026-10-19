@@ -384,7 +384,7 @@ export class NotificationService implements OnModuleInit {
         android: { priority: 'high', ttl: this.driverNotificationTtl(notification, ringUntil) * 1000 },
       });
     }
-    const passengerRing = notification.data?.type === 'trip_request_accepted' &&
+    const passengerRing = this.isPassengerRideResponse(notification) &&
       await this.ringClientVersion(notification, pushToken) >= 2;
     const nearbyVersion = this.isNearbyRequestRing(notification)
       ? await this.ringClientVersion(notification, pushToken) : 0;
@@ -409,11 +409,13 @@ export class NotificationService implements OnModuleInit {
         body: notification.body,
       },
       data: this.stringifyNotificationData(passengerRing
-        ? { ...notification.data, ringAlert: 'request-accepted-v1' } : notification.data),
+        ? this.passengerRingData(notification) : nearbyRing
+          ? { ...notification.data, ringUntil: this.driverRingUntil(notification) } : notification.data),
       ...(passengerRing || nearbyRing ? { android: { priority: 'high' as const,
         ttl: nearbyRing ? this.driverNotificationTtl(notification, this.driverRingUntil(notification)) * 1000 : 60_000,
         notification: { channelId: 'booking-ring-v2', sound: 'driver_ring',
-          tag: `${nearbyRing ? 'request-nearby' : 'request-accepted'}-${notification.data?.tripRequestId}`, visibility: 'private' as const } } }
+          tag: nearbyRing ? `request-nearby-${notification.data?.tripRequestId}`
+            : `ride-response-${notification.data?.bookingId ?? notification.data?.tripRequestId}`, visibility: 'private' as const } } }
         : ordinaryDriverAlert ? { android: { priority: 'high' as const,
           ttl: this.driverNotificationTtl(notification, this.driverRingUntil(notification)) * 1000,
           notification: { channelId: 'zwanga_default', sound: 'default', visibility: 'private' as const,
@@ -427,7 +429,7 @@ export class NotificationService implements OnModuleInit {
   ): Promise<string> {
     const version = await this.driverActionVersion(notification, pushToken);
     const driverActions = version > 0;
-    const passengerRing = notification.data?.type === 'trip_request_accepted' &&
+    const passengerRing = this.isPassengerRideResponse(notification) &&
       await this.ringClientVersion(notification, pushToken) >= 2;
     const nearbyAlert = this.isNearbyRequestRing(notification);
     const nearbyRing = nearbyAlert &&
@@ -451,7 +453,8 @@ export class NotificationService implements OnModuleInit {
         body: notification.body,
         data: driverActions ? { ...notification.data, actionProtocol: 'driver-v1',
           ...(version >= 2 ? { ringVersion: 'v2', ringUntil } : {}) }
-          : passengerRing ? { ...notification.data, ringAlert: 'request-accepted-v1' } : notification.data ?? undefined,
+          : passengerRing ? this.passengerRingData(notification)
+          : nearbyAlert ? { ...notification.data, ringUntil } : notification.data ?? undefined,
         ...(driverActions ? { categoryId: version >= 2 ? 'driver-offer-v2' : 'driver-offer-v1' } : {}),
         ...(driverRing || nearbyAlert ? { ttl: this.driverNotificationTtl(notification, ringUntil) } : {}),
         ...(timeSensitive ? { interruptionLevel: 'time-sensitive' } : {}),
@@ -483,6 +486,18 @@ export class NotificationService implements OnModuleInit {
     return ticket.id
       ? `${EXPO_TICKET_PREFIX}${ticket.id}`
       : `${EXPO_RECEIPT_OK_PREFIX}accepted-${notification.id}`;
+  }
+
+  private isPassengerRideResponse(notification: Notification): boolean {
+    return notification.data?.type === 'trip_request_accepted' ||
+      (notification.data?.type === 'booking_response' &&
+        (!notification.data.status || ['accepted', 'rejected'].includes(notification.data.status)));
+  }
+
+  private passengerRingData(notification: Notification): Record<string, unknown> {
+    return { ...notification.data, passengerId: notification.userId, role: 'passenger',
+      ringAlert: notification.data?.type === 'booking_response' ? 'booking-response-v1' : 'request-accepted-v1',
+      ringUntil: this.driverRingUntil(notification) };
   }
 
   /** A stale booking stays actionable in-app, but must not ring an hour later. */

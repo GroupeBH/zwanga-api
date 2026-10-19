@@ -13,6 +13,7 @@ import { enqueueTransactionalNotification, enqueueTransactionalNotifications } f
 import { DriverPositionDto, DriverPresenceDto } from './dispatch.dto';
 import { boundedInteger, DispatchDecision, dispatchOfferIsActionable } from './dispatch-policy';
 import { enqueueScheduledRequestAlert } from './scheduled-request-alert';
+import { rideSpeechData } from '../../notifications/ride-speech-data';
 import { ELIGIBLE_NEARBY_DRIVER_SQL, NEARBY_DRIVER_BATCH_SIZE, NEARBY_DRIVER_RADIUS_METERS } from './nearby-driver-policy';
 import { enqueueStaleLocationReminders } from './stale-location-reminder';
 import { hasUsableDriverLocation, USABLE_DRIVER_LOCATION_SQL } from './driver-location-policy';
@@ -312,6 +313,8 @@ export class DriverDispatchService {
         title: 'Commande de trajet à proximité',
         body: `${request.departureLocation} → ${request.arrivalLocation} · ${request.numberOfSeats} place(s) · ${request.maxPricePerSeat} FC/place · ${offer.brand} ${offer.model}. Accepter ou refuser ?`,
         data: { type: 'driver_dispatch_offer', offerId: offer.id, tripRequestId: requestId, driverId: offer.driverId,
+          ...rideSpeechData({ departure: request.departureLocation, arrival: request.arrivalLocation,
+            seats: request.numberOfSeats, departureAt: request.departureDateMin }),
           expiresAt: expiresAt.toISOString(), role: 'driver' },
       })));
     });

@@ -872,7 +872,7 @@ export class BookingsService implements OnModuleInit {
           eventKey: `booking-invitation:${booking.id}`, userId: booking.passengerId,
           title: nextStatus === BookingStatus.ACCEPTED ? 'Réservation acceptée' : 'Réservation refusée',
           body: 'Le conducteur a répondu à votre réservation. Consultez les détails dans l’application.',
-          data: { type: 'booking_response', bookingId: booking.id, tripId: trip.id, role: 'passenger' },
+          data: { type: 'booking_response', bookingId: booking.id, tripId: trip.id, role: 'passenger', status: nextStatus },
         });
       }
 
@@ -3698,6 +3698,8 @@ export class BookingsService implements OnModuleInit {
           bookingId: booking.id,
           tripId: booking.tripId,
           status: booking.status,
+          type: [BookingStatus.ACCEPTED, BookingStatus.REJECTED].includes(booking.status) ? 'booking_response' : 'booking_status',
+          role: 'passenger',
         },
         booking.passengerId,
       );

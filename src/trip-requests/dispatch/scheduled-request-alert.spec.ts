@@ -40,6 +40,8 @@ describe('scheduled nearby request alert', () => {
     expect(enqueueTransactionalNotifications).toHaveBeenCalledWith(f.manager, [expect.objectContaining({
       eventKey: 'nearby-scheduled-request:request:nearest', userId: 'nearest', title: 'Commande programmée à proximité',
       data: expect.objectContaining({ type: 'trip_request_nearby', ringAlert: 'nearby-request-v1',
+        rideSpeechVersion: '1', rideDeparture: 'Départ', rideArrival: 'Arrivée', rideSeats: '2',
+        rideDepartureAt: f.request.departureDateMin.toISOString(),
         tripRequestId: 'request', driverId: 'nearest', role: 'driver' }),
     }), expect.objectContaining({
       eventKey: 'nearby-scheduled-request:request:next', userId: 'next',

@@ -30,7 +30,7 @@ import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { KycDocument, KycProvider, KycStatus } from '../users/entities/kyc-document.entity';
 import { AwsKycSession } from '../users/aws-kyc/aws-kyc-session.entity';
 import { identityHash } from '../users/aws-kyc/aws-kyc.policy';
-import { Vehicle } from '../vehicles/entities/vehicle.entity';
+import { Vehicle, VehicleType } from '../vehicles/entities/vehicle.entity';
 import {
   ADMIN_USER_ROLES,
   BACK_OFFICE_USER_ROLES,
@@ -55,6 +55,7 @@ import {
   USER_SEARCH_SQL,
   normalizeUserSearch,
   parseAdminUserSegment,
+  parseAdminVehicleType,
   parseRegistrationRange,
   userSearchLikePattern,
 } from './dto/admin-users.dto';
@@ -84,6 +85,9 @@ type Coordinates = [number, number] | null;
 type WalletAccountWithUser = WalletAccount & { user?: User | null };
 type WalletLedgerEntryWithUser = WalletLedgerEntry & { user?: User | null };
 type PaymentWithUser = PaymentTransaction & { user?: User | null };
+type AdminDriverQualification = DriverQualification & {
+  activeVehicleType: VehicleType | null;
+};
 
 @Injectable()
 export class AdminService {
@@ -322,15 +326,19 @@ export class AdminService {
     registeredFrom?: string,
     registeredTo?: string,
     search?: string,
+    vehicleType?: string,
   ): Promise<{ users: Array<Record<string, unknown>>; total: number }> {
     const { pageNumber, pageSize } = this.normalizePagination(page, limit);
     const roleFilter = parseAdminUserSegment(role);
+    const vehicleTypeFilter = parseAdminVehicleType(vehicleType);
     const registered = parseRegistrationRange(registeredFrom, registeredTo);
     this.logger.debug(
       `Fetching all users - Page: ${pageNumber}, Limit: ${pageSize}, Role: ${roleFilter ?? 'all'}`,
     );
 
-    const query = this.createUsersListQuery(roleFilter, registered, search)
+    const query = this.createUsersListQuery(
+      roleFilter, registered, search, vehicleTypeFilter,
+    )
       .orderBy('user.createdAt', 'DESC')
       .skip((pageNumber - 1) * pageSize)
       .take(pageSize);
@@ -338,7 +346,9 @@ export class AdminService {
     const [users, total] = await query.getManyAndCount();
     this.logger.debug(`Fetched ${users.length} users (total: ${total})`);
     return {
-      users: await this.serializeUsersWithDriverQualification(users),
+      users: await this.serializeUsersWithDriverQualification(
+        users, vehicleTypeFilter,
+      ),
       total,
     };
   }
@@ -348,21 +358,27 @@ export class AdminService {
     registeredFrom?: string,
     registeredTo?: string,
     search?: string,
+    vehicleType?: string,
   ): Promise<{
     buffer: Buffer;
     filename: string;
     contentType: string;
   }> {
     const roleFilter = parseAdminUserSegment(role);
+    const vehicleTypeFilter = parseAdminVehicleType(vehicleType);
     const registered = parseRegistrationRange(registeredFrom, registeredTo);
     this.logger.debug(
       `Exporting users spreadsheet - Role: ${roleFilter ?? 'all'}`,
     );
 
-    const users = await this.createUsersListQuery(roleFilter, registered, search)
+    const users = await this.createUsersListQuery(
+      roleFilter, registered, search, vehicleTypeFilter,
+    )
       .orderBy('user.createdAt', 'DESC')
       .getMany();
-    const serialized = await this.serializeUsersWithDriverQualification(users);
+    const serialized = await this.serializeUsersWithDriverQualification(
+      users, vehicleTypeFilter,
+    );
 
     return {
       buffer: buildUsersSpreadsheet(serialized),
@@ -1178,6 +1194,7 @@ export class AdminService {
     roleFilter?: AdminUserSegment,
     registered?: { from?: Date; to?: Date },
     search?: string,
+    vehicleType?: VehicleType,
   ) {
     const query = roleFilter
       ? applyAdminUserSegmentFilter(
@@ -1185,6 +1202,23 @@ export class AdminService {
           roleFilter,
         )
       : this.userRepository.createQueryBuilder('user');
+
+    if (vehicleType) {
+      // EXISTS filters before pagination/counting, without duplicating owners
+      // who have several active vehicles. TypeORM binds both parameters.
+      const vehicleQuery = query
+        .subQuery()
+        .select('1')
+        .from(Vehicle, 'activeVehicle')
+        .where('activeVehicle.ownerId = user.id')
+        .andWhere('activeVehicle.isActive = :adminVehicleActive', {
+          adminVehicleActive: true,
+        })
+        .andWhere('activeVehicle.type = :adminVehicleType', {
+          adminVehicleType: vehicleType,
+        });
+      query.andWhere(`EXISTS ${vehicleQuery.getQuery()}`);
+    }
 
     if (registered?.from) {
       query.andWhere('user.createdAt >= :registeredFrom', {
@@ -1404,8 +1438,11 @@ export class AdminService {
     };
   }
 
-  private async serializeUsersWithDriverQualification(users: User[]) {
-    const qualifications = await this.loadDriverQualifications(users);
+  private async serializeUsersWithDriverQualification(
+    users: User[],
+    vehicleType?: VehicleType,
+  ) {
+    const qualifications = await this.loadDriverQualifications(users, vehicleType);
     return users.map((user) => ({
       ...this.sanitizeUser(user)!,
       ...qualifications.get(user.id),
@@ -1414,22 +1451,23 @@ export class AdminService {
 
   private async loadDriverQualifications(
     users: Array<Pick<User, 'id' | 'role' | 'isDriver'>>,
-  ): Promise<Map<string, DriverQualification>> {
-    const qualifications = new Map<string, DriverQualification>();
+    vehicleType?: VehicleType,
+  ): Promise<Map<string, AdminDriverQualification>> {
+    const qualifications = new Map<string, AdminDriverQualification>();
     const userIds = [
       ...new Set(users.map((user) => user.id).filter(Boolean)),
     ];
 
     for (const user of users) {
-      qualifications.set(
-        user.id,
-        resolveDriverQualification({
+      qualifications.set(user.id, {
+        ...resolveDriverQualification({
           role: user.role,
           isDriver: user.isDriver,
           hasApprovedKyc: false,
           hasActiveVehicle: false,
         }),
-      );
+        activeVehicleType: null,
+      });
     }
 
     if (userIds.length === 0) {
@@ -1443,7 +1481,8 @@ export class AdminService {
       }),
       this.userRepository.manager.find(Vehicle, {
         where: { ownerId: In(userIds), isActive: true },
-        select: ['id', 'ownerId'],
+        select: ['id', 'ownerId', 'type'],
+        order: { createdAt: 'DESC', id: 'DESC' },
       }),
     ]);
 
@@ -1455,17 +1494,29 @@ export class AdminService {
     const activeVehicleOwnerIds = new Set(
       activeVehicles.map((vehicle) => vehicle.ownerId),
     );
+    const activeVehicleTypes = new Map<string, VehicleType>();
+    for (const vehicle of activeVehicles) {
+      // Prefer a matching active type when filtering, so the front's defensive
+      // filter agrees with the server even for owners of several vehicle types.
+      // Otherwise the first vehicle is the latest created (UUID breaks ties).
+      if (
+        !activeVehicleTypes.has(vehicle.ownerId) ||
+        vehicle.type === vehicleType
+      ) {
+        activeVehicleTypes.set(vehicle.ownerId, vehicle.type);
+      }
+    }
 
     for (const user of users) {
-      qualifications.set(
-        user.id,
-        resolveDriverQualification({
+      qualifications.set(user.id, {
+        ...resolveDriverQualification({
           role: user.role,
           isDriver: user.isDriver,
           hasApprovedKyc: approvedKycUserIds.has(user.id),
           hasActiveVehicle: activeVehicleOwnerIds.has(user.id),
         }),
-      );
+        activeVehicleType: activeVehicleTypes.get(user.id) ?? null,
+      });
     }
 
     return qualifications;

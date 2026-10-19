@@ -1,5 +1,201 @@
 # Journal des changements techniques
 
+## 19 octobre 2026 — Gestion des véhicules de la plateforme par l'admin
+
+- **Demande et périmètre :** fournir au back-office une liste globale filtrable
+  par type, puis la possibilité de consulter, modifier et désactiver un véhicule.
+  Implémentation backend uniquement ; les routes propriétaire `/vehicles`
+  et les filtres `/admin/users` ajoutés précédemment restent inchangés.
+- **Endpoints (préfixe habituel `/api/v1`) :**
+  - `GET /admin/vehicles?vehicleType=car&isActive=true&page=1&limit=25` :
+    renvoie `{ vehicles, total, page, limit }`. `vehicleType` accepte `car`,
+    `motorcycle_2_wheels`, `motorcycle_3_wheels`. Sans ce paramètre, tous les
+    types sont inclus. Sans `isActive`, actifs et désactivés sont inclus ;
+    `isActive=true` ou `false` filtre leur état. Pagination : 25 lignes par
+    défaut, 200 maximum, pages entières positives. Filtres appliqués en base
+    avant comptage/pagination ; tri `createdAt DESC, id DESC` stable à dates égales.
+  - `GET /admin/vehicles/:vehicleId` : détail, y compris pour un véhicule inactif.
+  - `PUT /admin/vehicles/:vehicleId` : modification partielle de `brand`, `model`,
+    `color`, `type`, `licensePlate`, `photoUrl`, `isActive`. Corps vide refusé.
+    Exemple : `{ "color": "Noir", "licensePlate": "1234AB01" }`. Les champs texte
+    sont bornés et nettoyés ; les valeurs nulles/non conformes sont refusées.
+    `isActive` attend un booléen JSON, jamais une chaîne `"false"`/`"true"`.
+    `true` utilise la réactivation existante, sans contourner l'éligibilité du
+    compte conducteur ; `false` applique les mêmes vérifications que ci-dessous.
+  - `PUT /admin/vehicles/:vehicleId/deactivate` : aucune suppression physique ;
+    renvoie `{ id, isActive: false, message }`. Une répétition sur un véhicule
+    déjà inactif reste possible. L'identifiant doit être un UUID valide.
+- **Réponses et accès :** chaque véhicule contient ses propriétés et un objet
+  `owner` limité à l'identité/contact, rôle et état du propriétaire. Photos
+  converties par le service d'URL existant, sans accès aux pièces KYC. Pas de
+  mot de passe, jeton de session ou jeton push. Authentification JWT et rôles
+  admin/super-admin requis, contrôle du compte administrateur actif également
+  dans le service ; marketeurs, conducteurs et passagers refusés. Limites
+  existantes de fréquence : 30 lectures/minute, 10 écritures/minute.
+- **Règles conservées :** `AdminVehiclesService` récupère le propriétaire en
+  base, jamais dans le corps reçu. Liste blanche de champs éditables : impossible
+  de changer `ownerId`, `id` ou les dates. Les écritures délèguent à
+  `VehiclesService.update/remove` : normalisation/unicité des plaques, capacité
+  du type face aux trajets, invalidation des caches et règles d'activation
+  conducteur existantes. Désactivation refusée avec HTTP 400 et le code
+  `VEHICLE_HAS_ACTIVE_TRIPS` pour les trajets `ongoing`/`upcoming`, ou
+  `VEHICLE_HAS_ACTIVE_RECURRING_TRIPS` pour un modèle récurrent actif non terminé.
+  Les trajets terminés/annulés et l'historique sont conservés. Actions réussies
+  journalisées avec l'admin, le véhicule et les noms des champs, sans leurs
+  valeurs ; il ne s'agit pas d'une nouvelle table d'audit immuable.
+- **Implémentation :** nouveaux `src/admin/admin-vehicles.controller.ts`,
+  `admin-vehicles.service.ts`, `dto/admin-vehicles.dto.ts` ; branchement dans
+  `admin.module.ts` avec le `VehiclesModule` existant. Lecture TypeORM avec
+  jointure many-to-one et sélection bornée du propriétaire, sans requête en
+  base par véhicule. Aucun changement de schéma, migration, `.env`, dépendance,
+  Terraform, CI/CD ou environnement AWS.
+- **Vérifications :** 141 tests admin/véhicules unitaires et HTTP réussis ;
+  16 tests PostgreSQL 18/PostGIS isolés réussis (dont les six de non-régression
+  du filtre utilisateurs). Nouveaux tests dans `admin-vehicles.spec.ts`,
+  `admin-vehicles.http.spec.ts`, `admin-vehicles-postgres.spec.ts`. Validation
+  des rôles et DTO via HTTP local, filtres/totaux/jointures, modifications
+  persistées, unicité des plaques, capacité, refus de désactivation par les
+  deux chemins, récurrence, historique et invalidation des caches. Compilation
+  TypeScript `tsconfig.build.json --noEmit --incremental false` validée.
+  PostgreSQL jetable arrêté et supprimé après les tests ; aucune base réelle,
+  lecture de `.env` ni utilisation de S3/Redis. L'authentification des tests HTTP
+  est synthétique ; les règles de rôle et les pipes Nest sont réels. Pas de
+  simulation de publications concurrentes, test de charge ou validation du
+  front admin. Le modèle de concurrence du service véhicule existant est inchangé.
+
+## 19 octobre 2026 — Filtre admin par type de véhicule actif
+
+- **Demande :** filtrer `GET /admin/users` et `GET /admin/users/export` sur
+  le véhicule actif, avec un champ utilisable par le filtre défensif du front.
+- **Contrat :** paramètre facultatif `vehicleType=car`,
+  `vehicleType=motorcycle_2_wheels` ou `vehicleType=motorcycle_3_wheels`.
+  Absence ou chaîne vide : aucun filtre supplémentaire. Toute autre valeur
+  est refusée avec HTTP 400 avant une requête en base. Les paramètres existants
+  `role`, `search`, `registeredFrom`, `registeredTo`, `page` et `limit` gardent
+  leur sens ; l'export reste non paginé. Exemple :
+  `/api/v1/admin/users?role=driver&vehicleType=motorcycle_2_wheels` ; mêmes
+  filtres sur `/api/v1/admin/users/export`.
+- **Sélection :** au moins un véhicule du propriétaire doit avoir
+  `isActive=true` et le type demandé. Un ancien véhicule désactivé ne suffit
+  pas. Le modèle autorisant plusieurs véhicules actifs, la sous-requête
+  `EXISTS` construite avec TypeORM filtre avant pagination et comptage, sans
+  dupliquer les utilisateurs. Les valeurs sont liées comme paramètres SQL.
+- **Réponse :** chaque utilisateur de la liste expose `activeVehicleType`
+  (une des trois valeurs ou `null` sans véhicule actif). Avec un filtre, le
+  type actif correspondant est privilégié pour que le front ne rejette pas
+  un utilisateur possédant plusieurs types de véhicules. Sans filtre, on
+  retient le véhicule actif le plus récemment créé, puis l'UUID décroissant
+  en cas d'égalité. Le détail utilisateur, qui partage ce sérialiseur,
+  reçoit également ce champ. Les colonnes et le nom du fichier XLS ne changent
+  pas ; seul son jeu d'utilisateurs est filtré.
+- **Fichiers et précautions :** `src/admin/admin.controller.ts` expose et
+  documente le paramètre Swagger ; `dto/admin-users.dto.ts` le valide ;
+  `admin.service.ts` mutualise liste/export et enrichit le chargement groupé
+  des véhicules existant, sans requête par utilisateur. Droits admin,
+  limitations de fréquence, règles KYC/rôle et suppression des secrets dans
+  les réponses conservés. Aucune migration, dépendance, variable d'environnement,
+  modification Terraform/CI/CD, intervention ou déploiement AWS.
+- **Vérification :** 75 tests du module admin réussis et six tests sur
+  PostgreSQL 18 local jetable dans `admin-users-vehicle-postgres.spec.ts`.
+  Couverture des trois types, véhicules désactivés, propriétaires multiples,
+  champ retourné, pagination/total, export et combinaison rôle/KYC/recherche/
+  dates. Test SQL activé avec `AUDIT_TEST_POSTGRES_BIN`, sans lecture de `.env`
+  ni accès à une base applicative ; cluster arrêté et supprimé après les tests.
+  Les noms synthétiques du test combiné sont ASCII pour rester indépendants
+  de la locale C de ce cluster. TypeScript `tsconfig.build.json --noEmit
+  --incremental false` validé. Pas de test de charge ni mesure en production.
+
+## 19 octobre 2026 — Détails des trajets pour les annonces vocales mobiles
+
+- **Problème / demande :** les alertes conducteurs n'exposaient pas de description
+  structurée utilisable par une annonce vocale courte. La nouvelle annonce doit
+  être lue uniquement au premier plan ; en arrière-plan, le mobile conserve le
+  vocal réservé au trajet en cours et la sonnerie des nouvelles alertes.
+- **Solution appliquée :** `src/notifications/ride-speech-data.ts` produit
+  `rideSpeechVersion`, `rideDeparture`, `rideArrival`, `rideSeats` et
+  `rideDepartureAt`, tous scalaires, optionnels et bornés. Pas de nom, téléphone,
+  coordonnées ou message libre ajouté à ces métadonnées. Le subscriber
+  `transactional-notifications.subscriber.ts` utilise les points de réservation
+  du passager, avec repli sur le trajet. Les producteurs
+  `src/trip-requests/dispatch/dispatch.service.ts` et `scheduled-request-alert.ts`
+  fournissent les points, places et date prévus pour les commandes immédiates
+  et programmées. Aucun appel à un service distant de synthèse vocale.
+  `src/notifications/notifications.service.ts` inclut aussi la limite `ringUntil`
+  dans les commandes programmées APNs/FCM v2 (déjà présente en FCM v3) pour
+  permettre une reprise au premier plan seulement pendant la fenêtre fraîche.
+  La durée de sonnerie et l'expiration métier ne sont pas prolongées.
+- **Conservé :** mêmes transactions, contrôles d'accès, rayon/destinataires,
+  délais d'offre, événements dédupliqués, compatibilité anciens clients et
+  transports FCM/APNs ; champs supplémentaires ignorables par un ancien mobile.
+  Pas de requête supplémentaire, changement de SQL, schéma ou migration.
+- **Tests :** 141 tests passent dans `ride-speech-data.spec.ts`,
+  `transactional-notifications.subscriber.spec.ts`, `scheduled-request-alert.spec.ts`,
+  `dispatch-speech.spec.ts`, `driver-action-notifications.spec.ts`,
+  `passenger-ride-sound.spec.ts`, `bookings.service.spec.ts`. Vérifications des
+  descriptions, des replis, des valeurs invalides, de tous les producteurs et
+  de la conservation des champs dans les transports FCM/APNs. TypeScript
+  `tsconfig.build.json --noEmit` réussi. Tests synthétiques, sans base réelle.
+- **Limites :** aucun déploiement AWS, notification réelle ou validation sonore
+  sur téléphone. Le comportement de lecture appartient au mobile et doit être
+  livré/testé avec lui ; détails et recette dans le
+  [journal mobile](../../zwanga/docs/CHANGEMENTS_TECHNIQUES.md).
+
+## 19 octobre 2026 — Sonnerie des réponses de réservation côté passager
+
+- **Constat :** seule l’acceptation d’une commande (`trip_request_accepted`)
+  demandait le son embarqué côté passager. Les réponses aux réservations publiées
+  utilisaient `booking_response` ou un payload sans type, donc un son ordinaire.
+- **Solution appliquée :** `src/bookings/bookings.service.ts` fournit type,
+  statut et rôle passager pour les acceptations/refus, y compris dans la file
+  transactionnelle des invitations. `src/notifications/notifications.service.ts`
+  ajoute le son `driver_ring` / `driver_ring.wav`, le destinataire passager et
+  `ringUntil` aux réponses compatibles ; tag Android stable par réservation.
+  Ces métadonnées permettent au mobile d’arrêter son lecteur lorsque le passager
+  ouvre le trajet concerné, sans lui attribuer les boutons du conducteur.
+- **Conservé :** validation du token de notification et de sa capacité, client
+  ancien recevant toujours un push visible, expiration des offres conducteurs,
+  transactions de réservation, rayon de diffusion et contrôles d’acceptation.
+  Les statuts terminé/annulé ne deviennent pas des réponses sonores. Aucun
+  changement de schéma, migration, SQL de sélection ou configuration AWS.
+- **Vérification :** 101 tests Jest passent dans `passenger-ride-sound.spec.ts`,
+  `driver-action-notifications.spec.ts`, `bookings.service.spec.ts`. Vérification
+  TypeScript `tsconfig.build.json --noEmit` réussie. Tests synthétiques ; aucun
+  push réel envoyé et aucune preuve de lecture audio sur téléphone physique.
+- **Livraison :** correctif local à déployer avec le mobile décrit dans le
+  [journal mobile](../../zwanga/docs/CHANGEMENTS_TECHNIQUES.md). Le son système
+  reste borné à 29–30 s en arrière-plan ; le lecteur au premier plan relève du
+  mobile. Aucun déploiement ou changement de données de production effectué.
+
+## 18 octobre 2026 — Vérification du contrat Apple email / App Review
+
+- **Périmètre :** nouvelle présentation du refus App Review du 12 octobre,
+  avec `property email should not exist` à la fin de l’inscription Apple.
+  Le correctif `RegistrationCompatibilityDto` est déjà présent : transformation
+  de l’ancien champ `email` en `undefined` et héritage pour les DTO téléphone,
+  Google et Apple. Les autres champs inconnus restent refusés et l’adresse Apple
+  utilisée par le service provient du jeton vérifié, pas du corps client.
+- **Vérification réelle de l’API AWS actuelle :** deux requêtes synthétiques à
+  `/auth/apple/mobile`, avec jeton volontairement invalide : l’une contenant
+  `email` obtient `401` sans erreur sur ce champ ; l’autre contenant un champ
+  inconnu obtient `400` avec rejet explicite. Aucune authentification réussie,
+  aucun compte créé, aucun jeton valide ou secret utilisé, aucune modification
+  AWS/RDS. Cela ne prouve pas quelle API était appelée par l’ancien binaire.
+- **Vérification locale :** `node node_modules/jest/bin/jest.js --runInBand
+  --silent --runTestsByPath src/auth/registration-compatibility.spec.ts
+  src/auth/apple-keys-resilience.spec.ts src/auth/driver-signup.spec.ts` :
+  **58 tests réussis**. Contrôle de la suppression de `email` avant la logique
+  applicative, du rejet des champs inconnus/privilégiés, de la provenance de
+  l’adresse, de la vérification Apple et des inscriptions conducteur.
+- **Corrections complémentaires mobiles :** adresse de secours encore Render
+  remplacée par AWS, destination du profil de production EAS explicitée,
+  possibilité de compléter le nom Apple absent dans le formulaire et suppression
+  de `email` résiduel de l’inscription par téléphone. Voir le
+  [journal mobile](../../zwanga/docs/CHANGEMENTS_TECHNIQUES.md#2026-10-18--connexion-apple--finalisation-du-profil-et-api-de-production).
+  Le code fonctionnel serveur n’a pas été modifié par cette vérification.
+- **Limites :** aucune preuve de connexion avec un véritable compte Apple sur
+  iPhone/iPad, aucune nouvelle soumission ou promesse d’acceptation App Review.
+  Les essais natifs du nouveau build, neuf et après mise à jour, restent requis.
+
 ## 18 octobre 2026 — Dernière position conducteur durable et analyse GPS mobile
 
 - **Demande et périmètre :** accepter une localisation ancienne et utiliser la
