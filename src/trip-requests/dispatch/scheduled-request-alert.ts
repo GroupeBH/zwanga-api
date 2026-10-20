@@ -42,7 +42,7 @@ export async function enqueueScheduledRequestAlert(manager: EntityManager, reque
       eventKey: `nearby-scheduled-request:${request.id}:${candidate.driverId}`, userId: candidate.driverId,
       title: 'Commande programmée à proximité',
       body: `${departure} · ${request.departureLocation} → ${request.arrivalLocation} · ${request.numberOfSeats} place(s). Consultez la commande.`,
-      data: { type: 'trip_request_nearby', ringAlert: 'nearby-request-v1', tripRequestId: request.id,
+      data: { type: 'trip_request_nearby', ringAlert: 'nearby-request-v1', tripRequestId: request.id, passengerId: request.passengerId,
         ...rideSpeechData({ departure: request.departureLocation, arrival: request.arrivalLocation,
           seats: request.numberOfSeats, departureAt: request.departureDateMin }),
         driverId: candidate.driverId, role: 'driver', vehicleType: request.vehicleType, alertExpiresAt },

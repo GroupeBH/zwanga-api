@@ -12,6 +12,8 @@ import {
 import { User } from '../../users/entities/user.entity';
 import { Vehicle } from '../../vehicles/entities/vehicle.entity';
 import { TripRequest } from './trip-request.entity';
+import { Trip } from '../../trips/entities/trip.entity';
+import { Booking } from '../../bookings/entities/booking.entity';
 
 export enum DriverOfferStatus {
   PENDING = 'pending', // En attente de réponse
@@ -23,6 +25,25 @@ export enum DriverOfferStatus {
 @Entity('driver_offers')
 @Index(['tripRequestId', 'driverId'])
 export class DriverOffer {
+  @Index('IDX_driver_offers_existing_trip')
+  @Column({ type: 'uuid', nullable: true })
+  existingTripId: string | null;
+
+  @ManyToOne(() => Trip, { nullable: true, onDelete: 'RESTRICT' })
+  @JoinColumn({ name: 'existingTripId' })
+  existingTrip: Trip | null;
+
+  @Index('IDX_driver_offers_shared_booking', { unique: true })
+  @Column({ type: 'uuid', nullable: true })
+  sharedBookingId: string | null;
+
+  @ManyToOne(() => Booking, { nullable: true, onDelete: 'RESTRICT' })
+  @JoinColumn({ name: 'sharedBookingId' })
+  sharedBooking: Booking | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  sharedTripConsentAt: Date | null;
+
   @PrimaryGeneratedColumn('uuid')
   id: string;
 

@@ -58,9 +58,9 @@ export class TripRequestsController {
   @Roles(UserRole.DRIVER)
   @SensitiveThrottle(30, 60000)
   @ApiOperation({
-    summary: 'Get all pending trip requests',
+    summary: 'Get available, unexpired trip requests',
     description:
-      'Conducteurs authentifiés uniquement. Adresses et coordonnées exactes visibles ; aucun téléphone avant acceptation.',
+      'Conducteurs authentifiés uniquement. Exclut les demandes expirées, y compris lorsque leur délai est dépassé avant la mise à jour du statut. Adresses et coordonnées exactes visibles ; aucun téléphone avant acceptation.',
   })
   async findAll(@Request() req: { user: { userId: string } }) {
     return this.tripRequestsService.findAll(req.user.userId);

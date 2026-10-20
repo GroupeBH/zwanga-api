@@ -29,6 +29,7 @@ describe('scheduled nearby request alert', () => {
     await expect(f.run()).resolves.toBe(true);
     const [sql, parameters] = f.query.mock.calls[0];
     expect(sql).toContain('ST_DWithin'); expect(sql).toContain('ORDER BY ST_Distance');
+    expect(sql).toContain('p."driverId" <> $1::uuid');
     expect(sql).toContain('LIMIT 50'); expect(sql).toContain('v."isActive" = true');
     expect(sql).toContain('v.type = $5'); expect(sql).toContain('>= $6');
     expect(sql).toContain('p."discoveryEnabled" = true');
@@ -42,7 +43,7 @@ describe('scheduled nearby request alert', () => {
       data: expect.objectContaining({ type: 'trip_request_nearby', ringAlert: 'nearby-request-v1',
         rideSpeechVersion: '1', rideDeparture: 'Départ', rideArrival: 'Arrivée', rideSeats: '2',
         rideDepartureAt: f.request.departureDateMin.toISOString(),
-        tripRequestId: 'request', driverId: 'nearest', role: 'driver' }),
+        tripRequestId: 'request', passengerId: 'passenger', driverId: 'nearest', role: 'driver' }),
     }), expect.objectContaining({
       eventKey: 'nearby-scheduled-request:request:next', userId: 'next',
     })]);

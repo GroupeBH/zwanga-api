@@ -1,5 +1,127 @@
 # Journal des changements techniques
 
+## 20 octobre 2026 — Partager un trajet en cours avec accord du nouveau passager
+
+Le dispatch des courses indépendantes continue d’exclure les conducteurs
+occupés. Un circuit distinct les avertit désormais d’une commande compatible
+avec leurs places libres, puis exige la proposition du conducteur et l’accord
+explicite du passager avant de créer sa réservation.
+
+- **Éligibilité :** trajet `ongoing`, véhicule actif du type demandé, places déjà
+  déclarées libres, conducteur actif avec dernier KYC approuvé, prise en charge
+  dans un rayon de 5 km et créneau commençant dans les dix prochaines minutes
+  au plus, non dépassé. La position du trajet en cours est prioritaire ; la
+  dernière position de découverte sert de repli, sans limite d’ancienneté.
+  Le refus explicite des notifications de proximité est conservé.
+- **Prix :** tarif par place du trajet existant, au plus égal au budget du
+  demandeur ; mode de paiement demandé accepté par le trajet. Les remises,
+  paiements, commissions et points suivent le service de réservation existant.
+  Aucune augmentation automatique du nombre de places déclarées et aucune
+  facturation au moment de la proposition. Le conducteur vérifie les adresses
+  et le détour avant de proposer : pas de calcul automatique de compatibilité
+  d’itinéraire ni de garantie de temps de détour.
+- **Consentement :** `DriverOffer.existingTripId` désigne le trajet partagé ;
+  `sharedTripConsentAt` et `sharedBookingId` conservent la preuve et la
+  réservation. L’ancien endpoint `accept-offer` refuse une telle offre. Seul
+  `POST /trip-requests/:id/shared-offers/:offerId/accept` avec `consent: true`,
+  appelé par le propriétaire de la commande, l’accepte.
+  La conversion implicite globale des DTO est neutralisée pour ce champ :
+  les chaînes `"true"` et `"false"` ne constituent pas un consentement.
+- **Atomicité :** verrou de commande puis verrou de trajet, revalidation du
+  véhicule, du KYC, du prix et des places. Réservation acceptée, consommation
+  des places, affectation et notifications sont persistées ensemble. Les
+  autres offres/invitations perdent leur validité ; une répétition retourne
+  la réservation déjà enregistrée. Un refus conserve la commande ouverte,
+  y compris la recherche immédiate de conducteurs indépendants.
+- **API complémentaire :** `GET /trip-requests/:id/shared-offers/context`,
+  `POST /trip-requests/:id/shared-offers` avec `tripId`, et
+  `POST /trip-requests/:id/shared-offers/:offerId/decline`. Les offres restent
+  consultables via la liste existante et les nouveaux endpoints sont Swagger.
+- **Annulation :** la réservation ajoutée peut être annulée avant embarquement
+  via la commande. La fermeture d’un trajet privé vérifie sous verrou qu’aucune
+  autre réservation active ne reste, pour protéger les autres passagers.
+  La libération du conducteur par le passager de la commande d’origine garde
+  également le trajet ouvert si d’autres passagers y sont encore inscrits.
+  L’annulation d’une commande non affectée est sérialisée avec son acceptation.
+- **Fichiers :** `src/trip-requests/shared-trip-*`,
+  `dispatch/shared-trip-alert.ts`, `bookings/bookable-trip-transaction.ts`,
+  `bookings/private-trip-cancellation.ts`, services de commandes/réservations,
+  entité `DriverOffer` et migration `SharedTripOffers1780000079000`.
+- **Mise en service ultérieure :** appliquer les migrations du backend avant
+  d’exécuter le nouveau code, puis distribuer le mobile compatible pour proposer
+  et accepter le partage. Aucun nouveau secret ou variable d’environnement :
+  les alertes utilisent l’activation existante du dispatch. Le rollback de la
+  migration est possible avant usage ; après consentement enregistré, il refuse
+  de supprimer silencieusement ces preuves. Rien n’est déployé sur AWS et le
+  CI/CD reste inchangé.
+
+Les tests `shared-trip-policy.spec.ts` et `shared-trip-postgres.spec.ts` couvrent
+notamment les limites, refus, changement d’état, concurrence sur la dernière
+place, double acceptation, retour arrière transactionnel et conservation du
+trajet des autres passagers. Les tests PostgreSQL utilisent un cluster jetable
+avec données fictives. La réception réelle FCM/APNs et le parcours embarqué
+Android/iOS restent à valider sur appareils.
+
+Vérifications locales : suite générale de 210 suites et 2 384 tests réussis,
+328 tests ignorés dans ce lancement selon leurs prérequis ; 92 tests ciblés
+avec PostgreSQL/PostGIS puis 21 tests de partage PostgreSQL après ajout des
+derniers scénarios ; dernière vérification ciblée de 165 tests backend réussis ;
+24 tests JavaScript mobiles réussis. Les compilations
+applicatives se vérifient avec `tsc -p tsconfig.build.json --noEmit` côté backend
+et `tsc --noEmit` côté mobile : les deux passent. Aucun test ne lance un paiement
+ou un push réel.
+
+## 20 octobre 2026 — Exclure l’auteur des alertes de sa propre commande
+
+- **Périmètre et constat :** un conducteur peut être passager lorsqu’il commande.
+  Des tests terrain signalent une sonnerie sur son propre appareil. Les trois
+  sélections locales de destinataires excluaient déjà l’auteur, mais les
+  messages ne portaient pas toujours son identifiant et la livraison ne
+  contrôlait pas cette exclusion. La cause du push réellement reçu n’a pas été
+  reproduite ni attribuée à un serveur déployé ; les correctifs renforcent les
+  contrôles aux frontières où ils manquaient.
+- **Production des messages :** ajout de `passengerId` dans
+  `src/trip-requests/dispatch/scheduled-request-alert.ts`, `dispatch.service.ts`
+  et `src/trip-requests/trip-requests.service.ts`. Le rayon, le nombre de
+  destinataires, les exclusions SQL existantes, les droits et la capacité de
+  sonnerie restent inchangés.
+- **Livraison et reprise :** `src/notifications/driver-request-owner.ts` réutilise
+  l’auteur porté par les nouveaux messages ; pour les anciens, lecture
+  paramétrée par l’identifiant de demande ou d’offre. Dans
+  `notifications.service.ts`, une alerte conducteur sans auteur déterminable ou
+  dont l’auteur est le destinataire est rendue inactive sans envoi. Une erreur
+  de lecture reste un échec temporaire reprenable, avec diagnostic générique
+  sans données personnelles. Les validations SQL existantes des alertes
+  programmées et offres immédiates excluent l’auteur réel avant renvoi et
+  enrichissent l’ancien message avec son identifiant. Aucun aller-retour
+  supplémentaire par conducteur pour les messages nouvellement produits ;
+  aucune migration, aucun index ajouté ni changement de données exécuté.
+- **Compatibilité :** les notifications destinées au passager (acceptation,
+  refus, offre d’un conducteur) restent autorisées pour un compte conducteur
+  commandant comme passager. Un jeton push partagé par plusieurs comptes reste
+  bloqué par le contrôle d’unicité préexistant. Le mobile reçoit l’auteur pour
+  refuser aussi les alertes personnelles à la réception/restauration.
+- **Tests :** `driver-request-policy.spec.ts` couvre les quatre types de demande,
+  un auteur conducteur, les anciens messages sans auteur, une offre sans
+  identifiant de demande, les erreurs transitoires, les commandes disparues et
+  les réponses légitimes au passager. `scheduled-request-alert.spec.ts`,
+  `dispatch-speech.spec.ts` et `driver-action-notifications.spec.ts` vérifient
+  les exclusions, paramètres et métadonnées. Commande Jest `--runInBand
+  --no-cache --silent --testPathPatterns 'notifications|scheduled-request-alert.spec|
+  dispatch-speech.spec|trip-request-privacy.spec|trip-request-alert-routing.spec'` :
+  **15 suites réussies, 226 tests réussis, 27 ignorés** dans la suite
+  `transactional-notifications-postgres.spec.ts` non configurée. TypeScript
+  `tsc --project tsconfig.build.json --noEmit --incremental false` réussi.
+  Les transports et requêtes sont simulés : aucune mesure EXPLAIN, aucun essai
+  FCM/APNs réel et aucune validation PostgreSQL de cette modification.
+- **Précautions et limites :** modifications locales préexistantes préservées.
+  Aucun déploiement, accès en écriture à une base, envoi de notification,
+  changement de configuration ou de secrets. Déployer ce correctif serveur et
+  le mobile avant la recette à deux comptes, premier plan/veille/relance :
+  l’auteur ne sonne pas, les autres conducteurs reçoivent la demande, puis leur
+  réponse notifie l’auteur en tant que passager. Aucune disparition de crash
+  ou amélioration de consommation native annoncée.
+
 ## 19 octobre 2026 — Gestion des véhicules de la plateforme par l'admin
 
 - **Demande et périmètre :** fournir au back-office une liste globale filtrable

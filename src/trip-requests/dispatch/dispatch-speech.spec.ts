@@ -16,10 +16,12 @@ it('adds the same structured description to each immediate offer without queryin
     { get: () => undefined } as any, {} as any);
   await (service as any).allocate(request.id);
   expect(query).toHaveBeenCalledTimes(3);
+  expect(query.mock.calls[0][0]).toContain('p."driverId" <> $1::uuid');
+  expect(query.mock.calls[0][1][0]).toBe('passenger');
   const notifications = (enqueueTransactionalNotifications as jest.Mock).mock.calls[0][1];
   expect(notifications).toHaveLength(2);
   for (const notification of notifications) expect(notification.data).toMatchObject({
-    type: 'driver_dispatch_offer', tripRequestId: 'request', rideSpeechVersion: '1', rideDeparture: 'Place centrale',
+    type: 'driver_dispatch_offer', tripRequestId: 'request', passengerId: 'passenger', rideSpeechVersion: '1', rideDeparture: 'Place centrale',
     rideArrival: 'Gare', rideSeats: '2', rideDepartureAt: '2026-10-21T09:00:00.000Z',
   });
 });

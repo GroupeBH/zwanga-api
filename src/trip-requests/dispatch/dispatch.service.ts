@@ -13,6 +13,7 @@ import { enqueueTransactionalNotification, enqueueTransactionalNotifications } f
 import { DriverPositionDto, DriverPresenceDto } from './dispatch.dto';
 import { boundedInteger, DispatchDecision, dispatchOfferIsActionable } from './dispatch-policy';
 import { enqueueScheduledRequestAlert } from './scheduled-request-alert';
+import { enqueueSharedTripAlert } from './shared-trip-alert';
 import { rideSpeechData } from '../../notifications/ride-speech-data';
 import { ELIGIBLE_NEARBY_DRIVER_SQL, NEARBY_DRIVER_BATCH_SIZE, NEARBY_DRIVER_RADIUS_METERS } from './nearby-driver-policy';
 import { enqueueStaleLocationReminders } from './stale-location-reminder';
@@ -245,6 +246,7 @@ export class DriverDispatchService {
         if (request.immediateDispatch) await this.allocate(request.id);
         else await this.db.transaction(manager => enqueueScheduledRequestAlert(
           manager, request.id, this.radiusMeters, driverId => this.isBusy(manager, driverId)));
+        await this.db.transaction(manager => enqueueSharedTripAlert(manager, request.id));
       }
       void this.notifications.dispatchTransactionalNotifications().catch(() => this.logger.warn('Dispatch push delivery deferred.'));
     } catch (error) {
@@ -312,7 +314,7 @@ export class DriverDispatchService {
         eventKey: `dispatch-offer:${offer.id}`, userId: offer.driverId,
         title: 'Commande de trajet à proximité',
         body: `${request.departureLocation} → ${request.arrivalLocation} · ${request.numberOfSeats} place(s) · ${request.maxPricePerSeat} FC/place · ${offer.brand} ${offer.model}. Accepter ou refuser ?`,
-        data: { type: 'driver_dispatch_offer', offerId: offer.id, tripRequestId: requestId, driverId: offer.driverId,
+        data: { type: 'driver_dispatch_offer', offerId: offer.id, tripRequestId: requestId, driverId: offer.driverId, passengerId: request.passengerId,
           ...rideSpeechData({ departure: request.departureLocation, arrival: request.arrivalLocation,
             seats: request.numberOfSeats, departureAt: request.departureDateMin }),
           expiresAt: expiresAt.toISOString(), role: 'driver' },

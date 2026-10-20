@@ -11,6 +11,7 @@ import {
   Repository,
   Point,
   LessThanOrEqual,
+  MoreThan,
   Between,
   In,
   IsNull,
@@ -79,6 +80,8 @@ export interface SanitizedVehicle {
 }
 
 export interface SanitizedDriverOffer {
+  existingTripId?: string | null;
+  sharedTripConsentRequired?: boolean;
   id: string;
   driver: SanitizedUser;
   vehicle: SanitizedVehicle | null;
@@ -723,6 +726,7 @@ export class TripRequestsService {
       const data = {
         type: 'trip_request',
         tripRequestId: tripRequest.id,
+        passengerId: tripRequest.passengerId,
         departureLocation: 'Point de départ',
         arrivalLocation: 'Point d’arrivée',
         numberOfSeats: tripRequest.numberOfSeats.toString(),
@@ -755,9 +759,8 @@ export class TripRequestsService {
     await this.assertDriverViewer(driverId);
     this.logger.debug('Fetching all trip requests');
 
-    // Get all trip requests that are not cancelled, expired, or have an accepted offer
-    // Include PENDING and OFFERS_RECEIVED statuses (no offer accepted yet)
-    // Exclude DRIVER_SELECTED (which means an offer was accepted)
+    // Search/Home still use this legacy endpoint. Filter elapsed deadlines in
+    // SQL, independently of the cron or a successful status update on a read.
     const tripRequests = await this.tripRequestRepository.find({
       relations: [
         'passenger',
@@ -772,16 +775,21 @@ export class TripRequestsService {
           TripRequestStatus.PENDING,
           TripRequestStatus.OFFERS_RECEIVED,
         ]),
+        departureDateMax: MoreThan(new Date(Date.now() - this.UNACCEPTED_REQUEST_EXPIRATION_MS)),
+        immediateDispatch: false,
+        selectedDriverId: IsNull(),
+        tripId: IsNull(),
       },
       order: { createdAt: 'DESC' },
     });
 
     await this.expireRequests(tripRequests);
 
-    // Filter out trip requests that have an accepted offer (even if status is not DRIVER_SELECTED yet)
+    // Recheck the deadline after hydration, including a raced expiration update
+    // that affected zero rows and therefore left this snapshot unchanged.
+    const now = new Date();
     const visibleTripRequests = tripRequests.filter(
-      (tr) =>
-        !tr.immediateDispatch && tr.status !== TripRequestStatus.EXPIRED && !this.hasAcceptedDriver(tr),
+      (tr) => this.isAvailableRequest(tr, now),
     );
 
     return Promise.all(
@@ -799,10 +807,10 @@ export class TripRequestsService {
       relations: ['passenger', 'selectedDriver', 'selectedVehicle', 'driverOffers', 'driverOffers.driver', 'driverOffers.vehicle'] });
     await this.expireRequests(requests);
     // Recheck after hydration: an acceptance/cancellation can race the ID page.
+    const now = new Date();
     const visible = orderHistory(page.ids, requests).filter(request => own
       ? request.passengerId === userId
-      : !request.immediateDispatch && !this.hasAcceptedDriver(request) &&
-        [TripRequestStatus.PENDING, TripRequestStatus.OFFERS_RECEIVED].includes(request.status));
+      : this.isAvailableRequest(request, now));
     return { data: await Promise.all(visible.map(request => this.sanitizeTripRequest(request, userId, !own))),
       total: page.total, nextCursor: page.nextCursor };
   }
@@ -958,6 +966,11 @@ export class TripRequestsService {
     }
 
     await assertDriverCanOperate(this.userRepository.manager, driver);
+
+    if (await this.tripRequestRepository.manager.getRepository(Trip).exists({
+      where: { driverId, status: TripStatus.ACTIVE },
+    })) throw new ConflictException({ code: 'SHARED_TRIP_OFFER_REQUIRED',
+      message: 'Vous avez un trajet en cours. Proposez au passager de le partager ; son accord est nécessaire.' });
 
     const tripRequest = await this.tripRequestRepository.findOne({
       where: { id: tripRequestId },
@@ -1314,6 +1327,11 @@ export class TripRequestsService {
       throw new NotFoundException('Offre du conducteur non trouvée');
     }
 
+    if (offer.existingTripId) throw new BadRequestException({
+      code: 'SHARED_TRIP_CONSENT_REQUIRED',
+      message: 'Confirmez explicitement le partage du trajet dans une version compatible de l’application.',
+    });
+
     if (offer.status !== DriverOfferStatus.PENDING) {
       throw new BadRequestException("Cette offre n'est plus disponible");
     }
@@ -1340,6 +1358,9 @@ export class TripRequestsService {
       const current = await requests.findOne({ where: { id: tripRequestId }, lock: { mode: 'pessimistic_write' } });
       assertRequestSnapshot(current, tripRequest);
       assertUnassignedRequest(current!);
+      if (await manager.getRepository(Trip).exists({ where: { driverId: offer.driverId, status: TripStatus.ACTIVE } }))
+        throw new ConflictException({ code: 'SHARED_TRIP_OFFER_REQUIRED',
+          message: 'Ce conducteur est maintenant en trajet. Il doit proposer un partage que vous pourrez accepter explicitement.' });
       if (await manager.getRepository(Trip).exists({ where: { tripRequestId,
         status: In([TripStatus.PENDING, TripStatus.ACTIVE, TripStatus.COMPLETED]) } }))
         throw new ConflictException('Une prise en charge existe déjà pour cette commande.');
@@ -1539,6 +1560,10 @@ export class TripRequestsService {
     this.logger.log(
       `Driver ${driverId} accepte la commande de trajet ${tripRequestId}`,
     );
+    if (await this.tripRequestRepository.manager.getRepository(Trip).exists({
+      where: { driverId, status: TripStatus.ACTIVE },
+    })) throw new ConflictException({ code: 'SHARED_TRIP_OFFER_REQUIRED',
+      message: 'Vous avez un trajet en cours. Proposez son partage et attendez l’accord du passager.' });
 
     // Verify driver exists
     const driver = await this.userRepository.findOne({
@@ -1825,15 +1850,18 @@ export class TripRequestsService {
       );
     }
 
-    if (tripRequest.immediateDispatch && !tripRequest.selectedDriverId) {
+    if (!tripRequest.selectedDriverId && !tripRequest.tripId &&
+        tripRequest.status !== TripRequestStatus.DRIVER_SELECTED) {
       await this.tripRequestRepository.manager.transaction(async (manager) => {
         const locked = await manager.getRepository(TripRequest).findOne({
           where: { id: tripRequestId, passengerId }, lock: { mode: 'pessimistic_write' },
         });
-        if (!locked || locked.selectedDriverId) {
+        if (!locked || locked.selectedDriverId || locked.tripId) {
           throw new BadRequestException('Un conducteur vient de répondre. Actualisez la commande avant de l’annuler.');
         }
         await manager.getRepository(TripRequest).update(tripRequestId, { status: TripRequestStatus.CANCELLED });
+        await manager.getRepository(DriverOffer).update(
+          { tripRequestId, status: DriverOfferStatus.PENDING }, { status: DriverOfferStatus.CANCELLED });
         await manager.query(`UPDATE trip_request_dispatch_offers SET status = 'cancelled' WHERE "requestId" = $1 AND status = 'pending'`, [tripRequestId]);
       });
       return;
@@ -1843,8 +1871,11 @@ export class TripRequestsService {
       tripRequest.tripId
     ) {
       const trip = await this.tripsService.findOne(tripRequest.tripId);
+      const isSharedAddition = await this.driverOfferRepository.exists({
+        where: { tripRequestId, existingTripId: trip.id, status: DriverOfferStatus.ACCEPTED },
+      });
 
-      if (trip.status !== TripStatus.PENDING || trip.startedAt) {
+      if (!isSharedAddition && (trip.status !== TripStatus.PENDING || trip.startedAt)) {
         throw new BadRequestException(
           'Vous ne pouvez plus annuler cette commande car le trajet a déjà démarré',
         );
@@ -1859,6 +1890,9 @@ export class TripRequestsService {
       );
 
       if (passengerBooking) {
+        if (isSharedAddition && (passengerBooking.pickedUp || passengerBooking.pickedUpAt ||
+            passengerBooking.pickedUpConfirmedByPassenger))
+          throw new BadRequestException('Après embarquement, utilisez la demande d’arrêt du trajet.');
         await this.bookingsService.cancel(passengerBooking.id, passengerId);
       }
     }
@@ -2471,6 +2505,8 @@ export class TripRequestsService {
 
     return {
       id: offer.id,
+      existingTripId: offer.existingTripId ?? null,
+      sharedTripConsentRequired: Boolean(offer.existingTripId),
       driver,
       vehicle: await this.sanitizeVehicle(offer.vehicle || undefined),
       proposedDepartureDate: offer.proposedDepartureDate,
@@ -2623,6 +2659,16 @@ export class TripRequestsService {
       createdAt: tripRequest.createdAt,
       updatedAt: tripRequest.updatedAt,
     };
+  }
+
+  private isAvailableRequest(tripRequest: TripRequest, now: Date): boolean {
+    if (tripRequest.immediateDispatch || this.hasAcceptedDriver(tripRequest) ||
+      ![TripRequestStatus.PENDING, TripRequestStatus.OFFERS_RECEIVED].includes(tripRequest.status)) {
+      return false;
+    }
+    const deadline = this.getRequestExpirationAt(tripRequest);
+    // An invalid date cannot prove that a public request is still available.
+    return deadline !== null && deadline.getTime() > now.getTime();
   }
 
   private getRequestExpirationAt(tripRequest: TripRequest): Date | null {

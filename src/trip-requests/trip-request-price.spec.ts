@@ -35,6 +35,7 @@ describe('Confirmed request price propagation', () => {
       requiresPassengerKyc: false,
     };
     const repository = {
+      manager: { getRepository: () => ({ exists: jest.fn().mockResolvedValue(false) }) },
       findOne: jest.fn().mockResolvedValue(request),
       save: jest.fn(async (value) => value),
     };

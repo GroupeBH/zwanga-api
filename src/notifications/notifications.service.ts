@@ -20,6 +20,8 @@ import {
 } from './entities/notification.entity';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { canReceiveDriverRequests, DRIVER_REQUEST_NOTIFICATION_TYPES, isDriverRequestNotification } from './driver-request-policy';
+import { resolveDriverRequestOwner } from './driver-request-owner';
+import { sharedTripAlertIsDeliverable } from '../trip-requests/dispatch/shared-trip-alert';
 import { DriverPayout } from '../driver-settlements/entities/driver-payout.entity';
 import { WalletWithdrawal } from '../wallet/entities/wallet-withdrawal.entity';
 import { ReferralWithdrawal } from '../referrals/entities/referral-withdrawal.entity';
@@ -317,6 +319,22 @@ export class NotificationService implements OnModuleInit {
         return false;
       }
       savedNotification.fcmToken = owner?.fcmToken?.trim() ?? '';
+    }
+    if (driverRequest) {
+      let passengerId: string | undefined;
+      try {
+        passengerId = await resolveDriverRequestOwner(this.notificationRepository.manager, savedNotification.data);
+      } catch {
+        await this.markNotificationFailed(savedNotification, 'DRIVER_REQUEST_OWNER_CHECK_FAILED');
+        return false;
+      }
+      if (!passengerId || passengerId === savedNotification.userId) {
+        await this.suppressCriticalNotification(savedNotification,
+          passengerId ? 'DRIVER_REQUEST_SELF_NOTIFICATION' : 'DRIVER_REQUEST_OWNER_UNAVAILABLE');
+        return false;
+      }
+      // Preserve ownership on legacy retries and on both FCM/APNs payloads.
+      savedNotification.data = { ...savedNotification.data, passengerId };
     }
     const pushToken = savedNotification.fcmToken?.trim();
     if (!pushToken) {
@@ -801,9 +819,14 @@ export class NotificationService implements OnModuleInit {
     if (type === 'trip_request_nearby') {
       if (!this.isNearbyRequestRing(notification) ||
           !(Date.parse(String(notification.data?.alertExpiresAt)) > Date.now())) return false;
-      const rows: unknown[] = await this.notificationRepository.manager.query(`SELECT 1 FROM trip_requests r
+      if ((notification.data?.sharedTrip === true || notification.data?.sharedTrip === 'true') &&
+          !(await sharedTripAlertIsDeliverable(this.notificationRepository.manager, notification.userId,
+            notification.data?.tripRequestId, notification.data?.existingTripId))) return false;
+      const rows: { passengerId: string }[] = await this.notificationRepository.manager.query(`SELECT r."passengerId" FROM trip_requests r
         WHERE r.id = $1 AND r.status IN ('pending', 'offers_received') AND r."selectedDriverId" IS NULL
-          AND r."tripId" IS NULL AND r."departureDateMax" > now()`, [notification.data?.tripRequestId]);
+          AND r."tripId" IS NULL AND r."departureDateMax" > now() AND r."passengerId" <> $2`,
+        [notification.data?.tripRequestId, notification.userId]);
+      if (rows[0]?.passengerId) notification.data = { ...notification.data, passengerId: rows[0].passengerId };
       return rows.length > 0;
     }
     if (type === 'new_booking') {
@@ -819,10 +842,11 @@ export class NotificationService implements OnModuleInit {
     }
     if (type === 'driver_dispatch_offer') {
       if (this.configService.get<string>('DRIVER_DISPATCH_ENABLED') !== 'true') return false;
-      const rows: unknown[] = await this.notificationRepository.manager.query(`SELECT 1 FROM trip_request_dispatch_offers o
+      const rows: { passengerId: string }[] = await this.notificationRepository.manager.query(`SELECT r."passengerId" FROM trip_request_dispatch_offers o
         JOIN trip_requests r ON r.id = o."requestId" WHERE o.id = $1 AND o."driverId" = $2
-        AND o.status = 'pending' AND o."expiresAt" > now() AND r.status = 'pending'`,
+        AND o.status = 'pending' AND o."expiresAt" > now() AND r.status = 'pending' AND r."passengerId" <> $2`,
         [notification.data?.offerId, notification.userId]);
+      if (rows[0]?.passengerId) notification.data = { ...notification.data, passengerId: rows[0].passengerId };
       return rows.length > 0;
     }
     if (

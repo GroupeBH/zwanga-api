@@ -316,7 +316,8 @@ describe('driver notification transport', () => {
     expect(query.mock.calls[0][0]).toContain('r."selectedDriverId" IS NULL');
     expect(query.mock.calls[0][0]).toContain('r."tripId" IS NULL');
     expect(query.mock.calls[0][0]).toContain('r."departureDateMax" > now()');
-    expect(query.mock.calls[0][1]).toEqual(['request']);
+    expect(query.mock.calls[0][0]).toContain('r."passengerId" <> $2');
+    expect(query.mock.calls[0][1]).toEqual(['request', 'driver']);
     query.mockResolvedValue([]);
     await expect(service.isCriticalNotificationStillDeliverable(notification)).resolves.toBe(false);
     query.mockClear(); notification.data.alertExpiresAt = new Date(0).toISOString();

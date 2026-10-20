@@ -3,6 +3,7 @@ import { trustedContactMessagesEnabled } from '../safety/trusted-contact-policy'
 import { TOKEN_VALUE_CDF } from '../wallet/token-value.policy';
 import { CoalescedRideProgress } from './coalesced-ride-progress';
 import { withBookableTrip } from './bookable-trip-transaction';
+import { finishEmptyPrivateTrip } from './private-trip-cancellation';
 import {
   Injectable,
   NotFoundException,
@@ -747,12 +748,13 @@ export class BookingsService implements OnModuleInit {
   private async ensurePassengerKycForExtraSeats(
     passengerId: string,
     numberOfSeats: number,
+    manager?: EntityManager,
   ): Promise<void> {
     if (numberOfSeats <= this.MAX_SEATS_WITHOUT_APPROVED_KYC) {
       return;
     }
 
-    if (await this.hasApprovedPassengerKyc(passengerId)) {
+    if (await this.hasApprovedPassengerKyc(passengerId, manager)) {
       return;
     }
 
@@ -1144,6 +1146,13 @@ export class BookingsService implements OnModuleInit {
   async create(
     passengerId: string,
     createBookingDto: CreateBookingDto,
+    // Internal only; never bound to an HTTP DTO. A shared offer records consent,
+    // selection, booking and seats in the SAME transaction.
+    sharedSelection?: {
+      lockRequest: (manager: EntityManager) => Promise<void>;
+      validate: (manager: EntityManager, trip: Trip) => Promise<void>;
+      selected: (manager: EntityManager, booking: Booking) => Promise<void>;
+    },
   ): Promise<Booking> {
     this.logger.log(
       `Creating booking for passenger ${passengerId} on trip ${createBookingDto.tripId} (${createBookingDto.numberOfSeats} seats)`,
@@ -1358,8 +1367,25 @@ export class BookingsService implements OnModuleInit {
           tripId: trip.id, passengerId,
           status: In([BookingStatus.PENDING, BookingStatus.ACCEPTED]),
         } })) throw new BadRequestException('Vous avez déjà une réservation en attente ou acceptée pour ce trajet');
-        return this.saveBookingWithFirstTripSubsidyRaceFallback(booking, currentTrip, manager);
+        if (sharedSelection) {
+          await sharedSelection.validate(manager, currentTrip);
+          await this.ensurePassengerKycApprovedForTrip(currentTrip, passengerId,
+            { tripId: currentTrip.id, message: 'Ce trajet exige une identité vérifiée.' }, manager);
+          await this.ensurePassengerKycForExtraSeats(passengerId, booking.numberOfSeats, manager);
+          const acceptedSeats = await this.getAcceptedSeatCount(currentTrip.id, manager);
+          if (currentTrip.totalSeats == null || acceptedSeats + booking.numberOfSeats > currentTrip.totalSeats)
+            throw new BadRequestException('Les places disponibles ont changé.');
+          booking.status = BookingStatus.ACCEPTED;
+          booking.acceptedAt = new Date();
+          await manager.update(Trip, currentTrip.id, {
+            availableSeats: currentTrip.totalSeats - acceptedSeats - booking.numberOfSeats,
+          });
+        }
+        const saved = await this.saveBookingWithFirstTripSubsidyRaceFallback(booking, currentTrip, manager);
+        await sharedSelection?.selected(manager, saved);
+        return saved;
       },
+      sharedSelection?.lockRequest,
     );
 
     // Pending requests do not consume seats. Recalculating after commit could
@@ -2403,27 +2429,11 @@ export class BookingsService implements OnModuleInit {
     // Si c'est un trajet privé, l'annuler tant que le passager n'a pas été
     // pris en charge. Un simple démarrage/arrêt du conducteur ne doit pas
     // transformer l'annulation du passager en trajet terminé.
+    // A private request trip may now carry more than one consenting passenger.
+    // Cancelling one booking must never terminate the ride of the others.
     if (isPassenger && trip.isPrivate) {
-      const wasPassengerPickedUp = Boolean(
-        booking.pickedUp ||
-        booking.pickedUpConfirmedByPassenger ||
-        booking.pickedUpAt,
-      );
-      const shouldCancelTrip = !wasPassengerPickedUp;
-      this.logger.log(
-        `Private trip ${trip.id} - Passenger cancelled booking. ${shouldCancelTrip ? 'Cancelling' : 'Completing'} trip automatically.`,
-      );
-
-      trip.status = shouldCancelTrip
-        ? TripStatus.CANCELLED
-        : TripStatus.COMPLETED;
-      if (!shouldCancelTrip) {
-        trip.completedAt = new Date();
-      }
-      await this.tripRepository.save(trip);
-
-      // Notifier le driver
-      await this.notifyDriverAboutPrivateTripCancellation(trip, booking);
+      const ended = await finishEmptyPrivateTrip(this.tripRepository, trip.id, booking);
+      if (ended) await this.notifyDriverAboutPrivateTripCancellation({ ...trip, ...ended }, booking);
     }
 
     if (isDriver) {

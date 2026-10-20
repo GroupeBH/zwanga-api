@@ -79,6 +79,9 @@ import { AddMarketerRole1780000073000 } from './1780000073000-AddMarketerRole';
 import { BroadcastDriverRequests1780000074000 } from './1780000074000-BroadcastDriverRequests';
 import { IndexRequestsAndTransfers1780000075000 } from './1780000075000-IndexRequestsAndTransfers';
 import { RetainDriverLastLocation1780000076000 } from './1780000076000-RetainDriverLastLocation';
+import { AddStoreManagement1780000077000 } from './1780000077000-AddStoreManagement';
+import { AddStoreAdministration1780000078000 } from './1780000078000-AddStoreAdministration';
+import { SharedTripOffers1780000079000 } from './1780000079000-SharedTripOffers';
 
 export const databaseMigrations = [
   FillTotalSeats1780000000000,
@@ -157,4 +160,7 @@ export const databaseMigrations = [
   BroadcastDriverRequests1780000074000,
   IndexRequestsAndTransfers1780000075000,
   RetainDriverLastLocation1780000076000,
+  AddStoreManagement1780000077000,
+  AddStoreAdministration1780000078000,
+  SharedTripOffers1780000079000,
 ];

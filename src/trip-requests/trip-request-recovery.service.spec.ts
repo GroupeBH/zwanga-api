@@ -4,7 +4,7 @@ import { TripRequest, TripRequestStatus } from './entities/trip-request.entity';
 import { TripRequestRecoveryService } from './trip-request-recovery.service';
 
 describe('TripRequestRecoveryService', () => {
-  let manager: { findOne: jest.Mock; update: jest.Mock };
+  let manager: { findOne: jest.Mock; update: jest.Mock; exists: jest.Mock };
   let tripRequestRepository: { manager: { transaction: jest.Mock } };
   let notificationService: {
     sendNotificationToUser: jest.Mock;
@@ -13,7 +13,7 @@ describe('TripRequestRecoveryService', () => {
   let service: TripRequestRecoveryService;
 
   beforeEach(() => {
-    manager = { findOne: jest.fn(), update: jest.fn() };
+    manager = { findOne: jest.fn(), update: jest.fn(), exists: jest.fn().mockResolvedValue(false) };
     tripRequestRepository = {
       manager: {
         transaction: jest.fn(
@@ -166,5 +166,17 @@ describe('TripRequestRecoveryService', () => {
 
     expect(manager.update).not.toHaveBeenCalled();
     expect(notificationService.sendNotificationToUser).not.toHaveBeenCalled();
+  });
+
+  it('keeps the existing ride running when the original passenger releases the driver but other passengers remain', async () => {
+    const request = { id: 'request', passengerId: 'passenger', selectedDriverId: 'driver',
+      tripId: 'trip', status: TripRequestStatus.DRIVER_SELECTED };
+    manager.findOne.mockResolvedValueOnce(request).mockResolvedValueOnce({
+      id: 'trip', tripRequestId: 'request', isPrivate: true, status: TripStatus.ACTIVE,
+    }).mockResolvedValueOnce({ ...request, selectedDriverId: null, status: TripRequestStatus.PENDING });
+    manager.update.mockResolvedValue({ affected: 1 });
+    manager.exists.mockResolvedValue(true);
+    await service.reopenAfterPassengerReleasesOverdueDriver('request', 'passenger');
+    expect(manager.update).toHaveBeenCalledWith(Trip, { id: 'trip', tripRequestId: 'request' }, { tripRequestId: null });
   });
 });
