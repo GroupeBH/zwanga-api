@@ -4924,6 +4924,18 @@ Swagger résume l’opération ainsi : « List document funding requests (Admin)
 Objet `ListDocumentFundingRequestsQueryDto` :
 
 - **`status`** — facultatif, énumération. valeur autorisée : `pending`, `approved`, `rejected`, `funded`, `cancelled` ; énumération Swagger : `pending`, `approved`, `rejected`, `funded`, `cancelled`. présent dans le schéma Swagger.
+- **`dateFrom`** — facultatif, date valide au format `YYYY-MM-DD`. Début inclus de la période de **création** des demandes, à minuit en `Africa/Kinshasa` (UTC+1).
+- **`dateTo`** — facultatif, date valide au format `YYYY-MM-DD`. Fin incluse : toute la journée en `Africa/Kinshasa` est retenue. Une période inversée produit une erreur 400.
+- **`requesterName`** — facultatif, chaîne de 160 caractères maximum. Recherche partielle insensible à la casse sur le prénom, le nom ou le nom complet du conducteur demandeur, dans les deux ordres. Les espaces superflus de la recherche sont normalisés ; une recherche vide est ignorée. Les caractères `%`, `_` et `!` sont recherchés littéralement, sans joker SQL.
+
+Les filtres se combinent avec `status`. Chaque borne de date peut être utilisée seule ; pour une journée précise, passer la même date aux deux bornes. Sans nouveaux paramètres, le comportement reste inchangé : tableau de demandes, relations `driver` et `subscription`, tri de la plus récente à la plus ancienne. Aucun filtre n'est ajouté à la route personnelle `/my`.
+
+Exemple :
+
+```http
+GET /api/v1/subscriptions/document-funding-requests?status=pending&dateFrom=2026-10-01&dateTo=2026-10-21&requesterName=Jean%20Mukendi
+Authorization: Bearer <jwt>
+```
 
 
 <a id="post-api-v1-subscriptions-document-funding-requests"></a>

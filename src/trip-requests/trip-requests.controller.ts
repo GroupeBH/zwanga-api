@@ -75,8 +75,8 @@ export class TripRequestsController {
       "Récupère toutes les demandes de trajet créées par l'utilisateur connecté",
   })
   // @ApiBearerAuth()
-  async findMyRequests(@Request() req) {
-    return this.tripRequestsService.findByPassenger(req.user.userId);
+  async findMyRequests(@Request() req, @Query('scope') scope?: string) {
+    return this.tripRequestsService.findByPassenger(req.user.userId, scope === 'activity');
   }
 
   @Get('my-offers')

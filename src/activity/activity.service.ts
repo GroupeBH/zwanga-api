@@ -4,7 +4,7 @@ import { Repository } from 'typeorm';
 import { Booking } from '../bookings/entities/booking.entity';
 import { Trip } from '../trips/entities/trip.entity';
 import { TripRequest } from '../trip-requests/entities/trip-request.entity';
-import { activeBookingWhere, activeTripWhere } from '../common/activity-read-policy';
+import { activeBookingWhere, activeTripWhere, activeRequestWhere } from '../common/activity-read-policy';
 import { AccountActivity, ActivityRow, activityRevision, trackingBookingId } from './activity.model';
 
 const columns = (alias: string, names: string) => names.split(' ').map(name => `${alias}.${name}`);
@@ -71,13 +71,10 @@ export class ActivityService {
 
   private readRequests(userId: string, now: number): Promise<ActivityRow[]> {
     return this.requests.createQueryBuilder('request')
+      .setFindOptions({ where: activeRequestWhere(userId, now) })
       .select(columns('request', 'status updatedAt departureDateMax selectedDriverId driverPickupOverdueNotifiedAt'))
       .addSelect('request.id', 'id')
       .leftJoin('request.driverOffers', 'offer').addSelect(columns('offer', 'id updatedAt'))
-      .where('request.passengerId = :userId', { userId })
-      .andWhere('(request.status IN (:...statuses) OR request.updatedAt >= :recent)', {
-        statuses: ['pending', 'offers_received', 'driver_selected'], recent: new Date(now - 48 * 60 * 60_000),
-      })
       .getRawMany<ActivityRow>();
   }
 }
