@@ -7,6 +7,7 @@ import {
   ConflictException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { activeRequestWhere } from '../common/activity-read-policy';
 import {
   Repository,
   Point,
@@ -905,13 +906,11 @@ export class TripRequestsService {
     );
   }
 
-  async findByPassenger(passengerId: string): Promise<SanitizedTripRequest[]> {
+  async findByPassenger(passengerId: string, activityOnly = false): Promise<SanitizedTripRequest[]> {
     this.logger.debug(`Fetching trip requests for passenger: ${passengerId}`);
 
     const tripRequests = await this.tripRequestRepository.find({
-      where: {
-        passenger: { id: passengerId },
-      },
+      where: activityOnly ? activeRequestWhere(passengerId) : { passengerId },
       relations: [
         'passenger',
         'selectedDriver',

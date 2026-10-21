@@ -675,11 +675,51 @@ export class SubscriptionsService implements OnModuleInit {
   async getDocumentFundingRequests(
     query: ListDocumentFundingRequestsQueryDto,
   ): Promise<DocumentFundingRequest[]> {
-    return this.documentFundingRequestRepository.find({
-      where: query.status ? { status: query.status } : {},
-      relations: ['driver', 'subscription'],
-      order: { createdAt: 'DESC' },
-    });
+    // Date-only filters use the same calendar as the admin's Pro subscription list.
+    const from = query.dateFrom
+      ? new Date(`${query.dateFrom}T00:00:00+01:00`)
+      : undefined;
+    const to = query.dateTo
+      ? new Date(`${query.dateTo}T00:00:00+01:00`)
+      : undefined;
+    if (from && to && from > to) {
+      throw new BadRequestException(
+        'dateFrom doit être antérieure ou égale à dateTo',
+      );
+    }
+
+    const requests = this.documentFundingRequestRepository
+      .createQueryBuilder('fundingRequest')
+      .leftJoinAndSelect('fundingRequest.driver', 'driver')
+      .leftJoinAndSelect('fundingRequest.subscription', 'subscription');
+
+    if (query.status) {
+      requests.andWhere('fundingRequest.status = :status', { status: query.status });
+    }
+    if (from) {
+      requests.andWhere('fundingRequest.createdAt >= :dateFrom', { dateFrom: from });
+    }
+    if (to) {
+      // Exclusive next-day bound includes the entire final day, even microseconds.
+      to.setUTCDate(to.getUTCDate() + 1);
+      requests.andWhere('fundingRequest.createdAt < :dateToExclusive', {
+        dateToExclusive: to,
+      });
+    }
+
+    const name = query.requesterName?.trim().replace(/\s+/g, ' ');
+    if (name) {
+      requests.andWhere(
+        `(concat(driver.firstName, ' ', driver.lastName) ILIKE :requesterName ESCAPE '!'
+          OR concat(driver.lastName, ' ', driver.firstName) ILIKE :requesterName ESCAPE '!')`,
+        { requesterName: `%${name.replace(/[!%_]/g, '!$&')}%` },
+      );
+    }
+
+    return requests
+      .orderBy('fundingRequest.createdAt', 'DESC')
+      .addOrderBy('fundingRequest.id', 'DESC')
+      .getMany();
   }
 
   async updateDocumentFundingRequestStatus(

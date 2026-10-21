@@ -1,10 +1,19 @@
-import { activeBookingWhere, activeTripWhere } from './activity-read-policy';
+import { activeBookingWhere, activeTripWhere, activeRequestWhere } from './activity-read-policy';
+import { TripRequestStatus } from '../trip-requests/entities/trip-request.entity';
 import { BookingPaymentStatus, BookingStatus } from '../bookings/entities/booking.entity';
 import { TripStatus } from '../trips/entities/trip.entity';
 import { FindOperator } from 'typeorm';
 
 const now = Date.parse('2026-09-17T12:00:00Z');
 describe('activity reads without loading all historical rides', () => {
+  it('retains all unfinished requests and recent changes, with owner restrictions on both OR branches', () => {
+    const clauses = activeRequestWhere('owner', now);
+    expect(clauses.every(clause => clause.passengerId === 'owner')).toBe(true);
+    expect((clauses[0].status as FindOperator<TripRequestStatus>).value).toEqual([
+      TripRequestStatus.PENDING, TripRequestStatus.OFFERS_RECEIVED, TripRequestStatus.DRIVER_SELECTED,
+    ]);
+    expect((clauses[1].updatedAt as FindOperator<Date>).value).toEqual(new Date(now - 48 * 3600000));
+  });
   it('scopes every passenger branch and retains unfinished bookings, recent arrivals and pending transactions', () => {
     const clauses = activeBookingWhere('passenger', now);
     expect(clauses.every(clause => clause.passengerId === 'passenger')).toBe(true);

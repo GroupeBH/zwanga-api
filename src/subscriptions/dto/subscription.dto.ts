@@ -1,4 +1,5 @@
 import {
+  IsDateString,
   IsEnum,
   IsIn,
   IsNotEmpty,
@@ -213,4 +214,46 @@ export class ListDocumentFundingRequestsQueryDto {
   @IsEnum(DocumentFundingRequestStatus)
   @IsOptional()
   status?: DocumentFundingRequestStatus;
+
+  @ApiProperty({
+    required: false,
+    type: String,
+    format: 'date',
+    description:
+      'Date de création minimale incluse (YYYY-MM-DD), journée Africa/Kinshasa.',
+    example: '2026-10-01',
+  })
+  @IsOptional()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, {
+    message: 'dateFrom doit être au format YYYY-MM-DD',
+  })
+  @IsDateString({ strict: true }, { message: 'dateFrom doit être une date valide' })
+  dateFrom?: string;
+
+  @ApiProperty({
+    required: false,
+    type: String,
+    format: 'date',
+    description:
+      'Date de création maximale incluse (YYYY-MM-DD), journée entière Africa/Kinshasa.',
+    example: '2026-10-21',
+  })
+  @IsOptional()
+  @Matches(/^\d{4}-\d{2}-\d{2}$/, {
+    message: 'dateTo doit être au format YYYY-MM-DD',
+  })
+  @IsDateString({ strict: true }, { message: 'dateTo doit être une date valide' })
+  dateTo?: string;
+
+  @ApiProperty({
+    required: false,
+    description:
+      'Recherche partielle, sans distinction de casse, sur le prénom, le nom ou le nom complet du demandeur (dans les deux ordres).',
+    maxLength: 160,
+    example: 'Jean Mukendi',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(160)
+  requesterName?: string;
 }
