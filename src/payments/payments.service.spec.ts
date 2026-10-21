@@ -8,9 +8,11 @@ import {
   PaymentTransaction,
 } from './entities/payment-transaction.entity';
 import { DriverPayout } from '../driver-settlements/entities/driver-payout.entity';
+import { ReferralWithdrawal } from '../referrals/entities/referral-withdrawal.entity';
 import { PaymentsService } from './payments.service';
 import { PaymentSettlementRegistry } from './payment-settlement.registry';
 import { TOKEN_WITHDRAWAL_DISABLED } from './token-withdrawal.policy';
+import { PaymentGatewayUnavailableError } from './payment-provider.policy';
 
 describe('PaymentsService', () => {
   let paymentTransactionRepository: {
@@ -47,6 +49,8 @@ describe('PaymentsService', () => {
         }
         if (entity === DriverPayout) return { id: draft.relatedEntityId, driverId: draft.userId,
           amount: draft.amount, currency: draft.currency, status: 'pending' };
+        if (entity === ReferralWithdrawal) return { id: draft.relatedEntityId, userId: draft.userId,
+          amount: draft.amount, currency: draft.currency, phone: draft.phone, status: 'pending' };
         return { id: draft?.userId };
       },
       save: async (entity: unknown, value: any) => entity === PaymentTransaction ? paymentTransactionRepository.save(value) : value,
@@ -131,13 +135,38 @@ describe('PaymentsService', () => {
     expect(pawaPay.isConfigured).not.toHaveBeenCalled();
   });
 
-  it('allows an explicitly bound referral withdrawal of 1000 tokens at 25 CDF', async () => {
+  it('allows an explicitly bound referral withdrawal of 1000 tokens at 10 CDF', async () => {
     const input = { userId: 'referrer', purpose: PaymentPurpose.REFERRAL_PAYOUT,
       relatedEntityType: 'referral_withdrawal', relatedEntityId: 'withdrawal-1',
-      phone: '+243891234567', amount: 25000, currency: 'CDF', description: 'Retrait de parrainage' };
-    await expect(service.initiatePayout(input)).resolves.toMatchObject({ purpose: PaymentPurpose.REFERRAL_PAYOUT, amount: 25000 });
+      phone: '+243891234567', amount: 10000, currency: 'CDF', description: 'Retrait de parrainage' };
+    await expect(service.initiatePayout(input)).resolves.toMatchObject({ purpose: PaymentPurpose.REFERRAL_PAYOUT, amount: 10000 });
     expect(flexPayService.initiatePayout).toHaveBeenCalledTimes(1);
   });
+
+  it.each(['accepted', 'refused', 'timeout'])(
+    'returns a concurrently confirmed deposit despite a late %s initiation result', async result => {
+      const paidAt = new Date();
+      flexPayService.isSuccessfulCode.mockReturnValue(result !== 'refused');
+      flexPayService.initiatePayment.mockImplementation(async () => {
+        const draft = paymentTransactionRepository.create.mock.results[0].value;
+        await paymentTransactionRepository.save({
+          ...draft, id: 'payment-1', status: PaymentStatus.SUCCEEDED,
+          orderNumber: 'ORD123', paidAt,
+        });
+        if (result === 'timeout') throw new PaymentGatewayUnavailableError(
+          PaymentProvider.FLEXPAY, 'synthetic timeout', { uncertainDelivery: true },
+        );
+        return { code: result === 'refused' ? '1' : '0', orderNumber: 'ORD123',
+          message: result === 'refused' ? 'invalid token' : 'accepted', raw: {} };
+      });
+      const saved = await service.initiatePayment({
+        userId: 'user-1', method: PaymentMethod.MOBILE_MONEY,
+        phone: '+243891234567', amount: 5000, currency: 'CDF', description: 'Synthetic',
+      });
+      expect(saved).toMatchObject({ status: PaymentStatus.SUCCEEDED, paidAt });
+      expect(flexPayService.initiatePayment).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it('a topup retry returns the original payment without contacting the provider again', async () => {
     const input = { userId: 'user', purpose: 'wallet_top_up', idempotencyKey: 'stable-key',

@@ -60,7 +60,7 @@ describe('AdminReferralsService', () => {
     createQueryBuilder: jest.fn(),
     findOne: jest.fn(),
   };
-  const referralsService = { checkWithdrawalStatus: jest.fn() };
+  const referralsService = { checkWithdrawalStatus: jest.fn(), recoverUnsentWithdrawal: jest.fn() };
   let service: AdminReferralsService;
 
   const safeUser = {
@@ -328,5 +328,21 @@ describe('AdminReferralsService', () => {
       service.reconcileWithdrawal('user-1', 'withdrawal-1'),
     ).rejects.toBeInstanceOf(ForbiddenException);
     expect(referralsService.checkWithdrawalStatus).not.toHaveBeenCalled();
+  });
+
+  it('uses safe recovery for an order-less reservation and reloads its public response', async () => {
+    userRepository.findOne.mockResolvedValue({ id: 'admin-1', role: UserRole.SUPER_ADMIN });
+    withdrawalRepository.findOne
+      .mockResolvedValueOnce({ id: 'orphan', userId: 'user-1', status: ReferralWithdrawalStatus.PENDING })
+      .mockResolvedValueOnce({
+        id: 'orphan', userId: 'user-1', user: safeUser, tokens: 1000,
+        amount: 10000, moneyPerToken: 10, status: ReferralWithdrawalStatus.FAILED,
+        failureReason: 'Reservation never sent',
+      });
+    const result = await service.reconcileWithdrawal('admin-1', 'orphan');
+    expect(referralsService.recoverUnsentWithdrawal).toHaveBeenCalledWith('orphan', 'admin-1');
+    expect(referralsService.checkWithdrawalStatus).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ status: 'failed', tokens: 1000 });
+    expect(result.user).toMatchObject({ id: 'user-1' });
   });
 });

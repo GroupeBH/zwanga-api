@@ -10,6 +10,7 @@ describe('Durable deposit reconciliation', () => {
   it('preserves success when a concurrent provider request finishes late with pending state', async () => {
     const stored = {
       id: 'payment',
+      provider: PaymentProvider.FLEXPAY,
       status: PaymentStatus.SUCCEEDED,
       purpose: PaymentPurpose.GENERIC,
     };
@@ -45,15 +46,15 @@ describe('Durable deposit reconciliation', () => {
         1,
       ])
       .mockResolvedValue([[], 0]);
-    const reconcileFlexPayDeposit =
+    const reconcilePayment =
       result instanceof Error
         ? jest.fn().mockRejectedValue(result)
         : jest.fn().mockResolvedValue(result);
     const worker = new PaymentReconciliationService(
       { query } as never,
-      { reconcileFlexPayDeposit } as never,
+      { reconcilePayment } as never,
     );
-    return { worker, query, reconcileFlexPayDeposit };
+    return { worker, query, reconcilePayment };
   }
   it('uses fenced leases and completes only after settlement', async () => {
     const f = workerFixture(true);
@@ -119,5 +120,26 @@ describe('Durable deposit reconciliation', () => {
     payment.purpose = PaymentPurpose.DRIVER_PAYOUT;
     expect(await service.reconcileFlexPayDeposit('payment')).toBe(true);
     expect(service.settlementRegistry.apply).not.toHaveBeenCalled();
+  });
+  it.each([PaymentPurpose.DRIVER_PAYOUT, PaymentPurpose.REFERRAL_PAYOUT, PaymentPurpose.WALLET_TOP_UP])(
+    'the new durable recovery applies terminal PawaPay %s settlements', async purpose => {
+      const { service, payment } = paymentFixture(PaymentStatus.SUCCEEDED);
+      payment.provider = PaymentProvider.PAWAPAY;
+      payment.purpose = purpose;
+      // Top-up proof is validated separately before it can be applied.
+      if (purpose === PaymentPurpose.WALLET_TOP_UP) {
+        payment.status = PaymentStatus.FAILED;
+      }
+      expect(await service.reconcilePayment(payment.id)).toBe(true);
+      expect(service.settlementRegistry.apply).toHaveBeenCalledWith(payment);
+    },
+  );
+  it('honors a paused PawaPay reconciliation without discarding pending work', async () => {
+    const { service, payment } = paymentFixture(PaymentStatus.INITIATED);
+    payment.provider = PaymentProvider.PAWAPAY;
+    service.configService = { get: () => 'false' };
+    service.pawaPayService = { isConfigured: () => true };
+    expect(await service.reconcilePayment(payment.id)).toBe(false);
+    expect(service.checkTransactionAndApply).not.toHaveBeenCalled();
   });
 });

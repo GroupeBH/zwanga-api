@@ -17,7 +17,7 @@ describe('token withdrawal policy', () => {
       purpose: PaymentPurpose.REFERRAL_PAYOUT,
       relatedEntityType: 'referral_withdrawal',
       relatedEntityId: 'withdrawal',
-      amount: 25000,
+      amount: 10000,
       currency: 'CDF',
     },
   ])('preserves the driver earnings payout contract: %j', (input) => {
@@ -50,7 +50,7 @@ describe('token withdrawal policy', () => {
       purpose: PaymentPurpose.REFERRAL_PAYOUT,
       relatedEntityType: 'referral_withdrawal',
       relatedEntityId: 'withdrawal',
-      amount: 24999.75,
+      amount: 9999.9,
       currency: 'CDF',
     },
     {

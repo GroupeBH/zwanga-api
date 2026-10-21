@@ -1,5 +1,13 @@
 # Administration du parrainage
 
+## Actualisation du 20 octobre 2026 — rattachement sans bonus
+
+`POST /api/v1/admin/users/:userId/referrer` conserve l'autorisation admin, le motif obligatoire, l'interdiction de modifier un parrain existant et la protection contre les cycles. Il ne crédite désormais aucun jeton ; `attributionBonusTokens` vaut toujours `0`.
+
+Le premier rattachement conserve l'identifiant de l'admin et son motif dans `referral_profiles.attributionAdminId` / `attributionAdminReason` via la migration 82. Ces champs ne sont pas exposés dans les réponses publiques. L'ancienne trace incluse dans les écritures de bonus reste intacte. Un nouvel appel idempotent ne remplace pas le motif initial.
+
+Les rémunérations du parrain viennent uniquement des transactions éligibles du filleul. Voir [la politique et la procédure de déploiement](referral-program.md). Les sections suivantes documentent les fonctions de lecture et de rapprochement existantes.
+
 Identifiant : `FIN-REF-006`  
 Date : 26 août 2026  
 Statut : implémenté, migration d'index et déploiement requis
@@ -86,7 +94,9 @@ Authorization: Bearer <jeton-super-admin>
 
 Cette route ne permet jamais de choisir le statut final. Elle retrouve l'`orderNumber` interne, appelle `PaymentsService.checkPaymentStatus` par l'intermédiaire du flux existant `ReferralsService.checkWithdrawalStatus`, puis applique la réponse FlexPay dans la transaction idempotente existante.
 
-Un retrait déjà `succeeded` est retourné sans nouvel appel fournisseur. Un retrait sans transaction ou sans `orderNumber` vérifiable produit une réponse `400`.
+Un retrait déjà `succeeded` est retourné sans nouvel appel fournisseur. Depuis le correctif financier du 20 octobre 2026, une réservation `pending` de plus de quinze minutes sans **aucune** transaction associée peut être libérée, une seule fois, après vérification sous verrou. L'envoi concurrent est empêché par la base. La même vérification est exécutée automatiquement toutes les cinq minutes.
+
+Si une transaction existe mais n'a pas d'`orderNumber`, son résultat reste incertain : aucun nouvel envoi et aucune libération automatique. La réponse conserve son statut en attente ; un rapprochement avec les preuves du prestataire est nécessaire. Un lien de transaction introuvable reste une anomalie refusée. Les détails du déploiement et de la migration 83 figurent dans le [journal financier](CHANGELOG.md).
 
 ## Règles financières inchangées
 

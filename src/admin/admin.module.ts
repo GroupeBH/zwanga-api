@@ -28,9 +28,11 @@ import { Vehicle } from '../vehicles/entities/vehicle.entity';
 import { VehiclesModule } from '../vehicles/vehicles.module';
 import { AdminVehiclesController } from './admin-vehicles.controller';
 import { AdminVehiclesService } from './admin-vehicles.service';
+import { StoreManagementModule } from '../store-management/store-management.module';
 
 @Module({
   imports: [
+    StoreManagementModule,
     KycEvidenceModule,
     TypeOrmModule.forFeature([
       User,

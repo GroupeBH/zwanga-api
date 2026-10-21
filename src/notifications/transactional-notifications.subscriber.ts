@@ -161,7 +161,7 @@ export class TransactionalNotificationsSubscriber
           data: { type: 'new_booking', bookingId: booking.id, tripId: trip.id,
             ...rideSpeechData({ departure: booking.passengerOrigin || trip.departureLocation,
               arrival: booking.passengerDestination || trip.arrivalLocation, seats: booking.numberOfSeats,
-              departureAt: trip.departureDate }),
+              departureAt: trip.departureDate, pricePerSeat: trip.pricePerSeat, priceKind: 'fare' }),
             driverId: trip.driverId, role: 'driver' },
         };
       }

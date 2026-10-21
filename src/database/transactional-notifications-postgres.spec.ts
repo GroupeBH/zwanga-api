@@ -18,6 +18,7 @@ import {
   NotificationStatus,
 } from '../notifications/entities/notification.entity';
 import { NotificationService } from '../notifications/notifications.service';
+import { isRideResponseDeliverable } from '../notifications/ride-response-delivery';
 import { WalletAccount } from '../wallet/entities/wallet-account.entity';
 import { WalletLedgerEntry } from '../wallet/entities/wallet-ledger-entry.entity';
 import { WalletService } from '../wallet/wallet.service';
@@ -27,6 +28,7 @@ import { ReferralsService } from '../referrals/referrals.service';
 import { ReferralProfile } from '../referrals/entities/referral-profile.entity';
 import { ReferralAccount } from '../referrals/entities/referral-account.entity';
 import { ReferralLedgerEntry } from '../referrals/entities/referral-ledger-entry.entity';
+import { ReferralAttributionAudit1780000082000 } from './migrations/1780000082000-ReferralAttributionAudit';
 
 // Explicit opt-in: fresh disposable loopback cluster, never an app URL or .env.
 const pgBin = process.env.NOTIFICATIONS_TEST_POSTGRES_BIN;
@@ -44,6 +46,7 @@ const pgBin = process.env.NOTIFICATIONS_TEST_POSTGRES_BIN;
     const migration = new AddTransactionalNotifications1780000047000();
     let wallet: WalletService;
     let referrals: ReferralsService;
+    const referralNotifications = { sendNotification: jest.fn().mockResolvedValue(true) };
     let notifications: NotificationService;
     let users: { findOne: jest.Mock; update: jest.Mock; count: jest.Mock };
 
@@ -106,7 +109,10 @@ const pgBin = process.env.NOTIFICATIONS_TEST_POSTGRES_BIN;
       CREATE TABLE driver_notification_clients ("userId" uuid PRIMARY KEY, "tokenHash" varchar);
       CREATE TABLE app_update_clients ("userId" uuid PRIMARY KEY, "tokenHash" varchar);
       CREATE TABLE trips (id uuid PRIMARY KEY, "driverId" uuid, status varchar, "tripRequestId" uuid);
-      CREATE TABLE bookings (id uuid PRIMARY KEY, "tripId" uuid, status varchar);
+      CREATE TABLE bookings (id uuid PRIMARY KEY, "tripId" uuid, "passengerId" uuid, status varchar);
+      -- Match the deployed legacy schema: a request's trip reference is varchar, not uuid.
+      CREATE TABLE trip_requests (id uuid PRIMARY KEY, "passengerId" uuid, "selectedDriverId" uuid,
+        "tripId" varchar, status varchar, "selectedAt" timestamp);
       CREATE TABLE referral_profiles (
         id uuid PRIMARY KEY DEFAULT uuid_generate_v4(), "userId" uuid UNIQUE REFERENCES users(id), code varchar(16) UNIQUE,
         "linkToken" varchar(64) UNIQUE, "shareLinkUrl" varchar(500), "shareLinkGeneratedAt" timestamp,
@@ -154,6 +160,7 @@ const pgBin = process.env.NOTIFICATIONS_TEST_POSTGRES_BIN;
         await migration.up(runner);
         await runner.startTransaction();
         await new HardenPushOwnershipAndPriority1780000051000().up(runner);
+        await new ReferralAttributionAudit1780000082000().up(runner);
         await runner.commitTransaction();
       } finally {
         await runner.release();
@@ -178,8 +185,9 @@ const pgBin = process.env.NOTIFICATIONS_TEST_POSTGRES_BIN;
         {} as any,
       );
       referrals = new ReferralsService({} as any, {} as any, {} as any, {} as any, {} as any,
-        users as any, {} as any, {} as any, source, { get: jest.fn() } as any,
-        {} as any, {} as any, {} as any);
+        users as any, {} as any, {} as any, source,
+        { get: jest.fn(key => key === 'REFERRAL_ATTRIBUTION_BONUS_TOKENS' ? 500 : undefined) } as any,
+        {} as any, {} as any, referralNotifications as any);
       notifications = new NotificationService(
         { get: jest.fn() } as any,
         source.getRepository(Notification),
@@ -193,8 +201,10 @@ const pgBin = process.env.NOTIFICATIONS_TEST_POSTGRES_BIN;
     }, 60_000);
 
     beforeEach(async () => {
+      referralNotifications.sendNotification.mockReset().mockResolvedValue(true);
+      await source.query('UPDATE users SET "fcmToken" = NULL');
       await source.query(
-        'TRUNCATE notifications, wallet_ledger_entries, wallet_accounts, kyc_documents, referral_profiles, referral_accounts, referral_ledger_entries',
+        'TRUNCATE notifications, wallet_ledger_entries, wallet_accounts, kyc_documents, referral_profiles, referral_accounts, referral_ledger_entries, trip_requests, bookings, trips',
       );
       await source.query(
         "INSERT INTO wallet_accounts (id,\"userId\",type,balance,currency) VALUES ($1,$2,'points',100,'PTS')",
@@ -232,6 +242,107 @@ const pgBin = process.env.NOTIFICATIONS_TEST_POSTGRES_BIN;
       title: 'Solde ajusté',
       body: '25 jetons ajoutés.',
       data: { type: 'wallet_admin_adjustment' },
+    });
+
+    const acceptedRequest = async (tripStatus: 'upcoming' | 'ongoing' | null = 'upcoming') => {
+      const requestId = randomUUID(), tripId = tripStatus ? randomUUID() : null;
+      const selectedAt = new Date('2026-10-20T20:20:50.123Z');
+      if (tripId) await source.query(`INSERT INTO trips (id, "driverId", status) VALUES ($1,$2,$3)`,
+        [tripId, adminId, tripStatus]);
+      await source.query(`INSERT INTO trip_requests (id,"passengerId","selectedDriverId","tripId",status,"selectedAt")
+        VALUES ($1,$2,$3,$4,'driver_selected',$5)`, [requestId, userId, adminId, tripId, selectedAt]);
+      const eventKey = `request-accepted:${requestId}`;
+      await source.transaction(manager => enqueueTransactionalNotification(manager, {
+        ...event(eventKey), data: { type: 'trip_request_accepted', tripRequestId: requestId,
+          driverId: adminId, selectedAt: selectedAt.toISOString(), ...(tripId ? { tripId } : {}) },
+      }));
+      return { requestId, tripId, selectedAt,
+        notification: await source.getRepository(Notification).findOneByOrFail({ eventKey }) };
+    };
+
+    it.each([null, 'upcoming', 'ongoing'] as const)(
+      'delivers an accepted request with UUID trips and varchar references exactly once (trip=%s)', async tripStatus => {
+        const f = await acceptedRequest(tripStatus);
+        const send = jest.spyOn(notifications as any, 'sendExpoPushNotification').mockResolvedValue('synthetic-request-accepted');
+        // Execute the real validation SQL as well as the real outbox dispatcher.
+        await expect(isRideResponseDeliverable(source.manager, f.notification)).resolves.toBe(true);
+        await notifications.dispatchUrgentNotifications();
+        expect(send).toHaveBeenCalledTimes(1);
+        expect(await source.getRepository(Notification).findOneByOrFail({ id: f.notification.id })).toMatchObject({
+          status: NotificationStatus.SENT, isActive: true, errorMessage: null,
+        });
+        await notifications.dispatchUrgentNotifications();
+        expect(send).toHaveBeenCalledTimes(1);
+      });
+
+    it('recovers an acceptance push left claimed by the former UUID error without replaying sent pushes', async () => {
+      const f = await acceptedRequest();
+      await source.query(`UPDATE notifications SET "errorMessage" = 'TRANSACTIONAL_PUSH_CLAIMED',
+        "updatedAt" = now() - interval '121 seconds' WHERE id = $1`, [f.notification.id]);
+      const send = jest.spyOn(notifications as any, 'sendExpoPushNotification').mockResolvedValue('synthetic-recovered-acceptance');
+      await notifications.dispatchUrgentNotifications();
+      expect(send).toHaveBeenCalledTimes(1);
+      expect((await source.getRepository(Notification).findOneByOrFail({ id: f.notification.id })).status).toBe(NotificationStatus.SENT);
+      await notifications.dispatchUrgentNotifications();
+      expect(send).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(['cancelled-request', 'completed-trip', 'cancelled-trip', 'wrong-driver', 'wrong-passenger', 'wrong-trip', 'old-selection'])(
+      'suppresses an obsolete acceptance after %s using real PostgreSQL comparisons', async condition => {
+        const f = await acceptedRequest();
+        if (condition === 'cancelled-request') await source.query(`UPDATE trip_requests SET status = 'cancelled' WHERE id=$1`, [f.requestId]);
+        if (condition === 'completed-trip' || condition === 'cancelled-trip')
+          await source.query('UPDATE trips SET status=$2 WHERE id=$1', [f.tripId, condition === 'completed-trip' ? 'completed' : 'cancelled']);
+        if (condition === 'wrong-driver') f.notification.data!.driverId = randomUUID();
+        if (condition === 'wrong-passenger') f.notification.userId = adminId;
+        if (condition === 'wrong-trip') f.notification.data!.tripId = randomUUID();
+        if (condition === 'old-selection') f.notification.data!.selectedAt = new Date(0).toISOString();
+        await source.getRepository(Notification).save(f.notification);
+        const send = jest.spyOn(notifications as any, 'sendExpoPushNotification').mockResolvedValue('unused');
+        await expect(isRideResponseDeliverable(source.manager, f.notification)).resolves.toBe(false);
+        await notifications.dispatchUrgentNotifications();
+        expect(send).not.toHaveBeenCalled();
+        expect((await source.getRepository(Notification).findOneByOrFail({ id: f.notification.id })).isActive).toBe(false);
+      });
+
+    it.each(['', 'legacy-invalid-trip', 'ffffffff-ffff-ffff-ffff-ffffffffffff'])(
+      'ignores a missing or invalid stored trip reference without blocking other pushes (%s)', async reference => {
+        const invalid = await acceptedRequest();
+        await source.query('UPDATE trip_requests SET "tripId"=$2 WHERE id=$1', [invalid.requestId, reference]);
+        // Old dispatch notifications may have no tripId in their payload.
+        delete invalid.notification.data!.tripId;
+        await source.getRepository(Notification).save(invalid.notification);
+        const valid = await acceptedRequest();
+        const send = jest.spyOn(notifications as any, 'sendExpoPushNotification').mockResolvedValue('synthetic-valid-acceptance');
+        await expect(isRideResponseDeliverable(source.manager, invalid.notification)).resolves.toBe(false);
+        await notifications.dispatchUrgentNotifications();
+        expect(send).toHaveBeenCalledTimes(1);
+        expect((await source.getRepository(Notification).findOneByOrFail({ id: invalid.notification.id })).isActive).toBe(false);
+        expect((await source.getRepository(Notification).findOneByOrFail({ id: valid.notification.id })).status).toBe(NotificationStatus.SENT);
+      });
+
+    it('keeps UUID case-insensitivity and the legacy selectedAt timestamp semantics', async () => {
+      const f = await acceptedRequest();
+      await source.query('UPDATE trip_requests SET "tripId"=upper("tripId") WHERE id=$1', [f.requestId]);
+      await source.transaction(async manager => {
+        await manager.query("SET LOCAL TIME ZONE 'Pacific/Honolulu'");
+        await expect(isRideResponseDeliverable(manager, f.notification)).resolves.toBe(true);
+        delete f.notification.data!.selectedAt; // Legacy events remain supported.
+        await expect(isRideResponseDeliverable(manager, f.notification)).resolves.toBe(true);
+      });
+    });
+
+    it.each(['accepted', 'rejected'])('still delivers the current booking %s response on UUID foreign keys', async status => {
+      const tripId = randomUUID(), bookingId = randomUUID();
+      await source.query(`INSERT INTO trips (id,"driverId",status) VALUES ($1,$2,'ongoing')`, [tripId, adminId]);
+      await source.query('INSERT INTO bookings (id,"tripId","passengerId",status) VALUES ($1,$2,$3,$4)', [bookingId, tripId, userId, status]);
+      await source.transaction(manager => enqueueTransactionalNotification(manager, {
+        ...event(`booking-response:${bookingId}`), data: { type: 'booking_response', bookingId, status },
+      }));
+      const send = jest.spyOn(notifications as any, 'sendExpoPushNotification').mockResolvedValue('synthetic-booking-response');
+      await notifications.dispatchUrgentNotifications();
+      expect(send).toHaveBeenCalledTimes(1);
+      expect((await source.getRepository(Notification).findOneByOrFail({ eventKey: `booking-response:${bookingId}` })).status).toBe(NotificationStatus.SENT);
     });
 
     it('a token transfer notifies both users once after commit through the actual outbox dispatcher', async () => {
@@ -398,16 +509,25 @@ const pgBin = process.env.NOTIFICATIONS_TEST_POSTGRES_BIN;
       expect(await source.getRepository(Notification).count()).toBe(2);
     });
 
-    it('keeps an audit and a single referral bonus/push for concurrent administrative retries', async () => {
+    it('keeps the audit but grants no signup tokens during concurrent administrative retries', async () => {
       const reason = 'Rattachement administratif vérifié';
+      await source.query('UPDATE users SET "fcmToken"=$1 WHERE id=$2', ['synthetic-referrer-token', adminId]);
       const results = await Promise.all([1, 2].map(() => referrals.attachUserByAdmin(adminId, userId, adminId, reason)));
       expect(results.filter((result) => result.newlyAttached)).toHaveLength(1);
+      expect(results.every(result => result.attributionBonusTokens === 0)).toBe(true);
       const profile = await source.getRepository(ReferralProfile).findOneByOrFail({ userId });
       expect(profile).toMatchObject({ referredByUserId: adminId, attributionProvider: 'admin', qualifiedAt: null });
-      expect(Number((await source.getRepository(ReferralAccount).findOneByOrFail({ userId: adminId })).availableTokens)).toBe(5);
-      expect(await source.getRepository(ReferralLedgerEntry).count()).toBe(1);
-      expect(await source.getRepository(Notification).count()).toBe(1);
-      expect((await source.getRepository(ReferralLedgerEntry).findOneByOrFail({ userId: adminId })).description).toContain(`admin ${adminId} : ${reason}`);
+      expect(profile.attributionAdminId).toBeUndefined();
+      expect(profile.attributionAdminReason).toBeUndefined();
+      expect(await source.query(`SELECT "attributionAdminId", "attributionAdminReason" FROM referral_profiles WHERE "userId"=$1`, [userId]))
+        .toEqual([{ attributionAdminId: adminId, attributionAdminReason: reason }]);
+      expect(await source.getRepository(ReferralAccount).countBy({ userId: adminId })).toBe(0);
+      expect(await source.getRepository(ReferralLedgerEntry).count()).toBe(0);
+      expect(await source.getRepository(Notification).count()).toBe(0); // No financial outbox event.
+      expect(referralNotifications.sendNotification).toHaveBeenCalledTimes(1);
+      expect(referralNotifications.sendNotification.mock.calls[0][2]).toContain('paiements éligibles');
+      await expect(source.transaction(manager =>
+        new ReferralAttributionAudit1780000082000().down(manager.queryRunner!))).rejects.toThrow('must be preserved');
     });
 
     it('serializes opposing referrals and rolls back the assignment which would create a cycle', async () => {
@@ -417,20 +537,41 @@ const pgBin = process.env.NOTIFICATIONS_TEST_POSTGRES_BIN;
       ]);
       expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
       expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1);
-      expect(await source.getRepository(ReferralLedgerEntry).count()).toBe(1);
-      expect(await source.getRepository(Notification).count()).toBe(1);
+      expect(await source.getRepository(ReferralLedgerEntry).count()).toBe(0);
+      expect(await source.getRepository(Notification).count()).toBe(0);
     });
 
-    it('rolls back an administrative attachment if its bonus notification cannot be persisted', async () => {
+    it('rolls back the attachment if its non-financial audit cannot be persisted', async () => {
       const subscriber = source.subscribers[0] as TransactionalNotificationsSubscriber;
       jest.spyOn(subscriber, 'afterInsert').mockImplementation(async (event: any) => {
-        if (event.metadata.target === ReferralLedgerEntry) throw new Error('outbox unavailable');
+        if (event.metadata.target === ReferralProfile) throw new Error('audit unavailable');
       });
-      await expect(referrals.attachUserByAdmin(adminId, userId, adminId, 'Rattachement de test atomique')).rejects.toThrow('outbox unavailable');
+      await expect(referrals.attachUserByAdmin(adminId, userId, adminId, 'Rattachement de test atomique')).rejects.toThrow('audit unavailable');
       expect(await source.getRepository(ReferralProfile).count()).toBe(0);
       expect(await source.getRepository(ReferralAccount).count()).toBe(0);
       expect(await source.getRepository(ReferralLedgerEntry).count()).toBe(0);
       expect(await source.getRepository(Notification).count()).toBe(0);
+    });
+
+    it('keeps the committed attribution and audit if the informational notification fails', async () => {
+      await source.query('UPDATE users SET "fcmToken"=$1 WHERE id=$2', ['synthetic-referrer-token', adminId]);
+      referralNotifications.sendNotification.mockRejectedValueOnce(new Error('push unavailable'));
+      await expect(referrals.attachUserByAdmin(adminId, userId, adminId, 'Rattachement de test sans push'))
+        .resolves.toMatchObject({ attached: true, attributionBonusTokens: 0 });
+      expect(await source.getRepository(ReferralProfile).count()).toBe(1);
+      expect(await source.getRepository(ReferralLedgerEntry).count()).toBe(0);
+    });
+
+    it('preserves a historical signup bonus while a new referral is attached', async () => {
+      await source.query(`INSERT INTO referral_accounts ("userId","availableTokens") VALUES ($1,5)`, [adminId]);
+      const account = await source.getRepository(ReferralAccount).findOneByOrFail({ userId: adminId });
+      const [entry] = await source.query(`INSERT INTO referral_ledger_entries
+        ("accountId","userId",type,bucket,"amountTokens","balanceAfter","sourceType","sourceEntityId",description)
+        VALUES ($1,$2,'attribution_bonus','available',5,5,'referral_attribution',$3,'Historical signup bonus')
+        RETURNING *`, [account.id, adminId, randomUUID()]);
+      await referrals.attachUserByAdmin(adminId, userId, adminId, 'Nouveau rattachement sans bonus');
+      expect(await source.getRepository(ReferralAccount).findOneByOrFail({ userId: adminId })).toEqual(account);
+      expect(await source.query('SELECT * FROM referral_ledger_entries')).toEqual([entry]);
     });
 
     it('hides the notification until COMMIT and removes it on ROLLBACK', async () => {

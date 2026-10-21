@@ -5,6 +5,7 @@ import {
 } from '../wallet/token-value.policy';
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   Logger,
@@ -21,6 +22,8 @@ import {
   DataSource,
   EntityManager,
   In,
+  IsNull,
+  LessThan,
   LessThanOrEqual,
   Repository,
 } from 'typeorm';
@@ -46,7 +49,13 @@ import { isAdminRole } from '../users/user-role.policy';
 import { RequestReferralWithdrawalDto } from './dto/referral.dto';
 import { HistoryPageQuery, historyContext, loadHistoryIds, orderHistory } from '../common/history-page';
 import { reconcileReferralRewards } from './reward-reconciliation';
+import {
+  reserveAvailableReferralTokens,
+  validateReferralWithdrawalTokens,
+} from './referral-withdrawal-balance';
 import { ReferralAccount } from './entities/referral-account.entity';
+import { WalletLedgerEntry, WalletLedgerEntryType } from '../wallet/entities/wallet-ledger-entry.entity';
+import { assertSameReferralIntent, referralWithdrawalKey, referralWithdrawalPhone } from './referral-withdrawal-intent';
 import {
   ReferralBalanceBucket,
   ReferralLedgerEntry,
@@ -71,6 +80,7 @@ interface RewardSourceInput {
   grossAmount: number;
   sourceCurrency: string;
   eventAt: Date;
+  cashReceiptAt?: Date;
 }
 
 export interface ReferralRegistrationAttribution {
@@ -102,13 +112,14 @@ interface AdminReferralAssignment {
 @Injectable()
 export class ReferralsService implements OnModuleInit {
   private readonly rewardReconciliations = new Map<string, Promise<void>>();
+  private readonly shareLinkRefreshes = new Map<string, Promise<void>>();
+  private readonly shareLinkRefreshAfter = new Map<string, number>();
   private readonly logger = new Logger(ReferralsService.name);
   private readonly WITHDRAWAL_RELATED_ENTITY_TYPE = 'referral_withdrawal';
-  private readonly ATTRIBUTION_BONUS_SOURCE_TYPE = 'referral_attribution';
-  private readonly DEFAULT_SUBSCRIPTION_REWARD_RATE = 0.05;
+  private readonly DEFAULT_SUBSCRIPTION_REWARD_RATE = 0.01;
+  private readonly MAX_SUBSCRIPTION_REWARD_RATE = 0.01;
   private readonly DEFAULT_BOOKING_REWARD_RATE = 0.01;
   private readonly MAX_BOOKING_REWARD_RATE = 0.01;
-  private readonly DEFAULT_ATTRIBUTION_BONUS_TOKENS = 5;
   private readonly DEFAULT_PLATFORM_COMMISSION_RATE = 0.05;
   private readonly DEFAULT_HOLD_DAYS = 7;
   private readonly DEFAULT_PROGRAM_MONTHS = 12;
@@ -326,7 +337,6 @@ export class ReferralsService implements OnModuleInit {
 
       let newlyAttached = false;
       let resolvedReferrer: ReferralRegistrationResult['referrer'] = null;
-      let attributionBonusTokens = 0;
 
       if (normalizedCode || normalizedToken || adminAssignment) {
         const codeProfile = normalizedCode
@@ -389,26 +399,22 @@ export class ReferralsService implements OnModuleInit {
           profile.attributionReferringLink =
             attribution.referralReferringLink?.trim().slice(0, 500) || null;
           profile.attributionCapturedAt = capturedAt ?? new Date();
+          profile.attributionAdminId = adminAssignment?.adminId ?? null;
+          profile.attributionAdminReason = adminAssignment?.reason ?? null;
           newlyAttached = true;
         }
       }
 
       profile = await manager.save(profile);
       await this.getOrCreateAccount(manager, userId);
-      if (newlyAttached && resolvedReferrer) {
-        attributionBonusTokens = await this.creditAttributionBonus(
-          manager,
-          resolvedReferrer.userId,
-          userId,
-          adminAssignment,
-        );
-      }
+      // Attribution is not a financial event. Only eligible paid transactions
+      // may credit the referrer; legacy configuration must not restore a bonus.
       return {
         profile,
         newlyAttached,
         referrer: resolvedReferrer,
         referredFirstName: user.firstName,
-        attributionBonusTokens,
+        attributionBonusTokens: 0,
       };
     };
     return registrationManager ? work(registrationManager) : this.dataSource.transaction(work);
@@ -441,9 +447,7 @@ export class ReferralsService implements OnModuleInit {
       `Referral attribution attached: referredUserId=${userId}, referrerUserId=${result.referrer.userId}, provider=${result.profile.attributionProvider}`,
     );
 
-    // A credited attribution bonus already creates a durable financial push
-    // via its ledger entry, including for users without a current push token.
-    if (result.attributionBonusTokens > 0 || !result.referrer.fcmToken) {
+    if (!result.referrer.fcmToken) {
       return;
     }
 
@@ -451,11 +455,7 @@ export class ReferralsService implements OnModuleInit {
       await this.notificationService.sendNotification(
         result.referrer.fcmToken,
         'Nouveau filleul Zwanga',
-        `${result.referredFirstName} a rejoint votre reseau de parrainage.${
-          result.attributionBonusTokens > 0
-            ? ` Vous recevez ${result.attributionBonusTokens} jetons.`
-            : ''
-        }`,
+        `${result.referredFirstName} a rejoint votre réseau de parrainage. Vos commissions seront calculées sur ses paiements éligibles.`,
         {
           type: 'referral_new_referral',
           referredUserId: userId,
@@ -471,7 +471,6 @@ export class ReferralsService implements OnModuleInit {
   }
 
   async getSummary(userId: string) {
-    await this.releaseMatureRewardsForUser(userId);
     const { profile, account } = await this.ensureProfileAndAccount(userId);
     const [referralCount, rewardCount, kycApproved] = await Promise.all([
       this.profileRepository.count({ where: { referredByUserId: userId } }),
@@ -480,7 +479,7 @@ export class ReferralsService implements OnModuleInit {
     ]);
     const payoutCurrency = this.getPayoutCurrency();
     const payoutMoneyPerToken = this.getMoneyPerToken(payoutCurrency);
-    const shareLink = await this.getOrCreateChottuLinkShareLink(profile);
+    const shareLink = this.readShareLink(profile);
     const bookingRewardRate = this.getRewardRate(
       ReferralRewardSourceType.BOOKING_PAYMENT,
     );
@@ -526,14 +525,19 @@ export class ReferralsService implements OnModuleInit {
         rewardRate: bookingRewardRate,
         subscriptionRewardRate,
         bookingRewardRate,
+        bookingPaymentModes: [TripPaymentMode.ELECTRONIC, TripPaymentMode.POINTS, TripPaymentMode.CASH],
+        cashRewardRequiresReceipt: true,
         bookingRewardFunding: 'platform_commission_share',
         platformCommissionRate,
         platformRetainedBookingCommissionRate,
-        attributionBonusTokens: this.getAttributionBonusTokens(),
+        attributionBonusTokens: 0, // Retained for older clients; no signup reward.
         eligiblePayments: [
           'subscription_flexpay',
+          'subscription_pawapay',
           'booking_flexpay',
+          'booking_pawapay',
           'booking_tokens',
+          'booking_cash_confirmed',
         ],
         holdDays: this.getHoldDays(),
         rewardWindowMonths: this.getProgramMonths(),
@@ -544,7 +548,6 @@ export class ReferralsService implements OnModuleInit {
   }
 
   async getReferrals(userId: string, ids?: string[]) {
-    await this.releaseMatureRewardsForUser(userId);
     const profiles = await this.profileRepository.find({
         where: { referredByUserId: userId, ...(ids ? { id: In(ids) } : {}) },
         relations: ['user'],
@@ -622,7 +625,6 @@ export class ReferralsService implements OnModuleInit {
   }
 
   async getRewards(userId: string, ids?: string[]) {
-    await this.releaseMatureRewardsForUser(userId);
     const rewards = await this.rewardRepository.find({
       where: { referrerUserId: userId, ...(ids ? { id: In(ids) } : {}) },
       relations: ['referredUser'],
@@ -723,6 +725,10 @@ export class ReferralsService implements OnModuleInit {
   ): Promise<ReferralReward | null> {
     if (
       subscription.isTrial ||
+      // Welcome/promotional tokens pay Pro through the points flow. A stray
+      // callback must never turn that free month into a referral cash reward.
+      ['PTS', 'POINTS'].includes(subscription.currency?.toUpperCase()) ||
+      subscription.paymentReference?.startsWith('POINTS-') ||
       payment.status !== PaymentStatus.SUCCEEDED ||
       ![PaymentProvider.FLEXPAY, PaymentProvider.PAWAPAY].includes(
         payment.provider,
@@ -743,6 +749,23 @@ export class ReferralsService implements OnModuleInit {
   }
 
   async awardBookingReward(booking: Booking): Promise<ReferralReward | null> {
+    if (booking.paymentMode === TripPaymentMode.CASH) {
+      if (!this.isConfirmedCashBooking(booking)) return null;
+      const [policy] = await this.dataSource.query(
+        'SELECT "cashEligible" FROM referral_booking_jobs WHERE "bookingId" = $1', [booking.id],
+      );
+      if (!policy?.cashEligible) return null; // No retroactive cash rewards.
+      return this.awardReward({
+        referredUserId: booking.passengerId,
+        sourceType: ReferralRewardSourceType.BOOKING_PAYMENT,
+        sourceEntityId: booking.id,
+        paymentTransactionId: null,
+        grossAmount: Number(booking.cashReceivedAmount),
+        sourceCurrency: booking.paymentCurrency,
+        eventAt: booking.cashReceivedAt!,
+        cashReceiptAt: booking.cashReceivedAt!,
+      });
+    }
     if (
       booking.status !== BookingStatus.COMPLETED ||
       !booking.droppedOff ||
@@ -771,12 +794,21 @@ export class ReferralsService implements OnModuleInit {
       ) {
         return null;
       }
+      const grossAmount = booking.interruptionFareLocked
+        ? Number(booking.paymentAmount)
+        : Number(payment.amount);
+      if (booking.interruptionFareLocked &&
+          (booking.paymentAmount == null || !Number.isFinite(grossAmount) || grossAmount < 0 || grossAmount > Number(payment.amount) ||
+            booking.paymentCurrency !== payment.currency)) {
+        throw new BadRequestException('Le montant final du trajet doit être régularisé avant la commission de parrainage.');
+      }
+      if (grossAmount === 0) return null;
       return this.awardReward({
         referredUserId: booking.passengerId,
         sourceType: ReferralRewardSourceType.BOOKING_PAYMENT,
         sourceEntityId: booking.id,
         paymentTransactionId: payment.id,
-        grossAmount: Number(payment.amount),
+        grossAmount,
         sourceCurrency: payment.currency,
         eventAt: payment.paidAt ?? booking.paidAt ?? new Date(),
       });
@@ -786,6 +818,17 @@ export class ReferralsService implements OnModuleInit {
     if (!Number.isFinite(grossAmount) || grossAmount <= 0) {
       return null;
     }
+
+    // A success flag is not proof of a wallet debit. Never create withdrawable
+    // referral money from an unbacked/fully refunded points payment.
+    const entries = await this.dataSource.getRepository(WalletLedgerEntry).find({ where: {
+      userId: booking.passengerId, relatedEntityType: 'booking', relatedEntityId: booking.id,
+      type: In([WalletLedgerEntryType.BOOKING_PAYMENT, WalletLedgerEntryType.BOOKING_REFUND]),
+    } });
+    if (entries.some(entry => entry.type === WalletLedgerEntryType.BOOKING_REFUND)) return null;
+    const debits = entries.filter(entry => entry.type === WalletLedgerEntryType.BOOKING_PAYMENT &&
+      Number.isFinite(Number(entry.amount)) && Number(entry.amount) < 0 && ['PTS', 'POINTS'].includes(entry.currency));
+    if (debits.length !== 1) throw new BadRequestException('Le débit en jetons doit être régularisé avant la commission de parrainage.');
 
     return this.awardReward({
       referredUserId: booking.passengerId,
@@ -809,6 +852,15 @@ export class ReferralsService implements OnModuleInit {
     );
   }
 
+  private isConfirmedCashBooking(booking: Booking): boolean {
+    return booking.status === BookingStatus.COMPLETED && booking.droppedOff &&
+      booking.paymentMode === TripPaymentMode.CASH && booking.paymentStatus === BookingPaymentStatus.NOT_REQUIRED &&
+      !!booking.cashReceivedAt && Number.isFinite(new Date(booking.cashReceivedAt).getTime()) &&
+      !!booking.cashReceivedByDriverId && !!booking.paymentCurrency &&
+      Number.isFinite(Number(booking.cashReceivedAmount)) && Number(booking.cashReceivedAmount) > 0 &&
+      Number(booking.cashReceivedAmount) === Number(booking.paymentAmount);
+  }
+
   async reverseBookingReward(
     bookingId: string,
     reason: string,
@@ -824,16 +876,8 @@ export class ReferralsService implements OnModuleInit {
     userId: string,
     dto: RequestReferralWithdrawalDto,
   ): Promise<ReferralWithdrawal> {
-    // Check the unrounded request as well: 999.999 must not round up to 1,000.
-    if (
-      !Number.isFinite(dto.tokens) ||
-      dto.tokens < this.getMinimumWithdrawalTokens()
-    ) {
-      throw new BadRequestException(
-        `Le retrait minimum est de ${this.getMinimumWithdrawalTokens()} jetons de parrainage (25 000 FC)`,
-      );
-    }
-    const tokens = this.normalizePositiveAmount(dto.tokens);
+    const tokens = validateReferralWithdrawalTokens(dto.tokens);
+    const idempotencyKey = referralWithdrawalKey(dto.idempotencyKey);
     await this.releaseMatureRewardsForUser(userId);
     const kycApproved = await hasCurrentApprovedIdentity(this.kycRepository, userId);
     if (!kycApproved) {
@@ -845,24 +889,31 @@ export class ReferralsService implements OnModuleInit {
     if (!user) {
       throw new NotFoundException('Utilisateur introuvable');
     }
-    const phone = dto.phone?.trim() || user.phone;
-    if (!phone) {
+    const requestedPhone = dto.phone?.trim() || user.phone;
+    if (!requestedPhone) {
       throw new BadRequestException(
         'Un numéro Mobile Money est requis pour le retrait',
       );
     }
+    const phone = referralWithdrawalPhone(requestedPhone);
 
     const currency = this.getPayoutCurrency();
     const moneyPerToken = this.getMoneyPerToken(currency);
     const amount = this.roundMoney(tokens * moneyPerToken);
-    let withdrawal = await this.reserveWithdrawal({
+    if (!Number.isFinite(amount) || amount > 99_999_999.99) throw new BadRequestException('Montant du retrait trop élevé.');
+    const reservation = await this.reserveWithdrawal({
       userId,
       tokens,
       amount,
       currency,
       moneyPerToken,
       phone,
+      idempotencyKey,
     });
+    let withdrawal = reservation.withdrawal;
+    // Only the creator can submit. Replays read the original state even if no
+    // provider identifier exists yet; crash recovery must never send blindly.
+    if (!reservation.created) return withdrawal;
 
     let payment: PaymentTransaction;
     try {
@@ -922,7 +973,60 @@ export class ReferralsService implements OnModuleInit {
     return this.applyPaymentToWithdrawal(payment, userId);
   }
 
-  @Cron(CronExpression.EVERY_HOUR)
+  async getWithdrawalById(userId: string, id: string): Promise<ReferralWithdrawal> {
+    const withdrawal = await this.withdrawalRepository.findOne({ where: { id, userId } });
+    if (!withdrawal) throw new NotFoundException('Retrait de parrainage introuvable');
+    return withdrawal;
+  }
+
+  @Cron('*/5 * * * *', { waitForCompletion: true })
+  async recoverUnsentWithdrawals(): Promise<void> {
+    const rows = await this.withdrawalRepository.find({
+      where: { status: ReferralWithdrawalStatus.PENDING, paymentTransactionId: IsNull(),
+        requestedAt: LessThan(new Date(Date.now() - 15 * 60_000)) },
+      select: { id: true },
+      order: { recoveryCheckedAt: { direction: 'ASC', nulls: 'FIRST' }, requestedAt: 'ASC' },
+      take: 50,
+    });
+    for (const row of rows) {
+      try { await this.recoverUnsentWithdrawal(row.id); }
+      catch { this.logger.warn(`REFERRAL_PAYOUT_RECOVERY_PENDING withdrawalId=${row.id}`); }
+      finally { await this.withdrawalRepository.update(row.id, { recoveryCheckedAt: new Date() }); }
+    }
+  }
+
+  async recoverUnsentWithdrawal(id: string, adminId?: string): Promise<ReferralWithdrawal> {
+    const owner = await this.withdrawalRepository.findOne({ where: { id }, select: { id: true, userId: true } });
+    if (!owner) throw new NotFoundException('Retrait de parrainage introuvable');
+    const result = await this.dataSource.transaction(async manager => {
+      // Submission uses the same locks. A late sender cannot send released funds.
+      await manager.findOne(User, { where: { id: owner.userId }, select: { id: true }, lock: { mode: 'pessimistic_write' } });
+      const withdrawal = await manager.findOne(ReferralWithdrawal, { where: { id }, lock: { mode: 'pessimistic_write' } });
+      if (!withdrawal) throw new NotFoundException('Retrait de parrainage introuvable');
+      const payment = await manager.findOne(PaymentTransaction, { where: {
+        relatedEntityType: this.WITHDRAWAL_RELATED_ENTITY_TYPE, relatedEntityId: id, userId: owner.userId,
+      }, order: { createdAt: 'DESC' } });
+      if (payment) return { withdrawal, payment };
+      if (withdrawal.paymentTransactionId) throw new BadRequestException('Transaction liée introuvable : vérification du support requise.');
+      if (withdrawal.status !== ReferralWithdrawalStatus.PENDING) return { withdrawal, payment: null };
+      if (Date.now() - new Date(withdrawal.requestedAt).getTime() < 15 * 60_000)
+        throw new BadRequestException('Cette réservation est encore récente. Réessayez après quinze minutes.');
+      withdrawal.status = ReferralWithdrawalStatus.FAILED;
+      withdrawal.processedAt = new Date();
+      withdrawal.failureReason = `Réservation non envoyée, fonds libérés après vérification${adminId ? ` par admin ${adminId}` : ' automatique'}`;
+      await this.settleReservedWithdrawal(manager, withdrawal, false, null);
+      return { withdrawal: await manager.save(withdrawal), payment: null };
+    });
+    if (result.payment) {
+      // Never release or resubmit an uncertain provider transfer.
+      await this.paymentsService.reconcilePayment(result.payment.id);
+      const payment = await this.paymentsService.findTransactionById(result.payment.id, owner.userId);
+      return this.applyPaymentToWithdrawal(payment, owner.userId);
+    }
+    return result.withdrawal;
+  }
+
+  @Cron(CronExpression.EVERY_MINUTE, { waitForCompletion: true })
   async releaseMatureRewards(): Promise<void> {
     const rewards = await this.rewardRepository.find({
       select: { id: true },
@@ -934,7 +1038,8 @@ export class ReferralsService implements OnModuleInit {
       order: { holdUntil: 'ASC' },
     });
     for (const reward of rewards) {
-      await this.releaseRewardById(reward.id);
+      try { await this.releaseRewardById(reward.id); }
+      catch { this.logger.warn(`REFERRAL_REWARD_RELEASE_PENDING rewardId=${reward.id}`); }
     }
   }
 
@@ -964,6 +1069,13 @@ export class ReferralsService implements OnModuleInit {
 
     try {
       return await this.dataSource.transaction(async (manager) => {
+        if (input.cashReceiptAt) {
+          const current = await manager.findOne(Booking, { where: { id: input.sourceEntityId }, lock: { mode: 'pessimistic_write' } });
+          if (!current || !this.isConfirmedCashBooking(current)) return null;
+          if (current.passengerId !== input.referredUserId || Number(current.cashReceivedAmount) !== input.grossAmount ||
+              current.paymentCurrency !== input.sourceCurrency || new Date(current.cashReceivedAt!).getTime() !== new Date(input.cashReceiptAt).getTime())
+            throw new ConflictException('Le reçu cash a changé. La commission sera recalculée.');
+        }
         const duplicate = await manager.findOne(ReferralReward, {
           where: {
             sourceType: input.sourceType,
@@ -1192,12 +1304,40 @@ export class ReferralsService implements OnModuleInit {
     currency: string;
     moneyPerToken: number;
     phone: string;
-  }): Promise<ReferralWithdrawal> {
+    idempotencyKey?: string | null;
+  }): Promise<{ withdrawal: ReferralWithdrawal; created: boolean }> {
     return this.dataSource.transaction(async (manager) => {
       // Same user-first ordering as KYC decisions; recheck inside reservation.
       const user = await manager.findOne(User, { where: { id: input.userId }, lock: { mode: 'pessimistic_write' } });
       if (!user || !this.isUserEligibleAsReferrer(user)) {
         throw new BadRequestException('Ce compte ne peut pas demander de retrait.');
+      }
+      if (input.idempotencyKey) {
+        const existing = await manager.findOne(ReferralWithdrawal, { where: { userId: input.userId, idempotencyKey: input.idempotencyKey } });
+        if (existing) {
+          assertSameReferralIntent(existing, input.tokens, input.phone);
+          return { withdrawal: existing, created: false };
+        }
+      }
+      const open = await manager.findOne(ReferralWithdrawal, {
+        where: { userId: input.userId, status: In([ReferralWithdrawalStatus.PENDING, ReferralWithdrawalStatus.INITIATED]) },
+        order: { requestedAt: 'DESC', id: 'DESC' },
+      });
+      if (open) {
+        if (input.idempotencyKey) throw new ConflictException({ code: 'REFERRAL_WITHDRAWAL_IN_PROGRESS', message: 'Un retrait est déjà en cours. Vérifiez son statut avant de recommencer.', withdrawalId: open.id });
+        assertSameReferralIntent(open, input.tokens, input.phone);
+        return { withdrawal: open, created: false };
+      }
+      // Older store builds have no key: coalesce recent identical requests,
+      // including a response lost just after the provider finished the payout.
+      if (!input.idempotencyKey) {
+        const recent = await manager.findOne(ReferralWithdrawal, {
+          where: { userId: input.userId }, order: { requestedAt: 'DESC', id: 'DESC' },
+        });
+        if (recent && Date.now() - new Date(recent.processedAt ?? recent.updatedAt ?? recent.requestedAt).getTime() < 120_000) {
+          assertSameReferralIntent(recent, input.tokens, input.phone);
+          return { withdrawal: recent, created: false };
+        }
       }
       if (!(await hasCurrentApprovedIdentity(manager.getRepository(KycDocument), input.userId))) {
         throw new BadRequestException('Votre identité doit être vérifiée avant tout retrait.');
@@ -1207,13 +1347,12 @@ export class ReferralsService implements OnModuleInit {
         input.userId,
         true,
       );
-      if (Number(account.availableTokens) < input.tokens) {
-        throw new BadRequestException(
-          'Solde de jetons de parrainage insuffisant pour ce retrait',
-        );
-      }
+      // Only the persisted AVAILABLE referral bucket funds this withdrawal.
+      // Re-evaluate under the account lock so concurrent requests cannot reuse it.
+      const balances = reserveAvailableReferralTokens(account, input.tokens);
       let withdrawal = manager.create(ReferralWithdrawal, {
         userId: input.userId,
+        idempotencyKey: input.idempotencyKey ?? null,
         tokens: input.tokens,
         amount: input.amount,
         currency: input.currency,
@@ -1227,9 +1366,7 @@ export class ReferralsService implements OnModuleInit {
       });
       withdrawal = await manager.save(withdrawal);
 
-      account.availableTokens = this.roundMoney(
-        Number(account.availableTokens) - input.tokens,
-      );
+      account.availableTokens = balances.availableTokens;
       await manager.save(account);
       await this.createLedgerEntry(manager, account, {
         type: ReferralLedgerEntryType.WITHDRAWAL_RESERVED,
@@ -1242,9 +1379,7 @@ export class ReferralsService implements OnModuleInit {
         description: `Jetons réservés pour le retrait ${withdrawal.id}`,
       });
 
-      account.reservedTokens = this.roundMoney(
-        Number(account.reservedTokens) + input.tokens,
-      );
+      account.reservedTokens = balances.reservedTokens;
       await manager.save(account);
       await this.createLedgerEntry(manager, account, {
         type: ReferralLedgerEntryType.WITHDRAWAL_RESERVED,
@@ -1256,7 +1391,7 @@ export class ReferralsService implements OnModuleInit {
         paymentTransactionId: null,
         description: `Jetons en attente de confirmation FlexPay pour le retrait ${withdrawal.id}`,
       });
-      return withdrawal;
+      return { withdrawal, created: true };
     });
   }
 
@@ -1273,6 +1408,12 @@ export class ReferralsService implements OnModuleInit {
       );
     }
     return this.dataSource.transaction(async (manager) => {
+      if (!payment.userId || (userId && payment.userId !== userId))
+        throw new BadRequestException('Bénéficiaire du retrait incohérent');
+      await manager.findOne(User, {
+        where: { id: payment.userId }, select: { id: true },
+        lock: { mode: 'pessimistic_write' },
+      });
       const withdrawal = await manager.findOne(ReferralWithdrawal, {
         where: payment.relatedEntityId
           ? { id: payment.relatedEntityId, ...(userId ? { userId } : {}) }
@@ -1285,6 +1426,20 @@ export class ReferralsService implements OnModuleInit {
       if (!withdrawal) {
         throw new NotFoundException('Retrait de parrainage introuvable');
       }
+      // The callback snapshot can be older than a concurrently confirmed payment.
+      // Settle from the locked persisted record, never from stale failure data.
+      const current = await manager.findOne(PaymentTransaction, {
+        where: { id: payment.id }, lock: { mode: 'pessimistic_write' },
+      });
+      if (!current || current.userId !== withdrawal.userId ||
+          current.purpose !== PaymentPurpose.REFERRAL_PAYOUT ||
+          current.relatedEntityType !== this.WITHDRAWAL_RELATED_ENTITY_TYPE ||
+          current.relatedEntityId !== withdrawal.id ||
+          Number(current.amount) !== Number(withdrawal.amount) ||
+          current.currency !== withdrawal.currency || current.phone !== withdrawal.phone ||
+          (withdrawal.paymentTransactionId && withdrawal.paymentTransactionId !== current.id))
+        throw new BadRequestException('Transaction de retrait incohérente');
+      payment = current;
       if (withdrawal.status === ReferralWithdrawalStatus.SUCCEEDED) {
         return withdrawal;
       }
@@ -1539,58 +1694,6 @@ export class ReferralsService implements OnModuleInit {
     return account;
   }
 
-  private async creditAttributionBonus(
-    manager: EntityManager,
-    referrerUserId: string,
-    referredUserId: string,
-    adminAssignment?: AdminReferralAssignment,
-  ): Promise<number> {
-    const bonusTokens = this.getAttributionBonusTokens();
-    if (bonusTokens <= 0) {
-      return 0;
-    }
-
-    const existingBonus = await manager.findOne(ReferralLedgerEntry, {
-      where: {
-        userId: referrerUserId,
-        type: ReferralLedgerEntryType.ATTRIBUTION_BONUS,
-        sourceType: this.ATTRIBUTION_BONUS_SOURCE_TYPE,
-        sourceEntityId: referredUserId,
-      },
-    });
-    if (existingBonus) {
-      return 0;
-    }
-
-    const account = await this.getOrCreateAccount(
-      manager,
-      referrerUserId,
-      true,
-    );
-    account.availableTokens = this.roundMoney(
-      Number(account.availableTokens) + bonusTokens,
-    );
-    await manager.save(account);
-    await this.createLedgerEntry(manager, account, {
-      type: ReferralLedgerEntryType.ATTRIBUTION_BONUS,
-      bucket: ReferralBalanceBucket.AVAILABLE,
-      amountTokens: bonusTokens,
-      balanceAfter: Number(account.availableTokens),
-      rewardId: null,
-      withdrawalId: null,
-      paymentTransactionId: null,
-      sourceType: this.ATTRIBUTION_BONUS_SOURCE_TYPE,
-      sourceEntityId: referredUserId,
-      description: adminAssignment
-        ? `Bonus de ${bonusTokens} jetons ; filleul ${referredUserId} ; admin ${adminAssignment.adminId} : ${adminAssignment.reason}`
-        : `Bonus de ${bonusTokens} jetons pour le rattachement du filleul ${referredUserId}`,
-    });
-    this.logger.log(
-      `Referral attribution bonus credited: referrer=${referrerUserId}, referred=${referredUserId}, tokens=${bonusTokens}`,
-    );
-    return bonusTokens;
-  }
-
   private async createLedgerEntry(
     manager: EntityManager,
     account: ReferralAccount,
@@ -1745,10 +1848,12 @@ export class ReferralsService implements OnModuleInit {
       return this.getBookingRewardRate();
     }
 
-    return this.configRate(
+    const rate = this.configRate(
       ['REFERRAL_SUBSCRIPTION_REWARD_RATE', 'REFERRAL_REWARD_RATE'],
       this.DEFAULT_SUBSCRIPTION_REWARD_RATE,
     );
+    // Old runtime configuration must not keep paying the previous 5% share.
+    return Math.min(rate, this.MAX_SUBSCRIPTION_REWARD_RATE);
   }
 
   private getBookingRewardRate(): number {
@@ -1774,13 +1879,6 @@ export class ReferralsService implements OnModuleInit {
     return this.configRate(
       ['ZWANGA_COMMISSION_RATE'],
       this.DEFAULT_PLATFORM_COMMISSION_RATE,
-    );
-  }
-
-  private getAttributionBonusTokens(): number {
-    return this.positiveConfig(
-      'REFERRAL_ATTRIBUTION_BONUS_TOKENS',
-      this.DEFAULT_ATTRIBUTION_BONUS_TOKENS,
     );
   }
 
@@ -1902,6 +2000,26 @@ export class ReferralsService implements OnModuleInit {
     return result;
   }
 
+  private readShareLink(profile: ReferralProfile): string {
+    const fallback = this.buildFallbackShareLink(profile.linkToken);
+    const domain = this.configService.get<string>('CHOTTULINK_DOMAIN')?.trim();
+    const valid = Boolean(domain && profile.shareLinkUrl && this.isExpectedChottuLinkUrl(profile.shareLinkUrl, domain));
+    const fresh = valid && profile.shareLinkGeneratedAt &&
+      Date.now() - new Date(profile.shareLinkGeneratedAt).getTime() < this.getShareLinkRefreshDays() * 86_400_000;
+    if (!fresh && domain && this.configService.get<string>('CHOTTULINK_REST_API_KEY')?.trim() &&
+        !this.shareLinkRefreshes.has(profile.id) && this.shareLinkRefreshes.size < 10 &&
+        (this.shareLinkRefreshAfter.get(profile.id) ?? 0) <= Date.now()) {
+      if (this.shareLinkRefreshAfter.size >= 1000)
+        this.shareLinkRefreshAfter.delete(this.shareLinkRefreshAfter.keys().next().value!);
+      this.shareLinkRefreshAfter.set(profile.id, Date.now() + 5 * 60_000);
+      const work = this.getOrCreateChottuLinkShareLink(profile).then(() => undefined)
+        .catch(() => { this.logger.warn('Referral share-link refresh deferred'); })
+        .finally(() => { this.shareLinkRefreshes.delete(profile.id); });
+      this.shareLinkRefreshes.set(profile.id, work);
+    }
+    return valid ? profile.shareLinkUrl! : fallback;
+  }
+
   private async getOrCreateChottuLinkShareLink(
     profile: ReferralProfile,
   ): Promise<string> {
@@ -1959,7 +2077,9 @@ export class ReferralsService implements OnModuleInit {
       }
       profile.shareLinkUrl = shortUrl;
       profile.shareLinkGeneratedAt = new Date();
-      await this.profileRepository.save(profile);
+      await this.profileRepository.update(profile.id, {
+        shareLinkUrl: profile.shareLinkUrl, shareLinkGeneratedAt: profile.shareLinkGeneratedAt,
+      });
       return shortUrl;
     } catch (error) {
       this.logger.warn(

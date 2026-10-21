@@ -23,6 +23,7 @@ import { TripRequestsService } from '../trip-requests.service';
 import { boundedInteger, dispatchOfferIsActionable } from './dispatch-policy';
 import { NotificationService } from '../../notifications/notifications.service';
 import { Notification } from '../../notifications/entities/notification.entity';
+import { recoverDriverOffer } from '../../notifications/recover-driver-offer';
 
 describe('dispatch policy', () => {
   it.each([undefined, '60', '180', '300', '600', '900', '901'])(
@@ -46,10 +47,11 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
 (pgBin ? describe : describe.skip)('dispatch on real PostgreSQL/PostGIS', () => {
   let directory: string, started = false, source: DataSource, service: DriverDispatchService;
   let dispatchCycles: jest.SpyInstance<Promise<void>, []>;
+  const notifications = { dispatchTransactionalNotifications: jest.fn().mockResolvedValue(undefined),
+    dispatchUrgentNotifications: jest.fn().mockResolvedValue(undefined) };
   const waitForDispatchCycles = async () => {
-    // respond() deliberately starts tick() without awaiting it. Calling tick()
-    // again cannot drain that work: its single-flight guard returns immediately.
-    // Keep the real implementation and wait for every promise it already returned.
+    // Drain explicit concurrent cycles before destroying their fixtures.
+    // respond() now commits the successor inline and no longer detaches tick().
     const results = await Promise.allSettled((dispatchCycles?.mock.results ?? [])
       .filter(result => result.type === 'return').map(result => result.value));
     dispatchCycles?.mockClear();
@@ -85,12 +87,13 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
       await new RetainDriverLastLocation1780000076000().up(runner);
     } finally { await runner.release(); }
     service = new DriverDispatchService(source, new ConfigService({ DRIVER_DISPATCH_ENABLED: 'true' }),
-      { dispatchTransactionalNotifications: jest.fn().mockResolvedValue(undefined) } as never);
+      notifications as never);
     dispatchCycles = jest.spyOn(service, 'tick');
   }, 60000);
   beforeEach(async () => {
     await waitForDispatchCycles();
     await source.query('TRUNCATE users CASCADE');
+    notifications.dispatchUrgentNotifications.mockClear();
   });
   afterEach(waitForDispatchCycles);
   afterAll(async () => {
@@ -296,51 +299,83 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     expect((await source.getRepository(DriverOffer).findOneByOrFail({ id: offer.id })).status).toBe('rejected');
   });
 
-  it('broadcasts to both drivers immediately and a decline does not withdraw the other offer', async () => {
-    const near = await driver(); const far = await driver(15.32); const r = await request();
+  it('invites drivers one by one by distance, immediately after refusal, and stops on acceptance', async () => {
+    const near = await driver(), next = await driver(15.315), far = await driver(15.32);
+    await driver(15.325);
+    const r = await request();
     await service.tick(); const invitations = await offers(r.id);
-    expect(invitations).toHaveLength(2);
-    const first = invitations.find(offer => offer.driverId === near.user.id);
-    await service.respond(near.user.id, first.id, 'decline');
-    expect((await offers(r.id)).find(offer => offer.driverId === far.user.id).status).toBe('pending');
-    expect((await source.getRepository(TripRequest).findOneByOrFail({ id: r.id })).status).toBe('pending');
-  });
-  it('waits for the detached dispatch cycle after a response before allowing fixture cleanup', async () => {
-    const d = await driver(), r = await request();
+    expect(invitations).toHaveLength(1);
+    const [first] = invitations;
+    expect(first.driverId).toBe(near.user.id);
     await service.tick();
-    await waitForDispatchCycles();
+    expect(await offers(r.id)).toHaveLength(1);
+    await service.respond(near.user.id, first.id, 'decline');
+    const second = (await offers(r.id)).find(offer => offer.status === 'pending');
+    expect(second.driverId).toBe(next.user.id);
+    expect(new Date(second.expiresAt).getTime() - Date.now()).toBeGreaterThan(25_000);
+    expect((await source.getRepository(TripRequest).findOneByOrFail({ id: r.id })).status).toBe('pending');
+    await service.respond(next.user.id, second.id, 'decline');
+    const third = (await offers(r.id)).find(offer => offer.status === 'pending');
+    expect(third.driverId).toBe(far.user.id);
+    await service.respond(far.user.id, third.id, 'accept');
+    await service.tick();
+    expect((await offers(r.id)).map(o => o.status)).toEqual(['declined', 'declined', 'accepted']);
+    expect((await source.getRepository(TripRequest).findOneByOrFail({ id: r.id })).selectedDriverId).toBe(far.user.id);
+    expect(await source.getRepository(Notification).countBy({ eventKey: `dispatch-offer:${second.id}` })).toBe(1);
+  });
+  it('commits the successor and its push before responding even when the global cron is busy', async () => {
+    const d = await driver(), next = await driver(15.32), r = await request();
+    await service['allocate'](r.id);
     const [offer] = await offers(r.id);
-    let releaseAllocation!: () => void, allocationStarted!: () => void;
-    const gate = new Promise<void>(resolve => { releaseAllocation = resolve; });
-    const started = new Promise<void>(resolve => { allocationStarted = resolve; });
-    const allocate = service['allocate'].bind(service);
-    const allocation = jest.spyOn(service as any, 'allocate').mockImplementation(async (id: string) => {
-      allocationStarted();
-      await gate;
-      return allocate(id);
-    });
-    let drained: Promise<void> | undefined;
+    service['ticking'] = true;
     try {
       await expect(service.respond(d.user.id, offer.id, 'decline')).resolves.toMatchObject({ status: 'declined' });
-      await started;
-      // A second tick resolves immediately even though the original is still busy.
-      await service.tick();
-      expect(service['ticking']).toBe(true);
-      let cleanupAllowed = false;
-      drained = waitForDispatchCycles().then(() => { cleanupAllowed = true; });
-      await Promise.resolve();
-      expect(cleanupAllowed).toBe(false);
-      releaseAllocation();
-      await drained;
-      expect(cleanupAllowed).toBe(true);
-      expect(service['ticking']).toBe(false);
-      expect(allocation).toHaveBeenCalledWith(r.id);
-      expect((await offers(r.id))[0].status).toBe('declined');
-    } finally {
-      releaseAllocation();
-      try { await drained; await waitForDispatchCycles(); }
-      finally { allocation.mockRestore(); }
-    }
+      const pending = (await offers(r.id)).find(o => o.status === 'pending');
+      expect(pending.driverId).toBe(next.user.id);
+      expect(await source.getRepository(Notification).countBy({ eventKey: `dispatch-offer:${pending.id}` })).toBe(1);
+      expect(notifications.dispatchUrgentNotifications).toHaveBeenCalledTimes(1);
+      expect(dispatchCycles).not.toHaveBeenCalled();
+    } finally { service['ticking'] = false; }
+  });
+
+  it('deduplicates concurrent refusals and cron allocation without skipping the next driver', async () => {
+    const d = await driver(), next = await driver(15.32), r = await request();
+    await driver(15.33);
+    await service['allocate'](r.id);
+    const [offer] = await offers(r.id);
+    await Promise.all([service.respond(d.user.id, offer.id, 'decline'),
+      service.respond(d.user.id, offer.id, 'decline'), service['allocate'](r.id)]);
+    await service.respond(d.user.id, offer.id, 'decline');
+    const current = await offers(r.id);
+    expect(current).toHaveLength(2);
+    expect(current.filter(o => o.status === 'pending').map(o => o.driverId)).toEqual([next.user.id]);
+    expect(await source.query(`SELECT id FROM notifications WHERE data ->> 'type' = 'driver_dispatch_offer'
+      AND data ->> 'tripRequestId' = $1`, [r.id])).toHaveLength(2);
+  });
+
+  it('keeps an exhausted request open without re-inviting refusals and can find a newly available driver', async () => {
+    const d = await driver(), r = await request();
+    await service['allocate'](r.id);
+    const [offer] = await offers(r.id);
+    await service.respond(d.user.id, offer.id, 'decline');
+    await service.tick(); await service.tick();
+    expect((await offers(r.id)).map(o => o.status)).toEqual(['declined']);
+    const next = await driver(15.32);
+    await service.tick();
+    expect((await offers(r.id)).find(o => o.status === 'pending').driverId).toBe(next.user.id);
+  });
+
+  it.each(['cancelled', 'expired', 'assigned'])('does not advance a request that is %s', async state => {
+    const d = await driver(), next = await driver(15.32), r = await request();
+    await service['allocate'](r.id);
+    const [offer] = await offers(r.id);
+    await source.getRepository(TripRequest).update(r.id, state === 'expired'
+      ? { departureDateMax: new Date(Date.now() - 1) }
+      : state === 'assigned' ? { selectedDriverId: next.user.id }
+        : { status: TripRequestStatus.CANCELLED });
+    await expect(service.respond(d.user.id, offer.id, 'decline')).rejects.toThrow();
+    await service['allocate'](r.id);
+    expect(await offers(r.id)).toHaveLength(1);
   });
   it('a recent position automatically makes a v2 driver eligible, without availability or vehicle setup', async () => {
     const d = await driver();
@@ -460,7 +495,7 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     await expect(service.respond(d.user.id, offer.id, 'decline')).rejects.toThrow('traitée');
     expect((await service.status(d.user.id)).available).toBe(false);
   });
-  it('one expired offer cannot be accepted and does not invalidate another driver’s invitation', async () => {
+  it('a timeout advances to the next driver and a delayed push cannot resurrect the old invitation', async () => {
     const near = await driver(); const far = await driver(15.32); const r = await request();
     await service.tick(); const first = (await offers(r.id)).find(o => o.driverId === near.user.id);
     await source.query('UPDATE trip_request_dispatch_offers SET "expiresAt" = now() - interval \'1 second\' WHERE id = $1', [first.id]);
@@ -468,6 +503,13 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     await service.tick();
     expect((await offers(r.id)).find(o => o.driverId === far.user.id).status).toBe('pending');
     expect((await offers(r.id)).find(o => o.driverId === near.user.id).status).toBe('expired');
+    const oldPush = await source.getRepository(Notification).findOneByOrFail({ eventKey: `dispatch-offer:${first.id}` });
+    oldPush.data!.expiresAt = new Date(Date.now() - 1000).toISOString();
+    await source.transaction(manager => recoverDriverOffer(manager, oldPush));
+    expect((await offers(r.id)).filter(o => o.status === 'pending').map(o => o.driverId)).toEqual([far.user.id]);
+    const delivery = new NotificationService(new ConfigService({ DRIVER_DISPATCH_ENABLED: 'true' }),
+      source.getRepository(Notification), source.getRepository(User), source.getRepository(TripRequest));
+    expect(await delivery['isCriticalNotificationStillDeliverable'](oldPush)).toBe(false);
   });
   it('a late heartbeat cannot reactivate a driver who went offline', async () => {
     const d = await driver(); const leaseId = d.presence.presence.leaseId;
@@ -476,9 +518,32 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     expect((await service.status(d.user.id)).available).toBe(false);
   });
 
-  it('only one driver wins concurrent broadcast acceptance; all other offers are cancelled', async () => {
-    const a = await driver(), b = await driver(15.32), r = await request();
+  it('does not allocate a second invitation for one request even across concurrent workers', async () => {
+    const a = await driver(), r = await request(); await driver(15.32);
     await Promise.all([service['allocate'](r.id), service['allocate'](r.id)]);
+    await service['allocate'](r.id);
+    expect((await offers(r.id)).map(o => o.driverId)).toEqual([a.user.id]);
+  });
+
+  it('does not reserve the same driver for two simultaneous requests', async () => {
+    await driver(); await driver(15.32);
+    const a = await request(), b = await request();
+    await Promise.all([service['allocate'](a.id), service['allocate'](b.id)]);
+    await service['allocate'](a.id); await service['allocate'](b.id);
+    const first = await offers(a.id), second = await offers(b.id);
+    expect(first).toHaveLength(1); expect(second).toHaveLength(1);
+    expect(first[0].driverId).not.toBe(second[0].driverId);
+  });
+
+  const legacyBroadcast = async (requestId: string, d: Awaited<ReturnType<typeof driver>>) => {
+    await source.query(`INSERT INTO trip_request_dispatch_offers (id,"requestId","driverId","vehicleId",seats,"expiresAt")
+      VALUES ($1,$2,$3,$4,4,now() + interval '30 seconds')`, [randomUUID(), requestId, d.user.id, d.vehicle.id]);
+  };
+
+  it('only one driver wins concurrent acceptance of invitations left by the old broadcast version', async () => {
+    const a = await driver(), b = await driver(15.32), r = await request();
+    await service['allocate'](r.id);
+    await legacyBroadcast(r.id, b);
     const invitations = await offers(r.id);
     expect(invitations).toHaveLength(2);
     const results = await Promise.allSettled(invitations.map(o => service.respond(o.driverId, o.id, 'accept')));
@@ -491,20 +556,40 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     expect(await source.getRepository(DriverOffer).countBy({ tripRequestId: r.id })).toBe(1);
   });
 
-  it.each([true, false])('continues beyond a 50-driver batch without duplicate alerts (immediate=%s)', async immediate => {
+  it('lets the remaining legacy broadcast invitation finish before starting another turn', async () => {
+    const a = await driver(), b = await driver(15.32), c = await driver(15.33), r = await request();
+    await service['allocate'](r.id); await legacyBroadcast(r.id, b);
+    const first = (await offers(r.id)).find(o => o.driverId === a.user.id);
+    await service.respond(a.user.id, first.id, 'decline');
+    expect(await offers(r.id)).toHaveLength(2);
+    const second = (await offers(r.id)).find(o => o.driverId === b.user.id);
+    await service.respond(b.user.id, second.id, 'decline');
+    expect((await offers(r.id)).filter(o => o.status === 'pending').map(o => o.driverId)).toEqual([c.user.id]);
+  });
+
+  it.each([true, false])('can reach more than 50 drivers without duplicate alerts (immediate=%s)', async immediate => {
     for (let i = 0; i < 52; i++) {
       const d = await driver(15.31 + i * 0.00001); await service.registerNotifications(d.user.id, 2);
     }
     const r = await request(immediate);
     const run = () => immediate ? service['allocate'](r.id) : service.notifyScheduledRequest(r.id);
     await run(); await run(); await run();
-    if (immediate) expect(await offers(r.id)).toHaveLength(52);
+    if (immediate) {
+      expect(await offers(r.id)).toHaveLength(1);
+      for (let i = 0; i < 52; i++) {
+        const [offer] = (await offers(r.id)).filter(o => o.status === 'pending');
+        expect(offer).toBeDefined();
+        await service.respond(offer.driverId, offer.id, 'decline');
+      }
+      expect(await offers(r.id)).toHaveLength(52);
+      expect((await offers(r.id)).every(o => o.status === 'declined')).toBe(true);
+    }
     const notifications = await source.query(`SELECT * FROM notifications WHERE data ->> 'tripRequestId' = $1`, [r.id]);
     expect(notifications).toHaveLength(52);
     expect(new Set(notifications.map(n => n.userId)).size).toBe(52);
   }, 30000);
 
-  it.each([true, false])('notifies every nearby eligible driver independently of sound registration (immediate=%s)', async immediate => {
+  it.each([true, false])('reaches eligible drivers independently of sound registration (immediate=%s)', async immediate => {
     const clients = [await driver(), await driver(15.312), await driver(15.313), await driver(15.314), await driver(15.315)];
     await source.query('DELETE FROM driver_notification_clients WHERE "userId" = $1', [clients[0].user.id]);
     await service.registerNotifications(clients[2].user.id, 2);
@@ -516,6 +601,13 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     const r = await request(immediate);
     const run = () => immediate ? service['allocate'](r.id) : service.notifyScheduledRequest(r.id);
     await Promise.all([run(), run()]);
+    if (immediate) {
+      for (const client of clients) {
+        const [offer] = (await offers(r.id)).filter(o => o.status === 'pending');
+        expect(offer.driverId).toBe(client.user.id);
+        await service.respond(offer.driverId, offer.id, 'decline');
+      }
+    }
     const rows = await source.query('SELECT "userId" FROM notifications WHERE data ->> \'tripRequestId\' = $1', [r.id]);
     expect(rows.map(row => row.userId).sort()).toEqual(clients.map(client => client.user.id).sort());
     for (const excluded of [outside, incompatible, stale]) expect(rows.map(row => row.userId)).not.toContain(excluded.user.id);
@@ -570,7 +662,8 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
   });
 
   it('refuses destructive rollback with live broadcasts, then restores/reapplies the schema without deleting offers', async () => {
-    await driver(); await driver(15.32); const r = await request(); await service['allocate'](r.id);
+    await driver(); const second = await driver(15.32); const r = await request(); await service['allocate'](r.id);
+    await legacyBroadcast(r.id, second);
     const migration = new BroadcastDriverRequests1780000074000(), runner = source.createQueryRunner();
     try {
       await runner.startTransaction();

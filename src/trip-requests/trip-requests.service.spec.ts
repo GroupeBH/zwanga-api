@@ -14,7 +14,7 @@ const attachEditTransaction = (repository: any, request: any) => {
   request.updatedAt = new Date();
   const update = jest.fn().mockResolvedValue({ affected: 1 });
   const requests = { findOne: jest.fn().mockImplementation(async () => ({ ...request })), update };
-  repository.manager = { transaction: (work: any) => work({
+  repository.manager = { getRepository: () => ({ exists: jest.fn().mockResolvedValue(false) }), transaction: (work: any) => work({
     getRepository: (entity: any) => entity === TripRequest ? requests : {
       exists: jest.fn().mockResolvedValue(false), update: jest.fn().mockResolvedValue({ affected: 0 }),
     },
@@ -214,6 +214,7 @@ describe('TripRequestsService recommended price', () => {
 describe('TripRequestsService optional seat count', () => {
   it.each([undefined, 0, 1945, 2000, 6000])('stores one seat and preserves the confirmed price %s', async (confirmedPrice) => {
     const tripRequestRepository = {
+      manager: { getRepository: () => ({ exists: jest.fn().mockResolvedValue(false) }) },
       create: jest.fn().mockImplementation((request) => request),
       save: jest.fn().mockImplementation(async (request) => ({
         ...request,
@@ -273,6 +274,7 @@ describe('TripRequestsService optional seat count', () => {
 describe('TripRequestsService KYC seat limit', () => {
   const buildCreateService = (kycStatus: KycStatus) => {
     const tripRequestRepository = {
+      manager: { getRepository: () => ({ exists: jest.fn().mockResolvedValue(false) }) },
       findOne: jest.fn(),
       create: jest.fn().mockImplementation((request) => request),
       save: jest.fn().mockImplementation(async (request) => ({
@@ -420,6 +422,7 @@ describe('TripRequestsService vehicle type update', () => {
       driverOffers: [],
     };
     const tripRequestRepository = {
+      manager: { getRepository: () => ({ exists: jest.fn().mockResolvedValue(false) }) },
       findOne: jest.fn().mockResolvedValue(tripRequest),
       save: jest.fn().mockImplementation(async (request) => request),
     };
@@ -503,6 +506,7 @@ describe('TripRequestsService motorcycle capacity', () => {
   ])('rejects an oversized offer for %s', async (type, availableSeats) => {
     const now = Date.now();
     const tripRequestRepository = {
+      manager: { getRepository: () => ({ exists: jest.fn().mockResolvedValue(false) }) },
       findOne: jest.fn().mockResolvedValue({
         id: 'request-1',
         passengerId: 'passenger-1',
@@ -517,6 +521,7 @@ describe('TripRequestsService motorcycle capacity', () => {
       }),
     };
     const driverOfferRepository = {
+      exists: jest.fn().mockResolvedValue(false),
       findOne: jest.fn().mockResolvedValue(null),
       create: jest.fn(),
     };
@@ -558,6 +563,7 @@ describe('TripRequestsService motorcycle capacity', () => {
   it('rejects a driver vehicle that differs from the passenger choice', async () => {
     const now = Date.now();
     const tripRequestRepository = {
+      manager: { getRepository: () => ({ exists: jest.fn().mockResolvedValue(false) }) },
       findOne: jest.fn().mockResolvedValue({
         id: 'request-1',
         passengerId: 'passenger-1',
@@ -573,6 +579,7 @@ describe('TripRequestsService motorcycle capacity', () => {
       }),
     };
     const driverOfferRepository = {
+      exists: jest.fn().mockResolvedValue(false),
       findOne: jest.fn().mockResolvedValue(null),
       create: jest.fn(),
     };
@@ -652,6 +659,7 @@ describe('TripRequestsService unaccepted request expiration', () => {
       driverOffers: [],
     };
     const tripRequestRepository = {
+      manager: { getRepository: () => ({ exists: jest.fn().mockResolvedValue(false) }) },
       find: jest.fn().mockResolvedValue([request]),
       update: jest.fn(),
     };
@@ -689,6 +697,7 @@ describe('TripRequestsService unaccepted request expiration', () => {
       driverOffers: [],
     };
     const tripRequestRepository = {
+      manager: { getRepository: () => ({ exists: jest.fn().mockResolvedValue(false) }) },
       find: jest.fn().mockResolvedValue([request]),
       update: jest.fn().mockResolvedValue({ affected: 1 }),
     };
@@ -758,6 +767,7 @@ describe('TripRequestsService unaccepted request expiration', () => {
       driverOffers: [{ id: 'offer-3', status: DriverOfferStatus.PENDING }],
     };
     const tripRequestRepository = {
+      manager: { getRepository: () => ({ exists: jest.fn().mockResolvedValue(false) }) },
       find: jest
         .fn()
         .mockResolvedValue([
@@ -817,9 +827,11 @@ describe('TripRequestsService unaccepted request expiration', () => {
     const tripRequestRepository = {
       findOne: jest.fn().mockResolvedValue(tripRequest),
       update: jest.fn().mockResolvedValue({ affected: 1 }),
-      manager: { transaction: async work => work({ getRepository: () => tripRequestRepository }) },
+      manager: { getRepository: () => ({ exists: jest.fn().mockResolvedValue(false) }),
+        transaction: async work => work({ getRepository: () => tripRequestRepository }) },
     };
     const driverOfferRepository = {
+      exists: jest.fn().mockResolvedValue(false),
       findOne: jest.fn(),
       create: jest.fn(),
     };
@@ -864,7 +876,8 @@ describe('TripRequestsService failed provisional booking', () => {
           vehicleType: VehicleType.CAR, numberOfSeats: 1, maxPricePerSeat: 8500, driverOffers: [],
         };
         const failure = new Error('booking insert failed');
-        const requests = { findOne: jest.fn().mockResolvedValue(request), save: jest.fn() };
+        const requests = { manager: { getRepository: () => ({ exists: jest.fn().mockResolvedValue(false) }) },
+          findOne: jest.fn().mockResolvedValue(request), save: jest.fn() };
         const trips = { create: jest.fn().mockResolvedValue({ id: 'trip-test' }),
           ensureDriverCanStartTrip: jest.fn(),
           cancelFailedRequestTrip: cleanupFails ? jest.fn().mockRejectedValue(new Error('cleanup failed')) : jest.fn(),
@@ -908,6 +921,7 @@ describe('TripRequestsService passenger KYC requirements', () => {
       driverOffers: [],
     };
     const tripRequestRepository = {
+      manager: { getRepository: () => ({ exists: jest.fn().mockResolvedValue(false) }) },
       findOne: jest.fn().mockResolvedValue(tripRequest),
       save: jest.fn(),
     };
@@ -990,10 +1004,12 @@ describe('TripRequestsService passenger KYC requirements', () => {
       driverOffers: [offer],
     };
     const tripRequestRepository = {
+      manager: { getRepository: () => ({ exists: jest.fn().mockResolvedValue(false) }) },
       findOne: jest.fn().mockResolvedValue(tripRequest),
       save: jest.fn(),
     };
     const driverOfferRepository = {
+      exists: jest.fn().mockResolvedValue(false),
       save: jest.fn(),
     };
     const userRepository = {
@@ -1039,10 +1055,12 @@ describe('TripRequestsService passenger KYC requirements', () => {
 describe('TripRequestsService cancellation after driver acceptance', () => {
   const buildService = (tripRequest: Record<string, unknown>, trip?: any) => {
     const tripRequestRepository = {
+      manager: { getRepository: () => ({ exists: jest.fn().mockResolvedValue(false) }) },
       findOne: jest.fn().mockResolvedValue(tripRequest),
       save: jest.fn((payload: unknown) => Promise.resolve(payload)),
     };
     const driverOfferRepository = {
+      exists: jest.fn().mockResolvedValue(false),
       update: jest.fn().mockResolvedValue({ affected: 1 }),
     };
     const tripsService = {
@@ -1252,6 +1270,7 @@ describe('TripRequestsService overdue selected driver recovery', () => {
       departureDateMax: new Date(Date.now() - 60_000),
     };
     const tripRequestRepository = {
+      manager: { getRepository: () => ({ exists: jest.fn().mockResolvedValue(false) }) },
       findOne: jest.fn().mockResolvedValue(selectedRequest),
     };
     const recoveryService = {

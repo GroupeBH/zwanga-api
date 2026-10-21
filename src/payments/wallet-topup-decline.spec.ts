@@ -2,6 +2,7 @@ import { Logger } from '@nestjs/common';
 import { PaymentsService } from './payments.service';
 import {
   PaymentStatus,
+  PaymentProvider,
   type PaymentTransaction,
 } from './entities/payment-transaction.entity';
 import type { FlexPayTransactionStatus } from './flexpay.service';
@@ -14,6 +15,7 @@ function environment(providerPatch: Partial<FlexPayTransactionStatus> = {}) {
     id: 'payment-test',
     userId: 'passenger-test',
     purpose: 'wallet_top_up',
+    provider: PaymentProvider.FLEXPAY,
     relatedEntityType: 'wallet_top_up',
     relatedEntityId: 'passenger-test',
     method: 'mobile_money',

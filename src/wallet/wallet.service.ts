@@ -488,10 +488,11 @@ export class WalletService implements OnModuleInit {
   async payForSubscription(
     subscription: { id: string; userId: string },
     amount: number,
+    manager?: EntityManager,
   ): Promise<WalletLedgerEntry> {
     const normalizedAmount = this.normalizePositiveAmount(amount);
 
-    const existingEntry = await this.ledgerRepository.findOne({
+    const existingEntry = await (manager?.getRepository(WalletLedgerEntry) ?? this.ledgerRepository).findOne({
       where: {
         userId: subscription.userId,
         type: WalletLedgerEntryType.SUBSCRIPTION_PAYMENT,
@@ -501,6 +502,8 @@ export class WalletService implements OnModuleInit {
       order: { createdAt: 'DESC' },
     });
     if (existingEntry) {
+      if (Number(existingEntry.amount) !== -normalizedAmount)
+        throw new BadRequestException('Le débit existant de cet abonnement doit être régularisé.');
       return existingEntry;
     }
 
@@ -512,7 +515,7 @@ export class WalletService implements OnModuleInit {
         relatedEntityType: this.SUBSCRIPTION_RELATED_ENTITY_TYPE,
         relatedEntityId: subscription.id,
         description: `Paiement par jetons pour l’abonnement ${subscription.id}`,
-      });
+      }, manager);
     } catch (error) {
       if (error instanceof BadRequestException) {
         throw new BadRequestException(
@@ -815,6 +818,7 @@ export class WalletService implements OnModuleInit {
       userId: string;
     },
     paymentTransactionId?: string | null,
+    manager?: EntityManager,
   ): Promise<WalletLedgerEntry> {
     const entryCriteria = {
       userId: subscription.userId,
@@ -822,7 +826,7 @@ export class WalletService implements OnModuleInit {
       relatedEntityType: this.SUBSCRIPTION_RELATED_ENTITY_TYPE,
       relatedEntityId: subscription.id,
     };
-    const existingEntry = await this.ledgerRepository.findOne({
+    const existingEntry = await (manager?.getRepository(WalletLedgerEntry) ?? this.ledgerRepository).findOne({
       where: entryCriteria,
       order: { createdAt: 'DESC' },
     });
@@ -839,8 +843,11 @@ export class WalletService implements OnModuleInit {
         relatedEntityId: subscription.id,
         paymentTransactionId: paymentTransactionId ?? null,
         description: `Bonus de 25 jetons pour l’abonnement ${subscription.id}`,
-      });
+      }, manager);
     } catch (error) {
+      // An enclosing transaction must roll back; a second connection cannot
+      // recover a uniqueness error while this transaction is aborted.
+      if (manager) throw error;
       if (this.isUniqueConstraintViolation(error)) {
         const concurrentEntry = await this.ledgerRepository.findOne({
           where: entryCriteria,
@@ -1128,13 +1135,13 @@ export class WalletService implements OnModuleInit {
     relatedEntityId?: string | null;
     paymentTransactionId?: string | null;
     description?: string | null;
-  }): Promise<WalletLedgerEntry> {
+  }, transactionManager?: EntityManager): Promise<WalletLedgerEntry> {
     let amount = this.roundMoney(input.amount);
     if (!amount) {
       throw new BadRequestException('Le montant de jetons est invalide');
     }
 
-    return this.dataSource.transaction(async (manager) => {
+    const apply = async (manager: EntityManager) => {
       // Serialize fare-adjustment retries even when this passenger has no wallet yet.
       // All callers lock the booking before the wallet, and recheck the ledger inside the transaction.
       if (
@@ -1263,7 +1270,8 @@ export class WalletService implements OnModuleInit {
         `Wallet balance changed: userId=${input.userId}, type=${input.type}, amount=${amount}, balanceAfter=${nextBalance}`,
       );
       return savedEntry;
-    });
+    };
+    return transactionManager ? apply(transactionManager) : this.dataSource.transaction(apply);
   }
 
   private async findBookingEntry(

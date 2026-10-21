@@ -16,6 +16,8 @@ import { SubscriptionsModule } from '../subscriptions/subscriptions.module';
 import { WeatherModule } from '../weather/weather.module';
 import { TripRequestRecoveryModule } from './trip-request-recovery.module';
 import { DriverDispatchService } from './dispatch/dispatch.service';
+import { SharedTripOffersController } from './shared-trip-offers.controller';
+import { SharedTripOffersService } from './shared-trip-offers.service';
 import { DriverDispatchController } from './dispatch/dispatch.controller';
 
 @Module({
@@ -31,8 +33,8 @@ import { DriverDispatchController } from './dispatch/dispatch.controller';
     WeatherModule,
     TripRequestRecoveryModule,
   ],
-  controllers: [DriverDispatchController, TripRequestsController],
-  providers: [TripRequestsService, DriverDispatchService],
+  controllers: [DriverDispatchController, TripRequestsController, SharedTripOffersController],
+  providers: [TripRequestsService, DriverDispatchService, SharedTripOffersService],
   exports: [TripRequestsService],
 })
 export class TripRequestsModule {}

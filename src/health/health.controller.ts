@@ -38,10 +38,15 @@ export class HealthController {
       const [schema] = await this.source.transaction(async manager => {
         await manager.query(`SET LOCAL statement_timeout = '1500ms'`);
         return manager.query(`SELECT "contractVersion", enabled,
-          to_regprocedure('zwanga_cash_policy_enabled()') IS NOT NULL AS functions
+          to_regprocedure('zwanga_cash_policy_enabled()') IS NOT NULL AS functions,
+          to_regclass('payment_settlement_jobs') IS NOT NULL
+            AND to_regprocedure('zwanga_guard_referral_payout_submission()') IS NOT NULL AS recovery,
+          to_regclass('referral_booking_jobs') IS NOT NULL
+            AND to_regclass('"IDX_referral_withdrawal_intent"') IS NOT NULL
+            AND to_regprocedure('zwanga_queue_booking_referral()') IS NOT NULL AS referrals
           FROM financial_rollout WHERE id=true`);
       });
-      if (schema?.contractVersion !== 1 || !schema.functions) throw new Error('schema');
+      if (schema?.contractVersion !== 1 || !schema.functions || !schema.recovery || !schema.referrals) throw new Error('schema');
     } catch { throw new ServiceUnavailableException('Le schéma financier du serveur n’est pas prêt.'); }
 
     return {

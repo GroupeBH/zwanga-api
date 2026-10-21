@@ -7,9 +7,10 @@ import { DataSource } from 'typeorm';
 import { postgresTestServerOptions } from '../../test/postgres-test-options';
 import { TokenValue25Cdf1780000070000 } from './migrations/1780000070000-TokenValue25Cdf';
 import { WelcomeBonus25CdfCopy1780000071000 } from './migrations/1780000071000-WelcomeBonus25CdfCopy';
+import { TokenValue10Cdf1780000080000 } from './migrations/1780000080000-TokenValue10Cdf';
 
 // Only a throwaway cluster on a random loopback port. No application env/DB URL.
-const bin = process.env.TOKEN_VALUE_TEST_POSTGRES_BIN;
+const bin = process.env.TOKEN_VALUE_TEST_POSTGRES_BIN ?? process.env.WALLET_TEST_POSTGRES_BIN;
 (bin ? describe : describe.skip)(
   'token value migration on isolated PostgreSQL',
   () => {
@@ -116,6 +117,22 @@ const bin = process.env.TOKEN_VALUE_TEST_POSTGRES_BIN;
           'SELECT amount, "tokenQuantity" FROM payment_transactions WHERE id=1',
         ),
       ).toEqual([{ amount: '5000.00', tokenQuantity: null }]);
+    });
+
+    it('changes future quotes to 10 without touching old quotes, token counts or pending purchases', async () => {
+      const migration = new TokenValue10Cdf1780000080000();
+      await db.transaction(manager => migration.up(manager.queryRunner!));
+      await db.query('INSERT INTO bookings(id) VALUES (10)');
+      expect(await db.query('SELECT "cashCommissionTokenValue" FROM bookings ORDER BY id')).toEqual([
+        { cashCommissionTokenValue: '100.0000' },
+        { cashCommissionTokenValue: '25.0000' },
+        { cashCommissionTokenValue: '10.0000' },
+      ]);
+      expect(await db.query('SELECT balance FROM wallet_accounts')).toEqual([{ balance: '100.00' }]);
+      expect(await db.query('SELECT amount FROM payment_transactions WHERE id=1')).toEqual([{ amount: '5000.00' }]);
+      await db.transaction(manager => migration.down(manager.queryRunner!));
+      expect(await db.query('SELECT "cashCommissionTokenValue" FROM bookings WHERE id=10'))
+        .toEqual([{ cashCommissionTokenValue: '10.0000' }]);
     });
 
     it('stores a purchase quantity without allowing invalid or non-topup quotes', async () => {

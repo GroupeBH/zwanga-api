@@ -2,6 +2,14 @@
 
 Référence des opérations HTTP publiées par Swagger (`ZWANGA API`, version déclarée `1.0`). Elle décrit ce que l’interface montre et ce que le serveur valide réellement lorsque le schéma Swagger est incomplet.
 
+### Ajout du 21 octobre 2026 — retraits de parrainage
+
+- `POST /api/v1/referrals/me/withdrawals` : `{ tokens, phone?, idempotencyKey? }`. La clé est un UUID réutilisé à chaque reprise de la même intention. Minimum 1 000 jetons disponibles, compte/KYC éligibles, téléphone RDC ; même clé et paramètres = même retrait sans nouvel envoi. Conflit de paramètres ou autre intention en cours = HTTP 409. Les anciens clients sans clé restent acceptés avec la protection de reprise limitée décrite dans la politique financière.
+- `GET /api/v1/referrals/me/withdrawals/:id` : lecture du retrait du compte authentifié, même sans commande prestataire. UUID obligatoire, 404 si absent ou appartenant à un autre compte.
+- `GET /api/v1/referrals/me` : `rules.bookingPaymentModes` inclut `cash`, `rules.cashRewardRequiresReceipt=true` ; `eligiblePayments` conserve ses anciennes valeurs et ajoute PawaPay et `booking_cash_confirmed`. Abonnements payés en jetons toujours exclus.
+
+Voir [les règles et limites de reprise](finance/referral-program.md#21-octobre-2026--cash-confirmé-et-reprises-financières). Migrations 85/86 requises.
+
 ## Où ouvrir Swagger
 
 - Interface : `GET /api/v1/docs`
@@ -3283,6 +3291,10 @@ Swagger ne donne pas de résumé : l’opération existe, mais son intitulé n�
 Classe `DispatchResponseDto`.
 
 - **`decision`** — obligatoire, énumération. valeur autorisée : `accept`, `decline`. validé par le serveur, absent du schéma Swagger (pas de `@ApiProperty`).
+
+**Comportement des commandes immédiates (20 octobre 2026)**
+
+`decline` enregistre le refus et prépare immédiatement la proposition au conducteur éligible suivant par proximité, dans la même transaction. Le push est déclenché après commit. Une répétition du même refus reste idempotente : elle ne passe pas au-delà du conducteur suivant. Une seule invitation active est créée par demande ; une acceptation arrête la recherche. La réponse reste `{ status, requestId }`, sans changement du contrat mobile. La réception physique du push dépend du téléphone et du fournisseur.
 
 <a id="put-api-v1-driver-dispatch-position"></a>
 ### PUT `/api/v1/driver-dispatch/position`

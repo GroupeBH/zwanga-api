@@ -17,8 +17,10 @@ export async function withBookableTrip<T>(
   tripId: string,
   seats: number,
   save: (manager: EntityManager, trip: Trip) => Promise<T>,
+  beforeTripLock?: (manager: EntityManager) => Promise<void>,
 ): Promise<T> {
   return repository.manager.transaction(async (manager) => {
+    await beforeTripLock?.(manager);
     await lockTripBookingCreation(manager, tripId);
     // Only new bookings are inserted here; existing booking transitions keep
     // their booking -> trip lock order. No geocoding, push or HTTP under this lock.

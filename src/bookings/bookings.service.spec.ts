@@ -16,6 +16,7 @@ import { TripPaymentMode } from '../payments/enums/trip-payment-mode.enum';
 
 describe('BookingsService trip payments', () => {
   let bookingRepository: {
+    exists: jest.Mock;
     find: jest.Mock;
     findOne: jest.Mock;
     count: jest.Mock;
@@ -73,6 +74,8 @@ describe('BookingsService trip payments', () => {
   let service: BookingsService;
   let boardingCandidates: Map<string, unknown>;
   let financialManager: {
+    exists: jest.Mock;
+    update: jest.Mock;
     findOne: jest.Mock;
     count: jest.Mock;
     save: jest.Mock;
@@ -109,6 +112,7 @@ describe('BookingsService trip payments', () => {
 
   beforeEach(() => {
     bookingRepository = {
+      exists: jest.fn().mockResolvedValue(false),
       find: jest.fn(),
       findOne: jest.fn(),
       count: jest.fn().mockResolvedValue(0),
@@ -197,6 +201,8 @@ describe('BookingsService trip payments', () => {
 
     let lockedBooking: any = null;
     financialManager = {
+      exists: jest.fn().mockResolvedValue(false),
+      update: jest.fn((entity, id, patch) => entity === Trip ? tripRepository.update(id, patch) : bookingRepository.update(id, patch)),
       query: jest.fn().mockResolvedValue([]),
       transaction: jest.fn(work => work(financialManager)),
       findOne: jest.fn(async (entity: unknown, options: unknown) => {
@@ -290,7 +296,7 @@ describe('BookingsService trip payments', () => {
     expect(privateBooking.status).toBe(BookingStatus.CANCELLED);
     expect(privateTrip.status).toBe(TripStatus.CANCELLED);
     expect(privateTrip.completedAt).toBeNull();
-    expect(tripRepository.save).toHaveBeenCalledWith(privateTrip);
+    expect(tripRepository.update).toHaveBeenCalledWith(privateTrip.id, { status: TripStatus.CANCELLED });
   });
 
   it('blocks cancellation by the selected driver for a request-linked booking', async () => {
@@ -1306,6 +1312,11 @@ describe('BookingsService trip payments', () => {
       save: jest.fn(async (payload) => payload),
     };
     const manager = {
+      createQueryBuilder: jest.fn().mockReturnValue({
+        insert: jest.fn().mockReturnThis(), into: jest.fn().mockReturnThis(),
+        values: jest.fn().mockReturnThis(), onConflict: jest.fn().mockReturnThis(),
+        execute: jest.fn().mockResolvedValue({}),
+      }),
       getRepository: jest.fn((entity) =>
         entity === Booking
           ? transactionBookingRepository
@@ -1321,6 +1332,10 @@ describe('BookingsService trip payments', () => {
     });
 
     expect(result.status).toBe(BookingStatus.ACCEPTED);
+    expect(manager.createQueryBuilder().values).toHaveBeenCalledWith(expect.objectContaining({
+      eventKey: 'booking-response:booking-1:accepted', userId: 'passenger-1',
+      data: expect.objectContaining({ type: 'booking_response', status: 'accepted' }),
+    }));
     expect(transactionTripRepository.save).toHaveBeenCalledWith(
       expect.objectContaining({ availableSeats: 2 }),
     );

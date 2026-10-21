@@ -1,10 +1,12 @@
 # Documentation financière de Zwanga
 
-Dernière mise à jour : 14 octobre 2026
+Dernière mise à jour : 20 octobre 2026
 
-Règle actuelle : **1 jeton = 25 FC**, sans multiplication des soldes existants. Retrait du portefeuille interdit ; parrainage retirable dès **1 000 jetons = 25 000 FC** ; gains conducteur conservés. [Migrations, historique et précautions mobiles](./purchased-token-withdrawals.md).
+Règle actuelle : **1 jeton = 10 FC**, sans modification du nombre de jetons existants. Retrait du portefeuille interdit ; parrainage disponible retirable dès **1 000 jetons = 10 000 FC** ; gains conducteur conservés. [Migrations, historique et précautions mobiles](./purchased-token-withdrawals.md).
 
-Bonus de bienvenue : **200 jetons = 5 000 FC** pour les futures attributions éligibles. Les anciens bonus de 50 restent inchangés, sans complément ni second crédit. L'abonnement Pro n'est pas activé automatiquement.
+Bonus de bienvenue : **500 jetons = 5 000 FC** pour les futures attributions éligibles. Les anciens bonus de 50 ou 200 restent inchangés, sans complément ni second crédit. L'abonnement Pro n'est pas activé automatiquement et son paiement en jetons promotionnels ne rémunère pas le parrain.
+
+Parrainage : **aucun bonus à l'inscription ou au rattachement**. Le parrain gagne uniquement les commissions des transactions éligibles du filleul (abonnement 1 %, trajet terminé et payé 1 %). Les anciens crédits restent acquis. [Règles et audit du rattachement](./referral-program.md).
 
 ## Objectif
 
@@ -33,7 +35,7 @@ Les montants CDF ou USD encaissés ou décaissés par FlexPay représentent de l
 
 Les jetons sont une unité interne du portefeuille `POINTS`. Les identifiants `points` et `PTS` sont conservés pour la compatibilité technique, mais l'appellation visible est « jetons Zwanga ». Leur valeur monétaire est configurable et ne doit jamais être supposée à partir du nom de l'unité.
 
-La règle courante impose `1 jeton = 25 CDF`. Les devis historiques déjà enregistrés conservent leur taux ; les configurations d'environnement doivent être alignées avant le déploiement financier.
+La règle courante impose `1 jeton = 10 CDF`. Les devis historiques déjà enregistrés conservent leur taux ; les configurations d'environnement doivent être alignées avant le déploiement financier.
 
 Les [jetons du portefeuille ne sont pas retirables](./purchased-token-withdrawals.md), même lorsqu'ils ont été achetés. L'origine est conservée lors des paiements, transferts et remboursements. Les revenus conducteur et gains de parrainage gardent leurs comptes séparés et leurs propres règles de retrait.
 
@@ -75,7 +77,7 @@ Toute évolution financière doit respecter les règles suivantes :
 - [Contrôle d'accès financier du back-office](./admin-finance-access-control.md)
 - [Administration des portefeuilles de jetons](./admin-token-wallet-management.md)
 - [Administration du parrainage](./admin-referral-management.md)
-- [Parrainage, abonnement 5 %, courses 1 % et retraits FlexPay](./referral-program.md)
+- [Parrainage, abonnement 1 %, courses 1 % et retraits FlexPay](./referral-program.md)
 - [Configuration ChottuLink du lien de parrainage automatique](./chottulink-referral-setup.md)
 - [Fiabilisation mobile et rattachement des comptes existants](./referral-attribution-reliability.md)
 - [Fiabilisation PostgreSQL du rattachement de parrainage](./referral-attribution-postgresql-hardening.md)

@@ -10,7 +10,7 @@ describe('scheduled nearby request alert', () => {
     const request = { id: 'request', passengerId: 'passenger', immediateDispatch: false,
       status: TripRequestStatus.PENDING, selectedDriverId: null, tripId: null,
       departurePoint: { type: 'Point', coordinates: [15.3, -4.3] }, vehicleType: 'car', numberOfSeats: 2,
-      departureLocation: 'Départ', arrivalLocation: 'Arrivée',
+      departureLocation: 'Départ', arrivalLocation: 'Arrivée', maxPricePerSeat: 2500,
       departureDateMin: new Date(Date.now() + 86_400_000), departureDateMax: new Date(Date.now() + 90_000_000) };
     const query = jest.fn().mockImplementation(async (sql: string) => sql.includes('FROM driver_dispatch_presence')
       ? [{ driverId: 'nearest' }, { driverId: 'next' }] : [{}]);
@@ -29,6 +29,7 @@ describe('scheduled nearby request alert', () => {
     await expect(f.run()).resolves.toBe(true);
     const [sql, parameters] = f.query.mock.calls[0];
     expect(sql).toContain('ST_DWithin'); expect(sql).toContain('ORDER BY ST_Distance');
+    expect(sql).toContain('p."driverId" <> $1::uuid');
     expect(sql).toContain('LIMIT 50'); expect(sql).toContain('v."isActive" = true');
     expect(sql).toContain('v.type = $5'); expect(sql).toContain('>= $6');
     expect(sql).toContain('p."discoveryEnabled" = true');
@@ -41,8 +42,8 @@ describe('scheduled nearby request alert', () => {
       eventKey: 'nearby-scheduled-request:request:nearest', userId: 'nearest', title: 'Commande programmée à proximité',
       data: expect.objectContaining({ type: 'trip_request_nearby', ringAlert: 'nearby-request-v1',
         rideSpeechVersion: '1', rideDeparture: 'Départ', rideArrival: 'Arrivée', rideSeats: '2',
-        rideDepartureAt: f.request.departureDateMin.toISOString(),
-        tripRequestId: 'request', driverId: 'nearest', role: 'driver' }),
+        rideDepartureAt: f.request.departureDateMin.toISOString(), ridePricePerSeat: '2500', ridePriceKind: 'budget',
+        tripRequestId: 'request', passengerId: 'passenger', driverId: 'nearest', role: 'driver' }),
     }), expect.objectContaining({
       eventKey: 'nearby-scheduled-request:request:next', userId: 'next',
     })]);

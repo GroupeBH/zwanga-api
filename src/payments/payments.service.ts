@@ -48,6 +48,8 @@ import { loadPaymentContext, PaymentContextDto } from './payment-context';
 import type { PaymentHistoryPageDto } from '../common/pagination/history-page';
 import { claimDriverPayoutPayment, commitFlexPayPayoutState } from './flexpay-payout-state';
 import { claimTopUpPayment, topUpReference } from './topup-payment-claim';
+import { commitFlexPayDepositState } from './flexpay-deposit-state';
+import { claimReferralPayoutPayment } from './referral-payout-claim';
 
 export interface InitiatePaymentInput {
   tokenQuantity?: number;
@@ -139,16 +141,17 @@ export class PaymentsService {
   }
 
   async reconcileFlexPayDeposit(paymentId: string): Promise<boolean> {
+    const payment = await this.paymentTransactionRepository.findOne({ where: { id: paymentId } });
+    if (!payment || payment.provider !== PaymentProvider.FLEXPAY || this.isPayoutTransaction(payment)) return true;
+    return this.reconcilePayment(paymentId);
+  }
+
+  /** Durable recovery includes confirmed payments whose business settlement failed. */
+  async reconcilePayment(paymentId: string): Promise<boolean> {
     let payment = await this.paymentTransactionRepository.findOne({
       where: { id: paymentId },
     });
-    if (
-      !payment ||
-      payment.provider !== PaymentProvider.FLEXPAY ||
-      this.isPayoutTransaction(payment)
-    ) {
-      return true;
-    }
+    if (!payment) return true;
     if (
       !this.isTerminalPaymentStatus(payment.status) ||
       (payment.purpose === PaymentPurpose.WALLET_TOP_UP &&
@@ -156,6 +159,9 @@ export class PaymentsService {
         !hasVerifiedWalletTopUpProof(payment))
     ) {
       if (!payment.orderNumber) return false;
+      if (payment.provider === PaymentProvider.PAWAPAY &&
+          (this.configService.get<string>('PAWAPAY_RECONCILIATION_ENABLED') === 'false' ||
+            !this.pawaPayService.isConfigured())) return false;
       payment = await this.checkTransactionAndApply(payment);
     }
     if (!this.isTerminalPaymentStatus(payment.status)) return false;
@@ -306,7 +312,8 @@ export class PaymentsService {
         if (isUncertainProviderDelivery(error)) {
           return this.persistFailedInitiation(savedTransaction, error, true);
         }
-        await this.persistFailedInitiation(savedTransaction, error, false);
+        const persisted = await this.persistFailedInitiation(savedTransaction, error, false);
+        if (persisted.status === PaymentStatus.SUCCEEDED) return persisted;
         throw error;
       }
     }
@@ -369,6 +376,8 @@ export class PaymentsService {
     const claim = transaction.purpose === PaymentPurpose.DRIVER_PAYOUT &&
         transaction.relatedEntityType === 'driver_payout' && transaction.relatedEntityId
       ? await claimDriverPayoutPayment(this.paymentTransactionRepository, transaction)
+      : transaction.purpose === PaymentPurpose.REFERRAL_PAYOUT && transaction.relatedEntityType === 'referral_withdrawal'
+        ? await claimReferralPayoutPayment(this.paymentTransactionRepository, transaction)
       : { payment: await this.paymentTransactionRepository.save(transaction), created: true };
     if (!claim.created) return claim.payment;
     let savedTransaction = claim.payment;
@@ -892,32 +901,9 @@ export class PaymentsService {
 
   private async saveFlexPayDepositCheck(
     candidate: PaymentTransaction,
+    initiation = false,
   ): Promise<PaymentTransaction> {
-    return this.paymentTransactionRepository.manager.transaction(async (manager) => {
-      const current = await manager.findOne(PaymentTransaction, {
-        where: { id: candidate.id },
-        lock: { mode: 'pessimistic_write' },
-      });
-      if (!current) throw new NotFoundException('Paiement introuvable');
-      // A delayed timeout/pending response must never undo confirmed success.
-      if (
-        current.status === PaymentStatus.SUCCEEDED &&
-        (candidate.status !== PaymentStatus.SUCCEEDED ||
-          (current.purpose === PaymentPurpose.WALLET_TOP_UP &&
-            hasVerifiedWalletTopUpProof(current)))
-      ) return current;
-      Object.assign(current, {
-        status: candidate.status,
-        providerStatusCode: candidate.providerStatusCode,
-        providerMessage: candidate.providerMessage,
-        providerReference: candidate.providerReference,
-        orderNumber: candidate.orderNumber,
-        rawCheckResponse: candidate.rawCheckResponse,
-        rawCallbackPayload: candidate.rawCallbackPayload,
-        paidAt: current.paidAt ?? candidate.paidAt,
-      });
-      return manager.save(PaymentTransaction, current);
-    });
+    return commitFlexPayDepositState(this.paymentTransactionRepository, candidate, initiation);
   }
 
   private async applyFlexPayCheckResult(
@@ -1320,14 +1306,14 @@ export class PaymentsService {
     if (this.isPayoutTransaction(transaction)) {
       return commitFlexPayPayoutState(this.paymentTransactionRepository, transaction);
     }
-    await this.paymentTransactionRepository.save(transaction);
+    const saved = await this.saveFlexPayDepositCheck(transaction, true);
     if (!this.isPayoutTransaction(transaction)) {
       this.logger.error(
         `Payment initiation failed: paymentId=${transaction.id}, reference=${transaction.reference}, method=${transaction.method}, message=${errorMessage}`,
         this.getErrorStack(error),
       );
     }
-    return transaction;
+    return saved;
   }
 
   private async initiateFlexPayDeposit(
@@ -1368,7 +1354,10 @@ export class PaymentsService {
       savedTransaction.providerMessage = this.getInitiationFailureMessage(
         flexPayResponse.message,
       );
-      await this.paymentTransactionRepository.save(savedTransaction);
+      const persisted = await this.saveFlexPayDepositCheck(savedTransaction, true);
+      // A callback may have confirmed this payment while initiation was in flight.
+      // Never fail over to a second provider after that confirmation.
+      if (persisted.status === PaymentStatus.SUCCEEDED) return persisted;
       if (this.looksLikeFlexPayTokenError(flexPayResponse.message)) {
         this.logger.error(
           `FlexPay token configuration rejected: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, code=${flexPayResponse.code}, message=${flexPayResponse.message ?? 'none'}, response=${formatPaymentLogPayload(flexPayResponse.raw)}`,
@@ -1385,7 +1374,7 @@ export class PaymentsService {
     }
 
     savedTransaction.status = PaymentStatus.INITIATED;
-    const saved = await this.paymentTransactionRepository.save(savedTransaction);
+    const saved = await this.saveFlexPayDepositCheck(savedTransaction, true);
     this.logger.warn(
       `Payment initialized: paymentId=${saved.id}, reference=${saved.reference}, orderNumber=${saved.orderNumber ?? 'none'}, status=${saved.status}, amount=${saved.amount} ${saved.currency}, response=${formatPaymentLogPayload(this.formatPaymentLogResponse(saved))}`,
     );

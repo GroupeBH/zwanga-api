@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { IsNull, Repository } from 'typeorm';
+import { In, IsNull, Not, Repository } from 'typeorm';
+import { Booking, BookingStatus } from '../bookings/entities/booking.entity';
 import type { FindOptionsWhere } from 'typeorm';
 import { NotificationService } from '../notifications/notifications.service';
 import { Trip, TripStatus } from '../trips/entities/trip.entity';
@@ -87,14 +88,19 @@ export class TripRequestRecoveryService {
         if (request.tripId) {
           const linkedTrip = await manager.findOne(Trip, {
             where: { id: request.tripId, tripRequestId: request.id },
+            lock: { mode: 'pessimistic_write' },
           });
           if (linkedTrip) {
+            const hasOtherPassengers = await manager.exists(Booking, {
+              where: { tripId: linkedTrip.id, passengerId: Not(request.passengerId),
+                status: In([BookingStatus.PENDING, BookingStatus.ACCEPTED]) },
+            });
             await manager.update(
               Trip,
               { id: linkedTrip.id, tripRequestId: request.id },
               {
                 tripRequestId: null,
-                ...(linkedTrip.isPrivate &&
+                ...(linkedTrip.isPrivate && !hasOtherPassengers &&
                 linkedTrip.status !== TripStatus.COMPLETED
                   ? { status: TripStatus.CANCELLED }
                   : {}),

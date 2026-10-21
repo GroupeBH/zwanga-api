@@ -516,7 +516,7 @@ export class AdminController {
   @Auth()
   @Roles(UserRole.ADMIN)
   @SensitiveThrottle(5, 60000)
-  @ApiOperation({ summary: 'Attach a first referrer with an audited, non-retroactive attribution bonus' })
+  @ApiOperation({ summary: 'Attach a first referrer with an audit, without a signup bonus or retroactive rewards' })
   attachUserReferrer(
     @Request() req: AuthenticatedAdminRequest,
     @Param('userId', ParseUUIDPipe) userId: string,

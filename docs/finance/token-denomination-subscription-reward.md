@@ -1,6 +1,6 @@
 # FIN-WALLET-001 — Jetons Zwanga et bonus d'abonnement
 
-Dernière mise à jour : 14 octobre 2026
+Dernière mise à jour : 20 octobre 2026
 Statut : implémenté dans le code ; migration à appliquer  
 Périmètre : portefeuille, registre comptable, paiements d'abonnement et application mobile
 
@@ -61,15 +61,17 @@ Un abonnement payé avec le portefeuille reçoit aussi le bonus, car il s'agit b
 mouvementNet = -prixAbonnementEnJetons + 25
 ```
 
-Exemple actuel : Pro à 5 000 FC, soit 200 jetons à 25 FC :
+Exemple actuel : Pro à 5 000 FC, soit 500 jetons à 10 FC :
 
 ```text
-débit abonnement = -200
+débit abonnement = -500
 bonus abonnement = +25
-mouvement net = -175 jetons
+mouvement net = -475 jetons
 ```
 
 Deux écritures distinctes sont conservées. Le bonus ne réduit pas ou ne modifie pas rétroactivement le prix de l'abonnement.
+
+Ce bonus d'abonnement est distinct de la rémunération du parrain. Un Pro financé par les jetons de bienvenue ne génère **aucune commission de parrainage**. Le parcours existant ne rémunère pas non plus le parrain pour les autres paiements Pro en jetons ; la garde de `awardSubscriptionReward` rejette explicitement `PTS`, `POINTS` et les références `POINTS-`, même en présence d'un callback prestataire incohérent. Un premier mois réellement payé par un prestataire reste éligible selon les règles normales.
 
 ## 5. Registre comptable
 
@@ -92,14 +94,14 @@ Le solde et l'écriture sont enregistrés dans une transaction avec verrou pessi
 
 ## 6. Valeur financière
 
-Depuis le 14 octobre 2026, la règle CDF est commune au portefeuille et au parrainage :
+Depuis la modification locale du 20 octobre 2026, la règle CDF est commune au portefeuille et au parrainage :
 
 ```text
-1 jeton = 25 CDF
-25 jetons = 625 CDF de valeur d'usage
+1 jeton = 10 CDF
+25 jetons = 250 CDF de valeur d'usage
 ```
 
-Le nombre de jetons existants est conservé sans multiplication, ainsi que les taux de fidélité et les prix monétaires des courses/abonnements. Le backend impose 25 en CDF malgré d'anciennes variables à 100 ; les variables documentées sont alignées. Les transactions déjà engagées conservent leurs devis. Voir [la procédure de migration et les limites mobiles](purchased-token-withdrawals.md).
+Le nombre de jetons existants est conservé, ainsi que les taux de fidélité et les prix monétaires des courses/abonnements. Le backend impose 10 en CDF malgré d'anciennes variables à 25 ou 100 ; les variables documentées sont alignées. Les transactions déjà engagées conservent leurs devis. Voir [la procédure de migration et les limites mobiles](purchased-token-withdrawals.md).
 
 Les jetons promotionnels restent une unité interne utilisable selon les fonctionnalités actuelles et ne deviennent pas retirables. `FIN-REF-001` implémente un compte séparé pour les gains de parrainage retirables ; le bonus de 25 jetons n'y est jamais versé.
 

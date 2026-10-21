@@ -28,12 +28,12 @@ export class PaymentReconciliationService {
     ] = await this.source.query(
       `
       WITH due AS (
-        SELECT "paymentId" FROM payment_reconciliation_jobs
+        SELECT "paymentId" FROM payment_settlement_jobs
         WHERE "completedAt" IS NULL AND "nextAttemptAt" <= now()
           AND ("leaseUntil" IS NULL OR "leaseUntil" < now())
         ORDER BY "nextAttemptAt", "paymentId" LIMIT 5 FOR UPDATE SKIP LOCKED
       )
-      UPDATE payment_reconciliation_jobs j SET "leaseToken" = $1,
+      UPDATE payment_settlement_jobs j SET "leaseToken" = $1,
         "leaseUntil" = now() + interval '15 minutes', attempts = j.attempts + 1
       FROM due WHERE j."paymentId" = due."paymentId"
       RETURNING j."paymentId", j.attempts, j.revision, j."createdAt"`,
@@ -44,7 +44,7 @@ export class PaymentReconciliationService {
       let completed = false;
       let errorCode: string | null = null;
       try {
-        completed = await this.payments.reconcileFlexPayDeposit(job.paymentId);
+        completed = await this.payments.reconcilePayment(job.paymentId);
       } catch {
         // Provider bodies can contain personal data: do not persist/log them here.
         errorCode = 'VERIFICATION_OR_SETTLEMENT_FAILED';
@@ -55,7 +55,7 @@ export class PaymentReconciliationService {
       );
       // A callback received during settlement must not be acknowledged by stale work.
       await this.source.query(
-        `UPDATE payment_reconciliation_jobs SET
+        `UPDATE payment_settlement_jobs SET
         "completedAt" = CASE WHEN $3 AND revision = $6 THEN now() ELSE NULL END,
         "nextAttemptAt" = CASE WHEN revision <> $6 THEN LEAST("nextAttemptAt", now() + interval '1 minute')
           ELSE now() + $4::double precision * interval '1 second' END,
