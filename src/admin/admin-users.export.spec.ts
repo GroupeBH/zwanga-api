@@ -35,13 +35,14 @@ function createUsersQueryMock() {
     subQuery: jest.fn().mockReturnValue(vehicleQuery),
     andWhere: jest.fn(),
     orderBy: jest.fn(),
+    addOrderBy: jest.fn(),
     skip: jest.fn(),
     take: jest.fn(),
     getManyAndCount: jest.fn(),
     getMany: jest.fn(),
     getCount: jest.fn(),
   };
-  for (const method of ['andWhere', 'orderBy', 'skip', 'take'] as const) {
+  for (const method of ['andWhere', 'orderBy', 'addOrderBy', 'skip', 'take'] as const) {
     query[method].mockReturnValue(query);
   }
   return query;
@@ -96,6 +97,9 @@ describe('AdminController user vehicle filter contract', () => {
       '2026-10-19',
       'JEAN',
       'car',
+      'suspended',
+      'name',
+      'ASC',
     );
     expect(service.getAllUsers).toHaveBeenCalledWith(
       2,
@@ -105,6 +109,9 @@ describe('AdminController user vehicle filter contract', () => {
       '2026-10-19',
       'JEAN',
       'car',
+      'suspended',
+      'name',
+      'ASC',
     );
     const response = { set: jest.fn() };
     await controller.exportUsers(
@@ -114,6 +121,9 @@ describe('AdminController user vehicle filter contract', () => {
       '2026-10-19',
       'JEAN',
       'car',
+      'suspended',
+      'name',
+      'ASC',
     );
     expect(service.exportUsersXls).toHaveBeenCalledWith(
       'driver',
@@ -121,6 +131,9 @@ describe('AdminController user vehicle filter contract', () => {
       '2026-10-19',
       'JEAN',
       'car',
+      'suspended',
+      'name',
+      'ASC',
     );
     expect(response.set).toHaveBeenCalledWith(
       expect.objectContaining({ 'Cache-Control': 'no-store' }),

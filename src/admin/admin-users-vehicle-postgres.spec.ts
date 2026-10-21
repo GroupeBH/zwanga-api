@@ -2,7 +2,7 @@ import { randomUUID } from 'crypto';
 import { DataSource, Table } from 'typeorm';
 import { IsolatedPostgres } from '../../test/isolated-postgres';
 import { typeOrmEntities } from '../database/entities';
-import { User, UserRole } from '../users/entities/user.entity';
+import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { KycDocument, KycStatus } from '../users/entities/kyc-document.entity';
 import { Vehicle, VehicleType } from '../vehicles/entities/vehicle.entity';
 import { AdminService } from './admin.service';
@@ -10,7 +10,7 @@ import { AdminService } from './admin.service';
 // Opt-in disposable loopback cluster; never loads .env or an application DB URL.
 const bin = process.env.AUDIT_TEST_POSTGRES_BIN;
 (bin ? describe : describe.skip)(
-  'admin vehicle filters on isolated PostgreSQL',
+  'admin user filters and sorting on isolated PostgreSQL',
   () => {
     let cluster: IsolatedPostgres, db: DataSource, service: AdminService;
 
@@ -224,6 +224,196 @@ const bin = process.env.AUDIT_TEST_POSTGRES_BIN;
         )
       ).buffer.toString('utf8');
       expect(xml.match(/<Row>/g)).toHaveLength(3);
+    });
+
+    it.each(Object.values(UserStatus))(
+      'filters list/count/export by status %s before pagination',
+      async (status) => {
+        const users = await Promise.all(
+          Object.values(UserStatus).map((value) =>
+            addUser({
+              status: value,
+              firstName: value,
+              isActive: value === UserStatus.ACTIVE,
+            }),
+          ),
+        );
+        const matching = users.find((u) => u.status === status)!;
+        const result = await service.getAllUsers(
+          1,
+          1,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          status,
+        );
+        expect(result.total).toBe(1);
+        expect(result.users.map((u) => u.id)).toEqual([matching.id]);
+        const xml = (
+          await service.exportUsersXls(
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            status,
+          )
+        ).buffer.toString('utf8');
+        expect(xml).toContain(matching.id);
+        for (const user of users.filter((u) => u.id !== matching.id))
+          expect(xml).not.toContain(user.id);
+      },
+    );
+
+    it('orders names consistently across pages and export, retaining disabled identities', async () => {
+      const zoe = await addUser({
+        firstName: 'Zoe',
+        lastName: 'zulu',
+        status: UserStatus.SUSPENDED,
+        isActive: false,
+      });
+      const eric = await addUser({
+        firstName: 'Eric',
+        lastName: 'écho',
+        status: UserStatus.SUSPENDED,
+        isActive: false,
+      });
+      const alice = await addUser({
+        firstName: 'Alice',
+        lastName: 'Alpha',
+        status: UserStatus.SUSPENDED,
+        isActive: false,
+      });
+      const bob = await addUser({
+        firstName: 'Bob',
+        lastName: 'alpha',
+        status: UserStatus.SUSPENDED,
+        isActive: false,
+      });
+      for (const order of ['ASC', 'DESC']) {
+        const expected =
+          order === 'ASC' ? [alice, bob, eric, zoe] : [zoe, eric, bob, alice];
+        const ids: unknown[] = [];
+        for (let page = 1; page <= 4; page++) {
+          const result = await service.getAllUsers(
+            page,
+            1,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            'suspended',
+            'name',
+            order,
+          );
+          expect(result.total).toBe(4);
+          expect(result.users[0]).toMatchObject({
+            displayName: `${expected[page - 1].firstName} ${expected[page - 1].lastName}`,
+            isDeleted: false,
+          });
+          ids.push(result.users[0].id);
+        }
+        expect(ids).toEqual(expected.map((u) => u.id));
+        const xml = (
+          await service.exportUsersXls(
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            'suspended',
+            'name',
+            order,
+          )
+        ).buffer.toString('utf8');
+        const positions = expected.map((u) => xml.indexOf(u.id));
+        expect(positions).toEqual([...positions].sort((a, b) => a - b));
+      }
+    });
+
+    it.each(['createdAt', 'updatedAt', 'lastLoginAt'])(
+      'orders %s both ways with stable ties and nulls last',
+      async (field) => {
+        const older = await addUser({
+          [field]: new Date('2026-10-01T00:00:00Z'),
+        });
+        const newer = await addUser({
+          [field]: new Date('2026-10-02T00:00:00Z'),
+        });
+        const twin = await addUser({
+          [field]: new Date('2026-10-02T00:00:00Z'),
+        });
+        const twins = [newer.id, twin.id].sort();
+        const missing = field === 'lastLoginAt' ? await addUser() : undefined;
+        for (const order of ['ASC', 'DESC']) {
+          const result = await service.getAllUsers(
+            1,
+            10,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            field,
+            order,
+          );
+          const expected =
+            order === 'ASC'
+              ? [older.id, ...twins]
+              : [...twins].reverse().concat(older.id);
+          if (missing) expected.push(missing.id);
+          expect(result.users.map((u) => u.id)).toEqual(expected);
+        }
+      },
+    );
+
+    it('labels only truly anonymized accounts as deleted and preserves inactive names in export', async () => {
+      const deleted = await addUser({
+        firstName: 'Compte',
+        lastName: 'supprimé',
+        status: UserStatus.INACTIVE,
+        isActive: false,
+      });
+      const inactive = await addUser({
+        firstName: 'Paul',
+        lastName: 'Mukendi',
+        status: UserStatus.INACTIVE,
+        isActive: false,
+      });
+      const result = await service.getAllUsers(
+        1,
+        10,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        'inactive',
+      );
+      expect(result.users.find((u) => u.id === deleted.id)).toMatchObject({
+        displayName: 'Compte supprimé',
+        isDeleted: true,
+      });
+      expect(result.users.find((u) => u.id === inactive.id)).toMatchObject({
+        displayName: 'Paul Mukendi',
+        isDeleted: false,
+      });
+      const xml = (
+        await service.exportUsersXls(
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          'inactive',
+        )
+      ).buffer.toString('utf8');
+      expect(xml).toContain('Mukendi');
+      expect(xml).toContain('Supprimé (anonymisé)');
     });
 
     it('combines vehicle type with role/KYC, search and registration dates identically in the export', async () => {

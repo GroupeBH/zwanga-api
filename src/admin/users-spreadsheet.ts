@@ -19,6 +19,7 @@ export type UsersSpreadsheetRow = {
   hasActiveVehicle?: boolean;
   status: UserStatus | string;
   isActive: boolean;
+  isDeleted?: boolean;
   isEmailVerified: boolean;
   isPhoneVerified: boolean;
   lastLoginAt?: Date | string | null;
@@ -100,7 +101,7 @@ export const buildUsersSpreadsheet = (
       yesNo(Boolean(user.isQualifiedDriver)),
       yesNo(Boolean(user.hasApprovedKyc)),
       yesNo(Boolean(user.hasActiveVehicle)),
-      STATUS_LABELS[user.status] ?? user.status,
+      user.isDeleted ? 'Supprimé (anonymisé)' : STATUS_LABELS[user.status] ?? user.status,
       yesNo(Boolean(user.isActive)),
       yesNo(Boolean(user.isEmailVerified)),
       yesNo(Boolean(user.isPhoneVerified)),

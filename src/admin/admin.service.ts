@@ -52,10 +52,14 @@ import { CreateAdminAccountDto } from './dto/admin-account.dto';
 import { provisionAdminAccount } from './admin-account.provisioning';
 import {
   AdminUserSegment,
+  AdminUserSort,
+  adminUserSortExpressions,
   USER_SEARCH_SQL,
   normalizeUserSearch,
   parseAdminUserSegment,
   parseAdminVehicleType,
+  parseAdminUserStatus,
+  parseAdminUserSort,
   parseRegistrationRange,
   userSearchLikePattern,
 } from './dto/admin-users.dto';
@@ -80,6 +84,7 @@ import {
 } from './admin-spreadsheets';
 import type { SpreadsheetFile } from './spreadsheet';
 import { KycEvidenceRepository } from '../users/kyc-evidence/kyc-evidence.repository';
+import { adminUserIdentity } from './admin-user-identity';
 
 type Coordinates = [number, number] | null;
 type WalletAccountWithUser = WalletAccount & { user?: User | null };
@@ -327,19 +332,24 @@ export class AdminService {
     registeredTo?: string,
     search?: string,
     vehicleType?: string,
+    status?: string,
+    sortBy?: string,
+    sortOrder?: string,
   ): Promise<{ users: Array<Record<string, unknown>>; total: number }> {
     const { pageNumber, pageSize } = this.normalizePagination(page, limit);
     const roleFilter = parseAdminUserSegment(role);
     const vehicleTypeFilter = parseAdminVehicleType(vehicleType);
+    const statusFilter = parseAdminUserStatus(status);
+    const sort = parseAdminUserSort(sortBy, sortOrder);
     const registered = parseRegistrationRange(registeredFrom, registeredTo);
     this.logger.debug(
       `Fetching all users - Page: ${pageNumber}, Limit: ${pageSize}, Role: ${roleFilter ?? 'all'}`,
     );
 
-    const query = this.createUsersListQuery(
-      roleFilter, registered, search, vehicleTypeFilter,
+    const query = this.applyUsersListOrder(
+      this.createUsersListQuery(roleFilter, registered, search, vehicleTypeFilter, statusFilter),
+      sort,
     )
-      .orderBy('user.createdAt', 'DESC')
       .skip((pageNumber - 1) * pageSize)
       .take(pageSize);
 
@@ -359,6 +369,9 @@ export class AdminService {
     registeredTo?: string,
     search?: string,
     vehicleType?: string,
+    status?: string,
+    sortBy?: string,
+    sortOrder?: string,
   ): Promise<{
     buffer: Buffer;
     filename: string;
@@ -366,16 +379,17 @@ export class AdminService {
   }> {
     const roleFilter = parseAdminUserSegment(role);
     const vehicleTypeFilter = parseAdminVehicleType(vehicleType);
+    const statusFilter = parseAdminUserStatus(status);
+    const sort = parseAdminUserSort(sortBy, sortOrder);
     const registered = parseRegistrationRange(registeredFrom, registeredTo);
     this.logger.debug(
       `Exporting users spreadsheet - Role: ${roleFilter ?? 'all'}`,
     );
 
-    const users = await this.createUsersListQuery(
-      roleFilter, registered, search, vehicleTypeFilter,
-    )
-      .orderBy('user.createdAt', 'DESC')
-      .getMany();
+    const users = await this.applyUsersListOrder(
+      this.createUsersListQuery(roleFilter, registered, search, vehicleTypeFilter, statusFilter),
+      sort,
+    ).getMany();
     const serialized = await this.serializeUsersWithDriverQualification(
       users, vehicleTypeFilter,
     );
@@ -856,7 +870,10 @@ export class AdminService {
     const suspendedUser = await this.userRepository.save(user);
 
     this.logger.warn(`User ${userId} suspended by admin ${adminId}`);
-    return this.sanitizeUser(suspendedUser);
+    return {
+      ...this.sanitizeUser(suspendedUser),
+      ...adminUserIdentity(suspendedUser),
+    };
   }
 
   async activateUser(userId: string, adminId: string) {
@@ -880,7 +897,10 @@ export class AdminService {
     const activatedUser = await this.userRepository.save(user);
 
     this.logger.log(`User ${userId} activated by admin ${adminId}`);
-    return this.sanitizeUser(activatedUser);
+    return {
+      ...this.sanitizeUser(activatedUser),
+      ...adminUserIdentity(activatedUser),
+    };
   }
 
   async getAllTrips(
@@ -1195,6 +1215,7 @@ export class AdminService {
     registered?: { from?: Date; to?: Date },
     search?: string,
     vehicleType?: VehicleType,
+    status?: UserStatus,
   ) {
     const query = roleFilter
       ? applyAdminUserSegmentFilter(
@@ -1202,6 +1223,10 @@ export class AdminService {
           roleFilter,
         )
       : this.userRepository.createQueryBuilder('user');
+
+    if (status) {
+      query.andWhere('user.status = :adminUserStatus', { adminUserStatus: status });
+    }
 
     if (vehicleType) {
       // EXISTS filters before pagination/counting, without duplicating owners
@@ -1237,6 +1262,16 @@ export class AdminService {
     }
 
     return query;
+  }
+
+  private applyUsersListOrder(query: SelectQueryBuilder<User>, sort: AdminUserSort) {
+    const [primary, ...secondary] = adminUserSortExpressions(sort);
+    query.orderBy(primary, sort.sortOrder, 'NULLS LAST');
+    for (const expression of secondary) {
+      query.addOrderBy(expression, sort.sortOrder, 'NULLS LAST');
+    }
+    // Stable pages when several users share a date or a name.
+    return query.addOrderBy('user.id', sort.sortOrder);
   }
 
   private createKycListQuery(status?: KycStatus, search?: string) {
@@ -1445,6 +1480,7 @@ export class AdminService {
     const qualifications = await this.loadDriverQualifications(users, vehicleType);
     return users.map((user) => ({
       ...this.sanitizeUser(user)!,
+      ...adminUserIdentity(user),
       ...qualifications.get(user.id),
     }));
   }

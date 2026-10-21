@@ -1885,6 +1885,14 @@ Swagger résume l’opération ainsi : « Get all users (paginated) ». La route
 - `role` — facultatif. Type `string`.
 - `registeredFrom` — facultatif. Type `string`.
 - `registeredTo` — facultatif. Type `string`.
+- `status` — facultatif : `active`, `inactive`, `suspended`, `pending_kyc`. Vide ou `all` désactive ce filtre. Il filtre le champ `status`, indépendamment du rôle ; `inactive` inclut les comptes désactivés et ceux anonymisés après suppression.
+- `sortBy` — facultatif : `createdAt` (inscription, défaut), `updatedAt` (dernière modification), `lastLoginAt` (dernière connexion), `name`, `firstName`, `lastName`.
+- `sortOrder` — facultatif : `ASC` ou `DESC` (minuscules acceptées). Défaut : `DESC` pour les dates, `ASC` pour les noms. `name`/`lastName` trient par nom puis prénom, `firstName` par prénom puis nom. Le tri ignore la casse et les accents latins courants ; les dates absentes restent en fin de liste. L'identifiant départage les ex æquo pour stabiliser la pagination.
+- `search` et `vehicleType` — filtres existants, combinables avec le statut, le rôle et les dates d'inscription.
+
+Exemples : `GET /api/v1/admin/users?role=driver&status=suspended&sortBy=name&sortOrder=ASC` ; `GET /api/v1/admin/users?sortBy=createdAt&sortOrder=DESC`.
+
+La réponse conserve `{ users, total }`. Les identités administratives ajoutent `displayName` (prénom et nom conservés, même si le compte est désactivé/suspendu) et `isDeleted`. Ce dernier vaut `true` uniquement lorsque le marqueur historique d'anonymisation est présent : statut `inactive`, `isActive=false`, nom « Compte supprimé » et identifiants de connexion effacés. Le frontend ne doit **pas** déduire une suppression de `isActive=false` seul. Aucun nom déjà effacé n'est restauré, et la suppression volontaire conserve son anonymisation. Les nouvelles valeurs invalides de filtre/tri donnent une erreur 400, sans changer les permissions admin.
 
 <a id="put-api-v1-admin-users-userid-activate"></a>
 ### PUT `/api/v1/admin/users/:userId/activate`
@@ -1985,6 +1993,7 @@ Swagger résume l’opération ainsi : « Export users as an Excel .xls spreadsh
 - `role` — facultatif. Type `string`.
 - `registeredFrom` — facultatif. Type `string`.
 - `registeredTo` — facultatif. Type `string`.
+- `status`, `sortBy`, `sortOrder`, `search`, `vehicleType` — mêmes valeurs et comportement que `GET /api/v1/admin/users`. L'export applique les mêmes filtres et le même ordre, sans pagination. Les noms des comptes désactivés restent présents ; un compte anonymisé porte le libellé de statut « Supprimé (anonymisé) ».
 
 <a id="get-api-v1-admin-users-stats"></a>
 ### GET `/api/v1/admin/users/stats`

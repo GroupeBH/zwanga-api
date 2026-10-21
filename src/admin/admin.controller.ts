@@ -17,7 +17,7 @@ import type { Response } from 'express';
 import { AdminService } from './admin.service';
 import { Auth } from '../auth/decorators/auth.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
-import { UserRole } from '../users/entities/user.entity';
+import { UserRole, UserStatus } from '../users/entities/user.entity';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
 import { UpdateTripDto } from '../trips/dto/trip.dto';
 import { UpdateTripRequestDto } from '../trip-requests/dto/trip-request.dto';
@@ -29,6 +29,7 @@ import { TripStatementService } from './trip-statement.service';
 import { CreateAdminAccountDto, ResetAdminAccountPasswordDto } from './dto/admin-account.dto';
 import { spreadsheetHeaders, type SpreadsheetFile } from './spreadsheet';
 import { VehicleType } from '../vehicles/entities/vehicle.entity';
+import { ADMIN_USER_SORT_FIELDS } from './dto/admin-users.dto';
 
 interface AuthenticatedAdminRequest {
   user: { userId: string };
@@ -145,6 +146,9 @@ export class AdminController {
   @Roles(UserRole.ADMIN)
   @SensitiveThrottle(30, 60000) // 30 requests per minute per IP
   @ApiOperation({ summary: 'Get all users (paginated)' })
+  @ApiQuery({ name: 'status', enum: UserStatus, required: false })
+  @ApiQuery({ name: 'sortBy', enum: ADMIN_USER_SORT_FIELDS, required: false })
+  @ApiQuery({ name: 'sortOrder', enum: ['ASC', 'DESC'], required: false })
   @ApiQuery({
     name: 'vehicleType', enum: VehicleType, required: false,
     description: 'Users owning an active vehicle of this type; activeVehicleType reflects the matching type.',
@@ -157,6 +161,9 @@ export class AdminController {
     @Query('registeredTo') registeredTo?: string,
     @Query('search') search?: string,
     @Query('vehicleType') vehicleType?: string,
+    @Query('status') status?: string,
+    @Query('sortBy') sortBy?: string,
+    @Query('sortOrder') sortOrder?: string,
   ) {
     return this.adminService.getAllUsers(
       page,
@@ -166,6 +173,9 @@ export class AdminController {
       registeredTo,
       search,
       vehicleType,
+      status,
+      sortBy,
+      sortOrder,
     );
   }
 
@@ -173,6 +183,9 @@ export class AdminController {
   @Auth()
   @Roles(UserRole.ADMIN)
   @SensitiveThrottle(10, 60000)
+  @ApiQuery({ name: 'status', enum: UserStatus, required: false })
+  @ApiQuery({ name: 'sortBy', enum: ADMIN_USER_SORT_FIELDS, required: false })
+  @ApiQuery({ name: 'sortOrder', enum: ['ASC', 'DESC'], required: false })
   @ApiOperation({
     summary:
       'Export users as an Excel .xls spreadsheet, with the same filters as the user list',
@@ -188,6 +201,9 @@ export class AdminController {
     @Query('registeredTo') registeredTo?: string,
     @Query('search') search?: string,
     @Query('vehicleType') vehicleType?: string,
+    @Query('status') status?: string,
+    @Query('sortBy') sortBy?: string,
+    @Query('sortOrder') sortOrder?: string,
   ) {
     const file = await this.adminService.exportUsersXls(
       role,
@@ -195,6 +211,9 @@ export class AdminController {
       registeredTo,
       search,
       vehicleType,
+      status,
+      sortBy,
+      sortOrder,
     );
     return this.sendSpreadsheet(res, file);
   }
