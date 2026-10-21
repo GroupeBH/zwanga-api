@@ -21,6 +21,18 @@ import {
 import { UserRole } from '../users/entities/user.entity';
 
 describe('financial notification coverage', () => {
+  it.each(['PTS', 'POINTS'])('presents the current 500-token welcome offer in %s', currency => {
+    const result = walletMovementNotification({
+      id: 'welcome-new', userId: 'driver', type: WalletLedgerEntryType.LOYALTY_REWARD,
+      relatedEntityType: 'welcome_bonus', amount: 500, currency, balanceAfter: 570,
+    } as WalletLedgerEntry, UserRole.DRIVER)!;
+    expect(result.body).toBe(
+      'Bienvenue chez Zwanga ! 5 000 FC vous sont offerts sous forme de 500 jetons Zwanga pour vous permettre de payer votre abonnement Pro.',
+    );
+    expect(result.data).toMatchObject({ amount: 500, balanceAfter: 570 });
+    expect(result.body).not.toContain('abonnement activé');
+  });
+
   it.each(['PTS', 'POINTS'])('presents the new 200-token welcome offer in %s', currency => {
     const result = walletMovementNotification({
       id: 'welcome', userId: 'driver', type: WalletLedgerEntryType.LOYALTY_REWARD,

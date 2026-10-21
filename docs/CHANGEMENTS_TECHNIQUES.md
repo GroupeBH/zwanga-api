@@ -1,5 +1,88 @@
 # Journal des changements techniques
 
+## 20 octobre 2026 — Correction UUID des confirmations de demande acceptée
+
+- **Cause confirmée :** `ride-response-delivery.ts` comparait `trips.id` (UUID) à `trip_requests.tripId` (varchar), puis cette référence texte à un paramètre UUID. PostgreSQL refusait la requête avec `42883`, avant tout envoi du push `trip_request_accepted`, même pour une demande dont le trajet n'était pas encore créé. Les tests unitaires simulant la requête ne détectaient pas cette incompatibilité.
+- **Correctif :** conversion explicite et protégée de la référence vers UUID pour la jointure ; comparaison du paramètre UUID avec `trips.id`. Le guide PostgreSQL a conduit à conserver la clé primaire non convertie, pour maintenir son index utilisable. Une ancienne référence mal formée ou pointant vers un trajet absent rend le message obsolète sans erreur SQL. Les contrôles du destinataire, du conducteur sélectionné, de l'état du trajet et de `selectedAt` restent actifs.
+- **Reprise :** le worker existant peut reprendre les notifications encore actives dont la prise en charge a expiré (120 secondes), après vérification de l'état métier courant. Pas de remise en attente globale ni de replay des messages déjà envoyés. Aucune notification réelle déclenchée par les tests.
+- **Validation :** trois nouveaux scénarios PostgreSQL ont d'abord reproduit l'erreur sur l'ancien code (sans trajet, trajet à venir, trajet en cours). Après correction : **46 tests PostgreSQL réels réussis**, **67 tests unitaires ciblés réussis**, compilation TypeScript sans émission validée. La suite PostgreSQL existante a été enrichie avec le vrai type varchar de la référence, les reprises, les décisions obsolètes, les références invalides, les réservations et l'absence de doublons ; aucun nouveau paramétrage CI/CD nécessaire.
+- **Vérification locale en lecture seule :** la requête corrigée réussit également pour la notification signalée, dont l'état métier permet toujours la livraison. Son dernier échec enregistré est désormais « Aucun token push actif pour cet utilisateur » : la correction SQL ne remplace pas l'enregistrement du jeton de l'appareil par l'application. Aucun envoi ni réarmement manuel de cette notification n'a été exécuté pendant la vérification.
+- **Périmètre :** modification locale du code et des tests uniquement, aucune migration supplémentaire pour ce correctif, aucun changement des données applicatives, de `.env`, Terraform, AWS ou GitHub. Ce résultat corrige le défaut identifié ; il ne constitue pas une validation de l'état actuel des migrations AWS ni une garantie générale de déploiement.
+
+## 20 octobre 2026 — Passage immédiat au conducteur suivant après refus
+
+- **Commandes immédiates :** `DriverDispatchService` propose désormais une demande à un seul conducteur éligible à la fois, par distance croissante dans le rayon existant de 5 km. Le refus et l'invitation du suivant (avec sa notification persistante) sont enregistrés dans la même transaction, sans attendre le cron global ni son lot de 25 demandes. Chaque conducteur n'est sollicité qu'une fois pour une même demande.
+- **Fin du délai :** le délai de réponse reste configurable par `DRIVER_DISPATCH_RESPONSE_SECONDS` (30 secondes par défaut). Le cycle existant, toutes les 5 secondes, poursuit la recherche après expiration ; sous charge, plusieurs cycles peuvent être nécessaires. La recherche s'arrête après acceptation, annulation ou expiration de la demande. Sans candidat, la demande reste ouverte et peut trouver un nouveau conducteur disponible à un cycle ultérieur.
+- **Fiabilité :** le guide PostgreSQL a orienté la transaction courte et l'ordre de verrouillage demande → offre → présence. Les refus répétés ne sautent pas de conducteur, deux workers ne créent pas deux propositions pour la même demande et les appels push restent hors transaction. Un ancien push ne peut plus réactiver une offre expirée ; la prolongation bornée d'une offre encore valide en attente d'envoi est conservée.
+- **Compatibilité :** mêmes routes, DTO, réponses et protocole de sonnerie mobile. L'application appelle déjà `PUT /driver-dispatch/offers/:id/respond` avec `decision: decline`. Les invitations déjà émises par l'ancien broadcast restent valides jusqu'à leur réponse/expiration, sans nouvelle diffusion ajoutée en parallèle. Les alertes de demandes programmées et de partage d'un trajet en cours restent inchangées, avec consentement du passager pour le partage.
+- **Livraison :** déclenchement de la voie push urgente après commit ; la réception et la sonnerie physique dépendent toujours du transport push, des permissions et du téléphone. Pas de promesse de sonnerie instantanée si le téléphone est hors ligne. Le passage séquentiel est effectif une fois toutes les instances de l'ancien backend remplacées.
+- **Vérifications :** 53 tests réussis dans `dispatch-postgres.spec.ts` sur PostgreSQL/PostGIS local jetable, dont chaîne de refus, première acceptation, concurrence, délai dépassé, anciens pushes, compatibilité broadcast et plus de 50 candidats. Compilation TypeScript validée. Aucun appel push réel ni test sur téléphone.
+- **Non-régression générale :** première exécution : 2 505 réussites, 361 tests d'intégration non activés et quatre échecs dans `trip-request-price.spec.ts`. Ces quatre échecs provenaient du simulateur de base qui ne fournissait pas `manager.transaction`, déjà utilisé par l'acceptation avec notification persistante. Seul le simulateur de ce test a été adapté, avec assertions supplémentaires sur la transaction et la notification, sans modification du code métier de prix. Relance de ce fichier et de `dispatch-handoff.spec.ts` : 21 tests réussis.
+- **Relance finale ciblée :** `npm test -- --runInBand --testPathPatterns 'trip-requests|notifications|driver-action'` : 435 tests réussis dans 31 suites, 95 tests PostgreSQL non activés dans cette commande (la suite dispatch a été exécutée séparément ci-dessus). Pas de seconde exécution intégrale après la correction du seul simulateur de prix.
+- **Périmètre local :** aucune nouvelle migration requise pour ce changement ; réutilisation du schéma et des index de dispatch existants. Aucun changement AWS, Terraform, CI/CD, `.env` réel ou publication GitHub.
+
+## 20 octobre 2026 — Correctifs de fiabilité financière, sans Terraform
+
+- **Périmètre :** achats Pro en jetons atomiques, protection des succès FlexPay contre les réponses tardives, reprise durable des règlements FlexPay/PawaPay, récupération des réservations de parrainage jamais envoyées, contrôle des callbacks périmés, assiette finale des commissions et allègement des GET de parrainage.
+- **Base :** migration `1780000083000-FinancialRecovery`, nouvelle file versionnée pour compatibilité avec les anciens workers, garde SQL contre l'envoi après libération, index ciblés. Le guide PostgreSQL a conduit à garder les transactions courtes, les verrous dans l'ordre utilisateur → retrait → paiement, et les appels prestataires hors transaction.
+- **Non-régression :** mêmes endpoints et contrats mobiles, montants/historiques conservés. Pas de libération d'un paiement prestataire incertain, pas de replay global. Les anciens historiques non paginés restent un risque de volume documenté jusqu'à migration des clients.
+- **Exploitation :** appliquer les migrations avant le backend ; `/health` contrôle la présence du nouveau schéma. Aucune modification Terraform, CI/CD, AWS, secrets ni publication GitHub. Procédure et limites dans le [journal financier](finance/CHANGELOG.md).
+
+## 20 octobre 2026 — Parrainage abonnement à 1 % uniquement
+
+- **Demande :** réduire le pourcentage du parrain sur un abonnement éligible de 5 % à 1 %, sans modifier les autres règles financières.
+- **Appliqué :** `src/referrals/referrals.service.ts` utilise 1 % par défaut et plafonne également les anciennes variables à 1 %. `.env.example`, le guide du parrainage et son exemple chiffré sont alignés ; le résumé API utilise le même calcul. Les variables réelles et l'application mobile ne sont pas modifiées.
+- **Préservé :** récompenses historiques non recalculées, déduplication des callbacks, exclusions des abonnements gratuits/en jetons, absence de bonus au rattachement, 1 % trajet et 5 % commission plateforme. Aucun changement de schéma ni migration supplémentaire.
+- **Vérifications :** tests des configurations anciennes/invalides/absentes, prestataires FlexPay/PawaPay et récompenses historiques dans `referrals.service.spec.ts` ; résultats dans le [journal financier](finance/CHANGELOG.md). Aucun appel prestataire réel, aucune modification AWS, Terraform, CI/CD ou GitHub.
+
+## 20 octobre 2026 — Plus de bonus au rattachement d'un filleul
+
+- **Demande :** le parrain gagne uniquement un pourcentage des abonnements et trajets éligibles du filleul, plus de crédit à l'inscription ou au rattachement.
+- **Appliqué :** `referrals.service.ts` supprime `creditAttributionBonus` et sa configuration ; réponse compatible `attributionBonusTokens: 0`. Les inscriptions par code/lien, le rattachement authentifié et l'action admin partagent ce chemin sans crédit. Le push de nouveau filleul n'annonce aucun gain immédiat. `.env.example` marque la variable obsolète ; `.env` réel inchangé.
+- **Audit préservé :** migration additive `1780000082000-ReferralAttributionAudit`, entité `ReferralProfile` et documentation Swagger admin. L'identifiant et le motif admin, auparavant dans le bonus financier, sont désormais enregistrés dans la transaction du premier rattachement et ne sont pas sélectionnés par défaut. Répétitions et retours arrière ne peuvent pas écraser une trace. Aucun ancien solde ni journal modifié.
+- **Conservé :** 5 % abonnement, 1 % trajet terminé/payé, exclusions des paiements gratuits/Pro en jetons, retenue sept jours, fenêtre douze mois, taux 10 FC et minimum de retrait 1 000 jetons disponibles. Le bonus de bienvenue 500 reste indépendant.
+- **Mobile :** texte explicatif dans `app/referrals.tsx`, assertion de rendu dans `tests/referralScreenPerformance.test.js`, [journal mobile](../../zwanga/docs/CHANGEMENTS_TECHNIQUES.md). Le contrôle financier reste serveur.
+- **Vérifications :** 29 tests PostgreSQL réels et 77 tests mobiles ciblés réussis ; détails finaux backend/TypeScript dans le [journal financier](finance/CHANGELOG.md). Prestataires simulés, pas de test sur téléphone.
+- **Activation :** appliquer la migration 82 via la tâche existante avant le nouveau backend, puis remplacer toutes les instances qui attribuaient encore cinq jetons. Rien n'est déployé ici ; CI/CD, Terraform, AWS et GitHub inchangés.
+
+## 20 octobre 2026 — Jeton à 10 FC, bienvenue à 500 et retraits du parrainage disponible
+
+- **Périmètre et décisions :** nouveau taux de 10 FC pour tous les jetons, futurs bonus de 500 jetons pour maintenir les 5 000 FC, retrait dès 1 000 jetons disponibles. Réseau du tableur abandonné sur instruction explicite ; système de parrainage existant conservé.
+- **Backend :** `wallet/token-value.policy.ts` devient la référence à 10, utilisée par les conversions existantes. `referral-withdrawal-balance.ts` vérifie le minimum, les décimales et le disponible puis réserve en centièmes sous le verrou existant ; aucun jeton en attente, réservé ou promotionnel ne finance le retrait. `referrals.service.ts` exclut explicitement les abonnements Pro en jetons des récompenses de parrainage, même avec un callback prestataire incohérent.
+- **Base :** migrations `1780000080000-TokenValue10Cdf` et `1780000081000-WelcomeBonus500Tokens` enregistrées, transactions et délais bornés selon le guide PostgreSQL. Nouveau défaut des réservations et future attribution de bienvenue uniquement ; anciens nombres de jetons, bonus 50/200, historiques et opérations engagées conservés. Pas de distribution dans la migration. Retour arrière de 81 refusé : correction en avant nécessaire.
+- **Mobile :** messages de refus, contrôle du disponible actualisé et double clic, lecture du taux serveur pour les recharges et du taux de réservation pour les paiements. Détails et vérifications dans le [journal mobile](../../zwanga/docs/CHANGEMENTS_TECHNIQUES.md).
+- **Validation :** 634 tests backend ciblés, puis 2 426 tests réussis dans la suite générale (337 tests d'intégration non activés par défaut). 25 tests PostgreSQL financiers exécutés séparément sur clusters locaux jetables et 203 tests mobiles ciblés réussis ; TypeScript backend et mobile validés. Prestataires simulés ; aucun test Mobile Money réel ni essai sur téléphone.
+- **Déploiement non réalisé :** aucun AWS, CI/CD, Terraform, `.env` réel ou GitHub modifié. Les deux migrations et une livraison backend sont nécessaires ; le nouvel affichage exige aussi une livraison mobile. Coordonnez la bascule : les anciennes instances calculent à 25, les nouvelles à 10, et le bonus SQL passe à 500 dès sa migration. [Règles et procédure financière](finance/purchased-token-withdrawals.md).
+
+## 20 octobre 2026 — Prix par place dans les notifications natives conducteur
+
+- **Problème :** les cartes Android Notifee disposaient de la destination,
+  mais le prix manquait dans les métadonnées des réservations et commandes
+  programmées. Le mobile ne doit pas effectuer une lecture réseau additionnelle
+  en veille pour le deviner.
+- **Solution préparée :** `src/notifications/ride-speech-data.ts` transporte
+  facultativement `ridePricePerSeat` et `ridePriceKind` (`fare` ou `budget`),
+  uniquement pour un nombre décimal valide, non négatif et borné. Un tarif
+  absent reste absent, un vrai zéro reste représentable.
+  `transactional-notifications.subscriber.ts` fournit le tarif publié par place ;
+  `dispatch.service.ts`, `scheduled-request-alert.ts` et `shared-trip-alert.ts`
+  fournissent le budget demandé par place. Les champs restent des chaînes
+  compatibles FCM. Aucun contenu privé supplémentaire autre que ce tarif.
+- **Conservé :** ciblage, SQL et transactions existants, consentement de partage,
+  délais, destinataires, contrôles d’accès et endpoints de décision inchangés.
+  Les travaux de partage en cours ne sont pas remplacés. Pas de migration ni de
+  lecture supplémentaire par conducteur.
+- **Vérifications :** 40 tests réussis dans quatre suites Jest : formateur
+  `ride-speech-data`, subscriber transactionnel, `scheduled-request-alert` et
+  `dispatch-speech`. Les assertions vérifient les vrais champs des producteurs,
+  les montants absents/invalides et le zéro explicite, sans base réelle.
+  L’intégration mobile est documentée dans le
+  [journal mobile](../../zwanga/docs/CHANGEMENTS_TECHNIQUES.md), entrée du même
+  jour « Actions Notifee et fiche de notification avec tarif et destination ».
+- **Limites :** changements locaux uniquement, aucun déploiement, accès à la
+  base ou envoi réel FCM/APNs. Les anciens clients ignorent les champs facultatifs.
+  Les cartes déjà envoyées ne sont pas réécrites.
+
 ## 20 octobre 2026 — Partager un trajet en cours avec accord du nouveau passager
 
 Le dispatch des courses indépendantes continue d’exclure les conducteurs

@@ -1780,50 +1780,29 @@ export class TripRequestsService {
     tripRequest.selectedVehicleId = vehicle.id;
     tripRequest.selectedPricePerSeat = pricePerSeat;
     tripRequest.selectedDriverRequiresPassengerKyc = requiresPassengerKyc;
-    tripRequest.selectedAt = new Date();
+    const selectedAt = new Date();
+    tripRequest.selectedAt = selectedAt;
     tripRequest.tripId = trip.id;
     tripRequest.driverPickupOverdueNotifiedAt = null;
-    await this.tripRequestRepository.save(tripRequest);
-
-    // Reject all pending offers for this trip request
-    await this.driverOfferRepository.update(
-      { tripRequestId, status: DriverOfferStatus.PENDING },
-      { status: DriverOfferStatus.REJECTED },
-    );
-
-    // Notify passenger
-    try {
-      const passenger = await this.userRepository.findOne({
-        where: { id: tripRequest.passengerId },
-        select: ['id', 'fcmToken', 'firstName'],
-      });
-
-      // Reload driver with firstName and lastName for notification
-      const driverWithName = await this.userRepository.findOne({
-        where: { id: driverId },
-        select: ['id', 'firstName', 'lastName'],
-      });
-
-      if (passenger?.fcmToken && driverWithName) {
-        await this.notificationService.sendNotification(
-          passenger.fcmToken,
-          'Commande acceptée',
-          `${driverWithName.firstName} ${driverWithName.lastName} a accepté votre commande de trajet`,
-          {
-            type: 'trip_request_accepted',
-            tripRequestId: tripRequest.id,
-            tripId: trip.id,
-            driverId: driverId,
-            requiresPassengerKyc: requiresPassengerKyc ? 'true' : 'false',
-          },
-          tripRequest.passengerId,
-        );
+    await this.tripRequestRepository.manager.transaction(async manager => {
+      const requests = manager.getRepository(TripRequest);
+      const current = await requests.findOne({ where: { id: tripRequestId }, lock: { mode: 'pessimistic_write' } });
+      if (!current || [TripRequestStatus.CANCELLED, TripRequestStatus.EXPIRED].includes(current.status) ||
+          (current.selectedDriverId && current.selectedDriverId !== driverId) ||
+          (current.tripId && current.tripId !== trip.id)) {
+        throw new ConflictException('Cette commande a changé. Actualisez ses détails.');
       }
-    } catch (error) {
-      this.logger.error(
-        `Failed to notify passenger about trip request acceptance: ${error.message}`,
+      await requests.save(tripRequest);
+      await manager.getRepository(DriverOffer).update(
+        { tripRequestId, status: DriverOfferStatus.PENDING }, { status: DriverOfferStatus.REJECTED },
       );
-    }
+      await enqueueTransactionalNotification(manager, {
+        eventKey: `request-accepted:${tripRequest.id}:${trip.id}`, userId: tripRequest.passengerId,
+        title: 'Commande acceptée', body: 'Un conducteur a accepté votre commande. Ouvrez-la pour voir les détails.',
+        data: { type: 'trip_request_accepted', tripRequestId, tripId: trip.id, driverId,
+          requiresPassengerKyc, selectedAt: selectedAt.toISOString() },
+      });
+    });
 
     this.logger.log(
       `Trip request ${tripRequestId} accepted by driver ${driverId}, trip ${trip.id} created`,

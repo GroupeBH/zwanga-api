@@ -13,6 +13,7 @@ import { ReferralReward } from './entities/referral-reward.entity';
 import { ReferralWithdrawal } from './entities/referral-withdrawal.entity';
 import { ReferralsController } from './referrals.controller';
 import { ReferralsService } from './referrals.service';
+import { ReferralBookingReconciliationService } from './referral-booking-reconciliation.service';
 
 @Module({
   imports: [
@@ -31,7 +32,7 @@ import { ReferralsService } from './referrals.service';
     NotificationsModule,
   ],
   controllers: [ReferralsController],
-  providers: [ReferralsService],
+  providers: [ReferralsService, ReferralBookingReconciliationService],
   exports: [ReferralsService],
 })
 export class ReferralsModule {}

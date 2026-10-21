@@ -14,7 +14,7 @@ describe('driver finance API projections', () => {
     trip = {
       id: 'trip',
       driverId: 'driver',
-      pricePerSeat: 2500,
+      pricePerSeat: 1000,
       acceptedPaymentModes: ['cash', 'points'],
       isPrivate: false,
     };
@@ -47,7 +47,7 @@ describe('driver finance API projections', () => {
     };
     service = new DriverFinanceService(
       db as any,
-      { convertPointsToMoney: () => 25 } as any,
+      { convertPointsToMoney: () => 10 } as any,
       { getPremiumOverview: async () => ({ isActive: true }) } as any,
     );
   });
@@ -61,15 +61,15 @@ describe('driver finance API projections', () => {
     });
   });
 
-  it('prices a new 10000 CDF cash trip commission at 20 tokens, not 5', async () => {
+  it('prices a new 10000 CDF cash trip commission at 50 tokens, not 20', async () => {
     trip.pricePerSeat = 10000;
-    account.balance = 0;
+    account.balance = 30;
     account.reservedCashCommissionBalance = 0;
     debt = 5;
     expect((await service.tripOptions('passenger', 'trip')).availablePaymentModes).toContain('cash');
     debt = 5.01;
     expect((await service.tripOptions('passenger', 'trip')).availablePaymentModes).not.toContain('cash');
-    expect((await service.summary('driver')).cash).toMatchObject({ moneyPerToken: 25, debtLimitTokens: 25, debtAmount: 125.25 });
+    expect((await service.summary('driver')).cash).toMatchObject({ moneyPerToken: 10, debtLimitTokens: 25, debtAmount: 50.1 });
   });
   it('uses all seats and all free tokens, blocking cash above the aggregate debt limit', async () => {
     account.reservedCashCommissionBalance = 0;

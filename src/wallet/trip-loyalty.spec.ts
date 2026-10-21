@@ -155,7 +155,7 @@ describe('Trip loyalty: base token, paid bonus and replay protection', () => {
       }),
       5000,
     );
-    expect(entries.map((entry) => entry.amount)).toEqual([1, 2]);
+    expect(entries.map((entry) => entry.amount)).toEqual([1, 5]);
   });
 
   it('keeps the existing distance minimum for successful non-cash payments', async () => {

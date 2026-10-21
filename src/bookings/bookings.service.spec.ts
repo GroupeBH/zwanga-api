@@ -1312,6 +1312,11 @@ describe('BookingsService trip payments', () => {
       save: jest.fn(async (payload) => payload),
     };
     const manager = {
+      createQueryBuilder: jest.fn().mockReturnValue({
+        insert: jest.fn().mockReturnThis(), into: jest.fn().mockReturnThis(),
+        values: jest.fn().mockReturnThis(), onConflict: jest.fn().mockReturnThis(),
+        execute: jest.fn().mockResolvedValue({}),
+      }),
       getRepository: jest.fn((entity) =>
         entity === Booking
           ? transactionBookingRepository
@@ -1327,6 +1332,10 @@ describe('BookingsService trip payments', () => {
     });
 
     expect(result.status).toBe(BookingStatus.ACCEPTED);
+    expect(manager.createQueryBuilder().values).toHaveBeenCalledWith(expect.objectContaining({
+      eventKey: 'booking-response:booking-1:accepted', userId: 'passenger-1',
+      data: expect.objectContaining({ type: 'booking_response', status: 'accepted' }),
+    }));
     expect(transactionTripRepository.save).toHaveBeenCalledWith(
       expect.objectContaining({ availableSeats: 2 }),
     );

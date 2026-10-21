@@ -239,15 +239,13 @@ export class AdminReferralsService {
 
     const orderNumber = withdrawal.paymentTransaction?.orderNumber;
     if (!orderNumber) {
-      throw new BadRequestException(
-        "Ce retrait n'a pas de transaction FlexPay verifiable",
+      await this.referralsService.recoverUnsentWithdrawal(withdrawalId, adminId);
+    } else {
+      await this.referralsService.checkWithdrawalStatus(
+        withdrawal.userId,
+        orderNumber,
       );
     }
-
-    await this.referralsService.checkWithdrawalStatus(
-      withdrawal.userId,
-      orderNumber,
-    );
     const reconciled = await this.withdrawalRepository.findOne({
       where: { id: withdrawalId },
       relations: ['user', 'paymentTransaction'],

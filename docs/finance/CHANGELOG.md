@@ -1,5 +1,71 @@
 # Journal des modifications financières
 
+## 2026-10-21 — Reprises de retraits et commissions cash (local)
+
+- Retraits de parrainage : intention UUID facultative, unicité persistée, contrôle des paramètres sous verrou utilisateur, seul le créateur peut envoyer. Protection compatible des anciens clients sans clé, limitée pour leurs relances tardives après résultat terminal. Lecture du statut par UUID même sans numéro prestataire ; validation du téléphone RDC et du montant avant réservation.
+- Commission cash de 1 % au parrain du passager, sur sa part réellement déclarée encaissée par le conducteur, hors subvention. Pas de rétroactivité sur les reçus historiques. Les abonnements en jetons restent exclus conformément à la décision utilisateur.
+- File transactionnelle de commissions trajet (cash, jetons, électronique), reprise avec bail/révision/backoff et unicité de récompense. Vérification de l'existence d'un débit réel en jetons, exclusion des remboursements intégraux.
+- FlexPay : une vérification tardive en attente ne rouvre plus un dépôt échoué/annulé ; un succès vérifié ne peut pas être déclassé.
+- Migrations additives **85 et 86** avant le code, contrôle `/health` renforcé et correction en avant après utilisation. Aucun transfert ou crédit historique exécuté par les migrations.
+- Les quatre suites financières auparavant non activées utilisent maintenant les variables PostgreSQL déjà exportées dans le workflow ; aucun fichier CI/CD, Terraform, AWS ou environnement réel modifié.
+
+Validation : suite générale **2 521 tests réussis dans 217 suites**, 395 tests ignorés faute d'activation de leurs environnements ; vérifications PostgreSQL exécutées séparément : **214 tests réussis sur neuf suites**, trois scénarios existants ignorés. Deux tests supplémentaires du worker de commissions (échec isolé et perte d'acquittement) ont aussi été validés séparément. Compilation TypeScript sans émission et contrôle du diff réussis. Bases locales jetables et prestataires simulés, aucun débit/push réel ; pas de validation sur téléphone ni sur AWS. Voir les [contrats et limites de reprise](referral-program.md#21-octobre-2026--cash-confirmé-et-reprises-financières). Aucun code ne peut garantir la disparition de tous les incidents fournisseur ; les résultats incertains restent soumis au rapprochement, sans renvoi aveugle.
+
+## 2026-10-20 — Reprise financière et achats Pro atomiques (correctifs locaux)
+
+- **Pro en jetons :** débit, activation et bonus de 25 jetons dans une seule transaction PostgreSQL, avec verrou utilisateur. Deux achats concurrents réutilisent le même achat. Une ancienne souscription en attente déjà débitée est reprise à son prix d'origine ; des débits multiples incohérents nécessitent le support. Un paiement électronique Pro en cours bloque un nouvel achat en jetons. Une panne du cache après validation ne transforme pas l'achat réussi en échec.
+- **FlexPay :** les réponses tardives d'initiation, de timeout ou de vérification ne peuvent plus remplacer un succès ni effacer sa date de paiement. Une confirmation déjà reçue empêche également le déclenchement d'un second prestataire à partir d'une réponse de refus tardive.
+- **Reprise FlexPay/PawaPay :** même worker à bail et révision, désormais sur `payment_settlement_jobs`. La tâche n'est acquittée qu'après application des effets métier, y compris lorsque le paiement est déjà `succeeded`. Backoff conservé, aucune réémission d'un transfert. La pause `PAWAPAY_RECONCILIATION_ENABLED=false` bloque les vérifications distantes automatiques, pas la finalisation locale d'un résultat terminal déjà connu. Les remboursements PawaPay gardent leur tâche existante.
+- **Retraits de parrainage orphelins :** réservation de plus de quinze minutes, encore `pending`, sans aucun paiement associé : libération transactionnelle une seule fois, contrôle automatique toutes les cinq minutes (50 dossiers par passage) et rapprochement super-admin existant. L'envoi prend les mêmes verrous ; un trigger protège aussi contre une ancienne instance qui essaierait d'envoyer après libération. Dès qu'une transaction existe, même sans `orderNumber`, les fonds restent réservés tant que le prestataire est incertain. Un callback périmé ne peut pas rembourser un retrait confirmé en base.
+- **Cohérence des commissions :** après interruption et réduction tarifaire, la commission de parrainage électronique est calculée sur le montant final verrouillé, comme pour les paiements en jetons ; montant nul = aucune récompense, montant incohérent = refus pour régularisation. Les anciennes récompenses ne sont pas réécrites.
+- **Lectures du parrainage :** plus de libération synchrone de centaines de récompenses dans les GET. Traitement toutes les minutes ; le retrait actualise toujours les récompenses mûres avant de vérifier le disponible. Le lien court est rafraîchi en arrière-plan, dédupliqué et borné par instance ; la réponse utilise immédiatement le lien en cache ou le lien d'invitation de secours.
+
+### Prérequis de livraison et limites
+
+1. Appliquer **1780000083000-FinancialRecovery**, après les migrations précédentes, avec le mécanisme de migration existant (`npm run migration:run:prod` dans l'image construite, uniquement sur la base voulue). Cette commande **n'a pas été exécutée sur l'environnement applicatif ni sur AWS**. `/health` refuse le trafic si le schéma de reprise manque.
+2. Livrer ensuite le backend sur toutes les instances. L'ancienne file reste présente ; ses tâches ouvertes sont copiées. Les nouveaux événements alimentent la nouvelle file, qu'une ancienne version ne peut pas acquitter par erreur. Pendant un retour à l'ancien binaire, les nouveaux travaux attendront le rétablissement du worker récent ; ne pas supprimer la file.
+3. Surveiller les tâches non terminées et les avertissements `Payment reconciliation pending`, `REFERRAL_PAYOUT_RECOVERY_PENDING` et `REFERRAL_REWARD_RELEASE_PENDING`. Un paiement sans identifiant prestataire n'est **jamais** réémis ni libéré à l'aveugle. Le rapprochement support avec les preuves du prestataire reste requis.
+4. La migration ne recalcule aucun solde, n'envoie aucun paiement et n'effectue pas de replay global de l'historique. Elle reprend les travaux ouverts et des anomalies explicites (recharges sans crédit, abonnements non activés, retraits non finalisés). Les anciennes anomalies déjà masquées par un état métier terminal nécessitent une investigation ciblée.
+5. Migration transactionnelle, délais de verrou 5 s / instruction 30 s : si une table trop sollicitée empêche son application, elle échoue sans changement partiel et doit être reprogrammée. Retour arrière SQL volontairement refusé pour ne pas perdre des reprises financières ; correction en avant.
+6. Les anciennes routes d'historique à tableau complet sont conservées pour ne pas tronquer les données des applications existantes. **Le risque de volume sur ces routes reste ouvert** : les clients doivent migrer vers `/payments/history/page`, `/wallet/ledger/page` et les routes de parrainage paginées déjà disponibles. Aucune promesse de temps de réponse chiffrée sans mesure de charge.
+
+Terraform, infrastructure AWS, CI/CD, secrets et environnements réels inchangés. Aucune publication GitHub ni déploiement. La redondance infrastructure reste différée.
+
+### Vérification
+
+Tests unitaires de non-régression, compilation TypeScript et suites PostgreSQL isolées ; prestataires simulés, aucun vrai débit Mobile Money. Les tests PostgreSQL de ce correctif s'activent explicitement avec `FINANCIAL_RECOVERY_TEST_POSTGRES_BIN` puis `npm test -- --runInBand --runTestsByPath src/database/financial-recovery-postgres.spec.ts`. Ils créent et suppriment leur propre cluster temporaire, sans lire `.env`.
+
+Résultats PostgreSQL : **183 tests distincts réussis sur huit suites**, trois scénarios ignorés par leurs conditions existantes. Cela inclut les quatorze nouveaux scénarios financiers, la migration de l'ancienne file, les reprises à bail expiré, les crédits/bonus, les retraits conducteur, le parrainage et les notifications transactionnelles. TypeScript backend (`--noEmit --incremental false`) validé. Les clusters temporaires sont arrêtés et nettoyés après les tests.
+
+Suite générale : **2 470 tests réussis, 212 suites réussies**, 353 tests / 22 suites ignorés sans activation explicite de leurs environnements. Les tests PostgreSQL ci-dessus ont été exécutés séparément ; les autres intégrations ignorées ne sont pas présentées comme validées. `git diff --check` validé.
+
+## 2026-10-20 — Commission de parrainage abonnement réduite à 1 %
+
+- Décision remplaçant le taux abonnement de 5 % indiqué dans les entrées antérieures : **1 % du paiement éligible**, soit 50 FC / 5 jetons pour 5 000 FC. `referrals.service.ts` applique le taux par défaut et le plafond de 1 % aux variables dédiée et historique ; `.env.example` est aligné, environnements réels inchangés.
+- Les anciens crédits, la déduplication, la retenue et les exclusions restent inchangés ; un abonnement gratuit/payé en bonus ou jetons ne génère toujours pas de commission. Le partage trajet reste à 1 %, la commission plateforme à 5 %, et le bonus d'inscription du parrain à zéro.
+- Le résumé API retourne le taux réellement appliqué. Aucun taux abonnement codé en dur trouvé dans l'écran mobile de parrainage ; aucun changement mobile nécessaire.
+- Vérifications : **449 tests réussis dans 28 suites** (parrainage, paiements, abonnements et notifications financières), dont les 40 tests de `referrals.service.spec.ts` ; cinq tests PostgreSQL opt-in non activés lors de ce passage. TypeScript backend sans émission et contrôle des diffs réussis. Configurations anciennes/absentes/invalides, PawaPay et conservation d'une récompense historique couverts ; prestataires simulés. Aucune migration supplémentaire, aucun déploiement ni changement AWS/CI/CD.
+
+## 2026-10-20 — Parrainage : commissions transactionnelles uniquement
+
+- Suppression du bonus fixe à l'inscription et au rattachement, y compris admin. Le code de crédit est retiré et l'ancienne variable `REFERRAL_ATTRIBUTION_BONUS_TOKENS` est ignorée. Champ API conservé à zéro pour compatibilité.
+- Maintien de 5 % sur les abonnements éligibles confirmés et de 1 % sur les trajets terminés/déposés/payés par voie électronique ou jetons. Essai, Pro payé avec le bonus/les jetons, trajet inachevé/impayé et cash exclus comme auparavant. La retenue, la fenêtre et les retraits restent inchangés.
+- Soldes et anciennes écritures `attribution_bonus` intacts. Le bonus de bienvenue 500 du bénéficiaire KYC est indépendant et conservé.
+- Migration additive 82 : audit admin non financier sur le profil, dans la transaction du rattachement ; aucune attribution d'argent ni réécriture de registre. Colonnes non sélectionnées par défaut ; rollback interdit dès qu'une trace existe. Ordre des verrous existant conservé selon le guide PostgreSQL.
+- Notification de nouveau filleul informative ; une panne de push après commit n'annule pas l'attribution. Texte mobile clarifié et testé.
+- Vérifications : **2 441 tests backend réussis dans 212 suites** (339 tests dans 21 suites désactivées par défaut), **29 tests PostgreSQL réels** exécutés séparément sur cluster jetable et **77 tests mobiles de parrainage** réussis. TypeScript backend/mobile et contrôle des diffs validés. Pas de base applicative, AWS, CI/CD, Terraform ou GitHub modifié ; aucun push ni paiement réel, aucun essai sur téléphone.
+- [Règle et déploiement](referral-program.md) : migration avant le code, toutes les instances doivent être mises à jour ; pas besoin d'attendre les stores pour arrêter le crédit serveur.
+
+## 2026-10-20 — Jeton à 10 FC, bienvenue de 500 jetons et retrait du disponible
+
+- Décisions confirmées : **1 jeton = 10 FC**, nombre de jetons existants conservé ; futurs bonus de bienvenue **500 jetons = 5 000 FC** ; minimum de retrait de parrainage **1 000 jetons = 10 000 FC**. Le réseau à plusieurs niveaux proposé dans le tableur est abandonné.
+- Source de taux commune portefeuille/parrainage/commission cash ; Pro à 5 000 FC coûte 500 jetons. Plafond de dette cash inchangé à 25 jetons. Gains monétaires conducteur inchangés.
+- Migration 80 : défaut à 10 pour les nouvelles réservations seulement. Migration 81 : fonction de bienvenue à 500, contrainte 50/200/500, sans crédit pendant la migration. Pas de modification des migrations déjà appliquées, des anciens crédits ni des montants engagés. Les recommandations PostgreSQL imposent des transactions courtes et bornées, sans recalcul de l'historique.
+- Retrait exclusivement depuis `availableTokens`, relecture sous verrou et arithmétique en centièmes. Bonus Pro financé en jetons : aucune rémunération du parrain ; garde explicite contre un callback incohérent. Les paiements réels éligibles et leurs taux sont conservés.
+- Mobile : erreur de solde/minimum/KYC explicite, actualisation avant retrait, protection du double clic, erreurs prestataire conservées. Les prix de recharge lisent le taux serveur ; les anciennes réservations gardent leur devis. Texte obsolète autorisant le retrait des jetons achetés supprimé.
+- Vérifications : **634 tests backend ciblés**, puis **2 426 tests backend réussis dans 211 suites** lors du passage général (337 tests dans 21 suites d'intégration restent désactivés par défaut). **25 tests PostgreSQL réels** financiers exécutés séparément sur clusters jetables, **203 tests mobiles** ciblés. TypeScript backend et mobile validés ; contrôle des diffs sans erreur. Aucun paiement, push, accès à une base applicative, modification AWS/CI/CD/Terraform ni envoi GitHub.
+- Migrations, coordination de la bascule de taux, rollback en avant et limites des apps déjà publiées : [guide de déploiement](purchased-token-withdrawals.md). Les fichiers d'environnement réels n'ont pas été modifiés ; seul l'exemple est aligné.
+
 ## 2026-10-14 — Bonus de bienvenue : 200 jetons pour conserver l'offre de 5 000 FC
 
 - Décision confirmée : seules les futures attributions passent à **200 jetons**, avec la valeur commune de 25 FC. Les anciens bonus de 50 restent inchangés et ne donnent droit à aucun complément.

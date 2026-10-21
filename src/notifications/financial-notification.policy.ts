@@ -36,11 +36,13 @@ export function walletMovementNotification(
     const driverWelcomeCopy =
       recipientRole === UserRole.DRIVER &&
       ['PTS', 'POINTS'].includes(entry.currency)
-        ? Number(entry.amount) === 200
-          ? 'Bienvenue chez Zwanga ! 5 000 FC vous sont offerts sous forme de 200 jetons Zwanga pour vous permettre de payer votre abonnement Pro.'
-          : Number(entry.amount) === 50
-            ? 'Bienvenue chez Zwanga ! 1 250 FC vous sont offerts sous forme de 50 jetons Zwanga pour contribuer au paiement de votre abonnement Pro.'
-            : null
+        ? Number(entry.amount) === 500
+          ? 'Bienvenue chez Zwanga ! 5 000 FC vous sont offerts sous forme de 500 jetons Zwanga pour vous permettre de payer votre abonnement Pro.'
+          : Number(entry.amount) === 200
+            ? 'Bienvenue chez Zwanga ! 5 000 FC vous sont offerts sous forme de 200 jetons Zwanga pour vous permettre de payer votre abonnement Pro.'
+            : Number(entry.amount) === 50
+              ? 'Bienvenue chez Zwanga ! 1 250 FC vous sont offerts sous forme de 50 jetons Zwanga pour contribuer au paiement de votre abonnement Pro.'
+              : null
         : null;
     return {
       eventKey: `wallet:${entry.id}`,

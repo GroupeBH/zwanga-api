@@ -11,7 +11,7 @@ import {
 import { TripPaymentMode } from '../payments/enums/trip-payment-mode.enum';
 import { SubscriptionPlan } from '../subscriptions/entities/subscription.entity';
 import { User, UserStatus } from '../users/entities/user.entity';
-import { of } from 'rxjs';
+import { of, Subject } from 'rxjs';
 import { ReferralAccount } from './entities/referral-account.entity';
 import {
   ReferralLedgerEntry,
@@ -24,6 +24,7 @@ import {
   ReferralRewardStatus,
 } from './entities/referral-reward.entity';
 import { ReferralsService } from './referrals.service';
+import { WalletLedgerEntryType } from '../wallet/entities/wallet-ledger-entry.entity';
 
 describe('ReferralsService', () => {
   const buildService = (options?: {
@@ -39,7 +40,7 @@ describe('ReferralsService', () => {
       reversedTokens: string;
     }[];
     bookingPayment?: PaymentTransaction | null;
-    configOverrides?: Record<string, string | number>;
+    configOverrides?: Record<string, string | number | undefined>;
   }) => {
     const account = {
       id: 'account-1',
@@ -96,6 +97,7 @@ describe('ReferralsService', () => {
       }),
     };
     const dataSource = {
+      getRepository: jest.fn(() => ({ find: jest.fn().mockResolvedValue([{ type: WalletLedgerEntryType.BOOKING_PAYMENT, amount: -1000, currency: 'PTS' }]) })),
       transaction: jest.fn((callback: (value: typeof manager) => unknown) =>
         callback(manager),
       ),
@@ -122,12 +124,13 @@ describe('ReferralsService', () => {
         .mockResolvedValue(options?.referralProfiles?.length ?? 0),
       find: jest.fn().mockResolvedValue(options?.referralProfiles ?? []),
       save: jest.fn((value: ReferralProfile) => Promise.resolve(value)),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
     };
     const configService = {
       get: jest.fn((key: string) => {
-        const values: Record<string, string | number> = {
-          REFERRAL_REWARD_RATE: 0.05,
-          REFERRAL_SUBSCRIPTION_REWARD_RATE: 0.05,
+        const values: Record<string, string | number | undefined> = {
+          REFERRAL_REWARD_RATE: 0.01,
+          REFERRAL_SUBSCRIPTION_REWARD_RATE: 0.01,
           REFERRAL_BOOKING_REWARD_RATE: 0.01,
           REFERRAL_ATTRIBUTION_BONUS_TOKENS: 5,
           ZWANGA_COMMISSION_RATE: 0.05,
@@ -216,11 +219,11 @@ describe('ReferralsService', () => {
     kycRepository.findOne.mockResolvedValue({ status: 'approved' });
     const summary = await service.getSummary('referrer-1');
     expect(summary.withdrawal).toMatchObject({
-      enabled: true, blocked: true, minimumTokens: 1000, moneyPerToken: 25,
+      enabled: true, blocked: true, minimumTokens: 1000, moneyPerToken: 10,
       kycApproved: true,
     });
     expect(summary.balances.availableTokens).toBe(100);
-    expect(summary.balances.availableAmount).toBe(2500);
+    expect(summary.balances.availableAmount).toBe(1000);
     expect(account.reservedTokens).toBe(0);
   });
 
@@ -267,7 +270,7 @@ describe('ReferralsService', () => {
     paidAt: paymentPaidAt,
   } as unknown as PaymentTransaction;
 
-  it('credits exactly 5 percent of an eligible subscription payment', async () => {
+  it('credits exactly 1 percent of an eligible subscription payment', async () => {
     const { service, account, profile } = buildService();
 
     const reward = await service.awardSubscriptionReward(
@@ -284,24 +287,76 @@ describe('ReferralsService', () => {
       expect.objectContaining({
         sourceType: ReferralRewardSourceType.SUBSCRIPTION_PAYMENT,
         grossAmount: 5000,
-        rewardAmount: 250,
-        rewardTokens: 10,
-        rate: 0.05,
+        rewardAmount: 50,
+        rewardTokens: 5,
+        rate: 0.01,
         status: ReferralRewardStatus.PENDING,
       }),
     );
-    expect(account.pendingTokens).toBe(10);
+    expect(account.pendingTokens).toBe(5);
     expect(profile.qualifiedAt).toEqual(paymentPaidAt);
     expect(profile.rewardWindowEndsAt?.toISOString()).toBe(
       '2027-08-24T10:00:00.000Z',
     );
   });
 
-  it('returns the existing reward without a second balance mutation', async () => {
+  it.each([
+    { label: 'old dedicated rate', dedicated: 0.05, legacy: 0.05 },
+    { label: 'old legacy fallback', dedicated: undefined, legacy: 0.05 },
+    { label: 'missing configuration', dedicated: undefined, legacy: undefined },
+    { label: 'string configuration', dedicated: '0.05', legacy: undefined },
+    { label: 'invalid configuration', dedicated: 'invalid', legacy: 0.05 },
+    { label: 'negative configuration', dedicated: -1, legacy: undefined },
+    { label: 'zero configuration', dedicated: 0, legacy: undefined },
+    { label: 'nonfinite configuration', dedicated: Infinity, legacy: undefined },
+    { label: 'dedicated rate priority', dedicated: 0.01, legacy: 0.05 },
+  ])('uses 1 percent for new subscription rewards and the mobile summary with $label', async ({ dedicated, legacy }) => {
+    const { service, account } = buildService({
+      configOverrides: {
+        REFERRAL_SUBSCRIPTION_REWARD_RATE: dedicated,
+        REFERRAL_REWARD_RATE: legacy,
+      },
+    });
+    const reward = await service.awardSubscriptionReward({
+      id: 'subscription-rate-policy', userId: 'referred-1', isTrial: false,
+    } as any, succeededSubscriptionPayment);
+    expect(reward).toMatchObject({ rate: 0.01, rewardAmount: 50, rewardTokens: 5 });
+    expect(account.pendingTokens).toBe(5);
+    expect((await service.getSummary('referrer-1')).rules).toMatchObject({
+      subscriptionRewardRate: 0.01,
+      bookingRewardRate: 0.01,
+      platformCommissionRate: 0.05,
+      attributionBonusTokens: 0,
+    });
+  });
+
+  it('also credits 1 percent on a confirmed PawaPay subscription', async () => {
+    const { service, account } = buildService();
+    const reward = await service.awardSubscriptionReward({
+      id: 'subscription-pawapay', userId: 'referred-1', isTrial: false,
+    } as any, { ...succeededSubscriptionPayment, provider: PaymentProvider.PAWAPAY });
+    expect(reward).toMatchObject({ rate: 0.01, rewardAmount: 50, rewardTokens: 5 });
+    expect(account.pendingTokens).toBe(5);
+  });
+
+  it('keeps a more restrictive configured subscription rate', async () => {
+    const { service } = buildService({
+      configOverrides: { REFERRAL_SUBSCRIPTION_REWARD_RATE: 0.005 },
+    });
+    const reward = await service.awardSubscriptionReward({
+      id: 'subscription-lower-rate', userId: 'referred-1', isTrial: false,
+    } as any, succeededSubscriptionPayment);
+    expect(reward).toMatchObject({ rate: 0.005, rewardAmount: 25, rewardTokens: 2.5 });
+  });
+
+  it('returns a historical 5 percent reward without recalculation or a second balance mutation', async () => {
     const existingReward = {
       id: 'reward-existing',
       sourceType: ReferralRewardSourceType.SUBSCRIPTION_PAYMENT,
       sourceEntityId: 'subscription-1',
+      rate: 0.05,
+      rewardAmount: 250,
+      rewardTokens: 25,
     } as ReferralReward;
     const { service, dataSource } = buildService({ existingReward });
 
@@ -315,6 +370,22 @@ describe('ReferralsService', () => {
     );
 
     expect(reward).toBe(existingReward);
+    expect(reward).toMatchObject({ rate: 0.05, rewardAmount: 250, rewardTokens: 25 });
+    expect(dataSource.transaction).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { isTrial: true, currency: 'CDF' },
+    { isTrial: false, currency: 'PTS', amount: 500 },
+    { isTrial: false, currency: 'POINTS', amount: 500 },
+    { isTrial: false, currency: 'CDF', paymentReference: 'POINTS-welcome-bonus-debit' },
+  ])('does not pay a referrer for free/bonus-funded Pro even with a stray successful provider payment: %j', async markers => {
+    const { service, account, dataSource } = buildService();
+    const reward = await service.awardSubscriptionReward({
+      id: 'subscription-bonus', userId: 'referred-1', ...markers,
+    } as any, succeededSubscriptionPayment);
+    expect(reward).toBeNull();
+    expect(account.pendingTokens).toBe(0);
     expect(dataSource.transaction).not.toHaveBeenCalled();
   });
 
@@ -377,13 +448,61 @@ describe('ReferralsService', () => {
         sourceType: ReferralRewardSourceType.BOOKING_PAYMENT,
         grossAmount: 10000,
         rewardAmount: 100,
-        rewardTokens: 4,
+        rewardTokens: 10,
         rate: 0.01,
         paymentTransactionId: 'payment-booking-1',
         status: ReferralRewardStatus.PENDING,
       }),
     );
-    expect(account.pendingTokens).toBe(4);
+    expect(account.pendingTokens).toBe(10);
+  });
+
+  it.each([TripPaymentMode.ELECTRONIC, TripPaymentMode.POINTS])(
+    'rewards the final reduced fare, not the original payment (%s)', async paymentMode => {
+      const { service } = buildService({ bookingPayment: succeededBookingPayment });
+      const reward = await service.awardBookingReward({
+        id: 'adjusted-fare', passengerId: 'referred-1', status: BookingStatus.COMPLETED,
+        droppedOff: true, paymentMode, paymentStatus: BookingPaymentStatus.SUCCEEDED,
+        paymentTransactionId: succeededBookingPayment.id, paidAt: paymentPaidAt,
+        paymentAmount: 8000, paymentCurrency: 'CDF', interruptionFareLocked: true,
+      } as any);
+      expect(reward).toMatchObject({ grossAmount: 8000, rewardAmount: 80, rewardTokens: 8 });
+    },
+  );
+
+  it.each([-1, 10001, NaN, null, undefined])('refuses an inconsistent final fare (%s)', async paymentAmount => {
+    const { service } = buildService({ bookingPayment: succeededBookingPayment });
+    await expect(service.awardBookingReward({
+      id: 'invalid-final-fare', passengerId: 'referred-1', status: BookingStatus.COMPLETED,
+      droppedOff: true, paymentMode: TripPaymentMode.ELECTRONIC,
+      paymentStatus: BookingPaymentStatus.SUCCEEDED, paymentTransactionId: succeededBookingPayment.id,
+      paymentAmount, paymentCurrency: 'CDF', interruptionFareLocked: true,
+    } as any)).rejects.toThrow('montant final');
+  });
+
+  it('does not reward a fully refunded interrupted electronic fare', async () => {
+    const { service } = buildService({ bookingPayment: succeededBookingPayment });
+    await expect(service.awardBookingReward({
+      id: 'zero-final-fare', passengerId: 'referred-1', status: BookingStatus.COMPLETED,
+      droppedOff: true, paymentMode: TripPaymentMode.ELECTRONIC,
+      paymentStatus: BookingPaymentStatus.SUCCEEDED, paymentTransactionId: succeededBookingPayment.id,
+      paymentAmount: 0, paymentCurrency: 'CDF', interruptionFareLocked: true,
+    } as any)).resolves.toBeNull();
+  });
+
+  it('returns summaries without awaiting short links or settling rewards on the read path', async () => {
+    const { service, httpService } = buildService({ chottuLink: true });
+    const slow = new Subject<any>();
+    httpService.post.mockReturnValue(slow);
+    const release = jest.spyOn(service as any, 'releaseMatureRewardsForUser');
+    const first = await service.getSummary('referrer-1');
+    await service.getSummary('referrer-1');
+    expect(JSON.stringify(first)).toContain('referralToken=');
+    expect(httpService.post).toHaveBeenCalledTimes(1);
+    expect(release).not.toHaveBeenCalled();
+    slow.next({ data: { short_url: 'https://zwanga.chottu.link/AbCdEf' } });
+    slow.complete();
+    await Promise.all((service as any).shareLinkRefreshes.values());
   });
 
   it('caps trip referral rewards at 1 percent even if the booking rate is misconfigured at 5 percent', async () => {
@@ -410,11 +529,11 @@ describe('ReferralsService', () => {
         sourceType: ReferralRewardSourceType.BOOKING_PAYMENT,
         grossAmount: 10000,
         rewardAmount: 100,
-        rewardTokens: 4,
+        rewardTokens: 10,
         rate: 0.01,
       }),
     );
-    expect(account.pendingTokens).toBe(4);
+    expect(account.pendingTokens).toBe(10);
   });
 
   it('exposes trip rewards as a 1 percent share funded from the 5 percent Zwanga commission', async () => {
@@ -432,7 +551,7 @@ describe('ReferralsService', () => {
           bookingRewardFunding: 'platform_commission_share',
           platformCommissionRate: 0.05,
           platformRetainedBookingCommissionRate: 0.04,
-          attributionBonusTokens: 5,
+          attributionBonusTokens: 0,
         }),
       }),
     );
@@ -460,13 +579,32 @@ describe('ReferralsService', () => {
         sourceType: ReferralRewardSourceType.BOOKING_PAYMENT,
         grossAmount: 10000,
         rewardAmount: 100,
-        rewardTokens: 4,
+        rewardTokens: 10,
         rate: 0.01,
         paymentTransactionId: null,
         status: ReferralRewardStatus.PENDING,
       }),
     );
-    expect(account.pendingTokens).toBe(4);
+    expect(account.pendingTokens).toBe(10);
+  });
+
+  it.each([
+    { status: BookingStatus.ACCEPTED },
+    { status: BookingStatus.CANCELLED },
+    { droppedOff: false },
+    { paymentStatus: BookingPaymentStatus.INITIATED },
+    { paymentStatus: BookingPaymentStatus.FAILED },
+    { paymentMode: TripPaymentMode.CASH },
+  ])('does not reward an unfinished, unpaid or ineligible trip: %j', async patch => {
+    const { service, account, dataSource } = buildService();
+    await expect(service.awardBookingReward({
+      id: 'booking-ineligible', passengerId: 'referred-1',
+      status: BookingStatus.COMPLETED, droppedOff: true,
+      paymentMode: TripPaymentMode.POINTS, paymentStatus: BookingPaymentStatus.SUCCEEDED,
+      paymentAmount: 10000, paymentCurrency: 'CDF', ...patch,
+    } as any)).resolves.toBeNull();
+    expect(account.pendingTokens).toBe(0);
+    expect(dataSource.transaction).not.toHaveBeenCalled();
   });
 
   it('calculates referral rewards for a subsidized first trip on the amount paid by the filleul only', async () => {
@@ -498,13 +636,36 @@ describe('ReferralsService', () => {
         sourceType: ReferralRewardSourceType.BOOKING_PAYMENT,
         grossAmount: 4000,
         rewardAmount: 40,
-        rewardTokens: 1.6,
+        rewardTokens: 4,
         rate: 0.01,
         paymentTransactionId: 'payment-booking-subsidized',
         status: ReferralRewardStatus.PENDING,
       }),
     );
-    expect(account.pendingTokens).toBe(1.6);
+    expect(account.pendingTokens).toBe(4);
+  });
+
+  it.each([{ entries: [] }, { entries: [{ type: WalletLedgerEntryType.BOOKING_PAYMENT, amount: 10, currency: 'PTS' }] }])(
+    'does not turn a points success flag without an actual debit into a referral credit', async ({ entries }) => {
+      const { service, dataSource } = buildService();
+      dataSource.getRepository.mockReturnValue({ find: jest.fn().mockResolvedValue(entries) });
+      await expect(service.awardBookingReward({ id: 'unbacked', passengerId: 'referred-1', status: BookingStatus.COMPLETED,
+        droppedOff: true, paymentMode: TripPaymentMode.POINTS, paymentStatus: BookingPaymentStatus.SUCCEEDED,
+        paymentAmount: 10000, paymentCurrency: 'CDF' } as any)).rejects.toThrow('débit en jetons');
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    },
+  );
+
+  it('does not reward a fully refunded points payment', async () => {
+    const { service, dataSource } = buildService();
+    dataSource.getRepository.mockReturnValue({ find: jest.fn().mockResolvedValue([
+      { type: WalletLedgerEntryType.BOOKING_PAYMENT, amount: -1000, currency: 'PTS' },
+      { type: WalletLedgerEntryType.BOOKING_REFUND, amount: 1000, currency: 'PTS' },
+    ]) });
+    await expect(service.awardBookingReward({ id: 'refunded', passengerId: 'referred-1', status: BookingStatus.COMPLETED,
+      droppedOff: true, paymentMode: TripPaymentMode.POINTS, paymentStatus: BookingPaymentStatus.SUCCEEDED,
+      paymentAmount: 10000, paymentCurrency: 'CDF' } as any)).resolves.toBeNull();
+    expect(dataSource.transaction).not.toHaveBeenCalled();
   });
 
   it('resolves an active referrer from an opaque link token', async () => {
@@ -616,19 +777,15 @@ describe('ReferralsService', () => {
     );
     expect(existingProfile.referredByUserId).toBe('referrer-1');
     expect(existingProfile.attributionProvider).toBe('chottulink');
-    expect(account.availableTokens).toBe(5);
-    expect(manager.create).toHaveBeenCalledWith(
-      ReferralLedgerEntry,
-      expect.objectContaining({
-        type: ReferralLedgerEntryType.ATTRIBUTION_BONUS,
-        bucket: 'available',
-        amountTokens: 5,
-        sourceType: 'referral_attribution',
-        sourceEntityId: 'existing-user',
-      }),
+    expect(account.availableTokens).toBe(0);
+    expect(manager.create.mock.calls.some(([entity]) => entity === ReferralLedgerEntry)).toBe(false);
+    expect(notificationService.sendNotification).toHaveBeenCalledWith(
+      'fcm-referrer-1',
+      'Nouveau filleul Zwanga',
+      expect.stringContaining('paiements éligibles'),
+      expect.objectContaining({ attributionBonusTokens: 0 }),
+      'referrer-1',
     );
-    // The transactional ledger subscriber owns the credited bonus notification.
-    expect(notificationService.sendNotification).not.toHaveBeenCalled();
     expect(manager.query).toHaveBeenCalledWith(
       'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
       ['zwanga:referral-user:existing-user'],
@@ -647,8 +804,8 @@ describe('ReferralsService', () => {
     ).resolves.toEqual(
       expect.objectContaining({ attached: true, newlyAttached: false }),
     );
-    expect(account.availableTokens).toBe(5);
-    expect(notificationService.sendNotification).not.toHaveBeenCalled();
+    expect(account.availableTokens).toBe(0);
+    expect(notificationService.sendNotification).toHaveBeenCalledTimes(1);
   });
 
   it('never replaces the referrer of an existing account', async () => {
@@ -853,7 +1010,8 @@ describe('ReferralsService', () => {
         },
       },
     );
-    expect(profileRepository.save).toHaveBeenCalledWith(
+    expect(profileRepository.update).toHaveBeenCalledWith(
+      profile.id,
       expect.objectContaining({
         shareLinkUrl: 'https://zwanga.chottu.link/AbCdEf',
       }),
@@ -893,7 +1051,7 @@ describe('ReferralsService', () => {
           pendingTokens: 1.5,
           releasedTokens: 4,
           reversedTokens: 2,
-          earnedAmount: 137.5,
+          earnedAmount: 55,
           currency: 'CDF',
         },
       }),

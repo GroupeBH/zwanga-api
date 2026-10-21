@@ -1,4 +1,7 @@
 import { isAppUpdateDeliverable } from '../app-updates/app-update-dispatch.service';
+import { isRideResponseDeliverable } from './ride-response-delivery';
+import { androidDriverBackup, androidDriverBackupTtl } from './android-driver-backup';
+import { recoverDriverOffer } from './recover-driver-offer';
 import { isTripReminderDeliverable } from './trip-reminder-delivery';
 import { isStaleLocationReminderDeliverable } from '../trip-requests/dispatch/stale-location-reminder';
 import {
@@ -42,7 +45,7 @@ const PUSH_DELIVERY_TIMEOUT_MS = 10_000;
 const CRITICAL_RETRY_DELAY_MS = 5 * 60 * 1000;
 const CRITICAL_RETRY_WINDOW_MS = 72 * 60 * 60 * 1000;
 const CRITICAL_RETRY_BATCH_SIZE = 25;
-const URGENT_NOTIFICATION_TYPES = ['new_booking', 'driver_dispatch_offer', 'trip_request_nearby'];
+const URGENT_NOTIFICATION_TYPES = ['new_booking', 'driver_dispatch_offer', 'trip_request_nearby', 'booking_response', 'trip_request_accepted'];
 const EXPO_RECEIPT_DELAY_MS = 15 * 60 * 1000;
 const EXPO_RECEIPT_WINDOW_MS = 24 * 60 * 60 * 1000;
 const EXPO_RECEIPT_BATCH_SIZE = 100;
@@ -394,12 +397,13 @@ export class NotificationService implements OnModuleInit {
     const version = await this.driverActionVersion(notification, pushToken);
     if (version > 0) {
       const ringUntil = version >= 2 ? this.driverRingUntil(notification) : undefined;
-      // No title/message fields: Expo must treat this as headless and let Notifee display it once.
+      // v1-v3 stay headless. v4 adds a quiet native Expo safety card while
+      // Notifee owns the sound and interactive card if the JS task runs.
       const data = { ...notification.data, actionProtocol: 'driver-v1', invitationText: notification.body,
         ...(ringUntil ? { ringVersion: 'v2', ringUntil } : {}) };
       return getMessaging(this.firebaseApp).send({ token: pushToken,
-        data: this.stringifyNotificationData(data),
-        android: { priority: 'high', ttl: this.driverNotificationTtl(notification, ringUntil) * 1000 },
+        data: this.stringifyNotificationData(version >= 4 ? androidDriverBackup(notification, data) : data),
+        android: { priority: 'high', ttl: version >= 4 ? androidDriverBackupTtl(notification) : this.driverNotificationTtl(notification, ringUntil) * 1000 },
       });
     }
     const passengerRing = this.isPassengerRideResponse(notification) &&
@@ -410,14 +414,15 @@ export class NotificationService implements OnModuleInit {
     // Capability registration may be delayed, or invalidated by token rotation.
     // Preserve an OS-visible alert for those devices instead of relying on JS.
     const ordinaryDriverAlert = this.isDriverRingInvitation(notification) || this.isNearbyRequestRing(notification);
-    if (nearbyVersion === 3) {
-      // Local Notifee owns the ringtone + native 30s timeout. FCM alert sound has
+    if (nearbyVersion >= 3) {
+      // Local Notifee owns the finite ringtone. FCM alert sound has
       // no playback timeout (TTL only bounds delivery), so never play it twice.
       const ringUntil = this.driverRingUntil(notification);
       return getMessaging(this.firebaseApp).send({ token: pushToken,
-        data: this.stringifyNotificationData({ ...notification.data,
-          delivery: 'driver-phone-v3', invitationText: notification.body, ringUntil }),
-        android: { priority: 'high', ttl: this.driverNotificationTtl(notification, ringUntil) * 1000 },
+        data: this.stringifyNotificationData(nearbyVersion >= 4
+          ? androidDriverBackup(notification, { ...notification.data, delivery: 'driver-phone-v3', invitationText: notification.body, ringUntil })
+          : { ...notification.data, delivery: 'driver-phone-v3', invitationText: notification.body, ringUntil }),
+        android: { priority: 'high', ttl: nearbyVersion >= 4 ? androidDriverBackupTtl(notification) : this.driverNotificationTtl(notification, ringUntil) * 1000 },
       });
     }
     return getMessaging(this.firebaseApp).send({
@@ -550,12 +555,13 @@ export class NotificationService implements OnModuleInit {
   private async ringClientVersion(notification: Notification, pushToken: string): Promise<number> {
     if (!notification.userId) return 0;
     const rows: { version: number }[] = await this.notificationRepository.manager.query(
-      `SELECT CASE WHEN "tokenHash" = $4 THEN 3 WHEN "tokenHash" = $3 THEN 2 ELSE 1 END AS version FROM driver_notification_clients
-        WHERE "userId" = $1 AND "tokenHash" IN ($2,$3,$4)`,
+      `SELECT CASE WHEN "tokenHash" = $5 THEN 4 WHEN "tokenHash" = $4 THEN 3 WHEN "tokenHash" = $3 THEN 2 ELSE 1 END AS version FROM driver_notification_clients
+        WHERE "userId" = $1 AND "tokenHash" IN ($2,$3,$4,$5)`,
       [notification.userId, createHash('sha256').update(pushToken).digest('hex'),
         createHash('sha256').update(pushToken + ':driver-v2').digest('hex'),
-        createHash('sha256').update(pushToken + ':driver-v3').digest('hex')]);
-    return rows.length > 0 ? (rows[0].version === 3 ? 3 : rows[0].version === 2 ? 2 : 1) : 0;
+        createHash('sha256').update(pushToken + ':driver-v3').digest('hex'),
+        createHash('sha256').update(pushToken + ':driver-v4').digest('hex')]);
+    return rows.length > 0 ? ([2, 3, 4].includes(rows[0].version) ? rows[0].version : 1) : 0;
   }
 
   private stringifyNotificationData(
@@ -694,6 +700,11 @@ export class NotificationService implements OnModuleInit {
             const notification = notifications[next++];
             const deliveryStartedAt = Date.now();
             try {
+              if (this.configService.get<string>('DRIVER_DISPATCH_ENABLED') === 'true' &&
+                  ['driver_dispatch_offer', 'trip_request_nearby'].includes(notification.data?.type)) {
+                await this.notificationRepository.manager.transaction(manager => recoverDriverOffer(manager, notification,
+                  Number(this.configService.get('DRIVER_DISPATCH_RESPONSE_SECONDS') ?? 30)));
+              }
               if (
                 !(await this.isCriticalNotificationStillDeliverable(
                   notification,
@@ -809,6 +820,9 @@ export class NotificationService implements OnModuleInit {
     notification: Notification,
   ): Promise<boolean> {
     const type = notification.data?.type;
+    if (type === 'booking_response' || type === 'trip_request_accepted') {
+      return isRideResponseDeliverable(this.notificationRepository.manager, notification);
+    }
     if (type === 'driver_location_stale') {
       if (this.configService.get<string>('DRIVER_DISPATCH_ENABLED') !== 'true') return false;
       return isStaleLocationReminderDeliverable(this.notificationRepository.manager, notification);

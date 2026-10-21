@@ -37,6 +37,8 @@ describe('deployment readiness', () => {
         contractVersion: 1,
         enabled,
         functions: true,
+        recovery: true,
+        referrals: true,
       });
       expect(await service.check()).toMatchObject({ status: 'ok' });
       expect(query).toHaveBeenCalledWith(
@@ -48,6 +50,8 @@ describe('deployment readiness', () => {
     undefined,
     { contractVersion: 0, functions: true },
     { contractVersion: 1, functions: false },
+    { contractVersion: 1, functions: true, recovery: false },
+    { contractVersion: 1, functions: true, recovery: true, referrals: false },
   ])('refuses traffic with an incompatible/missing schema', async (schema) => {
     await expect(fixture(schema).service.check()).rejects.toMatchObject({
       status: 503,

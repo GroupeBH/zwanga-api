@@ -31,7 +31,9 @@ describe('Administrative referral attribution', () => {
       findOne: jest.fn(async (entity, { where }) => {
         if (entity === User) return users.get(where.id) ?? null;
         if (entity === ReferralProfile)
-          return profiles.get(where.userId) ?? null;
+          return profiles.get(where.userId) ?? [...profiles.values()].find(profile =>
+            (where.code && profile.code === where.code) ||
+            (where.linkToken && profile.linkToken === where.linkToken)) ?? null;
         if (entity === ReferralAccount)
           return accounts.get(where.userId) ?? null;
         if (entity === ReferralLedgerEntry)
@@ -71,7 +73,7 @@ describe('Administrative referral attribution', () => {
       {} as any,
       {} as any,
       source as any,
-      { get: jest.fn() } as any,
+      { get: jest.fn(key => key === 'REFERRAL_ATTRIBUTION_BONUS_TOKENS' ? 500 : undefined) } as any,
       {} as any,
       {} as any,
       notifications as any,
@@ -90,7 +92,7 @@ describe('Administrative referral attribution', () => {
   }
   const reason = 'Rattachement validé avec le support';
 
-  it('creates missing profiles/accounts, records an admin audit and grants the usual bonus only once', async () => {
+  it('records the admin attribution without a bonus, even with legacy bonus configuration', async () => {
     const f = fixture();
     const before = Date.now();
     const first = await f.service.attachUserByAdmin(
@@ -102,39 +104,79 @@ describe('Administrative referral attribution', () => {
     expect(first).toMatchObject({
       attached: true,
       newlyAttached: true,
-      attributionBonusTokens: 5,
+      attributionBonusTokens: 0,
     });
     expect(f.profiles.get('child')).toMatchObject({
       referredByUserId: 'parent',
       attributionProvider: 'admin',
       qualifiedAt: null,
       rewardWindowEndsAt: null,
+      attributionAdminId: 'admin',
+      attributionAdminReason: reason,
     });
     expect(f.profiles.get('child').referredAt.getTime()).toBeGreaterThanOrEqual(
       before,
     );
-    expect(f.accounts.get('parent').availableTokens).toBe(5);
-    expect(f.ledger).toHaveLength(1);
-    expect(f.ledger[0]).toMatchObject({
-      sourceEntityId: 'child',
-      type: 'attribution_bonus',
-      description: `Bonus de 5 jetons ; filleul child ; admin admin : ${reason}`,
-    });
+    expect(f.accounts.has('parent')).toBe(false);
+    expect(f.accounts.get('child').availableTokens).toBe(0);
+    expect(f.ledger).toHaveLength(0);
     const referredAt = first.referredAt;
     const repeat = await f.service.attachUserByAdmin(
       'admin',
       'child',
       'parent',
-      reason,
+      'Un nouveau motif ne remplace pas le premier audit',
     );
     expect(repeat).toMatchObject({
       newlyAttached: false,
       attributionBonusTokens: 0,
       referredAt,
     });
-    expect(f.ledger).toHaveLength(1);
-    expect(f.accounts.get('parent').availableTokens).toBe(5);
-    expect(f.notifications.sendNotification).not.toHaveBeenCalled(); // The ledger outbox owns the push.
+    expect(f.ledger).toHaveLength(0);
+    expect(f.accounts.has('parent')).toBe(false);
+    expect(f.profiles.get('child').attributionAdminReason).toBe(reason);
+    expect(f.notifications.sendNotification).not.toHaveBeenCalled(); // No current FCM token.
+  });
+
+  it.each(['code', 'token', 'transaction'] as const)(
+    'registers by %s without credit and sends only an informational notification after commit',
+    async mode => {
+      const f = fixture();
+      f.users.get('parent').fcmToken = 'synthetic-token';
+      f.profiles.set('parent', { userId: 'parent', code: 'ZWPARENT', linkToken: 'parent-link-token-abcdefghijklmnopqrstuvwxyz' });
+      const attribution = mode === 'code'
+        ? { referralCode: 'ZWPARENT' }
+        : { referralToken: 'parent-link-token-abcdefghijklmnopqrstuvwxyz', referralCapturedAt: new Date().toISOString() };
+      if (mode === 'transaction') {
+        const afterCommit = await f.service.registerUserInTransaction(f.manager as any, 'child', attribution);
+        expect(f.notifications.sendNotification).not.toHaveBeenCalled();
+        await afterCommit();
+      } else {
+        await f.service.registerUser('child', attribution);
+      }
+      expect(f.profiles.get('child')).toMatchObject({
+        referredByUserId: 'parent', qualifiedAt: null, rewardWindowEndsAt: null,
+        attributionAdminId: null, attributionAdminReason: null,
+      });
+      expect(f.accounts.has('parent')).toBe(false);
+      expect(f.ledger).toHaveLength(0);
+      expect(f.notifications.sendNotification).toHaveBeenCalledTimes(1);
+      expect(f.notifications.sendNotification.mock.calls[0][2]).not.toMatch(/recevez.*jetons/);
+      await f.service.registerUser('child', attribution);
+      expect(f.notifications.sendNotification).toHaveBeenCalledTimes(1);
+      expect(f.ledger).toHaveLength(0);
+    },
+  );
+
+  it('preserves previously credited signup bonuses and existing account buckets', async () => {
+    const f = fixture();
+    const historical = { userId: 'parent', sourceEntityId: 'ancestor', type: 'attribution_bonus', amountTokens: 5 };
+    const balances = { userId: 'parent', availableTokens: 1005, pendingTokens: 20, reservedTokens: 1000, withdrawnTokens: 2000 };
+    f.ledger.push(historical);
+    f.accounts.set('parent', { ...balances });
+    await f.service.attachUserByAdmin('admin', 'child', 'parent', reason);
+    expect(f.accounts.get('parent')).toEqual(balances);
+    expect(f.ledger).toEqual([historical]);
   });
 
   it.each([UserRole.PASSENGER, UserRole.DRIVER])(

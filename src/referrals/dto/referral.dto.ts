@@ -6,6 +6,7 @@ import {
   IsNumber,
   IsOptional,
   IsString,
+  IsUUID,
   Matches,
   MaxLength,
   Min,
@@ -105,7 +106,17 @@ export class AttachReferralAttributionDto {
 }
 
 export class RequestReferralWithdrawalDto {
-  @ApiProperty({ minimum: 1000, example: 1000 })
+  @ApiProperty({ required: false, format: 'uuid', description: 'Identifiant conservé pour toutes les reprises de la même demande. Une nouvelle intention nécessite un nouvel UUID.' })
+  @IsOptional()
+  @IsUUID()
+  idempotencyKey?: string;
+
+  @ApiProperty({
+    minimum: 1000,
+    example: 1000,
+    description:
+      'Jetons de parrainage disponibles uniquement, avec au maximum deux décimales. Les jetons en attente, réservés et du portefeuille ordinaire sont exclus.',
+  })
   @Type(() => Number)
   @IsNumber({ maxDecimalPlaces: 2 })
   @Min(1000)

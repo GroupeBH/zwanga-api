@@ -870,8 +870,12 @@ export class BookingsService implements OnModuleInit {
         if (oldStatus !== BookingStatus.PENDING || trip.tripRequestId) {
           throw new BadRequestException('Cette réservation a déjà été traitée. Actualisez les détails du trajet.');
         }
+      }
+      // All entry points (screen, navigation and native actions) share the same
+      // durable event. A rollback removes both decision and notification.
+      if (!trip.tripRequestId && [BookingStatus.ACCEPTED, BookingStatus.REJECTED].includes(nextStatus)) {
         await enqueueTransactionalNotification(manager, {
-          eventKey: `booking-invitation:${booking.id}`, userId: booking.passengerId,
+          eventKey: `booking-response:${booking.id}:${nextStatus}`, userId: booking.passengerId,
           title: nextStatus === BookingStatus.ACCEPTED ? 'Réservation acceptée' : 'Réservation refusée',
           body: 'Le conducteur a répondu à votre réservation. Consultez les détails dans l’application.',
           data: { type: 'booking_response', bookingId: booking.id, tripId: trip.id, role: 'passenger', status: nextStatus },
@@ -2512,7 +2516,6 @@ export class BookingsService implements OnModuleInit {
     const booking = await this.updateStatus(bookingId, driverId, {
       status: BookingStatus.ACCEPTED,
     });
-    await this.notifyPassengerOfStatusChange(booking, BookingStatus.ACCEPTED);
     return booking;
   }
 
@@ -2625,11 +2628,6 @@ export class BookingsService implements OnModuleInit {
       status: BookingStatus.REJECTED,
       rejectionReason: reason,
     });
-    await this.notifyPassengerOfStatusChange(
-      booking,
-      BookingStatus.REJECTED,
-      reason,
-    );
     return booking;
   }
 

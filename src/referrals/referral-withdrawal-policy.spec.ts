@@ -10,9 +10,9 @@ function fixture() {
     id: 'withdrawal',
     userId: 'user',
     tokens: 1000,
-    amount: 25000,
+    amount: 10000,
     currency: 'CDF',
-    moneyPerToken: 25,
+    moneyPerToken: 10,
   };
   const payments = {
     initiatePayout: jest
@@ -41,7 +41,7 @@ function fixture() {
           status: 'active',
         }),
     },
-    reserveWithdrawal: jest.fn().mockResolvedValue(withdrawal),
+    reserveWithdrawal: jest.fn().mockResolvedValue({ withdrawal, created: true }),
     getWithdrawalCallbackUrl: () => 'https://example.invalid/callback',
     paymentsService: payments,
     failWithdrawal: jest.fn(),
@@ -65,9 +65,9 @@ describe('referral withdrawal threshold and CDF denomination', () => {
   );
 
   it.each([
-    [1000, 25000],
-    [1000.01, 25000.25],
-    [1200, 30000],
+    [1000, 10000],
+    [1000.01, 10000.1],
+    [1200, 12000],
   ])(
     'allows %s referral tokens at %s CDF despite legacy env values',
     async (tokens, amount) => {
@@ -80,7 +80,7 @@ describe('referral withdrawal threshold and CDF denomination', () => {
           tokens,
           amount,
           currency: 'CDF',
-          moneyPerToken: 25,
+          moneyPerToken: 10,
         }),
       );
       expect(payments.initiatePayout).toHaveBeenCalledWith(
@@ -91,6 +91,19 @@ describe('referral withdrawal threshold and CDF denomination', () => {
           currency: 'CDF',
         }),
       );
+    },
+  );
+
+  it.each([1000.001, 1000.999, Number.MAX_VALUE])(
+    'refuses an invalid precision or unsafe amount %s before any side effect',
+    async tokens => {
+      const { service, payments } = fixture();
+      await expect(service.requestWithdrawal('user', { tokens })).rejects.toThrow(
+        'deux décimales',
+      );
+      expect(service.releaseMatureRewardsForUser).not.toHaveBeenCalled();
+      expect(service.reserveWithdrawal).not.toHaveBeenCalled();
+      expect(payments.initiatePayout).not.toHaveBeenCalled();
     },
   );
 

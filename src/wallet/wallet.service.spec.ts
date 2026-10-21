@@ -181,7 +181,7 @@ describe('WalletService', () => {
       availableMoney: 0,
       nonWithdrawableTokens: 1000,
       currency: 'CDF',
-      moneyPerToken: 25,
+      moneyPerToken: 10,
       minimumTokens: 1,
     });
     expect(summary.account).toEqual({
@@ -191,7 +191,7 @@ describe('WalletService', () => {
     expect(dataSource.transaction).not.toHaveBeenCalled();
   });
 
-  it('initiates a FlexPay purchase where one point costs 25 CDF despite stale configuration', async () => {
+  it('initiates a FlexPay purchase where one point costs 10 CDF despite stale configuration', async () => {
     paymentsService.initiatePayment.mockResolvedValue(topUpPayment);
 
     const result = await service.initiateTopUp('passenger-1', {
@@ -206,7 +206,7 @@ describe('WalletService', () => {
         purpose: PaymentPurpose.WALLET_TOP_UP,
         relatedEntityType: 'wallet_top_up',
         relatedEntityId: 'passenger-1',
-        amount: 1250,
+        amount: 500,
         tokenQuantity: 50,
         currency: 'CDF',
         description: 'Achat de 50 jetons Zwanga',
@@ -260,9 +260,9 @@ describe('WalletService', () => {
     );
   });
 
-  it('converts 200 tokens to the unchanged 5000 CDF Pro price', () => {
-    expect(service.convertMoneyToPoints(5000, 'CDF')).toBe(200);
-    expect(service.convertPointsToMoney(1000, 'CDF')).toBe(25000);
+  it('converts 500 tokens to the unchanged 5000 CDF Pro price', () => {
+    expect(service.convertMoneyToPoints(5000, 'CDF')).toBe(500);
+    expect(service.convertPointsToMoney(1000, 'CDF')).toBe(10000);
   });
 
   it.each([
@@ -582,11 +582,11 @@ describe('WalletService', () => {
   });
 
   it.each([
-    { amount: 580, tokens: 23.2, remaining: 76.8 },
-    { amount: 1450, tokens: 58, remaining: 42 },
+    { amount: 580, tokens: 58, remaining: 142 },
+    { amount: 1450, tokens: 145, remaining: 55 },
   ])('debits exactly $tokens tokens for a passenger share of $amount CDF', async ({ amount, tokens, remaining }) => {
     manager.findOne.mockImplementation(async (entity: unknown) =>
-      entity === WalletAccount ? { ...account, balance: 100 } : null);
+      entity === WalletAccount ? { ...account, balance: 200 } : null);
 
     const entry = await service.payForBooking({ id: 'booking-fare', passengerId: 'passenger-1',
       paymentCurrency: 'CDF', paymentAmount: amount, grossPaymentAmount: 1450 } as any, amount);
@@ -677,13 +677,13 @@ describe('WalletService', () => {
     );
 
     expect(manager.save).toHaveBeenCalledWith(
-      expect.objectContaining({ balance: 1060 }),
+      expect.objectContaining({ balance: 1150 }),
     );
     expect(manager.save).toHaveBeenCalledWith(
       expect.objectContaining({
         type: WalletLedgerEntryType.BOOKING_FARE_ADJUSTMENT,
-        amount: 60,
-        balanceAfter: 1060,
+        amount: 150,
+        balanceAfter: 1150,
         relatedEntityType: 'booking',
         relatedEntityId: 'booking-1',
         paymentTransactionId: 'payment-1',
@@ -981,9 +981,9 @@ describe('WalletService', () => {
     expect(manager.save).toHaveBeenCalledWith(
       expect.objectContaining({
         type: WalletLedgerEntryType.LOYALTY_REWARD,
-        amount: 2,
+        amount: 5,
         relatedEntityType: 'trip_loyalty_bonus',
-        balanceAfter: 1003,
+        balanceAfter: 1006,
       }),
     );
   });

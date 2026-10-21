@@ -1,9 +1,16 @@
 import { TripRequestsService } from './trip-requests.service';
-import { TripRequestStatus } from './entities/trip-request.entity';
+import { TripRequest, TripRequestStatus } from './entities/trip-request.entity';
 import { DriverOfferStatus } from './entities/driver-offer.entity';
 import { VehicleType } from '../vehicles/entities/vehicle.entity';
+import { enqueueTransactionalNotification } from '../notifications/transactional-notification';
+
+jest.mock('../notifications/transactional-notification', () => ({
+  ...jest.requireActual('../notifications/transactional-notification'),
+  enqueueTransactionalNotification: jest.fn(),
+}));
 
 describe('Confirmed request price propagation', () => {
+  beforeEach(() => jest.clearAllMocks());
   function buildService(price: number | string) {
     const request = {
       id: 'request-1',
@@ -34,11 +41,16 @@ describe('Confirmed request price propagation', () => {
       pricePerSeat: price,
       requiresPassengerKyc: false,
     };
+    const manager = { getRepository: jest.fn(), transaction: jest.fn() };
     const repository = {
-      manager: { getRepository: () => ({ exists: jest.fn().mockResolvedValue(false) }) },
+      manager,
       findOne: jest.fn().mockResolvedValue(request),
       save: jest.fn(async (value) => value),
     };
+    manager.getRepository.mockImplementation(entity => entity === TripRequest ? repository : {
+      exists: jest.fn().mockResolvedValue(false), update: jest.fn(),
+    });
+    manager.transaction.mockImplementation(async work => work(manager));
     const tripsService = {
       create: jest.fn(async (_driverId, payload) => ({
         id: 'trip-1',
@@ -106,6 +118,7 @@ describe('Confirmed request price propagation', () => {
       const {
         service,
         request,
+        repository,
         tripsService,
         bookingsService,
         calculatePrice,
@@ -137,6 +150,9 @@ describe('Confirmed request price propagation', () => {
         'driver-1',
       );
       expect(result.tripRequest.selectedPricePerSeat).toBe(Number(price));
+      expect(repository.manager.transaction).toHaveBeenCalledTimes(1);
+      expect(enqueueTransactionalNotification).toHaveBeenCalledWith(repository.manager,
+        expect.objectContaining({ data: expect.objectContaining({ type: 'trip_request_accepted', tripId: 'trip-1' }) }));
       expect(calculatePrice).not.toHaveBeenCalled();
     },
   );

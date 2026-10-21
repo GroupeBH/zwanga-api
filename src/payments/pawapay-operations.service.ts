@@ -385,25 +385,8 @@ export class PawaPayOperationsService {
     this.reconciling = true;
     try {
       const cutoff = new Date(Date.now() - 60_000);
-      const payments = await this.paymentRepository.find({
-        where: {
-          provider: PaymentProvider.PAWAPAY,
-          status: In([PaymentStatus.PENDING, PaymentStatus.INITIATED]),
-          updatedAt: LessThan(cutoff),
-        },
-        order: { updatedAt: 'ASC' },
-        take: 50,
-      });
-      for (const payment of payments) {
-        if (!payment.orderNumber) continue;
-        try {
-          await this.paymentsService.checkPaymentStatus(payment.orderNumber);
-        } catch (error) {
-          this.logger.warn(
-            `Réconciliation PawaPay paiement ${payment.id}: ${error instanceof Error ? error.message : error}`,
-          );
-        }
-      }
+      // Deposits and payouts use durable, leased settlement jobs, including terminal
+      // payments. This local cron remains responsible only for refund snapshots.
       const refunds = await this.refundRepository.find({
         where: {
           status: In([

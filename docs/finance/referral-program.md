@@ -1,8 +1,87 @@
 # FIN-REF-001 — Parrainage, commissions et retraits FlexPay
 
-## Mise à jour du 14 octobre 2026 — retrait dès 1 000 jetons, à 25 FC
+## 21 octobre 2026 — Cash confirmé et reprises financières
 
-Les montants/seuils ci-dessous documentent le fonctionnement initial. La règle actuelle autorise `POST /referrals/me/withdrawals` dès **1 000 jetons par demande**, soit **25 000 CDF**, avec KYC et solde disponible suffisants. La valeur est de **25 FC pour tous les jetons Zwanga**. Le résumé indique `withdrawal.enabled=true`, `minimumTokens=1000`, `moneyPerToken=25`, et `blocked=true` si le KYC ou le solde est insuffisant. Une ancienne configuration à 50 jetons/100 FC ne contourne pas ces règles.
+Décision courante : **les trajets cash deviennent éligibles ; les abonnements payés en jetons restent exclus**, même avec des jetons achetés. Le parrain du passager reçoit 1 % de la part payée par son filleul, hors subvention Zwanga. Aucun prélèvement supplémentaire au conducteur : le partage reste inclus dans la commission plateforme de 5 %, avec la même tolérance de dette cash.
+
+### Preuve de paiement et reprise
+
+- Cash : réservation `completed`, dépose persistée, reçu d'encaissement du conducteur (`cashReceivedAt`, montant et conducteur). `not_required` seul ne prouve pas l'encaissement. Seuls les nouveaux reçus après migration 86 sont éligibles, y compris pour un trajet non encore encaissé au déploiement. Les reçus historiques ne sont pas recrédités après un simple réenregistrement.
+- Migration **1780000086000-ReferralBookingRecovery** : file PostgreSQL alimentée dans la même transaction que le reçu ou le changement d'état de la réservation. Traitement chaque minute, lots bornés, bail, backoff et acquittement par révision. Un crédit validé avant perte de l'acquittement est repris sans deuxième récompense. Aucun appel au prestataire pour la commission cash. Pas de rejeu massif de l'historique.
+- Un paiement de trajet en jetons doit être appuyé par un débit négatif unique du journal et ne pas être intégralement remboursé. Une anomalie reste à régulariser, sans créer arbitrairement une commission retirable.
+- La retenue de sept jours, la fenêtre de douze mois et le seuil de retrait de 1 000 jetons disponibles sont inchangés. Le résumé API ajoute les modes éligibles et précise que le cash exige un reçu.
+
+### Intention de retrait
+
+`POST /referrals/me/withdrawals` accepte désormais `idempotencyKey`, UUID facultatif pour compatibilité. Le client doit générer une clé par intention et conserver cette clé et les paramètres après un timeout. Une reprise retrouve le même retrait, y compris terminal, sans nouveau débit ni nouvel envoi. Un changement de montant/destination avec la même clé renvoie 409. Une autre intention en cours bloque une nouvelle demande.
+
+```json
+{"tokens":1000,"phone":"+243891234567","idempotencyKey":"550e8400-e29b-41d4-a716-446655440000"}
+```
+
+Anciennes applications sans clé : regroupement des demandes identiques tant qu'un retrait est en cours, puis pendant deux minutes après son résultat terminal (ou sa dernière mise à jour pour une ancienne ligne sans date de traitement). **Une relance très tardive après un retrait terminé n'est pas distinguable d'une nouvelle intention sans clé** ; une mise à jour client reste nécessaire pour la garantie durable. Aucun nouveau champ obligatoire.
+
+`GET /referrals/me/withdrawals/:id` lit uniquement le retrait du propriétaire authentifié, même sans numéro de commande prestataire. Une reprise ne réémet jamais un envoi incertain. Les réservations sans aucune transaction associée restent récupérables après quinze minutes par le mécanisme existant.
+
+### Livraison et limites
+
+- Appliquer **85 — ReferralWithdrawalIdempotency**, puis **86 — ReferralBookingRecovery**, avant le serveur ; `/health` contrôle les nouveaux objets. Remplacer toutes les instances : une ancienne instance ne connaît pas la clé d'intention.
+- Migration 85 : UUID nullable et unicité par utilisateur/clé. Aucun solde historique modifié. Les retours arrière SQL sont refusés dès que les clés ou la file sont utilisées ; correction en avant pour préserver les preuves financières.
+- Les suites de récupération/retrait acceptent aussi `PAYOUT_TEST_POSTGRES_BIN`, celles de taux/bonus `WALLET_TEST_POSTGRES_BIN`. Le workflow existant les active désormais sans modification CI/CD. Aucun changement AWS, Terraform ou `.env`.
+- Un transfert potentiellement envoyé mais sans preuve de résultat doit rester réservé : vérification prestataire et rapprochement support, jamais renvoi ou remboursement aveugle. Le reçu cash est une déclaration du conducteur, pas une preuve bancaire. Les anciennes routes d'historique complet restent compatibles, avec leur risque de volume ; préférer les routes paginées.
+
+## 20 octobre 2026 — Suppression du bonus d'inscription et de rattachement
+
+Le parrain ne reçoit **aucun jeton à l'inscription, au rattachement d'un compte existant ou au rattachement par un admin**. Seuls les paiements éligibles du filleul produisent désormais une rémunération :
+
+- **1 %** sur un abonnement réellement payé et confirmé par FlexPay/PawaPay ; pas de gain sur un essai gratuit ou un abonnement payé en jetons, notamment avec le bonus de bienvenue Zwanga ;
+- **1 %** sur un trajet terminé, avec dépose effectuée et paiement confirmé (électronique ou jetons ; cash confirmé ajouté le 21 octobre ci-dessus). Les trajets non terminés, annulés et impayés restent exclus.
+
+Le taux de 10 FC, la retenue de sept jours, la fenêtre de douze mois à partir du premier paiement éligible, l'absence de rétroactivité et le retrait dès 1 000 jetons disponibles sont conservés. Le bonus de bienvenue de 500 jetons du **bénéficiaire KYC** est indépendant et n'est pas supprimé.
+
+Le taux abonnement est désormais de **1 % par défaut et au maximum**, y compris si `REFERRAL_SUBSCRIPTION_REWARD_RATE` ou son fallback historique `REFERRAL_REWARD_RATE` contient encore `0.05`. Une configuration plus restrictive reste respectée. Un abonnement éligible de **5 000 FC produit 50 FC, soit 5 jetons**. Le résumé API expose le même taux que le calcul. Seules les nouvelles récompenses sont calculées ainsi : une commission déjà enregistrée à 5 % conserve son montant, même si son callback est rejoué. Cette réduction ne nécessite aucune migration supplémentaire, ni modification mobile ; `.env.example` est aligné sur `0.01`, sans modifier les environnements réels ni AWS.
+
+`creditAttributionBonus` est supprimé du service. `REFERRAL_ATTRIBUTION_BONUS_TOKENS` est obsolète et ignoré, même si la production contient encore `5` ou une autre valeur positive. `rules.attributionBonusTokens` et la réponse du rattachement admin conservent le champ numérique à `0` pour les anciens clients. Le push de nouveau filleul est informatif ; aucun nouvel événement financier `attribution_bonus` n'est créé.
+
+Les anciens bonus restent dans le registre et le solde, sans reprise ni suppression. La migration historique 29, le type d'écriture et les lecteurs de notifications historiques sont conservés.
+
+### Audit admin, migration et déploiement
+
+Le motif et l'identifiant de l'admin étaient inclus dans l'écriture financière du bonus. Pour ne pas perdre cette trace, la migration **`1780000082000-ReferralAttributionAudit`** ajoute deux colonnes nullable à `referral_profiles` : `attributionAdminId` (UUID) et `attributionAdminReason` (300 caractères maximum, comme le DTO existant). Elles sont enregistrées avec le premier rattachement, dans la même transaction ; une répétition ne les remplace pas. Elles ne sont pas sélectionnées par défaut ni ajoutées aux réponses publiques.
+
+- Appliquer la migration 82 via le mécanisme transactionnel existant avant le nouveau backend ; elle suit les migrations de taux/bonus 80 et 81 déjà préparées.
+- Pas de nouvelle variable, aucun recalcul financier ni extraction/reconstruction des anciens audits.
+- Les recommandations PostgreSQL conservent l'ordre des verrous et les notifications hors transaction. Les délais de migration sont bornés ; le retour arrière n'efface pas un audit utilisé.
+- Remplacer toutes les anciennes instances : tant qu'une ancienne version traite une inscription, elle peut encore attribuer son bonus. Aucun changement de CI/CD ou d'infrastructure n'est inclus.
+- Le blocage financier est serveur et n'exige pas une mise à jour des stores. Le texte explicatif ajouté à l'app sera visible après sa livraison.
+
+Les passages historiques ci-dessous décrivant le crédit de cinq jetons sont remplacés par cette décision. Vérifications et limites : [journal financier](CHANGELOG.md).
+
+## Règle courante — 20 octobre 2026 : 10 FC par jeton
+
+- `1 jeton = 10 CDF` pour tous les jetons Zwanga ; nombre de jetons existants conservé.
+- Retrait de parrainage dès **1 000 jetons disponibles = 10 000 CDF**, avec KYC approuvé. Aucun autre compartiment ni portefeuille ne complète le disponible.
+- Pro à 5 000 FC coûte 500 jetons. Les futurs bonus de bienvenue passent à **500 jetons**, sans complément des anciens bonus de 50 ou 200.
+- Le Pro payé avec le bonus de bienvenue ne rémunère pas le parrain. Le flux Pro en jetons reste exclu et une garde explicite protège aussi les callbacks incohérents. Un abonnement réellement payé et confirmé par le prestataire reste éligible, même au premier mois.
+- Les deux taux de parrainage sont de 1 % : abonnement éligible et trajet éligible. Par exemple, 1 % de 5 000 FC donnent 50 FC, soit 5 jetons au nouveau taux.
+- Le réseau à plusieurs niveaux du tableur joint est **abandonné sur instruction de l'utilisateur** ; ni nouveaux rangs, ni Packs Pro, ni bonus USD.
+- Les nouvelles migrations, la compatibilité mobile et le déploiement sont détaillés dans [la politique des jetons](purchased-token-withdrawals.md). Aucun changement en production n'a été réalisé.
+
+## Contrôle du solde disponible — 20 octobre 2026
+
+Un retrait ne peut utiliser que `referral_accounts.availableTokens` de l'utilisateur authentifié. Les jetons `pendingTokens`, `reservedTokens`, `withdrawnTokens`, les recharges, les bonus du portefeuille ordinaire et les gains conducteur ne peuvent pas compléter ce solde. Les commissions arrivées à maturité sont d'abord libérées suivant les règles existantes ; les autres restent en attente.
+
+Le serveur vérifie le montant (minimum 1 000 jetons, deux décimales maximum), puis relit le compte de parrainage sous verrou transactionnel. Il déplace exactement le montant demandé du disponible vers le réservé avant l'appel au prestataire, sans appel réseau sous verrou. Les montants ou soldes non numériques/incohérents sont refusés. Les champs clients permettant de choisir un autre solde sont rejetés par la validation HTTP existante.
+
+Exemple : 800 jetons disponibles et 5 000 en attente ne permettent pas de retirer 1 000 jetons. Avec 1 500 disponibles, deux demandes simultanées de 1 000 ne peuvent pas toutes deux être financées. Les callbacks de confirmation et les règles de déblocage après échec restent inchangés. Les gains conducteur conservent leur propre circuit de retrait.
+
+Pas de migration, de variable d'environnement supplémentaire ni de changement du corps de requête mobile. Le déploiement du backend sera nécessaire pour appliquer le durcissement en production.
+
+Validation locale : 544 tests des modules parrainage, portefeuille, paiements et gains conducteur réussis, plus 5 tests sur un cluster PostgreSQL/PostGIS jetable (solde disponible seul, montant exact, concurrence, maturité et rollback). Compilation applicative réussie. Le test PostgreSQL s'active avec `REFERRAL_TEST_POSTGRES_BIN` pointant vers les binaires locaux ; il ne lit pas `.env` et les versements externes sont simulés.
+
+## Historique du 14 octobre 2026 — remplacé par le taux de 10 FC ci-dessus
+
+Les montants/seuils de cette section documentent l'étape précédente. La règle du 14 octobre autorisait `POST /referrals/me/withdrawals` dès **1 000 jetons par demande**, soit **25 000 CDF**, avec KYC et solde disponible suffisants. La valeur était de **25 FC pour tous les jetons Zwanga**. Le résumé indiquait `withdrawal.enabled=true`, `minimumTokens=1000`, `moneyPerToken=25`, et `blocked=true` si le KYC ou le solde était insuffisant. Le minimum de 1 000 est conservé, mais le taux courant est désormais 10.
 
 Les soldes acquis gardent leur nombre de jetons ; aucun crédit multiplicateur. Les taux de récompense restent inchangés, les nouvelles récompenses sont converties à 25 FC/jeton. Les anciens retraits déjà transmis gardent leur taux/montant enregistré. Les gains conducteur restent retirables ; les jetons du portefeuille d'usage restent non retirables. Voir [la politique actuelle, ses migrations et les limites mobiles](purchased-token-withdrawals.md).
 
@@ -19,7 +98,7 @@ Chaque utilisateur Zwanga possède un lien d'invitation ChottuLink personnel. Le
 Le parrain reçoit :
 
 - **5 jetons de parrainage disponibles immédiatement** quand le filleul est rattaché pour la première fois ;
-- **5 % du prix total réellement payé** pour un abonnement Pro payé et confirmé par FlexPay ;
+- **1 % du prix total réellement payé** pour un abonnement Pro payé et confirmé par FlexPay/PawaPay ;
 - **1 % du montant réellement payé par le filleul** pour une course terminée, déposée automatiquement, puis payée par FlexPay ou en jetons Zwanga.
 
 Pour les courses, ce 1 % est prélevé sur la commission plateforme Zwanga de 5 %. Le conducteur conserve donc son calcul existant : il reçoit le net après la commission globale de 5 %. Sur une course parrainée, Zwanga conserve économiquement 4 % et le parrain reçoit 1 %.
@@ -40,7 +119,7 @@ Après ce changement :
 - l'attribution différée est acceptée par les inscriptions téléphone, Google et Apple ;
 - le rattachement du parrain est immuable ;
 - le premier rattachement crédite 5 jetons disponibles au parrain ;
-- les paiements éligibles créent une commission en attente : 5 % sur abonnement FlexPay, 1 % sur course FlexPay ou jetons ;
+- les paiements éligibles créent une commission en attente : 1 % sur abonnement FlexPay/PawaPay, 1 % sur course FlexPay ou jetons ;
 - la commission devient disponible après sept jours ;
 - les gains sont séparés des jetons promotionnels ;
 - un utilisateur KYC approuvé peut retirer au moins 50 jetons par FlexPay Mobile Money ;
@@ -363,10 +442,10 @@ La détection anti-abus multi-comptes par appareil ou graphe de paiement reste u
 
 | Variable                               | Valeur livrée                   | Effet                                                                |
 | -------------------------------------- | ------------------------------- | -------------------------------------------------------------------- |
-| `REFERRAL_SUBSCRIPTION_REWARD_RATE`    | `0.05`                          | 5 % du prix total payé pour un abonnement FlexPay                    |
+| `REFERRAL_SUBSCRIPTION_REWARD_RATE`    | `0.01`                          | 1 % du prix payé pour un abonnement éligible ; plafond serveur à 1 % |
 | `REFERRAL_BOOKING_REWARD_RATE`         | `0.01`                          | 1 % du montant payé par le filleul pour une course FlexPay ou jetons |
 | `REFERRAL_ATTRIBUTION_BONUS_TOKENS`    | `5`                             | bonus disponible au premier rattachement d'un filleul                |
-| `REFERRAL_REWARD_RATE`                 | `0.05`                          | compatibilité legacy, utilisé comme fallback abonnement              |
+| `REFERRAL_REWARD_RATE`                 | `0.01`                          | fallback abonnement historique, lui aussi plafonné à 1 %             |
 | `REFERRAL_HOLD_DAYS`                   | `7`                             | retenue                                                              |
 | `REFERRAL_REWARD_WINDOW_MONTHS`        | `12`                            | durée depuis le premier paiement                                     |
 | `REFERRAL_MIN_WITHDRAWAL_TOKENS`       | `50`                            | retrait minimum                                                      |
@@ -423,7 +502,7 @@ Application : `app.config.js`, `app/+native-intent.tsx`, `app/(tabs)/profile.tsx
 7. Ouvrir un lien sur un appareil sans Zwanga, installer puis créer le filleul.
 8. Vérifier l'audit ChottuLink et le rattachement immuable.
 9. Confirmer un abonnement FlexPay test.
-10. Vérifier une commission abonnement de 5 % en `pending`.
+10. Vérifier une commission abonnement de 1 % en `pending` (5 jetons pour 5 000 FC).
 11. Vérifier une commission course de 1 % en `pending`, aussi bien pour FlexPay que pour les jetons.
 12. Vérifier que le rattachement du filleul crédite une seule fois 5 jetons disponibles.
 13. Vérifier la libération des commissions après sept jours.
@@ -477,7 +556,7 @@ La migration de fournisseur `1780000020000` ne touche pas aux attributions ni au
 - invitation WhatsApp et repli SMS conservant le lien personnel ;
 - rattachement immuable ;
 - bonus unique de 5 jetons au premier rattachement ;
-- 5 % exact sur abonnement FlexPay ;
+- 1 % sur abonnement FlexPay/PawaPay, même avec l'ancienne configuration à 5 % ;
 - 1 % exact sur course FlexPay ou jetons ;
 - aucun gain pour espèces, essai ou paiement non réussi ;
 - début au premier paiement et fin après douze mois ;

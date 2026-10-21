@@ -6,7 +6,7 @@ import {
   OnModuleInit,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, MoreThan, Not, Repository } from 'typeorm';
+import { EntityManager, In, MoreThan, Not, Repository } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import {
   Subscription,
@@ -35,7 +35,7 @@ import { FlexPayCallbackDto } from '../payments/dto/payment.dto';
 import { PaymentsService } from '../payments/payments.service';
 import { User, UserRole } from '../users/entities/user.entity';
 import { CacheService } from '../common/services/cache.service';
-import { WalletLedgerEntry } from '../wallet/entities/wallet-ledger-entry.entity';
+import { WalletLedgerEntry, WalletLedgerEntryType } from '../wallet/entities/wallet-ledger-entry.entity';
 import { WalletService } from '../wallet/wallet.service';
 import { ReferralsService } from '../referrals/referrals.service';
 import { DRIVER_FINANCE } from '../driver-finance/driver-finance.policy';
@@ -332,63 +332,77 @@ export class SubscriptionsService implements OnModuleInit {
       );
     }
 
-    const activeSubscription = await this.getActiveSubscription(user.id);
-    if (activeSubscription) {
-      const response = this.buildPaymentResponse(activeSubscription, null);
-      this.logSubscriptionPaymentResponse(
-        'Subscription token payment skipped active subscription',
-        response,
-      );
-      return response;
-    }
-
-    await this.cancelPendingSubscriptions(user.id);
-
     const pointsAmount = this.getSubscriptionPointsPrice();
-    const startDate = new Date();
-    const endDate = this.calculateEndDate(startDate);
-    const subscription = this.subscriptionRepository.create({
-      userId: user.id,
-      plan: dto.plan,
-      status: SubscriptionStatus.PENDING,
-      startDate,
-      endDate,
-      amount: pointsAmount,
-      currency: this.walletService.getPointsCurrency(),
-      premiumBadgeEnabled: true,
-      featuredTripsEnabled: true,
-      documentFundingEnabled: true,
-      documentFundingLimit: this.getDocumentFundingLimit(),
-      documentFundingCurrency: this.getDocumentFundingCurrency(),
-      paymentReference: null,
-      paymentTransactionId: null,
-      isTrial: false,
+    const result = await this.subscriptionRepository.manager.transaction(async manager => {
+      // Same user-first order as paid activation. A retry observes the committed Pro.
+      await manager.findOne(User, { where: { id: user.id }, lock: { mode: 'pessimistic_write' } });
+      const active = await manager.findOne(Subscription, {
+        where: { userId: user.id, status: SubscriptionStatus.ACTIVE },
+        order: { createdAt: 'DESC' }, lock: { mode: 'pessimistic_write' },
+      });
+      if (active && active.endDate > new Date()) {
+        const walletEntry = await manager.findOne(WalletLedgerEntry, { where: {
+          userId: user.id, type: WalletLedgerEntryType.SUBSCRIPTION_PAYMENT,
+          relatedEntityType: 'subscription', relatedEntityId: active.id,
+        } });
+        return { subscription: active, walletEntry };
+      }
+      if (active) {
+        active.status = SubscriptionStatus.EXPIRED;
+        await manager.save(Subscription, active);
+      }
+      // Do not cancel a Mobile Money request which can still debit the user.
+      const pendingPayment = await manager.findOne(PaymentTransaction, { where: {
+        userId: user.id, purpose: PaymentPurpose.SUBSCRIPTION_PRO,
+        status: In([PaymentStatus.PENDING, PaymentStatus.INITIATED]),
+      } });
+      if (pendingPayment) throw new BadRequestException('Un paiement Pro est déjà en cours. Vérifiez son statut avant de payer en jetons.');
+
+      // Recover a pre-fix debit with its ORIGINAL amount; never silently charge it again.
+      const pending = await manager.find(Subscription, {
+        where: { userId: user.id, status: SubscriptionStatus.PENDING, currency: In(['PTS', 'POINTS']) },
+        order: { createdAt: 'ASC' }, take: 21,
+      });
+      if (pending.length > 20) throw new BadRequestException('Vos anciens achats Pro nécessitent une vérification par le support.');
+      let recovered: Subscription | undefined;
+      for (const candidate of pending) {
+        const debit = await manager.findOne(WalletLedgerEntry, { where: {
+          userId: user.id, type: WalletLedgerEntryType.SUBSCRIPTION_PAYMENT,
+          relatedEntityType: 'subscription', relatedEntityId: candidate.id,
+        } });
+        if (!debit) continue;
+        if (recovered) throw new BadRequestException('Plusieurs achats Pro débités nécessitent une régularisation par le support.');
+        recovered = candidate;
+      }
+      const startDate = new Date();
+      const subscription = recovered ?? manager.create(Subscription, {
+        userId: user.id,
+        plan: dto.plan,
+        status: SubscriptionStatus.PENDING,
+        startDate,
+        endDate: this.calculateEndDate(startDate),
+        amount: pointsAmount,
+        currency: this.walletService.getPointsCurrency(),
+        premiumBadgeEnabled: true,
+        featuredTripsEnabled: true,
+        documentFundingEnabled: true,
+        documentFundingLimit: this.getDocumentFundingLimit(),
+        documentFundingCurrency: this.getDocumentFundingCurrency(),
+        paymentReference: null,
+        paymentTransactionId: null,
+        isTrial: false,
+      });
+      const saved = await manager.save(Subscription, subscription);
+      const walletEntry = await this.walletService.payForSubscription(saved, Number(saved.amount), manager);
+      const activated = await this.activatePointsSubscription(saved, walletEntry, manager);
+      return { subscription: activated, walletEntry };
     });
-
-    let savedSubscription =
-      await this.subscriptionRepository.save(subscription);
-    let walletEntry: WalletLedgerEntry;
-
-    try {
-      walletEntry = await this.walletService.payForSubscription(
-        savedSubscription,
-        pointsAmount,
-      );
-    } catch (error) {
-      savedSubscription.status = SubscriptionStatus.PAYMENT_FAILED;
-      await this.subscriptionRepository.save(savedSubscription);
-      throw error;
-    }
-
-    savedSubscription = await this.activatePointsSubscription(
-      savedSubscription,
-      walletEntry,
-    );
-
-    const response = this.buildPointsPaymentResponse(
-      savedSubscription,
-      walletEntry,
-    );
+    // The money and entitlement are committed. Cache failures must not report a failed purchase.
+    try { await this.invalidatePremiumCaches(); }
+    catch { this.logger.warn('Pro activated; premium cache refresh will be retried on later reads'); }
+    const response = result.walletEntry
+      ? this.buildPointsPaymentResponse(result.subscription, result.walletEntry)
+      : this.buildPaymentResponse(result.subscription, null);
     this.logSubscriptionPaymentResponse(
       'Subscription token payment completed',
       response,
@@ -969,8 +983,9 @@ export class SubscriptionsService implements OnModuleInit {
   private async activatePointsSubscription(
     subscription: Subscription,
     walletEntry: WalletLedgerEntry,
+    manager: EntityManager,
   ): Promise<Subscription> {
-    await this.subscriptionRepository.update(
+    await manager.update(Subscription,
       {
         userId: subscription.userId,
         status: SubscriptionStatus.ACTIVE,
@@ -992,9 +1007,8 @@ export class SubscriptionsService implements OnModuleInit {
     subscription.documentFundingCurrency = this.getDocumentFundingCurrency();
 
     const savedSubscription =
-      await this.subscriptionRepository.save(subscription);
-    await this.walletService.awardSubscriptionPaymentTokens(savedSubscription);
-    await this.invalidatePremiumCaches();
+      await manager.save(Subscription, subscription);
+    await this.walletService.awardSubscriptionPaymentTokens(savedSubscription, undefined, manager);
 
     this.logger.log(
       `Token subscription activated: subscriptionId=${savedSubscription.id}, userId=${savedSubscription.userId}, walletEntryId=${walletEntry.id}, endDate=${savedSubscription.endDate.toISOString()}`,

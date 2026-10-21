@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, Request, Query } from '@nestjs/common';
+import { Body, Controller, Get, Param, Post, Request, Query, ParseUUIDPipe } from '@nestjs/common';
 import { HistoryPageQuery } from '../common/history-page';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Auth } from '../auth/decorators/auth.decorator';
@@ -122,11 +122,24 @@ export class ReferralsController {
   @Post('me/withdrawals')
   @Auth()
   @SensitiveThrottle(5, 60000)
+  @ApiOperation({
+    summary: 'Retirer uniquement les jetons de parrainage disponibles',
+    description:
+      'Minimum 1 000 jetons, KYC approuvé et solde disponible suffisant. Le solde est contrôlé et réservé atomiquement côté serveur.',
+  })
   requestWithdrawal(
     @Request() req: AuthenticatedRequest,
     @Body() dto: RequestReferralWithdrawalDto,
   ) {
     return this.referralsService.requestWithdrawal(req.user.userId, dto);
+  }
+
+  @Get('me/withdrawals/:id')
+  @Auth()
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'Lire son retrait, même sans numéro de commande prestataire' })
+  getWithdrawal(@Request() req: AuthenticatedRequest, @Param('id', new ParseUUIDPipe()) id: string) {
+    return this.referralsService.getWithdrawalById(req.user.userId, id);
   }
 
   @Post('withdrawals/flexpay/callback')

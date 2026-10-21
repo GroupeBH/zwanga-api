@@ -14,9 +14,10 @@ import { DriverWelcomeBonusCopy1780000059000 } from './migrations/1780000059000-
 import { IsolateWelcomeBonusFailures1780000063000 } from './migrations/1780000063000-IsolateWelcomeBonusFailures';
 import { WelcomeBonus25CdfCopy1780000071000 } from './migrations/1780000071000-WelcomeBonus25CdfCopy';
 import { WelcomeBonus200Tokens1780000072000 } from './migrations/1780000072000-WelcomeBonus200Tokens';
+import { WelcomeBonus500Tokens1780000081000 } from './migrations/1780000081000-WelcomeBonus500Tokens';
 
 // Only a throwaway cluster on a random loopback port. No application env/DB URL.
-const bin = process.env.WELCOME_BONUS_TEST_POSTGRES_BIN;
+const bin = process.env.WELCOME_BONUS_TEST_POSTGRES_BIN ?? process.env.WALLET_TEST_POSTGRES_BIN;
 (bin ? describe : describe.skip)(
   '200-token welcome bonus on isolated PostgreSQL',
   () => {
@@ -412,6 +413,41 @@ const bin = process.env.WELCOME_BONUS_TEST_POSTGRES_BIN;
         await db.query(`SELECT column_default FROM information_schema.columns
         WHERE table_name='welcome_bonus_grants' AND column_name='amount'`),
       ).toEqual([{ column_default: '200' }]);
+    });
+
+    it('grants 500 only to new beneficiaries and preserves historical 50/200 balances and notices', async () => {
+      const old50 = await candidate();
+      await approve(old50);
+      await upgrade();
+      const old200 = await candidate();
+      await approve(old200);
+      const missed = await unclaimed();
+      const fresh = await candidate();
+      const previous = {
+        old50: await wallet(old50), old200: await wallet(old200),
+        entries: await entries(), notices: await notices(),
+      };
+      await db.transaction(m => new WelcomeBonus500Tokens1780000081000().up(m.queryRunner!));
+      expect(await entries()).toEqual(previous.entries);
+      expect(await notices()).toEqual(previous.notices);
+      expect(await wallet(old50)).toEqual(previous.old50);
+      expect(await wallet(old200)).toEqual(previous.old200);
+      await approve(fresh);
+      await Promise.all([grant(missed), grant(missed), backfill()]);
+      expect((await wallet(fresh)).balance).toBe('570.00');
+      expect((await wallet(missed)).balance).toBe('570.00');
+      expect((await wallet(fresh)).withdrawableBalance).toBe('20.00');
+      expect(await claims()).toHaveLength(4);
+      expect(await entries()).toHaveLength(4);
+      expect(await notices()).toHaveLength(4);
+      const freshEntry = (await entries()).find((entry: any) => entry.userId === fresh);
+      const freshNotice = (await notices()).find((notice: any) => notice.userId === fresh);
+      expect(freshEntry.amount).toBe('500.00');
+      expect(freshNotice.body).toBe(walletMovementNotification(freshEntry, UserRole.DRIVER)!.body);
+      expect(freshNotice.body).toContain('5 000 FC');
+      expect(freshNotice.data.amount).toBe(500);
+      expect(await grant(old50)).toEqual([{ credited: false }]);
+      expect(await grant(old200)).toEqual([{ credited: false }]);
     });
   },
 );

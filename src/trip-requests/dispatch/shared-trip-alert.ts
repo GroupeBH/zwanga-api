@@ -104,6 +104,8 @@ export async function enqueueSharedTripAlert(
           arrival: request.arrivalLocation,
           seats: request.numberOfSeats,
           departureAt: request.departureDateMin,
+          pricePerSeat: request.maxPricePerSeat,
+          priceKind: 'budget',
         }),
       },
     })),

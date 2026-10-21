@@ -22,12 +22,17 @@ export enum ReferralWithdrawalStatus {
 @Entity('referral_withdrawals')
 @Index(['userId', 'status'])
 @Index(['paymentTransactionId'])
+@Index('IDX_referral_withdrawal_intent', ['userId', 'idempotencyKey'], { unique: true, where: '"idempotencyKey" IS NOT NULL' })
+@Index('IDX_referral_withdrawal_recent', ['userId', 'requestedAt'])
 export class ReferralWithdrawal {
   @PrimaryGeneratedColumn('uuid')
   id: string;
 
   @Column({ type: 'uuid' })
   userId: string;
+
+  @Column({ type: 'uuid', nullable: true, update: false })
+  idempotencyKey: string | null;
 
   @ManyToOne(() => User, { onDelete: 'RESTRICT' })
   @JoinColumn({ name: 'userId' })
@@ -70,6 +75,9 @@ export class ReferralWithdrawal {
 
   @Column({ type: 'varchar', length: 500, nullable: true })
   failureReason: string | null;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  recoveryCheckedAt: Date | null;
 
   @CreateDateColumn()
   createdAt: Date;

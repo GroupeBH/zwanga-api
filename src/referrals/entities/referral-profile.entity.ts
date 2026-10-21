@@ -61,6 +61,13 @@ export class ReferralProfile {
   @Column({ type: 'timestamp', nullable: true })
   attributionCapturedAt: Date | null;
 
+  // Non-financial audit of an admin assignment; never exposed by default reads.
+  @Column({ type: 'uuid', nullable: true, select: false })
+  attributionAdminId: string | null;
+
+  @Column({ type: 'varchar', length: 300, nullable: true, select: false })
+  attributionAdminReason: string | null;
+
   @Column({ type: 'timestamp', nullable: true })
   qualifiedAt: Date | null;
 

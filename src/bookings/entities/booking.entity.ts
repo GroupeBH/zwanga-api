@@ -1,4 +1,5 @@
 import type { Point } from 'typeorm';
+import { TOKEN_VALUE_CDF } from '../../wallet/token-value.policy';
 import type { RideDeclarations, RideStage } from '../../ride-declarations/ride-declaration.model';
 import {
   Entity,
@@ -50,7 +51,7 @@ export class Booking {
   @Column({ type: 'smallint', default: 2, update: false })
   cashCommissionPolicyVersion: number;
 
-  @Column({ type: 'numeric', precision: 12, scale: 4, default: 25, update: false })
+  @Column({ type: 'numeric', precision: 12, scale: 4, default: TOKEN_VALUE_CDF, update: false })
   cashCommissionTokenValue: number;
 
   @PrimaryGeneratedColumn('uuid')
