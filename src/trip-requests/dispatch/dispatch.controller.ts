@@ -51,4 +51,11 @@ export class DriverDispatchController {
     @Body() body: DispatchResponseDto) {
     return this.dispatch.respond(req.user.userId, id, body.decision);
   }
+
+  @Put('nearby-requests/:id/decline')
+  @Roles(UserRole.DRIVER)
+  @SensitiveThrottle(20, 60000)
+  declineNearby(@Request() req: { user: { userId: string } }, @Param('id', ParseUUIDPipe) id: string) {
+    return this.dispatch.declineNearbyRequest(req.user.userId, id);
+  }
 }

@@ -2,6 +2,11 @@ import { NotificationService } from './notifications.service';
 import { NotificationStatus } from './entities/notification.entity';
 import { DRIVER_REQUEST_NOTIFICATION_TYPES } from './driver-request-policy';
 
+// These tests isolate recipient eligibility; cooldown SQL/transport have their own suites.
+jest.mock('./nearby-request-cooldown', () => ({ ...jest.requireActual('./nearby-request-cooldown'),
+  prepareNearbyRequestRinging: jest.fn(async () => true),
+}));
+
 const fixture = () => {
   const query = { where: jest.fn().mockReturnThis(), andWhere: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(), take: jest.fn().mockReturnThis(), skip: jest.fn().mockReturnThis(),

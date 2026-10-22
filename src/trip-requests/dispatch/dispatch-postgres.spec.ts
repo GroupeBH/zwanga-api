@@ -11,6 +11,7 @@ import { typeOrmEntities } from '../../database/entities';
 import { AddDriverDispatch1780000048000 } from '../../database/migrations/1780000048000-AddDriverDispatch';
 import { BroadcastDriverRequests1780000074000 } from '../../database/migrations/1780000074000-BroadcastDriverRequests';
 import { RetainDriverLastLocation1780000076000 } from '../../database/migrations/1780000076000-RetainDriverLastLocation';
+import { NearbyRequestRingingCooldown1780000087000 } from '../../database/migrations/1780000087000-NearbyRequestRingingCooldown';
 import { enqueueStaleLocationReminders, isStaleLocationReminderDeliverable } from './stale-location-reminder';
 import { IndexNearbyRequestAlerts1780000066000 } from '../../database/migrations/1780000066000-IndexNearbyRequestAlerts';
 import { DriverDispatchService } from './dispatch.service';
@@ -85,6 +86,7 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
       await new AddDriverDispatch1780000048000().up(runner);
       await new BroadcastDriverRequests1780000074000().up(runner);
       await new RetainDriverLastLocation1780000076000().up(runner);
+      await new NearbyRequestRingingCooldown1780000087000().up(runner);
     } finally { await runner.release(); }
     service = new DriverDispatchService(source, new ConfigService({ DRIVER_DISPATCH_ENABLED: 'true' }),
       notifications as never);
@@ -128,6 +130,22 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
       numberOfSeats: seats, maxPricePerSeat: 1000, vehicleType: VehicleType.CAR });
   };
   const offers = (requestId: string) => source.query('SELECT * FROM trip_request_dispatch_offers WHERE "requestId" = $1 ORDER BY "createdAt"', [requestId]);
+
+  it('excludes a muted nearby driver from scheduled and immediate dispatch, then resumes after expiry', async () => {
+    const d = await driver();
+    await service.registerNotifications(d.user.id, 2);
+    await source.query(`INSERT INTO nearby_driver_ring_state ("driverId", "missedCount", "mutedUntil")
+      VALUES ($1,4,now() + interval '24 hours')`, [d.user.id]);
+    const scheduled = await request(false), immediate = await request();
+    await service.notifyScheduledRequest(scheduled.id); await service.tick();
+    expect(await offers(immediate.id)).toHaveLength(0);
+    expect(await source.query(`SELECT id FROM notifications WHERE "userId" = $1`, [d.user.id])).toHaveLength(0);
+    expect((await service.status(d.user.id)).available).toBe(true);
+    await source.query(`UPDATE nearby_driver_ring_state SET "mutedUntil" = now() - interval '1 second' WHERE "driverId" = $1`, [d.user.id]);
+    await service.notifyScheduledRequest(scheduled.id); await service.tick();
+    expect(await offers(immediate.id)).toHaveLength(1);
+    expect(await source.query(`SELECT id FROM notifications WHERE "userId" = $1 AND data ->> 'type' = 'trip_request_nearby'`, [d.user.id])).toHaveLength(1);
+  });
 
   it('hides old driver order alerts from a passenger inbox and unread counts while retaining own updates', async () => {
     const owner = await passenger();

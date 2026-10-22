@@ -1,0 +1,379 @@
+import { execFileSync, spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve, sep } from 'node:path';
+import { createServer } from 'node:net';
+import { randomUUID } from 'node:crypto';
+import { DataSource } from 'typeorm';
+import { postgresTestServerOptions } from '../../test/postgres-test-options';
+import { NearbyRequestRingingCooldown1780000087000 } from '../database/migrations/1780000087000-NearbyRequestRingingCooldown';
+import type { Notification } from './entities/notification.entity';
+type Notice = Pick<Notification, 'id' | 'userId' | 'data'>;
+import {
+  declineNearbyRequest,
+  prepareNearbyRequestRinging,
+  reconcileNearbyRequestCooldowns,
+  NEARBY_RING_COOLDOWN_MS,
+} from './nearby-request-cooldown';
+
+// Explicit opt-in, disposable loopback cluster. Never read DATABASE_URL or .env.
+const pgBin = process.env.NEARBY_RING_TEST_POSTGRES_BIN;
+(pgBin ? describe : describe.skip)(
+  'nearby ringtone cooldown on isolated PostgreSQL',
+  () => {
+    let directory: string,
+      started = false,
+      db: DataSource;
+    const driver = randomUUID(),
+      passenger = randomUUID(),
+      otherDriver = randomUUID();
+    const executable = (name: string) =>
+      join(pgBin!, process.platform === 'win32' ? `${name}.exe` : name);
+    const run = (name: string, args: string[]) =>
+      execFileSync(executable(name), args, {
+        windowsHide: true,
+        stdio: name === 'pg_ctl' ? 'ignore' : 'pipe',
+        timeout: 30_000,
+      });
+    beforeAll(async () => {
+      directory = mkdtempSync(join(tmpdir(), 'zwanga-nearby-ring-'));
+      run('initdb', [
+        '-D',
+        directory,
+        '-U',
+        'nearby_ring_test',
+        '-A',
+        'trust',
+        '--no-locale',
+        '-E',
+        'UTF8',
+      ]);
+      const port = await new Promise<number>((done) => {
+        const server = createServer();
+        server.listen(0, '127.0.0.1', () => {
+          const port = (server.address() as { port: number }).port;
+          server.close(() => done(port));
+        });
+      });
+      started = true;
+      run('pg_ctl', [
+        '-D',
+        directory,
+        '-l',
+        join(directory, 'postgres.log'),
+        '-o',
+        postgresTestServerOptions(port),
+        '-w',
+        'start',
+      ]);
+      db = new DataSource({
+        type: 'postgres',
+        host: '127.0.0.1',
+        port,
+        username: 'nearby_ring_test',
+        database: 'postgres',
+        synchronize: false,
+      });
+      await db.initialize();
+      await db.query(`CREATE TABLE users (id uuid PRIMARY KEY);
+      CREATE TABLE trip_requests (id uuid PRIMARY KEY, "passengerId" uuid, status text,
+        "selectedDriverId" uuid, "tripId" uuid, "departureDateMax" timestamptz);
+      CREATE TABLE notifications (id uuid PRIMARY KEY, status text);
+      CREATE TABLE driver_offers ("tripRequestId" uuid, "driverId" uuid);
+      CREATE TABLE trip_request_dispatch_offers ("requestId" uuid, "driverId" uuid, status text, id uuid)`);
+      const runner = db.createQueryRunner();
+      try {
+        await new NearbyRequestRingingCooldown1780000087000().up(runner);
+      } finally {
+        await runner.release();
+      }
+      await db.query('INSERT INTO users (id) VALUES ($1),($2),($3)', [
+        driver,
+        passenger,
+        otherDriver,
+      ]);
+    }, 60_000);
+    afterAll(async () => {
+      if (db?.isInitialized) await db.destroy();
+      if (started) {
+        const result = spawnSync(
+          executable('pg_ctl'),
+          ['-D', directory, 'status'],
+          { windowsHide: true, stdio: 'ignore', timeout: 10_000 },
+        );
+        if (result.status === 0)
+          run('pg_ctl', ['-D', directory, '-m', 'immediate', '-w', 'stop']);
+        else if (result.status !== 3)
+          throw new Error(
+            'Cannot confirm disposable PostgreSQL has stopped; keeping its data directory.',
+          );
+      }
+      if (
+        directory &&
+        resolve(directory).startsWith(
+          resolve(tmpdir()) + sep + 'zwanga-nearby-ring-',
+        )
+      )
+        rmSync(directory, { recursive: true, force: true });
+    });
+    beforeEach(async () => {
+      await db.query(
+        'TRUNCATE nearby_driver_ring_events, nearby_driver_ring_state, notifications, trip_requests, driver_offers, trip_request_dispatch_offers CASCADE',
+      );
+    });
+    async function create(type = 'trip_request_nearby', owner = driver) {
+      const id = randomUUID(),
+        requestId = randomUUID();
+      await db.query(
+        `INSERT INTO trip_requests (id, "passengerId", status, "departureDateMax")
+      VALUES ($1,$2,'pending',now() + interval '1 day')`,
+        [requestId, passenger],
+      );
+      await db.query(`INSERT INTO notifications VALUES ($1,'pending')`, [id]);
+      return {
+        id,
+        userId: owner,
+        data: {
+          type,
+          driverId: owner,
+          passengerId: passenger,
+          tripRequestId: requestId,
+        },
+      };
+    }
+    const prepare = (notice: Notice) =>
+      prepareNearbyRequestRinging(db.manager, notice);
+    const sent = (notice: Notice) =>
+      db.query(`UPDATE notifications SET status = 'sent' WHERE id = $1`, [
+        notice.id,
+      ]);
+    const refuse = (notice: Notice, owner = driver) =>
+      declineNearbyRequest(db.manager, owner, notice.data!.tripRequestId);
+    const status = async () =>
+      (
+        await db.query(
+          'SELECT * FROM nearby_driver_ring_state WHERE "driverId" = $1',
+          [driver],
+        )
+      )[0];
+    const expire = () =>
+      db.query(
+        `UPDATE nearby_driver_ring_events SET "responseDeadline" = now() - interval '1 second'`,
+      );
+
+    it('rings the first four distinct orders, then blocks both nearby families for exactly 24h, not bookings', async () => {
+      for (let i = 1; i <= 4; i++) {
+        const notice = await create(
+          i % 2 ? 'trip_request_nearby' : 'driver_dispatch_offer',
+        );
+        expect(await prepare(notice)).toBe(true);
+        await sent(notice);
+        const result = await refuse(notice);
+        expect(result.missedCount).toBe(i);
+        if (i < 4) expect(result.mutedUntil).toBeNull();
+        else
+          expect(
+            new Date(result.mutedUntil!).getTime() -
+              new Date(result.serverNow).getTime(),
+          ).toBe(NEARBY_RING_COOLDOWN_MS);
+      }
+      const before = await status();
+      for (const type of ['trip_request_nearby', 'driver_dispatch_offer'])
+        expect(await prepare(await create(type))).toBe(false);
+      expect(await prepare(await create('new_booking'))).toBe(true);
+      expect(await prepare(await create('booking_response'))).toBe(true);
+      expect((await status()).mutedUntil).toEqual(before.mutedUntil);
+    });
+
+    it('counts ignored successful sends, never pending/failed sends, and combines refusals with timeouts', async () => {
+      for (let i = 0; i < 3; i++) {
+        const n = await create();
+        await prepare(n);
+        await sent(n);
+      }
+      const failed = await create();
+      await prepare(failed);
+      await db.query(
+        `UPDATE notifications SET status = 'failed' WHERE id = $1`,
+        [failed.id],
+      );
+      const pending = await create();
+      await prepare(pending);
+      await expire();
+      await reconcileNearbyRequestCooldowns(db.manager);
+      expect((await status()).missedCount).toBe(3);
+      expect((await status()).mutedUntil).toBeNull();
+      const fourth = await create();
+      expect(await prepare(fourth)).toBe(true);
+      await sent(fourth);
+      await refuse(fourth);
+      expect((await status()).missedCount).toBe(4);
+    });
+
+    it('deduplicates concurrent refusals, retries and two notification families for the same order', async () => {
+      const n = await create();
+      await prepare(n);
+      await sent(n);
+      await Promise.all(Array.from({ length: 8 }, () => refuse(n)));
+      expect((await status()).missedCount).toBe(1);
+      expect(await prepare(n)).toBe(false);
+      const otherId = randomUUID();
+      await db.query(`INSERT INTO notifications VALUES ($1,'pending')`, [
+        otherId,
+      ]);
+      expect(await prepare({ ...n, id: otherId })).toBe(false);
+      expect((await status()).missedCount).toBe(1);
+      await expect(refuse(n, otherDriver)).rejects.toThrow('Aucune alerte');
+    });
+
+    it('starts a fresh counter after cooldown and never revives an old outstanding strike', async () => {
+      const late = await create();
+      await prepare(late); // Send finishes during cooldown.
+      for (let i = 0; i < 4; i++) {
+        const n = await create();
+        await prepare(n);
+        await sent(n);
+        await refuse(n);
+      }
+      await db.query(
+        `UPDATE nearby_driver_ring_state SET "mutedUntil" = clock_timestamp() WHERE "driverId" = $1`,
+        [driver],
+      );
+      await sent(late);
+      await expire();
+      const fresh = await create();
+      expect(await prepare(fresh)).toBe(true);
+      expect((await status()).missedCount).toBe(0);
+      expect((await status()).mutedUntil).toBeNull();
+      await sent(fresh);
+      await refuse(fresh);
+      expect((await status()).missedCount).toBe(1);
+    });
+
+    it('does not count answers, cancelled/taken orders, another account or self notifications', async () => {
+      const answered = await create();
+      await prepare(answered);
+      await sent(answered);
+      await db.query('INSERT INTO driver_offers VALUES ($1,$2)', [
+        answered.data!.tripRequestId,
+        driver,
+      ]);
+      const cancelled = await create();
+      await prepare(cancelled);
+      await sent(cancelled);
+      await db.query(
+        `UPDATE trip_requests SET status = 'cancelled' WHERE id = $1`,
+        [cancelled.data!.tripRequestId],
+      );
+      await refuse(cancelled);
+      const taken = await create();
+      await prepare(taken);
+      await sent(taken);
+      await db.query(
+        `UPDATE trip_requests SET status = 'driver_selected', "selectedDriverId" = $2 WHERE id = $1`,
+        [taken.data!.tripRequestId, otherDriver],
+      );
+      await expire();
+      await reconcileNearbyRequestCooldowns(db.manager);
+      expect((await status()).missedCount).toBe(0);
+      expect(
+        await prepare({
+          ...taken,
+          data: { ...taken.data, passengerId: driver },
+        }),
+      ).toBe(false);
+    });
+
+    it('caps the counter during a burst and recognises authoritative dispatch answers', async () => {
+      const notices: Notice[] = [];
+      for (let i = 0; i < 8; i++) {
+        const n = await create('driver_dispatch_offer');
+        await prepare(n);
+        await sent(n);
+        notices.push(n);
+      }
+      for (const [i, n] of notices.entries()) {
+        await db.query(
+          'INSERT INTO trip_request_dispatch_offers ("requestId", "driverId", status) VALUES ($1,$2,$3)',
+          [n.data!.tripRequestId, driver, i === 0 ? 'accepted' : 'declined'],
+        );
+      }
+      await expire();
+      await Promise.all([
+        reconcileNearbyRequestCooldowns(db.manager),
+        reconcileNearbyRequestCooldowns(db.manager),
+      ]);
+      expect((await status()).missedCount).toBe(4);
+      const rows = await db.query(
+        'SELECT outcome, count(*)::int AS count FROM nearby_driver_ring_events GROUP BY outcome',
+      );
+      expect(rows.find((row) => row.outcome === 'declined').count).toBe(4);
+      expect(
+        rows
+          .filter((row) => ['answered', 'muted'].includes(row.outcome))
+          .reduce((n, row) => n + row.count, 0),
+      ).toBe(4);
+    });
+
+    it('honours dispatch refusals immediately, before their response deadlines or the cron', async () => {
+      for (let i = 0; i < 4; i++) {
+        const n = await create('driver_dispatch_offer');
+        expect(await prepare(n)).toBe(true);
+        await sent(n);
+        await db.query(
+          'INSERT INTO trip_request_dispatch_offers ("requestId", "driverId", status) VALUES ($1,$2,$3)',
+          [n.data!.tripRequestId, driver, 'declined'],
+        );
+      }
+      expect(await prepare(await create())).toBe(false);
+      expect((await status()).missedCount).toBe(4);
+    });
+
+    it('resolves old offer-only payloads without allowing another recipient to use them', async () => {
+      const n = await create('driver_dispatch_offer'),
+        offerId = randomUUID();
+      await db.query(
+        'INSERT INTO trip_request_dispatch_offers VALUES ($1,$2,$3,$4)',
+        [n.data.tripRequestId, driver, 'pending', offerId],
+      );
+      const legacy = {
+        ...n,
+        data: {
+          type: 'driver_dispatch_offer',
+          offerId,
+          passengerId: passenger,
+        },
+      };
+      expect(await prepare(legacy)).toBe(true);
+      expect(await prepare({ ...legacy, userId: otherDriver })).toBe(false);
+      await sent(n);
+      await refuse(n);
+      expect((await status()).missedCount).toBe(1);
+    });
+
+    it('gives a failed send its response window on retry without extending an already successful send', async () => {
+      const n = await create();
+      await prepare(n);
+      await expire();
+      await db.query(
+        `UPDATE notifications SET status = 'failed' WHERE id = $1`,
+        [n.id],
+      );
+      expect(await prepare(n)).toBe(true);
+      await sent(n);
+      await reconcileNearbyRequestCooldowns(db.manager);
+      expect((await status()).missedCount).toBe(0);
+      const [before] = await db.query(
+        'SELECT "responseDeadline" FROM nearby_driver_ring_events',
+      );
+      expect(await prepare(n)).toBe(true);
+      const [after] = await db.query(
+        'SELECT "responseDeadline" FROM nearby_driver_ring_events',
+      );
+      expect(after.responseDeadline).toEqual(before.responseDeadline);
+      await expire();
+      await reconcileNearbyRequestCooldowns(db.manager);
+      expect((await status()).missedCount).toBe(1);
+    });
+  },
+);

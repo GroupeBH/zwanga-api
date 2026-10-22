@@ -18,6 +18,7 @@ import { rideSpeechData } from '../../notifications/ride-speech-data';
 import { ELIGIBLE_NEARBY_DRIVER_SQL, NEARBY_DRIVER_RADIUS_METERS } from './nearby-driver-policy';
 import { enqueueStaleLocationReminders } from './stale-location-reminder';
 import { hasUsableDriverLocation, USABLE_DRIVER_LOCATION_SQL } from './driver-location-policy';
+import { declineNearbyRequest } from '../../notifications/nearby-request-cooldown';
 
 interface DispatchOffer {
   id: string; requestId: string; driverId: string; vehicleId: string;
@@ -32,6 +33,9 @@ export class DriverDispatchService {
     private readonly notifications: NotificationService) {}
 
   get enabled() { return this.config.get<string>('DRIVER_DISPATCH_ENABLED') === 'true'; }
+  declineNearbyRequest(driverId: string, requestId: string) {
+    return declineNearbyRequest(this.db.manager, driverId, requestId);
+  }
   private get responseSeconds() { return boundedInteger(this.config.get('DRIVER_DISPATCH_RESPONSE_SECONDS'), 30, 10, 120); }
   private get presenceSeconds() { return boundedInteger(this.config.get('DRIVER_DISPATCH_PRESENCE_SECONDS'), 90, 45, 180); }
   private get radiusMeters() { return NEARBY_DRIVER_RADIUS_METERS; }

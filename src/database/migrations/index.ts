@@ -89,6 +89,7 @@ import { FinancialRecovery1780000083000 } from './1780000083000-FinancialRecover
 import { RideResponseOutbox1780000084000 } from './1780000084000-RideResponseOutbox';
 import { ReferralWithdrawalIdempotency1780000085000 } from './1780000085000-ReferralWithdrawalIdempotency';
 import { ReferralBookingRecovery1780000086000 } from './1780000086000-ReferralBookingRecovery';
+import { NearbyRequestRingingCooldown1780000087000 } from './1780000087000-NearbyRequestRingingCooldown';
 
 export const databaseMigrations = [
   FillTotalSeats1780000000000,
@@ -177,4 +178,5 @@ export const databaseMigrations = [
   RideResponseOutbox1780000084000,
   ReferralWithdrawalIdempotency1780000085000,
   ReferralBookingRecovery1780000086000,
+  NearbyRequestRingingCooldown1780000087000,
 ];

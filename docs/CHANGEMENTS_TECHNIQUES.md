@@ -1,5 +1,55 @@
 # Journal des changements techniques
 
+## 22 octobre 2026 — Pause de 24 heures après quatre demandes proches ignorées ou refusées
+
+- **Problème / périmètre :** la proximité seule continuait à solliciter un
+  conducteur ne répondant pas aux demandes. Règle limitée à `trip_request_nearby`
+  et `driver_dispatch_offer`, jamais aux réservations publiées ou aux retours
+  passagers. Quatre demandes distinctes, refus et absences cumulés, déclenchent
+  une pause non extensible de 24 heures ; le compteur repart à zéro ensuite.
+- **Solution appliquée :** nouvelle politique `src/notifications/nearby-request-cooldown.ts`,
+  migration additive `1780000087000-NearbyRequestRingingCooldown.ts` enregistrée
+  dans `src/database/migrations/index.ts`, deux tables avec contrainte unique
+  conducteur/demande. Le guide PostgreSQL a guidé l'index partiel, les types de
+  dates, les mises à jour groupées et les transactions courtes état → événements,
+  sans réseau sous verrou. Le contrôle de livraison de `notifications.service.ts`
+  et `dispatch/nearby-driver-policy.ts` filtrent les conducteurs en pause.
+  Un cron minute traite des lots bornés et ne se chevauche pas dans une instance.
+- **Refus :** `dispatch.controller.ts` / `dispatch.service.ts` exposent
+  `PUT /driver-dispatch/nearby-requests/:id/decline`, authentifié, réservé aux
+  conducteurs, UUID validé, limité en fréquence et dédupliqué. Il ne modifie pas
+  la commande du passager. Les réponses dispatch existantes sont également
+  reconnues avant tout nouvel envoi. Les anciens payloads avec `offerId` seul et
+  les nouvelles tentatives d'envoi restent compatibles.
+- **Précautions :** aucun changement de rayon, de présence ou de statut du
+  conducteur. Notifications de proximité suspendues, demandes toujours
+  consultables manuellement. Réservations, événements de trajet et réponses aux
+  passagers inchangés. Un envoi `failed` ou `pending` ne pénalise pas le conducteur ;
+  une absence suppose un envoi `sent`, une échéance dépassée, aucune réponse et
+  une demande encore disponible. Fenêtre plafonnée à 60 secondes et aux échéances
+  existantes. Les anciens événements ne prolongent pas la pause ni ne relancent
+  immédiatement une nouvelle pause après expiration.
+- **Vérifications :** suites nouvelles `nearby-request-cooldown.spec.ts` et
+  `nearby-request-cooldown.postgres.spec.ts`, adaptation du mock de
+  `driver-request-policy.spec.ts` et des migrations des fixtures dispatch/partage.
+  54 tests ciblés réussis, dont 9 PostgreSQL 17 isolés, puis 119 tests unitaires
+  complémentaires réussis. Le journal mobile associé détaille les contrôles et
+  l'intégration des refus dans `zwanga/docs/CHANGEMENTS_TECHNIQUES.md` au 22 octobre.
+  Les suites dispatch/partage PostgreSQL 18/PostGIS passent aussi : **75 tests**
+  (dont les tests de politique purs), avec exclusion puis réintégration effective
+  du conducteur en pause. TypeScript production sans émission et ESLint des
+  nouveaux fichiers de politique/migration validés ; le
+  contrôle global incluant les anciennes fixtures conserve des erreurs de types
+  hors périmètre et n'est pas présenté comme validé.
+- **Limites / déploiement :** migration préparée mais jamais exécutée sur une
+  base applicative ; aucun déploiement, envoi réel ou modification de configuration.
+  Appliquer la migration avant le nouveau backend, puis distribuer le mobile.
+  Aucun historique antérieur recompté. `sent` n'atteste pas une réception audible ;
+  les erreurs de reçus Expo tardives ne défont pas le compteur et les push déjà
+  en vol ne sont pas rappelés. Sans liaison mobile, un refus local reste constaté
+  à l'échéance comme absence de réponse. Tests physiques iOS/Android et charge
+  production non réalisés ; aucune promesse de disparition de crash ou de chauffe.
+
 ## 20 octobre 2026 — Correction UUID des confirmations de demande acceptée
 
 - **Cause confirmée :** `ride-response-delivery.ts` comparait `trips.id` (UUID) à `trip_requests.tripId` (varchar), puis cette référence texte à un paramètre UUID. PostgreSQL refusait la requête avec `42883`, avant tout envoi du push `trip_request_accepted`, même pour une demande dont le trajet n'était pas encore créé. Les tests unitaires simulant la requête ne détectaient pas cette incompatibilité.

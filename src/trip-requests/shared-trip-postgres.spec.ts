@@ -6,6 +6,7 @@ import { typeOrmEntities } from '../database/entities';
 import { AddDriverDispatch1780000048000 } from '../database/migrations/1780000048000-AddDriverDispatch';
 import { BroadcastDriverRequests1780000074000 } from '../database/migrations/1780000074000-BroadcastDriverRequests';
 import { RetainDriverLastLocation1780000076000 } from '../database/migrations/1780000076000-RetainDriverLastLocation';
+import { NearbyRequestRingingCooldown1780000087000 } from '../database/migrations/1780000087000-NearbyRequestRingingCooldown';
 import { SharedTripOffers1780000079000 } from '../database/migrations/1780000079000-SharedTripOffers';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { Vehicle, VehicleType } from '../vehicles/entities/vehicle.entity';
@@ -48,6 +49,7 @@ const bin = process.env.DISPATCH_TEST_POSTGRES_BIN;
         await new AddDriverDispatch1780000048000().up(runner);
         await new BroadcastDriverRequests1780000074000().up(runner);
         await new RetainDriverLastLocation1780000076000().up(runner);
+        await new NearbyRequestRingingCooldown1780000087000().up(runner);
         await db.query(
           'ALTER TABLE driver_offers DROP COLUMN "existingTripId", DROP COLUMN "sharedBookingId", DROP COLUMN "sharedTripConsentAt"',
         );

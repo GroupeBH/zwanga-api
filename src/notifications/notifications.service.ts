@@ -2,6 +2,7 @@ import { isAppUpdateDeliverable } from '../app-updates/app-update-dispatch.servi
 import { isRideResponseDeliverable } from './ride-response-delivery';
 import { androidDriverBackup, androidDriverBackupTtl } from './android-driver-backup';
 import { recoverDriverOffer } from './recover-driver-offer';
+import { isNearbyRingingRequest, prepareNearbyRequestRinging, reconcileNearbyRequestCooldowns } from './nearby-request-cooldown';
 import { isTripReminderDeliverable } from './trip-reminder-delivery';
 import { isStaleLocationReminderDeliverable } from '../trip-requests/dispatch/stale-location-reminder';
 import {
@@ -356,6 +357,11 @@ export class NotificationService implements OnModuleInit {
         await this.markNotificationFailed(savedNotification, 'PUSH_TOKEN_OWNERSHIP_AMBIGUOUS');
         return false;
       }
+      if (isNearbyRingingRequest(savedNotification.data) &&
+          !await prepareNearbyRequestRinging(this.notificationRepository.manager, savedNotification)) {
+        await this.suppressCriticalNotification(savedNotification, 'NEARBY_REQUEST_RINGING_PAUSED_OR_HANDLED');
+        return false;
+      }
       this.logger.debug(
         `Sending notification through ${this.isExpoPushToken(pushToken) ? 'Expo' : 'FCM'} - Title: ${savedNotification.title}`,
       );
@@ -627,6 +633,17 @@ export class NotificationService implements OnModuleInit {
   @Cron(CronExpression.EVERY_10_SECONDS)
   async dispatchTransactionalNotifications(): Promise<void> {
     await Promise.all([this.dispatchNotificationLane(false), this.dispatchUrgentNotifications()]);
+  }
+
+  private reconcilingNearbyRequests = false;
+
+  @Cron(CronExpression.EVERY_MINUTE)
+  async reconcileNearbyRequestRinging(): Promise<void> {
+    if (this.reconcilingNearbyRequests) return;
+    this.reconcilingNearbyRequests = true;
+    try { await reconcileNearbyRequestCooldowns(this.notificationRepository.manager); }
+    catch { this.logger.warn('Nearby request ringing cooldown reconciliation deferred.'); }
+    finally { this.reconcilingNearbyRequests = false; }
   }
 
   @Cron('*/5 * * * * *')
