@@ -47,6 +47,10 @@ export enum BookingPaymentStatus {
 @Index('IDX_bookings_passenger_history', ['passengerId', 'tripId', 'id'])
 @Index(['tripId', 'passengerId'])
 export class Booking {
+  // Explicit cash choice after a wallet top-up. Never erased by stale entity saves.
+  @Column({ type: 'timestamptz', nullable: true, update: false })
+  tokenCashFallbackAt: Date | null;
+
   // Server-only policy snapshots, never writable through booking DTOs.
   @Column({ type: 'smallint', default: 2, update: false })
   cashCommissionPolicyVersion: number;
@@ -206,6 +210,15 @@ export class Booking {
 
   @Column({ type: 'varchar', length: 30, default: TripPaymentMode.CASH })
   paymentMode: TripPaymentMode;
+
+  @Column({ type: 'numeric', precision: 10, scale: 2, default: 0 })
+  mixedTokenAmount: number;
+
+  @Column({ type: 'numeric', precision: 12, scale: 2, default: 0 })
+  mixedTokenQuantity: number;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  mixedPaymentAt: Date | null;
 
   @Index()
   @Column({ type: 'varchar', length: 120, nullable: true })

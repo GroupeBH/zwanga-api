@@ -4,6 +4,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository, MoreThan, Not, FindOptionsWhere } from 'typeorm';
@@ -27,6 +28,7 @@ import { loadConversationSummaries, ConversationSummary } from './conversation-s
 import type { MessagePageDto } from './dto/message-page.dto';
 import { LegacyPageQuery, legacyPage } from '../common/legacy-page';
 import { resolveDirectConversation } from './direct-conversation';
+import { ChatRealtime } from './chat-realtime.service';
 
 @Injectable()
 export class ChatService {
@@ -45,6 +47,7 @@ export class ChatService {
     private readonly userRepository: Repository<User>,
     private readonly notificationService: NotificationService,
     private readonly fileUploadService: FileUploadService,
+    @Optional() private readonly realtime?: ChatRealtime,
   ) {}
 
   /* -------------------------------------------------------------------------- */
@@ -773,6 +776,13 @@ export class ChatService {
           allowedIds.has(participant.userId),
         );
       }
+
+      // Persisted HTTP messages and legacy socket messages use the same channel.
+      // Delivery does not depend on a push token; booking members were rechecked above.
+      this.realtime?.publish(
+        [...participants.map(participant => participant.userId), message.senderId],
+        messageResponse(message),
+      );
 
       const tokens = Array.from(
         new Set(

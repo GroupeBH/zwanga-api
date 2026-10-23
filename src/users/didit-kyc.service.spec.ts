@@ -356,6 +356,7 @@ describe('DiditKycService', () => {
     expect(result.workflowId).toBe(baseConfig.DIDIT_WORKFLOW_ID);
     expect(result.workflow_id).toBe(baseConfig.DIDIT_WORKFLOW_ID);
     expect(result.sessionToken).toBe(mode === 'hosted' ? null : 'test-token');
+    expect(result.launchMode).toBe(mode);
     expect(result.session_token).toBe(result.sessionToken);
     expect(result.url).toBe('https://verify.didit.me/fr/session/test-token');
     expect(txKycRepository.save).toHaveBeenCalledWith(expect.objectContaining({ status: KycStatus.PENDING }));

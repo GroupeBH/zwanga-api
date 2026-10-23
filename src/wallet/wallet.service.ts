@@ -48,6 +48,7 @@ import { User } from '../users/entities/user.entity';
 import { isAdminRole } from '../users/user-role.policy';
 import { applyTokenMovement, refundablePurchasedTokens } from './wallet-origin';
 import { hasVerifiedWalletTopUpProof } from '../payments/wallet-topup-proof';
+import { RecoverTopUpDto } from './dto/recover-topup.dto';
 import { loadWalletLedgerPage } from './wallet-ledger-page';
 import type { HistoryPageDto } from '../common/pagination/history-page';
 import { TOKEN_WITHDRAWAL_DISABLED } from '../payments/token-withdrawal.policy';
@@ -300,10 +301,22 @@ export class WalletService implements OnModuleInit {
       pawaPayOperator: dto.pawaPayOperator,
     });
 
-    const account = await this.getOrCreateAccount(userId);
+    const account = await this.applyTopUpPayment(payment);
     const response = this.buildPaymentResponse(account, payment);
     this.logWalletPaymentResponse('Wallet topup initialized', response);
     return response;
+  }
+
+  async recoverTopUp(userId: string, dto: RecoverTopUpDto): Promise<WalletPaymentResponse> {
+    const quantity = this.normalizePositiveAmount(dto.amount);
+    const currency = this.getPointValueCurrency();
+    const payment = await this.paymentsService.recoverWalletTopUp({
+      userId, idempotencyKey: dto.idempotencyKey, tokenQuantity: quantity,
+      amount: this.convertPointsToMoney(quantity, currency), currency,
+      method: dto.method, phone: dto.phone, relatedEntityType: this.TOP_UP_RELATED_ENTITY_TYPE,
+      description: `Achat de ${quantity} jetons Zwanga`,
+    });
+    return this.buildPaymentResponse(await this.applyTopUpPayment(payment), payment);
   }
 
   async handleTopUpCallback(

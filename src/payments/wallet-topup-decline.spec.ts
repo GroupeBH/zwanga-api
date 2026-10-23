@@ -173,8 +173,8 @@ describe('confirmed FlexPay top-up refusals', () => {
     },
   );
 
-  it.each(['0', '2', '4'])(
-    'keeps complete-proof requirements for unconfirmed refusal/status %s',
+  it.each(['0'])(
+    'keeps complete-proof requirements for a successful status %s',
     async (status) => {
       const env = environment({ status });
       env.result.message = 'Transaction found';
@@ -184,6 +184,69 @@ describe('confirmed FlexPay top-up refusals', () => {
       expect(env.repository.save).not.toHaveBeenCalled();
     },
   );
+
+  it.each(['2', '4', null])(
+    'keeps a correlated non-final status %s pending without demanding credit proof',
+    async (status) => {
+      const env = environment({ status, amount: null, currency: null });
+      env.result.message = 'Transaction found';
+      const payment = await env.service.checkPaymentStatus(
+        'ORDERTEST',
+        'passenger-test',
+      );
+      expect(payment.status).toBe(PaymentStatus.INITIATED);
+      expect(payment.orderNumber).toBe('ORDERTEST');
+      expect(payment.paidAt).toBeNull();
+      expect(hasVerifiedWalletTopUpProof(payment)).toBe(false);
+    },
+  );
+
+  it.each([
+    { reference: 'OTHER' },
+    { orderNumber: 'OTHER' },
+    { reference: null, orderNumber: null },
+    { amount: '1500' },
+    { currency: 'USD' },
+  ])('still rejects an inconsistent pending response: %p', async (patch) => {
+    const env = environment({ status: '2', ...patch });
+    env.result.message = 'Transaction found';
+    await expect(
+      env.service.checkPaymentStatus('ORDERTEST', 'passenger-test'),
+    ).rejects.toThrow();
+    expect(env.repository.save).not.toHaveBeenCalled();
+    expect(env.payment.status).toBe(PaymentStatus.INITIATED);
+  });
+
+  it('returns a pending wallet top-up without crediting tokens or releasing the payment order', async () => {
+    const env = environment({ status: '2', amount: null, currency: null });
+    env.result.message = 'Transaction found';
+    const account = {
+      id: 'wallet-test',
+      userId: 'passenger-test',
+      balance: 58,
+      currency: 'PTS',
+    };
+    const accounts = { findOne: jest.fn().mockResolvedValue(account) };
+    const ledger = { findOne: jest.fn(), save: jest.fn() };
+    const dataSource = { transaction: jest.fn() };
+    const wallet = new WalletService(
+      accounts as never,
+      ledger as never,
+      {} as never,
+      dataSource as never,
+      env.config as never,
+      env.service,
+    );
+    const response = await wallet.checkTopUpPaymentStatus(
+      'passenger-test',
+      'ORDERTEST',
+    );
+    expect(response.payment.status).toBe(PaymentStatus.INITIATED);
+    expect(response.payment.orderNumber).toBe('ORDERTEST');
+    expect(response.account.balance).toBe(58);
+    expect(ledger.save).not.toHaveBeenCalled();
+    expect(dataSource.transaction).not.toHaveBeenCalled();
+  });
 
   it('never treats a failed check envelope as an operator refusal', async () => {
     const env = environment();

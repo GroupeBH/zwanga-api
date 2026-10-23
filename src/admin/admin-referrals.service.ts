@@ -26,6 +26,9 @@ import {
   buildReferralWithdrawalsSpreadsheet,
 } from './admin-spreadsheets';
 import type { SpreadsheetFile } from './spreadsheet';
+import { ResolvePayoutNotPaidDto } from '../payments/dto/resolve-payout-not-paid.dto';
+import { payoutRecoveryActions } from '../payments/payout-recovery-actions';
+import { ReferralWithdrawalResolution } from '../referrals/entities/referral-withdrawal-resolution.entity';
 
 type AdminReferralAccount = ReferralAccount & {
   user?: User | null;
@@ -256,6 +259,27 @@ export class AdminReferralsService {
     return this.serializeWithdrawal(reconciled);
   }
 
+  async getWithdrawalDetail(withdrawalId: string) {
+    const withdrawal = await this.withdrawalRepository.findOne({
+      where: { id: withdrawalId }, relations: ['user', 'paymentTransaction'],
+    });
+    if (!withdrawal) throw new NotFoundException('Retrait de parrainage introuvable');
+    const resolution = await this.withdrawalRepository.manager.findOneBy(
+      ReferralWithdrawalResolution, { withdrawalId },
+    );
+    return {
+      ...this.serializeWithdrawal(withdrawal),
+      resolution,
+      lateSuccessAfterRelease: !!resolution && withdrawal.status === ReferralWithdrawalStatus.SUCCEEDED,
+    };
+  }
+
+  async resolveWithdrawalNotPaid(adminId: string, withdrawalId: string, dto: ResolvePayoutNotPaidDto) {
+    await this.ensureSuperAdmin(adminId);
+    await this.referralsService.resolveWithdrawalNotPaid(adminId, withdrawalId, dto);
+    return this.getWithdrawalDetail(withdrawalId);
+  }
+
   async exportAccounts(search?: string): Promise<SpreadsheetFile> {
     const accounts = await this.createAccountsQuery(search)
       .orderBy('account.updatedAt', 'DESC')
@@ -390,6 +414,7 @@ export class AdminReferralsService {
     const status = this.normalizeWithdrawalStatus(requestedStatus);
     const query = this.withdrawalRepository
       .createQueryBuilder('withdrawal')
+      .leftJoinAndSelect('withdrawal.paymentTransaction', 'withdrawalPayment')
       .leftJoinAndMapOne(
         'withdrawal.user',
         User,
@@ -560,7 +585,14 @@ export class AdminReferralsService {
   }
 
   private serializeWithdrawal(withdrawal: ReferralWithdrawal) {
+    const pending = [ReferralWithdrawalStatus.PENDING, ReferralWithdrawalStatus.INITIATED].includes(withdrawal.status);
+    const age = Date.now() - new Date(withdrawal.requestedAt ?? withdrawal.createdAt).getTime();
+    const isStale = pending && Number.isFinite(age) && age >= 24 * 60 * 60_000;
     return {
+      ...payoutRecoveryActions(withdrawal, withdrawal.paymentTransaction),
+      isStale,
+      requiresReview: pending && (isStale || !withdrawal.paymentTransaction?.orderNumber),
+      canRetry: [ReferralWithdrawalStatus.FAILED, ReferralWithdrawalStatus.CANCELLED].includes(withdrawal.status),
       id: withdrawal.id,
       userId: withdrawal.userId,
       user: this.serializeUser(withdrawal.user),

@@ -8,6 +8,7 @@ import type { Namespace } from 'socket.io';
 import request from 'supertest';
 import { ChatGateway } from './chat.gateway';
 import { ChatService } from './chat.service';
+import { ChatRealtime } from './chat-realtime.service';
 import { ConfiguredIoAdapter } from '../common/configured-io.adapter';
 import { TrackingGateway } from '../tracking/tracking.gateway';
 import { TripsService } from '../trips/trips.service';
@@ -91,6 +92,7 @@ describe('Chat and tracking Socket.IO security integration', () => {
     CORS_ORIGINS: 'https://app.example.test',
     GPS_LOG_SAMPLE_RATE: '0',
   });
+  const realtime = new ChatRealtime();
   const chat = {
     ensureUserCanAccessBookingChat: jest.fn((id: string, userId: string) => {
       if (id !== bookingId || ![passenger, driver].includes(userId)) {
@@ -98,9 +100,11 @@ describe('Chat and tracking Socket.IO security integration', () => {
       }
       return Promise.resolve();
     }),
-    createMessage: jest
-      .fn()
-      .mockResolvedValue({ id: 'message', content: 'Bonjour' }),
+    createMessage: jest.fn(async () => {
+      const message = { id: 'message', content: 'Bonjour' } as any;
+      realtime.publish([passenger, driver], message);
+      return message;
+    }),
     getMessages: jest.fn().mockResolvedValue([]),
   };
   const trips = { updateDriverLocation: jest.fn() };
@@ -117,6 +121,7 @@ describe('Chat and tracking Socket.IO security integration', () => {
             .map(([id, accessToken]) => ({ id, accessToken, isActive: true, status: 'active' })) }) } },
         { provide: RedisService, useValue: { getClient: () => ({ eval: async () => [1, 60000] }) } },
         { provide: ChatService, useValue: chat },
+        { provide: ChatRealtime, useValue: realtime },
         { provide: TripsService, useValue: trips },
         { provide: BookingsService, useValue: {} },
         { provide: JwtService, useValue: jwt },

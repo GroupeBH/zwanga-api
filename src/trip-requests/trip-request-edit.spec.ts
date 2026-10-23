@@ -114,6 +114,7 @@ describe('Editing and reopening requests', () => {
       lock: { mode: 'pessimistic_write' },
     });
     expect(ctx.locked.update).toHaveBeenCalledWith('request', {
+      id: 'request',
       description: 'Nouveau repère',
       status: TripRequestStatus.PENDING,
     });
@@ -136,6 +137,7 @@ describe('Editing and reopening requests', () => {
       });
       await ctx.service.update('passenger', 'request', future);
       expect(ctx.locked.update).toHaveBeenCalledWith('request', {
+        id: 'request',
         departureDateMin: new Date(future.departureDateMin),
         departureDateMax: new Date(future.departureDateMax),
         status: TripRequestStatus.PENDING,
@@ -211,6 +213,7 @@ describe('Editing and reopening requests', () => {
       description: 'Updated',
     });
     expect(ctx.locked.update).toHaveBeenCalledWith('request', {
+      id: 'request',
       description: 'Updated',
       status: TripRequestStatus.PENDING,
     });

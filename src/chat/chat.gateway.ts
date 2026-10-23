@@ -9,9 +9,11 @@ import {
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
 import { ChatService } from './chat.service';
+import { ChatRealtime } from './chat-realtime.service';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
-import { UseFilters, UseGuards, UsePipes, UseInterceptors } from '@nestjs/common';
+import { Optional, UseFilters, UseGuards, UsePipes, UseInterceptors } from '@nestjs/common';
+import { RideAlertRealtime } from '../notifications/ride-alert-realtime.service';
 import { WsSessionService } from '../common/services/ws-session.service';
 import { WsWorkInterceptor } from '../common/ws-work.interceptor';
 import {
@@ -43,7 +45,11 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private jwtService: JwtService,
     private configService: ConfigService,
     private readonly sessions: WsSessionService,
+    @Optional() private readonly rideAlerts?: RideAlertRealtime,
+    @Optional() private readonly chatRealtime?: ChatRealtime,
   ) {}
+
+  afterInit(server: Server) { this.rideAlerts?.bind(server); this.chatRealtime?.bind(server); }
 
   async handleConnection(client: Socket) {
     if (await this.sessions.connect(client, this.jwtService, this.configService)) {
@@ -87,8 +93,8 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
         data.content,
       );
 
-      // Emit to all clients in the booking room
-      this.server.to(`booking:${data.bookingId}`).emit('new_message', message);
+      // ChatService publishes once for HTTP and socket sends alike, after save.
+      return { success: true, messageId: message?.id };
     } catch (error) {
       emitSocketError(client, error);
     }

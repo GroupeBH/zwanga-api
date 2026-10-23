@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { ChatService } from './chat.service';
 import { ChatController } from './chat.controller';
 import { ChatGateway } from './chat.gateway';
+import { ChatRealtime } from './chat-realtime.service';
 import { Message } from './entities/message.entity';
 import { Booking } from '../bookings/entities/booking.entity';
 import { JwtModule } from '@nestjs/jwt';
@@ -29,7 +30,7 @@ import { TripsModule } from '../trips/trips.module';
     TripsModule,
   ],
   controllers: [ChatController, ConversationsController],
-  providers: [ChatService, ChatGateway],
+  providers: [ChatService, ChatGateway, ChatRealtime],
   exports: [ChatService],
 })
 export class ChatModule {}

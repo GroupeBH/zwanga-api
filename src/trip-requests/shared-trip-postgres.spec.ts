@@ -6,6 +6,8 @@ import { typeOrmEntities } from '../database/entities';
 import { AddDriverDispatch1780000048000 } from '../database/migrations/1780000048000-AddDriverDispatch';
 import { BroadcastDriverRequests1780000074000 } from '../database/migrations/1780000074000-BroadcastDriverRequests';
 import { RetainDriverLastLocation1780000076000 } from '../database/migrations/1780000076000-RetainDriverLastLocation';
+import { NearbyRequestRingingCooldown1780000087000 } from '../database/migrations/1780000087000-NearbyRequestRingingCooldown';
+import { DispatchDeliveryResilience1780000088000 } from '../database/migrations/1780000088000-DispatchDeliveryResilience';
 import { SharedTripOffers1780000079000 } from '../database/migrations/1780000079000-SharedTripOffers';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { Vehicle, VehicleType } from '../vehicles/entities/vehicle.entity';
@@ -15,6 +17,7 @@ import { Booking, BookingStatus } from '../bookings/entities/booking.entity';
 import { BookingsService } from '../bookings/bookings.service';
 import { TripPaymentMode } from '../payments/enums/trip-payment-mode.enum';
 import { Notification } from '../notifications/entities/notification.entity';
+import { RideAlertChanges } from '../notifications/ride-alert-changes';
 import { TripRequest, TripRequestStatus } from './entities/trip-request.entity';
 import { DriverOffer, DriverOfferStatus } from './entities/driver-offer.entity';
 import { SharedTripOffersService } from './shared-trip-offers.service';
@@ -48,6 +51,8 @@ const bin = process.env.DISPATCH_TEST_POSTGRES_BIN;
         await new AddDriverDispatch1780000048000().up(runner);
         await new BroadcastDriverRequests1780000074000().up(runner);
         await new RetainDriverLastLocation1780000076000().up(runner);
+        await new NearbyRequestRingingCooldown1780000087000().up(runner);
+        await new DispatchDeliveryResilience1780000088000().up(runner);
         await db.query(
           'ALTER TABLE driver_offers DROP COLUMN "existingTripId", DROP COLUMN "sharedBookingId", DROP COLUMN "sharedTripConsentAt"',
         );
@@ -155,6 +160,17 @@ const bin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     async function propose(f: Awaited<ReturnType<typeof fixture>>) {
       return offers.propose(f.driver.id, f.request.id, f.trip.id);
     }
+    it('publishes the committed shared acceptance to both parties', async () => {
+      const f = await fixture(true), offer = await propose(f);
+      const publish = jest.fn(), changes = new RideAlertChanges(db, { publish } as any);
+      try {
+        await offers.accept(f.passenger.id, f.request.id, offer.offerId, true);
+        for (let attempt = 0; attempt < 100 && !publish.mock.calls.some(call => call[1].requestId === f.request.id); attempt++)
+          await new Promise(resolve => setTimeout(resolve, 20));
+        expect(publish).toHaveBeenCalledWith(f.driver.id, { kind: 'changed', requestId: f.request.id, terminal: true });
+        expect(publish).toHaveBeenCalledWith(f.passenger.id, { kind: 'changed', requestId: f.request.id, terminal: true });
+      } finally { changes.onModuleDestroy(); }
+    });
     it('notifies an ongoing driver from the active-trip position even without discovery GPS; never assigns', async () => {
       const f = await fixture(true);
       await Promise.all(

@@ -427,8 +427,26 @@ export class DriverSettlementsService implements OnModuleInit {
 
   private resolveCashSubsidyEarningAmount(booking: Booking): number {
     return booking.paymentMode === TripPaymentMode.CASH
-      ? this.resolveBookingSubsidyAmount(booking)
+      ? this.resolveBookingSubsidyAmount(booking) + Number(booking.mixedTokenAmount ?? 0) * (1 - this.getCommissionRate())
       : 0;
+  }
+
+  /** Same transaction as the passenger debit, with the booking locked. */
+  async recordMixedCashEarningWithManager(manager: EntityManager, before: Booking, after: Booking): Promise<void> {
+    const existing = await manager.findOne(DriverEarning, {
+      where: { bookingId: after.id }, lock: { mode: 'pessimistic_write' },
+    });
+    if (!existing) {
+      await this.recordCompletedBookingEarningWithManager(manager, after);
+      return;
+    }
+    // Preserve the existing subsidy. Payouts subtract from aggregate earnings;
+    // increasing this AVAILABLE entry adds only the newly funded token portion.
+    this.assertEarningMatchesBooking(existing, before);
+    const next = this.buildEarningData(after);
+    if (!next || existing.status !== DriverEarningStatus.AVAILABLE || Number(next.netAmount) < Number(existing.netAmount))
+      throw new BadRequestException('Ce règlement nécessite une vérification des gains. Choisissez un autre mode.');
+    await manager.save(DriverEarning, { ...existing, ...next, availableAt: existing.availableAt });
   }
 
   private buildTripRevenueNotificationBody(
@@ -628,7 +646,7 @@ export class DriverSettlementsService implements OnModuleInit {
       );
     }
 
-    if (booking.cashCommissionPolicyVersion === 0) {
+    if (booking.cashCommissionPolicyVersion === 0 && !booking.mixedPaymentAt) {
       // Historical ledger entries keep their recorded rate, even if an old
       // environment override differed from today's fixed 5% policy.
       const historicalRate = Number(earning.commissionRate);
@@ -681,7 +699,7 @@ export class DriverSettlementsService implements OnModuleInit {
     }
 
     if (booking.paymentMode === TripPaymentMode.CASH) {
-      return this.resolveBookingSubsidyAmount(booking) > 0;
+      return this.resolveBookingSubsidyAmount(booking) + Number(booking.mixedTokenAmount ?? 0) > 0;
     }
 
     return false;
@@ -689,7 +707,7 @@ export class DriverSettlementsService implements OnModuleInit {
 
   private resolveDriverEarningGrossAmount(booking: Booking): number {
     if (booking.paymentMode === TripPaymentMode.CASH) {
-      return this.resolveBookingSubsidyAmount(booking);
+      return this.roundMoney(this.resolveBookingSubsidyAmount(booking) + Number(booking.mixedTokenAmount ?? 0));
     }
 
     const persistedGrossAmount = Number(booking.grossPaymentAmount);
@@ -706,12 +724,14 @@ export class DriverSettlementsService implements OnModuleInit {
   }
 
   private resolveDriverEarningCommissionRate(booking: Booking): number {
-    return booking.paymentMode === TripPaymentMode.CASH
+    return booking.paymentMode === TripPaymentMode.CASH && !Number(booking.mixedTokenAmount)
       ? 0
       : this.getCommissionRate();
   }
 
   private bookingCommission(booking: Booking, grossAmount: number, rate: number): number {
+    if (booking.paymentMode === TripPaymentMode.CASH && Number(booking.mixedTokenAmount) > 0)
+      return this.roundMoney(Number(booking.mixedTokenAmount) * rate);
     // New bookings charge the PASSENGER payment, not Zwanga's subsidy, regardless
     // of payment mode. Keep historical snapshots reconcilable without repricing.
     const base = booking.cashCommissionPolicyVersion >= 1

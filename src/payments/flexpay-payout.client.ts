@@ -65,6 +65,24 @@ export class FlexPayPayoutClient {
     };
     // An auth failure is safe to release: /pay has not been called yet.
     const authorization = await this.getToken();
+    // Optional for backwards compatibility: validate the merchant balance URL
+    // before enabling. This check is NOT a cancellation of an existing transfer.
+    if (this.config.get('FLEXPAY_PAYOUT_BALANCE_CHECK_ENABLED') === 'true') {
+      let balances: { currency: string; amount: string }[];
+      try {
+        ({ balances } = await this.checkBalance());
+      } catch {
+        // /pay was never called; releasing the local reservation is safe.
+        throw new BadRequestException({ code: 'PAYOUT_BALANCE_UNAVAILABLE', message: PAYOUT_MESSAGES.configuration });
+      }
+      const matching = balances.filter(balance => balance.currency === currency);
+      if (matching.length !== 1) {
+        throw new BadRequestException({ code: 'PAYOUT_BALANCE_UNAVAILABLE', message: PAYOUT_MESSAGES.configuration });
+      }
+      if (Number(matching[0].amount) < input.amount) {
+        throw new BadRequestException({ code: 'PAYOUT_INSUFFICIENT_MERCHANT_BALANCE', message: PAYOUT_MESSAGES.funds });
+      }
+    }
     this.logger.log(
       `FlexPaie payout request: reference=${input.reference}, amount=${body.amount} ${currency}`,
     );
@@ -156,7 +174,7 @@ export class FlexPayPayoutClient {
     };
   }
 
-  /** Internal diagnostic only; no public route exposing the merchant balance. */
+  /** Internal diagnostic/preflight only; never expose the merchant balance to users. */
   async checkBalance(): Promise<{
     balances: { currency: string; amount: string }[];
   }> {

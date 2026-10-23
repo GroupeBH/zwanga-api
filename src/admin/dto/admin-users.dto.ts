@@ -1,5 +1,54 @@
 import { BadRequestException } from '@nestjs/common';
 import { VehicleType } from '../../vehicles/entities/vehicle.entity';
+import { UserStatus } from '../../users/entities/user.entity';
+
+export function parseAdminUserStatus(
+  value?: string | null,
+): UserStatus | undefined {
+  if (value == null || value === '' || value === 'all') return undefined;
+  if (Object.values(UserStatus).includes(value as UserStatus))
+    return value as UserStatus;
+  throw new BadRequestException(
+    'status doit être active, inactive, suspended ou pending_kyc.',
+  );
+}
+
+export const ADMIN_USER_SORT_FIELDS = [
+  'createdAt',
+  'updatedAt',
+  'lastLoginAt',
+  'name',
+  'firstName',
+  'lastName',
+] as const;
+export type AdminUserSort = {
+  sortBy: (typeof ADMIN_USER_SORT_FIELDS)[number];
+  sortOrder: 'ASC' | 'DESC';
+};
+
+export function parseAdminUserSort(
+  sortBy?: string,
+  sortOrder?: string,
+): AdminUserSort {
+  const field = sortBy == null || sortBy === '' ? 'createdAt' : sortBy;
+  if (!(ADMIN_USER_SORT_FIELDS as readonly string[]).includes(field)) {
+    throw new BadRequestException(
+      `sortBy doit être ${ADMIN_USER_SORT_FIELDS.join(', ')}.`,
+    );
+  }
+  const order =
+    sortOrder == null || sortOrder === ''
+      ? ['name', 'firstName', 'lastName'].includes(field)
+        ? 'ASC'
+        : 'DESC'
+      : typeof sortOrder === 'string'
+        ? sortOrder.toUpperCase()
+        : undefined;
+  if (order !== 'ASC' && order !== 'DESC') {
+    throw new BadRequestException('sortOrder doit être ASC ou DESC.');
+  }
+  return { sortBy: field as AdminUserSort['sortBy'], sortOrder: order };
+}
 
 export function parseAdminVehicleType(
   value?: string | null,
@@ -69,6 +118,27 @@ export function parseRegistrationDay(value?: string | null): Date | undefined {
 
 const USER_SEARCH_ACCENTS = 'àâäáãåçéèêëìíîïñòóôöõùúûüýÿ';
 const USER_SEARCH_FOLDED = 'aaaaaaceeeeiiiinooooouuuuyy';
+
+// Static whitelist only: no client-provided SQL column/expression is interpolated.
+export const ADMIN_USER_SORT_COLUMNS: Record<
+  AdminUserSort['sortBy'],
+  string[]
+> = {
+  createdAt: ['user.createdAt'],
+  updatedAt: ['user.updatedAt'],
+  lastLoginAt: ['user.lastLoginAt'],
+  name: ['lastName', 'firstName'],
+  firstName: ['firstName', 'lastName'],
+  lastName: ['lastName', 'firstName'],
+};
+
+export function adminUserSortExpressions(sort: AdminUserSort): string[] {
+  return ADMIN_USER_SORT_COLUMNS[sort.sortBy].map((column) =>
+    column === 'firstName' || column === 'lastName'
+      ? `translate(lower(user.${column}), '${USER_SEARCH_ACCENTS}', '${USER_SEARCH_FOLDED}')`
+      : column,
+  );
+}
 
 /** Case- and accent-folded text used on both sides of the user search. */
 export function normalizeUserSearch(value?: string | null): string | undefined {

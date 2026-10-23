@@ -35,7 +35,7 @@ export async function enqueueSharedTripAlert(
 ): Promise<boolean> {
   const request = await manager.findOne(TripRequest, {
     where: { id: requestId },
-    lock: { mode: 'pessimistic_write' },
+    lock: { mode: 'pessimistic_write', onLocked: 'skip_locked' },
   });
   if (
     !request ||

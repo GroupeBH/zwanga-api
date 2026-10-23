@@ -2,6 +2,11 @@ import { NotificationService } from './notifications.service';
 import { NotificationStatus } from './entities/notification.entity';
 import { DRIVER_REQUEST_NOTIFICATION_TYPES } from './driver-request-policy';
 
+// These tests isolate recipient eligibility; cooldown SQL/transport have their own suites.
+jest.mock('./nearby-request-cooldown', () => ({ ...jest.requireActual('./nearby-request-cooldown'),
+  prepareNearbyRequestRinging: jest.fn(async () => true),
+}));
+
 const fixture = () => {
   const query = { where: jest.fn().mockReturnThis(), andWhere: jest.fn().mockReturnThis(),
     orderBy: jest.fn().mockReturnThis(), take: jest.fn().mockReturnThis(), skip: jest.fn().mockReturnThis(),
@@ -74,7 +79,7 @@ describe('Driver-only order alerts', () => {
     expect(await f.deliver('driver_dispatch_offer', 'recipient', { passengerId: undefined, offerId: 'offer' })).toBe(true);
     expect(f.ownerQuery).toHaveBeenCalledWith(expect.stringContaining('o.id = $1'), ['offer']);
     expect(f.send).toHaveBeenCalledWith(expect.objectContaining({
-      data: { type: 'driver_dispatch_offer', offerId: 'offer', passengerId: 'author' },
+      data: { type: 'driver_dispatch_offer', offerId: 'offer', passengerId: 'author', notificationId: 'notice' },
     }), 'current-token');
   });
 

@@ -1,7 +1,7 @@
 import { isAppUpdateDeliverable } from '../app-updates/app-update-dispatch.service';
 import { isRideResponseDeliverable } from './ride-response-delivery';
 import { androidDriverBackup, androidDriverBackupTtl } from './android-driver-backup';
-import { recoverDriverOffer } from './recover-driver-offer';
+import { isNearbyRingingRequest, prepareNearbyRequestRinging, reconcileNearbyRequestCooldowns } from './nearby-request-cooldown';
 import { isTripReminderDeliverable } from './trip-reminder-delivery';
 import { isStaleLocationReminderDeliverable } from '../trip-requests/dispatch/stale-location-reminder';
 import {
@@ -12,7 +12,10 @@ import {
 } from 'firebase-admin/app';
 import { getMessaging, type MulticastMessage } from 'firebase-admin/messaging';
 import { createHash, randomUUID } from 'node:crypto';
-import { Injectable, OnModuleInit, Logger } from '@nestjs/common';
+import { Injectable, OnModuleInit, Logger, Optional } from '@nestjs/common';
+import { RideAlertRealtime } from './ride-alert-realtime.service';
+import { claimRideRealtimeNotifications } from './ride-realtime-delivery';
+import { iosDriverPush } from './ios-driver-push';
 import { ConfigService } from '@nestjs/config';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -127,6 +130,7 @@ export class NotificationService implements OnModuleInit {
   private dispatchingTransactionalNotifications = false;
   private dispatchingUrgentNotifications = false;
   private urgentWorkers = 0;
+  private dispatchingRealtime = false;
 
   constructor(
     private configService: ConfigService,
@@ -136,6 +140,7 @@ export class NotificationService implements OnModuleInit {
     private readonly userRepository: Repository<User>,
     @InjectRepository(TripRequest)
     private readonly tripRequestRepository: Repository<TripRequest>,
+    @Optional() private readonly rideAlerts?: RideAlertRealtime,
   ) {}
 
   onModuleInit() {
@@ -337,7 +342,7 @@ export class NotificationService implements OnModuleInit {
         return false;
       }
       // Preserve ownership on legacy retries and on both FCM/APNs payloads.
-      savedNotification.data = { ...savedNotification.data, passengerId };
+      savedNotification.data = { ...savedNotification.data, passengerId, notificationId: savedNotification.id };
     }
     const pushToken = savedNotification.fcmToken?.trim();
     if (!pushToken) {
@@ -356,6 +361,11 @@ export class NotificationService implements OnModuleInit {
         await this.markNotificationFailed(savedNotification, 'PUSH_TOKEN_OWNERSHIP_AMBIGUOUS');
         return false;
       }
+      if (isNearbyRingingRequest(savedNotification.data) &&
+          !await prepareNearbyRequestRinging(this.notificationRepository.manager, savedNotification)) {
+        await this.suppressCriticalNotification(savedNotification, 'NEARBY_REQUEST_RINGING_PAUSED_OR_HANDLED');
+        return false;
+      }
       this.logger.debug(
         `Sending notification through ${this.isExpoPushToken(pushToken) ? 'Expo' : 'FCM'} - Title: ${savedNotification.title}`,
       );
@@ -368,6 +378,8 @@ export class NotificationService implements OnModuleInit {
       savedNotification.messageId = messageId;
       savedNotification.errorMessage = null;
       await this.notificationRepository.save(savedNotification);
+
+      // Realtime has its own durable claim and never waits for this HTTP send.
 
       this.logger.log(
         `Notification sent successfully - Title: ${savedNotification.title}, MessageId: ${messageId}`,
@@ -395,6 +407,12 @@ export class NotificationService implements OnModuleInit {
       throw new Error('FCM non configuré sur le serveur');
     }
     const version = await this.driverActionVersion(notification, pushToken);
+    if (version === 5 || ((this.isNearbyRequestRing(notification) || this.isPassengerRideResponse(notification)) &&
+        await this.ringClientVersion(notification, pushToken) === 5)) {
+      const iosNotification = this.isPassengerRideResponse(notification)
+        ? { ...notification, data: this.passengerRingData(notification) } : notification;
+      return getMessaging(this.firebaseApp).send(iosDriverPush(iosNotification, pushToken, this.driverRingUntil(notification)));
+    }
     if (version > 0) {
       const ringUntil = version >= 2 ? this.driverRingUntil(notification) : undefined;
       // v1-v3 stay headless. v4 adds a quiet native Expo safety card while
@@ -526,7 +544,8 @@ export class NotificationService implements OnModuleInit {
   /** A stale booking stays actionable in-app, but must not ring an hour later. */
   private driverRingUntil(notification: Notification): string {
     const expiry = Date.parse(String(notification.data?.alertExpiresAt ?? notification.data?.expiresAt ?? ''));
-    const deadline = Date.now() + 30_000;
+    const createdAt = new Date(notification.createdAt).getTime();
+    const deadline = (Number.isFinite(createdAt) ? createdAt : Date.now()) + 30_000;
     return new Date(Number.isFinite(expiry) ? Math.min(expiry, deadline) : deadline).toISOString();
   }
 
@@ -555,13 +574,14 @@ export class NotificationService implements OnModuleInit {
   private async ringClientVersion(notification: Notification, pushToken: string): Promise<number> {
     if (!notification.userId) return 0;
     const rows: { version: number }[] = await this.notificationRepository.manager.query(
-      `SELECT CASE WHEN "tokenHash" = $5 THEN 4 WHEN "tokenHash" = $4 THEN 3 WHEN "tokenHash" = $3 THEN 2 ELSE 1 END AS version FROM driver_notification_clients
-        WHERE "userId" = $1 AND "tokenHash" IN ($2,$3,$4,$5)`,
+      `SELECT CASE WHEN "tokenHash" = $6 THEN 5 WHEN "tokenHash" = $5 THEN 4 WHEN "tokenHash" = $4 THEN 3 WHEN "tokenHash" = $3 THEN 2 ELSE 1 END AS version FROM driver_notification_clients
+        WHERE "userId" = $1 AND "tokenHash" IN ($2,$3,$4,$5,$6)`,
       [notification.userId, createHash('sha256').update(pushToken).digest('hex'),
         createHash('sha256').update(pushToken + ':driver-v2').digest('hex'),
         createHash('sha256').update(pushToken + ':driver-v3').digest('hex'),
-        createHash('sha256').update(pushToken + ':driver-v4').digest('hex')]);
-    return rows.length > 0 ? ([2, 3, 4].includes(rows[0].version) ? rows[0].version : 1) : 0;
+        createHash('sha256').update(pushToken + ':driver-v4').digest('hex'),
+        createHash('sha256').update(pushToken + ':driver-v5').digest('hex')]);
+    return rows.length > 0 ? ([2, 3, 4, 5].includes(rows[0].version) ? rows[0].version : 1) : 0;
   }
 
   private stringifyNotificationData(
@@ -626,11 +646,72 @@ export class NotificationService implements OnModuleInit {
   /** Deliver newly committed outbox rows without holding business/database locks over HTTP. */
   @Cron(CronExpression.EVERY_10_SECONDS)
   async dispatchTransactionalNotifications(): Promise<void> {
-    await Promise.all([this.dispatchNotificationLane(false), this.dispatchUrgentNotifications()]);
+    await Promise.all([this.dispatchNotificationLane(false), this.dispatchUrgentNotifications(), this.dispatchRealtimeNotifications()]);
+  }
+
+  /** Independent from FCM/Expo capacity. Emits only authenticated business recipients. */
+  @Cron('*/2 * * * * *')
+  async dispatchRealtimeNotifications(): Promise<void> {
+    if (this.dispatchingRealtime || !this.rideAlerts?.isBound()) return;
+    this.dispatchingRealtime = true;
+    const manager = this.notificationRepository.manager;
+    try {
+      const ids = await claimRideRealtimeNotifications(manager);
+      if (!ids.length) return;
+      const rows = await this.notificationRepository.findBy({ id: In(ids) });
+      let next = 0;
+      await Promise.all(Array.from({ length: Math.min(5, rows.length) }, async () => {
+        while (next < rows.length) {
+          const row = rows[next++];
+          try {
+            await this.publishRealtimeInvitation(row);
+            await manager.query(`UPDATE ride_realtime_deliveries SET "completedAt" = clock_timestamp()
+              WHERE "notificationId" = $1`, [row.id]);
+          } catch {
+            // Lease retries after 5s, never after the original invitation expires.
+            this.logger.warn(`Ride realtime delivery deferred notificationId=${row.id}`);
+          }
+        }
+      }));
+    } catch { this.logger.warn('Ride realtime batch deferred.'); }
+    finally { this.dispatchingRealtime = false; }
+  }
+
+  private async publishRealtimeInvitation(notification: Notification): Promise<void> {
+    if (!notification.userId || !notification.isActive ||
+        !(await this.isCriticalNotificationStillDeliverable(notification))) return;
+    const owner = await this.userRepository.findOne({ where: { id: notification.userId },
+      select: ['id', 'role', 'isActive', 'status'] });
+    if (!canReceiveDriverRequests(owner)) return;
+    const passengerId = await resolveDriverRequestOwner(this.notificationRepository.manager, notification.data);
+    if (!passengerId || passengerId === notification.userId) return;
+    notification.data = { ...notification.data, passengerId, notificationId: notification.id };
+    if (isNearbyRingingRequest(notification.data) &&
+        !await prepareNearbyRequestRinging(this.notificationRepository.manager, notification)) return;
+    const ringUntil = this.driverRingUntil(notification);
+    if (Date.parse(ringUntil) <= Date.now()) return;
+    if (!this.rideAlerts?.publish(notification.userId, {
+      kind: 'incoming', eventId: notification.id,
+      data: { ...notification.data, actionProtocol: 'driver-v1', delivery: 'driver-phone-v3',
+        invitationText: notification.body, ringVersion: 'v2', ringUntil },
+    })) throw new Error('Realtime transport unavailable');
+  }
+
+  private reconcilingNearbyRequests = false;
+
+  @Cron(CronExpression.EVERY_MINUTE)
+  async reconcileNearbyRequestRinging(): Promise<void> {
+    if (this.reconcilingNearbyRequests) return;
+    this.reconcilingNearbyRequests = true;
+    try { await reconcileNearbyRequestCooldowns(this.notificationRepository.manager); }
+    catch { this.logger.warn('Nearby request ringing cooldown reconciliation deferred.'); }
+    finally { this.reconcilingNearbyRequests = false; }
   }
 
   @Cron('*/5 * * * * *')
   async dispatchUrgentNotifications(): Promise<void> {
+    // Starting push delivery must never occupy the realtime lane's capacity.
+    void this.dispatchRealtimeNotifications().catch(() => this.logger.warn('Ride realtime delivery deferred.'));
     // Drain a broadcast promptly when the provider is fast, without increasing
     // the five-worker cap or claiming a large backlog behind a slow request.
     const startedAt = Date.now();
@@ -700,11 +781,8 @@ export class NotificationService implements OnModuleInit {
             const notification = notifications[next++];
             const deliveryStartedAt = Date.now();
             try {
-              if (this.configService.get<string>('DRIVER_DISPATCH_ENABLED') === 'true' &&
-                  ['driver_dispatch_offer', 'trip_request_nearby'].includes(notification.data?.type)) {
-                await this.notificationRepository.manager.transaction(manager => recoverDriverOffer(manager, notification,
-                  Number(this.configService.get('DRIVER_DISPATCH_RESPONSE_SECONDS') ?? 30)));
-              }
+              // Retry transport only: the original server deadline is immutable.
+              // Relevance below rejects expired invitations instead of reviving them.
               if (
                 !(await this.isCriticalNotificationStillDeliverable(
                   notification,
@@ -858,7 +936,9 @@ export class NotificationService implements OnModuleInit {
       if (this.configService.get<string>('DRIVER_DISPATCH_ENABLED') !== 'true') return false;
       const rows: { passengerId: string }[] = await this.notificationRepository.manager.query(`SELECT r."passengerId" FROM trip_request_dispatch_offers o
         JOIN trip_requests r ON r.id = o."requestId" WHERE o.id = $1 AND o."driverId" = $2
-        AND o.status = 'pending' AND o."expiresAt" > now() AND r.status = 'pending' AND r."passengerId" <> $2`,
+        AND o.status = 'pending' AND o."expiresAt" > now() AND r.status = 'pending' AND r."passengerId" <> $2
+        AND r."selectedDriverId" IS NULL AND r."tripId" IS NULL AND r."departureDateMax" > now()
+        AND r."maxPricePerSeat" IS NOT NULL`,
         [notification.data?.offerId, notification.userId]);
       if (rows[0]?.passengerId) notification.data = { ...notification.data, passengerId: rows[0].passengerId };
       return rows.length > 0;

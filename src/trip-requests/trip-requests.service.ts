@@ -685,7 +685,7 @@ export class TripRequestsService {
           .set({ status: 'cancelled' }).where('"requestId" = :id AND status = :status',
             { id: tripRequestId, status: 'pending' }).execute();
       }
-      await requests.update(tripRequestId, { ...patch, status: TripRequestStatus.PENDING });
+      await requests.update(tripRequestId, { ...patch, id: tripRequestId, status: TripRequestStatus.PENDING });
     });
     this.logger.log(`Trip request updated: ${tripRequestId}${adminId ? ` by admin ${adminId}` : ''}`);
     if (tripRequest.immediateDispatch && patch.immediateDispatch !== false) void this.driverDispatch?.tick();
@@ -1150,7 +1150,7 @@ export class TripRequestsService {
       if (await offers.exists({ where: { tripRequestId, driverId, status: DriverOfferStatus.PENDING } }))
         throw new ConflictException('Vous avez déjà une offre en attente pour cette commande.');
       const result = await offers.save(offer);
-      await requests.update(tripRequestId, { status: TripRequestStatus.OFFERS_RECEIVED });
+      await requests.update(tripRequestId, { id: tripRequestId, status: TripRequestStatus.OFFERS_RECEIVED });
       return result;
     });
 
@@ -1371,6 +1371,7 @@ export class TripRequestsService {
       await offers.update({ tripRequestId, status: DriverOfferStatus.PENDING },
         { status: DriverOfferStatus.REJECTED, rejectedAt: acceptedAt });
       await requests.update(tripRequestId, {
+        id: tripRequestId,
         status: TripRequestStatus.DRIVER_SELECTED, selectedDriverId: offer.driverId,
         selectedVehicleId: offer.vehicleId, selectedPricePerSeat: offer.pricePerSeat,
         selectedDriverRequiresPassengerKyc: offer.requiresPassengerKyc,
@@ -1837,7 +1838,8 @@ export class TripRequestsService {
         if (!locked || locked.selectedDriverId || locked.tripId) {
           throw new BadRequestException('Un conducteur vient de répondre. Actualisez la commande avant de l’annuler.');
         }
-        await manager.getRepository(TripRequest).update(tripRequestId, { status: TripRequestStatus.CANCELLED });
+        locked.status = TripRequestStatus.CANCELLED;
+        await manager.getRepository(TripRequest).save(locked);
         await manager.getRepository(DriverOffer).update(
           { tripRequestId, status: DriverOfferStatus.PENDING }, { status: DriverOfferStatus.CANCELLED });
         await manager.query(`UPDATE trip_request_dispatch_offers SET status = 'cancelled' WHERE "requestId" = $1 AND status = 'pending'`, [tripRequestId]);

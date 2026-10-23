@@ -92,6 +92,45 @@ describe('FlexPaie payout v1.03 (mocked HTTP)', () => {
   });
   afterEach(() => jest.restoreAllMocks());
 
+  it.each([PaymentPurpose.DRIVER_PAYOUT, PaymentPurpose.REFERRAL_PAYOUT])(
+    'preflights %s without calling /pay when the merchant has insufficient funds', async purpose => {
+      config.FLEXPAY_PAYOUT_BALANCE_CHECK_ENABLED = 'true';
+      http.get.mockReturnValue(of({ data: { code: '0', balances: [{ currency: 'CDF', amount: '100' }] } }));
+      await expect(flexpay.initiatePayout({ ...input, description: purpose })).rejects.toMatchObject({
+        response: { code: 'PAYOUT_INSUFFICIENT_MERCHANT_BALANCE' },
+      });
+      expect(http.post).toHaveBeenCalledTimes(1); // authentication only
+      expect(http.post.mock.calls.some(([url]) => url.endsWith('/pay'))).toBe(false);
+    },
+  );
+
+  it('records a safe final failure before sending when the enabled balance check fails', async () => {
+    config.FLEXPAY_PAYOUT_BALANCE_CHECK_ENABLED = 'true';
+    http.get.mockReturnValue(throwError(() => new Error('Synthetic balance timeout')));
+    await expect(payments.initiatePayout(input)).rejects.toMatchObject({ response: { code: 'PAYOUT_BALANCE_UNAVAILABLE' } });
+    expect(repository.save).toHaveBeenLastCalledWith(expect.objectContaining({ status: PaymentStatus.FAILED }));
+    expect(http.post).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    [], [{ currency: 'USD', amount: '999999' }],
+    [{ currency: 'CDF', amount: '999999' }, { currency: 'CDF', amount: '999999' }],
+    [{ currency: 'CDF', amount: 'invalid' }],
+  ].map(balances => [balances]))('refuses unusable balance data without submitting the transfer: %j', async balances => {
+    config.FLEXPAY_PAYOUT_BALANCE_CHECK_ENABLED = 'true';
+    http.get.mockReturnValue(of({ data: { code: '0', balances } }));
+    await expect(flexpay.initiatePayout(input)).rejects.toMatchObject({ response: { code: 'PAYOUT_BALANCE_UNAVAILABLE' } });
+    expect(http.post).toHaveBeenCalledTimes(1);
+  });
+
+  it('submits exactly once when the merchant balance covers the request', async () => {
+    config.FLEXPAY_PAYOUT_BALANCE_CHECK_ENABLED = 'true';
+    http.get.mockReturnValue(of({ data: { code: '0', balances: [{ currency: 'CDF', amount: String(input.amount) }] } }));
+    expect((await payments.initiatePayout(input)).status).toBe(PaymentStatus.INITIATED);
+    expect(http.get).toHaveBeenCalledTimes(1);
+    expect(http.post).toHaveBeenCalledTimes(2);
+  });
+
   async function initiateAndCheck(
     data: Record<string, unknown>,
     purpose = PaymentPurpose.DRIVER_PAYOUT,

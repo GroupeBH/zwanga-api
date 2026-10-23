@@ -48,6 +48,7 @@ import { loadPaymentContext, PaymentContextDto } from './payment-context';
 import type { PaymentHistoryPageDto } from '../common/pagination/history-page';
 import { claimDriverPayoutPayment, commitFlexPayPayoutState } from './flexpay-payout-state';
 import { claimTopUpPayment, topUpReference } from './topup-payment-claim';
+import { recoverTopUpClaim } from './topup-recovery';
 import { commitFlexPayDepositState } from './flexpay-deposit-state';
 import { claimReferralPayoutPayment } from './referral-payout-claim';
 
@@ -272,7 +273,12 @@ export class PaymentsService {
     const claim = isIdempotentTopUp
       ? await claimTopUpPayment(this.paymentTransactionRepository, transaction)
       : { payment: await this.paymentTransactionRepository.save(transaction), created: true };
-    if (!claim.created) return claim.payment;
+    if (!claim.created) {
+      // A replay must reconcile the existing attempt, never initiate a new one.
+      return claim.payment.orderNumber
+        ? this.checkPaymentStatus(claim.payment.orderNumber, input.userId!)
+        : claim.payment;
+    }
     let savedTransaction = claim.payment;
     this.logger.warn(
       `Payment transaction created: id=${savedTransaction.id}, reference=${savedTransaction.reference}, userId=${savedTransaction.userId ?? 'anonymous'}, purpose=${savedTransaction.purpose}, method=${savedTransaction.method}, amount=${savedTransaction.amount} ${savedTransaction.currency}, related=${savedTransaction.relatedEntityType ?? 'none'}:${savedTransaction.relatedEntityId ?? 'none'}`,
@@ -313,7 +319,8 @@ export class PaymentsService {
           return this.persistFailedInitiation(savedTransaction, error, true);
         }
         const persisted = await this.persistFailedInitiation(savedTransaction, error, false);
-        if (persisted.status === PaymentStatus.SUCCEEDED) return persisted;
+        if (persisted.status === PaymentStatus.SUCCEEDED ||
+            (isIdempotentTopUp && this.isTerminalPaymentStatus(persisted.status))) return persisted;
         throw error;
       }
     }
@@ -321,6 +328,25 @@ export class PaymentsService {
     throw lastError instanceof Error
       ? lastError
       : new BadRequestException("Le paiement n'a pas pu être initialisé");
+  }
+
+  /** Recover or seal an original top-up key without ever sending a debit. */
+  async recoverWalletTopUp(input: InitiatePaymentInput & { userId: string; idempotencyKey: string }): Promise<PaymentTransaction> {
+    const candidate = this.paymentTransactionRepository.create({
+      userId: input.userId, purpose: PaymentPurpose.WALLET_TOP_UP,
+      relatedEntityType: input.relatedEntityType, relatedEntityId: input.userId,
+      reference: topUpReference(input.userId, input.idempotencyKey),
+      provider: PaymentProvider.FLEXPAY, method: input.method,
+      amount: input.amount, tokenQuantity: input.tokenQuantity, currency: input.currency,
+      phone: input.method === PaymentMethod.MOBILE_MONEY ? input.phone : null,
+      description: input.description, status: PaymentStatus.CANCELLED,
+      providerMessage: 'Demande non envoyée. Vous pouvez choisir un autre paiement.',
+    });
+    const payment = await recoverTopUpClaim(this.paymentTransactionRepository, candidate);
+    if (this.isTerminalPaymentStatus(payment.status) &&
+        !(payment.status === PaymentStatus.SUCCEEDED && !hasVerifiedWalletTopUpProof(payment))) return payment;
+    // No provider reference means uncertain delivery, not permission to pay cash.
+    return payment.orderNumber ? this.checkPaymentStatus(payment.orderNumber, input.userId) : payment;
   }
 
   async initiatePayout(
@@ -956,7 +982,7 @@ export class PaymentsService {
     assertWalletTopUpCheckEvidence(
       transaction,
       providerTransaction,
-      providerFailed,
+      providerSucceeded ? 'succeeded' : providerFailed ? 'failed' : 'pending',
     );
 
     const normalizedProviderReference = providerTransaction.reference?.trim();

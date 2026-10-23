@@ -15,9 +15,10 @@ it('adds a structured description to the next immediate offer without querying m
   const service = new DriverDispatchService({ transaction: (work: any) => work(manager) } as any,
     { get: () => undefined } as any, {} as any);
   await (service as any).allocate(request.id);
-  expect(query).toHaveBeenCalledTimes(5);
+  expect(query).toHaveBeenCalledTimes(6);
   expect(query.mock.calls[2][0]).toContain('p."driverId" <> $1::uuid');
-  expect(query.mock.calls[2][0]).toContain('LIMIT 1 FOR UPDATE OF p SKIP LOCKED');
+  expect(query.mock.calls[2][0]).toContain('LIMIT 1 FOR UPDATE OF locked SKIP LOCKED');
+  expect(query.mock.calls[2][0]).toContain('locked.xmin = c."presenceVersion"');
   expect(query.mock.calls[2][1][0]).toBe('passenger');
   expect(enqueueTransactionalNotification).toHaveBeenCalledTimes(1);
   const notification = (enqueueTransactionalNotification as jest.Mock).mock.calls[0][1];
