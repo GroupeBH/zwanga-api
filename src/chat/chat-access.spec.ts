@@ -68,6 +68,7 @@ function fixture() {
     sendNotification: jest.fn(),
     sendToMultiple: jest.fn(),
   };
+  const realtime = { publish: jest.fn() };
   const service = new ChatService(
     ...([
       messages,
@@ -77,6 +78,7 @@ function fixture() {
       users,
       notifications,
       {},
+      realtime,
     ] as unknown as ConstructorParameters<typeof ChatService>),
   );
   return {
@@ -87,11 +89,38 @@ function fixture() {
     participants,
     bookings,
     notifications,
+    realtime,
     query,
   };
 }
 
 describe('Booking conversation access', () => {
+  it('publishes persisted HTTP messages without requiring push tokens and excludes old unauthorized members', async () => {
+    const f = fixture();
+    const message = { id: 'saved-message', conversationId, bookingId, senderId: passenger, content: 'Bonjour',
+      createdAt: new Date(), sender: { id: passenger, firstName: 'Test', accessToken: 'must-not-leak' } };
+    f.messages.create.mockReturnValue(message);
+    f.messages.save.mockResolvedValue(message);
+    f.messages.findOne.mockResolvedValue(message);
+    f.participants.find.mockResolvedValue([passenger, driver, stranger].map(userId => ({ userId })));
+    const result = await f.service.sendConversationMessage(conversationId, passenger, 'Bonjour');
+    expect(result).toMatchObject({ id: message.id });
+    expect(f.realtime.publish).toHaveBeenCalledTimes(1);
+    const [recipients, payload] = f.realtime.publish.mock.calls[0];
+    expect(recipients).toEqual(expect.arrayContaining([passenger, driver]));
+    expect(recipients).not.toContain(stranger);
+    expect(payload).toEqual(result);
+    expect(payload.sender).not.toHaveProperty('accessToken');
+    expect(f.messages.save.mock.invocationCallOrder[0]).toBeLessThan(f.realtime.publish.mock.invocationCallOrder[0]);
+    expect(f.notifications.sendNotification).not.toHaveBeenCalled();
+  });
+
+  it('never emits a new message when persistence failed', async () => {
+    const f = fixture();
+    f.messages.save.mockRejectedValue(new Error('synthetic storage failure'));
+    await expect(f.service.sendConversationMessage(conversationId, passenger, 'Bonjour')).rejects.toThrow();
+    expect(f.realtime.publish).not.toHaveBeenCalled();
+  });
   it('bounds legacy reads before hydration and keeps chronological array responses', async () => {
     const { service, messages } = fixture();
     messages.find.mockResolvedValue([{ id: 'newer' }, { id: 'older' }]);

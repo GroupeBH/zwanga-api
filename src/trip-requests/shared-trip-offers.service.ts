@@ -138,6 +138,7 @@ export class SharedTripOffersService {
       // passenger actually accepts a shared offer.
       if (!request.immediateDispatch)
         await manager.update(TripRequest, requestId, {
+          id: requestId,
           status: TripRequestStatus.OFFERS_RECEIVED,
         });
       await enqueueTransactionalNotification(manager, {
@@ -244,6 +245,7 @@ export class SharedTripOffersService {
               { status: DriverOfferStatus.REJECTED, rejectedAt: now },
             );
             await manager.update(TripRequest, requestId, {
+              id: requestId,
               status: TripRequestStatus.DRIVER_SELECTED,
               selectedDriverId: offer.driverId,
               selectedVehicleId: offer.vehicleId,

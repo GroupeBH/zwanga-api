@@ -20,6 +20,7 @@ import {
   RequestWalletWithdrawalDto,
 } from './dto/wallet.dto';
 import { WalletService } from './wallet.service';
+import { RecoverTopUpDto } from './dto/recover-topup.dto';
 import { WalletWithdrawalsService } from './wallet-withdrawals.service';
 import { HistoryPageDto } from '../common/pagination/history-page';
 import { WalletCompatibilityInterceptor } from './wallet-compatibility.interceptor';
@@ -113,6 +114,14 @@ export class WalletController {
   @ApiOperation({ summary: 'Receive FlexPay callback for wallet topups' })
   async handleTopUpCallback(@Body() dto: FlexPayCallbackDto) {
     return this.walletService.handleTopUpCallback(dto);
+  }
+
+  @Post('topups/recover')
+  @Auth()
+  @SensitiveThrottle(20, 60000)
+  @ApiOperation({ summary: 'Recover the original top-up or cancel it if it was never sent; never initiates a debit' })
+  async recoverTopUp(@Request() req, @Body() dto: RecoverTopUpDto) {
+    return this.walletService.recoverTopUp(req.user.userId, dto);
   }
 
   @Get('topups/:orderNumber/status')

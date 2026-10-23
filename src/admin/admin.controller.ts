@@ -30,6 +30,7 @@ import { CreateAdminAccountDto, ResetAdminAccountPasswordDto } from './dto/admin
 import { spreadsheetHeaders, type SpreadsheetFile } from './spreadsheet';
 import { VehicleType } from '../vehicles/entities/vehicle.entity';
 import { ADMIN_USER_SORT_FIELDS } from './dto/admin-users.dto';
+import { ResolvePayoutNotPaidDto } from '../payments/dto/resolve-payout-not-paid.dto';
 
 interface AuthenticatedAdminRequest {
   user: { userId: string };
@@ -489,12 +490,34 @@ export class AdminController {
   @ApiOperation({ summary: 'Reconcile a referral withdrawal with FlexPay' })
   reconcileReferralWithdrawal(
     @Request() req: AuthenticatedAdminRequest,
-    @Param('withdrawalId') withdrawalId: string,
+    @Param('withdrawalId', ParseUUIDPipe) withdrawalId: string,
   ) {
     return this.adminReferralsService.reconcileWithdrawal(
       req.user.userId,
       withdrawalId,
     );
+  }
+
+  @Get('referrals/withdrawals/:withdrawalId')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'Détail du retrait de parrainage et preuve de résolution administrative' })
+  getReferralWithdrawalDetail(@Param('withdrawalId', ParseUUIDPipe) withdrawalId: string) {
+    return this.adminReferralsService.getWithdrawalDetail(withdrawalId);
+  }
+
+  @Post('referrals/withdrawals/:withdrawalId/resolve-not-paid')
+  @Auth()
+  @Roles(UserRole.SUPER_ADMIN)
+  @SensitiveThrottle(5, 60000)
+  @ApiOperation({ summary: 'Libérer les jetons après confirmation définitive de non-paiement FlexPaie, preuve obligatoire' })
+  resolveReferralWithdrawalNotPaid(
+    @Request() req: AuthenticatedAdminRequest,
+    @Param('withdrawalId', ParseUUIDPipe) withdrawalId: string,
+    @Body() dto: ResolvePayoutNotPaidDto,
+  ) {
+    return this.adminReferralsService.resolveWithdrawalNotPaid(req.user.userId, withdrawalId, dto);
   }
 
   @Get('users/:userId/details')

@@ -35,7 +35,7 @@ describe('scheduled nearby request alert', () => {
     expect(sql).toContain('p."discoveryEnabled" = true');
     expect(sql).toContain('p."discoveryEnabled" IS NULL AND p."expiresAt" > now()'); expect(sql).toContain('NOT EXISTS');
     expect(parameters).toEqual(['passenger', 15.3, -4.3, 5000, 'car', 2, 'request']);
-    expect(f.findRequest).toHaveBeenCalledWith({ where: { id: 'request' }, lock: { mode: 'pessimistic_write' } });
+    expect(f.findRequest).toHaveBeenCalledWith({ where: { id: 'request' }, lock: { mode: 'pessimistic_write', onLocked: 'skip_locked' } });
     expect(f.query).toHaveBeenCalledTimes(1);
     expect(enqueueTransactionalNotifications).toHaveBeenCalledTimes(1);
     expect(enqueueTransactionalNotifications).toHaveBeenCalledWith(f.manager, [expect.objectContaining({

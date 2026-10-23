@@ -12,6 +12,7 @@ import { AddDriverDispatch1780000048000 } from '../../database/migrations/178000
 import { BroadcastDriverRequests1780000074000 } from '../../database/migrations/1780000074000-BroadcastDriverRequests';
 import { RetainDriverLastLocation1780000076000 } from '../../database/migrations/1780000076000-RetainDriverLastLocation';
 import { NearbyRequestRingingCooldown1780000087000 } from '../../database/migrations/1780000087000-NearbyRequestRingingCooldown';
+import { DispatchDeliveryResilience1780000088000 } from '../../database/migrations/1780000088000-DispatchDeliveryResilience';
 import { enqueueStaleLocationReminders, isStaleLocationReminderDeliverable } from './stale-location-reminder';
 import { IndexNearbyRequestAlerts1780000066000 } from '../../database/migrations/1780000066000-IndexNearbyRequestAlerts';
 import { DriverDispatchService } from './dispatch.service';
@@ -24,7 +25,8 @@ import { TripRequestsService } from '../trip-requests.service';
 import { boundedInteger, dispatchOfferIsActionable } from './dispatch-policy';
 import { NotificationService } from '../../notifications/notifications.service';
 import { Notification } from '../../notifications/entities/notification.entity';
-import { recoverDriverOffer } from '../../notifications/recover-driver-offer';
+import { RideAlertChanges } from '../../notifications/ride-alert-changes';
+import { claimRideRealtimeNotifications } from '../../notifications/ride-realtime-delivery';
 
 describe('dispatch policy', () => {
   it.each([undefined, '60', '180', '300', '600', '900', '901'])(
@@ -87,6 +89,7 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
       await new BroadcastDriverRequests1780000074000().up(runner);
       await new RetainDriverLastLocation1780000076000().up(runner);
       await new NearbyRequestRingingCooldown1780000087000().up(runner);
+      await new DispatchDeliveryResilience1780000088000().up(runner);
     } finally { await runner.release(); }
     service = new DriverDispatchService(source, new ConfigService({ DRIVER_DISPATCH_ENABLED: 'true' }),
       notifications as never);
@@ -130,6 +133,101 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
       numberOfSeats: seats, maxPricePerSeat: 1000, vehicleType: VehicleType.CAR });
   };
   const offers = (requestId: string) => source.query('SELECT * FROM trip_request_dispatch_offers WHERE "requestId" = $1 ORDER BY "createdAt"', [requestId]);
+
+  it('does not let 30 requests without pickup points or a missing immediate price starve a valid request', async () => {
+    await driver();
+    const bad = await request();
+    await source.getRepository(TripRequest).update(bad.id, { departurePoint: null });
+    await source.getRepository(TripRequest).save(Array.from({ length: 29 }, () => ({ ...bad, id: randomUUID(), departurePoint: null })));
+    const unpriced = await request();
+    await source.getRepository(TripRequest).update(unpriced.id, { maxPricePerSeat: null });
+    const valid = await request();
+    await service.tick();
+    expect(await offers(valid.id)).toHaveLength(1);
+    expect(await offers(unpriced.id)).toHaveLength(0);
+    expect(await source.query('SELECT * FROM trip_request_dispatch_offers')).toHaveLength(1);
+  });
+
+  it('realtime recovers a dead worker lease and deduplicates replicas without waiting for push', async () => {
+    await driver(); const r = await request(); await service.tick();
+    const [id] = await claimRideRealtimeNotifications(source.manager);
+    expect(id).toBeDefined();
+    expect(await claimRideRealtimeNotifications(source.manager)).toHaveLength(0);
+    await source.query(`UPDATE ride_realtime_deliveries SET "attemptedAt" = now() - interval '6 seconds'`);
+    const publish = jest.fn().mockReturnValue(true);
+    const create = () => new NotificationService(new ConfigService({ DRIVER_DISPATCH_ENABLED: 'true' }),
+      source.getRepository(Notification), source.getRepository(User), source.getRepository(TripRequest),
+      { isBound: () => true, publish } as any);
+    const workers = [create(), create()];
+    workers.forEach(worker => { worker['urgentWorkers'] = 5; });
+    await Promise.all(workers.map(worker => worker.dispatchRealtimeNotifications()));
+    expect(publish).toHaveBeenCalledTimes(1);
+    expect((await source.getRepository(Notification).findOneByOrFail({ id })).status).toBe('pending');
+    expect((await source.query('SELECT * FROM ride_realtime_deliveries'))[0].completedAt).not.toBeNull();
+  });
+
+  it('reverts and reapplies resilience migration without losing requests or notifications', async () => {
+    await driver(); const r = await request(); await service.tick();
+    const migration = new DispatchDeliveryResilience1780000088000();
+    const runner = source.createQueryRunner();
+    try {
+      await migration.down(runner); await migration.up(runner);
+      expect(await offers(r.id)).toHaveLength(1);
+      expect(await source.getRepository(Notification).count()).toBe(1);
+    } finally { await runner.release(); }
+  });
+
+  it('skips a presence reserved after the candidate statement snapshot, without losing the successor', async () => {
+    const closest = await driver(15.31), successor = await driver(15.311);
+    const first = await request(), second = await request();
+    const runner = source.createQueryRunner();
+    let competing: Promise<void> | undefined;
+    let candidateReads = 0;
+    await runner.connect(); await runner.startTransaction();
+    try {
+      await runner.query('SELECT pg_advisory_xact_lock(782341)');
+      competing = source.transaction(async manager => {
+        const original = manager.query.bind(manager);
+        // Acquire a statement snapshot, then wait before scanning candidates.
+        // A different transaction commits the nearest driver's reservation meanwhile.
+        manager.query = ((sql: string, params?: any[]) => {
+          if (sql.startsWith('WITH candidates AS MATERIALIZED (')) {
+            candidateReads++;
+            sql = sql.replace('WITH candidates AS MATERIALIZED (',
+                'WITH gate AS MATERIALIZED (SELECT pg_advisory_xact_lock(782341)), candidates AS MATERIALIZED (')
+              .replace('FROM driver_dispatch_presence p', 'FROM driver_dispatch_presence p CROSS JOIN gate');
+          }
+          return original(sql, params);
+        }) as typeof manager.query;
+        const locked = await manager.getRepository(TripRequest).findOneOrFail({
+          where: { id: second.id }, lock: { mode: 'pessimistic_write' },
+        });
+        await service['allocateNext'](manager, locked);
+      });
+      // Observe the actual blocked query rather than relying on a sleep's timing.
+      const limit = Date.now() + 5000;
+      let blocked = false;
+      while (!blocked && Date.now() < limit) {
+        const rows = await source.query("SELECT 1 FROM pg_locks WHERE locktype='advisory' AND objid=782341 AND NOT granted");
+        blocked = rows.length > 0;
+        if (!blocked) await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      expect(blocked).toBe(true);
+      const locked = await runner.manager.getRepository(TripRequest).findOneOrFail({
+        where: { id: first.id }, lock: { mode: 'pessimistic_write' },
+      });
+      await service['allocateNext'](runner.manager, locked);
+      await runner.commitTransaction();
+      await competing;
+      expect(candidateReads).toBe(1);
+      expect((await offers(first.id))[0].driverId).toBe(closest.user.id);
+      expect(await offers(second.id)).toEqual([expect.objectContaining({ driverId: successor.user.id, status: 'pending' })]);
+    } finally {
+      if (runner.isTransactionActive) await runner.rollbackTransaction();
+      await competing?.catch(() => undefined);
+      await runner.release();
+    }
+  }, 15000);
 
   it('excludes a muted nearby driver from scheduled and immediate dispatch, then resumes after expiry', async () => {
     const d = await driver();
@@ -214,6 +312,20 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     jest.spyOn(edits as any, 'sanitizeDriverOffer').mockImplementation(async offer => offer);
     return edits;
   };
+
+  it('publishes a terminal hint after a classical offer acceptance using a partial TypeORM update', async () => {
+    const d = await driver(), r = await request(false), edits = editor();
+    const offer = await edits.createDriverOffer(d.user.id, r.id, { vehicleId: d.vehicle.id,
+      proposedDepartureDate: new Date(Date.now() + 60000).toISOString(), pricePerSeat: 1000, availableSeats: 1 });
+    const publish = jest.fn(), changes = new RideAlertChanges(source, { publish } as any);
+    try {
+      await edits.acceptDriverOffer(r.passengerId, r.id, { offerId: offer.id });
+      for (let attempt = 0; attempt < 100 && publish.mock.calls.length < 2; attempt++)
+        await new Promise(resolve => setTimeout(resolve, 20));
+      expect(publish).toHaveBeenCalledWith(d.user.id, { kind: 'changed', requestId: r.id, terminal: true });
+      expect(publish).toHaveBeenCalledWith(r.passengerId, { kind: 'changed', requestId: r.id, terminal: true });
+    } finally { changes.onModuleDestroy(); }
+  });
 
   it('expires concurrent requests with one durable outbox event and no HTTP inside the transaction', async () => {
     const r = await request(false);
@@ -513,6 +625,23 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     await expect(service.respond(d.user.id, offer.id, 'decline')).rejects.toThrow('traitée');
     expect((await service.status(d.user.id)).available).toBe(false);
   });
+  it('publishes cancellation hints to the passenger and invited driver only after commit', async () => {
+    const d = await driver(); const r = await request(); await service.tick();
+    const publish = jest.fn();
+    const changes = new RideAlertChanges(source, { publish } as any);
+    try {
+      await source.transaction(async manager => {
+        const request = await manager.getRepository(TripRequest).findOneByOrFail({ id: r.id });
+        request.status = TripRequestStatus.CANCELLED;
+        await manager.getRepository(TripRequest).save(request);
+        expect(publish).not.toHaveBeenCalled();
+      });
+      for (let attempt = 0; attempt < 100 && publish.mock.calls.length < 2; attempt++)
+        await new Promise(resolve => setTimeout(resolve, 20));
+      expect(new Set(publish.mock.calls.map(call => call[0]))).toEqual(new Set([d.user.id, r.passengerId]));
+      expect(publish.mock.calls.every(call => call[1].terminal === true && call[1].requestId === r.id)).toBe(true);
+    } finally { changes.onModuleDestroy(); }
+  });
   it('a timeout advances to the next driver and a delayed push cannot resurrect the old invitation', async () => {
     const near = await driver(); const far = await driver(15.32); const r = await request();
     await service.tick(); const first = (await offers(r.id)).find(o => o.driverId === near.user.id);
@@ -523,7 +652,6 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     expect((await offers(r.id)).find(o => o.driverId === near.user.id).status).toBe('expired');
     const oldPush = await source.getRepository(Notification).findOneByOrFail({ eventKey: `dispatch-offer:${first.id}` });
     oldPush.data!.expiresAt = new Date(Date.now() - 1000).toISOString();
-    await source.transaction(manager => recoverDriverOffer(manager, oldPush));
     expect((await offers(r.id)).filter(o => o.status === 'pending').map(o => o.driverId)).toEqual([far.user.id]);
     const delivery = new NotificationService(new ConfigService({ DRIVER_DISPATCH_ENABLED: 'true' }),
       source.getRepository(Notification), source.getRepository(User), source.getRepository(TripRequest));

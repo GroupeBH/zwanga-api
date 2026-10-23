@@ -15,6 +15,8 @@ import { cashAllTokenOriginsCases } from '../../test/cash-all-token-origins-post
 import { financialRolloutCases } from '../../test/financial-rollout-postgres';
 import { publicationRequestUuidCases } from '../../test/publication-request-uuid-postgres';
 import { cumulativeCashDebtCases } from '../../test/cumulative-cash-debt-postgres';
+import { mixedCashCommissionCases } from '../../test/mixed-cash-commission-postgres';
+import { tokenCashCommissionCases } from '../../test/token-cash-commission-postgres';
 import { WalletLedgerEntry } from '../wallet/entities/wallet-ledger-entry.entity';
 import { ModuleKind, ScriptTarget, transpileModule } from 'typescript';
 
@@ -1128,5 +1130,7 @@ const pgBin = process.env.DRIVER_FINANCE_TEST_POSTGRES_BIN;
     financialRolloutCases(() => db, driver, trip);
     publicationRequestUuidCases(() => db, driver);
     cumulativeCashDebtCases(() => db, driver, trip);
+    mixedCashCommissionCases(() => db, driver, trip);
+    tokenCashCommissionCases(() => db, driver, trip);
   },
 );

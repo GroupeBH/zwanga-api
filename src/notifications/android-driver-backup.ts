@@ -7,7 +7,7 @@ export function androidDriverBackup(_notification: Notification, data: Record<st
   const kind = data.type === 'new_booking' ? 'booking' : data.type === 'driver_dispatch_offer' ? 'dispatch' : 'nearby';
   const id = data.bookingId ?? data.offerId ?? data.tripRequestId;
   const fallbackTag = `ride-backup-${kind}-${id}`;
-  const fields = ['type', 'actionProtocol', 'bookingId', 'tripId', 'tripRequestId', 'offerId',
+  const fields = ['type', 'actionProtocol', 'notificationId', 'bookingId', 'tripId', 'tripRequestId', 'offerId',
     'driverId', 'passengerId', 'ringAlert', 'ringVersion', 'ringUntil', 'expiresAt', 'alertExpiresAt',
     'delivery', 'sharedTrip', 'existingTripId', 'rideSpeechVersion', 'rideDeparture', 'rideArrival',
     'rideSeats', 'rideDepartureAt', 'ridePricePerSeat', 'ridePriceKind', 'invitationText'];

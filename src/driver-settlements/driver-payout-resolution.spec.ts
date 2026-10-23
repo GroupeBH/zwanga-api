@@ -1,5 +1,6 @@
 import {
   BadGatewayException,
+  BadRequestException,
   ConflictException,
   Logger,
   NotFoundException,
@@ -218,6 +219,15 @@ describe('Driver payout support resolution', () => {
     expect((await service.resolveNotPaid('admin', 'payout', dto)).status).toBe(
       'cancelled',
     );
+  });
+
+  it('permits audited definitive proof when payout authentication is unavailable', async () => {
+    payment.orderNumber = 'ORDER';
+    payments.reconcileFlexPayDriverPayout.mockRejectedValue(
+      new BadRequestException({ code: 'PAYOUT_SERVICE_UNAVAILABLE' }),
+    );
+    expect((await service.resolveNotPaid('admin', 'payout', dto)).status).toBe('cancelled');
+    expect(events[0].evidenceReference).toBe(dto.evidenceReference);
   });
 
   it.each([

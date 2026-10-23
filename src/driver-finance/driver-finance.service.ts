@@ -166,6 +166,14 @@ export class DriverFinanceService {
     ) {
       result.availablePaymentModes.push(booking.paymentMode);
     }
-    return result;
+    return {
+      ...result,
+        mixedCashSupported: !booking.tokenCashFallbackAt && booking.status === BookingStatus.COMPLETED && booking.droppedOff &&
+        !booking.mixedPaymentAt && !booking.cashReceivedAt && booking.paymentStatus !== 'succeeded' &&
+        booking.paymentCurrency === 'CDF' && Number(booking.cashCommissionTokenValue) > 0 &&
+        result.acceptedPaymentModes.includes(TripPaymentMode.POINTS) &&
+        result.acceptedPaymentModes.includes(TripPaymentMode.CASH) &&
+        result.availablePaymentModes.includes(TripPaymentMode.CASH),
+    };
   }
 }

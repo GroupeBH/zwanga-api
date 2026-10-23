@@ -9,7 +9,7 @@ import {
   emitSocketError,
   WsAuthenticatedGuard,
 } from './websocket-security';
-import { createOriginPolicy, createSocketOriginOptions } from './cors-policy';
+import { createCorsOptions, createOriginPolicy, createSocketOriginOptions } from './cors-policy';
 import {
   BookingChatSocketDto,
   SendChatSocketMessageDto,
@@ -145,6 +145,33 @@ describe('WebSocket authentication and safe errors', () => {
 });
 
 describe('Shared HTTP and Socket.IO origin policy', () => {
+  it('allows the official production admin without widening access to lookalike origins', () => {
+    const policy = createOriginPolicy(config({ NODE_ENV: 'production' }));
+    expect(policy('https://hqadmin.zwanga-app.com')).toBe(true);
+    expect(policy('http://hqadmin.zwanga-app.com')).toBe(false);
+    expect(policy('https://hqadmin.zwanga-app.com.attacker.test')).toBe(false);
+    expect(policy('https://other.zwanga-app.com')).toBe(false);
+    expect(policy('null')).toBe(false);
+  });
+
+  it('accepts the production admin for HTTP polling and direct WebSocket upgrades', () => {
+    const options = createSocketOriginOptions(config({
+      NODE_ENV: 'production', CORS_ORIGINS: 'https://app.example.test',
+    }));
+    const callback = jest.fn();
+    const cors = options.cors as ReturnType<typeof createCorsOptions>;
+    cors.origin('https://hqadmin.zwanga-app.com', callback);
+    expect(callback).toHaveBeenLastCalledWith(null, true);
+    expect(cors.credentials).toBe(true);
+    options.allowRequest!(
+      { headers: { origin: 'https://hqadmin.zwanga-app.com' } } as IncomingMessage,
+      callback,
+    );
+    expect(callback).toHaveBeenLastCalledWith(null, true);
+    cors.origin('https://app.example.test', callback);
+    expect(callback).toHaveBeenLastCalledWith(null, true);
+  });
+
   it('uses an exact production allowlist while accepting native clients without Origin', () => {
     const policy = createOriginPolicy(
       config({

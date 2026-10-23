@@ -11,6 +11,7 @@ import type { Notification } from './entities/notification.entity';
 type Notice = Pick<Notification, 'id' | 'userId' | 'data'>;
 import {
   declineNearbyRequest,
+  acknowledgeNearbyRequest,
   prepareNearbyRequestRinging,
   reconcileNearbyRequestCooldowns,
   NEARBY_RING_COOLDOWN_MS,
@@ -84,6 +85,8 @@ const pgBin = process.env.NEARBY_RING_TEST_POSTGRES_BIN;
       const runner = db.createQueryRunner();
       try {
         await new NearbyRequestRingingCooldown1780000087000().up(runner);
+        // Minimal schema here; complete migration up/down is covered by dispatch integration tests.
+        await db.query('ALTER TABLE nearby_driver_ring_events ADD COLUMN "receivedAt" timestamptz');
       } finally {
         await runner.release();
       }
@@ -158,7 +161,8 @@ const pgBin = process.env.NEARBY_RING_TEST_POSTGRES_BIN;
       )[0];
     const expire = () =>
       db.query(
-        `UPDATE nearby_driver_ring_events SET "responseDeadline" = now() - interval '1 second'`,
+        `UPDATE nearby_driver_ring_events SET "responseDeadline" = now() - interval '1 second',
+          "receivedAt" = CASE WHEN "receivedAt" IS NOT NULL THEN now() - interval '20 seconds' ELSE NULL END`,
       );
 
     it('rings the first four distinct orders, then blocks both nearby families for exactly 24h, not bookings', async () => {
@@ -185,11 +189,12 @@ const pgBin = process.env.NEARBY_RING_TEST_POSTGRES_BIN;
       expect((await status()).mutedUntil).toEqual(before.mutedUntil);
     });
 
-    it('counts ignored successful sends, never pending/failed sends, and combines refusals with timeouts', async () => {
+    it('counts ignored device receipts, never provider-only sends, and combines refusals with timeouts', async () => {
       for (let i = 0; i < 3; i++) {
         const n = await create();
         await prepare(n);
         await sent(n);
+        expect(await acknowledgeNearbyRequest(db.manager, driver, n.id)).toEqual({ received: true });
       }
       const failed = await create();
       await prepare(failed);
@@ -208,6 +213,34 @@ const pgBin = process.env.NEARBY_RING_TEST_POSTGRES_BIN;
       await sent(fourth);
       await refuse(fourth);
       expect((await status()).missedCount).toBe(4);
+    });
+
+    it('does not pause a driver for provider-accepted but undelivered pushes', async () => {
+      for (let i = 0; i < 5; i++) {
+        const n = await create(); await prepare(n); await sent(n);
+      }
+      await expire(); await reconcileNearbyRequestCooldowns(db.manager);
+      expect((await status()).missedCount).toBe(0);
+      expect((await status()).mutedUntil).toBeNull();
+    });
+
+    it('accepts only the owning app receipt, including when push failed but realtime arrived', async () => {
+      const n = await create(); await prepare(n);
+      await db.query(`UPDATE notifications SET status = 'failed' WHERE id = $1`, [n.id]);
+      expect(await acknowledgeNearbyRequest(db.manager, otherDriver, n.id)).toEqual({ received: false });
+      expect(await acknowledgeNearbyRequest(db.manager, driver, n.id)).toEqual({ received: true });
+      expect(await acknowledgeNearbyRequest(db.manager, driver, n.id)).toEqual({ received: true });
+      await expire(); await reconcileNearbyRequestCooldowns(db.manager);
+      expect((await status()).missedCount).toBe(1);
+      expect(await acknowledgeNearbyRequest(db.manager, driver, n.id)).toEqual({ received: false });
+    });
+
+    it('does not penalise a device that received the alert too late to respond', async () => {
+      const n = await create(); await prepare(n); await sent(n);
+      await acknowledgeNearbyRequest(db.manager, driver, n.id);
+      await db.query(`UPDATE nearby_driver_ring_events SET "responseDeadline" = now() - interval '1 second'`);
+      await reconcileNearbyRequestCooldowns(db.manager);
+      expect((await status()).missedCount).toBe(0);
     });
 
     it('deduplicates concurrent refusals, retries and two notification families for the same order', async () => {
@@ -351,16 +384,16 @@ const pgBin = process.env.NEARBY_RING_TEST_POSTGRES_BIN;
       expect((await status()).missedCount).toBe(1);
     });
 
-    it('gives a failed send its response window on retry without extending an already successful send', async () => {
+    it('does not extend a response window after a device receipt', async () => {
       const n = await create();
       await prepare(n);
-      await expire();
       await db.query(
         `UPDATE notifications SET status = 'failed' WHERE id = $1`,
         [n.id],
       );
       expect(await prepare(n)).toBe(true);
       await sent(n);
+      await acknowledgeNearbyRequest(db.manager, driver, n.id);
       await reconcileNearbyRequestCooldowns(db.manager);
       expect((await status()).missedCount).toBe(0);
       const [before] = await db.query(

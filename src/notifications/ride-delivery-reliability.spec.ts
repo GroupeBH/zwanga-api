@@ -1,8 +1,6 @@
 import { getMessaging } from 'firebase-admin/messaging';
 import { NotificationService } from './notifications.service';
 import { Notification, NotificationStatus } from './entities/notification.entity';
-import { TripRequest, TripRequestStatus } from '../trip-requests/entities/trip-request.entity';
-import { recoverDriverOffer } from './recover-driver-offer';
 import { isRideResponseDeliverable } from './ride-response-delivery';
 import { androidDriverBackup } from './android-driver-backup';
 import { RideResponseOutbox1780000084000 } from '../database/migrations/1780000084000-RideResponseOutbox';
@@ -44,81 +42,32 @@ describe('v4 Android native safety card', () => {
     const item = notification('trip_request_nearby');
     const payload = androidDriverBackup(item, { ...item.data, invitationText: 'é'.repeat(9000),
       rideArrival: 'é'.repeat(9000), rideDeparture: 'é'.repeat(9000), unknownBlob: 'x'.repeat(9000),
-      sharedTrip: true, existingTripId: uuid(7), ridePricePerSeat: '2500', ridePriceKind: 'budget' });
+      notificationId: uuid(1), sharedTrip: true, existingTripId: uuid(7), ridePricePerSeat: '2500', ridePriceKind: 'budget' });
     expect(Buffer.byteLength(JSON.stringify(payload), 'utf8')).toBeLessThan(4096);
     expect(JSON.parse(payload.body)).toMatchObject({ passengerId: uuid(3), driverId: uuid(2),
-      sharedTrip: true, existingTripId: uuid(7), ridePricePerSeat: '2500' });
+      notificationId: uuid(1), sharedTrip: true, existingTripId: uuid(7), ridePricePerSeat: '2500' });
     expect(payload).not.toHaveProperty('unknownBlob');
   });
 });
 
-describe('recovery of interrupted/failed delivery, not answered offers', () => {
-  const fixture = () => {
-    const request: any = { id: uuid(5), status: TripRequestStatus.PENDING, passengerId: uuid(3),
-      selectedDriverId: null, departureDateMax: new Date(Date.now() + 60_000),
-      departurePoint: { coordinates: [0, 0] }, numberOfSeats: 1, vehicleType: 'car' };
-    const offer = { id: uuid(4), status: 'pending', expiresAt: new Date(Date.now() + 10_000), vehicleId: uuid(7), seats: 4 };
-    const flags = { presence: true, other: false };
-    const update = jest.fn();
-    const findOne = jest.fn(async () => request);
-    const query = jest.fn(async (sql: string, _parameters?: unknown[]) => {
-      if (sql.startsWith('SELECT *')) return [offer];
-      if (sql.includes('SELECT p."driverId"')) return flags.presence ? [{}] : [];
-      if (sql.includes('SELECT 1')) return flags.other ? [{}] : [];
-      return [];
+describe('immutable incoming deadlines', () => {
+  it('a retry cannot restart the sound budget of the same booking notification', () => {
+    const service: any = Object.create(NotificationService.prototype);
+    const item = notification('new_booking');
+    delete item.data!.expiresAt;
+    expect(service.driverRingUntil(item)).toBe(new Date(item.createdAt.getTime() + 30_000).toISOString());
+    expect(Date.parse(service.driverRingUntil(item))).toBeLessThan(Date.now());
+  });
+  it('rejects a delayed dispatch notification without renewing its deadline', async () => {
+    const item = notification('driver_dispatch_offer');
+    const expiry = item.data!.expiresAt;
+    const query = jest.fn().mockResolvedValue([]);
+    const service: any = Object.assign(Object.create(NotificationService.prototype), {
+      configService: { get: () => 'true' }, notificationRepository: { manager: { query } },
     });
-    const manager: any = { query, getRepository: (entity: unknown) =>
-      entity === TripRequest ? { findOne } : { update } };
-    return { request, offer, flags, manager, query, update };
-  };
-  it('renews a still-live offer before delivery without allocating a duplicate', async () => {
-    const f = fixture(); const item = notification('driver_dispatch_offer');
-    await recoverDriverOffer(f.manager, item);
-    expect(f.query.mock.calls.at(-1)![0]).toContain("SET status = 'pending'");
-    expect(f.query.mock.calls.at(-1)![1][0]).toBe(uuid(4));
-    expect(item.data!.deliveryRenewals).toBe(1);
-    expect(Date.parse(item.data!.expiresAt) - Date.now()).toBeGreaterThan(20_000);
-    expect(f.update).toHaveBeenCalledWith(item.id, { data: item.data });
-    expect(f.query.mock.calls[1][0]).toContain('ST_DWithin');
-    expect(f.query.mock.calls[1][1]!.at(-1)).toBe(5000);
-    expect(f.query.mock.calls[2][0]).toContain('OR "requestId" = $3');
-    expect(f.query.mock.calls[2][1]).toEqual([item.userId, uuid(4), uuid(5)]);
-  });
-  it.each(['declined', 'cancelled', 'accepted', 'expired'])('never revives an offer already %s', async status => {
-    const f = fixture(); f.offer.status = status;
-    await recoverDriverOffer(f.manager, notification('driver_dispatch_offer'));
-    expect(f.update).not.toHaveBeenCalled();
-  });
-  it('does not revive a timed-out offer before the expiration cron has updated its status', async () => {
-    const f = fixture(); f.offer.expiresAt = new Date(Date.now() - 1);
-    await recoverDriverOffer(f.manager, notification('driver_dispatch_offer'));
-    expect(f.update).not.toHaveBeenCalled();
-    expect(f.query).toHaveBeenCalledTimes(1);
-  });
-  it.each(['sent', 'old', 'cap', 'own', 'selected', 'expired-request', 'disabled', 'other-offer'])('does not renew for %s', async condition => {
-    const f = fixture(); const item = notification('driver_dispatch_offer');
-    if (condition === 'sent') item.status = NotificationStatus.SENT;
-    if (condition === 'old') item.createdAt = new Date(Date.now() - 301_000);
-    if (condition === 'cap') item.data!.deliveryRenewals = 2;
-    if (condition === 'own') f.request.passengerId = item.userId;
-    if (condition === 'selected') f.request.selectedDriverId = uuid(8);
-    if (condition === 'expired-request') f.request.departureDateMax = new Date(0);
-    if (condition === 'disabled') f.flags.presence = false;
-    if (condition === 'other-offer') f.flags.other = true;
-    await recoverDriverOffer(f.manager, item);
-    expect(f.update).not.toHaveBeenCalled();
-  });
-  it('renews a queued nearby transport window only twice and never an already sent alert', async () => {
-    const f = fixture(); const item = notification('trip_request_nearby');
-    for (let i = 0; i < 3; i++) {
-      item.data!.alertExpiresAt = new Date(0).toISOString();
-      await recoverDriverOffer(f.manager, item);
-    }
-    expect(f.update).toHaveBeenCalledTimes(2);
-    item.data!.deliveryRenewals = 0; item.status = NotificationStatus.SENT;
-    await recoverDriverOffer(f.manager, item);
-    expect(f.update).toHaveBeenCalledTimes(2);
-    expect(f.query).not.toHaveBeenCalled();
+    expect(await service.isCriticalNotificationStillDeliverable(item)).toBe(false);
+    expect(item.data!.expiresAt).toBe(expiry);
+    expect(query.mock.calls.every(([sql]) => !/UPDATE|INSERT/i.test(sql))).toBe(true);
   });
 });
 

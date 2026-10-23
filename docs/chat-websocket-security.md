@@ -37,11 +37,12 @@ La validation utilise des exceptions WebSocket, conformément à la
 
 ## CORS et déploiement
 
-HTTP et Socket.IO partagent la politique `CORS_ORIGINS` existante : liste exacte
-d'origines séparées par des virgules en production, origines libres en
-développement. Les clients natifs sans en-tête `Origin` restent acceptés mais
-doivent présenter un JWT valide. Une liste vide en production interdit les
-origines web.
+HTTP et Socket.IO autorisent l'administration officielle
+`https://hqadmin.zwanga-app.com` en production. `CORS_ORIGINS` conserve la liste
+exacte des origines supplémentaires, séparées par des virgules ; une liste vide
+n'autorise donc que cette administration. Aucun joker de sous-domaine n'est
+ajouté. Les origines restent libres en développement. Les clients natifs sans
+en-tête `Origin` restent acceptés mais doivent présenter un JWT valide.
 
 La politique est appliquée au serveur Engine.IO partagé, pas seulement aux
 namespaces. `allowRequest` vérifie aussi les connexions WebSocket directes :
@@ -52,6 +53,22 @@ les anciennes connexions et vider leurs abonnements aux rooms. Une ancienne
 instance conserve l'ancien comportement tant qu'elle reste accessible.
 
 ## Application mobile
+
+### Complément du 23 octobre 2026 : diffusion HTTP et reprise après coupure
+
+Les messages enregistrés par REST et par le gateway utilisent désormais
+`ChatRealtime`. La diffusion `new_message` cible les rooms `user:<id>` établies
+par le serveur à l'authentification. Pour une réservation, les participants
+actuels sont contrôlés avant diffusion, même si une ancienne adhésion existe.
+Les événements `join_booking`, `leave_booking` et les payloads restent compatibles ;
+le gateway n'émet pas une seconde copie du message.
+
+Le mobile est maintenant modifié : chat et tracking traitent `server_restart`
+avec reprises bornées/temporisées et nettoyage au logout. Une révocation de
+session n'est pas traitée comme une panne temporaire. Le chat relit les messages
+à la reconnexion et les push de chat invalident le cache de la conversation.
+Les mentions « lecture seule » du contrôle initial ci-dessous décrivent donc
+le passage précédent, et non ces nouveaux correctifs.
 
 Les payloads de `services/chatSocket.ts` et `services/trackingSocket.ts` dans
 `zwanga` ont été vérifiés en lecture seule. Aucun changement de format mobile

@@ -9,7 +9,7 @@ import { rideSpeechData } from '../../notifications/ride-speech-data';
 export async function enqueueScheduledRequestAlert(manager: EntityManager, requestId: string,
   radiusMeters: number, _isBusy?: (driverId: string) => Promise<boolean>): Promise<boolean> {
   const request = await manager.getRepository(TripRequest).findOne({
-    where: { id: requestId }, lock: { mode: 'pessimistic_write' },
+    where: { id: requestId }, lock: { mode: 'pessimistic_write', onLocked: 'skip_locked' },
   });
   if (!request || request.immediateDispatch || ![TripRequestStatus.PENDING, TripRequestStatus.OFFERS_RECEIVED].includes(request.status) ||
       request.selectedDriverId || request.tripId || !request.departurePoint ||

@@ -6,6 +6,10 @@ import { BookingsService } from './bookings.service';
 import { BookingsController } from './bookings.controller';
 import { CashReceiptsController } from './cash-receipts.controller';
 import { CashReceiptsService } from './cash-receipts.service';
+import { MixedCashPaymentService } from './mixed-cash-payment.service';
+import { MixedCashPaymentController } from './mixed-cash-payment.controller';
+import { TokenCashFallbackController } from './token-cash-fallback.controller';
+import { TokenCashFallbackService } from './token-cash-fallback.service';
 import { Booking } from './entities/booking.entity';
 import { Trip } from '../trips/entities/trip.entity';
 import { User } from '../users/entities/user.entity';
@@ -42,8 +46,8 @@ import {
     DriverSettlementsModule,
     ReferralsModule,
   ],
-  controllers: [BookingsController, RideDeclarationsController, CashReceiptsController],
-  providers: [BookingsService, RideDeclarationsService, CashReceiptsService],
+  controllers: [BookingsController, RideDeclarationsController, CashReceiptsController, MixedCashPaymentController, TokenCashFallbackController],
+  providers: [BookingsService, RideDeclarationsService, CashReceiptsService, MixedCashPaymentService, TokenCashFallbackService],
   exports: [BookingsService],
 })
 export class BookingsModule {}

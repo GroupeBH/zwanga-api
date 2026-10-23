@@ -1,7 +1,6 @@
 import { ApiProperty } from '@nestjs/swagger';
 import { Transform, Type } from 'class-transformer';
 import {
-  Equals,
   IsInt,
   IsOptional,
   IsString,
@@ -10,6 +9,7 @@ import {
   Min,
   MinLength,
 } from 'class-validator';
+import { ResolvePayoutNotPaidDto } from '../../payments/dto/resolve-payout-not-paid.dto';
 
 const trim = ({ value }: { value: unknown }) =>
   typeof value === 'string' ? value.trim() : value;
@@ -41,35 +41,8 @@ export class ReconcileDriverPayoutDto {
   orderNumber?: string;
 }
 
-export class ResolveDriverPayoutDto extends RequestPayoutReviewDto {
-  @ApiProperty({
-    description:
-      'Référence Zwanga attendue (ID du retrait si aucune transaction)',
-  })
-  @Transform(trim)
-  @IsString()
-  @MinLength(1)
-  @MaxLength(120)
-  expectedReference: string;
-
-  @ApiProperty({
-    description:
-      'Référence de confirmation définitive FlexPay ou du dossier de rapprochement, sans secrets',
-  })
-  @Transform(trim)
-  @IsString()
-  @MinLength(5)
-  @MaxLength(200)
-  evidenceReference: string;
-
-  @ApiProperty({
-    enum: [true],
-    description:
-      'Attestation administrateur : non-exécution ou annulation définitive confirmée par FlexPay',
-  })
-  @Equals(true)
-  confirmedNotPaid: true;
-}
+// Preserve the existing DTO name and request contract for older admin clients.
+export class ResolveDriverPayoutDto extends ResolvePayoutNotPaidDto {}
 
 export class ClosePayoutIncidentDto extends RequestPayoutReviewDto {
   @ApiProperty({

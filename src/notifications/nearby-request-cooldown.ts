@@ -28,6 +28,8 @@ type Event = {
   answered: boolean;
   dispatchDeclined: boolean;
   actionable: boolean;
+  receivedAt: Date | null;
+  responseDeadline: Date;
 };
 
 // Lock order is always state -> events. Never lock a trip/request here, or hold
@@ -50,13 +52,15 @@ async function lockState(
 
 async function reconcile(manager: EntityManager, state: State): Promise<void> {
   const now = new Date(state.now).getTime();
+  let reset = false;
   if (state.mutedUntil && new Date(state.mutedUntil).getTime() <= now) {
     state.cycleStartedAt = state.mutedUntil;
     state.mutedUntil = null;
     state.missedCount = 0;
+    reset = true;
   }
   const events: Event[] = await manager.query(
-    `SELECT e."requestId", e."createdAt", e."declinedAt",
+    `SELECT e."requestId", e."createdAt", e."declinedAt", e."receivedAt", e."responseDeadline",
     (r."selectedDriverId" = e."driverId" OR EXISTS (SELECT 1 FROM driver_offers o
       WHERE o."tripRequestId" = e."requestId" AND o."driverId" = e."driverId") OR
       EXISTS (SELECT 1 FROM trip_request_dispatch_offers o WHERE o."requestId" = e."requestId"
@@ -65,9 +69,8 @@ async function reconcile(manager: EntityManager, state: State): Promise<void> {
       AND o."driverId" = e."driverId" AND o.status = 'declined') AS "dispatchDeclined",
     (r."passengerId" <> e."driverId" AND r.status IN ('pending','offers_received')
       AND r."selectedDriverId" IS NULL AND r."tripId" IS NULL AND r."departureDateMax" > $2) AS actionable
-    FROM nearby_driver_ring_events e JOIN notifications n ON n.id = e."notificationId"
-    JOIN trip_requests r ON r.id = e."requestId"
-    WHERE e."driverId" = $1 AND e."processedAt" IS NULL AND n.status = 'sent'
+    FROM nearby_driver_ring_events e JOIN trip_requests r ON r.id = e."requestId"
+    WHERE e."driverId" = $1 AND e."processedAt" IS NULL
       AND (e."declinedAt" IS NOT NULL OR e."responseDeadline" <= $2 OR EXISTS (
         SELECT 1 FROM trip_request_dispatch_offers o WHERE o."requestId" = e."requestId"
           AND o."driverId" = e."driverId" AND o.status = 'declined'))
@@ -86,6 +89,13 @@ async function reconcile(manager: EntityManager, state: State): Promise<void> {
     else if (event.answered) outcome = 'answered';
     else if (!event.actionable && !event.declinedAt && !event.dispatchDeclined)
       outcome = 'obsolete';
+    // Provider acceptance is not proof that a device received an invitation.
+    // Legacy clients remain usable; only their explicit refusals count.
+    else if (!event.receivedAt && !event.declinedAt && !event.dispatchDeclined)
+      outcome = 'obsolete';
+    else if (!event.declinedAt && !event.dispatchDeclined &&
+      new Date(event.responseDeadline).getTime() - new Date(event.receivedAt!).getTime() < 10_000)
+      outcome = 'obsolete'; // A late delivery did not leave a fair response window.
     else {
       outcome =
         event.declinedAt || event.dispatchDeclined ? 'declined' : 'ignored';
@@ -107,7 +117,7 @@ async function reconcile(manager: EntityManager, state: State): Promise<void> {
         state.now,
       ],
     );
-  await manager.query(
+  if (events.length || reset) await manager.query(
     `UPDATE nearby_driver_ring_state SET "missedCount" = $2, "mutedUntil" = $3,
     "cycleStartedAt" = $4 WHERE "driverId" = $1`,
     [state.driverId, state.missedCount, state.mutedUntil, state.cycleStartedAt],
@@ -169,6 +179,7 @@ export async function prepareNearbyRequestRinging(
       ON CONFLICT ("driverId", "requestId") DO UPDATE SET "responseDeadline" = EXCLUDED."responseDeadline"
       WHERE nearby_driver_ring_events."notificationId" = EXCLUDED."notificationId"
         AND nearby_driver_ring_events."processedAt" IS NULL AND nearby_driver_ring_events."declinedAt" IS NULL
+        AND nearby_driver_ring_events."receivedAt" IS NULL
         AND EXISTS (SELECT 1 FROM notifications n WHERE n.id = EXCLUDED."notificationId" AND n.status <> 'sent')`,
       [driverId, requestId, notification.id, new Date(deadline)],
     );
@@ -187,6 +198,22 @@ export async function prepareNearbyRequestRinging(
       !event.declinedAt
     );
   });
+}
+
+/** Authenticated recipient acknowledgement, idempotent and bounded by the original deadline. */
+export async function acknowledgeNearbyRequest(
+  manager: EntityManager, driverId: string, notificationId: string,
+): Promise<{ received: boolean }> {
+  const rows = await manager.query(`UPDATE nearby_driver_ring_events e
+    SET "receivedAt" = COALESCE(e."receivedAt", clock_timestamp())
+    WHERE e."driverId" = $1 AND e."notificationId" = $2 AND e."processedAt" IS NULL
+      AND e."responseDeadline" > clock_timestamp()
+      AND EXISTS (SELECT 1 FROM trip_requests r WHERE r.id = e."requestId"
+        AND r."passengerId" <> $1 AND r.status IN ('pending','offers_received')
+        AND r."selectedDriverId" IS NULL AND r."tripId" IS NULL AND r."departureDateMax" > clock_timestamp())
+    RETURNING e."notificationId"`, [driverId, notificationId]);
+  // TypeORM PostgreSQL UPDATE ... RETURNING returns [rows, affected].
+  return { received: Array.isArray(rows?.[0]) ? rows[0].length > 0 : rows.length > 0 };
 }
 
 /** A refusal only belongs to this recipient; it never cancels the passenger's order. */
@@ -229,8 +256,8 @@ export async function reconcileNearbyRequestCooldowns(
 ): Promise<void> {
   const drivers: { driverId: string }[] =
     await manager.query(`SELECT DISTINCT e."driverId"
-    FROM nearby_driver_ring_events e JOIN notifications n ON n.id = e."notificationId"
-    WHERE e."processedAt" IS NULL AND e."responseDeadline" <= now() AND n.status = 'sent'
+    FROM nearby_driver_ring_events e
+    WHERE e."processedAt" IS NULL AND e."responseDeadline" <= now()
     ORDER BY e."driverId" LIMIT 100`);
   for (const { driverId } of drivers) {
     await manager.transaction(async (tx) =>

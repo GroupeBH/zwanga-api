@@ -1,5 +1,298 @@
 # Journal des changements techniques
 
+## 2026-10-23 — Bascule vers les espèces après complément Mobile Money bloqué
+
+- Commande authentifiée/idempotente, marqueur durable et garde-fous transactionnels
+  préparés pour payer le trajet en espèces sans attendre le résultat d’une recharge.
+  La recharge tardive reste créditable dans le portefeuille, pas dans ce trajet.
+- Fichiers, précautions et tests : [bascule cash](finance/token-cash-fallback.md).
+  Règles cash/parrainage conservées ; réception des espèces toujours confirmée
+  par le conducteur. Collecte directe en attente non débloquée artificiellement.
+- Vérifications : 47 tests de paiement/reprise et 108 tests de commissions réussis,
+  dont PostgreSQL 18/PostGIS isolé ; trois cas de compatibilité ignorés faute de
+  commit de déploiement explicite. TypeScript build sans émission et diff check
+  réussis ; suite backend globale non relancée. Aucun déploiement, aucun
+  paiement fournisseur, aucune migration sur une base existante ni essai natif.
+
+## 23 octobre 2026 — Cohérence backend/mobile : chat, reconnexion et notifications
+
+- **Constat :** le mobile envoyait les messages par HTTP, mais seul le gateway
+  diffusait `new_message`. Les notifications financières/KYC et le signal
+  `server_restart` n'étaient pas entièrement traités côté mobile. Les retraits
+  de parrainage mobiles ne transmettaient pas de clé durable de reprise.
+- **Backend appliqué :** `src/chat/chat-realtime.service.ts` est lié au même
+  serveur `/chat` et à son adaptateur existant. `ChatService` diffuse une seule
+  fois après sauvegarde vers les rooms utilisateurs authentifiées, y compris
+  sans jeton push. Les participants réels d'une réservation sont recontrôlés ;
+  les anciennes adhésions étrangères ne reçoivent rien. Le gateway ne rediffuse
+  plus le message. L'échec de diffusion ne transforme pas l'enregistrement en
+  erreur et les lectures REST restent disponibles.
+- **Compatibilité Didit :** `didit-kyc.service.ts` ajoute `launchMode` à la réponse
+  de création de session. Les champs existants restent inchangés. Le SDK reste
+  le choix normal ; le mobile peut respecter un mode `hosted` explicitement
+  choisi par le serveur, pour la même session et une URL Didit validée.
+- **Mobile associé (`../zwanga`) :** intention de retrait persistée avant POST,
+  conservation du montant/téléphone/UUID, lecture par ID après confirmation,
+  reconnexion temporaire bornée avec backoff/jitter, relecture du chat au retour
+  du socket, politique commune de navigation et invalidation de cache pour
+  retraits, ajustements de jetons, commissions, paiements et décisions KYC.
+  Le contenu d'une notification ne donne jamais une autorisation ni un solde.
+- **Vérifications :** 228 tests backend réussis dans 18 suites ciblées, dont
+  échanges Socket.IO réels en boucle locale avec dépendances simulées ;
+  vérification TypeScript backend sans émission réussie. Côté mobile : 494 tests
+  JavaScript réussis dans 45 fichiers et TypeScript sans émission réussi ;
+  leurs limites sont détaillées dans le journal du dépôt mobile.
+- **Périmètre conservé :** aucun paiement réel, migration nouvelle, changement
+  Terraform/CI/CD, modification AWS ou push GitHub pour ces correctifs.
+  Les 14 anciens appels mobiles vers des routes absentes restent inchangés :
+  leur suppression groupée a été bloquée par le contrôle de sécurité et requiert
+  une validation séparée des contrats. Aucun écran actif identifié ne les utilise.
+- **Limites :** pas de recette Android/iOS physique ni validation de la version
+  des stores. Déployer le backend seul ne met pas à jour les handlers mobiles ;
+  ces comportements demandent la distribution de la nouvelle version mobile.
+
+## 23 octobre 2026 — Reprise Mobile Money et changement de paiement après refus
+
+- **Constat / périmètre :** une réponse perdue au complément en jetons pouvait
+  laisser le passager sans référence et sans possibilité sûre de changer.
+  Le mixte était refusé même après un échec fournisseur confirmé ; un callback
+  de refus ancien pouvait aussi rétablir le mode électronique.
+- **Solution :** nouvel endpoint authentifié/limité `POST /wallet/topups/recover`
+  dans `src/wallet/wallet.controller.ts`, `dto/recover-topup.dto.ts` et
+  `wallet.service.ts`. `src/payments/topup-recovery.ts` et `payments.service.ts`
+  retrouvent la tentative par sa clé d'origine ou réservent cette référence en
+  annulation si elle n'a jamais été enregistrée. L'index unique départage
+  récupération et initiation tardive ; aucun nouveau débit ni HTTP sous verrou.
+  Un paiement en attente existant n'est jamais déclaré refusé sans preuve.
+- **Rejeu :** l'initiation idempotente relit désormais un résultat fournisseur
+  existant sans refaire la collecte ; le service wallet applique le crédit
+  vérifié/dédupliqué existant avant de retourner son solde.
+- **Réservation :** `src/bookings/bookings.service.ts` réconcilie le paiement
+  électronique avant de permettre un autre mode, bloque attente/inconnu/succès
+  et ignore un ancien refus reçu après passage en espèces/jetons.
+  `mixed-cash-payment.service.ts` accepte le mixte après `FAILED`/`CANCELLED`
+  mais conserve le blocage pour attente/succès et recharge non résolue. Cela
+  remplace expressément la règle du 22 octobre « même échoué » ci-dessous.
+- **Conservés :** identité authentifiée, paramètres d'origine, preuve de crédit,
+  déduplication, contrôle du montant/arrivée et réception cash par le conducteur.
+  Le parrainage reste calculé sur la part espèces ; aucun calcul ajouté sur
+  les jetons. Pas de nouvelle migration : référence unique existante utilisée.
+- **Vérifications :** 158 tests unitaires/services réussis (paiements, wallet,
+  réservations, claim idempotent et nouvelles suites `topup-recovery` et
+  `booking-payment-recovery`), puis 11 tests PostgreSQL isolés réussis dans
+  `mixed-cash-payment-postgres`, y compris deux courses réelles sur l'index
+  unique. Cluster jetable local avec transports simulés, sans base distante.
+  TypeScript build sans émission et lint des deux nouveaux fichiers de
+  production réussis. Les erreurs du TypeScript global des anciennes specs et
+  du lint global ne sont pas certifiées corrigées.
+- **Livraison / limites :** aucune production modifiée, aucun déploiement,
+  secret ou paiement réel. Backend à livrer avant le mobile ; une collecte
+  déjà envoyée sans résultat exploitable reste à réconcilier, elle ne peut pas
+  être effacée sur simple timeout. La migration mixte antérieure demeure un
+  prérequis si non livrée. Parcours, fichiers mobiles et recette physique :
+  [fiche du dépôt mobile voisin](../../zwanga/docs/PAIEMENT_RECUPERATION_MOBILE_MONEY.md).
+
+## 22 octobre 2026 — Paiement mixte jetons et espèces après l'arrivée
+
+- **Problème / périmètre :** un solde de jetons insuffisant imposait le complément
+  Mobile Money. Ajout local du complément cash autorisé par l'utilisateur ;
+  le correctif précédent de vérification MM est conservé. Aucune opération sur
+  la production, aucun appel prestataire ni déploiement.
+- **Endpoint :** `src/bookings/mixed-cash-payment.{controller,service}.ts`,
+  `dto/mixed-cash-payment.dto.ts` et `bookings.module.ts` ajoutent
+  `POST /bookings/:id/pay-tokens-cash`, authentifié et limité en fréquence.
+  Arrivée confirmée, réservation terminée, CDF, propriétaire, deux moyens acceptés,
+  prix/valeur/quantité consentis et solde disponible sont revérifiés. Aucune
+  conversion avant arrivée, après cash reçu ou paiement réussi. La présence
+  d'un paiement fournisseur sur la réservation, même échoué, ou d'une recharge
+  encore en attente bloque la conversion pour éviter un règlement concurrent.
+- **Atomicité :** verrou de réservation, verrous des portefeuilles ordonnés,
+  débit avec le service wallet existant, écriture de gain et notification outbox
+  dans la même transaction. Aucun appel fournisseur. Une reprise avec les mêmes
+  montants lit le résultat existant ; une différence est refusée. Une panne de
+  cache après commit ne transforme pas le succès en échec. Les recommandations
+  `supabase-postgres-best-practices` ont guidé la durée et l'ordre des verrous.
+- **Contrat additif :** `entities/booking.entity.ts`, `bookings.service.ts`,
+  `driver-finance.service.ts` et `driver-settlements.service.ts` préservent le
+  brut/subvention ; après mixte, `paymentAmount` est le reliquat cash,
+  `mixedTokenAmount`/`mixedTokenQuantity`/`mixedPaymentAt` prouvent la part jetons.
+  Le total passager est cash + jetons. Le mode reste `cash/not_required` ; les
+  contraintes de réception et fonctions de commission cash existantes restent
+  inchangées. La créance conducteur couvre les jetons nets de commission plus
+  une éventuelle subvention, jamais les espèces déjà reçues physiquement.
+  Une subvention disponible peut être étendue seulement si elle correspond
+  exactement à la réservation antérieure ; aucun gain incohérent n'est écrasé.
+- **Parrainage :** inchangé à la demande explicite de l'utilisateur, sur la part
+  espèces effectivement confirmée uniquement. Aucun calcul sur les jetons.
+- **Migration :** `1780000089000-MixedTokensCash.ts`, inscrite dans `index.ts`,
+  ajoute les champs et protège répartition, montant total et absence d'une
+  collecte électronique ultérieure. Elle ne remplace aucun trigger cash existant.
+  Migration transactionnelle avec attentes bornées ; rollback interdit dès
+  qu'une répartition est utilisée, pour ne pas effacer une preuve financière.
+- **Vérifications :** 117 tests unitaires de régression réussis (réception cash,
+  arrivée, gains/subventions/revenus, portefeuille, refus de recharge), plus
+  16 tests financement/parrainage. Deux suites PostgreSQL isolées : 113 réussis,
+  trois tests optionnels préexistants ignorés. Sept cas du service mixte testent
+  débit concurrent unique, 58 jetons/580 FC + 3 920 FC cash, remise cash séparée,
+  subvention non dupliquée, rollback en cas d'erreur, montants/acteur invalides,
+  interverrouillage fournisseur et panne cache. Le helper
+  `test/mixed-cash-commission-postgres.ts` vérifie les anciens triggers réels,
+  le remboursement unique de commission et le rollback sûr de migration.
+  TypeScript build sans émission et lint des six nouveaux fichiers réussis.
+  Les neuf suites unitaires ont aussi été rejouées ensemble : 133 tests réussis.
+  Pas de certification du lint global.
+- **Livraison / limites :** migration/backend à livrer en test avant le mobile ;
+  option mobile masquée sans `mixedCashSupported`. CDF et arrivée uniquement.
+  Toute ancienne transaction fournisseur ou écriture de gain incompatible
+  exige une réconciliation préalable. Pas de test téléphone ni paiement réel.
+  Le détail du parcours, des fichiers mobiles et de la recette figure dans
+  `zwanga/docs/PAIEMENT_MIXTE_JETONS_ESPECES.md` du dépôt mobile voisin.
+
+## 22 octobre 2026 — Résilience du dispatch et banc de charge isolé
+
+- **Allocation :** exclusion des départs sans coordonnées et des demandes immédiates
+  sans prix avant pagination ; lots de 25 réservés atomiquement entre instances
+  (`SKIP LOCKED`, bail de 10 s), trois traitements simultanés maximum par instance.
+  Une erreur n'interrompt plus le reste du lot. Libération du bail uniquement par
+  son propriétaire. Une seconde lecture après verrouillage de la présence évite
+  d'insérer une invitation sur un conducteur réservé depuis le snapshot SQL.
+  La sélection matérialise aussi la version MVCC de la présence pour ignorer
+  immédiatement une réservation concurrente : comparaison `xmin` dans la même
+  instruction uniquement, jamais stockée ni utilisée comme version métier.
+  Le plan SQL à 1 000 conducteurs a également révélé des balayages répétés des
+  véhicules : ajout des index partiels propriétaire/type/véhicule actif et
+  conducteur/demandes déjà attribuées, puis séparation des exclusions
+  « déjà sollicité » et « invitation en attente ».
+- **Temps réel :** les acceptations classiques/partagées et éditions transportent
+  maintenant leur identifiant dans les événements TypeORM. Une file PostgreSQL
+  distincte (`ride_realtime_deliveries`) délivre les invitations sur le socket
+  existant sans attendre FCM/Expo ; reprise d'un traitement interrompu après 5 s,
+  réexamen de l'éligibilité et respect de l'échéance sonore originale de 30 s.
+  Le transport reste « au moins une fois » : les clients dédupliquent par eventId.
+  Le bail push reste à 120 s : raccourcir ce bail pendant un envoi SDK non annulable
+  pourrait provoquer des doublons. Le canal temps réel ne dépend plus de ce bail.
+- **Pause de proximité :** un succès FCM/Expo ne prouve plus une réception.
+  Les refus explicites continuent de compter. Une absence de réponse ne compte
+  qu'après un accusé de l'application et au moins 10 s disponibles pour répondre.
+  Les anciennes versions sans accusé restent fonctionnelles, sans pénalité pour
+  une simple absence. Les pauses déjà enregistrées ne sont pas réécrites.
+- **Contrat mobile additif :** après réception effective, appeler
+  `POST /api/v1/driver-dispatch/notifications/:id/received`, authentifié en conducteur,
+  sans corps. `id` = `notificationId` du push ou `eventId` du socket. Réponse
+  `{ received: boolean }`, idempotente, limitée au destinataire et à une invitation
+  encore valable. Ne pas appeler depuis un reçu fournisseur. Aucun changement
+  mobile effectué ici ; le secours socket bénéficie aux clients écoutant `ride_alert`.
+- **Migration :** `1780000088000-DispatchDeliveryResilience`, additive et réversible,
+  ajoute les reçus, les baux et les index. Elle doit précéder l'exécution du nouveau
+  backend. Le rollback retire seulement ces structures techniques ; coordonner
+  le retour de code avant de retirer le schéma. Aucun Terraform/CI/CD modifié.
+- **Mesure reproductible :** `npm run test:load:dispatch` (ou `-- --quick`).
+  `LOAD_TEST_PG_BIN` désigne uniquement les exécutables PostgreSQL avec PostGIS.
+  Base neuve sur boucle locale, environnement nettoyé, aucun `.env` chargé,
+  connexions externes interdites, transports simulés. Rapport JSON horodaté dans
+  `tmp/dispatch-load-*/report.json`, nettoyage automatique de la base jetable.
+  Le test porte sur les vrais services/SQL et non sur HTTP, FCM/APNs, Redis réseau,
+  AWS ou un basculement multi-hôte. Les résultats ne sont pas une capacité de production.
+  Les trois instances simulées partagent un processus Node et un pool de huit
+  connexions. Les cycles de 5 s sont alignés comme le cron, avec un premier cycle
+  immédiat (jusqu'à 5 s d'attente initiale supplémentaires en conditions réelles).
+  La fixture inclut l'index KYC de la migration 52, sans ses triggers financiers.
+  `-- --diagnose` produit le plan `EXPLAIN ANALYZE` sur la base jetable seulement.
+- **Non-régression locale :** compilation TypeScript sans émission réussie.
+  Suite générale : 2 611 tests réussis, 423 conditionnels ignorés, un timeout
+  Store Management ; les 29 tests de cette suite passent à la relance isolée.
+  Après le dernier correctif de concurrence : **94/94 tests PostgreSQL/PostGIS**
+  et **66/66 tests unitaires ciblés** réussis. Le test de concurrence bloque
+  volontairement une sélection pendant qu'une autre transaction réserve le
+  conducteur, puis vérifie que le suivant est choisi en une seule sélection.
+  Le passage PostgreSQL utilise `--testTimeout=15000` : certains nettoyages de
+  fixtures dépassaient 5 s sur ce PC chargé. Les budgets des services et du banc
+  de charge ne sont pas augmentés. Migration aller/retour et reçus sont vérifiés.
+- **Charge finale (22/10, 19:08 UTC) :** 1 000 conducteurs fictifs, PostgreSQL 18,
+  pool de 8 connexions ; rapport local
+  `tmp/dispatch-load-2026-10-22T19-08-15-906Z/report.json`.
+
+  | Scénario | Résultat local |
+  | --- | --- |
+  | 200 allocations en rafale, un worker simulé | 6,28 s ; 31,87 allocations/s |
+  | 200 allocations, trois instances simulées dans le même processus | 3,71 s ; 53,94 allocations/s |
+  | 100 demandes, cadence de 5 s | Première offre P95 : 15,45 s ; quatre cycles |
+  | 300 positions GPS, concurrence 30 | 240,45 opérations/s ; P95 : 169,65 ms |
+  | 20 refus, concurrence 5 | 20 successeurs réservés ; P95 : 108,44 ms |
+  | Reprise de 50 invitations avec capacité push occupée | 171,35 ms ; aucun doublon observé |
+  | 500 alertes, cadence de 2 s | 8,50 s ; 500 émissions simulées, aucun doublon |
+
+  Tous les contrôles passent, aucun avertissement/erreur de service enregistré,
+  aucune connexion externe tentée ; base jetable arrêtée et nettoyée.
+  Le rollback SQL ne laisse ni offre ni outbox orpheline ; douze acceptations
+  simultanées ne créent qu'une attribution. Une première rafale de refus avait
+  révélé un passage différé au successeur : le contrôle MVCC et sa reproduction
+  PostgreSQL corrigent ce cas dans la mesure finale.
+  Le cron reste une limite de latence sous rafale : cette mesure ne garantit ni
+  un premier appel instantané pour 100 demandes ni la livraison réelle au téléphone.
+  Résultats ponctuels sur PC partagé, sans estimation de capacité AWS/haute disponibilité.
+
+## 22 octobre 2026 — Recharge de complément : conserver les états en attente
+
+- **Problème constaté :** le parcours mobile jetons + complément Mobile Money
+  affiche parfois une vérification indisponible. Le contrôle local de preuve
+  FlexPay exigeait un justificatif complet de crédit sur une réponse encore
+  non finale, y compris corrélée par sa référence au numéro de commande interrogé.
+  L'absence de certains champs produisait alors un rejet HTTP 400. Le défaut est
+  établi par le code et les tests, sans logs du paiement réel signalé.
+- **Solution appliquée :** `src/payments/wallet-topup-check-evidence.ts` reçoit
+  explicitement l'issue calculée dans `payments.service.ts`. Les réponses en
+  attente sont soumises aux contrôles de corrélation, mais pas aux exigences de
+  preuve d'un crédit réussi. Elles conservent l'état non final et le numéro de
+  commande. Le contrôle des montants/devises fournis, le refus des incohérences,
+  les preuves complètes de réussite et l'idempotence du portefeuille restent
+  inchangés. Aucun assouplissement du crédit des jetons ou nouveau code de statut
+  prestataire interprété comme une réussite.
+- **Tests / résultats :** `wallet-topup-decline.spec.ts` couvre les états non
+  finaux corrélés sans preuve complète, les incohérences toujours refusées et la
+  réponse portefeuille sans crédit ni écriture ledger. 164 tests réussis dans
+  9 suites ciblées paiements/portefeuille/reçus cash/avant-arrivée. Compilation
+  TypeScript de production sans émission et `git diff --check` réussis. Le lint
+  du helper est vert ; les 119 erreurs du service et les 8 erreurs de sa fixture
+  sont déjà présentes dans HEAD, aucun diagnostic supplémentaire après correctif.
+- **Limites :** tests unitaires simulés, aucune base réelle ni API de paiement
+  contactée. Aucun déploiement ou migration. La version backend doit être
+  déployée pour corriger les réponses servies au mobile. Le paiement mixte
+  jetons/espèces n'est pas ajouté : cash reste un choix pour tout le trajet.
+  Les vraies erreurs de vérification restent bloquantes pour éviter un double
+  paiement. Changements mobiles documentés dans leur journal technique.
+
+## 22 octobre 2026 — Demandes entrantes : délais fixes et synchronisation
+
+- **Problème :** la reprise d'une notification pouvait prolonger son délai ; les
+  invitations n'utilisaient pas le socket existant et Firebase n'avait pas de
+  contrat APNs interactif pour un token iOS natif.
+- **Solution :** suppression de `notifications/recover-driver-offer.ts` et de son
+  appel ; échéance sonore ancrée à la création. `dispatch.service.ts` durcit la
+  lecture de l'actionnabilité et signale la décision après commit. Ajout de
+  `ride-alert-realtime.service.ts`, `ride-alert-changes.ts`, raccordement au gateway
+  `/chat` et à `NotificationsModule`. L'annulation sauvegarde la demande déjà
+  verrouillée pour permettre le signal de changement après transaction.
+  Les signaux sont regroupés dans une file de 200 clés maximum et un worker,
+  sans attendre une seconde connexion SQL depuis le callback de commit. Une
+  invitation socket part après `SENT`, conservant la comptabilisation des refus
+  et absences. Un prix absent n'est plus renvoyé comme zéro par la fiche dispatch.
+  `ios-driver-push.ts`, capacité v5 et `notifications.service.ts` préparent le
+  transport APNs via Firebase sans VoIP/Critical Alerts.
+- **Conservé :** décisions transactionnelles/idempotentes, premier accepté gagnant,
+  exclusion de l'auteur, pause de 24 h, demandes programmées/partagées, anciens
+  transports Android et Expo. Les signaux Socket.io ne constituent pas des décisions.
+- **Vérifié :** exécution finale : 55 tests de politique/dispatch PostgreSQL/PostGIS
+  sur cluster local jetable, puis 81 tests de notifications (cinq suites) réussis ;
+  compilation TypeScript production réussie. Le subscriber est vérifié après
+  commit réel. Deux tentatives précédentes ont subi des délais de préparation locale
+  dépassés ; l'exécution finale utilise `--testTimeout=20000`, sans modifier les
+  délais métier, les assertions de concurrence ni les données de production.
+- **Limites :** aucune migration nouvelle, aucun déploiement, aucune base de
+  production touchée. Les migrations préexistantes du compteur de proximité restent
+  nécessaires. Aucun envoi APNs/FCM réel ni essai physique. Suivi complet et résultats
+  finaux dans [le journal des boucles mobile](../../zwanga/docs/DEMANDES_ENTRANTES_LOOPS_2026-10-22.md).
+
 ## 22 octobre 2026 — Pause de 24 heures après quatre demandes proches ignorées ou refusées
 
 - **Problème / périmètre :** la proximité seule continuait à solliciter un

@@ -168,13 +168,15 @@ describe('PaymentsService', () => {
     },
   );
 
-  it('a topup retry returns the original payment without contacting the provider again', async () => {
+  it('a topup retry verifies the original payment without sending a new debit', async () => {
     const input = { userId: 'user', purpose: 'wallet_top_up', idempotencyKey: 'stable-key',
       method: PaymentMethod.CARD, amount: 5000, currency: 'CDF', description: 'Synthetic topup' };
     const first = await service.initiatePayment(input);
     paymentTransactionRepository.save.mockRejectedValueOnce({ code: '23505' });
     paymentTransactionRepository.findOne.mockResolvedValue(first);
+    const check = jest.spyOn(service, 'checkPaymentStatus').mockResolvedValue(first);
     expect(await service.initiatePayment(input)).toBe(first);
+    expect(check).toHaveBeenCalledWith(first.orderNumber, input.userId);
     expect(flexPayService.initiatePayment).toHaveBeenCalledTimes(1);
     expect(first.reference).toMatch(/^[A-Z0-9]{25}$/);
   });

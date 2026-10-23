@@ -67,6 +67,23 @@ describe('NotificationService critical push reliability', () => {
     jest.restoreAllMocks();
   });
 
+  it.each([false, true])('push delivery never owns the independent realtime lane, provider failure=%s', async failure => {
+    const f = buildService();
+    const publish = jest.fn(); Object.assign(f.service, { rideAlerts: { publish } });
+    f.userRepository.findOne.mockResolvedValue({ fcmToken: 'synthetic-device' });
+    const send = jest.spyOn(f.service as any, 'sendFirebaseNotification');
+    if (failure) send.mockRejectedValue(new Error('synthetic provider unavailable'));
+    else send.mockResolvedValue('synthetic-message');
+    f.notificationRepository.save.mockImplementation(async value => {
+      expect(publish).not.toHaveBeenCalled(); return value;
+    });
+    const item = { id: 'n', userId: 'driver', title: 'Test', body: 'Test', createdAt: new Date(),
+      data: { type: 'new_booking', bookingId: 'b', driverId: 'driver' }, status: NotificationStatus.PENDING };
+    expect(await (f.service as any).deliverSavedNotification(item)).toBe(!failure);
+    expect(item.status).toBe(failure ? NotificationStatus.FAILED : NotificationStatus.SENT);
+    expect(publish).not.toHaveBeenCalled();
+  });
+
   it('drains a 50-driver broadcast in one tick with at most five sends in flight', async () => {
     const f = buildService();
     for (let batch = 0; batch < 5; batch++) {

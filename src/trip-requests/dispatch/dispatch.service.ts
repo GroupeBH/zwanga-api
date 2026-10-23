@@ -1,4 +1,5 @@
-import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
+import { RideAlertChanges } from '../../notifications/ride-alert-changes';
 import { ConfigService } from '@nestjs/config';
 import { Cron } from '@nestjs/schedule';
 import { createHash, randomUUID } from 'node:crypto';
@@ -18,7 +19,7 @@ import { rideSpeechData } from '../../notifications/ride-speech-data';
 import { ELIGIBLE_NEARBY_DRIVER_SQL, NEARBY_DRIVER_RADIUS_METERS } from './nearby-driver-policy';
 import { enqueueStaleLocationReminders } from './stale-location-reminder';
 import { hasUsableDriverLocation, USABLE_DRIVER_LOCATION_SQL } from './driver-location-policy';
-import { declineNearbyRequest } from '../../notifications/nearby-request-cooldown';
+import { acknowledgeNearbyRequest, declineNearbyRequest } from '../../notifications/nearby-request-cooldown';
 
 interface DispatchOffer {
   id: string; requestId: string; driverId: string; vehicleId: string;
@@ -30,11 +31,15 @@ export class DriverDispatchService {
   private readonly logger = new Logger(DriverDispatchService.name);
   private ticking = false;
   constructor(private readonly db: DataSource, private readonly config: ConfigService,
-    private readonly notifications: NotificationService) {}
+    private readonly notifications: NotificationService,
+    @Optional() private readonly rideChanges?: RideAlertChanges) {}
 
   get enabled() { return this.config.get<string>('DRIVER_DISPATCH_ENABLED') === 'true'; }
   declineNearbyRequest(driverId: string, requestId: string) {
     return declineNearbyRequest(this.db.manager, driverId, requestId);
+  }
+  acknowledgeNotification(driverId: string, notificationId: string) {
+    return acknowledgeNearbyRequest(this.db.manager, driverId, notificationId);
   }
   private get responseSeconds() { return boundedInteger(this.config.get('DRIVER_DISPATCH_RESPONSE_SECONDS'), 30, 10, 120); }
   private get presenceSeconds() { return boundedInteger(this.config.get('DRIVER_DISPATCH_PRESENCE_SECONDS'), 90, 45, 180); }
@@ -174,10 +179,12 @@ export class DriverDispatchService {
     const vehicle = await this.db.getRepository(Vehicle).findOneBy({ id: offer.vehicleId, ownerId: driverId });
     return { ...offer, serverNow: new Date().toISOString(),
       vehicleName: vehicle ? `${vehicle.brand} ${vehicle.model}` : null,
-      actionable: this.enabled && dispatchOfferIsActionable(offer.status, offer.expiresAt, request.status),
+      actionable: this.enabled && !request.selectedDriverId && !request.tripId &&
+        request.departureDateMax.getTime() > Date.now() && request.maxPricePerSeat !== null &&
+        dispatchOfferIsActionable(offer.status, offer.expiresAt, request.status),
       request: { id: request.id, passengerName: request.passenger.firstName,
         departure: request.departureLocation, arrival: request.arrivalLocation,
-        seats: request.numberOfSeats, pricePerSeat: Number(request.maxPricePerSeat ?? 0),
+        seats: request.numberOfSeats, pricePerSeat: request.maxPricePerSeat == null ? null : Number(request.maxPricePerSeat),
         paymentMode: request.paymentMode, vehicleType: request.vehicleType },
     };
   }
@@ -237,6 +244,7 @@ export class DriverDispatchService {
     });
     // The existing urgent lane sends the committed push immediately when a
     // worker is free; its cron retries delivery without keeping HTTP/DB locks.
+    this.rideChanges?.enqueue({ kind: 'request', id: result.requestId, terminal: decision === 'accept' });
     void this.notifications.dispatchUrgentNotifications()
       .catch(() => this.logger.warn('Dispatch response push delivery deferred.'));
     return result;
@@ -249,17 +257,44 @@ export class DriverDispatchService {
     try {
       // Release deadlines even if no driver is currently available; batches remain bounded.
       await this.db.query(`UPDATE trip_request_dispatch_offers SET status = 'expired' WHERE id IN
-        (SELECT id FROM trip_request_dispatch_offers WHERE status = 'pending' AND "expiresAt" <= now() LIMIT 100)`);
-      const requests: { id: string; immediateDispatch: boolean }[] = await this.db.query(`SELECT r.id, r."immediateDispatch" FROM trip_requests r
+        (SELECT id FROM trip_request_dispatch_offers WHERE status = 'pending' AND "expiresAt" <= now()
+          ORDER BY "expiresAt", id LIMIT 100 FOR UPDATE SKIP LOCKED)`);
+      const leaseId = randomUUID();
+      const requests: { id: string; immediateDispatch: boolean }[] = await this.db.query(`WITH candidates AS (
+        SELECT r.id FROM trip_requests r
         WHERE r.status IN ('pending', 'offers_received') AND r."departureDateMax" > now()
-        AND r."selectedDriverId" IS NULL AND r."tripId" IS NULL
-        ORDER BY r."dispatchCheckedAt" NULLS FIRST, r."createdAt" LIMIT 25`);
-      for (const request of requests) {
-        if (request.immediateDispatch) await this.allocate(request.id);
-        else await this.db.transaction(manager => enqueueScheduledRequestAlert(
-          manager, request.id, this.radiusMeters, driverId => this.isBusy(manager, driverId)));
-        await this.db.transaction(manager => enqueueSharedTripAlert(manager, request.id));
-      }
+          AND r."selectedDriverId" IS NULL AND r."tripId" IS NULL AND r."departurePoint" IS NOT NULL
+          AND (r."immediateDispatch" = false OR (r.status = 'pending' AND r."maxPricePerSeat" IS NOT NULL))
+          AND (r."dispatchClaimedUntil" IS NULL OR r."dispatchClaimedUntil" <= now())
+        ORDER BY r."dispatchCheckedAt" NULLS FIRST, r."createdAt", r.id LIMIT 25 FOR UPDATE SKIP LOCKED
+      ), claimed AS (
+        UPDATE trip_requests r SET "dispatchLeaseId" = $1, "dispatchClaimedUntil" = now() + interval '10 seconds',
+          "dispatchCheckedAt" = now() FROM candidates c WHERE r.id = c.id RETURNING r.id, r."immediateDispatch"
+      ) SELECT * FROM claimed`, [leaseId]);
+      // Small bounded concurrency: preserve pool capacity for acceptance and GPS.
+      // A bad request must neither abort the batch nor monopolise its next turn.
+      let next = 0;
+      await Promise.all(Array.from({ length: Math.min(3, requests.length) }, async () => {
+        while (next < requests.length) {
+          const request = requests[next++];
+          try {
+            if (request.immediateDispatch) await this.allocate(request.id);
+            else await this.db.transaction(manager => enqueueScheduledRequestAlert(
+              manager, request.id, this.radiusMeters, driverId => this.isBusy(manager, driverId)));
+            await this.db.transaction(manager => enqueueSharedTripAlert(manager, request.id));
+          } catch (error) {
+            this.logger.warn(`Dispatch request deferred id=${request.id}: ${error instanceof Error ? error.message : 'database error'}`);
+            try {
+              await this.db.query(`UPDATE trip_requests SET "dispatchCheckedAt" = now() WHERE id = $1`, [request.id]);
+            } catch { /* Database outage: leave state intact for the next cycle. */ }
+          } finally {
+            try {
+              await this.db.query(`UPDATE trip_requests SET "dispatchLeaseId" = NULL, "dispatchClaimedUntil" = NULL
+                WHERE id = $1 AND "dispatchLeaseId" = $2`, [request.id, leaseId]);
+            } catch { /* Lease expires automatically if this worker/database stops. */ }
+          }
+        }
+      }));
       void this.notifications.dispatchTransactionalNotifications().catch(() => this.logger.warn('Dispatch push delivery deferred.'));
     } catch (error) {
       this.logger.error('Driver dispatch cycle failed', error instanceof Error ? error.stack : undefined);
@@ -291,7 +326,7 @@ export class DriverDispatchService {
 
   /** Caller holds the request lock. One live invitation, nearest eligible driver first. */
   private async allocateNext(manager: EntityManager, request: TripRequest): Promise<void> {
-    if (!request.immediateDispatch || request.status !== TripRequestStatus.PENDING || !request.departurePoint ||
+    if (!request.immediateDispatch || request.status !== TripRequestStatus.PENDING || !request.departurePoint || request.maxPricePerSeat == null ||
         request.selectedDriverId || request.tripId || request.departureDateMax.getTime() <= Date.now()) return;
     const requestId = request.id;
     // Dispatch scheduling is not a user edit. Keep the form's optimistic version stable.
@@ -302,8 +337,19 @@ export class DriverDispatchService {
       WHERE "requestId" = $1 AND status = 'pending' LIMIT 1`, [requestId]);
     // Also lets invitations from the former broadcast version finish safely.
     if (pending.length) return;
-    const [candidate]: { driverId: string; vehicleId: string; seats: number; brand: string; model: string }[] = await manager.query(`
-      SELECT p."driverId", v.id AS "vehicleId", v.brand, v.model, CASE WHEN v.id = p."vehicleId" THEN p.seats
+    type Candidate = { driverId: string; vehicleId: string; seats: number; brand: string; model: string };
+    let candidate: Candidate | undefined;
+    // Under READ COMMITTED a candidate statement's snapshot may predate another
+    // worker committing its offer and releasing the presence lock. Re-read after
+    // acquiring the lock before inserting, rather than failing the unique index.
+    // Materialize xmin too: EvalPlanQual skips rows changed since selection
+    // instead of locking an already-reserved driver from a stale join snapshot.
+    // xmin is compared only within this statement, never persisted or exposed.
+    for (let attempt = 0; attempt < 5; attempt++) {
+    const [selected]: Candidate[] = await manager.query(`WITH candidates AS MATERIALIZED (
+      SELECT p."driverId", p.xmin AS "presenceVersion", v.id AS "vehicleId", v.brand, v.model,
+        ST_Distance(p.position, ST_SetSRID(ST_MakePoint($4,$5),4326)::geography) AS distance,
+        CASE WHEN v.id = p."vehicleId" THEN p.seats
         WHEN v.type = 'motorcycle_2_wheels' THEN 2 WHEN v.type = 'motorcycle_3_wheels' THEN 3 ELSE 4 END AS seats
       FROM driver_dispatch_presence p
       JOIN LATERAL (SELECT v.* FROM vehicles v WHERE v."ownerId" = p."driverId"
@@ -314,11 +360,19 @@ export class DriverDispatchService {
         WHEN v.type = 'motorcycle_3_wheels' THEN 3 ELSE 4 END) >= $3
       AND ST_DWithin(p.position, ST_SetSRID(ST_MakePoint($4,$5),4326)::geography, $6)
       AND ${ELIGIBLE_NEARBY_DRIVER_SQL}
-      AND NOT EXISTS (SELECT 1 FROM trip_request_dispatch_offers o WHERE
-        (o."requestId" = $7 AND o."driverId" = p."driverId") OR (o."driverId" = p."driverId" AND o.status = 'pending'))
-      ORDER BY ST_Distance(p.position, ST_SetSRID(ST_MakePoint($4,$5),4326)::geography), p."driverId"
-      LIMIT 1 FOR UPDATE OF p SKIP LOCKED`, [request.passengerId, request.vehicleType, request.numberOfSeats,
+      AND NOT EXISTS (SELECT 1 FROM trip_request_dispatch_offers o
+        WHERE o."requestId" = $7 AND o."driverId" = p."driverId")
+      AND NOT EXISTS (SELECT 1 FROM trip_request_dispatch_offers o
+        WHERE o."driverId" = p."driverId" AND o.status = 'pending')
+      ) SELECT c."driverId", c."vehicleId", c.brand, c.model, c.seats FROM candidates c
+      JOIN driver_dispatch_presence locked ON locked."driverId" = c."driverId" AND locked.xmin = c."presenceVersion"
+      ORDER BY c.distance, c."driverId" LIMIT 1 FOR UPDATE OF locked SKIP LOCKED`, [request.passengerId, request.vehicleType, request.numberOfSeats,
       request.departurePoint.coordinates[0], request.departurePoint.coordinates[1], this.radiusMeters, requestId]);
+    if (!selected) break;
+    const occupied = await manager.query(`SELECT 1 FROM trip_request_dispatch_offers
+      WHERE "driverId" = $1 AND status = 'pending' LIMIT 1`, [selected.driverId]);
+    if (!occupied.length) { candidate = selected; break; }
+    }
     if (!candidate) return;
     // Eligibility, current KYC and vehicle are already
     // filtered in the candidate SQL. Delivery and acceptance revalidate them.

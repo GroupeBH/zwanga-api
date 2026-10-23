@@ -30,6 +30,14 @@ export class DriverDispatchController {
     return this.dispatch.setPresence(req.user.userId, body);
   }
 
+  /** Call only after the recipient app received the invitation; never from a provider receipt. */
+  @Post('notifications/:id/received')
+  @Roles(UserRole.DRIVER)
+  @SensitiveThrottle(60, 60000)
+  received(@Request() req: { user: { userId: string } }, @Param('id', ParseUUIDPipe) id: string) {
+    return this.dispatch.acknowledgeNotification(req.user.userId, id);
+  }
+
   @Put('position')
   @Roles(UserRole.DRIVER)
   @SensitiveThrottle(6, 60000)

@@ -47,6 +47,8 @@ import { KycDocument } from '../users/entities/kyc-document.entity';
 import { User, UserStatus } from '../users/entities/user.entity';
 import { isAdminRole } from '../users/user-role.policy';
 import { RequestReferralWithdrawalDto } from './dto/referral.dto';
+import { ResolvePayoutNotPaidDto } from '../payments/dto/resolve-payout-not-paid.dto';
+import { resolveReferralWithdrawalNotPaid } from './referral-withdrawal-recovery';
 import { HistoryPageQuery, historyContext, loadHistoryIds, orderHistory } from '../common/history-page';
 import { reconcileReferralRewards } from './reward-reconciliation';
 import {
@@ -681,7 +683,9 @@ export class ReferralsService implements OnModuleInit {
       status: withdrawal.status,
       paymentTransactionId: withdrawal.paymentTransactionId,
       orderNumber: withdrawal.paymentTransaction?.orderNumber ?? null,
-      paymentMessage: withdrawal.paymentTransaction
+      paymentMessage: withdrawal.status === ReferralWithdrawalStatus.CANCELLED
+        ? 'Retrait annulé dans Zwanga ; les jetons ont été rendus disponibles.'
+        : withdrawal.paymentTransaction
         ? this.paymentsService.getClientPaymentMessage(
             withdrawal.paymentTransaction,
           )
@@ -977,6 +981,15 @@ export class ReferralsService implements OnModuleInit {
     const withdrawal = await this.withdrawalRepository.findOne({ where: { id, userId } });
     if (!withdrawal) throw new NotFoundException('Retrait de parrainage introuvable');
     return withdrawal;
+  }
+
+  /** Called only by the super-admin recovery API after authorization. */
+  resolveWithdrawalNotPaid(adminId: string, id: string, dto: ResolvePayoutNotPaidDto) {
+    return resolveReferralWithdrawalNotPaid(
+      this.dataSource, this.paymentsService, adminId, id, dto,
+      payment => this.applyPaymentToWithdrawal(payment),
+      (manager, withdrawal, payment) => this.settleReservedWithdrawal(manager, withdrawal, false, payment),
+    );
   }
 
   @Cron('*/5 * * * *', { waitForCompletion: true })

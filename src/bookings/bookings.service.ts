@@ -8,6 +8,7 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
+  ConflictException,
   Logger,
   ForbiddenException,
   OnModuleInit,
@@ -2554,10 +2555,29 @@ export class BookingsService implements OnModuleInit {
       );
     }
 
-    if (booking.cashReceivedAt || booking.paymentStatus === BookingPaymentStatus.SUCCEEDED) {
+    if (booking.tokenCashFallbackAt) {
+      if (paymentMode === TripPaymentMode.CASH) return booking;
+      throw new ConflictException('Le paiement en espèces a été choisi pour ce trajet. Les jetons restent dans votre portefeuille.');
+    }
+    if (booking.mixedPaymentAt || booking.cashReceivedAt || booking.paymentStatus === BookingPaymentStatus.SUCCEEDED) {
       throw new BadRequestException(
         'Impossible de changer un paiement déjà confirmé',
       );
+    }
+
+    if (booking.paymentMode === TripPaymentMode.ELECTRONIC && paymentMode !== TripPaymentMode.ELECTRONIC) {
+      let attempt = await this.findCurrentPaymentForBooking(booking, passengerId);
+      if (attempt && [PaymentStatus.PENDING, PaymentStatus.INITIATED].includes(attempt.status) && attempt.orderNumber) {
+        try { attempt = await this.paymentsService.checkPaymentStatus(attempt.orderNumber, passengerId); }
+        catch { throw new ConflictException('Votre opérateur n’a pas encore confirmé le résultat. Vérifiez le paiement avant de choisir les espèces.'); }
+      }
+      if (attempt?.status === PaymentStatus.SUCCEEDED) {
+        await this.applyPaymentToBooking(booking, attempt);
+        throw new ConflictException('Ce trajet est déjà payé. Actualisez votre paiement : ne payez pas en espèces.');
+      }
+      if (attempt && ![PaymentStatus.FAILED, PaymentStatus.CANCELLED].includes(attempt.status)) {
+        throw new ConflictException('Paiement encore en cours. Attendez sa confirmation avant de changer de moyen de paiement.');
+      }
     }
 
     if (booking.paymentMode === paymentMode) {
@@ -2718,6 +2738,8 @@ export class BookingsService implements OnModuleInit {
   }
 
   private prepareBookingForElectronicPayment(booking: Booking): void {
+    if (booking.tokenCashFallbackAt) throw new ConflictException('Ce trajet doit être payé en espèces.');
+    if (booking.mixedPaymentAt) throw new BadRequestException('Les jetons sont déjà réglés. Seul le complément en espèces reste à remettre au conducteur.');
     this.ensureBookingCanBePaid(booking);
 
     if (booking.paymentMode === TripPaymentMode.ELECTRONIC) {
@@ -2766,6 +2788,7 @@ export class BookingsService implements OnModuleInit {
       }
       lockedBooking.trip = lockedTrip;
 
+      if (lockedBooking.tokenCashFallbackAt) return lockedBooking;
       if (lockedBooking.paymentMode !== TripPaymentMode.POINTS) {
         throw new BadRequestException(
           'Le mode de paiement de la réservation a changé',
@@ -3015,6 +3038,7 @@ export class BookingsService implements OnModuleInit {
   }
 
   private resolveBookingPaymentAmount(booking: Booking, trip: Trip): number {
+    if (booking.mixedPaymentAt) return Number(booking.paymentAmount);
     if (booking.interruptionFareLocked) return this.roundMoney(Number(booking.paymentAmount));
     const grossAmount = this.resolveBookingGrossPaymentAmount(booking, trip);
     if (
@@ -3065,6 +3089,9 @@ export class BookingsService implements OnModuleInit {
     trip: Trip,
     manager?: EntityManager,
   ): Promise<BookingFareBreakdown> {
+    if (booking.mixedPaymentAt) {
+      return this.buildBookingFareBreakdown(booking, Number(booking.grossPaymentAmount), Number(booking.paymentAmount) + Number(booking.mixedTokenAmount));
+    }
     if (booking.interruptionFareLocked) {
       return this.buildBookingFareBreakdown(booking, Number(booking.grossPaymentAmount), Number(booking.paymentAmount));
     }
@@ -3444,6 +3471,10 @@ export class BookingsService implements OnModuleInit {
     booking: Booking,
     payment: PaymentTransaction,
   ): Promise<Booking> {
+    // A late refusal for the previous attempt must not undo an explicit cash
+    // choice or a token settlement. Successful callbacks still need settlement.
+    if ([PaymentStatus.FAILED, PaymentStatus.CANCELLED].includes(payment.status) &&
+        booking.paymentMode !== TripPaymentMode.ELECTRONIC) return booking;
     const grossAmount = booking.trip
       ? this.resolveBookingGrossPaymentAmount(booking, booking.trip)
       : Number(booking.grossPaymentAmount ?? booking.paymentAmount ?? 0);

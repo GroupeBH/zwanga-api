@@ -1,5 +1,4 @@
 import {
-  BadGatewayException,
   BadRequestException,
   ConflictException,
   Injectable,
@@ -8,6 +7,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { DataSource, EntityManager } from 'typeorm';
 import { PaymentsService } from '../payments/payments.service';
+import { isPayoutRecoveryCheckUnavailable } from '../payments/payout-recovery-actions';
 import {
   PaymentProvider,
   PaymentPurpose,
@@ -185,7 +185,7 @@ export class DriverPayoutRecoveryService {
       try {
         await this.refresh(id);
       } catch (error) {
-        if (!(error instanceof BadGatewayException)) throw error;
+        if (!isPayoutRecoveryCheckUnavailable(error)) throw error;
       }
     }
     const result = await this.source.transaction(async (manager) => {

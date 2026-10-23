@@ -3,8 +3,9 @@ import {
   DriverPayoutStatus,
 } from './entities/driver-payout.entity';
 import { PaymentTransaction } from '../payments/entities/payment-transaction.entity';
+import { PAYOUT_RELEASE_GRACE_MS, payoutRecoveryActions } from '../payments/payout-recovery-actions';
 
-export const PAYOUT_RECOVERY_GRACE_MS = 15 * 60 * 1000;
+export const PAYOUT_RECOVERY_GRACE_MS = PAYOUT_RELEASE_GRACE_MS;
 export const DEFAULT_PAYOUT_REVIEW_AFTER_MINUTES = 24 * 60;
 
 export function payoutReviewDelay(value: unknown): number {
@@ -33,6 +34,7 @@ export function payoutRecoveryState(
     payout.reviewRequestedAt && !payout.reviewResolvedAt,
   );
   return {
+    ...payoutRecoveryActions(payout, payment, now),
     isStale,
     requiresReview: Boolean(
       payout.recoveryBlocked ||

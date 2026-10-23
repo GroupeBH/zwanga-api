@@ -11,6 +11,7 @@ import { ReferralLedgerEntry } from './entities/referral-ledger-entry.entity';
 import { ReferralProfile } from './entities/referral-profile.entity';
 import { ReferralReward } from './entities/referral-reward.entity';
 import { ReferralWithdrawal } from './entities/referral-withdrawal.entity';
+import { ReferralWithdrawalResolution } from './entities/referral-withdrawal-resolution.entity';
 import { ReferralsController } from './referrals.controller';
 import { ReferralsService } from './referrals.service';
 import { ReferralBookingReconciliationService } from './referral-booking-reconciliation.service';
@@ -24,6 +25,7 @@ import { ReferralBookingReconciliationService } from './referral-booking-reconci
       ReferralReward,
       ReferralLedgerEntry,
       ReferralWithdrawal,
+      ReferralWithdrawalResolution,
       User,
       KycDocument,
       PaymentTransaction,

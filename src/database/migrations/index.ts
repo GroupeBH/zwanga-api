@@ -1,4 +1,7 @@
 import { FillTotalSeats1780000000000 } from './1780000000000-FillTotalSeats';
+import { MixedTokensCash1780000089000 } from './1780000089000-MixedTokensCash';
+import { ReferralWithdrawalResolution1780000090000 } from './1780000090000-ReferralWithdrawalResolution';
+import { TokenCashFallback1780000091000 } from './1780000091000-TokenCashFallback';
 import { AddAppUpdates1780000049000 } from './1780000049000-AddAppUpdates';
 import { AddFinancialHistoryIndexes1780000040000 } from './1780000040000-AddFinancialHistoryIndexes';
 import { AddProServices1780000041000 } from './1780000041000-AddProServices';
@@ -90,6 +93,7 @@ import { RideResponseOutbox1780000084000 } from './1780000084000-RideResponseOut
 import { ReferralWithdrawalIdempotency1780000085000 } from './1780000085000-ReferralWithdrawalIdempotency';
 import { ReferralBookingRecovery1780000086000 } from './1780000086000-ReferralBookingRecovery';
 import { NearbyRequestRingingCooldown1780000087000 } from './1780000087000-NearbyRequestRingingCooldown';
+import { DispatchDeliveryResilience1780000088000 } from './1780000088000-DispatchDeliveryResilience';
 
 export const databaseMigrations = [
   FillTotalSeats1780000000000,
@@ -179,4 +183,8 @@ export const databaseMigrations = [
   ReferralWithdrawalIdempotency1780000085000,
   ReferralBookingRecovery1780000086000,
   NearbyRequestRingingCooldown1780000087000,
+  DispatchDeliveryResilience1780000088000,
+  MixedTokensCash1780000089000,
+  ReferralWithdrawalResolution1780000090000,
+  TokenCashFallback1780000091000,
 ];

@@ -58,6 +58,7 @@ type DiditSessionResponse = {
 };
 
 type DiditKycSessionResult = {
+  launchMode: 'native' | 'hosted';
   sessionId: string;
   session_id: string;
   sessionNumber: number | null;
@@ -198,6 +199,7 @@ export class DiditKycService {
       sessionNumber: this.extractSessionNumber(diditSession),
       session_number: this.extractSessionNumber(diditSession),
       sessionToken: launch.sessionToken,
+      launchMode,
       session_token: launch.sessionToken,
       url: launch.url,
       verification_url: launch.url,

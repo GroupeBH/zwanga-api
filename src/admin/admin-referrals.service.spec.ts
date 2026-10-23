@@ -13,6 +13,7 @@ import { AdminReferralsService } from './admin-referrals.service';
 function createQueryBuilderMock() {
   const query = {
     leftJoinAndMapOne: jest.fn(),
+    leftJoinAndSelect: jest.fn(),
     addSelect: jest.fn(),
     where: jest.fn(),
     andWhere: jest.fn(),
@@ -31,6 +32,7 @@ function createQueryBuilderMock() {
   };
   for (const method of [
     'leftJoinAndMapOne',
+    'leftJoinAndSelect',
     'addSelect',
     'where',
     'andWhere',
@@ -59,8 +61,9 @@ describe('AdminReferralsService', () => {
   const withdrawalRepository = {
     createQueryBuilder: jest.fn(),
     findOne: jest.fn(),
+    manager: { findOneBy: jest.fn() },
   };
-  const referralsService = { checkWithdrawalStatus: jest.fn(), recoverUnsentWithdrawal: jest.fn() };
+  const referralsService = { checkWithdrawalStatus: jest.fn(), recoverUnsentWithdrawal: jest.fn(), resolveWithdrawalNotPaid: jest.fn() };
   let service: AdminReferralsService;
 
   const safeUser = {
@@ -344,5 +347,27 @@ describe('AdminReferralsService', () => {
     expect(referralsService.checkWithdrawalStatus).not.toHaveBeenCalled();
     expect(result).toMatchObject({ status: 'failed', tokens: 1000 });
     expect(result.user).toMatchObject({ id: 'user-1' });
+  });
+
+  it.each([UserRole.PASSENGER, UserRole.DRIVER, UserRole.ADMIN])('refuses manual release for %s', async role => {
+    userRepository.findOne.mockResolvedValue({ id: 'actor', role });
+    await expect(service.resolveWithdrawalNotPaid('actor', 'id', {} as any)).rejects.toBeInstanceOf(ForbiddenException);
+    expect(referralsService.resolveWithdrawalNotPaid).not.toHaveBeenCalled();
+  });
+
+  it('allows a super-admin to release and returns the immutable audit without payment secrets', async () => {
+    userRepository.findOne.mockResolvedValue({ id: 'actor', role: UserRole.SUPER_ADMIN });
+    withdrawalRepository.findOne.mockResolvedValue({
+      id: 'withdrawal', status: ReferralWithdrawalStatus.CANCELLED,
+      paymentTransaction: { reference: 'REF', rawCheckResponse: { secret: 'hidden' } },
+    });
+    withdrawalRepository.manager.findOneBy.mockResolvedValue({ actorId: 'actor', evidenceReference: 'PROOF' });
+    const dto = { expectedReference: 'REF', reason: 'Confirmed not executed', evidenceReference: 'PROOF', confirmedNotPaid: true as const };
+    expect(await service.resolveWithdrawalNotPaid('actor', 'withdrawal', dto)).toMatchObject({
+      status: 'cancelled', canRetry: true, canResolveNotPaid: false,
+      resolution: { actorId: 'actor', evidenceReference: 'PROOF' },
+    });
+    expect(referralsService.resolveWithdrawalNotPaid).toHaveBeenCalledWith('actor', 'withdrawal', dto);
+    expect(JSON.stringify(await service.getWithdrawalDetail('withdrawal'))).not.toContain('hidden');
   });
 });

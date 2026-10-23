@@ -9,6 +9,9 @@ export function createOriginPolicy(config: ConfigService) {
       .filter(Boolean),
   );
   const production = config.get<string>('NODE_ENV') === 'production';
+  // Official administration origin; keep configured origins as additional entries.
+  // An HTTP Origin has no path or trailing slash.
+  if (production) origins.add('https://hqadmin.zwanga-app.com');
   // Preserve HTTP's local-development policy and native clients without Origin.
   return (origin: string | undefined): boolean =>
     !origin || !production || origins.has(origin);

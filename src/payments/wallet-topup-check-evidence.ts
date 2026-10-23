@@ -5,14 +5,14 @@ import {
 } from './entities/payment-transaction.entity';
 import type { FlexPayTransactionStatus } from './flexpay.service';
 
-/** A verified refusal needs correlation, not the full proof required to grant tokens. */
+/** Only a successful credit needs complete proof. Other states still require correlation. */
 export function assertWalletTopUpCheckEvidence(
   payment: PaymentTransaction,
   provider: FlexPayTransactionStatus,
-  confirmedFailure: boolean,
+  outcome: 'succeeded' | 'failed' | 'pending',
 ): void {
   if (payment.purpose !== String(PaymentPurpose.WALLET_TOP_UP)) return;
-  if (confirmedFailure) {
+  if (outcome !== 'succeeded') {
     const expectedOrder = payment.orderNumber?.trim();
     const expectedReference = payment.reference?.trim();
     const order = provider.orderNumber?.trim();
@@ -29,11 +29,11 @@ export function assertWalletTopUpCheckEvidence(
       (reference && !referenceMatches)
     ) {
       throw new BadRequestException(
-        'Le refus FlexPay ne correspond pas à cette recharge',
+        'La réponse FlexPay ne correspond pas à cette recharge',
       );
     }
     // Supplied amounts/currencies are still checked by PaymentsService.
-    // This branch can never authorize a success or a wallet credit.
+    // Pending is not a refusal, a successful payment or permission to credit tokens.
     return;
   }
   if (

@@ -79,7 +79,7 @@ describe('Driver-only order alerts', () => {
     expect(await f.deliver('driver_dispatch_offer', 'recipient', { passengerId: undefined, offerId: 'offer' })).toBe(true);
     expect(f.ownerQuery).toHaveBeenCalledWith(expect.stringContaining('o.id = $1'), ['offer']);
     expect(f.send).toHaveBeenCalledWith(expect.objectContaining({
-      data: { type: 'driver_dispatch_offer', offerId: 'offer', passengerId: 'author' },
+      data: { type: 'driver_dispatch_offer', offerId: 'offer', passengerId: 'author', notificationId: 'notice' },
     }), 'current-token');
   });
 

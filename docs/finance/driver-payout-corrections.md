@@ -1,5 +1,144 @@
 # Versements conducteur et résolution des retraits bloqués
 
+## 23 octobre 2026 — Résolution du parrainage et prévention des retraits sans provision
+
+Le parcours de résolution couvre maintenant les **gains conducteur** et les
+**jetons de parrainage disponibles**. Aucune annulation n'est déclenchée sur le
+seul âge du retrait ou le seul solde marchand. Un versement en attente peut
+encore être exécuté par FlexPaie après réapprovisionnement.
+
+### API d'administration
+
+Toutes les routes ci-dessous sont préfixées par `/api/v1` et exigent le JWT
+administrateur existant. Le contrôle de rôle reste côté backend.
+
+| Route | Rôle et usage |
+| --- | --- |
+| `GET /admin/referrals/withdrawals?status=pending` | Admin/super-admin : liste paginée, puis `status=initiated` pour les versements acceptés |
+| `GET /admin/referrals/withdrawals/:id` | Admin/super-admin : détail, référence attendue et preuve de résolution éventuelle |
+| `POST /admin/referrals/withdrawals/:id/reconcile` | Super-admin : vérifier sans réémettre ; restitution automatique uniquement si non-envoi prouvé ou échec définitif vérifié |
+| `POST /admin/referrals/withdrawals/:id/resolve-not-paid` | **Super-admin uniquement** : libération après confirmation définitive de non-exécution |
+| `GET /admin/driver-payouts` | Admin/super-admin : file des retraits conducteur à examiner, déjà existante |
+| `POST /admin/driver-payouts/:id/reconcile` | Admin/super-admin : contrôle du versement conducteur |
+| `POST /admin/driver-payouts/:id/resolve-not-paid` | Admin/super-admin : résolution conducteur existante, contrat conservé |
+
+Le corps de résolution est identique pour les deux types de retrait :
+
+```json
+{
+  "expectedReference": "REFERENCE_ZWANGA_DU_RETRAIT",
+  "confirmedNotPaid": true,
+  "reason": "Non-exécution définitive confirmée par FlexPaie",
+  "evidenceReference": "REFERENCE_DE_CONFIRMATION_DU_PRESTATAIRE"
+}
+```
+
+Procédure : lire le dossier, lancer `reconcile`, puis obtenir de FlexPaie une
+confirmation **définitive** de non-exécution/annulation si l'état reste incertain.
+Un ticket simplement ouvert, un timeout, « transaction introuvable » ou une
+capture de solde insuffisant ne constituent pas cette preuve. Soumettre ensuite
+la résolution avec `expectedReference` renvoyée par le dossier. Sans transaction
+créée, cette référence correspond à l'ID du retrait. Délai de sécurité : 15 minutes.
+Une indisponibilité du contrôle ou de l'authentification FlexPaie ne bloque pas
+la résolution avec cette preuve externe. Une incohérence de référence, de
+bénéficiaire ou de montant reste bloquante ; elle n'est pas assimilée à une panne.
+
+Les réponses ajoutent `expectedReference`, `canResolveNotPaid` et
+`resolutionRequiresProviderConfirmation`. Ce sont des indications pour
+l'interface, **pas des permissions ni une confirmation du prestataire**. Les
+listes de parrainage indiquent également `isStale` (24 h), `requiresReview` et
+`canRetry`. Le détail conserve `resolution` et signale
+`lateSuccessAfterRelease`. Les anciens champs/statuts restent compatibles.
+Ces endpoints sont également raccordés localement dans `zwanga-admin`, sans
+modification des fichiers de style :
+
+- **Parrainage → Retraits → Détails / traiter** : consultation pour les admins,
+  vérification et libération sur preuve pour les super-admins, y compris sans
+  transaction encore créée.
+- **Paiements → Retraits de gains à examiner** : file paginée, ouverture par
+  identifiant de retrait, vérification, libération sur preuve et clôture d'un
+  incident de succès tardif pour les admins/super-admins.
+- Depuis le détail d'une transaction conducteur/parrainage liée, **Ouvrir le
+  dossier de retrait** utilise l'identifiant du retrait, pas celui du paiement.
+
+Le panneau distingue l'état local de celui de la transaction prestataire et
+affiche l'historique ou la preuve enregistrée. La confirmation n'est jamais
+précochée. Le dossier est relu avant toute action ; les doubles clics sont
+bloqués, les soldes/historiques invalidés après traitement, et une panne
+d'actualisation après un succès n'est pas présentée comme un rejet du traitement.
+Un backend ancien sans les capacités de résolution ne permet aucune libération
+dans l'interface. La preuve externe reste obligatoire ; le bouton ne commande
+pas d'annulation chez FlexPaie.
+
+Validation admin locale : 30 tests réussis (dont 18 nouveaux tests de règles,
+contrats API, rendu React et gestionnaires d'action simulés), contrôle TypeScript
+et build Next.js réussis. Aucun retrait réel, test navigateur authentifié contre
+un prestataire ou déploiement n'a été exécuté.
+
+### Garanties financières et notifications
+
+- Le parrainage passe en `cancelled` et les jetons réservés redeviennent
+  disponibles, une seule fois, dans leur **compte de parrainage**. Aucun crédit
+  de portefeuille ordinaire, bonus ou conversion au taux actuel n'est créé.
+- Pour les gains conducteur, le calcul existant du disponible déduit les retraits
+  en cours/réussis ; l'annulation libère la réservation sans ajouter de gains.
+- La libération locale n'appelle pas une API d'annulation FlexPaie et ne falsifie
+  pas `payment_transactions.status`. Les contrôles/callbacks continuent.
+- Un succès tardif du parrainage redébite les jetons restitués, une seule fois,
+  conserve l'audit et peut rendre le disponible négatif si des jetons ont déjà
+  été réutilisés. Cette dette n'est pas effacée ni remplacée par zéro. Un retrait
+  conducteur confirmé tardivement conserve le blocage de rapprochement existant.
+- La notification « Retrait annulé » est enregistrée dans la même transaction
+  que la restitution via le subscriber/outbox existant. Son envoi push intervient
+  après commit, selon la disponibilité du service et du jeton appareil.
+- L'ordre de verrouillage propriétaire → retrait → paiement → compte et les
+  transactions courtes suivent le guide PostgreSQL. Aucun appel réseau sous
+  verrou. Les répétitions et les appels concurrents ne doublent pas la restitution.
+
+### Contrôle facultatif du solde marchand avant envoi
+
+`FLEXPAY_PAYOUT_BALANCE_CHECK_ENABLED=true` active un GET du solde **avant** `/pay`
+pour les deux types de retrait. Valider auparavant les accès et l'URL
+`FLEXPAY_PAYOUT_BALANCE_URL` auprès de FlexPaie. Par défaut, le contrôle est désactivé
+afin de ne pas imposer un nouvel endpoint à une configuration existante.
+
+Si le solde de la devise ne couvre pas le montant, aucun `/pay` n'est envoyé :
+erreur `PAYOUT_INSUFFICIENT_MERCHANT_BALANCE`. Si le contrôle activé échoue ou
+renvoie une devise absente/ambiguë, aucun envoi non plus :
+`PAYOUT_BALANCE_UNAVAILABLE`. Le paiement est enregistré en échec, donc les
+réservations peuvent être libérées par les parcours existants. Aucun solde
+marchand ni secret n'est exposé à l'utilisateur.
+
+Ce contrôle ne réserve pas le solde chez FlexPaie : des frais ou d'autres
+versements simultanés peuvent encore provoquer un refus/une attente ensuite.
+La réponse effective du prestataire reste déterminante. Le contrôle ne débloque
+pas rétroactivement les retraits existants et ne rejoue jamais `/pay`.
+
+### Livraison ultérieure
+
+Exécuter la migration `1780000090000-ReferralWithdrawalResolution` avant le code
+qui utilise le nouveau détail/résolution. Elle crée seulement la table d'audit
+`referral_withdrawal_resolutions` et son index ; aucun solde ni retrait existant
+n'est changé. Le rollback est possible tant que la table est vide et refusé
+après utilisation pour conserver les preuves. La migration est enregistrée dans
+la liste TypeORM existante. Ne pas utiliser `synchronize` en production.
+
+Après libération, l'utilisateur rafraîchit son solde et crée une **nouvelle**
+demande avec une nouvelle clé d'idempotence ; rejouer l'ancienne retourne
+l'ancienne opération. Les retraits réels existants doivent être traités dossier
+par dossier. Aucun paramètre AWS, Terraform, CI/CD, déploiement ou virement réel
+n'est modifié par cette intervention locale.
+
+Validation locale : suite globale de 227 suites / 2 629 tests réussis, avec
+450 tests conditionnels ignorés dans ce passage. Les vérifications PostgreSQL
+ont été exécutées séparément sur des bases jetables : 18 scénarios de résolution
+du parrainage, 5 de récupération conducteur et 10 de retrait sur solde de
+parrainage disponible, tous réussis. Après le dernier ajustement de gestion des
+pannes d'authentification, les 20 tests ciblés du contrat de résolution et du
+service conducteur passent également. Les appels FlexPaie et l'envoi réel des
+push sont simulés ; le test PostgreSQL vérifie la notification persistée dans
+l'outbox, pas sa réception sur un téléphone.
+
 ## Résolution des retraits bloqués du 3 octobre 2026
 
 Le backend et l'écran mobile des gains conducteur disposent maintenant d'un
