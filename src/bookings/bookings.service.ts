@@ -223,7 +223,7 @@ export class BookingsService implements OnModuleInit {
     BookingStatus.BOARDING_UNCERTAIN,
   ];
   private readonly boardingDetectionConfig: BoardingDetectionConfig;
-  private readonly automaticRideProgressQueues = new CoalescedRideProgress<AutomaticRideProgressResult>();
+  private readonly automaticRideProgressQueues = new CoalescedRideProgress<AutomaticRideProgressResult>(1000);
   private financialReconciliationRunning = false;
 
   constructor(
@@ -4168,8 +4168,8 @@ export class BookingsService implements OnModuleInit {
   ): Promise<AutomaticRideProgressResult> {
     const result: AutomaticRideProgressResult = { tripId, events: [] };
     const bookings = await this.bookingRepository.find({
-      where: { tripId },
-      relations: ['trip', 'trip.driver', 'passenger'],
+      where: { tripId, status: In([BookingStatus.ACCEPTED, BookingStatus.NO_SHOW, BookingStatus.BOARDING_UNCERTAIN]) },
+      relations: ['trip', 'passenger'],
     });
 
     for (const booking of bookings) {

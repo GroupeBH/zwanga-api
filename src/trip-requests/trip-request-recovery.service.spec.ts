@@ -78,6 +78,9 @@ describe('TripRequestRecoveryService', () => {
       }),
       {
         status: TripRequestStatus.PENDING,
+        departureDateMin: expect.any(Date),
+        departureDateMax: expect.any(Date),
+        dispatchCheckedAt: null,
         selectedDriverId: null,
         selectedVehicleId: null,
         selectedPricePerSeat: null,
@@ -166,6 +169,30 @@ describe('TripRequestRecoveryService', () => {
 
     expect(manager.update).not.toHaveBeenCalled();
     expect(notificationService.sendNotificationToUser).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])('renews the window only when searching now (%s)', async searchNow => {
+    const row = { id: 'request', passengerId: 'passenger', tripId: null,
+      selectedDriverId: 'driver', immediateDispatch: true, status: TripRequestStatus.DRIVER_SELECTED,
+      departureDateMin: new Date(Date.now() - 3_600_000), departureDateMax: new Date(Date.now() - 60_000) };
+    const originalMax = row.departureDateMax;
+    manager.findOne.mockImplementation(async () => ({ ...row }));
+    manager.update.mockImplementation(async (entity, _where, patch) => {
+      if (entity === TripRequest) Object.assign(row, patch);
+      return { affected: 1 };
+    });
+    const result = await service.reopenAfterPassengerReleasesOverdueDriver('request', 'passenger', searchNow);
+    if (searchNow) {
+      expect(result?.status).toBe(TripRequestStatus.PENDING);
+      expect(result!.departureDateMax.getTime()).toBeGreaterThan(Date.now());
+      expect(result!.departureDateMax.getTime() - result!.departureDateMin.getTime()).toBe(30 * 60_000);
+      expect(notificationService.sendNotificationToUser).toHaveBeenCalled();
+    } else {
+      expect(result?.status).toBe(TripRequestStatus.EXPIRED);
+      expect(result?.departureDateMax).toEqual(originalMax);
+      expect(notificationService.sendNotificationToUser).not.toHaveBeenCalled();
+    }
+    expect(notificationService.sendToMultiple).not.toHaveBeenCalled();
   });
 
   it('keeps the existing ride running when the original passenger releases the driver but other passengers remain', async () => {

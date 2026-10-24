@@ -21,6 +21,7 @@ import {
   UpdateTripRequestDto,
   RecommendTripRequestPriceDto,
   TripRequestVehicleOptionsDto,
+  ReleaseOverdueDriverDto,
 } from './dto/trip-request.dto';
 import { Auth } from '../auth/decorators/auth.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
@@ -275,10 +276,12 @@ export class TripRequestsController {
   async releaseOverdueSelectedDriver(
     @Request() req: { user: { userId: string } },
     @Param('id') id: string,
+    @Body() dto: ReleaseOverdueDriverDto,
   ) {
     return this.tripRequestsService.releaseOverdueSelectedDriver(
       req.user.userId,
       id,
+      dto?.searchNow ?? true,
     );
   }
 

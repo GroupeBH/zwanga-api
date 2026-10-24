@@ -136,7 +136,7 @@ export class SyncDiditKycSessionDto {
   @ApiProperty({
     required: false,
     description:
-      "Statut reçu côté app. Il n'est jamais utilisé seul pour approuver un KYC ; le backend vérifie Didit côté serveur.",
+      "Statut reçu côté app, accepté pour compatibilité mais ignoré pour la décision KYC. Seule la décision vérifiée côté serveur est utilisée.",
   })
   @IsString()
   @IsOptional()

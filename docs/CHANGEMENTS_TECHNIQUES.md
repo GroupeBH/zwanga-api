@@ -1,5 +1,113 @@
 # Journal des changements techniques
 
+## 2026-10-24 — Reprises fiables backend/mobile et traitements bornés
+
+- **KYC Didit :** dans `src/users/didit-kyc.service.ts`, les événements d'une
+  session remplacée ne modifient plus ni le dossier ni son identifiant de
+  session, même après plusieurs livraisons. Les événements de démarrage tardifs
+  ne font pas régresser une décision ; une approbation concurrente empêche aussi
+  une création de session de la remplacer. Les mises en revue/resoumission
+  légitimes de la session courante restent traitées, conformément aux
+  [statuts Didit](https://help.didit.me/verification-sessions/session-statuses).
+- **Sessions :** `POST /auth/refresh` accepte un `requestId` UUID v4 optionnel.
+  Le mobile le sauvegarde avant envoi. Le backend conserve un reçu AES-GCM dans
+  Redis pendant 120 secondes, écrit avant la rotation conditionnelle. La reprise
+  exige le même identifiant et les empreintes de la session actuellement en base.
+  Déconnexion, nouveau login, suspension, changement de rôle et réinitialisation
+  du PIN restent prioritaires. Aucun ancien jeton n'est accepté sans ces preuves.
+  Redis indisponible : 503, pas de rotation sans reçu. Clients sans `requestId` :
+  ancien comportement conservé, sans bénéfice de reprise d'une réponse perdue.
+- **Demandes de trajet :** `PUT /trip-requests/:id/release-driver` accepte
+  `searchNow` optionnel (true par défaut pour les anciens clients). true renouvelle
+  la plage à maintenant → +30 minutes et rend la demande éligible au dispatch ;
+  false libère le conducteur et laisse la demande expirée jusqu'à modification
+  des horaires. Une demande immédiate n'est plus diffusée à tous les conducteurs
+  par ce chemin : le worker existant sélectionne le prochain conducteur éligible.
+- **Paiements :** récupération toutes les 10 secondes, cinq opérations réclamées
+  au maximum, deux traitements simultanés, aucun chevauchement local ; leases et
+  contrôles de révision conservés. Une erreur d'acquittement n'interrompt plus les
+  autres opérations. Backoff plafonné à 15 minutes et avertissement dès 15 minutes
+  d'ancienneté. Les échéances déjà enregistrées et les leases de 15 minutes restent
+  respectées ; ce n'est pas une garantie de règlement en 15 minutes.
+- **GPS :** progression cadencée à une évaluation/seconde/trajet/processus avec
+  relecture différée, sans réponse fondée sur un état ancien mis en cache. Chargement
+  limité aux réservations acceptées, absentes ou à embarquement incertain ; jointure
+  du profil conducteur retirée de cette lecture. Logique d'arrivée, points et gains
+  conservée. Le regroupement n'est pas un verrou distribué entre instances.
+- **Vérifications :** 681 tests ciblés/49 suites backend, 441 tests JavaScript
+  mobile/44 fichiers ; quatre tests supplémentaires avec PostgreSQL 18 jetable
+  après autorisation de démarrage hors environnement restreint. Base temporaire
+  nettoyée. Simulation couplée des vrais services : réponse perdue, deux requêtes,
+  une rotation, aucune déconnexion. Vérifications TypeScript sans émission des
+  deux dépôts. Fournisseurs simulés ; aucun paiement/OTP/push réel, ni essai natif.
+- **Déploiement ultérieur :** backend d'abord, puis mobile (nouveaux champs de DTO).
+  Aucun changement Terraform, AWS, CI/CD, `.env`, dépendance, migration, commit ou
+  push. Aucune nouvelle variable obligatoire : le secret JWT de renouvellement et
+  Redis existants servent au reçu. Une reprise après expiration du reçu ou perte
+  de Redis peut encore imposer une reconnexion ; ne pas assimiler ces tests à un
+  test de charge ni à une validation de haute disponibilité en production.
+
+### Vérification complémentaire du 24 octobre 2026
+
+Les correctifs ci-dessus étaient déjà présents dans les deux répertoires lors
+de cette reprise. Ils ont été relus et validés sans écraser les modifications
+locales ni ajouter de changement métier.
+
+- Backend : `jest --runInBand --silent --testPathIgnorePatterns src/database`
+  réussit avec **2 738 tests dans 219 suites** ; 189 tests conditionnels et
+  11 suites restent ignorés. Cette commande exclut les suites de `src/database`.
+- PostgreSQL : les **4 tests** de `session-rotation-postgres.spec.ts` réussissent
+  séparément sur un cluster PostgreSQL 18 jetable, sans configuration applicative.
+  Le premier démarrage était empêché dans le sandbox ; l'exécution autorisée hors
+  sandbox a réussi, puis le cluster temporaire a été arrêté et supprimé.
+- Mobile : **441 tests JavaScript ciblés dans 44 fichiers** réussissent ; les SDK,
+  transports et stockages natifs restent simulés.
+- `tsc --noEmit --incremental false` réussit dans les deux dépôts (configuration
+  `tsconfig.build.json` pour le backend). `git diff --check` ne signale aucune
+  erreur dans les deux dépôts.
+- Simulation couplée avec le code réel d'authentification backend et mobile :
+  réponse perdue après la rotation, reconnexion, même identifiant de tentative,
+  **deux requêtes, une seule rotation, session récupérée sans déconnexion**.
+  Redis, PostgreSQL et le transport sont simulés dans cette simulation spécifique.
+
+Ces contrôles ne remplacent pas une recette Android/iOS sur appareil ni un test
+de charge. Aucun service de paiement, OTP, KYC ou push réel n'a été appelé et
+aucun changement AWS, Terraform, CI/CD ou publication n'a été effectué.
+
+## 2026-10-24 — Correctifs des tests de sécurité Didit et HTTP
+
+- Le statut envoyé par le mobile reste accepté dans le DTO mais ne décide plus
+  du KYC. Décision fournisseur incomplète : 502 explicite, aucune écriture ni
+  activation ; approbations/rejets existants préservés.
+- Horodatage signé lié à l'en-tête et à la fenêtre de validité des webhooks.
+  Rejeu avec en-tête rafraîchi bloqué, formats numériques/texte pris en charge.
+  V2 invalide non rétrogradable ; Simple exige une décision serveur fraîche et
+  ne stocke plus de données non signées en cas de panne fournisseur.
+- En-têtes HTTP : retrait de l'empreinte Express, `nosniff`, absence de cache
+  pour auth/KYC et les requêtes autorisées. CORS, Swagger et médias inchangés.
+- Validation : 499 tests backend/31 suites, 47 tests JS mobile/3 fichiers,
+  TypeScript sans émission et deux reproductions Didit désormais négatives.
+  Aucune requête fournisseur réelle, migration, variable ajoutée, modification
+  mobile, Terraform, AWS, CI/CD, commit ou push.
+- Détails et limites : [suivi du rapport de sécurité](operations/penetration-tests-2026-10-24.md).
+
+## 2026-10-24 — Tests de sécurité locaux backend/mobile
+
+- Campagne ciblée, sans correctif métier, changement d'infrastructure, paiement,
+  appel fournisseur, modification de compte ni déploiement.
+- Ajout d'une sonde HTTP/Socket.IO limitée à la boucle locale, de 24 tests
+  HTTP adverses isolés et de deux reproductions KYC hors réseau.
+- Résultats : 388 tests backend et 194 tests JavaScript mobile réussis ;
+  26 contrôles réseau conformes et 2 observations ; activité Android interne
+  refusée à l'appel externe sur l'émulateur debug. TypeScript backend validé.
+- Deux défauts Didit reproduits séparément : statut client utilisé lorsque la
+  décision fournisseur manque, et ancien webhook signé accepté avec un en-tête
+  temporel récent. Scripts d'audit volontairement en sortie 1 si reproduits ;
+  pas de changement de la suite CI/CD. Aucun test de paiement ou KYC payant.
+- Détails, conditions d'exploitation, limites et recommandations :
+  [rapport de sécurité](operations/penetration-tests-2026-10-24.md) et
+  [modèle de menaces](../zwanga-backend-threat-model.md).
+
 ## 2026-10-23 — Bascule vers les espèces après complément Mobile Money bloqué
 
 - Commande authentifiée/idempotente, marqueur durable et garde-fous transactionnels

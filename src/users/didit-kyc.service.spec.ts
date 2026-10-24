@@ -38,6 +38,14 @@ const canonicalJson = (payload: unknown): string => {
   return JSON.stringify(sortValue(payload));
 };
 
+const webhookHeaders = (method: 'v2' | 'simple', payload: Record<string, any>) => ({
+  'x-timestamp': String(payload.timestamp),
+  [`x-signature-${method}`]: createHmac('sha256', 'webhook-secret')
+    .update(method === 'v2' ? canonicalJson(payload)
+      : `${payload.timestamp}:${payload.session_id}:${payload.status}:${payload.webhook_type}`)
+    .digest('hex'),
+});
+
 describe('DiditKycService', () => {
   const baseConfig = {
     DIDIT_KYC_ENABLED: 'true',
@@ -153,6 +161,45 @@ describe('DiditKycService', () => {
 
   afterEach(() => {
     jest.restoreAllMocks();
+  });
+
+  it.each(['In Progress', 'Declined', 'Approved'])('ignores repeated %s from a superseded Didit session', async status => {
+    Object.assign(kyc, { status: KycStatus.APPROVED, diditSessionId: 'new-session' });
+    user.status = UserStatus.ACTIVE;
+    const original = { ...kyc };
+    const input = { userId: user.id, sessionId: 'old-session', source: 'webhook',
+      payload: { session_id: 'old-session', status, vendor_data: user.id } };
+    await (service as any).applyDiditState(input);
+    await (service as any).applyDiditState(input);
+    expect(kyc).toEqual(original);
+    expect(user.status).toBe(UserStatus.ACTIVE);
+    expect(txKycRepository.save).not.toHaveBeenCalled();
+    expect(evidence.enqueue).not.toHaveBeenCalled();
+  });
+
+  it.each([KycStatus.APPROVED, KycStatus.REJECTED])('does not regress current terminal %s to pending', async status => {
+    kyc.status = status;
+    await (service as any).applyDiditState({ userId: user.id, sessionId: kyc.diditSessionId,
+      source: 'sync', payload: { status: 'In Progress', vendor_data: user.id } });
+    expect(kyc.status).toBe(status);
+    expect(txKycRepository.save).not.toHaveBeenCalled();
+  });
+
+  it.each(['In Review', 'Resubmitted'])('keeps legitimate current-session %s updates', async status => {
+    kyc.status = KycStatus.APPROVED;
+    await (service as any).applyDiditState({ userId: user.id, sessionId: kyc.diditSessionId,
+      source: 'sync', payload: { status, vendor_data: user.id } });
+    expect(kyc.status).toBe(KycStatus.PENDING);
+    expect(txKycRepository.save).toHaveBeenCalled();
+  });
+
+  it('does not overwrite an approval that committed during session creation', async () => {
+    kyc.status = KycStatus.APPROVED;
+    await expect((service as any).applyDiditState({ userId: user.id, source: 'session_created',
+      sessionId: 'new-session', payload: { status: 'Not Started', vendor_data: user.id } }))
+      .rejects.toMatchObject({ status: 409 });
+    expect(kyc.status).toBe(KycStatus.APPROVED);
+    expect(txKycRepository.save).not.toHaveBeenCalled();
   });
 
   it.each([baseConfig, { KYC_PROVIDER: 'aws' }, {}])(
@@ -488,6 +535,49 @@ describe('DiditKycService', () => {
     expect(kyc.reviewedBy).toBe('admin-1');
   });
 
+  it.each([undefined, null, '', '   ', 123, true, {}, []])(
+    'rejects an incomplete provider decision (%j) without trusting client approval',
+    async (status) => {
+      user.driverOnboardingRequestedAt = new Date();
+      txVehicleRepository.exists.mockResolvedValue(true);
+      (global.fetch as jest.Mock).mockResolvedValueOnce(createFetchResponse({
+        session_id: 'session-1', vendor_data: user.id, status,
+      }));
+
+      await expect(service.syncSession(user.id, {
+        sessionId: 'session-1', status: 'Approved',
+      })).rejects.toMatchObject({
+        status: 502, response: { code: 'KYC_PROVIDER_INVALID_RESPONSE' },
+      });
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+      expect(txKycRepository.save).not.toHaveBeenCalled();
+      expect(txUserRepository.update).not.toHaveBeenCalled();
+      expect(evidence.enqueue).not.toHaveBeenCalled();
+      expect(kyc.status).toBe(KycStatus.PENDING);
+      expect(user.status).toBe(UserStatus.PENDING_KYC);
+      expect(user.isDriver).toBe(false);
+    },
+  );
+
+  it.each([KycStatus.APPROVED, KycStatus.REJECTED])(
+    'preserves an existing %s decision when the provider decision is missing',
+    async (status) => {
+      Object.assign(kyc, { status, reviewedAt: new Date(), reviewedBy: 'admin-1' });
+      user.status = status === KycStatus.APPROVED ? UserStatus.ACTIVE : UserStatus.PENDING_KYC;
+      const originalKyc = { ...kyc };
+      const originalUser = { ...user };
+      (global.fetch as jest.Mock).mockResolvedValueOnce(createFetchResponse({
+        session_id: 'session-1', vendor_data: user.id,
+      }));
+      await expect(service.syncSession(user.id, {
+        sessionId: 'session-1', status: 'Approved',
+      })).rejects.toMatchObject({ status: 502 });
+      expect(kyc).toEqual(originalKyc);
+      expect(user).toEqual(originalUser);
+      expect(dataSource.transaction).not.toHaveBeenCalled();
+    },
+  );
+
   it('versions a new Didit approval and clears attribution to an older admin rejection', async () => {
     const previousDate = new Date(Date.now() + 1_000);
     Object.assign(kyc, { status: KycStatus.REJECTED, reviewedAt: previousDate, reviewedBy: 'admin-1' });
@@ -618,8 +708,89 @@ describe('DiditKycService', () => {
     expect(evidence.enqueue).not.toHaveBeenCalled();
   });
 
+  it.each(['v2', 'simple'] as const)('rejects replayed %s webhooks before any DB or provider access', async (method) => {
+    const payload = { timestamp: Math.floor(Date.now() / 1000) - 86400,
+      session_id: 'session-1', status: 'Approved', webhook_type: 'status.updated' };
+    await expect(service.handleWebhook({ ...webhookHeaders(method, payload),
+      'x-timestamp': String(Math.floor(Date.now() / 1000)),
+    }, payload)).rejects.toBeInstanceOf(UnauthorizedException);
+    expect(userRepository.findOne).not.toHaveBeenCalled();
+    expect(kycRepository.findOne).not.toHaveBeenCalled();
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(dataSource.transaction).not.toHaveBeenCalled();
+    expect(evidence.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('preserves the fresh fully signed V2 fallback during a provider outage', async () => {
+    const payload = { timestamp: Math.floor(Date.now() / 1000),
+      session_id: 'session-1', status: 'Approved', vendor_data: user.id, webhook_type: 'status.updated' };
+    (global.fetch as jest.Mock).mockRejectedValueOnce(new Error('Synthetic provider outage'));
+    await expect(service.handleWebhook(webhookHeaders('v2', payload), payload))
+      .resolves.toMatchObject({ status: KycStatus.APPROVED });
+    expect(user.status).toBe(UserStatus.ACTIVE);
+  });
+
+  it.each(['v2', 'simple'] as const)('does not apply an older %s status over an incomplete fetched decision', async (method) => {
+    const payload = { timestamp: Math.floor(Date.now() / 1000),
+      session_id: 'session-1', status: 'Approved', webhook_type: 'status.updated' };
+    (global.fetch as jest.Mock).mockResolvedValueOnce(createFetchResponse({ session_id: 'session-1' }));
+    await expect(service.handleWebhook(webhookHeaders(method, payload), payload))
+      .rejects.toMatchObject({ status: 502, response: { code: 'KYC_PROVIDER_INVALID_RESPONSE' } });
+    expect(dataSource.transaction).not.toHaveBeenCalled();
+    expect(evidence.enqueue).not.toHaveBeenCalled();
+    expect(user.status).toBe(UserStatus.PENDING_KYC);
+  });
+
+  it('requires a provider decision for Simple and ignores unsigned identity fields', async () => {
+    const payload = { timestamp: Math.floor(Date.now() / 1000),
+      session_id: 'session-1', status: 'Approved', webhook_type: 'status.updated',
+      vendor_data: 'attacker-supplied-user', decision: { status: 'Approved' } };
+    (global.fetch as jest.Mock).mockResolvedValueOnce(createFetchResponse({
+      session_id: 'session-1', status: 'In Review', vendor_data: user.id,
+    }));
+    await expect(service.handleWebhook(webhookHeaders('simple', payload), payload))
+      .resolves.toMatchObject({ status: KycStatus.PENDING });
+    expect(kyc.providerMetadata.vendorData).toBe(user.id);
+    expect(kyc.providerMetadata.decisionSummary).toBeNull();
+    expect(user.status).toBe(UserStatus.PENDING_KYC);
+  });
+
+  it('returns a retryable error for Simple when the provider is down, without storing unsigned evidence', async () => {
+    const payload = { timestamp: Math.floor(Date.now() / 1000),
+      session_id: 'session-1', status: 'Approved', webhook_type: 'status.updated',
+      decision: { status: 'Approved' } };
+    (global.fetch as jest.Mock).mockRejectedValueOnce(new Error('Synthetic provider outage'));
+    await expect(service.handleWebhook(webhookHeaders('simple', payload), payload))
+      .rejects.toMatchObject({ status: 503 });
+    expect(dataSource.transaction).not.toHaveBeenCalled();
+    expect(evidence.enqueue).not.toHaveBeenCalled();
+    expect(user.status).toBe(UserStatus.PENDING_KYC);
+  });
+
+  it('does not acknowledge Simple as applied when the provider is not configured', async () => {
+    const payload = { timestamp: Math.floor(Date.now() / 1000),
+      session_id: 'session-1', status: 'Approved', webhook_type: 'status.updated' };
+    service = new DiditKycService(userRepository, kycRepository,
+      createConfigService({ DIDIT_WEBHOOK_SECRET: baseConfig.DIDIT_WEBHOOK_SECRET }) as any, dataSource);
+    await expect(service.handleWebhook(webhookHeaders('simple', payload), payload))
+      .rejects.toMatchObject({ status: 503 });
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(dataSource.transaction).not.toHaveBeenCalled();
+  });
+
+  it('keeps session creation pending when the provider omits the initial status', async () => {
+    (global.fetch as jest.Mock).mockResolvedValueOnce(createFetchResponse({
+      session_id: 'session-1', session_token: 'synthetic-token', vendor_data: user.id,
+    }));
+    await service.createSession(user.id, {});
+    expect(kyc.status).toBe(KycStatus.PENDING);
+    expect(kyc.diditSessionStatus).toBe('Not Started');
+    expect(user.status).toBe(UserStatus.PENDING_KYC);
+  });
+
   it('accepts a signed v2 manual-review webhook and applies the refreshed Didit decision', async () => {
     const payload = {
+      timestamp: Math.floor(Date.now() / 1000),
       webhook_type: 'status.updated',
       trigger: 'manual_review',
       session_id: 'session-1',
@@ -637,7 +808,7 @@ describe('DiditKycService', () => {
 
     const result = await service.handleWebhook(
       {
-        'x-timestamp': `${Math.floor(Date.now() / 1000)}`,
+        'x-timestamp': String(payload.timestamp),
         'x-signature-v2': signature,
       },
       payload,

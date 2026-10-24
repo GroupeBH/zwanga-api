@@ -190,7 +190,6 @@ export class DiditKycService {
       sessionId,
       payload: diditSession,
       source: 'session_created',
-      fallbackStatus: diditSession.status ?? 'Not Started',
     });
 
     return {
@@ -269,7 +268,6 @@ export class DiditKycService {
       sessionId: effectiveSessionId,
       payload: diditSession,
       source: 'sync',
-      fallbackStatus: dto.status,
     });
   }
 
@@ -340,6 +338,16 @@ export class DiditKycService {
     let diditSession = eventPayload;
     const config = this.getOptionalDiditApiConfig();
 
+    // Simple signs only four envelope fields, not the identity evidence or
+    // vendor_data. Require a fresh server decision instead of storing unsigned
+    // fields when the provider is unavailable; a non-2xx response permits retry.
+    if (signatureVerification.method === 'simple' && !config) {
+      throw new ServiceUnavailableException({
+        code: 'KYC_PROVIDER_NOT_CONFIGURED',
+        message: 'La décision KYC doit être confirmée auprès du fournisseur.',
+      });
+    }
+
     if (sessionId && config) {
       try {
         diditSession = await this.retrieveSessionDecision(
@@ -348,6 +356,7 @@ export class DiditKycService {
           config.baseUrl,
         );
       } catch (error) {
+        if (signatureVerification.method === 'simple') throw error;
         this.logger.warn(
           `Didit webhook could not refresh session ${sessionId}; applying signed webhook payload. ${
             error instanceof Error ? error.message : String(error)
@@ -362,7 +371,6 @@ export class DiditKycService {
       sessionId,
       payload: diditSession,
       source: 'webhook',
-      fallbackStatus: this.asNullableString(eventPayload.status),
     });
 
     return {
@@ -544,15 +552,24 @@ export class DiditKycService {
     sessionId?: string | null;
     payload: DiditSessionResponse | DiditPayload;
     source: 'session_created' | 'sync' | 'webhook';
-    fallbackStatus?: string | null;
   }): Promise<KycDocument> {
     const diditPayload = this.unwrapDiditPayload(input.payload as DiditPayload);
     const sessionId = input.sessionId ?? this.extractSessionId(diditPayload);
     const diditVendorData = this.extractVendorData(diditPayload);
     const statusText =
       this.asNullableString(diditPayload.status) ??
-      input.fallbackStatus ??
-      null;
+      (input.source === 'session_created' ? 'Not Started' : null);
+    // A client callback is only a sync hint, never an identity decision.
+    // Fail before any write so an incomplete provider response preserves the
+    // previous approval/rejection and cannot activate a user or grant benefits.
+    if (!statusText) {
+      throw new BadGatewayException({
+        error: 'Réponse KYC invalide',
+        code: 'KYC_PROVIDER_INVALID_RESPONSE',
+        message:
+          "Le service de vérification d'identité a retourné une décision incomplète. Votre statut est inchangé. Réessayez dans quelques instants.",
+      });
+    }
     const mappedStatus = this.mapDiditStatus(statusText);
     const now = new Date();
 
@@ -579,9 +596,18 @@ export class DiditKycService {
 
       // A delayed Didit callback must never overwrite a newer AWS dossier or its account status.
       const latest = await kycRepository.findOne({ where: { userId: input.userId }, order: { createdAt: 'DESC' } });
+      if (input.source === 'session_created' && latest?.status === KycStatus.APPROVED) {
+        throw new ConflictException({ code: 'KYC_ALREADY_APPROVED', message: 'Votre identité est déjà vérifiée.' });
+      }
       if (latest?.provider === KycProvider.AWS && input.source !== 'session_created') return latest;
       if (latest?.provider === KycProvider.AWS && latest.status !== KycStatus.REJECTED)
         throw new ConflictException('Une vérification AWS est déjà en cours ou approuvée.');
+
+      // A delayed session must not replace the current session pointer, even if
+      // its first delivery leaves the status unchanged. Otherwise its retry
+      // appears current and can undo a newer approval.
+      if (input.source !== 'session_created' && latest?.diditSessionId &&
+          sessionId && latest.diditSessionId !== sessionId) return latest;
 
       if (input.existingKyc?.id) {
         kycDocument = await kycRepository.findOne({
@@ -620,12 +646,14 @@ export class DiditKycService {
         });
       }
 
-      const isStalePendingEvent =
-        Boolean(sessionId) &&
-        Boolean(kycDocument.diditSessionId) &&
-        kycDocument.diditSessionId !== sessionId &&
-        mappedStatus === KycStatus.PENDING &&
-        kycDocument.status !== KycStatus.PENDING;
+      if (input.source !== 'session_created' &&
+          mappedStatus === KycStatus.PENDING &&
+          !['in review', 'resubmitted', 'awaiting user'].includes(statusText.trim().toLowerCase()) &&
+          kycDocument.status !== KycStatus.PENDING) {
+        // A delayed start event is not a revocation. Current-session In Review /
+        // Resubmitted updates remain supported (e.g. ongoing AML monitoring).
+        return kycDocument;
+      }
 
       kycDocument.provider = KycProvider.DIDIT;
       kycDocument.diditSessionId = sessionId ?? kycDocument.diditSessionId;
@@ -644,24 +672,22 @@ export class DiditKycService {
         input.source,
       );
 
-      if (!isStalePendingEvent) {
-        if (kycDocument.status !== mappedStatus) {
-          // A provider decision must not be attributed to an earlier admin.
-          // Keep the last decision date through pending states, then advance it
-          // only on a new terminal decision (never on a repeated sync/webhook).
-          kycDocument.reviewedBy = null;
-          if (mappedStatus !== KycStatus.PENDING) {
-            kycDocument.reviewedAt = new Date(
-              Math.max(now.getTime(), (kycDocument.reviewedAt?.getTime() ?? 0) + 1),
-            );
-          }
+      if (kycDocument.status !== mappedStatus) {
+        // A provider decision must not be attributed to an earlier admin.
+        // Keep the last decision date through pending states, then advance it
+        // only on a new terminal decision (never on a repeated sync/webhook).
+        kycDocument.reviewedBy = null;
+        if (mappedStatus !== KycStatus.PENDING) {
+          kycDocument.reviewedAt = new Date(
+            Math.max(now.getTime(), (kycDocument.reviewedAt?.getTime() ?? 0) + 1),
+          );
         }
-        kycDocument.status = mappedStatus;
-        kycDocument.rejectionReason =
-          mappedStatus === KycStatus.REJECTED
-            ? this.extractRejectionReason(statusText, diditPayload)
-            : null;
       }
+      kycDocument.status = mappedStatus;
+      kycDocument.rejectionReason =
+        mappedStatus === KycStatus.REJECTED
+          ? this.extractRejectionReason(statusText, diditPayload)
+          : null;
 
       const savedKyc = await kycRepository.save(kycDocument);
       if (input.source !== 'session_created') await this.evidence?.enqueue(manager, savedKyc);
@@ -670,7 +696,7 @@ export class DiditKycService {
       const mayUpdateStatus = user.isActive &&
         ![UserStatus.SUSPENDED, UserStatus.INACTIVE].includes(user.status);
 
-      if (mappedStatus === KycStatus.APPROVED && !isStalePendingEvent) {
+      if (mappedStatus === KycStatus.APPROVED) {
         if (mayUpdateStatus) {
           const nextStatus = UserStatus.ACTIVE;
           userStatusChanged = user.status !== nextStatus;
@@ -802,17 +828,34 @@ export class DiditKycService {
       throw new UnauthorizedException('Webhook Didit non signe.');
     }
 
+    const configuredTolerance = Number(
+      this.configService.get<string>('DIDIT_WEBHOOK_TOLERANCE_SECONDS'),
+    );
     const toleranceSeconds =
-      Number(
-        this.configService.get<string>('DIDIT_WEBHOOK_TOLERANCE_SECONDS'),
-      ) || DIDIT_SIGNATURE_TOLERANCE_SECONDS;
+      Number.isFinite(configuredTolerance) && configuredTolerance > 0
+        ? configuredTolerance
+        : DIDIT_SIGNATURE_TOLERANCE_SECONDS;
     const timestampMs = this.parseWebhookTimestamp(timestamp);
+    const eventPayload = this.unwrapDiditPayload(payload);
+    const signedTimestampMs = this.parseWebhookTimestamp(
+      eventPayload.timestamp !== undefined
+        ? eventPayload.timestamp
+        : payload.timestamp,
+    );
+    const envelopeTimestampMs = payload.timestamp === undefined
+      ? signedTimestampMs
+      : this.parseWebhookTimestamp(payload.timestamp);
 
+    // X-Timestamp alone is not authenticated by V2. Bind freshness to the
+    // signed body, including legacy wrapped payloads, and reject ambiguities.
     if (
-      !timestampMs ||
-      Math.abs(Date.now() - timestampMs) > toleranceSeconds * 1000
+      timestampMs === null ||
+      signedTimestampMs === null ||
+      timestampMs !== signedTimestampMs ||
+      envelopeTimestampMs !== signedTimestampMs ||
+      Math.abs(Date.now() - signedTimestampMs) > toleranceSeconds * 1000
     ) {
-      throw new UnauthorizedException('Webhook Didit expire.');
+      throw new UnauthorizedException('Horodatage du webhook Didit invalide ou expiré.');
     }
 
     const canonicalPayload = this.canonicalJson(payload);
@@ -831,9 +874,13 @@ export class DiditKycService {
       return { method: 'v2' };
     }
 
+    if (signature) {
+      throw new UnauthorizedException('Signature webhook Didit invalide.');
+    }
+
     if (
       signatureSimple &&
-      this.verifySimpleSignature(payload, signatureSimple, timestamp, secret)
+      this.verifySimpleSignature(payload, signatureSimple, secret)
     ) {
       return { method: 'simple' };
     }
@@ -844,12 +891,10 @@ export class DiditKycService {
   private verifySimpleSignature(
     payload: DiditPayload,
     signature: string,
-    fallbackTimestamp: string,
     secret: string,
   ): boolean {
     const eventPayload = this.unwrapDiditPayload(payload);
-    const signedTimestamp =
-      this.asNullableString(eventPayload.timestamp) ?? fallbackTimestamp;
+    const signedTimestamp = String(eventPayload.timestamp ?? payload.timestamp);
     const sessionId = this.extractSessionId(eventPayload) ?? '';
     const status = this.asNullableString(eventPayload.status) ?? '';
     const webhookType =
@@ -878,14 +923,17 @@ export class DiditKycService {
     return value ? String(value).trim() : null;
   }
 
-  private parseWebhookTimestamp(timestamp: string): number | null {
+  private parseWebhookTimestamp(timestamp: unknown): number | null {
+    if (typeof timestamp !== 'string' && typeof timestamp !== 'number') return null;
+    if (typeof timestamp === 'string' && !timestamp.trim()) return null;
     const numeric = Number(timestamp);
 
     if (Number.isFinite(numeric)) {
-      return timestamp.length >= 13 ? numeric : numeric * 1000;
+      if (!Number.isSafeInteger(numeric) || numeric <= 0) return null;
+      return numeric >= 1_000_000_000_000 ? numeric : numeric * 1000;
     }
 
-    const parsed = Date.parse(timestamp);
+    const parsed = typeof timestamp === 'string' ? Date.parse(timestamp) : NaN;
     return Number.isFinite(parsed) ? parsed : null;
   }
 
