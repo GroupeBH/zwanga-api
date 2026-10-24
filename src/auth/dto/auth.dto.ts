@@ -293,6 +293,11 @@ export class RefreshTokenDto {
   @IsString()
   @IsNotEmpty()
   refreshToken: string;
+
+  @ApiProperty({ required: false, description: 'UUID stable pour reprendre le même renouvellement après une réponse perdue.' })
+  @IsOptional()
+  @Matches(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)
+  requestId?: string;
 }
 
 export class GoogleMobileAuthDto extends RegistrationCompatibilityDto {

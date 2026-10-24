@@ -29,16 +29,18 @@ export class TripRequestRecoveryService {
   async reopenAfterPassengerReleasesOverdueDriver(
     tripRequestId: string,
     passengerId: string,
+    searchNow = true,
   ): Promise<TripRequest | null> {
     return this.reopenMatchingSelection({
       id: tripRequestId,
       passengerId,
       status: TripRequestStatus.DRIVER_SELECTED,
-    });
+    }, searchNow);
   }
 
   private async reopenMatchingSelection(
     where: FindOptionsWhere<TripRequest>,
+    searchNow: boolean,
   ): Promise<TripRequest | null> {
     const reopened = await this.tripRequestRepository.manager.transaction(
       async (manager) => {
@@ -50,6 +52,7 @@ export class TripRequestRecoveryService {
           return null;
         }
 
+        const reopeningAt = new Date();
         const updateResult = await manager.update(
           TripRequest,
           {
@@ -59,7 +62,12 @@ export class TripRequestRecoveryService {
             status: TripRequestStatus.DRIVER_SELECTED,
           },
           {
-            status: TripRequestStatus.PENDING,
+            status: searchNow ? TripRequestStatus.PENDING : TripRequestStatus.EXPIRED,
+            ...(searchNow ? {
+              departureDateMin: reopeningAt,
+              departureDateMax: new Date(reopeningAt.getTime() + 30 * 60_000),
+              dispatchCheckedAt: null,
+            } : {}),
             selectedDriverId: null,
             selectedVehicleId: null,
             selectedPricePerSeat: null,
@@ -122,7 +130,7 @@ export class TripRequestRecoveryService {
     this.logger.log(
       `Trip request ${reopened.id} reopened after its passenger released the overdue driver`,
     );
-    await this.notifyReopenedRequest(reopened);
+    if (searchNow) await this.notifyReopenedRequest(reopened);
     return reopened;
   }
 
@@ -131,13 +139,17 @@ export class TripRequestRecoveryService {
       await this.notificationService.sendNotificationToUser(
         tripRequest.passengerId,
         'Votre commande est de nouveau disponible',
-        'Le conducteur ne peut plus effectuer ce trajet. Votre commande est de nouveau visible par les conducteurs.',
+        'La recherche reprend avec une nouvelle plage de prise en charge de 30 minutes.',
         {
           type: 'trip_request_reopened',
           tripRequestId: tripRequest.id,
           reason: 'passenger_released_overdue_driver',
         },
       );
+
+      // Immediate requests are handled by the nearest-driver dispatch worker.
+      // Never broadcast them to all drivers while holding up the HTTP response.
+      if (tripRequest.immediateDispatch) return;
 
       const drivers = await this.userRepository.find({
         where: { role: UserRole.DRIVER, isActive: true },

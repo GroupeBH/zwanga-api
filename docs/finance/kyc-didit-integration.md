@@ -5,6 +5,25 @@ Date : 1 septembre 2026
 Périmètre : application mobile, backend NestJS, back-office admin, retraits conducteur, retraits de parrainage  
 Statut : implémenté localement ; migration, variables d'environnement, configuration Didit et déploiements requis
 
+## 24 octobre 2026 — Validation serveur et signatures renforcées
+
+- `POST /users/kyc/didit/sync` accepte toujours le champ mobile `status`, mais
+  l'ignore pour décider du KYC. Une réponse fournisseur sans décision exploitable
+  renvoie `502 KYC_PROVIDER_INVALID_RESPONSE` et conserve le statut enregistré.
+  Aucune nouvelle version mobile n'est nécessaire pour ce correctif backend.
+- Le `timestamp` signé doit être valide, récent et égal à `X-Timestamp`.
+  Un message ancien avec un en-tête récent ou une V2 invalide est refusé (401).
+  Utiliser une livraison de test fraîchement signée pour la recette, pas une
+  ancienne capture. Les timestamps entiers Unix ou chaînes sont pris en charge.
+- La variante Simple n'authentifie pas les pièces/`vendor_data`/`decision` :
+  le backend doit obtenir la décision courante de l'API avant toute écriture.
+  Une panne fournisseur produit une erreur réessayable, jamais une approbation
+  à partir de données non signées. Le repli V2 récent, intégralement signé,
+  reste disponible. Voir le [contrat officiel Didit](https://docs.didit.me/integration/webhooks).
+- Pas de migration ni de nouvelle variable d'environnement. Les clés existantes
+  restent inchangées ; recharger le backend pour appliquer le correctif.
+- Tests et limites : [rapport de sécurité et suivi](../operations/penetration-tests-2026-10-24.md).
+
 ## 8 octobre 2026 — Archivage privé des justificatifs Didit
 
 **Implémenté dans le backend, désactivé par défaut, non déployé.** Le KYC historique

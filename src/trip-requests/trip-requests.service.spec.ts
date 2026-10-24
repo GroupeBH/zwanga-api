@@ -1299,7 +1299,7 @@ describe('TripRequestsService overdue selected driver recovery', () => {
     );
     expect(
       recoveryService.reopenAfterPassengerReleasesOverdueDriver,
-    ).toHaveBeenCalledWith(selectedRequest.id, selectedRequest.passengerId);
+    ).toHaveBeenCalledWith(selectedRequest.id, selectedRequest.passengerId, true);
   });
 
   it('refuses to release the driver after the passenger was picked up', async () => {

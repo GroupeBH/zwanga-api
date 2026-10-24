@@ -80,4 +80,27 @@ const bin = process.env.AUDIT_TEST_POSTGRES_BIN;
     expect(settled.filter(result => result.status === 'fulfilled')).toHaveLength(1);
     expect(settled.filter(result => result.status === 'rejected')).toHaveLength(1);
   });
+
+  it('recovers concurrent/lost responses with one committed pair and refuses replay after logout', async () => {
+    const test = await setup();
+    const receipts = new Map<string, string>();
+    test.service.configService = { get: () => 'synthetic-recovery-secret' };
+    test.service.redisService = {
+      get: async key => receipts.get(key) ?? null,
+      compareAndSet: async (key, _expected, value) => {
+        if (receipts.has(key)) return false;
+        receipts.set(key, value); return true;
+      },
+    };
+    const dto = { refreshToken: 'old-refresh', requestId: randomUUID() };
+    const both = Promise.all([test.service.refreshToken(dto), test.service.refreshToken(dto)]);
+    await test.started; test.release();
+    const [first, second] = await both;
+    expect(second).toEqual(first);
+    expect(await test.service.refreshToken(dto)).toEqual(first);
+    await test.service.logout(test.id);
+    await expect(test.service.refreshToken(dto)).rejects.toMatchObject({ status: 401 });
+    expect(await db.query('SELECT "refreshToken", "accessToken" FROM users WHERE id=$1', [test.id]))
+      .toEqual([{ refreshToken: null, accessToken: null }]);
+  });
 });

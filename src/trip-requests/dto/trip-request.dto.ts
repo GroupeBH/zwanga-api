@@ -15,6 +15,13 @@ import { ApiProperty, OmitType } from '@nestjs/swagger';
 import { TripPaymentMode } from '../../payments/enums/trip-payment-mode.enum';
 import { VehicleType } from '../../vehicles/entities/vehicle.entity';
 
+export class ReleaseOverdueDriverDto {
+  @ApiProperty({ required: false, default: true, description: 'Relance pour 30 minutes. false libère le conducteur sans publier avant modification des horaires.' })
+  @IsOptional()
+  @IsBoolean()
+  searchNow?: boolean;
+}
+
 export class CreateTripRequestDto {
   @ApiProperty({ required: false, default: false,
     description: 'Départ immédiat demandé par le passager. Le serveur décide de son activation ; les commandes programmées gardent leur parcours habituel.' })

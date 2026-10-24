@@ -57,6 +57,7 @@ import { normalizeLegalName } from '../users/legal-identity.util';
 import { RedisService } from '../common/services/redis.service';
 import { matchesStoredToken, tokenFingerprint } from './token-fingerprint';
 import { rethrowSessionError } from './session-error';
+import { openRefreshReceipt, REFRESH_RECOVERY_SECONDS, sealRefreshReceipt } from './refresh-recovery';
 import {
   accountReservesPhone,
   saveRegistrationWithPhone,
@@ -818,8 +819,12 @@ export class AuthService {
 
       const user = await this.userRepository.findOne({
         where: { id: payload.sub },
-        select: ['id', 'phone', 'role', 'status', 'isActive', 'refreshToken'],
+        select: ['id', 'phone', 'role', 'status', 'isActive', 'refreshToken', 'accessToken'],
       });
+
+      if (refreshTokenDto.requestId && user) {
+        return await this.refreshRecoverably(user, refreshTokenDto.refreshToken, refreshTokenDto.requestId);
+      }
 
       if (!user || !matchesStoredToken(user.refreshToken, refreshTokenDto.refreshToken)) {
         throw new UnauthorizedException('Token de rafraîchissement invalide');
@@ -843,6 +848,48 @@ export class AuthService {
     } catch (error) {
       rethrowSessionError(error);
     }
+  }
+
+  private async refreshRecoverably(user: User, oldToken: string, requestId: string) {
+    this.assertUserCanAuthenticate(user);
+    type Receipt = { requestId: string; userId: string; role: UserRole; status: UserStatus;
+      expiresAt: number; tokens: { accessToken: string; refreshToken: string } };
+    const key = `auth:refresh-recovery:${tokenFingerprint(oldToken)}`;
+    const secret = this.configService.get<string>('JWT_REFRESH_SECRET')!;
+    let sealed = await this.redisService.get<string>(key);
+    if (!sealed) {
+      if (!matchesStoredToken(user.refreshToken, oldToken)) throw new UnauthorizedException();
+      const receipt: Receipt = { requestId, userId: user.id, role: user.role, status: user.status,
+        expiresAt: Date.now() + REFRESH_RECOVERY_SECONDS * 1000, tokens: await this.signTokens(user) };
+      const proposed = sealRefreshReceipt(receipt, secret);
+      // Persist before rotation: a crash cannot commit a rotation without its receipt.
+      const claimed = await this.redisService.compareAndSet(key, null, proposed, REFRESH_RECOVERY_SECONDS);
+      sealed = claimed ? proposed : await this.redisService.get<string>(key);
+      if (!sealed) throw new ServiceUnavailableException('Renouvellement temporairement indisponible. Réessayez.');
+    }
+    const receipt = openRefreshReceipt<Receipt>(sealed, secret);
+    if (receipt.requestId !== requestId) {
+      if (matchesStoredToken(user.refreshToken, oldToken)) throw new ServiceUnavailableException('Renouvellement déjà en cours.');
+      throw new UnauthorizedException();
+    }
+    const currentMatches = (current: User) => current.isActive && current.id === receipt.userId &&
+      current.role === receipt.role && current.status === receipt.status && receipt.expiresAt > Date.now() &&
+      matchesStoredToken(current.refreshToken, receipt.tokens.refreshToken) &&
+      matchesStoredToken(current.accessToken, receipt.tokens.accessToken);
+    if (currentMatches(user)) return receipt.tokens;
+    if (receipt.userId !== user.id || receipt.role !== user.role || receipt.status !== user.status ||
+        receipt.expiresAt <= Date.now() || !matchesStoredToken(user.refreshToken, oldToken)) {
+      throw new UnauthorizedException();
+    }
+    const rotated = await this.userRepository.update(
+      { id: user.id, refreshToken: user.refreshToken!, isActive: true, role: user.role, status: user.status },
+      { accessToken: tokenFingerprint(receipt.tokens.accessToken), refreshToken: tokenFingerprint(receipt.tokens.refreshToken) },
+    );
+    if (rotated.affected === 1) return receipt.tokens;
+    const current = await this.userRepository.findOne({ where: { id: user.id },
+      select: ['id', 'role', 'status', 'isActive', 'refreshToken', 'accessToken'] });
+    if (current && currentMatches(current)) return receipt.tokens;
+    throw new UnauthorizedException(); // Logout/PIN reset/account changes always win.
   }
 
   /**

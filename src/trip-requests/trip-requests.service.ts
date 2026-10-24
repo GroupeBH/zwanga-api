@@ -1895,6 +1895,7 @@ export class TripRequestsService {
   async releaseOverdueSelectedDriver(
     passengerId: string,
     tripRequestId: string,
+    searchNow = true,
   ): Promise<SanitizedTripRequest> {
     const tripRequest = await this.tripRequestRepository.findOne({
       where: { id: tripRequestId, passengerId },
@@ -1963,6 +1964,7 @@ export class TripRequestsService {
       await this.tripRequestRecoveryService.reopenAfterPassengerReleasesOverdueDriver(
         tripRequestId,
         passengerId,
+        searchNow,
       );
 
     if (!reopened) {

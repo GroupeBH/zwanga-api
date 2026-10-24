@@ -7,6 +7,37 @@ import {
 } from './entities/payment-transaction.entity';
 
 describe('Durable deposit reconciliation', () => {
+  it('uses two lanes, skips overlapping cycles and caps backoff at fifteen minutes', async () => {
+    const jobs = Array.from({ length: 5 }, (_, i) => ({ paymentId: String(i), attempts: 30, revision: 1, createdAt: new Date() }));
+    const query = jest.fn().mockResolvedValueOnce([jobs, 5]).mockResolvedValue([[], 0]);
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let active = 0, peak = 0;
+    const reconcilePayment = jest.fn(async () => {
+      active++; peak = Math.max(peak, active); await gate; active--; return false;
+    });
+    const worker = new PaymentReconciliationService({ query } as any, { reconcilePayment } as any);
+    const batch = worker.reconcile();
+    await new Promise(resolve => setImmediate(resolve));
+    expect(reconcilePayment).toHaveBeenCalledTimes(2);
+    await worker.reconcile();
+    expect(query).toHaveBeenCalledTimes(1);
+    release(); await batch;
+    expect(peak).toBe(2);
+    expect(reconcilePayment).toHaveBeenCalledTimes(5);
+    for (const call of query.mock.calls.slice(1)) expect(call[1][3]).toBe(900);
+  });
+
+  it('continues other jobs when one acknowledgement fails and releases the running gate', async () => {
+    const jobs = ['one', 'two'].map(paymentId => ({ paymentId, attempts: 1, revision: 1, createdAt: new Date() }));
+    const query = jest.fn().mockResolvedValueOnce([jobs, 2]).mockRejectedValueOnce(new Error('database outage'))
+      .mockResolvedValue([[], 0]);
+    const reconcilePayment = jest.fn(async () => true);
+    const worker = new PaymentReconciliationService({ query } as any, { reconcilePayment } as any);
+    await worker.reconcile(); await worker.reconcile();
+    expect(reconcilePayment).toHaveBeenCalledTimes(2);
+    expect(query).toHaveBeenCalledTimes(4);
+  });
   it('preserves success when a concurrent provider request finishes late with pending state', async () => {
     const stored = {
       id: 'payment',
