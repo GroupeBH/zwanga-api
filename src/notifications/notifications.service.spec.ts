@@ -30,7 +30,9 @@ describe('NotificationService critical push reliability', () => {
       })),
       save: jest.fn((value: unknown) => Promise.resolve(value)),
       findOne: jest.fn(),
+      update: jest.fn().mockResolvedValue({ affected: 1 }),
       manager: {
+        query: jest.fn().mockResolvedValue([]),
         transaction: jest.fn(
           (work: (transactionManager: typeof manager) => Promise<unknown>) =>
             work(manager),
@@ -67,6 +69,22 @@ describe('NotificationService critical push reliability', () => {
     jest.restoreAllMocks();
   });
 
+  const expectClaimedResult = (
+    repository: ReturnType<typeof buildService>['notificationRepository'],
+    id: string,
+    result: Record<string, unknown>,
+  ) => {
+    expect(repository.update).toHaveBeenCalledWith(
+      {
+        id,
+        status: NotificationStatus.PENDING,
+        errorMessage: expect.stringMatching(/^TRANSACTIONAL_PUSH_CLAIMED:/),
+      },
+      expect.objectContaining(result),
+    );
+    expect(repository.save).not.toHaveBeenCalled();
+  };
+
   it.each([false, true])('push delivery never owns the independent realtime lane, provider failure=%s', async failure => {
     const f = buildService();
     const publish = jest.fn(); Object.assign(f.service, { rideAlerts: { publish } });
@@ -86,8 +104,9 @@ describe('NotificationService critical push reliability', () => {
 
   it('drains a 50-driver broadcast in one tick with at most five sends in flight', async () => {
     const f = buildService();
-    for (let batch = 0; batch < 5; batch++) {
-      f.queryBuilder.getMany.mockResolvedValueOnce(Array.from({ length: 10 }, (_, index) => ({ id: `${batch}:${index}` })) as never[]);
+    jest.spyOn(Date, 'now').mockReturnValue(Date.now());
+    for (let batch = 0; batch < 10; batch++) {
+      f.queryBuilder.getMany.mockResolvedValueOnce(Array.from({ length: 5 }, (_, index) => ({ id: `${batch}:${index}` })) as never[]);
     }
     jest.spyOn(f.service as any, 'isCriticalNotificationStillDeliverable').mockResolvedValue(true);
     let active = 0, peak = 0;
@@ -99,34 +118,58 @@ describe('NotificationService critical push reliability', () => {
     await f.service.dispatchUrgentNotifications();
     expect(delivery).toHaveBeenCalledTimes(50);
     expect(peak).toBe(5);
-    expect(f.queryBuilder.getMany).toHaveBeenCalledTimes(6);
+    expect(f.queryBuilder.getMany).toHaveBeenCalledTimes(11);
+    expect(f.queryBuilder.take.mock.calls.every(([size]) => size === 5)).toBe(true);
   });
 
-  it('bounds a continuously full urgent queue to six batches per tick', async () => {
+  it('bounds a continuously full urgent queue to twenty five-item batches per tick', async () => {
     const f = buildService();
-    f.queryBuilder.getMany.mockResolvedValue(Array.from({ length: 10 }, (_, index) => ({ id: String(index) })) as never[]);
+    jest.spyOn(Date, 'now').mockReturnValue(Date.now());
+    f.queryBuilder.getMany.mockResolvedValue(Array.from({ length: 5 }, (_, index) => ({ id: String(index) })) as never[]);
     jest.spyOn(f.service as any, 'isCriticalNotificationStillDeliverable').mockResolvedValue(true);
-    jest.spyOn(f.service as any, 'deliverSavedNotification').mockResolvedValue(true);
+    const delivery = jest.spyOn(f.service as any, 'deliverSavedNotification').mockResolvedValue(true);
     await f.service.dispatchUrgentNotifications();
-    expect(f.queryBuilder.getMany).toHaveBeenCalledTimes(6);
+    expect(f.queryBuilder.getMany).toHaveBeenCalledTimes(20);
+    expect(delivery).toHaveBeenCalledTimes(100);
+    expect(f.queryBuilder.take.mock.calls.every(([size]) => size === 5)).toBe(true);
+  });
+
+  it('does not claim another urgent batch after the two-second drain budget', async () => {
+    const f = buildService();
+    let now = Date.now();
+    jest.spyOn(Date, 'now').mockImplementation(() => now);
+    f.queryBuilder.getMany.mockResolvedValue(Array.from({ length: 5 }, (_, index) => ({ id: String(index) })) as never[]);
+    jest.spyOn(f.service as any, 'isCriticalNotificationStillDeliverable').mockResolvedValue(true);
+    const delivery = jest.spyOn(f.service as any, 'deliverSavedNotification').mockImplementation(async () => {
+      now += 500;
+      return true;
+    });
+    await f.service.dispatchUrgentNotifications();
+    expect(f.queryBuilder.getMany).toHaveBeenCalledTimes(1);
+    expect(delivery).toHaveBeenCalledTimes(5);
+    expect((f.service as any).urgentWorkers).toBe(0);
   });
 
   it('reuses free urgent slots while another urgent send remains unresolved', async () => {
     const f = buildService();
     let resolveSlow!: (value: boolean) => void;
     const slow = new Promise<boolean>(resolve => { resolveSlow = resolve; });
-    const rows = Array.from({ length: 6 }, (_, index) => ({ id: String(index), data: { type: 'new_booking' } }));
+    const rows = Array.from({ length: 5 }, (_, index) => ({ id: String(index), data: { type: 'new_booking' } }));
     f.queryBuilder.getMany.mockResolvedValueOnce(rows as never[]).mockResolvedValueOnce([{ id: 'next' }] as never[]);
     jest.spyOn(f.service as any, 'isCriticalNotificationStillDeliverable').mockResolvedValue(true);
     const delivery = jest.spyOn(f.service as any, 'deliverSavedNotification').mockImplementation((...args: any[]) => args[0].id === '0' ? slow : Promise.resolve(true));
     const first = f.service.dispatchUrgentNotifications();
-    await new Promise(resolve => setImmediate(resolve));
-    expect((f.service as any).urgentWorkers).toBe(1);
-    expect(delivery).toHaveBeenCalledWith(expect.objectContaining({ id: '5' }));
-    await f.service.dispatchUrgentNotifications();
-    expect(delivery).toHaveBeenCalledWith(expect.objectContaining({ id: 'next' }));
-    expect(f.queryBuilder.take).toHaveBeenLastCalledWith(8);
-    resolveSlow(true); await first;
+    try {
+      await new Promise(resolve => setImmediate(resolve));
+      expect((f.service as any).urgentWorkers).toBe(1);
+      expect(delivery).toHaveBeenCalledWith(expect.objectContaining({ id: '4' }));
+      await f.service.dispatchUrgentNotifications();
+      expect(delivery).toHaveBeenCalledWith(expect.objectContaining({ id: 'next' }));
+      expect(f.queryBuilder.take).toHaveBeenLastCalledWith(4);
+    } finally {
+      resolveSlow(true);
+      await first;
+    }
     expect((f.service as any).urgentWorkers).toBe(0);
   });
 
@@ -158,14 +201,18 @@ describe('NotificationService critical push reliability', () => {
     f.userRepository.findOne.mockResolvedValue({ fcmToken: 'synthetic-device' });
     const delivery = jest.spyOn(f.service as any, 'deliverSavedNotification').mockResolvedValue(true);
     const run = f.service.dispatchTransactionalNotifications();
-    await new Promise(resolve => setImmediate(resolve));
-    expect(delivery).toHaveBeenCalledWith(urgent);
-    expect(f.queryBuilder.andWhere).toHaveBeenCalledWith("notification.data ->> 'type' IN (:...urgentTypes)", {
-      urgentTypes: ['new_booking', 'driver_dispatch_offer', 'trip_request_nearby', 'booking_response', 'trip_request_accepted'],
-    });
-    expect(f.queryBuilder.andWhere).toHaveBeenCalledWith("COALESCE(notification.data ->> 'type', '') NOT IN (:...urgentTypes)", expect.any(Object));
-    expect(f.queryBuilder.take).toHaveBeenCalledWith(10);
-    finishRegular([]); await run;
+    try {
+      await new Promise(resolve => setImmediate(resolve));
+      expect(delivery).toHaveBeenCalledWith(urgent);
+      expect(f.queryBuilder.andWhere).toHaveBeenCalledWith("notification.data ->> 'type' IN (:...urgentTypes)", {
+        urgentTypes: ['new_booking', 'driver_dispatch_offer', 'trip_request_nearby', 'booking_response', 'trip_request_accepted'],
+      });
+      expect(f.queryBuilder.andWhere).toHaveBeenCalledWith("COALESCE(notification.data ->> 'type', '') NOT IN (:...urgentTypes)", expect.any(Object));
+      expect(f.queryBuilder.take).toHaveBeenCalledWith(5);
+    } finally {
+      finishRegular([]);
+      await run;
+    }
   });
 
   it('suppresses a booking invitation already accepted/cancelled or no longer owned by the recipient', async () => {
@@ -178,7 +225,7 @@ describe('NotificationService critical push reliability', () => {
     await f.service.dispatchUrgentNotifications();
     expect(query).toHaveBeenCalledWith(expect.stringContaining("b.status = 'pending'"), ['b', 'driver']);
     expect(delivery).not.toHaveBeenCalled();
-    expect(f.notificationRepository.save).toHaveBeenCalledWith(expect.objectContaining({ isActive: false }));
+    expectClaimedResult(f.notificationRepository, 'stale', { isActive: false, status: NotificationStatus.FAILED });
   });
 
   it('never delivers a saved device snapshot after its account has unregistered push', async () => {
@@ -362,12 +409,11 @@ describe('NotificationService critical push reliability', () => {
     await service.dispatchTransactionalNotifications();
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     expect(queryBuilder.setOnLocked).toHaveBeenCalledWith('skip_locked');
-    expect(notificationRepository.save).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        status: NotificationStatus.SENT,
-        fcmToken: 'ExponentPushToken[new-device]',
-      }),
-    );
+    expectClaimedResult(notificationRepository, 'outbox', {
+      status: NotificationStatus.SENT,
+      fcmToken: 'ExponentPushToken[new-device]',
+      messageId: 'expo-ticket:ticket',
+    });
   });
 
   it('keeps token-less outbox notifications then retries them using a newly registered device', async () => {
@@ -382,7 +428,7 @@ describe('NotificationService critical push reliability', () => {
       title: 'Jetons reçus',
       body: '5 jetons',
     };
-    queryBuilder.getMany.mockResolvedValue([row]);
+    queryBuilder.getMany.mockResolvedValueOnce([row]);
     userRepository.findOne.mockResolvedValue({ fcmToken: null });
     const fetchSpy = jest
       .spyOn(global, 'fetch')
@@ -396,11 +442,33 @@ describe('NotificationService critical push reliability', () => {
     userRepository.findOne.mockResolvedValue({
       fcmToken: 'ExpoPushToken[new-device]',
     });
+    queryBuilder.getMany.mockResolvedValueOnce([row]);
     await service.retryCriticalFinancialNotifications();
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     expect(notificationRepository.save).toHaveBeenLastCalledWith(
       expect.objectContaining({ status: NotificationStatus.SENT }),
     );
+  });
+
+  it('does not send an outbox push when another worker has taken over its claim', async () => {
+    const f = buildService();
+    f.queryBuilder.getMany.mockResolvedValueOnce([{
+      id: 'outbox', eventKey: 'wallet:entry', userId: 'user',
+      status: NotificationStatus.PENDING, data: { type: 'wallet_transfer_in' },
+    }]);
+    f.userRepository.findOne.mockResolvedValue({ fcmToken: 'ExpoPushToken[device]' });
+    f.notificationRepository.update.mockResolvedValue({ affected: 0 });
+    const send = jest.spyOn(f.service as any, 'sendExpoPushNotification').mockResolvedValue('ticket');
+
+    await f.service.dispatchTransactionalNotifications();
+
+    expect(send).not.toHaveBeenCalled();
+    expect(f.notificationRepository.save).not.toHaveBeenCalled();
+    expect(f.notificationRepository.update).toHaveBeenCalledTimes(1);
+    expect(f.notificationRepository.update).toHaveBeenCalledWith({
+      id: 'outbox', status: NotificationStatus.PENDING,
+      errorMessage: expect.stringMatching(/^TRANSACTIONAL_PUSH_CLAIMED:/),
+    }, { updatedAt: expect.any(Function) });
   });
 
   it('suppresses obsolete pending withdrawal messages after the payout succeeds', async () => {
@@ -411,7 +479,7 @@ describe('NotificationService critical push reliability', () => {
         .fn()
         .mockResolvedValue({ userId: 'user', status: 'succeeded' }),
     });
-    queryBuilder.getMany.mockResolvedValue([
+    queryBuilder.getMany.mockResolvedValueOnce([
       {
         id: 'outbox',
         eventKey: 'wallet-withdrawal:payout:pending',
@@ -422,12 +490,10 @@ describe('NotificationService critical push reliability', () => {
     ]);
     await service.dispatchTransactionalNotifications();
     expect(userRepository.findOne).not.toHaveBeenCalled();
-    expect(notificationRepository.save).toHaveBeenCalledWith(
-      expect.objectContaining({
-        isActive: false,
-        status: NotificationStatus.FAILED,
-      }),
-    );
+    expectClaimedResult(notificationRepository, 'outbox', {
+      isActive: false,
+      status: NotificationStatus.FAILED,
+    });
   });
 
   it('does not retry an approval that has since been revoked', async () => {
@@ -500,7 +566,7 @@ describe('NotificationService critical push reliability', () => {
     }]);
     await f.service.dispatchTransactionalNotifications();
     expect(f.userRepository.findOne).not.toHaveBeenCalled();
-    expect(f.notificationRepository.save).toHaveBeenCalledWith(expect.objectContaining({ isActive: false }));
+    expectClaimedResult(f.notificationRepository, 'outbox', { isActive: false, status: NotificationStatus.FAILED });
   });
 
   it('isolates push failures between recipients and leaves the failed row retryable', async () => {

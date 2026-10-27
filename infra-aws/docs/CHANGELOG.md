@@ -1,5 +1,89 @@
 # Journal détaillé des changements d'infrastructure AWS
 
+## INFRA-2026-10-27-001 — Alignement Node et contrôles des dépendances avant déploiement
+
+### Métadonnées
+
+| Champ | Valeur |
+| --- | --- |
+| Date et heure de documentation | 2026-10-27 13:17, Africa/Kinshasa (UTC+1) |
+| Auteur / opérateur | Codex, correctif documentaire local demandé par le mainteneur |
+| Environnements concernés | développement, staging et production lors de la prochaine livraison |
+| Statut | changements versionnés ; documentation complétée localement, déploiement non constaté |
+| Type | CI/CD, environnement Node, construction Docker et sécurité des dépendances |
+| Référence | commit `d84ee754593514924aba877bc037704c6899bc1d` ; contrôle `check-infra-documentation.sh` en échec |
+
+### Contexte, état précédent et cause
+
+Le commit remplace Node 22 par la version 24.22.1 définie dans `.nvmrc` et
+actualise les dépendances applicatives. Auparavant, les deux workflows fixaient
+Node 22, le Dockerfile utilisait `NODE_VERSION=22`, et Compose transmettait
+`NODE_BASE_IMAGE`, argument non consommé par ce Dockerfile.
+
+Le contrôle documentaire échoue parce que quatre fichiers surveillés changent
+sans modification de ce journal. La documentation existante dans
+`docs/CHANGEMENTS_TECHNIQUES.md` et le rapport de dépendances ne satisfait pas ce
+contrôle. L'échec a été reproduit localement sur `HEAD^..HEAD` ; il intervient
+avant les tests, la construction et les opérations AWS du workflow de production.
+
+### Modifications réalisées
+
+| Fichier | Modification | Raison |
+| --- | --- | --- |
+| `.github/workflows/deploy.yml` | `setup-node` lit `.nvmrc` ; exécution de `npm run test:dependencies` avant Jest | aligner l'exécution et contrôler les intégrations des dépendances |
+| `.github/workflows/deploy-staging.yml` | même sélection Node et mêmes tests pour les actions `deploy` et `bootstrap` | contrôler le backend avant le démarrage du serveur de test |
+| `Dockerfile` | argument `NODE_VERSION` par défaut à `24.22.1` | construire les étapes existantes depuis `node:24.22.1-alpine` |
+| `docker-compose.yml` | argument de construction `NODE_VERSION: ${NODE_VERSION:-24.22.1}` à la place de `NODE_BASE_IMAGE` | transmettre l'argument réellement consommé par le Dockerfile |
+| `.nvmrc`, `package.json`, `package-lock.json`, `test/dependency-security.test.cjs` | version Node, dépendances, substitutions et tests associés | maintenir la cohérence entre code, installation et image |
+| `infra-aws/docs/CHANGELOG.md` | présente entrée | compléter la traçabilité exigée sans désactiver le contrôle |
+
+**Ressources AWS :** aucune création, modification ou suppression exécutée pour
+ce correctif documentaire. La future livraison conserve le pipeline existant :
+image ECR, tâche de migrations et remplacement des tâches ECS ; le staging
+conserve ses actions manuelles existantes. Aucun fichier Terraform modifié.
+
+**Variables et paramètres :** `NODE_VERSION` est un argument de construction
+non secret, avec `24.22.1` comme défaut. Aucun nouveau paramètre SSM, secret,
+identifiant AWS ou variable d'exécution obligatoire pour l'application.
+
+### Impacts
+
+- **Disponibilité :** la documentation seule ne redémarre aucun service. Le
+  changement Node sera effectif à la prochaine livraison de l'image ; les tests
+  des dépendances natives et la santé des nouvelles tâches doivent être validés.
+- **Sécurité et IAM :** les permissions, OIDC, certificats RDS et utilisateur
+  Docker restent inchangés dans ce lot. Le détail des mises à jour et les limites
+  de l'audit sont consignés dans le [rapport de dépendances](../../docs/operations/node-dependencies-security-2026-10-27.md).
+- **Données :** aucune nouvelle migration dans ce commit ; le pipeline continue
+  d'exécuter les migrations applicatives en attente selon sa procédure existante.
+- **Coûts :** aucun service AWS ajouté ou redimensionné ; durée des tests CI
+  potentiellement accrue. Le staging reste démarré par ses actions existantes.
+
+### Livraison, surveillance et retour arrière
+
+1. Inclure cette entrée dans le commit correctif ou la PR contenant les changements.
+2. Exécuter le contrôle documentaire, puis laisser le pipeline vérifier
+   l'installation, les tests des dépendances, Jest et la compilation. Aucun
+   `terraform apply` ni changement SSM n'est requis pour cette correction.
+3. Livrer par le workflow existant et contrôler la stabilisation ECS, les cibles
+   ALB, `/health/live`, `/health`, les erreurs et les redémarrages pendant au moins
+   30 minutes. Vérifier particulièrement le chargement des dépendances natives.
+4. En cas de régression du runtime, utiliser la précédente image et la précédente
+   définition de tâche validées, après vérification de leur compatibilité avec
+   les migrations effectivement exécutées. Ne pas rétrograder seulement Node
+   avec le nouveau manifeste de dépendances ; conserver un ensemble cohérent.
+
+### Validation et éléments restant à faire
+
+Le contrôle sans cette entrée reproduit l'échec sur les quatre fichiers cités.
+La vérification locale `bash infra-aws/scripts/check-infra-documentation.sh HEAD^ WORKTREE`
+réussit : `Infrastructure documentation check passed for 4 changed file(s).`
+Elle inclut les changements du commit et ce correctif non commité.
+`git diff --check` réussit également. Les tests applicatifs déjà réalisés sont détaillés dans les journaux
+techniques ; ils ne sont pas réexécutés pour cette modification documentaire.
+Le résultat du pipeline complet sur le futur commit reste à confirmer. Aucun
+push GitHub, déploiement ou appel AWS effectué pour ce correctif.
+
 ## INFRA-2026-10-14-002 — Surveillance et sondes après audit de résilience
 
 - Préparé localement uniquement : aucun `plan`, `apply`, changement SSM ou déploiement.

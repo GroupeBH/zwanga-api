@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
-# Node 20 is EOL in 2026. Node 22 matches package.json (engines.node >=22).
-ARG NODE_VERSION=22
+# Node LTS security release; keep in sync with .nvmrc and package.json.
+ARG NODE_VERSION=24.22.1
 
 FROM node:${NODE_VERSION}-alpine AS base
 WORKDIR /app

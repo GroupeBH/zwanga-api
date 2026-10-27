@@ -1,5 +1,38 @@
 # Journal des changements techniques
 
+## 2026-10-27 — Tests de notifications et de dispatch après réservation des envois
+
+- Le journal CI fourni présente 12 échecs dans deux suites. Les simulations de
+  `notifications.service.spec.ts` ignoraient la mise à jour conditionnelle des
+  notifications réservées et conservaient les anciennes tailles de lots.
+  `dispatch-speech.spec.ts` simulait encore une allocation individuelle, alors
+  que le service utilise désormais une sélection et une écriture groupées.
+- Les simulations respectent les réservations actuelles : cinq envois urgents
+  simultanés au maximum, vingt lots au maximum par passage, arrêt des nouvelles
+  réservations après deux secondes. Les tests contrôlent les mises à jour avec
+  identifiant de réservation, l'annulation des notifications obsolètes et la
+  libération des traitements simulés même lorsqu'une assertion échoue.
+- Régressions couvertes : perte de réservation avant envoi, résultat d'un ancien
+  worker qui ne doit pas écraser celui de son successeur, descriptions vocales
+  pour 1, 3 et 50 invitations avec un nombre constant de requêtes simulées.
+- Validation locale : `jest --runInBand --silent src/notifications
+  src/trip-requests/dispatch` réussit avec 290 tests dans 26 suites ; 71 tests
+  conditionnels ne sont pas exécutés. `tsc --noEmit --incremental false -p
+  tsconfig.build.json` réussit également. Ce passage ne remplace pas la recette
+  PostgreSQL ni l'exécution complète du pipeline sur le futur commit.
+- Périmètre du correctif : trois fichiers de tests et cette documentation.
+  Aucun changement du service en production, du schéma, du CI/CD ou d'AWS pour
+  ce correctif ; les autres modifications déjà présentes dans le dépôt restent
+  distinctes. Aucun envoi réel aux fournisseurs ni déploiement.
+
+## 2026-10-27 - Node et dependances de securite
+
+- Probleme : Node non fixe au correctif LTS actuel et 30 paquets affectes selon npm.
+- Solution : Node 24.22.1, versions compatibles et substitutions ciblees, Docker/Compose/CI alignes.
+- Precautions : aucun deploiement, migration ou changement du schema ; registre ADOT conserve.
+- Fichiers, mesures et limites : [rapport de securite des dependances](operations/node-dependencies-security-2026-10-27.md).
+
+
 ## 2026-10-24 — Reprises fiables backend/mobile et traitements bornés
 
 - **KYC Didit :** dans `src/users/didit-kyc.service.ts`, les événements d'une
