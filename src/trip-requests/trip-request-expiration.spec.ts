@@ -14,7 +14,10 @@ const buildService = () => {
     find: jest.fn().mockResolvedValue([]),
     findOne: jest.fn(),
     update: jest.fn().mockResolvedValue({ affected: 1 }),
-    manager: { transaction: jest.fn(async work => work({ getRepository: () => repository })) },
+    manager: {
+      query: jest.fn().mockResolvedValue([]),
+      transaction: jest.fn(async work => work({ getRepository: () => repository })),
+    },
   };
   const notifications = {
     sendNotificationToUser: jest.fn().mockResolvedValue(true),

@@ -1,3 +1,4 @@
+import { sequentialMobileFlow } from '../../../test/sequential-mobile-flow';
 import { RequestResponsePhases1780000098000 } from '../../database/migrations/1780000098000-RequestResponsePhases';
 import { claimRequestAcceptance, completeRequestAcceptance, releaseRequestAcceptance, startPassengerDecision } from './request-acceptance';
 import { Booking, BookingStatus } from '../../bookings/entities/booking.entity';
@@ -348,4 +349,5 @@ const redisPort = Number(process.env.DISPATCH_TEST_REDIS_PORT);
     expect((await db.getRepository(Trip).findOneByOrFail({ id: trip.id })).status).toBe('cancelled');
     expect((await offers(r.id)).map(o => o.status)).toEqual(['cancelled']);
   });
+  sequentialMobileFlow(() => ({ db, relay, dispatch, notifications, driver, ids, offers }));
 });

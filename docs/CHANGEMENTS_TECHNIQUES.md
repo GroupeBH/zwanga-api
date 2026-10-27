@@ -1,5 +1,25 @@
 # Journal des changements techniques
 
+## 2026-10-27 — Correction des tests CI des demandes de trajet
+
+- **Journal fourni :** 9 échecs dans 4 suites après l'ajout des refus persistants et du conducteur ciblé.
+- **Base de test :** `shared-trip-postgres.spec.ts` applique désormais la migration existante `RememberDriverRequestRefusals1780000095000`. Sa table SQL n'est pas créée par la synchronisation des entités TypeORM. Les migrations de production sont déjà enregistrées ; aucune nouvelle migration n'est nécessaire pour ce correctif.
+- **Concurrence :** les deux tests utilisant des transactions simultanées attendent toutes leurs fins avec `Promise.allSettled`, puis propagent les erreurs. Cela empêche le nettoyage `TRUNCATE` du test suivant de démarrer alors qu'une transaction précédente travaille encore.
+- **Contrats :** simulation de `manager.query` complétée pour le contrôle de confidentialité ; attentes adaptées au filtre de visibilité et à la relation `targetDriver`, en conservant les assertions d'expiration, de propriétaire et d'activité.
+- **Non-régression :** deux scénarios PostgreSQL supplémentaires vérifient l'absence de notification après refus et pour une demande ciblant un autre utilisateur.
+- **Validation :** 83 tests réussis dans 7 suites (`shared-trip-postgres`, `trip-request-expiration`, `request-availability`, `request-activity`, `trip-request-privacy`, `request-pages`, `driver-choice`), dont 24 scénarios sur PostgreSQL/PostGIS jetable. `tsc --project tsconfig.build.json --noEmit --incremental false` réussi. Exécution locale sur Windows, Node 24.11.0 et PostgreSQL 18 ; la totalité de la suite CI n'a pas été relancée.
+- **Portée :** quatre fichiers de tests et cette documentation uniquement ; aucune modification du comportement de production, du CI/CD ou de l'infrastructure AWS dans ce correctif. Aucun envoi de notification réelle ni déploiement.
+
+## 2026-10-27 — Tests locaux intégrés du relais et des notifications mobiles
+
+- **Demande :** vérifier ensemble les ajouts backend et mobile sans solliciter les utilisateurs réels.
+- **Ajout :** deux parcours croisés exécutant l'API NestJS, PostgreSQL/PostGIS, Redis, le transport de push local, le publieur Android natif et les gestionnaires TypeScript du mobile. Le véritable cron a relayé une demande ignorée après 41,164 secondes mesurées.
+- **Banc :** horloge synthétique alignée sur celle de l'émulateur et dossiers de résultats séparés ; aucune modification de la logique de production. Les fichiers et comportements conservés sont détaillés dans le rapport.
+- **Vérifications :** 106 tests d'intégration backend, 51 tests de contrats, 129 tests mobiles et 30 scénarios natifs Android réussis ; contrôle TypeScript du build réussi. Le contrôle TypeScript global a relevé 40 erreurs de tests préexistantes.
+- **Limites :** fournisseur Firebase simulé, application Android de test séparée, pas de recette complète React Native ni d'essai physique/iOS. Aucun déploiement.
+- **Rapport et reproduction :** [tests d'intégration locaux](TESTS_INTEGRATION_RELAIS_2026-10-27.md).
+
+
 ## 2026-10-27 — Compatibilité sonnerie avec Android 1.0.18 (176)
 
 - Préparation serveur : identifiant de secours par type, expiration de transport bornée pour les demandes séquentielles, Redis isolé dans le pipeline de tests.

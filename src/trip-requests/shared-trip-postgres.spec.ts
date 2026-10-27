@@ -8,6 +8,7 @@ import { BroadcastDriverRequests1780000074000 } from '../database/migrations/178
 import { RetainDriverLastLocation1780000076000 } from '../database/migrations/1780000076000-RetainDriverLastLocation';
 import { NearbyRequestRingingCooldown1780000087000 } from '../database/migrations/1780000087000-NearbyRequestRingingCooldown';
 import { DispatchDeliveryResilience1780000088000 } from '../database/migrations/1780000088000-DispatchDeliveryResilience';
+import { RememberDriverRequestRefusals1780000095000 } from '../database/migrations/1780000095000-RememberDriverRequestRefusals';
 import { SharedTripOffers1780000079000 } from '../database/migrations/1780000079000-SharedTripOffers';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { Vehicle, VehicleType } from '../vehicles/entities/vehicle.entity';
@@ -53,6 +54,8 @@ const bin = process.env.DISPATCH_TEST_POSTGRES_BIN;
         await new RetainDriverLastLocation1780000076000().up(runner);
         await new NearbyRequestRingingCooldown1780000087000().up(runner);
         await new DispatchDeliveryResilience1780000088000().up(runner);
+        // This SQL-only table is not created by TypeORM entity synchronization.
+        await new RememberDriverRequestRefusals1780000095000().up(runner);
         await db.query(
           'ALTER TABLE driver_offers DROP COLUMN "existingTripId", DROP COLUMN "sharedBookingId", DROP COLUMN "sharedTripConsentAt"',
         );
@@ -173,11 +176,15 @@ const bin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     });
     it('notifies an ongoing driver from the active-trip position even without discovery GPS; never assigns', async () => {
       const f = await fixture(true);
-      await Promise.all(
+      // Wait for both transactions even on failure before the next TRUNCATE.
+      const results = await Promise.allSettled(
         [1, 2].map(() =>
           db.transaction((m) => enqueueSharedTripAlert(m, f.request.id)),
         ),
       );
+      for (const result of results) {
+        if (result.status === 'rejected') throw result.reason;
+      }
       const notifications = await db.getRepository(Notification).find();
       expect(notifications).toHaveLength(1);
       expect(notifications[0].data).toMatchObject({
@@ -194,7 +201,7 @@ const bin = process.env.DISPATCH_TEST_POSTGRES_BIN;
       ).toBeNull();
       expect(await db.getRepository(Booking).count()).toBe(1);
     });
-    it.each(['full', 'wrong-vehicle', 'far', 'offline', 'revoked-kyc'])(
+    it.each(['full', 'wrong-vehicle', 'far', 'offline', 'revoked-kyc', 'refused', 'targeted-to-another'])(
       'does not notify a %s driver',
       async (reason) => {
         const f = await fixture();
@@ -221,9 +228,19 @@ const bin = process.env.DISPATCH_TEST_POSTGRES_BIN;
       VALUES ($1,$2,2,ST_SetSRID(ST_MakePoint(15.31,-4.3),4326),now(),$3,false)`,
             [f.driver.id, f.vehicle.id, randomUUID()],
           );
+        if (reason === 'refused')
+          await db.query(
+            'INSERT INTO trip_request_driver_refusals ("driverId", "requestId") VALUES ($1, $2)',
+            [f.driver.id, f.request.id],
+          );
+        if (reason === 'targeted-to-another')
+          await db.getRepository(TripRequest).update(f.request.id, {
+            targetDriverId: (await user()).id,
+          });
         expect(
           await db.transaction((m) => enqueueSharedTripAlert(m, f.request.id)),
         ).toBe(false);
+        expect(await db.getRepository(Notification).count()).toBe(0);
       },
     );
     it('keeps immediate dispatch open while waiting for consent and allows refusal without consuming seats', async () => {
@@ -315,11 +332,14 @@ const bin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     it('returns the same booking for simultaneous acceptance retries', async () => {
       const f = await fixture(),
         offer = await propose(f);
-      const results = await Promise.all(
+      const results = await Promise.allSettled(
         [1, 2].map(() =>
           offers.accept(f.passenger.id, f.request.id, offer.offerId, true),
         ),
       );
+      for (const result of results) {
+        if (result.status === 'rejected') throw result.reason;
+      }
       expect(results[0]).toEqual(results[1]);
       expect(await db.getRepository(Booking).count()).toBe(2);
     });
