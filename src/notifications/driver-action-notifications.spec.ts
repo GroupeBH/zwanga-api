@@ -1,3 +1,4 @@
+jest.mock('./bounded-firebase-send', () => ({ sendBoundedFirebase: (app: unknown, message: unknown) => require('firebase-admin/messaging').getMessaging(app).send(message) }));
 import { getMessaging } from 'firebase-admin/messaging';
 import { NotificationService } from './notifications.service';
 import { BookingsService } from '../bookings/bookings.service';
@@ -87,12 +88,12 @@ describe('driver notification transport', () => {
         expect(payload.categoryId).toBe(version ? `driver-offer-v${version}` : undefined);
         expect(payload.sound).toBe('driver_ring.wav');
         expect(payload.data.actionProtocol).toBe(version ? 'driver-v1' : undefined);
-        expect(payload.ttl).toBeLessThanOrEqual(30);
+        expect(payload.ttl).toBeLessThanOrEqual(60);
         expect(payload.interruptionLevel).toBe(version === 2 ? 'time-sensitive' : undefined);
         expect(payload.channelId).toBe(version === 2 ? 'booking-ring-v2' : undefined);
         if (version === 2) {
           expect(Date.parse(payload.data.ringUntil)).toBeGreaterThan(Date.now());
-          expect(payload.ttl).toBeLessThanOrEqual(30);
+          expect(payload.ttl).toBeLessThanOrEqual(60);
         } else expect(payload.data.ringUntil).toBeUndefined();
       }
     } finally { global.fetch = original; }
@@ -128,8 +129,8 @@ describe('driver notification transport', () => {
     expect(payload.notification).toBeUndefined();
     expect(payload.data).toMatchObject({ actionProtocol: 'driver-v1', ringVersion: 'v2' });
     expect(payload.android).toMatchObject({ priority: 'high' });
-    expect(payload.android.ttl).toBeLessThanOrEqual(30000);
-    expect(Date.parse(payload.data.ringUntil)).toBeLessThanOrEqual(Date.now() + 30000);
+    expect(payload.android.ttl).toBeLessThanOrEqual(60000);
+    expect(Date.parse(payload.data.ringUntil)).toBeLessThanOrEqual(Date.now() + 60000);
   });
   it('bounds ringing transport to 30s for a booking without changing its business expiry', async () => {
     const { service, send, query } = fixture(true); query.mockResolvedValue([{ version: 2 }]);
@@ -137,7 +138,7 @@ describe('driver notification transport', () => {
     await service.sendFirebaseNotification({ userId: 'driver', body: 'Booking', data }, 'fixture-token');
     const payload = send.mock.calls[0][0];
     expect(payload.android.ttl).toBeGreaterThan(0);
-    expect(payload.android.ttl).toBeLessThanOrEqual(30000);
+    expect(payload.android.ttl).toBeLessThanOrEqual(60000);
     expect(payload.data.expiresAt).toBeUndefined();
     expect(data).not.toHaveProperty('ringUntil');
   });
@@ -229,8 +230,8 @@ describe('driver notification transport', () => {
     expect(payload.data).toMatchObject({ delivery: 'driver-phone-v3', ringAlert: 'nearby-request-v1' });
     expect(payload.data.actionProtocol).toBeUndefined();
     expect(payload.android.ttl).toBeGreaterThan(0);
-    expect(payload.android.ttl).toBeLessThanOrEqual(30000);
-    expect(Date.parse(payload.data.ringUntil)).toBeLessThanOrEqual(Date.now() + 30000);
+    expect(payload.android.ttl).toBeLessThanOrEqual(60000);
+    expect(Date.parse(payload.data.ringUntil)).toBeLessThanOrEqual(Date.now() + 60000);
   });
   it.each(['new_booking', 'driver_dispatch_offer'])('v3 %s retains the existing actions and 30s deadline', async type => {
     const { service, send, query } = fixture(true); query.mockResolvedValue([{ version: 3 }]);
@@ -238,7 +239,7 @@ describe('driver notification transport', () => {
     const payload = send.mock.calls[0][0];
     expect(payload.notification).toBeUndefined();
     expect(payload.data).toMatchObject({ actionProtocol: 'driver-v1', ringVersion: 'v2' });
-    expect(payload.android.ttl).toBeLessThanOrEqual(30000);
+    expect(payload.android.ttl).toBeLessThanOrEqual(60000);
   });
   it('v3 does not turn the passenger acceptance into a driver phone ringtone', async () => {
     const { service, send, query } = fixture(true); query.mockResolvedValue([{ version: 3 }]);
@@ -252,12 +253,12 @@ describe('driver notification transport', () => {
     const payload = send.mock.calls[0][0];
     expect(payload.notification.title).toBe('Commande programmée à proximité');
     expect(Date.parse(payload.data.ringUntil)).toBeGreaterThan(Date.now());
-    expect(Date.parse(payload.data.ringUntil)).toBeLessThanOrEqual(Date.now() + 30000);
+    expect(Date.parse(payload.data.ringUntil)).toBeLessThanOrEqual(Date.now() + 60000);
     expect(payload.data).toMatchObject({ type: 'trip_request_nearby', ringAlert: 'nearby-request-v1' });
     expect(payload.data.actionProtocol).toBeUndefined();
     expect(payload.android).toMatchObject({ priority: 'high', notification: {
       channelId: 'booking-ring-v2', sound: 'driver_ring', visibility: 'private', tag: 'request-nearby-request' } });
-    expect(payload.android.ttl).toBeGreaterThan(0); expect(payload.android.ttl).toBeLessThanOrEqual(30_000);
+    expect(payload.android.ttl).toBeGreaterThan(0); expect(payload.android.ttl).toBeLessThanOrEqual(60_000);
   });
   it('uses the bundled iOS sound and a bounded lifetime for scheduled requests', async () => {
     const original = global.fetch;
@@ -306,7 +307,7 @@ describe('driver notification transport', () => {
       await service.sendExpoPushNotification(scheduled(), 'ExponentPushToken[test]');
       const payload = JSON.parse(send.mock.calls[0][1].body);
       expect(payload).toMatchObject({ sound: 'default', priority: 'high' });
-      expect(payload.ttl).toBeGreaterThan(0); expect(payload.ttl).toBeLessThanOrEqual(30);
+      expect(payload.ttl).toBeGreaterThan(0); expect(payload.ttl).toBeLessThanOrEqual(60);
       expect(payload.categoryId).toBeUndefined(); expect(payload.data.actionProtocol).toBeUndefined();
     } finally { global.fetch = original; }
   });

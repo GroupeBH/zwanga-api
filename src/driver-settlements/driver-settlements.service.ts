@@ -39,6 +39,7 @@ import {
 import { RequestDriverPayoutDto } from './dto/driver-settlement.dto';
 import { getPayoutFailureMessage, normalizePayoutPhone, PAYOUT_MESSAGES } from '../payments/payout-policy';
 import { settleCashSubsidy } from './cash-subsidy-settlement';
+import { upgradePaidCashSubsidy, earningReconciliationRequired } from './paid-cash-subsidy';
 import { sumConfirmedDriverCash } from './driver-cash-summary';
 import { loadHistoryPage, type HistoryPageDto } from '../common/pagination/history-page';
 import { DriverPayoutEvent } from './entities/driver-payout-event.entity';
@@ -526,8 +527,12 @@ export class DriverSettlementsService implements OnModuleInit {
 
     const existing = await manager.findOne(DriverEarning, {
       where: { bookingId: booking.id },
+      lock: { mode: 'pessimistic_write' },
     });
     if (existing) {
+      if (existing.paymentMode === TripPaymentMode.CASH && booking.paymentMode !== TripPaymentMode.CASH) {
+        return upgradePaidCashSubsidy(manager, existing, booking, this.buildEarningData(booking));
+      }
       this.assertEarningMatchesBooking(existing, booking);
       return existing;
     }
@@ -554,6 +559,20 @@ export class DriverSettlementsService implements OnModuleInit {
       where: { bookingId: booking.id },
     });
     if (existing) {
+      // An electronic callback can follow a cash subsidy already credited at
+      // arrival. Re-read authoritative state under the same lock as token pay.
+      if (existing.paymentMode === TripPaymentMode.CASH && booking.paymentMode !== TripPaymentMode.CASH) {
+        return this.dataSource.transaction(async manager => {
+          const current = await manager.findOne(Booking, {
+            where: { id: booking.id }, lock: { mode: 'pessimistic_write' },
+          });
+          if (!current) throw earningReconciliationRequired();
+          const trip = await manager.findOne(Trip, { where: { id: current.tripId } });
+          if (!trip) throw earningReconciliationRequired();
+          current.trip = trip;
+          return this.recordCompletedBookingEarningWithManager(manager, current);
+        });
+      }
       this.assertEarningMatchesBooking(existing, booking);
       return existing;
     }
@@ -671,9 +690,8 @@ export class DriverSettlementsService implements OnModuleInit {
       earning.passengerId !== booking.passengerId ||
       (expectedDriverId && earning.driverId !== expectedDriverId)
     ) {
-      throw new BadRequestException(
-        `Le gain conducteur existant est incohérent pour la réservation ${booking.id}`,
-      );
+      this.logger.error('DRIVER_EARNING_RECONCILIATION_REQUIRED');
+      throw earningReconciliationRequired();
     }
   }
 

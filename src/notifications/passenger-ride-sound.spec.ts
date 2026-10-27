@@ -1,3 +1,4 @@
+jest.mock('./bounded-firebase-send', () => ({ sendBoundedFirebase: (app: unknown, message: unknown) => require('firebase-admin/messaging').getMessaging(app).send(message) }));
 import { getMessaging } from 'firebase-admin/messaging';
 import { NotificationService } from './notifications.service';
 

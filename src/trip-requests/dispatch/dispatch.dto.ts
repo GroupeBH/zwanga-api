@@ -21,5 +21,12 @@ export class DispatchResponseDto {
 }
 
 export class NotificationCapabilityDto {
-  @IsInt() @IsIn([1, 2, 3, 4, 5]) version: number;
+  @IsInt() @IsIn([1, 2, 3, 4, 5, 6]) version: number;
+}
+
+export class NotificationReceiptDto {
+  @IsOptional() @IsIn(['received', 'displayed']) stage?: 'received' | 'displayed';
+  @IsOptional() @IsISO8601() observedAt?: string;
+  @IsOptional() @IsIn(['native', 'javascript']) source?: 'native' | 'javascript';
+  @IsOptional() @IsIn(['NATIVE_CARD_FAILED', 'NATIVE_CARD_PENDING', 'NATIVE_FALLBACK_FAILED']) failureCode?: string;
 }

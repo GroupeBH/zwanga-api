@@ -1,7 +1,10 @@
+import { RideDeliveryRecovery1780000094000 } from './1780000094000-RideDeliveryRecovery';
+import { RideNotificationReceipts1780000093000 } from './1780000093000-RideNotificationReceipts';
 import { FillTotalSeats1780000000000 } from './1780000000000-FillTotalSeats';
 import { MixedTokensCash1780000089000 } from './1780000089000-MixedTokensCash';
 import { ReferralWithdrawalResolution1780000090000 } from './1780000090000-ReferralWithdrawalResolution';
 import { TokenCashFallback1780000091000 } from './1780000091000-TokenCashFallback';
+import { AnonymousUpdateInstallations1780000092000 } from './1780000092000-AnonymousUpdateInstallations';
 import { AddAppUpdates1780000049000 } from './1780000049000-AddAppUpdates';
 import { AddFinancialHistoryIndexes1780000040000 } from './1780000040000-AddFinancialHistoryIndexes';
 import { AddProServices1780000041000 } from './1780000041000-AddProServices';
@@ -187,4 +190,7 @@ export const databaseMigrations = [
   MixedTokensCash1780000089000,
   ReferralWithdrawalResolution1780000090000,
   TokenCashFallback1780000091000,
+  AnonymousUpdateInstallations1780000092000,
+  RideNotificationReceipts1780000093000,
+  RideDeliveryRecovery1780000094000,
 ];

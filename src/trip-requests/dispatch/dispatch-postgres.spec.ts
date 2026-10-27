@@ -1,3 +1,11 @@
+import { createServer as createHttpServer } from 'node:http';
+import { Test } from '@nestjs/testing';
+import { ValidationPipe } from '@nestjs/common';
+import { DriverDispatchController } from './dispatch.controller';
+import { JwtAuthGuard } from '../../common/guards/jwt-auth.guard';
+import supertest from 'supertest';
+import { RideDeliveryRecovery1780000094000 } from '../../database/migrations/1780000094000-RideDeliveryRecovery';
+import { recoverUnacknowledgedRides } from '../../notifications/recover-unacknowledged-ride';
 import { execFileSync } from 'node:child_process';
 import { postgresTestServerOptions } from '../../../test/postgres-test-options';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -26,9 +34,19 @@ import { boundedInteger, dispatchOfferIsActionable } from './dispatch-policy';
 import { NotificationService } from '../../notifications/notifications.service';
 import { Notification } from '../../notifications/entities/notification.entity';
 import { RideAlertChanges } from '../../notifications/ride-alert-changes';
+import { RideNotificationReceipts1780000093000 } from '../../database/migrations/1780000093000-RideNotificationReceipts';
+import { recordRideNotificationReceipt } from '../../notifications/ride-notification-receipt';
+import { ownPushClaim, renewPushClaim, saveNotificationResult } from '../../notifications/notification-push-claim';
+import { NotificationStatus } from '../../notifications/entities/notification.entity';
 import { claimRideRealtimeNotifications } from '../../notifications/ride-realtime-delivery';
 
 describe('dispatch policy', () => {
+  it.each([undefined, '30', '59', '60', '90', '120', '121'])(
+    'keeps a response window of at least 60 seconds without extending an existing offer (%s)', value => {
+      const service = new DriverDispatchService({} as any, { get: () => value } as any, {} as any);
+      expect(service['responseSeconds']).toBe(value === '90' ? 90 : value === '120' ? 120 : 60);
+      expect(dispatchOfferIsActionable('pending', new Date(1000), 'pending', 1000)).toBe(false);
+    });
   it.each([undefined, '60', '180', '300', '600', '900', '901'])(
     'keeps a presence window compatible with the 3-minute heartbeat (%s)', value => {
       const service = new DriverDispatchService({} as any,
@@ -99,8 +117,8 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     await waitForDispatchCycles();
     await source.query('TRUNCATE users CASCADE');
     notifications.dispatchUrgentNotifications.mockClear();
-  });
-  afterEach(waitForDispatchCycles);
+  }, 30000); // Windows/PostGIS fixture cleanup is not an application latency assertion.
+  afterEach(waitForDispatchCycles, 30000);
   afterAll(async () => {
     try {
       try { await waitForDispatchCycles(); }
@@ -177,7 +195,7 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     } finally { await runner.release(); }
   });
 
-  it('skips a presence reserved after the candidate statement snapshot, without losing the successor', async () => {
+  it('excludes drivers reserved after the candidate statement snapshot', async () => {
     const closest = await driver(15.31), successor = await driver(15.311);
     const first = await request(), second = await request();
     const runner = source.createQueryRunner();
@@ -220,8 +238,8 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
       await runner.commitTransaction();
       await competing;
       expect(candidateReads).toBe(1);
-      expect((await offers(first.id))[0].driverId).toBe(closest.user.id);
-      expect(await offers(second.id)).toEqual([expect.objectContaining({ driverId: successor.user.id, status: 'pending' })]);
+      expect(new Set((await offers(first.id)).map(o => o.driverId))).toEqual(new Set([closest.user.id, successor.user.id]));
+      expect(await offers(second.id)).toHaveLength(0);
     } finally {
       if (runner.isTransactionActive) await runner.rollbackTransaction();
       await competing?.catch(() => undefined);
@@ -229,17 +247,12 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     }
   }, 15000);
 
-  it('excludes a muted nearby driver from scheduled and immediate dispatch, then resumes after expiry', async () => {
+  it('selects a previously muted driver for scheduled and immediate requests without waiting 24 hours', async () => {
     const d = await driver();
     await service.registerNotifications(d.user.id, 2);
     await source.query(`INSERT INTO nearby_driver_ring_state ("driverId", "missedCount", "mutedUntil")
       VALUES ($1,4,now() + interval '24 hours')`, [d.user.id]);
     const scheduled = await request(false), immediate = await request();
-    await service.notifyScheduledRequest(scheduled.id); await service.tick();
-    expect(await offers(immediate.id)).toHaveLength(0);
-    expect(await source.query(`SELECT id FROM notifications WHERE "userId" = $1`, [d.user.id])).toHaveLength(0);
-    expect((await service.status(d.user.id)).available).toBe(true);
-    await source.query(`UPDATE nearby_driver_ring_state SET "mutedUntil" = now() - interval '1 second' WHERE "driverId" = $1`, [d.user.id]);
     await service.notifyScheduledRequest(scheduled.id); await service.tick();
     expect(await offers(immediate.id)).toHaveLength(1);
     expect(await source.query(`SELECT id FROM notifications WHERE "userId" = $1 AND data ->> 'type' = 'trip_request_nearby'`, [d.user.id])).toHaveLength(1);
@@ -384,7 +397,7 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
 
   it('editing cancels an old dispatch invitation atomically, and stale acceptance is refused', async () => {
     const d = await driver(); const r = await request(); await service.tick();
-    const [offer] = await offers(r.id);
+    const offer = (await offers(r.id)).find(o => o.driverId === d.user.id);
     await editor().update(r.passengerId, r.id, { description: 'Entrée côté rue' });
     expect((await offers(r.id))[0].status).toBe('cancelled');
     await expect(service.respond(d.user.id, offer.id, 'accept')).rejects.toThrow();
@@ -400,7 +413,7 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
   });
 
   it('one of a concurrent edit and dispatch acceptance wins; the loser cannot change the assignment', async () => {
-    const d = await driver(); const r = await request(); await service.tick(); const [offer] = await offers(r.id);
+    const d = await driver(); const r = await request(); await service.tick(); const offer = (await offers(r.id)).find(o => o.driverId === d.user.id);
     const result = await Promise.allSettled([
       editor().update(r.passengerId, r.id, { description: 'Nouvelles conditions' }),
       service.respond(d.user.id, offer.id, 'accept'),
@@ -429,34 +442,180 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     expect((await source.getRepository(DriverOffer).findOneByOrFail({ id: offer.id })).status).toBe('rejected');
   });
 
-  it('invites drivers one by one by distance, immediately after refusal, and stops on acceptance', async () => {
+  it('stores received/displayed once, rejects a different account, and rolls back the additive receipt migration', async () => {
+    const runner = source.createQueryRunner(), migration = new RideNotificationReceipts1780000093000();
+    await runner.connect();
+    try {
+      await migration.up(runner);
+      await new RideDeliveryRecovery1780000094000().up(runner);
+      const d = await driver(), r = await request(); await service['allocate'](r.id);
+      const n = await source.getRepository(Notification).findOneByOrFail({ userId: d.user.id });
+      expect(await recordRideNotificationReceipt(source.manager, randomUUID(), n.id, 'displayed')).toEqual({ received: false });
+      await recordRideNotificationReceipt(source.manager, d.user.id, n.id);
+      const [first] = await source.query('SELECT * FROM ride_notification_receipts');
+      expect(first.displayedAt).toBeNull();
+      await recordRideNotificationReceipt(source.manager, d.user.id, n.id, 'displayed');
+      await recordRideNotificationReceipt(source.manager, d.user.id, n.id, 'displayed');
+      const rows = await source.query('SELECT * FROM ride_notification_receipts');
+      expect(rows).toHaveLength(1); expect(rows[0].receivedAt).toEqual(first.receivedAt);
+      expect(rows[0].displayedAt).toBeInstanceOf(Date);
+    } finally { await new RideDeliveryRecovery1780000094000().down(runner); await migration.down(runner); await runner.release(); }
+  });
+
+  it('retries an unacknowledged v6 delivery once across replicas, preserves deadlines, and skips displayed/iOS', async () => {
+    const runner=source.createQueryRunner(), receiptMigration=new RideNotificationReceipts1780000093000(), recovery=new RideDeliveryRecovery1780000094000();
+    await receiptMigration.up(runner); await recovery.up(runner);
+    try {
+      const d=await driver(), r=await request(); await service['allocate'](r.id);
+      const n=await source.getRepository(Notification).findOneByOrFail({userId:d.user.id});
+      await source.query(`UPDATE notifications SET status='sent', data=data || '{"nativeDeliveryVersion":6}'::jsonb,
+        "updatedAt"=now()-interval '13 seconds' WHERE id=$1`,[n.id]);
+      const results=await Promise.all([recoverUnacknowledgedRides(source.manager),recoverUnacknowledgedRides(source.manager)]);
+      expect(results.reduce((a,b)=>a+b,0)).toBe(1);
+      expect((await source.getRepository(Notification).findOneByOrFail({id:n.id})).data!.expiresAt).toBe(n.data!.expiresAt);
+      await source.query(`UPDATE notifications SET status='sent', "updatedAt"=now()-interval '13 seconds' WHERE id=$1`,[n.id]);
+      expect(await recoverUnacknowledgedRides(source.manager)).toBe(0);
+      await source.query('DELETE FROM ride_notification_retries');
+      const observedAt=new Date(Date.now()-1000).toISOString();
+      await recordRideNotificationReceipt(source.manager,d.user.id,n.id,'displayed',{source:'native', observedAt});
+      expect(await recoverUnacknowledgedRides(source.manager)).toBe(0);
+      const [receipt]=await source.query('SELECT * FROM ride_notification_receipts');
+      expect(receipt.clientObservedAt.toISOString()).toBe(observedAt); expect(receipt.source).toBe('native');
+      await source.query('DELETE FROM ride_notification_receipts');
+      await source.query(`UPDATE notifications SET data=data || '{"nativeDeliveryVersion":5}'::jsonb WHERE id=$1`,[n.id]);
+      expect(await recoverUnacknowledgedRides(source.manager)).toBe(0);
+    } finally {await recovery.down(runner);await receiptMigration.down(runner);await runner.release();}
+  });
+
+  it('local E2E: nearby allocation -> HTTP push -> native card (optional emulator) -> HTTP receipt -> decline/accept', async () => {
+    const runner=source.createQueryRunner(), receiptMigration=new RideNotificationReceipts1780000093000(), recovery=new RideDeliveryRecovery1780000094000();
+    await receiptMigration.up(runner); await recovery.up(runner);
+    const wire: any[]=[]; const realFetch=global.fetch;
+    const provider=createHttpServer(async(req,res)=>{
+      let body='';for await(const part of req) body+=part; wire.push(JSON.parse(body).message);
+      res.setHeader('Content-Type','application/json');res.end(JSON.stringify({name:'local/fcm-message'}));
+    });
+    await new Promise<void>(done=>provider.listen(0,'127.0.0.1',done));
+    const providerUrl=`http://127.0.0.1:${(provider.address() as any).port}`;
+    const transport=jest.spyOn(global,'fetch').mockImplementation((url,options)=>{
+      if(!String(url).startsWith('https://fcm.googleapis.com/v1/projects/local-test/')) throw new Error('External network forbidden');
+      return realFetch(providerUrl,options);
+    });
+    let app:any;
+    try {
+      const d1=await driver(), d2=await driver(15.315); await driver(16.3);
+      await service.registerNotifications(d1.user.id,6); await service.registerNotifications(d2.user.id,6);
+      const r=await request(); await service['allocate'](r.id);
+      const delivery=new NotificationService(new ConfigService({DRIVER_DISPATCH_ENABLED:'true'}),source.getRepository(Notification),source.getRepository(User),source.getRepository(TripRequest));
+      delivery['firebaseApp']={options:{projectId:'local-test',credential:{getAccessToken:async()=>({access_token:'local-test-only',expires_in:3600})}}} as any;
+      await delivery.dispatchUrgentNotifications();
+      expect(wire).toHaveLength(2); expect(wire.map(x=>x.data.driverId).sort()).toEqual([d1.user.id,d2.user.id].sort());
+      expect(wire.every(x=>x.data.nativeAlert==='driver-v6' && x.android.priority==='HIGH')).toBe(true);
+      const builder=Test.createTestingModule({controllers:[DriverDispatchController],providers:[{provide:DriverDispatchService,useValue:service}]});
+      // Authentication fixture only; production business authorization/DTO/controller/service remain real.
+      const module=await builder.overrideGuard(JwtAuthGuard).useValue({canActivate:(context:any)=>{
+        const req=context.switchToHttp().getRequest();const id=req.headers['x-local-driver'];
+        if(![d1.user.id,d2.user.id].includes(id)) return false;req.user={userId:id};return true;
+      }}).compile();
+      app=module.createNestApplication();app.useGlobalPipes(new ValidationPipe({whitelist:true,forbidNonWhitelisted:true,transform:true}));await app.init();
+      for(const d of [d1,d2]) {
+        const payload=wire.find(x=>x.data.driverId===d.user.id).data;
+        let observedAt=new Date().toISOString();
+        if(process.env.RIDE_AUDIT_ADB) {
+          const adb=process.env.RIDE_AUDIT_ADB, serial=process.env.RIDE_AUDIT_SERIAL ?? 'emulator-5554';
+          if(!/^emulator-\d+$/.test(serial)) throw new Error('Only a local emulator is allowed');
+          const invoke=(args:string[])=>execFileSync(adb,['-s',serial,...args],{encoding:'utf8',windowsHide:true,timeout:15000});
+          invoke(['shell','am','broadcast','-n','com.zwanga.audit/.AuditReceiver','--es','operation','native-payload','--es','payload',Buffer.from(JSON.stringify(payload)).toString('base64')]);
+          let receipt:any;const until=Date.now()+10000;
+          while(Date.now()<until) {
+            try{receipt=JSON.parse(invoke(['shell','run-as','com.zwanga.audit','cat','files/ride-audit-result.json']));if(receipt.notificationId===payload.notificationId)break;}catch{}
+            await new Promise(done=>setTimeout(done,250));
+          }
+          expect(receipt).toMatchObject({notificationId:payload.notificationId,completed:true,count:1,actions:2,restorable:true,receipt:{displayed:true}});
+          observedAt=new Date(receipt.receipt.displayedAt).toISOString();
+        }
+        await supertest(app.getHttpServer()).post(`/driver-dispatch/notifications/${payload.notificationId}/received`).set('x-local-driver',d.user.id)
+          .send({stage:'displayed',source:process.env.RIDE_AUDIT_ADB?'native':'javascript',observedAt}).expect(201,{received:true});
+        const foreign=d===d1?d2:d1;
+        await supertest(app.getHttpServer()).post(`/driver-dispatch/notifications/${payload.notificationId}/received`).set('x-local-driver',foreign.user.id).send({stage:'displayed'}).expect(201,{received:false});
+        await supertest(app.getHttpServer()).put(`/driver-dispatch/offers/${payload.offerId}/respond`).set('x-local-driver',d.user.id)
+          .send({decision:d===d1?'decline':'accept'}).expect(200);
+      }
+      const completed=await source.getRepository(TripRequest).findOneByOrFail({id:r.id});
+      expect(completed.selectedDriverId).toBe(d2.user.id); expect(completed.status).toBe(TripRequestStatus.DRIVER_SELECTED);
+      expect(completed.tripId).toBeNull(); // The trip is created when the selected driver starts it.
+      expect(await source.query('SELECT * FROM ride_notification_receipts')).toHaveLength(2);
+    } finally {
+      transport.mockRestore();if(app)await app.close();provider.closeAllConnections();await new Promise<void>(done=>provider.close(()=>done()));
+      await recovery.down(runner);await receiptMigration.down(runner);await runner.release();
+    }
+  },120000);
+
+  it('recovers a crashed push claim in 20 seconds and fences the obsolete worker', async () => {
+    const d = await driver(), r = await request(); await service['allocate'](r.id);
+    const repository = source.getRepository(Notification);
+    const n = await repository.findOneByOrFail({ userId: d.user.id });
+    const originalExpiry = n.data!.expiresAt;
+    await source.query(`UPDATE notifications SET status = 'pending', "errorMessage" = 'TRANSACTIONAL_PUSH_CLAIMED:old',
+      "updatedAt" = clock_timestamp() - interval '21 seconds' WHERE id = $1`, [n.id]);
+    ownPushClaim(n, 'TRANSACTIONAL_PUSH_CLAIMED:old');
+    const delivery = new NotificationService(new ConfigService({ DRIVER_DISPATCH_ENABLED: 'true' }),
+      repository, source.getRepository(User), source.getRepository(TripRequest));
+    const send = jest.spyOn(delivery as any, 'deliverSavedNotification').mockImplementation(async (claimed: Notification) => {
+      expect(await renewPushClaim(repository, n)).toBe(false);
+      n.status = NotificationStatus.SENT;
+      expect(await saveNotificationResult(repository, n)).toBe(false);
+      expect(claimed.data!.expiresAt).toBe(originalExpiry);
+      claimed.status = NotificationStatus.SENT; claimed.errorMessage = null;
+      return saveNotificationResult(repository, claimed);
+    });
+    await delivery.dispatchUrgentNotifications();
+    expect(send).toHaveBeenCalledTimes(1);
+    expect((await repository.findOneByOrFail({ id: n.id })).status).toBe('sent');
+    send.mockRestore();
+  });
+
+  it('recovers realtime messages at 45 seconds but not after the original 60-second window', async () => {
+    const d = await driver(), r = await request(); await service['allocate'](r.id);
+    const n = await source.getRepository(Notification).findOneByOrFail({ userId: d.user.id });
+    await source.query(`UPDATE notifications SET "createdAt" = now() - interval '45 seconds' WHERE id = $1`, [n.id]);
+    expect(await claimRideRealtimeNotifications(source.manager)).toContain(n.id);
+    await source.query('DELETE FROM ride_realtime_deliveries');
+    await source.query(`UPDATE notifications SET "createdAt" = now() - interval '61 seconds' WHERE id = $1`, [n.id]);
+    expect(await claimRideRealtimeNotifications(source.manager)).not.toContain(n.id);
+  });
+
+  it('broadcasts to nearby drivers, deduplicates ticks and cancels siblings after the first acceptance', async () => {
     const near = await driver(), next = await driver(15.315), far = await driver(15.32);
-    await driver(15.325);
+    await driver(16.3); // Outside 5 km.
     const r = await request();
-    await service.tick(); const invitations = await offers(r.id);
-    expect(invitations).toHaveLength(1);
-    const [first] = invitations;
-    expect(first.driverId).toBe(near.user.id);
+    await service.tick(); await service.tick();
+    const invitations = await offers(r.id);
+    expect(new Set(invitations.map(o => o.driverId))).toEqual(new Set([near.user.id, next.user.id, far.user.id]));
+    expect(invitations.every(o => o.status === 'pending')).toBe(true);
+    await service.respond(near.user.id, invitations.find(o => o.driverId === near.user.id).id, 'decline');
+    await service.respond(far.user.id, invitations.find(o => o.driverId === far.user.id).id, 'accept');
     await service.tick();
-    expect(await offers(r.id)).toHaveLength(1);
-    await service.respond(near.user.id, first.id, 'decline');
-    const second = (await offers(r.id)).find(offer => offer.status === 'pending');
-    expect(second.driverId).toBe(next.user.id);
-    expect(new Date(second.expiresAt).getTime() - Date.now()).toBeGreaterThan(25_000);
-    expect((await source.getRepository(TripRequest).findOneByOrFail({ id: r.id })).status).toBe('pending');
-    await service.respond(next.user.id, second.id, 'decline');
-    const third = (await offers(r.id)).find(offer => offer.status === 'pending');
-    expect(third.driverId).toBe(far.user.id);
-    await service.respond(far.user.id, third.id, 'accept');
-    await service.tick();
-    expect((await offers(r.id)).map(o => o.status)).toEqual(['declined', 'declined', 'accepted']);
+    const current = await offers(r.id);
+    expect(current.filter(o => o.status === 'accepted')).toHaveLength(1);
+    expect(current.filter(o => o.status === 'pending')).toHaveLength(0);
     expect((await source.getRepository(TripRequest).findOneByOrFail({ id: r.id })).selectedDriverId).toBe(far.user.id);
-    expect(await source.getRepository(Notification).countBy({ eventKey: `dispatch-offer:${second.id}` })).toBe(1);
+    expect(await source.query(`SELECT id FROM notifications WHERE data ->> 'type' = 'driver_dispatch_offer'
+      AND data ->> 'tripRequestId' = $1`, [r.id])).toHaveLength(3);
+  });
+  it('continues a bounded broadcast on subsequent ticks while previous offers are pending', async () => {
+    for (let i = 0; i < 51; i++) await driver();
+    const r = await request(); await service['allocate'](r.id);
+    expect(await offers(r.id)).toHaveLength(50);
+    await service['allocate'](r.id);
+    expect(await offers(r.id)).toHaveLength(51);
+    await service['allocate'](r.id);
+    expect(await offers(r.id)).toHaveLength(51);
   });
   it('commits the successor and its push before responding even when the global cron is busy', async () => {
     const d = await driver(), next = await driver(15.32), r = await request();
     await service['allocate'](r.id);
-    const [offer] = await offers(r.id);
+    const offer = (await offers(r.id)).find(o => o.driverId === d.user.id);
     service['ticking'] = true;
     try {
       await expect(service.respond(d.user.id, offer.id, 'decline')).resolves.toMatchObject({ status: 'declined' });
@@ -472,21 +631,22 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     const d = await driver(), next = await driver(15.32), r = await request();
     await driver(15.33);
     await service['allocate'](r.id);
-    const [offer] = await offers(r.id);
+    const offer = (await offers(r.id)).find(o => o.driverId === d.user.id);
     await Promise.all([service.respond(d.user.id, offer.id, 'decline'),
       service.respond(d.user.id, offer.id, 'decline'), service['allocate'](r.id)]);
     await service.respond(d.user.id, offer.id, 'decline');
     const current = await offers(r.id);
-    expect(current).toHaveLength(2);
-    expect(current.filter(o => o.status === 'pending').map(o => o.driverId)).toEqual([next.user.id]);
+    expect(current).toHaveLength(3);
+    expect(current.filter(o => o.status === 'pending')).toHaveLength(2);
+    expect(current.some(o => o.status === 'pending' && o.driverId === next.user.id)).toBe(true);
     expect(await source.query(`SELECT id FROM notifications WHERE data ->> 'type' = 'driver_dispatch_offer'
-      AND data ->> 'tripRequestId' = $1`, [r.id])).toHaveLength(2);
+      AND data ->> 'tripRequestId' = $1`, [r.id])).toHaveLength(3);
   });
 
   it('keeps an exhausted request open without re-inviting refusals and can find a newly available driver', async () => {
     const d = await driver(), r = await request();
     await service['allocate'](r.id);
-    const [offer] = await offers(r.id);
+    const offer = (await offers(r.id)).find(o => o.driverId === d.user.id);
     await service.respond(d.user.id, offer.id, 'decline');
     await service.tick(); await service.tick();
     expect((await offers(r.id)).map(o => o.status)).toEqual(['declined']);
@@ -498,14 +658,14 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
   it.each(['cancelled', 'expired', 'assigned'])('does not advance a request that is %s', async state => {
     const d = await driver(), next = await driver(15.32), r = await request();
     await service['allocate'](r.id);
-    const [offer] = await offers(r.id);
+    const offer = (await offers(r.id)).find(o => o.driverId === d.user.id);
     await source.getRepository(TripRequest).update(r.id, state === 'expired'
       ? { departureDateMax: new Date(Date.now() - 1) }
       : state === 'assigned' ? { selectedDriverId: next.user.id }
         : { status: TripRequestStatus.CANCELLED });
     await expect(service.respond(d.user.id, offer.id, 'decline')).rejects.toThrow();
     await service['allocate'](r.id);
-    expect(await offers(r.id)).toHaveLength(1);
+    expect(await offers(r.id)).toHaveLength(2);
   });
   it('a recent position automatically makes a v2 driver eligible, without availability or vehicle setup', async () => {
     const d = await driver();
@@ -516,7 +676,7 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     expect(state).toMatchObject({ available: true, automatic: true, positionFreshSeconds: 300 });
     const r = await request();
     await service.tick();
-    const [offer] = await offers(r.id);
+    const offer = (await offers(r.id)).find(o => o.driverId === d.user.id);
     expect(offer.driverId).toBe(d.user.id);
     await expect(service.respond(d.user.id, offer.id, 'accept')).resolves.toMatchObject({ status: 'accepted' });
   });
@@ -525,7 +685,7 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     const car = await source.getRepository(Vehicle).save({ ownerId: d.user.id, brand: 'Test', model: 'Test',
       color: 'Test', licensePlate: randomUUID(), type: VehicleType.CAR });
     const r = await request(); await service.tick();
-    const [offer] = await offers(r.id);
+    const offer = (await offers(r.id)).find(o => o.driverId === d.user.id);
     expect(offer.vehicleId).toBe(car.id);
     const state = await service.recordPosition(d.user.id, { latitude: -4.3, longitude: 15.31, accuracy: 20, recordedAt: new Date().toISOString() });
     expect('presence' in state && state.presence.vehicleId).toBe(car.id);
@@ -540,7 +700,7 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     const r = await request(immediate);
     if (immediate) {
       await service['allocate'](r.id);
-      const [offer] = await offers(r.id);
+      const offer = (await offers(r.id)).find(o => o.driverId === d.user.id);
       expect(offer.driverId).toBe(d.user.id);
       await expect(service.respond(d.user.id, offer.id, 'accept')).resolves.toMatchObject({ status: 'accepted' });
       expect((await service.status(d.user.id)).available).toBe(false); // Busy, not expired GPS.
@@ -616,7 +776,7 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     expect(await offers(scheduled.id)).toHaveLength(0); expect(await offers(immediate.id)).toHaveLength(0);
   });
   it('accepts once under simultaneous retries and protects ownership and processed offers', async () => {
-    const d = await driver(); const r = await request(); await service.tick(); const [offer] = await offers(r.id);
+    const d = await driver(); const r = await request(); await service.tick(); const offer = (await offers(r.id)).find(o => o.driverId === d.user.id);
     await expect(service.respond(randomUUID(), offer.id, 'accept')).rejects.toThrow('introuvable');
     const results = await Promise.all([service.respond(d.user.id, offer.id, 'accept'), service.respond(d.user.id, offer.id, 'accept')]);
     expect(results.map(v => v.status)).toEqual(['accepted', 'accepted']);
@@ -665,10 +825,10 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
   });
 
   it('does not allocate a second invitation for one request even across concurrent workers', async () => {
-    const a = await driver(), r = await request(); await driver(15.32);
+    const a = await driver(), r = await request(), b = await driver(15.32);
     await Promise.all([service['allocate'](r.id), service['allocate'](r.id)]);
     await service['allocate'](r.id);
-    expect((await offers(r.id)).map(o => o.driverId)).toEqual([a.user.id]);
+    expect(new Set((await offers(r.id)).map(o => o.driverId))).toEqual(new Set([a.user.id, b.user.id]));
   });
 
   it('does not reserve the same driver for two simultaneous requests', async () => {
@@ -677,13 +837,13 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     await Promise.all([service['allocate'](a.id), service['allocate'](b.id)]);
     await service['allocate'](a.id); await service['allocate'](b.id);
     const first = await offers(a.id), second = await offers(b.id);
-    expect(first).toHaveLength(1); expect(second).toHaveLength(1);
-    expect(first[0].driverId).not.toBe(second[0].driverId);
+    expect(first.length + second.length).toBe(2);
+    expect(new Set([...first, ...second].map(o => o.driverId)).size).toBe(2);
   });
 
   const legacyBroadcast = async (requestId: string, d: Awaited<ReturnType<typeof driver>>) => {
     await source.query(`INSERT INTO trip_request_dispatch_offers (id,"requestId","driverId","vehicleId",seats,"expiresAt")
-      VALUES ($1,$2,$3,$4,4,now() + interval '30 seconds')`, [randomUUID(), requestId, d.user.id, d.vehicle.id]);
+      VALUES ($1,$2,$3,$4,4,now() + interval '30 seconds') ON CONFLICT DO NOTHING`, [randomUUID(), requestId, d.user.id, d.vehicle.id]);
   };
 
   it('only one driver wins concurrent acceptance of invitations left by the old broadcast version', async () => {
@@ -702,12 +862,12 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     expect(await source.getRepository(DriverOffer).countBy({ tripRequestId: r.id })).toBe(1);
   });
 
-  it('lets the remaining legacy broadcast invitation finish before starting another turn', async () => {
+  it('keeps all other broadcast invitations pending after individual refusals', async () => {
     const a = await driver(), b = await driver(15.32), c = await driver(15.33), r = await request();
     await service['allocate'](r.id); await legacyBroadcast(r.id, b);
     const first = (await offers(r.id)).find(o => o.driverId === a.user.id);
     await service.respond(a.user.id, first.id, 'decline');
-    expect(await offers(r.id)).toHaveLength(2);
+    expect(await offers(r.id)).toHaveLength(3);
     const second = (await offers(r.id)).find(o => o.driverId === b.user.id);
     await service.respond(b.user.id, second.id, 'decline');
     expect((await offers(r.id)).filter(o => o.status === 'pending').map(o => o.driverId)).toEqual([c.user.id]);
@@ -721,7 +881,7 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     const run = () => immediate ? service['allocate'](r.id) : service.notifyScheduledRequest(r.id);
     await run(); await run(); await run();
     if (immediate) {
-      expect(await offers(r.id)).toHaveLength(1);
+      expect(await offers(r.id)).toHaveLength(52);
       for (let i = 0; i < 52; i++) {
         const [offer] = (await offers(r.id)).filter(o => o.status === 'pending');
         expect(offer).toBeDefined();
@@ -749,8 +909,8 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     await Promise.all([run(), run()]);
     if (immediate) {
       for (const client of clients) {
-        const [offer] = (await offers(r.id)).filter(o => o.status === 'pending');
-        expect(offer.driverId).toBe(client.user.id);
+        const offer = (await offers(r.id)).find(o => o.status === 'pending' && o.driverId === client.user.id);
+        expect(offer).toBeDefined();
         await service.respond(offer.driverId, offer.id, 'decline');
       }
     }

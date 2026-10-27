@@ -2,9 +2,6 @@ import { NotFoundException } from '@nestjs/common';
 import type { EntityManager } from 'typeorm';
 import type { Notification } from './entities/notification.entity';
 
-export const NEARBY_RING_THRESHOLD = 4;
-export const NEARBY_RING_COOLDOWN_MS = 24 * 60 * 60_000;
-
 export function isNearbyRingingRequest(
   data?: Record<string, unknown> | null,
 ): boolean {
@@ -47,18 +44,21 @@ async function lockState(
     FROM nearby_driver_ring_state WHERE "driverId" = $1 FOR UPDATE`,
     [driverId],
   );
+  // Keep the row lock and old response fields for compatible clients, but retire
+  // the global penalty, including rows muted before this version was deployed.
+  if (state.missedCount !== 0 || state.mutedUntil !== null) {
+    await manager.query(
+      `UPDATE nearby_driver_ring_state SET "missedCount" = 0, "mutedUntil" = NULL
+      WHERE "driverId" = $1`,
+      [driverId],
+    );
+    state.missedCount = 0;
+    state.mutedUntil = null;
+  }
   return state;
 }
 
 async function reconcile(manager: EntityManager, state: State): Promise<void> {
-  const now = new Date(state.now).getTime();
-  let reset = false;
-  if (state.mutedUntil && new Date(state.mutedUntil).getTime() <= now) {
-    state.cycleStartedAt = state.mutedUntil;
-    state.mutedUntil = null;
-    state.missedCount = 0;
-    reset = true;
-  }
   const events: Event[] = await manager.query(
     `SELECT e."requestId", e."createdAt", e."declinedAt", e."receivedAt", e."responseDeadline",
     (r."selectedDriverId" = e."driverId" OR EXISTS (SELECT 1 FROM driver_offers o
@@ -85,23 +85,24 @@ async function reconcile(manager: EntityManager, state: State): Promise<void> {
       new Date(state.cycleStartedAt).getTime()
     )
       outcome = 'obsolete';
-    else if (state.mutedUntil) outcome = 'muted';
     else if (event.answered) outcome = 'answered';
     else if (!event.actionable && !event.declinedAt && !event.dispatchDeclined)
       outcome = 'obsolete';
     // Provider acceptance is not proof that a device received an invitation.
-    // Legacy clients remain usable; only their explicit refusals count.
+    // Keep delivery outcomes for diagnostics, never as a future ringing penalty.
     else if (!event.receivedAt && !event.declinedAt && !event.dispatchDeclined)
       outcome = 'obsolete';
-    else if (!event.declinedAt && !event.dispatchDeclined &&
-      new Date(event.responseDeadline).getTime() - new Date(event.receivedAt!).getTime() < 10_000)
+    else if (
+      !event.declinedAt &&
+      !event.dispatchDeclined &&
+      new Date(event.responseDeadline).getTime() -
+        new Date(event.receivedAt!).getTime() <
+        10_000
+    )
       outcome = 'obsolete'; // A late delivery did not leave a fair response window.
     else {
       outcome =
         event.declinedAt || event.dispatchDeclined ? 'declined' : 'ignored';
-      state.missedCount++;
-      if (state.missedCount >= NEARBY_RING_THRESHOLD)
-        state.mutedUntil = new Date(now + NEARBY_RING_COOLDOWN_MS);
     }
     outcomes.push(outcome);
   }
@@ -117,11 +118,6 @@ async function reconcile(manager: EntityManager, state: State): Promise<void> {
         state.now,
       ],
     );
-  if (events.length || reset) await manager.query(
-    `UPDATE nearby_driver_ring_state SET "missedCount" = $2, "mutedUntil" = $3,
-    "cycleStartedAt" = $4 WHERE "driverId" = $1`,
-    [state.driverId, state.missedCount, state.mutedUntil, state.cycleStartedAt],
-  );
 }
 
 /** Runs before every delivery/retry, irrespective of FCM/APNs/client version. */
@@ -158,7 +154,6 @@ export async function prepareNearbyRequestRinging(
   return manager.transaction(async (tx) => {
     const state = await lockState(tx, driverId);
     await reconcile(tx, state);
-    if (state.mutedUntil) return false;
     const now = new Date(state.now).getTime();
     let deadline = now + 60_000;
     for (const value of [
@@ -170,7 +165,7 @@ export async function prepareNearbyRequestRinging(
       if (!Number.isFinite(parsed)) return false;
       deadline = Math.min(deadline, parsed);
     }
-    // Expired quiet backups cannot create a strike. The existing delivery policy
+    // Expired quiet backups do not create an invitation. The existing delivery policy
     // still decides whether the informational notification is useful.
     if (deadline <= now) return true;
     await tx.query(
@@ -202,18 +197,27 @@ export async function prepareNearbyRequestRinging(
 
 /** Authenticated recipient acknowledgement, idempotent and bounded by the original deadline. */
 export async function acknowledgeNearbyRequest(
-  manager: EntityManager, driverId: string, notificationId: string,
+  manager: EntityManager,
+  driverId: string,
+  notificationId: string,
 ): Promise<{ received: boolean }> {
-  const rows = await manager.query(`UPDATE nearby_driver_ring_events e
+  const rows:
+    { notificationId: string }[] | [{ notificationId: string }[], number] =
+    await manager.query(
+      `UPDATE nearby_driver_ring_events e
     SET "receivedAt" = COALESCE(e."receivedAt", clock_timestamp())
     WHERE e."driverId" = $1 AND e."notificationId" = $2 AND e."processedAt" IS NULL
       AND e."responseDeadline" > clock_timestamp()
       AND EXISTS (SELECT 1 FROM trip_requests r WHERE r.id = e."requestId"
         AND r."passengerId" <> $1 AND r.status IN ('pending','offers_received')
         AND r."selectedDriverId" IS NULL AND r."tripId" IS NULL AND r."departureDateMax" > clock_timestamp())
-    RETURNING e."notificationId"`, [driverId, notificationId]);
+    RETURNING e."notificationId"`,
+      [driverId, notificationId],
+    );
   // TypeORM PostgreSQL UPDATE ... RETURNING returns [rows, affected].
-  return { received: Array.isArray(rows?.[0]) ? rows[0].length > 0 : rows.length > 0 };
+  return {
+    received: Array.isArray(rows?.[0]) ? rows[0].length > 0 : rows.length > 0,
+  };
 }
 
 /** A refusal only belongs to this recipient; it never cancels the passenger's order. */
@@ -250,7 +254,7 @@ export async function declineNearbyRequest(
   });
 }
 
-/** Bounded timer work for drivers whose app is asleep; no device timer is needed. */
+/** Bounded event cleanup for sleeping apps. Historical export name; no cooldown remains. */
 export async function reconcileNearbyRequestCooldowns(
   manager: EntityManager,
 ): Promise<void> {

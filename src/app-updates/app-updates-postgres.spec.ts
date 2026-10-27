@@ -7,6 +7,7 @@ import { createServer } from 'net';
 import { randomUUID } from 'crypto';
 import { DataSource } from 'typeorm';
 import { AddAppUpdates1780000049000 } from '../database/migrations/1780000049000-AddAppUpdates';
+import { AnonymousUpdateInstallations1780000092000 } from '../database/migrations/1780000092000-AnonymousUpdateInstallations';
 import { AppUpdatesService } from './app-updates.service';
 import { AppUpdateDispatchService, isAppUpdateDeliverable } from './app-update-dispatch.service';
 
@@ -40,7 +41,7 @@ const pgBin = process.env.APP_UPDATES_TEST_POSTGRES_BIN;
         "userId" uuid REFERENCES users(id), "fcmToken" varchar, title varchar, body text, data jsonb,
         "isAutomatic" boolean, status varchar, "isActive" boolean)`);
     const runner = source.createQueryRunner();
-    try { await new AddAppUpdates1780000049000().up(runner); } finally { await runner.release(); }
+    try { await new AddAppUpdates1780000049000().up(runner); await new AnonymousUpdateInstallations1780000092000().up(runner); } finally { await runner.release(); }
     service = new AppUpdatesService(source, config);
     dispatcher = new AppUpdateDispatchService(source, config);
   }, 60000);
