@@ -1,3 +1,10 @@
+import { claimRequestAcceptance, completeRequestAcceptance, releaseRequestAcceptance, startPassengerDecision } from './dispatch/request-acceptance';
+import { sequentialInvitationSql, assertSequentialInvitation } from './dispatch/sequential-policy';
+import { DriverChoiceQuery } from './dto/driver-choice.dto';
+import { findDriverChoices, validateTargetDriver } from './driver-choices';
+import { assertRequestTarget } from './target-driver-policy';
+import { hasRefusedRequest } from './request-refusal';
+import { requestDriverVisibilitySql } from './target-driver-policy';
 import {
   Injectable,
   NotFoundException,
@@ -118,6 +125,11 @@ export interface SanitizedDriverOfferWithTripRequest extends SanitizedDriverOffe
 }
 
 export interface SanitizedTripRequest {
+  responseWindow?: { phase: 'driver' | 'passenger' | 'accepting'; expiresAt: string; serverNow: string };
+  targetDriverId?: string | null;
+  targetDriverName?: string | null;
+  targetDriverDeclined?: boolean;
+
   immediateDispatch: boolean;
   id: string;
   passenger: SanitizedUser;
@@ -297,8 +309,15 @@ export class TripRequestsService {
         'trip request creation',
       ));
 
+    if (createTripRequestDto.targetDriverId) {
+      if (!departurePoint) throw new BadRequestException('Choisissez le point de départ avant le conducteur.');
+      await validateTargetDriver(this.tripRequestRepository.manager, passengerId, createTripRequestDto.targetDriverId,
+        { longitude: departurePoint.coordinates[0], latitude: departurePoint.coordinates[1], vehicleType, seats: numberOfSeats });
+    }
+
     const tripRequest = this.tripRequestRepository.create({
       ...rest,
+      sequentialDispatch: Boolean(this.driverDispatch?.enabled),
       immediateDispatch: Boolean(createTripRequestDto.immediateDispatch && this.driverDispatch?.enabled),
       paymentMode: rest.paymentMode ?? TripPaymentMode.CASH,
       maxPricePerSeat: recommendedPrice,
@@ -314,8 +333,7 @@ export class TripRequestsService {
     const saved = await this.tripRequestRepository.save(tripRequest);
     this.logger.log(`Trip request created: ${saved.id}`);
 
-    // Immediate invitations broadcast accept/decline offers (first acceptance wins). A scheduled
-    // nearby alert only opens the existing request; it does not reserve the driver.
+    // Both request types use the Redis relay. Existing notification kinds retain mobile compatibility.
     if (saved.immediateDispatch) void this.driverDispatch?.tick();
     else {
       let nearbyAlertQueued = false;
@@ -324,11 +342,39 @@ export class TripRequestsService {
         catch { this.logger.warn('Nearby scheduled-request alert deferred to the dispatch worker.'); }
       }
       // When geographic dispatch is enabled, its cron continues the bounded
-      // broadcast. Never fall back to drivers with no recent position/outside 5 km.
+      // relay. Never bypass it with a general broadcast when delivery is deferred.
       if (!nearbyAlertQueued && !this.driverDispatch?.enabled) await this.notifyDriversAboutTripRequest(saved);
     }
 
     return this.findOne(saved.id, passengerId);
+  }
+
+  async driverChoices(passengerId: string, query: DriverChoiceQuery) {
+    return findDriverChoices(this.tripRequestRepository.manager, passengerId, query);
+  }
+
+  async openToNearbyDrivers(passengerId: string, id: string) {
+    await this.tripRequestRepository.manager.transaction(async manager => {
+      const repository = manager.getRepository(TripRequest);
+      const request = await repository.findOne({ where: { id, passengerId }, lock: { mode: 'pessimistic_write' } });
+      if (!request) throw new NotFoundException('Commande introuvable.');
+      assertUnassignedRequest(request);
+      if (!request.targetDriverId) return;
+      const linked = await manager.getRepository(Trip).exists({ where: {
+        tripRequestId: id, status: In([TripStatus.PENDING, TripStatus.ACTIVE, TripStatus.COMPLETED]),
+      } });
+      if (linked || await manager.getRepository(DriverOffer).exists({ where: { tripRequestId: id, status: DriverOfferStatus.ACCEPTED } }))
+        throw new ConflictException('Une prise en charge existe déjà pour cette commande.');
+      // Only the audience expands: keep the chosen driver's pending invitation actionable.
+      // Prices, dates, existing refusals and first-acceptance-wins remain unchanged.
+      await repository.update(id, { id, targetDriverId: null });
+    });
+    void this.driverDispatch?.tick();
+    if (!this.driverDispatch?.enabled) {
+      const request = await this.tripRequestRepository.findOneBy({ id, passengerId });
+      if (request) await this.notifyDriversAboutTripRequest(request);
+    }
+    return this.findOne(id, passengerId);
   }
 
   async recommendPrice(
@@ -680,7 +726,7 @@ export class TripRequestsService {
       assertUnassignedRequest({ ...current!, ...patch, status: TripRequestStatus.PENDING });
       await offers.update({ tripRequestId, status: DriverOfferStatus.PENDING },
         { status: DriverOfferStatus.REJECTED, rejectedAt: new Date() });
-      if (current!.immediateDispatch) {
+      if (current!.immediateDispatch || current!.sequentialDispatch) {
         await manager.createQueryBuilder().update('trip_request_dispatch_offers')
           .set({ status: 'cancelled' }).where('"requestId" = :id AND status = :status',
             { id: tripRequestId, status: 'pending' }).execute();
@@ -688,7 +734,8 @@ export class TripRequestsService {
       await requests.update(tripRequestId, { ...patch, id: tripRequestId, status: TripRequestStatus.PENDING });
     });
     this.logger.log(`Trip request updated: ${tripRequestId}${adminId ? ` by admin ${adminId}` : ''}`);
-    if (tripRequest.immediateDispatch && patch.immediateDispatch !== false) void this.driverDispatch?.tick();
+    if (tripRequest.sequentialDispatch) await this.driverDispatch?.notifyScheduledRequest(tripRequestId);
+    else if (tripRequest.immediateDispatch && patch.immediateDispatch !== false) void this.driverDispatch?.tick();
     return this.findOne(tripRequestId, passengerId);
   }
 
@@ -699,6 +746,7 @@ export class TripRequestsService {
       // Get all active drivers with FCM tokens, excluding the passenger who created the request
       const drivers = await this.userRepository.find({
         where: {
+          id: Raw(alias => requestDriverVisibilitySql(':refusedRequestId', alias), { refusedRequestId: tripRequest.id }),
           role: UserRole.DRIVER,
           isActive: true,
         },
@@ -764,7 +812,7 @@ export class TripRequestsService {
     // SQL, independently of the cron or a successful status update on a read.
     const tripRequests = await this.tripRequestRepository.find({
       relations: [
-        'passenger',
+        'passenger', 'targetDriver',
         'selectedDriver',
         'selectedVehicle',
         'driverOffers',
@@ -772,6 +820,7 @@ export class TripRequestsService {
         'driverOffers.vehicle',
       ],
       where: {
+        id: Raw(alias => requestDriverVisibilitySql(alias, ':refusingDriverId') + ' AND ' + sequentialInvitationSql(alias, ':refusingDriverId'), { refusingDriverId: driverId }),
         status: In([
           TripRequestStatus.PENDING,
           TripRequestStatus.OFFERS_RECEIVED,
@@ -804,8 +853,9 @@ export class TripRequestsService {
     if (!own) await this.assertDriverViewer(userId);
     const page = await requestPageIds(this.tripRequestRepository, userId, own, options);
     if (!page.ids.length) return { data: [], total: page.total, nextCursor: page.nextCursor };
-    const requests = await this.tripRequestRepository.find({ where: { id: In(page.ids) },
-      relations: ['passenger', 'selectedDriver', 'selectedVehicle', 'driverOffers', 'driverOffers.driver', 'driverOffers.vehicle'] });
+    const requests = await this.tripRequestRepository.find({ where: { id: own ? In(page.ids) : Raw(alias => `${alias} IN (:...requestIds) AND ${requestDriverVisibilitySql(alias, ':refusingDriverId')}`,
+        { requestIds: page.ids, refusingDriverId: userId }) },
+      relations: ['passenger', 'targetDriver', 'selectedDriver', 'selectedVehicle', 'driverOffers', 'driverOffers.driver', 'driverOffers.vehicle'] });
     await this.expireRequests(requests);
     // Recheck after hydration: an acceptance/cancellation can race the ID page.
     const now = new Date();
@@ -836,7 +886,7 @@ export class TripRequestsService {
     const tripRequest = await this.tripRequestRepository.findOne({
       where: { id },
       relations: [
-        'passenger',
+        'passenger', 'targetDriver',
         'selectedDriver',
         'selectedVehicle',
         'driverOffers',
@@ -853,6 +903,12 @@ export class TripRequestsService {
 
     const isPassenger = tripRequest.passengerId === userId;
     if (!isPassenger) {
+      assertRequestTarget(tripRequest, userId);
+      if (tripRequest.sequentialDispatch && this.getSelectedDriverId(tripRequest) !== userId) {
+        const visible = await this.tripRequestRepository.manager.query('SELECT r.id FROM trip_requests r WHERE r.id=$1 AND ' + sequentialInvitationSql('r.id', '$2'), [id, userId]);
+        if (!visible.length) throw new NotFoundException('Cette demande a été proposée à un autre conducteur.');
+      }
+      if (this.getSelectedDriverId(tripRequest) !== userId && await hasRefusedRequest(this.tripRequestRepository.manager, userId, id)) throw new NotFoundException('Commande introuvable.');
       if (this.hasAcceptedDriver(tripRequest)) {
         if (this.getSelectedDriverId(tripRequest) !== userId) {
           throw new NotFoundException('Commande de trajet non trouvée');
@@ -866,7 +922,17 @@ export class TripRequestsService {
       await this.assertDriverViewer(userId);
     }
 
-    return this.sanitizeTripRequest(tripRequest, userId);
+    const result = await this.sanitizeTripRequest(tripRequest, userId);
+    if (tripRequest.sequentialDispatch && !tripRequest.selectedDriverId) {
+      const [window] = await this.tripRequestRepository.manager.query(`SELECT phase,"expiresAt",clock_timestamp() AS "serverNow"
+        FROM trip_request_dispatch_offers WHERE "requestId"=$1 AND status='pending'
+        AND ("driverId"=$2 OR ($3 AND phase='passenger')) LIMIT 1`, [id, userId, isPassenger]);
+      if (window) result.responseWindow = { phase: window.phase, expiresAt: new Date(window.expiresAt).toISOString(),
+        serverNow: new Date(window.serverNow).toISOString() };
+    }
+    if (isPassenger && tripRequest.targetDriverId && !tripRequest.selectedDriverId)
+      result.targetDriverDeclined = await hasRefusedRequest(this.tripRequestRepository.manager, tripRequest.targetDriverId, tripRequest.id);
+    return result;
   }
 
   async getOffersForTripRequest(
@@ -912,7 +978,7 @@ export class TripRequestsService {
     const tripRequests = await this.tripRequestRepository.find({
       where: activityOnly ? activeRequestWhere(passengerId) : { passengerId },
       relations: [
-        'passenger',
+        'passenger', 'targetDriver',
         'selectedDriver',
         'selectedVehicle',
         'driverOffers',
@@ -973,13 +1039,15 @@ export class TripRequestsService {
 
     const tripRequest = await this.tripRequestRepository.findOne({
       where: { id: tripRequestId },
-      relations: ['passenger', 'driverOffers'],
+      relations: ['passenger', 'targetDriver', 'driverOffers'],
     });
 
     if (!tripRequest) {
       throw new NotFoundException('Commande de trajet non trouvée');
     }
 
+    assertRequestTarget(tripRequest, driverId);
+    await assertSequentialInvitation(this.tripRequestRepository.manager, tripRequest, driverId);
     await this.expireRequests([tripRequest]);
 
     if (tripRequest.immediateDispatch) {
@@ -1146,10 +1214,12 @@ export class TripRequestsService {
       const current = await requests.findOne({ where: { id: tripRequestId }, lock: { mode: 'pessimistic_write' } });
       assertRequestSnapshot(current, tripRequest);
       assertUnassignedRequest(current!);
+      await assertSequentialInvitation(manager, current!, driverId);
       const offers = manager.getRepository(DriverOffer);
       if (await offers.exists({ where: { tripRequestId, driverId, status: DriverOfferStatus.PENDING } }))
         throw new ConflictException('Vous avez déjà une offre en attente pour cette commande.');
       const result = await offers.save(offer);
+      await startPassengerDecision(manager, current!, driverId);
       await requests.update(tripRequestId, { id: tripRequestId, status: TripRequestStatus.OFFERS_RECEIVED });
       return result;
     });
@@ -1288,7 +1358,7 @@ export class TripRequestsService {
     const tripRequest = await this.tripRequestRepository.findOne({
       where: { id: tripRequestId, passengerId },
       relations: [
-        'passenger',
+        'passenger', 'targetDriver',
         'driverOffers',
         'driverOffers.driver',
         'driverOffers.vehicle',
@@ -1326,6 +1396,7 @@ export class TripRequestsService {
       throw new NotFoundException('Offre du conducteur non trouvée');
     }
 
+    assertRequestTarget(tripRequest, offer.driverId);
     if (offer.existingTripId) throw new BadRequestException({
       code: 'SHARED_TRIP_CONSENT_REQUIRED',
       message: 'Confirmez explicitement le partage du trajet dans une version compatible de l’application.',
@@ -1357,6 +1428,8 @@ export class TripRequestsService {
       const current = await requests.findOne({ where: { id: tripRequestId }, lock: { mode: 'pessimistic_write' } });
       assertRequestSnapshot(current, tripRequest);
       assertUnassignedRequest(current!);
+      assertRequestTarget(current!, offer.driverId);
+      await assertSequentialInvitation(manager, current!, offer.driverId, ['passenger']);
       if (await manager.getRepository(Trip).exists({ where: { driverId: offer.driverId, status: TripStatus.ACTIVE } }))
         throw new ConflictException({ code: 'SHARED_TRIP_OFFER_REQUIRED',
           message: 'Ce conducteur est maintenant en trajet. Il doit proposer un partage que vous pourrez accepter explicitement.' });
@@ -1377,11 +1450,16 @@ export class TripRequestsService {
         selectedDriverRequiresPassengerKyc: offer.requiresPassengerKyc,
         selectedAt: acceptedAt, driverPickupOverdueNotifiedAt: null,
       });
+      if (current!.sequentialDispatch) await manager.query(`UPDATE trip_request_dispatch_offers
+        SET status=CASE WHEN "driverId"=$2 THEN 'accepted' ELSE 'cancelled' END
+        WHERE "requestId"=$1 AND status='pending'`, [tripRequestId, offer.driverId]);
     });
 
     this.logger.log(
       `Driver offer ${acceptDto.offerId} accepted for trip request ${tripRequestId}`,
     );
+
+    await this.driverDispatch?.notifyScheduledRequest(tripRequestId);
 
     // Notify the driver that their offer was accepted
     await this.notifyDriverAboutOfferAcceptance(tripRequest, offer);
@@ -1396,7 +1474,7 @@ export class TripRequestsService {
 
     const tripRequest = await this.tripRequestRepository.findOne({
       where: { id: tripRequestId },
-      relations: ['passenger', 'selectedDriver', 'selectedVehicle'],
+      relations: ['passenger', 'targetDriver', 'selectedDriver', 'selectedVehicle'],
     });
 
     if (!tripRequest) {
@@ -1576,13 +1654,14 @@ export class TripRequestsService {
     // Get trip request with relations
     const tripRequest = await this.tripRequestRepository.findOne({
       where: { id: tripRequestId },
-      relations: ['passenger', 'driverOffers'],
+      relations: ['passenger', 'targetDriver', 'driverOffers'],
     });
 
     if (!tripRequest) {
       throw new NotFoundException('Commande de trajet non trouvée');
     }
 
+    assertRequestTarget(tripRequest, driverId);
     await this.expireRequests([tripRequest]);
 
     if (tripRequest.immediateDispatch) {
@@ -1712,6 +1791,7 @@ export class TripRequestsService {
 
     // Create Trip from TripRequest (private by default)
     // The trip is created with the number of seats requested by the passenger (or more if driver specified)
+    const acceptanceToken = await claimRequestAcceptance(this.tripRequestRepository.manager, tripRequest, driverId);
     const trip = await this.tripsService.create(
       driverId,
       {
@@ -1739,8 +1819,54 @@ export class TripRequestsService {
         isPrivate: true, // Trajet privé par défaut
         tripRequestId: tripRequest.id,
         requestSnapshot: tripRequest,
+        acceptanceToken,
       },
-    );
+    ).catch(async error => {
+      await releaseRequestAcceptance(this.tripRequestRepository.manager, tripRequestId, driverId, acceptanceToken)
+        .catch(() => this.logger.warn('Request acceptance release deferred to recovery'));
+      await this.driverDispatch?.notifyScheduledRequest(tripRequestId);
+      throw error;
+    });
+
+    if (tripRequest.sequentialDispatch) {
+      try {
+        await this.bookingsService.create(tripRequest.passengerId, {
+          tripId: trip.id, numberOfSeats: tripRequest.numberOfSeats,
+          passengerOrigin: tripRequest.departureLocation, passengerDestination: tripRequest.arrivalLocation,
+          passengerOriginReference: tripRequest.departureReference || undefined,
+          passengerDestinationReference: tripRequest.arrivalReference || undefined,
+          passengerOriginCoordinates: departureCoordinates ? { latitude: departureCoordinates[1], longitude: departureCoordinates[0] } : undefined,
+          passengerDestinationCoordinates: arrivalCoordinates ? { latitude: arrivalCoordinates[1], longitude: arrivalCoordinates[0] } : undefined,
+          paymentMode: tripRequest.paymentMode,
+        }, {
+          lockRequest: async manager => {
+            await manager.findOne(TripRequest, { where: { id: tripRequestId }, lock: { mode: 'pessimistic_write' } });
+          },
+          validate: async (manager, currentTrip) => {
+            const current = await manager.findOneByOrFail(TripRequest, { id: tripRequestId });
+            assertRequestSnapshot(current, tripRequest); assertUnassignedRequest(current);
+            await assertSequentialInvitation(manager, current, driverId, ['accepting'], acceptanceToken);
+            if (currentTrip.driverId !== driverId || currentTrip.tripRequestId !== tripRequestId)
+              throw new ConflictException('Cette commande a changé.');
+          },
+          selected: async manager => {
+            const current = await manager.findOneByOrFail(TripRequest, { id: tripRequestId });
+            await completeRequestAcceptance(manager, current, await manager.findOneByOrFail(Trip, { id: trip.id }));
+          },
+        });
+      } catch (error) {
+        // Cache invalidation can fail after the booking/selection transaction committed.
+        const committed = await this.tripRequestRepository.findOneBy({ id: tripRequestId, tripId: trip.id, selectedDriverId: driverId });
+        if (!committed) {
+          await this.tripsService.cancelFailedRequestTrip(trip.id, driverId, tripRequestId).catch(() => undefined);
+          await releaseRequestAcceptance(this.tripRequestRepository.manager, tripRequestId, driverId, acceptanceToken).catch(() => undefined);
+          await this.driverDispatch?.notifyScheduledRequest(tripRequestId);
+          throw error;
+        }
+      }
+      await this.driverDispatch?.notifyScheduledRequest(tripRequestId);
+      return { trip, tripRequest: await this.findOne(tripRequestId, driverId) };
+    }
 
     // Create booking for the passenger automatically with the number of seats they requested
     try {
@@ -1793,6 +1919,9 @@ export class TripRequestsService {
         throw new ConflictException('Cette commande a changé. Actualisez ses détails.');
       }
       await requests.save(tripRequest);
+      if (current.sequentialDispatch) await manager.query(`UPDATE trip_request_dispatch_offers
+        SET status = CASE WHEN "driverId" = $2 THEN 'accepted' ELSE 'cancelled' END
+        WHERE "requestId" = $1 AND status = 'pending'`, [tripRequestId, driverId]);
       await manager.getRepository(DriverOffer).update(
         { tripRequestId, status: DriverOfferStatus.PENDING }, { status: DriverOfferStatus.REJECTED },
       );
@@ -1808,6 +1937,7 @@ export class TripRequestsService {
       `Trip request ${tripRequestId} accepted by driver ${driverId}, trip ${trip.id} created`,
     );
 
+    await this.driverDispatch?.notifyScheduledRequest(tripRequestId);
     return {
       trip,
       tripRequest: await this.findOne(tripRequestId, driverId),
@@ -2232,7 +2362,7 @@ export class TripRequestsService {
 
     const request = await this.tripRequestRepository.findOne({
       where: { id: requestId },
-      relations: ['passenger', 'driverOffers'],
+      relations: ['passenger', 'targetDriver', 'driverOffers'],
       select: {
         id: true, passengerId: true, status: true, selectedDriverId: true,
         tripId: true, immediateDispatch: true, departureDateMax: true,
@@ -2587,6 +2717,8 @@ export class TripRequestsService {
 
     return {
       id: tripRequest.id,
+      targetDriverId: tripRequest.targetDriverId ?? null,
+      targetDriverName: tripRequest.targetDriver ? [tripRequest.targetDriver.firstName, tripRequest.targetDriver.lastName].filter(Boolean).join(' ') : null,
       immediateDispatch: tripRequest.immediateDispatch ?? false,
       passenger,
       // Authenticated drivers need exact pickup/drop-off points before accepting.
@@ -2965,7 +3097,7 @@ export class TripRequestsService {
           ),
           expirationNotificationSent: false,
         },
-        relations: ['passenger', 'driverOffers'],
+        relations: ['passenger', 'targetDriver', 'driverOffers'],
       });
 
       const requestsExpiringSoon = notificationCandidates.filter(

@@ -59,6 +59,7 @@ function buildService() {
   );
   request.driverOffers = offers;
   const requests = {
+    manager: { query: jest.fn().mockResolvedValue([]) },
     find: jest.fn().mockResolvedValue([request]),
     findOne: jest.fn().mockResolvedValue(request),
     update: jest.fn(),
@@ -116,6 +117,14 @@ function buildService() {
 }
 
 describe('Trip request privacy', () => {
+  it('hides a refused detail only from the refusing driver, preserving the passenger and an assigned ride', async () => {
+    const { service, requests, accept } = buildService();
+    requests.manager.query.mockResolvedValue([{ exists: 1 }]);
+    await expect(service.findOne('request', 'driver')).rejects.toBeInstanceOf(NotFoundException);
+    await expect(service.findOne('request', 'passenger')).resolves.toMatchObject({ id: 'request' });
+    accept();
+    await expect(service.findOne('request', 'driver')).resolves.toMatchObject({ id: 'request' });
+  });
   it('keeps exact addresses and map points for drivers, without phones or competing offers', async () => {
     const { service, request } = buildService();
     const [result] = await service.findAll('driver');

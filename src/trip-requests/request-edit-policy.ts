@@ -14,6 +14,7 @@ export function assertRequestSnapshot(
     current.status !== snapshot.status ||
     current.selectedDriverId !== snapshot.selectedDriverId ||
     current.tripId !== snapshot.tripId ||
+    (current.targetDriverId ?? null) !== (snapshot.targetDriverId ?? null) ||
     new Date(current.updatedAt).getTime() !==
       new Date(snapshot.updatedAt).getTime()
   ) {

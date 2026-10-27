@@ -30,6 +30,14 @@ export enum TripRequestStatus {
 @Index(['departureDateMax'])
 @Index('IDX_trip_requests_vehicle_type', ['vehicleType'])
 export class TripRequest {
+  @Index('IDX_request_target_driver', { where: '"targetDriverId" IS NOT NULL' })
+  @Column({ type: 'uuid', nullable: true })
+  targetDriverId: string | null;
+
+  @ManyToOne(() => User, { nullable: true, onDelete: 'RESTRICT' })
+  @JoinColumn({ name: 'targetDriverId', foreignKeyConstraintName: 'FK_request_target_driver' })
+  targetDriver: User | null;
+
   @Column({ type: 'smallint', default: 2, update: false })
   cashCommissionPolicyVersion: number;
 
@@ -38,6 +46,9 @@ export class TripRequest {
 
   @Column({ default: false })
   immediateDispatch: boolean;
+
+  @Column({ default: false })
+  sequentialDispatch: boolean;
 
   @PrimaryGeneratedColumn('uuid')
   id: string;

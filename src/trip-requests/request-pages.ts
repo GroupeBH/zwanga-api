@@ -1,3 +1,5 @@
+import { sequentialInvitationSql } from './dispatch/sequential-policy';
+import { requestDriverVisibilitySql } from './target-driver-policy';
 import { Repository } from 'typeorm';
 import { HistoryPageQuery, historyContext, loadHistoryIds } from '../common/history-page';
 import { TripRequest, TripRequestStatus } from './entities/trip-request.entity';
@@ -12,6 +14,8 @@ export async function requestPageIds(repository: Repository<TripRequest>, userId
     .where('request.createdAt <= :asOf', { asOf: context.asOf });
   if (own) query.andWhere('request.passengerId = :userId', { userId });
   else query.andWhere('request.status IN (:...states)', { states: [TripRequestStatus.PENDING, TripRequestStatus.OFFERS_RECEIVED] })
+    .andWhere(requestDriverVisibilitySql('request.id', ':userId'), { userId })
+    .andWhere(sequentialInvitationSql('request.id', ':userId'), { userId })
     .andWhere('request.immediateDispatch = false')
     .andWhere('request.passengerId <> :userId', { userId })
     .andWhere('request.selectedDriverId IS NULL AND request.tripId IS NULL')

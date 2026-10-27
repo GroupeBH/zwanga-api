@@ -269,7 +269,7 @@ export class TripsService {
   async create(
     driverId: string,
     createTripDto: CreateTripDto,
-    options?: { isPrivate?: boolean; tripRequestId?: string; requestSnapshot?: TripRequest },
+    options?: { isPrivate?: boolean; tripRequestId?: string; requestSnapshot?: TripRequest; acceptanceToken?: string },
   ): Promise<SanitizedTrip> {
     const isFree = createTripDto.isFree ?? createTripDto.pricePerSeat === 0;
     const pricePerSeat = isFree ? 0 : createTripDto.pricePerSeat;
@@ -329,7 +329,7 @@ export class TripsService {
 
     const savedTrip = options?.isPrivate
       ? options.requestSnapshot
-        ? await saveRequestTrip(this.tripRepository, trip, options.requestSnapshot)
+        ? await saveRequestTrip(this.tripRepository, trip, options.requestSnapshot, options.acceptanceToken)
         : await this.tripRepository.save(trip)
       : (await savePublicationsWithPhotoPolicy(this.tripRepository, driverId, [trip]))[0];
     await this.invalidateTripCaches();

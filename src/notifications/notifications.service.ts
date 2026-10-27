@@ -1,3 +1,5 @@
+import { sequentialInvitationSql } from '../trip-requests/dispatch/sequential-policy';
+import { requestDriverVisibilitySql } from '../trip-requests/target-driver-policy';
 import { sendBoundedFirebase } from './bounded-firebase-send';
 import { recoverUnacknowledgedRides } from './recover-unacknowledged-ride';
 import { nativeAndroidDriverPush } from './native-android-driver-push';
@@ -957,16 +959,19 @@ export class NotificationService implements OnModuleInit {
     if (notification.eventKey && ['trip_departure_reminder', 'trip_expiring_soon'].includes(type)) {
       return isTripReminderDeliverable(this.notificationRepository.manager, notification);
     }
-    if (type === 'trip_request_nearby') {
-      if (!this.isNearbyRequestRing(notification) ||
-          !(Date.parse(String(notification.data?.alertExpiresAt)) > Date.now())) return false;
+    if (['trip_request_nearby', 'trip_request', 'new_trip_request'].includes(type)) {
+      if (type === 'trip_request_nearby' && (!this.isNearbyRequestRing(notification) ||
+          !(Date.parse(String(notification.data?.alertExpiresAt)) > Date.now()))) return false;
       if ((notification.data?.sharedTrip === true || notification.data?.sharedTrip === 'true') &&
           !(await sharedTripAlertIsDeliverable(this.notificationRepository.manager, notification.userId,
             notification.data?.tripRequestId, notification.data?.existingTripId))) return false;
       const rows: { passengerId: string }[] = await this.notificationRepository.manager.query(`SELECT r."passengerId" FROM trip_requests r
         WHERE r.id = $1 AND r.status IN ('pending', 'offers_received') AND r."selectedDriverId" IS NULL
-          AND r."tripId" IS NULL AND r."departureDateMax" > now() AND r."passengerId" <> $2`,
-        [notification.data?.tripRequestId, notification.userId]);
+          AND r."tripId" IS NULL AND r."departureDateMax" > now() AND r."passengerId" <> $2
+          AND ${requestDriverVisibilitySql('r.id', '$2')} AND ${sequentialInvitationSql('r.id', '$2')}
+          AND (r."sequentialDispatch"=false OR EXISTS (SELECT 1 FROM trip_request_dispatch_offers active
+            WHERE active."requestId"=r.id AND active."driverId"=$2 AND active.status='pending' AND active.phase='driver'))`,
+        [notification.data?.tripRequestId ?? notification.data?.requestId, notification.userId]);
       if (rows[0]?.passengerId) notification.data = { ...notification.data, passengerId: rows[0].passengerId };
       return rows.length > 0;
     }
@@ -986,9 +991,9 @@ export class NotificationService implements OnModuleInit {
       if (this.configService.get<string>('DRIVER_DISPATCH_ENABLED') !== 'true') return false;
       const rows: { passengerId: string }[] = await this.notificationRepository.manager.query(`SELECT r."passengerId" FROM trip_request_dispatch_offers o
         JOIN trip_requests r ON r.id = o."requestId" WHERE o.id = $1 AND o."driverId" = $2
-        AND o.status = 'pending' AND o."expiresAt" > now() AND r.status = 'pending' AND r."passengerId" <> $2
+        AND o.status = 'pending' AND o.phase = 'driver' AND o."expiresAt" > clock_timestamp() AND r.status = 'pending' AND r."passengerId" <> $2
         AND r."selectedDriverId" IS NULL AND r."tripId" IS NULL AND r."departureDateMax" > now()
-        AND r."maxPricePerSeat" IS NOT NULL`,
+        AND r."maxPricePerSeat" IS NOT NULL AND ${requestDriverVisibilitySql('r.id', '$2')}`,
         [notification.data?.offerId, notification.userId]);
       if (rows[0]?.passengerId) notification.data = { ...notification.data, passengerId: rows[0].passengerId };
       return rows.length > 0;

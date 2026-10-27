@@ -1,3 +1,4 @@
+import { DriverChoiceQuery } from './dto/driver-choice.dto';
 import {
   Controller,
   Get,
@@ -65,6 +66,21 @@ export class TripRequestsController {
   })
   async findAll(@Request() req: { user: { userId: string } }) {
     return this.tripRequestsService.findAll(req.user.userId);
+  }
+
+  @Get('driver-choices')
+  @Auth()
+  @Header('Cache-Control', 'private, no-store')
+  @SensitiveThrottle(30, 60000)
+  async driverChoices(@Request() req: { user: { userId: string } }, @Query() query: DriverChoiceQuery) {
+    return this.tripRequestsService.driverChoices(req.user.userId, query);
+  }
+
+  @Post(':id/open-search')
+  @Auth()
+  @SensitiveThrottle(10, 60000)
+  async openSearch(@Request() req: { user: { userId: string } }, @Param('id', ParseUUIDPipe) id: string) {
+    return this.tripRequestsService.openToNearbyDrivers(req.user.userId, id);
   }
 
   @Get('my-requests')

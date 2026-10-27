@@ -1,3 +1,7 @@
+import { SequentialDispatchService } from './sequential-dispatch.service';
+import { assertRequestTarget } from '../target-driver-policy';
+import { recordRequestRefusal } from '../request-refusal';
+import { requestDriverVisibilitySql } from '../target-driver-policy';
 import { recordRideNotificationReceipt } from '../../notifications/ride-notification-receipt';
 import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
 import { RideAlertChanges } from '../../notifications/ride-alert-changes';
@@ -33,18 +37,28 @@ export class DriverDispatchService {
   private ticking = false;
   constructor(private readonly db: DataSource, private readonly config: ConfigService,
     private readonly notifications: NotificationService,
-    @Optional() private readonly rideChanges?: RideAlertChanges) {}
+    @Optional() private readonly rideChanges?: RideAlertChanges,
+    private readonly sequential?: SequentialDispatchService) {}
 
   get enabled() { return this.config.get<string>('DRIVER_DISPATCH_ENABLED') === 'true'; }
-  declineNearbyRequest(driverId: string, requestId: string) {
-    return declineNearbyRequest(this.db.manager, driverId, requestId);
+  async declineNearbyRequest(driverId: string, requestId: string) {
+    const result = await declineNearbyRequest(this.db.manager, driverId, requestId);
+    this.rideChanges?.enqueue({ kind: 'request', id: requestId, terminal: false });
+    await this.sequential?.advance(requestId);
+    return result;
+  }
+  async receiveRequestEvent(driverId: string, requestId: string, offerId: string) {
+    const rows = await this.db.query(`SELECT id FROM trip_request_dispatch_offers
+      WHERE id = $1 AND "requestId" = $2 AND "driverId" = $3`, [offerId, requestId, driverId]);
+    if (!rows.length) throw new NotFoundException('Proposition introuvable.');
+    return this.declineNearbyRequest(driverId, requestId);
   }
   async acknowledgeNotification(driverId: string, notificationId: string, stage: 'received' | 'displayed' = 'received', detail?: import('../../notifications/ride-notification-receipt').RideReceiptDetail) {
     const result = await recordRideNotificationReceipt(this.db.manager, driverId, notificationId, stage, detail);
     if (result.received) await acknowledgeNearbyRequest(this.db.manager, driverId, notificationId);
     return result;
   }
-  private get responseSeconds() { return boundedInteger(this.config.get('DRIVER_DISPATCH_RESPONSE_SECONDS'), 60, 60, 120); }
+  private get responseSeconds() { if (this.sequential) return 40; return boundedInteger(this.config.get('DRIVER_DISPATCH_RESPONSE_SECONDS'), 60, 60, 120); }
   private get presenceSeconds() { return boundedInteger(this.config.get('DRIVER_DISPATCH_PRESENCE_SECONDS'), 90, 45, 180); }
   private get radiusMeters() { return NEARBY_DRIVER_RADIUS_METERS; }
   // Compatibility/freshness metadata only. Durable positions do not expire.
@@ -52,6 +66,7 @@ export class DriverDispatchService {
 
   async notifyScheduledRequest(requestId: string): Promise<boolean> {
     if (!this.enabled) return false;
+    if (this.sequential) return this.sequential.advance(requestId);
     const queued = await this.db.transaction(manager => enqueueScheduledRequestAlert(
       manager, requestId, this.radiusMeters, driverId => this.isBusy(manager, driverId)));
     // No network operation while holding the request's transaction lock.
@@ -176,9 +191,10 @@ export class DriverDispatchService {
 
   async getOffer(driverId: string, id: string) {
     const [offer]: DispatchOffer[] = await this.db.query(`SELECT * FROM trip_request_dispatch_offers WHERE id = $1 AND "driverId" = $2`, [id, driverId]);
-    if (!offer) throw new NotFoundException('Proposition introuvable.');
+    if (!offer || offer.status === 'declined') throw new NotFoundException('Proposition introuvable.');
     const request = await this.db.getRepository(TripRequest).findOne({ where: { id: offer.requestId }, relations: ['passenger'] });
     if (!request) throw new NotFoundException('Commande introuvable.');
+    assertRequestTarget(request, driverId);
     const vehicle = await this.db.getRepository(Vehicle).findOneBy({ id: offer.vehicleId, ownerId: driverId });
     return { ...offer, serverNow: new Date().toISOString(),
       vehicleName: vehicle ? `${vehicle.brand} ${vehicle.model}` : null,
@@ -201,6 +217,9 @@ export class DriverDispatchService {
       const requests = manager.getRepository(TripRequest);
       const request = await requests.findOne({ where: { id: snapshot.requestId }, lock: { mode: 'pessimistic_write' } });
       const [offer]: DispatchOffer[] = await manager.query(`SELECT * FROM trip_request_dispatch_offers WHERE id = $1 FOR UPDATE`, [id]);
+      if (request) assertRequestTarget(request, driverId);
+      if (request?.sequentialDispatch && !request.immediateDispatch)
+        throw new BadRequestException('Ouvrez la commande pour choisir votre véhicule et répondre.');
       const expected = decision === 'accept' ? 'accepted' : 'declined';
       if (request && offer.status === expected && (decision === 'decline' || request.selectedDriverId === driverId))
         return { status: expected, requestId: request.id }; // Retry after a lost response; no repeated side effect.
@@ -242,12 +261,16 @@ export class DriverDispatchService {
       await manager.query(`UPDATE trip_request_dispatch_offers SET status = $2 WHERE id = $1`, [id, expected]);
       // Commit the refusal and its successor's durable invitation together. Do
       // not depend on the global cron's busy flag or its 25-request batch.
-      if (decision === 'decline') await this.allocateNext(manager, request);
+      if (decision === 'decline') {
+        await recordRequestRefusal(manager, driverId, request.id);
+        if (!this.sequential) await this.allocateNext(manager, request);
+      }
       return { status: expected, requestId: request.id };
     });
     // The existing urgent lane sends the committed push immediately when a
     // worker is free; its cron retries delivery without keeping HTTP/DB locks.
     this.rideChanges?.enqueue({ kind: 'request', id: result.requestId, terminal: decision === 'accept' });
+    await this.sequential?.advance(result.requestId);
     void this.notifications.dispatchUrgentNotifications()
       .catch(() => this.logger.warn('Dispatch response push delivery deferred.'));
     return result;
@@ -259,7 +282,7 @@ export class DriverDispatchService {
     this.ticking = true;
     try {
       // Release deadlines even if no driver is currently available; batches remain bounded.
-      await this.db.query(`UPDATE trip_request_dispatch_offers SET status = 'expired' WHERE id IN
+      await this.db.query(`UPDATE trip_request_dispatch_offers SET status = 'expired' WHERE sequential = false AND id IN
         (SELECT id FROM trip_request_dispatch_offers WHERE status = 'pending' AND "expiresAt" <= now()
           ORDER BY "expiresAt", id LIMIT 100 FOR UPDATE SKIP LOCKED)`);
       const leaseId = randomUUID();
@@ -281,7 +304,8 @@ export class DriverDispatchService {
         while (next < requests.length) {
           const request = requests[next++];
           try {
-            if (request.immediateDispatch) await this.allocate(request.id);
+            if (this.sequential) await this.sequential.poll(request.id);
+            else if (request.immediateDispatch) await this.allocate(request.id);
             else await this.db.transaction(manager => enqueueScheduledRequestAlert(
               manager, request.id, this.radiusMeters, driverId => this.isBusy(manager, driverId)));
             await this.db.transaction(manager => enqueueSharedTripAlert(manager, request.id));
@@ -351,7 +375,9 @@ export class DriverDispatchService {
       WHERE ${USABLE_DRIVER_LOCATION_SQL} AND p."driverId" <> $1::uuid
       AND (CASE WHEN v.id = p."vehicleId" THEN p.seats WHEN v.type = 'motorcycle_2_wheels' THEN 2
         WHEN v.type = 'motorcycle_3_wheels' THEN 3 ELSE 4 END) >= $3
-      AND ST_DWithin(p.position, ST_SetSRID(ST_MakePoint($4,$5),4326)::geography, $6)
+      AND (EXISTS (SELECT 1 FROM trip_requests target WHERE target.id = $7 AND target."targetDriverId" = p."driverId")
+        OR ST_DWithin(p.position, ST_SetSRID(ST_MakePoint($4,$5),4326)::geography, $6))
+      AND ${requestDriverVisibilitySql('$7', 'p."driverId"')}
       AND ${ELIGIBLE_NEARBY_DRIVER_SQL}
       AND NOT EXISTS (SELECT 1 FROM trip_request_dispatch_offers o
         WHERE o."requestId" = $7 AND o."driverId" = p."driverId")

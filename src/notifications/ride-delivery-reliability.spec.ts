@@ -34,8 +34,8 @@ describe('v4 Android native safety card', () => {
       channelId: 'driver-alert-backup-v1', sound: 'none', alertDelivery: 'native-backup-v4' });
     expect(JSON.parse(payload.data.body)).toMatchObject({ type, driverId: uuid(2), passengerId: uuid(3) });
     expect(JSON.parse(payload.data.body).fallbackTag).toBe(payload.data.tag);
-    expect(payload.android.ttl).toBeLessThanOrEqual(type === 'driver_dispatch_offer' ? 20_000 : 300_000);
-    expect(payload.android.ttl).toBeGreaterThan(type === 'driver_dispatch_offer' ? 0 : 30_000);
+    expect(payload.android.ttl).toBeLessThanOrEqual(20_000);
+    expect(payload.android.ttl).toBeGreaterThan(0);
     expect(Buffer.byteLength(JSON.stringify(payload.data), 'utf8')).toBeLessThan(4096);
   });
 

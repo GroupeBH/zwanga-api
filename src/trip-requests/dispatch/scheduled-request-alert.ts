@@ -1,3 +1,4 @@
+import { requestDriverVisibilitySql } from '../target-driver-policy';
 import type { EntityManager } from 'typeorm';
 import { TripRequest, TripRequestStatus } from '../entities/trip-request.entity';
 import { enqueueTransactionalNotifications } from '../../notifications/transactional-notification';
@@ -18,7 +19,9 @@ export async function enqueueScheduledRequestAlert(manager: EntityManager, reque
   const candidates: { driverId: string }[] = await manager.query(`
     SELECT p."driverId" FROM driver_dispatch_presence p
     WHERE ${USABLE_DRIVER_LOCATION_SQL} AND p."driverId" <> $1::uuid
-    AND ST_DWithin(p.position, ST_SetSRID(ST_MakePoint($2,$3),4326)::geography, $4)
+    AND (EXISTS (SELECT 1 FROM trip_requests target WHERE target.id = $7 AND target."targetDriverId" = p."driverId")
+      OR ST_DWithin(p.position, ST_SetSRID(ST_MakePoint($2,$3),4326)::geography, $4))
+    AND ${requestDriverVisibilitySql('$7', 'p."driverId"')}
     AND ${ELIGIBLE_NEARBY_DRIVER_SQL}
     AND EXISTS (SELECT 1 FROM vehicles v WHERE v."ownerId" = p."driverId" AND v."isActive" = true
       AND v.type = $5 AND (CASE WHEN v.id = p."vehicleId" THEN p.seats

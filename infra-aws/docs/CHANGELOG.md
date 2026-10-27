@@ -1,5 +1,62 @@
 # Journal détaillé des changements d'infrastructure AWS
 
+## INFRA-2026-10-27-003 — Exécuter les tests du relais Redis avant déploiement
+
+- Date / statut : 27 octobre 2026 ; modification locale du workflow, aucun appel de déploiement.
+- Problème : le pipeline fournissait PostgreSQL mais pas DISPATCH_TEST_REDIS_PORT ; la suite séquentielle pouvait être ignorée.
+- Solution : .github/workflows/deploy.yml installe redis-server, démarre une instance de test liée à 127.0.0.1:16379 sans persistance, vérifie PONG, fournit le port aux tests et arrête cette instance ensuite.
+- Conservé : pipeline release, PostgreSQL jetable, contrôle final ECS préexistant, ordre tests/compilation/migrations/déploiement. Aucun accès à Redis ou aux données de production.
+- Vérifications : YAML analysé localement. Pas d'exécution GitHub Actions dans cette intervention ; validation sur le runner Ubuntu restant à réaliser. [Rapport des contrats et limites](../../docs/AUDIT_RECEPTION_SONNERIE_BACKEND_2026-10-27.md).
+
+
+## INFRA-2026-10-27-002 — Attendre la confirmation du déploiement ECS après stabilisation
+
+- **Date / statut / périmètre :** 27 octobre 2026, Africa/Kinshasa ; diagnostic
+  AWS et GitHub en lecture seule, correctif CI/CD préparé localement pour la production.
+- **Constat vérifié :** le [workflow 40503693732](https://github.com/GroupeBH/zwanga-api/actions/runs/40503693732)
+  a passé les tests, la compilation, la construction d'image et les migrations.
+  À 13:37:18, son contrôle final a renvoyé `false`. ECS a déclaré le déploiement
+  `ecs-svc/0850713560371083635` terminé à 13:37:25. La révision `:29` est ensuite
+  confirmée `PRIMARY / COMPLETED`, avec une tâche saine sur une attendue et une
+  cible ALB `healthy`. L'image ECR correspond au commit `e35ae493030222c39fc30b080e3dbb2af3b5aadd`.
+- **Cause :** le waiter [AWS `services-stable`](https://docs.aws.amazon.com/cli/latest/reference/ecs/wait/services-stable.html)
+  vérifie le nombre de déploiements et l'égalité entre tâches actives et attendues,
+  sans attendre `rolloutState=COMPLETED`. Une lecture unique de cet état juste
+  après le waiter peut donc produire un faux échec. La chronologie observée est
+  cohérente avec cette fenêtre ; le JSON exact lu à 13:37:18 n'était pas journalisé.
+- **Avant / après :** `.github/workflows/deploy.yml` conserve le waiter, puis
+  appelle `infra-aws/scripts/wait-for-ecs-deployment.cjs` au lieu du contrôle
+  `jq` unique. Le script relit le service au maximum treize fois, avec douze
+  pauses de dix secondes au maximum et un délai d'exécution de vingt secondes
+  par appel AWS. Il exige toujours l'identifiant attendu, `PRIMARY`, `COMPLETED`,
+  un seul déploiement et les comptes de tâches stabilisés. Un état `FAILED`
+  explicite échoue immédiatement ; un rollback, un état incomplet persistant ou
+  une erreur de lecture ne donne jamais un succès.
+- **Diagnostic :** chaque lecture affiche l'identifiant attendu, les comptes
+  de tâches, les identifiants et états des déploiements. Aucun environnement de
+  conteneur ni secret n'est affiché. L'absence ou le format invalide de
+  `EXPECTED_DEPLOYMENT` est refusé avant tout appel AWS.
+- **Ressources / IAM / variables :** aucune modification Terraform, IAM, SSM,
+  réseau ou dimensionnement. Réutilisation d'`ecs:DescribeServices` et des
+  variables existantes `ECS_CLUSTER`, `ECS_SERVICE`, `EXPECTED_DEPLOYMENT`.
+- **Disponibilité / données / coûts :** aucune relance du service ou migration
+  par le correctif ; aucune dépendance ajoutée. Quelques lectures ECS et du
+  temps de runner supplémentaires si la confirmation arrive après le waiter.
+  Les étapes de construction, migration et mise à jour ECS restent identiques.
+- **Validation :** scénarios automatisés dans `src/database/deployment-completion.spec.ts` :
+  confirmation différée, succès immédiat, échec explicite, rollback stable,
+  état manquant, limites de tentatives, comptes instables et erreurs AWS.
+  Dix-huit tests réussis dans les deux suites `deployment-completion` et
+  `deployment-revision`. Syntaxe Node, `git diff --check` et contrôle documentaire
+  `HEAD WORKTREE` réussis. Les contrôles de révision immuable existants sont conservés.
+- **Livraison / surveillance :** inclure script, tests, workflow et cette entrée
+  dans la prochaine livraison ; vérifier le résultat et les diagnostics de
+  « Wait for ECS stability ». Le déploiement déjà terminé ne doit pas être
+  relancé uniquement pour repeindre le job en vert.
+- **Retour arrière / limites :** revenir au précédent contrôle CI restaure
+  aussi son risque de faux échec ; aucune restauration de base requise pour
+  ce changement. Aucun push, redéploiement ou changement d'état AWS effectué ici.
+
 ## INFRA-2026-10-27-001 — Alignement Node et contrôles des dépendances avant déploiement
 
 ### Métadonnées

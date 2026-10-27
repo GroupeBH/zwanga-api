@@ -1,3 +1,5 @@
+import { RequestDriverQueue } from './dispatch/request-driver-queue';
+import { SequentialDispatchService } from './dispatch/sequential-dispatch.service';
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ScheduleModule } from '@nestjs/schedule';
@@ -34,7 +36,7 @@ import { DriverDispatchController } from './dispatch/dispatch.controller';
     TripRequestRecoveryModule,
   ],
   controllers: [DriverDispatchController, TripRequestsController, SharedTripOffersController],
-  providers: [TripRequestsService, DriverDispatchService, SharedTripOffersService],
+  providers: [RequestDriverQueue, SequentialDispatchService, TripRequestsService, DriverDispatchService, SharedTripOffersService],
   exports: [TripRequestsService],
 })
 export class TripRequestsModule {}

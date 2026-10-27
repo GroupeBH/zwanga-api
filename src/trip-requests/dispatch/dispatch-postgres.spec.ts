@@ -1,3 +1,11 @@
+import { RequestResponsePhases1780000098000 } from '../../database/migrations/1780000098000-RequestResponsePhases';
+import { SequentialRequestQueue1780000097000 } from '../../database/migrations/1780000097000-SequentialRequestQueue';
+import { findDriverChoices, validateTargetDriver } from '../driver-choices';
+import { TargetTripRequestDriver1780000096000 } from '../../database/migrations/1780000096000-TargetTripRequestDriver';
+import { SharedTripOffersService } from '../shared-trip-offers.service';
+import { prepareNearbyRequestRinging } from '../../notifications/nearby-request-cooldown';
+import { declineRequestForDriver } from '../request-refusal';
+import { RememberDriverRequestRefusals1780000095000 } from '../../database/migrations/1780000095000-RememberDriverRequestRefusals';
 import { createServer as createHttpServer } from 'node:http';
 import { Test } from '@nestjs/testing';
 import { ValidationPipe } from '@nestjs/common';
@@ -100,14 +108,19 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     await source.initialize();
     await source.query('CREATE EXTENSION IF NOT EXISTS postgis');
     await source.synchronize();
-    await source.query('ALTER TABLE trip_requests DROP COLUMN "immediateDispatch"');
+    await source.query('ALTER TABLE trip_requests DROP COLUMN "targetDriverId"');
+    await source.query('ALTER TABLE trip_requests DROP COLUMN "immediateDispatch", DROP COLUMN "sequentialDispatch"');
     const runner = source.createQueryRunner();
     try {
+      await new TargetTripRequestDriver1780000096000().up(runner);
       await new AddDriverDispatch1780000048000().up(runner);
       await new BroadcastDriverRequests1780000074000().up(runner);
       await new RetainDriverLastLocation1780000076000().up(runner);
       await new NearbyRequestRingingCooldown1780000087000().up(runner);
+      await new RememberDriverRequestRefusals1780000095000().up(runner);
       await new DispatchDeliveryResilience1780000088000().up(runner);
+      await new SequentialRequestQueue1780000097000().up(runner);
+      await new RequestResponsePhases1780000098000().up(runner);
     } finally { await runner.release(); }
     service = new DriverDispatchService(source, new ConfigService({ DRIVER_DISPATCH_ENABLED: 'true' }),
       notifications as never);
@@ -325,6 +338,121 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     jest.spyOn(edits as any, 'sanitizeDriverOffer').mockImplementation(async offer => offer);
     return edits;
   };
+
+
+  it('target choice searches nearby or a known driver without exposing private contact/location data', async () => {
+    const near = await driver(), far = await driver(15.8), owner = await passenger();
+    await source.getRepository(User).update(far.user.id, { firstName: 'Known', lastName: 'Driver' });
+    const query = { latitude: -4.3, longitude: 15.31, vehicleType: VehicleType.CAR, seats: 1 };
+    const nearby = await findDriverChoices(source.manager, owner.id, query);
+    expect(nearby.map(d => d.id)).toEqual([near.user.id]);
+    expect(Object.keys(nearby[0]).sort()).toEqual(['distanceKm', 'id', 'name', 'vehicle']);
+    expect((await findDriverChoices(source.manager, owner.id, { ...query, search: 'Known' })).map(d => d.id)).toEqual([far.user.id]);
+    expect((await findDriverChoices(source.manager, owner.id, { ...query, search: far.user.id })).map(d => d.id)).toEqual([far.user.id]);
+    expect(await findDriverChoices(source.manager, near.user.id, query)).toEqual([]);
+    expect(await findDriverChoices(source.manager, owner.id, { ...query, search: "%' OR 1=1--" })).toEqual([]);
+    await expect(validateTargetDriver(source.manager, owner.id, far.user.id, query)).resolves.toBeUndefined();
+    await expect(validateTargetDriver(source.manager, near.user.id, near.user.id, query)).rejects.toThrow();
+    await expect(validateTargetDriver(source.manager, owner.id, randomUUID(), query)).rejects.toThrow();
+    await expect(validateTargetDriver(source.manager, owner.id, near.user.id, { ...query, seats: 5 })).rejects.toThrow();
+  });
+
+  it.each([true, false])('targets only the chosen driver, even outside the default radius (immediate=%s)', async immediate => {
+    const chosen = await driver(15.8), other = await driver(), r = await request(immediate);
+    await source.getRepository(TripRequest).update(r.id, { targetDriverId: chosen.user.id });
+    if (immediate) {
+      await service.tick();
+      expect((await offers(r.id)).map(o => o.driverId)).toEqual([chosen.user.id]);
+    } else await service.notifyScheduledRequest(r.id);
+    const notices = await source.query(`SELECT "userId" FROM notifications WHERE data ->> 'tripRequestId' = $1`, [r.id]);
+    expect(notices.map(n => n.userId)).toEqual([chosen.user.id]);
+    const fake = { id: randomUUID(), userId: other.user.id, data: { type: 'trip_request_nearby', tripRequestId: r.id } };
+    expect(await prepareNearbyRequestRinging(source.manager, fake as any)).toBe(false);
+  });
+
+  it('keeps a targeted order private across reads, direct acceptance, offers and refusal', async () => {
+    const chosen = await driver(), other = await driver(15.32), r = await request(false), edits = editor();
+    await source.getRepository(TripRequest).update(r.id, { targetDriverId: chosen.user.id });
+    await source.query(`UPDATE trip_requests SET "createdAt" = '2026-01-01 00:00:00' WHERE id = $1`, [r.id]);
+    (edits.findOne as jest.Mock).mockRestore();
+    jest.spyOn(edits as any, 'sanitizeTripRequest').mockImplementation(async value => value);
+    expect(await edits.findOne(r.id, chosen.user.id)).toMatchObject({ targetDriverId: chosen.user.id });
+    await expect(edits.findOne(r.id, other.user.id)).rejects.toMatchObject({ status: 404 });
+    expect(await edits.findAll(other.user.id)).toHaveLength(0);
+    expect(await edits.findRequestPage(other.user.id, false, {})).toMatchObject({ data: [], total: 0 });
+    expect((await edits.findRequestPage(chosen.user.id, false, {})).data).toHaveLength(1);
+    await expect(edits.acceptTripRequest(other.user.id, r.id, { vehicleId: other.vehicle.id } as any)).rejects.toMatchObject({ status: 404 });
+    await expect(edits.createDriverOffer(other.user.id, r.id, { vehicleId: other.vehicle.id } as any)).rejects.toMatchObject({ status: 404 });
+    await expect(declineRequestForDriver(source.manager, other.user.id, r.id)).rejects.toMatchObject({ status: 404 });
+    const shared = new SharedTripOffersService(source, {} as any);
+    await expect(shared.context(other.user.id, r.id)).rejects.toMatchObject({ status: 404 });
+  });
+
+  it('never broadcasts a targeted refusal until its owner explicitly broadens the request', async () => {
+    const chosen = await driver(), other = await driver(15.32), r = await request(), edits = editor();
+    (edits as any).driverDispatch = service;
+    await source.getRepository(TripRequest).update(r.id, { targetDriverId: chosen.user.id });
+    await service.tick();
+    const [offer] = await offers(r.id);
+    await service.respond(chosen.user.id, offer.id, 'decline');
+    await service.tick();
+    expect((await offers(r.id)).map(o => o.driverId)).toEqual([chosen.user.id]);
+    await expect(edits.openToNearbyDrivers(other.user.id, r.id)).rejects.toMatchObject({ status: 404 });
+    const opened = await edits.openToNearbyDrivers(r.passengerId, r.id);
+    expect(opened.targetDriverId).toBeNull();
+    await waitForDispatchCycles(); await service.tick();
+    expect((await offers(r.id)).filter(o => o.status === 'pending').map(o => o.driverId)).toEqual([other.user.id]);
+    await edits.openToNearbyDrivers(r.passengerId, r.id); await waitForDispatchCycles();
+    expect((await offers(r.id)).filter(o => o.driverId === other.user.id)).toHaveLength(1);
+    await source.getRepository(TripRequest).update(r.id, { status: TripRequestStatus.DRIVER_SELECTED, selectedDriverId: other.user.id });
+    await expect(edits.openToNearbyDrivers(r.passengerId, r.id)).rejects.toMatchObject({ status: 409 });
+  });
+
+  it('creates a targeted request through the service and preserves its invitation when broadening', async () => {
+    const chosen = await driver(), other = await driver(15.32), owner = await passenger(), edits = editor();
+    (edits as any).driverDispatch = service;
+    const created = await edits.create(owner.id, { targetDriverId: chosen.user.id, immediateDispatch: true,
+      departureLocation: 'Départ test', arrivalLocation: 'Arrivée test', departureCoordinates: [15.31, -4.3],
+      arrivalCoordinates: [15.32, -4.3], departureDateMin: new Date(Date.now() + 60_000).toISOString(),
+      departureDateMax: new Date(Date.now() + 600_000).toISOString(), vehicleType: VehicleType.CAR, maxPricePerSeat: 1500 });
+    expect(created.targetDriverId).toBe(chosen.user.id); await waitForDispatchCycles();
+    const [invitation] = await offers(created.id); expect(invitation.driverId).toBe(chosen.user.id);
+    await edits.openToNearbyDrivers(owner.id, created.id); await waitForDispatchCycles(); await service.tick();
+    expect((await offers(created.id)).filter(o => o.status === 'pending').map(o => o.driverId)).toEqual([chosen.user.id]);
+    await service.respond(chosen.user.id, invitation.id, 'accept');
+    const saved = await source.getRepository(TripRequest).findOneByOrFail({ id: created.id });
+    expect(saved.selectedDriverId).toBe(chosen.user.id);
+    expect((await offers(created.id)).find(o => o.driverId === other.user.id)).toBeUndefined();
+  });
+
+  it('target audience migration refuses a rollback that would expose private requests', async () => {
+    const chosen = await driver(), r = await request(false), runner = source.createQueryRunner();
+    const migration = new TargetTripRequestDriver1780000096000();
+    try {
+      await source.getRepository(TripRequest).update(r.id, { targetDriverId: chosen.user.id });
+      await expect(migration.down(runner)).rejects.toThrow('audience restriction');
+      await source.getRepository(TripRequest).update(r.id, { targetDriverId: null });
+      await migration.down(runner); await migration.up(runner);
+      expect((await source.getRepository(TripRequest).findOneByOrFail({ id: r.id })).targetDriverId).toBeNull();
+    } finally { await runner.release(); }
+  });
+
+  it('keeps a refused scheduled request out of lists, pagination and subsequent invitations for that driver only', async () => {
+    const d = await driver(), other = await driver(15.32), r = await request(false);
+    // Stable historical timestamp: this test isolates refusal from local Windows/PG timezone defaults.
+    await source.query(`UPDATE trip_requests SET "createdAt" = '2026-01-01 00:00:00' WHERE id = $1`, [r.id]);
+    const edits = editor();
+    jest.spyOn(edits as any, 'sanitizeTripRequest').mockImplementation(async value => value);
+    await declineRequestForDriver(source.manager, d.user.id, r.id);
+    expect(await edits.findAll(d.user.id)).toHaveLength(0);
+    expect(await edits.findAll(other.user.id)).toHaveLength(1);
+    expect(await edits.findRequestPage(d.user.id, false, {})).toMatchObject({ data: [], total: 0 });
+    expect((await edits.findRequestPage(other.user.id, false, {})).data).toHaveLength(1);
+    expect((await edits.findRequestPage(r.passengerId, true, {})).data).toHaveLength(1);
+    await service.notifyScheduledRequest(r.id);
+    const notices = await source.query(`SELECT "userId" FROM notifications WHERE data ->> 'tripRequestId' = $1`, [r.id]);
+    expect(notices.map(n => n.userId)).toEqual([other.user.id]);
+  });
 
   it('publishes a terminal hint after a classical offer acceptance using a partial TypeORM update', async () => {
     const d = await driver(), r = await request(false), edits = editor();

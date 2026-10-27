@@ -1,3 +1,4 @@
+import { assertSequentialInvitation } from './dispatch/sequential-policy';
 import {
   BadRequestException,
   ConflictException,
@@ -19,6 +20,7 @@ import {
   assertUnassignedRequest,
 } from './request-edit-policy';
 import { assertSharedTripAvailable } from './shared-trip-policy';
+import { assertRequestTarget } from './target-driver-policy';
 import { NEARBY_DRIVER_RADIUS_METERS } from './dispatch/nearby-driver-policy';
 
 @Injectable()
@@ -34,6 +36,8 @@ export class SharedTripOffersService {
     trip: Trip,
     driverId: string,
   ) {
+    assertRequestTarget(request, driverId);
+    await assertSequentialInvitation(manager, request, driverId);
     const driver = await manager.findOneBy(User, { id: driverId });
     if (!driver) throw new NotFoundException('Conducteur introuvable.');
     await assertDriverCanOperate(manager, driver);
@@ -64,6 +68,7 @@ export class SharedTripOffersService {
     });
     if (!request || request.passengerId === driverId)
       throw new NotFoundException('Commande introuvable.');
+    assertRequestTarget(request, driverId);
     const trip = await this.db.manager.findOneBy(Trip, {
       driverId,
       status: TripStatus.ACTIVE,
@@ -181,6 +186,7 @@ export class SharedTripOffersService {
     });
     if (!request || !offer?.existingTripId)
       throw new NotFoundException('Proposition introuvable.');
+    assertRequestTarget(request, offer.driverId);
     const committed = () =>
       this.committedSelection(passengerId, requestId, offerId);
     const previous = await committed();
@@ -212,6 +218,7 @@ export class SharedTripOffersService {
             });
             assertRequestSnapshot(current, request);
             assertUnassignedRequest(current!);
+            assertRequestTarget(current!, offer.driverId);
           },
           validate: async (manager, trip) => {
             const currentOffer = await manager.findOneBy(DriverOffer, {
