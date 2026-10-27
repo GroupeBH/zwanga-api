@@ -1,4 +1,4 @@
-import { In, IsNull, MoreThan } from 'typeorm';
+import { FindOperator, In, IsNull, MoreThan } from 'typeorm';
 import { TripRequestsService } from './trip-requests.service';
 import { TripRequestStatus } from './entities/trip-request.entity';
 import { DriverOfferStatus } from './entities/driver-offer.entity';
@@ -67,6 +67,7 @@ describe('Search/Home request availability independent of expiration persistence
     expect(repository.find).toHaveBeenCalledWith(
       expect.objectContaining({
         where: {
+          id: expect.any(FindOperator),
           status: In([
             TripRequestStatus.PENDING,
             TripRequestStatus.OFFERS_RECEIVED,

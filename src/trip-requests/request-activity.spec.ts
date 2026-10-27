@@ -16,7 +16,7 @@ describe('request activity read without unbounded history hydration', () => {
     expect(await service.findByPassenger('owner', true)).toEqual(rows);
     expect(repository.find).toHaveBeenLastCalledWith({
       where: activeRequestWhere('owner'),
-      relations: ['passenger', 'selectedDriver', 'selectedVehicle', 'driverOffers', 'driverOffers.driver', 'driverOffers.vehicle'],
+      relations: ['passenger', 'targetDriver', 'selectedDriver', 'selectedVehicle', 'driverOffers', 'driverOffers.driver', 'driverOffers.vehicle'],
       order: { createdAt: 'DESC' },
     });
     expect(expire).toHaveBeenCalledWith(rows);
