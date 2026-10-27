@@ -5,7 +5,7 @@ import type { Notification } from './entities/notification.entity';
  * v4 is advertised only after its channel exists; older clients stay unchanged. */
 export function androidDriverBackup(_notification: Notification, data: Record<string, unknown>) {
   const kind = data.type === 'new_booking' ? 'booking' : data.type === 'driver_dispatch_offer' ? 'dispatch' : 'nearby';
-  const id = data.bookingId ?? data.offerId ?? data.tripRequestId;
+  const id = kind === 'booking' ? data.bookingId : kind === 'dispatch' ? data.offerId : data.tripRequestId;
   const fallbackTag = `ride-backup-${kind}-${id}`;
   const fields = ['type', 'actionProtocol', 'notificationId', 'bookingId', 'tripId', 'tripRequestId', 'offerId',
     'driverId', 'passengerId', 'ringAlert', 'ringVersion', 'ringUntil', 'expiresAt', 'alertExpiresAt',
@@ -36,7 +36,10 @@ export function androidDriverBackup(_notification: Notification, data: Record<st
 }
 
 export function androidDriverBackupTtl(notification: Notification, now = Date.now()): number {
-  const expiry = Date.parse(String(notification.data?.expiresAt ?? ''));
-  return notification.data?.type === 'driver_dispatch_offer' && Number.isFinite(expiry)
-    ? Math.max(1, expiry - now) : 5 * 60_000;
+  // Scheduled sequential invitations also expire. A five-minute transport
+  // lifetime could deliver their safety card after the next driver was invited.
+  // This bounds delivery only; it cannot stop sound already owned by Android.
+  const expiries = [notification.data?.expiresAt, notification.data?.alertExpiresAt]
+    .map(value => Date.parse(String(value ?? ''))).filter(Number.isFinite);
+  return Math.max(1, Math.min(now + 5 * 60_000, ...expiries) - now);
 }

@@ -4,7 +4,7 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { SensitiveThrottle } from '../../common/decorators/sensitive-throttle.decorator';
 import { UserRole } from '../../users/entities/user.entity';
 import { DriverDispatchService } from './dispatch.service';
-import { DispatchResponseDto, DriverPositionDto, DriverPresenceDto, NotificationCapabilityDto, NotificationReceiptDto } from './dispatch.dto';
+import { RequestDispatchEventDto, DispatchResponseDto, DriverPositionDto, DriverPresenceDto, NotificationCapabilityDto, NotificationReceiptDto } from './dispatch.dto';
 
 @Controller('driver-dispatch')
 @Auth()
@@ -58,6 +58,15 @@ export class DriverDispatchController {
   respond(@Request() req: { user: { userId: string } }, @Param('id', ParseUUIDPipe) id: string,
     @Body() body: DispatchResponseDto) {
     return this.dispatch.respond(req.user.userId, id, body.decision);
+  }
+
+  /** Authenticated event callback: neither identity nor timeout is trusted from the client. */
+  @Post('requests/:id/events')
+  @Roles(UserRole.DRIVER)
+  @SensitiveThrottle(20, 60000)
+  event(@Request() req: { user: { userId: string } }, @Param('id', ParseUUIDPipe) id: string,
+    @Body() body: RequestDispatchEventDto) {
+    return this.dispatch.receiveRequestEvent(req.user.userId, id, body.offerId);
   }
 
   @Put('nearby-requests/:id/decline')

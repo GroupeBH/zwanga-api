@@ -19,7 +19,7 @@ describe('request/offer cursor pages', () => {
     expect(f.query.limit).toHaveBeenCalledWith(3);
     const conditions = f.query.andWhere.mock.calls.map(([sql]) => sql).join(' ');
     expect(conditions).toContain('immediateDispatch = false'); expect(conditions).toContain('selectedDriverId IS NULL');
-    expect(conditions).toContain('NOT EXISTS'); expect(conditions).toContain('departureDateMax > :cutoff');
+    expect(conditions).toContain('trip_request_driver_refusals'); expect(conditions).toContain('NOT EXISTS'); expect(conditions).toContain('departureDateMax > :cutoff');
     const context = historyContext({ before: page.nextCursor! }, 'requests-available');
     expect(context.cursor?.at).toBe(rows[1].at);
     expect(() => historyContext({ before: page.nextCursor! }, 'requests-own')).toThrow();

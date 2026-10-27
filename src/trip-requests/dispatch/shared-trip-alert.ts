@@ -1,3 +1,4 @@
+import { requestDriverVisibilitySql } from '../target-driver-policy';
 import { EntityManager } from 'typeorm';
 import {
   TripRequest,
@@ -38,7 +39,7 @@ export async function enqueueSharedTripAlert(
     lock: { mode: 'pessimistic_write', onLocked: 'skip_locked' },
   });
   if (
-    !request ||
+    !request || request.sequentialDispatch ||
     ![TripRequestStatus.PENDING, TripRequestStatus.OFFERS_RECEIVED].includes(
       request.status,
     ) ||
@@ -56,6 +57,7 @@ export async function enqueueSharedTripAlert(
     JOIN vehicles v ON v.id = t."vehicleId"::uuid AND v."ownerId" = t."driverId" AND v."isActive" = true
     LEFT JOIN driver_dispatch_presence p ON p."driverId" = t."driverId"
     WHERE t.status = 'ongoing' AND t."destinationReachedAt" IS NULL
+      AND ${requestDriverVisibilitySql('$1', 't."driverId"')}
       AND t."availableSeats" >= $2 AND v.type = $3 AND t."driverId" <> $4
       AND t."totalSeats" <= CASE WHEN v.type = 'motorcycle_2_wheels' THEN 2
         WHEN v.type = 'motorcycle_3_wheels' THEN 3 ELSE 20 END

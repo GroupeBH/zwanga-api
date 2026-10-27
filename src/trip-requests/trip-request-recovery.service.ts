@@ -1,6 +1,7 @@
+import { requestDriverVisibilitySql } from './target-driver-policy';
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, IsNull, Not, Repository } from 'typeorm';
+import { In, IsNull, Not, Raw, Repository } from 'typeorm';
 import { Booking, BookingStatus } from '../bookings/entities/booking.entity';
 import type { FindOptionsWhere } from 'typeorm';
 import { NotificationService } from '../notifications/notifications.service';
@@ -149,10 +150,11 @@ export class TripRequestRecoveryService {
 
       // Immediate requests are handled by the nearest-driver dispatch worker.
       // Never broadcast them to all drivers while holding up the HTTP response.
-      if (tripRequest.immediateDispatch) return;
+      if (tripRequest.immediateDispatch || tripRequest.sequentialDispatch) return;
 
       const drivers = await this.userRepository.find({
-        where: { role: UserRole.DRIVER, isActive: true },
+        where: { role: UserRole.DRIVER, isActive: true,
+          id: Raw(alias => requestDriverVisibilitySql(':refusedRequestId', alias), { refusedRequestId: tripRequest.id }) },
         select: ['id', 'fcmToken'],
       });
       const driversWithTokens = drivers.filter(

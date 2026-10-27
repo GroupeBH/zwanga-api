@@ -1,5 +1,63 @@
 # Journal des changements techniques
 
+## 2026-10-27 — Compatibilité sonnerie avec Android 1.0.18 (176)
+
+- Préparation serveur : identifiant de secours par type, expiration de transport bornée pour les demandes séquentielles, Redis isolé dans le pipeline de tests.
+- Contrats v0 à v6 conservés ; aucune migration supplémentaire ni modification mobile d'exécution. Les migrations 95 à 98 du relais restent nécessaires pour publier le lot complet.
+- 45 tests backend, 88 tests mobiles et 20 contrôles croisés réussis ; TypeScript backend et YAML vérifiés. Ni déploiement, ni notification réelle, ni essai physique.
+- Détail, limites et test avec le mobile du store : [rapport](AUDIT_RECEPTION_SONNERIE_BACKEND_2026-10-27.md).
+
+
+## 2026-10-27 — Correctifs du relais et des réponses aux demandes
+
+- Délais Redis complétés, acceptation protégée avant préparation puis finalisée avec la réservation, reprise des trajets provisoires et fenêtre distincte pour les contre-propositions.
+- Migration `1780000098000-RequestResponsePhases` préparée ; contrôles d'accès et notifications obsolètes adaptés. Paiements, réservations des trajets publiés et ciblage privé conservés.
+- 104 scénarios d'intégration serveur, 59 tests unitaires serveur et 23 tests mobiles distincts réussis. TypeScript vérifié ; push simulés, bases jetables, aucun déploiement.
+- Fichiers, résultats et limites : [rapport des correctifs](CORRECTIFS_RELAIS_DEMANDES_2026-10-27.md).
+
+
+## 2026-10-27 — File Redis et relais des demandes après 40 secondes
+
+- **Demande :** solliciter un seul conducteur, passer au suivant après refus ou
+  absence de réponse pendant 40 secondes, retirer la demande après acceptation.
+- **Solution préparée :** file Redis, callback authentifié, traitement serveur des
+  échéances, historique SQL, contrôles d'acceptation et migration backend.
+- **Comportements conservés :** demandes ciblées privées, contrôles de proximité,
+  formats de notification et parcours de réservation des trajets publiés.
+- **Vérifications et limites :** voir [le dossier technique](FILE_DEMANDES_REDIS_2026-10-27.md).
+  Aucun déploiement ni test push sur des utilisateurs de production.
+
+## 2026-10-27 — Destinataire facultatif des demandes de trajet
+
+- Problème : aucun ciblage d'un conducteur proche ou connu.
+- Appliqué : sélection éligible bornée, audience privée, contrôles des lectures,
+  offres, refus et notifications ; élargissement explicite sous verrou de commande.
+  Migration additive 1780000096000 et protections contre une ouverture involontaire.
+- Conservé : diffusion sans destinataire, acceptation volontaire, prix et dates,
+  refus persistants et règle du premier conducteur qui accepte.
+- Vérifications et limites : tests unitaires et PostgreSQL/PostGIS jetables,
+  compilation NestJS ; pas de déploiement, de base réelle ni d'envoi push réel.
+  Voir [le rapport complet](DEMANDE_CONDUCTEUR_CIBLE_2026-10-27.md).
+
+
+## 2026-10-27 - Refus persistants des demandes par conducteur
+
+- Probleme : un refus arretait une alerte sans retirer durablement la demande
+  des listes ; refus sans notification ou apres expiration parfois non enregistres.
+- Applique : table par conducteur/demande, transaction idempotente, filtres des
+  listes/details/pagination, alertes immediates/programmees/partagees et reouverture.
+  Migration additive 1780000095000, non appliquee en production.
+- Conserves : demande du passager, autres conducteurs, trajets attribues,
+  absence de penalite globale et absence de masquage pour une demande ignoree.
+- Verification : 167 tests dans 10 suites, puis 33 tests de reouverture/routage/
+  confidentialite (avec recoupement) ; compilation NestJS reussie.
+  PostgreSQL/PostGIS : 73 scenarios existants passent ; le nouveau scenario
+  de refus passe en relance ciblee apres stabilisation de sa fixture temporelle.
+- Details, fichiers, commandes de controle et limites :
+  [rapport refus conducteur](REFUS_DEMANDES_CONDUCTEUR_2026-10-27.md).
+  Bases jetables locales uniquement ; aucun push reel ni deploiement.
+
+
 ## 2026-10-27 — Tests de notifications et de dispatch après réservation des envois
 
 - Le journal CI fourni présente 12 échecs dans deux suites. Les simulations de

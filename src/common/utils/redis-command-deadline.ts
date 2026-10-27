@@ -11,6 +11,10 @@ const COMMANDS = new Set([
   'exists',
   'eval',
   'keys',
+  'zScore',
+  'zAdd',
+  'zRangeByScore',
+  'zRem',
 ]);
 
 export function withRedisCommandDeadlines<T extends object>(

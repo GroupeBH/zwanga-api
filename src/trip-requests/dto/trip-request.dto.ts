@@ -10,6 +10,7 @@ import {
   ArrayMinSize,
   ArrayMaxSize,
   IsBoolean,
+  IsUUID,
 } from 'class-validator';
 import { ApiProperty, OmitType } from '@nestjs/swagger';
 import { TripPaymentMode } from '../../payments/enums/trip-payment-mode.enum';
@@ -23,6 +24,10 @@ export class ReleaseOverdueDriverDto {
 }
 
 export class CreateTripRequestDto {
+  @ApiProperty({ required: false, description: 'Demande adressée uniquement à ce conducteur, sans attribution automatique.' })
+  @IsOptional() @IsUUID()
+  targetDriverId?: string;
+
   @ApiProperty({ required: false, default: false,
     description: 'Départ immédiat demandé par le passager. Le serveur décide de son activation ; les commandes programmées gardent leur parcours habituel.' })
   @IsOptional()

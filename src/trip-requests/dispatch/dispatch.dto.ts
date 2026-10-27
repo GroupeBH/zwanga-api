@@ -16,6 +16,11 @@ export class DriverPresenceDto {
   @ValidateIf((v: DriverPresenceDto) => v.available) @IsNumber() @Min(-180) @Max(180) longitude?: number;
 }
 
+export class RequestDispatchEventDto {
+  @IsIn(['declined']) type: 'declined';
+  @IsUUID() offerId: string;
+}
+
 export class DispatchResponseDto {
   @IsIn(['accept', 'decline']) decision: 'accept' | 'decline';
 }

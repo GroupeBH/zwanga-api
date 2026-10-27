@@ -1,3 +1,6 @@
+import { RequestResponsePhases1780000098000 } from './1780000098000-RequestResponsePhases';
+import { TargetTripRequestDriver1780000096000 } from './1780000096000-TargetTripRequestDriver';
+import { RememberDriverRequestRefusals1780000095000 } from './1780000095000-RememberDriverRequestRefusals';
 import { RideDeliveryRecovery1780000094000 } from './1780000094000-RideDeliveryRecovery';
 import { RideNotificationReceipts1780000093000 } from './1780000093000-RideNotificationReceipts';
 import { FillTotalSeats1780000000000 } from './1780000000000-FillTotalSeats';
@@ -98,6 +101,8 @@ import { ReferralBookingRecovery1780000086000 } from './1780000086000-ReferralBo
 import { NearbyRequestRingingCooldown1780000087000 } from './1780000087000-NearbyRequestRingingCooldown';
 import { DispatchDeliveryResilience1780000088000 } from './1780000088000-DispatchDeliveryResilience';
 
+import { SequentialRequestQueue1780000097000 } from './1780000097000-SequentialRequestQueue';
+
 export const databaseMigrations = [
   FillTotalSeats1780000000000,
   PreventMultipleActiveDriverTrips1780000001000,
@@ -193,4 +198,8 @@ export const databaseMigrations = [
   AnonymousUpdateInstallations1780000092000,
   RideNotificationReceipts1780000093000,
   RideDeliveryRecovery1780000094000,
+  RememberDriverRequestRefusals1780000095000,
+  TargetTripRequestDriver1780000096000,
+  SequentialRequestQueue1780000097000,
+  RequestResponsePhases1780000098000,
 ];

@@ -1,3 +1,5 @@
+import { assertSequentialInvitation } from '../trip-requests/dispatch/sequential-policy';
+import { assertRequestTarget } from '../trip-requests/target-driver-policy';
 import { ConflictException } from '@nestjs/common';
 import { In, Repository } from 'typeorm';
 import { Trip, TripStatus } from './entities/trip.entity';
@@ -16,6 +18,7 @@ export function saveRequestTrip(
   repository: Repository<Trip>,
   trip: Trip,
   snapshot: TripRequest,
+  acceptanceToken?: string,
 ): Promise<Trip> {
   return repository.manager.transaction(async (manager) => {
     const request = await manager.getRepository(TripRequest).findOne({
@@ -24,6 +27,8 @@ export function saveRequestTrip(
     });
     assertRequestSnapshot(request, snapshot);
     assertUnassignedRequest(request!);
+    assertRequestTarget(request!, trip.driverId);
+    await assertSequentialInvitation(manager, request!, trip.driverId, acceptanceToken ? ['accepting'] : ['driver'], acceptanceToken);
     const trips = manager.getRepository(Trip);
     if (
       (await trips.exists({

@@ -3,14 +3,14 @@ import { withRedisCommandDeadlines } from './redis-command-deadline';
 describe('Redis command deadlines', () => {
   beforeEach(() => jest.useFakeTimers());
   afterEach(() => jest.useRealTimers());
-  it('bounds a stalled command, requests recovery once and never retries it', async () => {
-    const client = { eval: jest.fn(() => new Promise(() => undefined)) };
+  it.each(['eval', 'zScore', 'zAdd', 'zRangeByScore', 'zRem'])('bounds stalled %s without retrying it', async command => {
+    const client = { [command]: jest.fn(() => new Promise(() => undefined)) };
     const recover = jest.fn();
     const wrapped = withRedisCommandDeadlines(client, 2000, recover);
-    const rejected = expect(wrapped.eval()).rejects.toThrow('deadline');
+    const rejected = expect(wrapped[command]()).rejects.toThrow('deadline');
     await jest.advanceTimersByTimeAsync(2001);
     await rejected;
-    expect(client.eval).toHaveBeenCalledTimes(1);
+    expect(client[command]).toHaveBeenCalledTimes(1);
     expect(recover).toHaveBeenCalledTimes(1);
     expect(jest.getTimerCount()).toBe(0);
   });

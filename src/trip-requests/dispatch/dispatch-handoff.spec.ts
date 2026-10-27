@@ -26,7 +26,7 @@ describe('immediate refusal handoff', () => {
   it('allocates after recording the refusal under the same transaction, then starts urgent delivery', async () => {
     const f = fixture(); f.service['ticking'] = true;
     f.allocate.mockImplementation(async () => {
-      expect(f.query).toHaveBeenLastCalledWith(
+      expect(f.query).toHaveBeenCalledWith(
         'UPDATE trip_request_dispatch_offers SET status = $2 WHERE id = $1', ['offer', 'declined']);
       expect(f.urgent).not.toHaveBeenCalled();
     });

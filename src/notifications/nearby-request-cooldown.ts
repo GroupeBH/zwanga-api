@@ -1,4 +1,5 @@
-import { NotFoundException } from '@nestjs/common';
+import { requestDriverVisibilitySql } from '../trip-requests/target-driver-policy';
+import { declineRequestForDriver } from '../trip-requests/request-refusal';
 import type { EntityManager } from 'typeorm';
 import type { Notification } from './entities/notification.entity';
 
@@ -152,6 +153,7 @@ export async function prepareNearbyRequestRinging(
   )
     return false;
   return manager.transaction(async (tx) => {
+    if (!(await tx.query(`SELECT 1 WHERE ${requestDriverVisibilitySql('$1::uuid', '$2::uuid')}`, [requestId, driverId])).length) return false;
     const state = await lockState(tx, driverId);
     await reconcile(tx, state);
     const now = new Date(state.now).getTime();
@@ -226,32 +228,7 @@ export async function declineNearbyRequest(
   driverId: string,
   requestId: string,
 ) {
-  return manager.transaction(async (tx) => {
-    const state = await lockState(tx, driverId);
-    const events: { requestId: string }[] = await tx.query(
-      `SELECT "requestId" FROM nearby_driver_ring_events
-      WHERE "driverId" = $1 AND "requestId" = $2`,
-      [driverId, requestId],
-    );
-    if (!events.length)
-      throw new NotFoundException(
-        'Aucune alerte de proximité à refuser pour cette commande.',
-      );
-    await tx.query(
-      `UPDATE nearby_driver_ring_events e SET "declinedAt" = COALESCE(e."declinedAt", $3)
-      WHERE e."driverId" = $1 AND e."requestId" = $2 AND e."processedAt" IS NULL
-        AND EXISTS (SELECT 1 FROM trip_requests r WHERE r.id = e."requestId"
-          AND r."passengerId" <> $1 AND r.status IN ('pending','offers_received')
-          AND r."selectedDriverId" IS NULL AND r."tripId" IS NULL AND r."departureDateMax" > $3)`,
-      [driverId, requestId, state.now],
-    );
-    await reconcile(tx, state);
-    return {
-      missedCount: state.missedCount,
-      mutedUntil: state.mutedUntil,
-      serverNow: state.now,
-    };
-  });
+  return declineRequestForDriver(manager, driverId, requestId);
 }
 
 /** Bounded event cleanup for sleeping apps. Historical export name; no cooldown remains. */
