@@ -1,3 +1,4 @@
+jest.mock('./bounded-firebase-send', () => ({ sendBoundedFirebase: (app: unknown, message: unknown) => require('firebase-admin/messaging').getMessaging(app).send(message) }));
 import { getMessaging } from 'firebase-admin/messaging';
 import { NotificationService } from './notifications.service';
 import { Notification, NotificationStatus } from './entities/notification.entity';
@@ -51,11 +52,26 @@ describe('v4 Android native safety card', () => {
 });
 
 describe('immutable incoming deadlines', () => {
+  it.each(['new_booking', 'trip_request_nearby'])('a %s delivered after 45 seconds retains a positive sound window', type => {
+    const service: any = Object.create(NotificationService.prototype);
+    const item = notification(type); item.createdAt = new Date(Date.now() - 45_000);
+    delete item.data!.expiresAt;
+    const first = service.driverRingUntil(item);
+    expect(Date.parse(first) - Date.now()).toBeGreaterThan(10_000);
+    expect(Date.parse(first) - item.createdAt.getTime()).toBe(60_000);
+    expect(service.driverRingUntil(item)).toBe(first);
+  });
+  it('a business expiry still caps the longer sound window', () => {
+    const service: any = Object.create(NotificationService.prototype);
+    const item = notification('driver_dispatch_offer'); item.createdAt = new Date();
+    item.data!.expiresAt = new Date(Date.now() + 5000).toISOString();
+    expect(service.driverRingUntil(item)).toBe(item.data!.expiresAt);
+  });
   it('a retry cannot restart the sound budget of the same booking notification', () => {
     const service: any = Object.create(NotificationService.prototype);
     const item = notification('new_booking');
     delete item.data!.expiresAt;
-    expect(service.driverRingUntil(item)).toBe(new Date(item.createdAt.getTime() + 30_000).toISOString());
+    expect(service.driverRingUntil(item)).toBe(new Date(item.createdAt.getTime() + 60_000).toISOString());
     expect(Date.parse(service.driverRingUntil(item))).toBeLessThan(Date.now());
   });
   it('rejects a delayed dispatch notification without renewing its deadline', async () => {

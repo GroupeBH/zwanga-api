@@ -1,4 +1,9 @@
+import { sendBoundedFirebase } from './bounded-firebase-send';
+import { recoverUnacknowledgedRides } from './recover-unacknowledged-ride';
+import { nativeAndroidDriverPush } from './native-android-driver-push';
+import { PUSH_CLAIM_LEASE_MS, ownPushClaim, heartbeatPushClaim, renewPushClaim, saveNotificationResult } from './notification-push-claim';
 import { isAppUpdateDeliverable } from '../app-updates/app-update-dispatch.service';
+import { installationUpdateToken } from '../app-updates/installation-update.policy';
 import { isRideResponseDeliverable } from './ride-response-delivery';
 import { androidDriverBackup, androidDriverBackupTtl } from './android-driver-backup';
 import { isNearbyRingingRequest, prepareNearbyRequestRinging, reconcileNearbyRequestCooldowns } from './nearby-request-cooldown';
@@ -161,6 +166,7 @@ export class NotificationService implements OnModuleInit {
         const credentials = JSON.parse(credentialsJson) as ServiceAccount;
         this.firebaseApp = initializeApp({
           credential: cert(credentials),
+          projectId: (credentials as ServiceAccount & { project_id?: string }).projectId ?? (credentials as { project_id?: string }).project_id ?? projectId,
         });
         this.logger.log('FCM initialized successfully with base64 credentials');
         return;
@@ -178,6 +184,7 @@ export class NotificationService implements OnModuleInit {
         );
 
         this.firebaseApp = initializeApp({
+          projectId,
           credential: cert({
             projectId,
             privateKey: privateKey.replace(/\\n/g, '\n'),
@@ -311,6 +318,16 @@ export class NotificationService implements OnModuleInit {
   private async deliverSavedNotification(
     savedNotification: Notification,
   ): Promise<boolean> {
+    if (savedNotification.data?.type === 'app_update' && savedNotification.data?.installationId) {
+      // Resolve the fresh token again at the last boundary, including retries.
+      const token = this.configService.get<string>('APP_UPDATES_ENABLED') === 'true'
+        ? await installationUpdateToken(this.notificationRepository.manager, savedNotification.data) : null;
+      if (!token) {
+        await this.suppressCriticalNotification(savedNotification, 'INSTALLATION_UPDATE_NO_LONGER_ELIGIBLE');
+        return false;
+      }
+      savedNotification.fcmToken = token;
+    }
     const driverRequest = isDriverRequestNotification(savedNotification.data);
     if (driverRequest && !savedNotification.userId) {
       await this.suppressCriticalNotification(savedNotification, 'DRIVER_REQUEST_RECIPIENT_REQUIRED');
@@ -363,12 +380,13 @@ export class NotificationService implements OnModuleInit {
       }
       if (isNearbyRingingRequest(savedNotification.data) &&
           !await prepareNearbyRequestRinging(this.notificationRepository.manager, savedNotification)) {
-        await this.suppressCriticalNotification(savedNotification, 'NEARBY_REQUEST_RINGING_PAUSED_OR_HANDLED');
+        await this.suppressCriticalNotification(savedNotification, 'NEARBY_REQUEST_INVALID_OR_HANDLED');
         return false;
       }
       this.logger.debug(
         `Sending notification through ${this.isExpoPushToken(pushToken) ? 'Expo' : 'FCM'} - Title: ${savedNotification.title}`,
       );
+      if (!await renewPushClaim(this.notificationRepository, savedNotification)) return false;
       const messageId = this.isExpoPushToken(pushToken)
         ? await this.sendExpoPushNotification(savedNotification, pushToken)
         : await this.sendFirebaseNotification(savedNotification, pushToken);
@@ -377,19 +395,20 @@ export class NotificationService implements OnModuleInit {
       savedNotification.status = NotificationStatus.SENT;
       savedNotification.messageId = messageId;
       savedNotification.errorMessage = null;
-      await this.notificationRepository.save(savedNotification);
+      const completed = await saveNotificationResult(this.notificationRepository, savedNotification);
 
       // Realtime has its own durable claim and never waits for this HTTP send.
 
       this.logger.log(
         `Notification sent successfully - Title: ${savedNotification.title}, MessageId: ${messageId}`,
       );
-      return true;
+      return completed;
     } catch (error) {
       const message = this.getErrorMessage(error);
       await this.markNotificationFailed(savedNotification, message);
       if (this.isInvalidPushTokenError(error)) {
         await this.clearInvalidPushToken(savedNotification.userId, pushToken);
+        await this.clearInvalidInstallationToken(savedNotification, pushToken);
       }
       this.logger.error(
         `Error sending notification: ${message}`,
@@ -406,12 +425,27 @@ export class NotificationService implements OnModuleInit {
     if (!this.firebaseApp) {
       throw new Error('FCM non configuré sur le serveur');
     }
+    if (notification.data?.type === 'app_update') {
+      return getMessaging(this.firebaseApp).send({ token: pushToken,
+        notification: { title: notification.title, body: notification.body },
+        data: this.stringifyNotificationData(notification.data),
+        android: { priority: 'normal', ttl: 86_400_000, notification: { channelId: 'zwanga_default' } },
+        apns: { headers: { 'apns-expiration': String(Math.floor(Date.now() / 1000) + 86_400) }, payload: { aps: { sound: 'default' } } },
+      });
+    }
+    const send = (message: import('firebase-admin/messaging').Message) =>
+      URGENT_NOTIFICATION_TYPES.includes(notification.data?.type)
+        ? sendBoundedFirebase(this.firebaseApp, message) : getMessaging(this.firebaseApp).send(message);
     const version = await this.driverActionVersion(notification, pushToken);
+    if (version === 6 || (this.isNearbyRequestRing(notification) && await this.ringClientVersion(notification, pushToken) === 6)) {
+      notification.data = { ...notification.data, nativeDeliveryVersion: 6 };
+      return send(nativeAndroidDriverPush(notification, pushToken, this.driverRingUntil(notification)));
+    }
     if (version === 5 || ((this.isNearbyRequestRing(notification) || this.isPassengerRideResponse(notification)) &&
         await this.ringClientVersion(notification, pushToken) === 5)) {
       const iosNotification = this.isPassengerRideResponse(notification)
         ? { ...notification, data: this.passengerRingData(notification) } : notification;
-      return getMessaging(this.firebaseApp).send(iosDriverPush(iosNotification, pushToken, this.driverRingUntil(notification)));
+      return send(iosDriverPush(iosNotification, pushToken, this.driverRingUntil(notification)));
     }
     if (version > 0) {
       const ringUntil = version >= 2 ? this.driverRingUntil(notification) : undefined;
@@ -419,7 +453,7 @@ export class NotificationService implements OnModuleInit {
       // Notifee owns the sound and interactive card if the JS task runs.
       const data = { ...notification.data, actionProtocol: 'driver-v1', invitationText: notification.body,
         ...(ringUntil ? { ringVersion: 'v2', ringUntil } : {}) };
-      return getMessaging(this.firebaseApp).send({ token: pushToken,
+      return send({ token: pushToken,
         data: this.stringifyNotificationData(version >= 4 ? androidDriverBackup(notification, data) : data),
         android: { priority: 'high', ttl: version >= 4 ? androidDriverBackupTtl(notification) : this.driverNotificationTtl(notification, ringUntil) * 1000 },
       });
@@ -436,14 +470,14 @@ export class NotificationService implements OnModuleInit {
       // Local Notifee owns the finite ringtone. FCM alert sound has
       // no playback timeout (TTL only bounds delivery), so never play it twice.
       const ringUntil = this.driverRingUntil(notification);
-      return getMessaging(this.firebaseApp).send({ token: pushToken,
+      return send({ token: pushToken,
         data: this.stringifyNotificationData(nearbyVersion >= 4
           ? androidDriverBackup(notification, { ...notification.data, delivery: 'driver-phone-v3', invitationText: notification.body, ringUntil })
           : { ...notification.data, delivery: 'driver-phone-v3', invitationText: notification.body, ringUntil }),
         android: { priority: 'high', ttl: nearbyVersion >= 4 ? androidDriverBackupTtl(notification) : this.driverNotificationTtl(notification, ringUntil) * 1000 },
       });
     }
-    return getMessaging(this.firebaseApp).send({
+    return send({
       token: pushToken,
       notification: {
         title: notification.title,
@@ -500,6 +534,7 @@ export class NotificationService implements OnModuleInit {
         ...(driverRing || nearbyAlert ? { ttl: this.driverNotificationTtl(notification, ringUntil) } : {}),
         ...(timeSensitive ? { interruptionLevel: 'time-sensitive' } : {}),
         ...(passengerRing ? { ttl: 60 } : {}),
+        ...(notification.data?.type === 'app_update' ? { ttl: 86400 } : {}),
         ...(version >= 2 || passengerRing || nearbyRing ? { channelId: 'booking-ring-v2' } : {}),
         sound: longRing ? 'driver_ring.wav' : 'default',
         priority: notification.data?.type === 'app_update' ? 'normal' : 'high',
@@ -545,7 +580,7 @@ export class NotificationService implements OnModuleInit {
   private driverRingUntil(notification: Notification): string {
     const expiry = Date.parse(String(notification.data?.alertExpiresAt ?? notification.data?.expiresAt ?? ''));
     const createdAt = new Date(notification.createdAt).getTime();
-    const deadline = (Number.isFinite(createdAt) ? createdAt : Date.now()) + 30_000;
+    const deadline = (Number.isFinite(createdAt) ? createdAt : Date.now()) + 60_000;
     return new Date(Number.isFinite(expiry) ? Math.min(expiry, deadline) : deadline).toISOString();
   }
 
@@ -574,14 +609,15 @@ export class NotificationService implements OnModuleInit {
   private async ringClientVersion(notification: Notification, pushToken: string): Promise<number> {
     if (!notification.userId) return 0;
     const rows: { version: number }[] = await this.notificationRepository.manager.query(
-      `SELECT CASE WHEN "tokenHash" = $6 THEN 5 WHEN "tokenHash" = $5 THEN 4 WHEN "tokenHash" = $4 THEN 3 WHEN "tokenHash" = $3 THEN 2 ELSE 1 END AS version FROM driver_notification_clients
-        WHERE "userId" = $1 AND "tokenHash" IN ($2,$3,$4,$5,$6)`,
+      `SELECT CASE WHEN "tokenHash" = $7 THEN 6 WHEN "tokenHash" = $6 THEN 5 WHEN "tokenHash" = $5 THEN 4 WHEN "tokenHash" = $4 THEN 3 WHEN "tokenHash" = $3 THEN 2 ELSE 1 END AS version FROM driver_notification_clients
+        WHERE "userId" = $1 AND "tokenHash" IN ($2,$3,$4,$5,$6,$7)`,
       [notification.userId, createHash('sha256').update(pushToken).digest('hex'),
         createHash('sha256').update(pushToken + ':driver-v2').digest('hex'),
         createHash('sha256').update(pushToken + ':driver-v3').digest('hex'),
         createHash('sha256').update(pushToken + ':driver-v4').digest('hex'),
-        createHash('sha256').update(pushToken + ':driver-v5').digest('hex')]);
-    return rows.length > 0 ? ([2, 3, 4, 5].includes(rows[0].version) ? rows[0].version : 1) : 0;
+        createHash('sha256').update(pushToken + ':driver-v5').digest('hex'),
+        createHash('sha256').update(pushToken + ':driver-v6').digest('hex')]);
+    return rows.length > 0 ? ([2, 3, 4, 5, 6].includes(rows[0].version) ? rows[0].version : 1) : 0;
   }
 
   private stringifyNotificationData(
@@ -629,6 +665,13 @@ export class NotificationService implements OnModuleInit {
     }
   }
 
+  private async clearInvalidInstallationToken(notification: Notification, token: string): Promise<void> {
+    if (notification.data?.type !== 'app_update' || !notification.data?.installationId) return;
+    // A delayed provider error for an old token must not disable its replacement.
+    await this.notificationRepository.manager.query(`UPDATE app_update_installations SET enabled=false, "pushToken"=NULL
+      WHERE id=$1 AND "pushToken"=$2`, [notification.data.installationId, token]);
+  }
+
   private async markNotificationFailed(
     notification: Notification,
     message: string,
@@ -636,7 +679,7 @@ export class NotificationService implements OnModuleInit {
     notification.status = NotificationStatus.FAILED;
     notification.messageId = null;
     notification.errorMessage = message;
-    await this.notificationRepository.save(notification);
+    await saveNotificationResult(this.notificationRepository, notification);
   }
 
   private getErrorMessage(error: unknown): string {
@@ -704,20 +747,22 @@ export class NotificationService implements OnModuleInit {
     if (this.reconcilingNearbyRequests) return;
     this.reconcilingNearbyRequests = true;
     try { await reconcileNearbyRequestCooldowns(this.notificationRepository.manager); }
-    catch { this.logger.warn('Nearby request ringing cooldown reconciliation deferred.'); }
+    catch { this.logger.warn('Nearby request ringing event reconciliation deferred.'); }
     finally { this.reconcilingNearbyRequests = false; }
   }
 
   @Cron('*/5 * * * * *')
   async dispatchUrgentNotifications(): Promise<void> {
+    try { await recoverUnacknowledgedRides(this.notificationRepository.manager); }
+    catch { this.logger.warn('Native delivery acknowledgement recovery deferred.'); }
     // Starting push delivery must never occupy the realtime lane's capacity.
     void this.dispatchRealtimeNotifications().catch(() => this.logger.warn('Ride realtime delivery deferred.'));
     // Drain a broadcast promptly when the provider is fast, without increasing
     // the five-worker cap or claiming a large backlog behind a slow request.
     const startedAt = Date.now();
-    for (let batch = 0; batch < 6; batch += 1) {
+    for (let batch = 0; batch < 20; batch += 1) {
       const processed = await this.dispatchNotificationLane(true);
-      if (processed < 10 || Date.now() - startedAt >= 2_000) break;
+      if (processed === 0 || Date.now() - startedAt >= 2_000) break;
     }
   }
 
@@ -748,19 +793,19 @@ export class NotificationService implements OnModuleInit {
                 pending: NotificationStatus.PENDING,
                 failed: NotificationStatus.FAILED,
                 retryBefore: new Date(Date.now() - 15_000),
-                leaseBefore: new Date(Date.now() - 120_000),
+                leaseBefore: new Date(Date.now() - PUSH_CLAIM_LEASE_MS),
               })
               .andWhere('notification.isActive = true')
               .orderBy(urgent ? "CASE WHEN notification.data ->> 'type' = 'driver_dispatch_offer' THEN 0 ELSE 1 END" : 'notification.createdAt', 'ASC')
               .addOrderBy('notification.createdAt', 'ASC')
               .addOrderBy('notification.id', 'ASC')
-              .take(urgent ? (5 - this.urgentWorkers) * 2 : CRITICAL_RETRY_BATCH_SIZE)
+              .take(urgent ? 5 - this.urgentWorkers : CRITICAL_RETRY_BATCH_SIZE)
               .setLock('pessimistic_write')
               .setOnLocked('skip_locked')
               .getMany();
             for (const row of rows) {
               row.status = NotificationStatus.PENDING;
-              row.errorMessage = 'TRANSACTIONAL_PUSH_CLAIMED';
+              row.errorMessage = `TRANSACTIONAL_PUSH_CLAIMED:${randomUUID()}`;
             }
             return rows.length ? repository.save(rows) : rows;
           },
@@ -780,6 +825,9 @@ export class NotificationService implements OnModuleInit {
           while (next < notifications.length) {
             const notification = notifications[next++];
             const deliveryStartedAt = Date.now();
+            ownPushClaim(notification, notification.errorMessage!);
+            const stopHeartbeat = heartbeatPushClaim(this.notificationRepository, notification,
+              () => this.logger.warn('Push claim renewal deferred.'));
             try {
               // Retry transport only: the original server deadline is immutable.
               // Relevance below rejects expired invitations instead of reviving them.
@@ -801,6 +849,7 @@ export class NotificationService implements OnModuleInit {
                 `TRANSACTIONAL_PUSH_FAILED notificationId=${notification.id}: ${this.getErrorMessage(error)}`,
               );
             } finally {
+              stopHeartbeat();
               const elapsedMs = Date.now() - deliveryStartedAt;
               if (elapsedMs >= PUSH_DELIVERY_TIMEOUT_MS) this.logger.warn(`TRANSACTIONAL_PUSH_SLOW urgent=${urgent} elapsedMs=${elapsedMs}`);
             }
@@ -838,7 +887,7 @@ export class NotificationService implements OnModuleInit {
         continue;
       }
 
-      if (!notification.userId) {
+      if (!notification.userId && !(notification.data?.type === 'app_update' && notification.data?.installationId)) {
         await this.markNotificationFailed(
           notification,
           'Notification financiere sans utilisateur destinataire',
@@ -930,6 +979,7 @@ export class NotificationService implements OnModuleInit {
     }
     if (type === 'app_update') {
       if (this.configService.get<string>('APP_UPDATES_ENABLED') !== 'true') return false;
+      if (notification.data?.installationId) return Boolean(await installationUpdateToken(this.notificationRepository.manager, notification.data));
       return isAppUpdateDeliverable(this.notificationRepository.manager, notification.data?.releaseId, notification.userId);
     }
     if (type === 'driver_dispatch_offer') {
@@ -1068,7 +1118,7 @@ export class NotificationService implements OnModuleInit {
     notification.isActive = false;
     notification.messageId = null;
     notification.errorMessage = reason;
-    await this.notificationRepository.save(notification);
+    await saveNotificationResult(this.notificationRepository, notification);
   }
 
   @Cron(CronExpression.EVERY_5_MINUTES)
@@ -1112,13 +1162,13 @@ export class NotificationService implements OnModuleInit {
         const receipt = payload.data?.[receiptId];
         if (!receipt) {
           notification.errorMessage = null;
-          await this.notificationRepository.save(notification);
+          await saveNotificationResult(this.notificationRepository, notification);
           continue;
         }
         if (receipt.status === 'ok') {
           notification.messageId = `${EXPO_RECEIPT_OK_PREFIX}${receiptId}`;
           notification.errorMessage = null;
-          await this.notificationRepository.save(notification);
+          await saveNotificationResult(this.notificationRepository, notification);
           confirmed += 1;
           continue;
         }
@@ -1133,6 +1183,7 @@ export class NotificationService implements OnModuleInit {
             notification.userId,
             notification.fcmToken,
           );
+          await this.clearInvalidInstallationToken(notification, notification.fcmToken);
         }
         failed += 1;
       }
@@ -1284,7 +1335,7 @@ export class NotificationService implements OnModuleInit {
               notificationResponse.error?.message || 'Unknown error';
           }
 
-          await this.notificationRepository.save(notification);
+          await saveNotificationResult(this.notificationRepository, notification);
         }
       }
 
@@ -1297,7 +1348,7 @@ export class NotificationService implements OnModuleInit {
       for (const notification of savedNotifications) {
         notification.status = NotificationStatus.FAILED;
         notification.errorMessage = message;
-        await this.notificationRepository.save(notification);
+        await saveNotificationResult(this.notificationRepository, notification);
       }
 
       this.logger.error(

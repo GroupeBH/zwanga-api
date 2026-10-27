@@ -1,3 +1,4 @@
+import { recordRideNotificationReceipt } from '../../notifications/ride-notification-receipt';
 import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
 import { RideAlertChanges } from '../../notifications/ride-alert-changes';
 import { ConfigService } from '@nestjs/config';
@@ -10,7 +11,7 @@ import { getVehicleMaxSeats, Vehicle } from '../../vehicles/entities/vehicle.ent
 import { TripRequest, TripRequestStatus } from '../entities/trip-request.entity';
 import { DriverOffer, DriverOfferStatus } from '../entities/driver-offer.entity';
 import { NotificationService } from '../../notifications/notifications.service';
-import { enqueueTransactionalNotification } from '../../notifications/transactional-notification';
+import { enqueueTransactionalNotification, enqueueTransactionalNotifications } from '../../notifications/transactional-notification';
 import { DriverPositionDto, DriverPresenceDto } from './dispatch.dto';
 import { boundedInteger, DispatchDecision, dispatchOfferIsActionable } from './dispatch-policy';
 import { enqueueScheduledRequestAlert } from './scheduled-request-alert';
@@ -38,10 +39,12 @@ export class DriverDispatchService {
   declineNearbyRequest(driverId: string, requestId: string) {
     return declineNearbyRequest(this.db.manager, driverId, requestId);
   }
-  acknowledgeNotification(driverId: string, notificationId: string) {
-    return acknowledgeNearbyRequest(this.db.manager, driverId, notificationId);
+  async acknowledgeNotification(driverId: string, notificationId: string, stage: 'received' | 'displayed' = 'received', detail?: import('../../notifications/ride-notification-receipt').RideReceiptDetail) {
+    const result = await recordRideNotificationReceipt(this.db.manager, driverId, notificationId, stage, detail);
+    if (result.received) await acknowledgeNearbyRequest(this.db.manager, driverId, notificationId);
+    return result;
   }
-  private get responseSeconds() { return boundedInteger(this.config.get('DRIVER_DISPATCH_RESPONSE_SECONDS'), 30, 10, 120); }
+  private get responseSeconds() { return boundedInteger(this.config.get('DRIVER_DISPATCH_RESPONSE_SECONDS'), 60, 60, 120); }
   private get presenceSeconds() { return boundedInteger(this.config.get('DRIVER_DISPATCH_PRESENCE_SECONDS'), 90, 45, 180); }
   private get radiusMeters() { return NEARBY_DRIVER_RADIUS_METERS; }
   // Compatibility/freshness metadata only. Durable positions do not expire.
@@ -333,20 +336,10 @@ export class DriverDispatchService {
     await manager.getRepository(TripRequest).update(request.id, { dispatchCheckedAt: new Date(), updatedAt: () => '"updatedAt"' });
     await manager.query(`UPDATE trip_request_dispatch_offers SET status = 'expired'
       WHERE "requestId" = $1 AND status = 'pending' AND "expiresAt" <= now()`, [requestId]);
-    const pending = await manager.query(`SELECT 1 FROM trip_request_dispatch_offers
-      WHERE "requestId" = $1 AND status = 'pending' LIMIT 1`, [requestId]);
-    // Also lets invitations from the former broadcast version finish safely.
-    if (pending.length) return;
     type Candidate = { driverId: string; vehicleId: string; seats: number; brand: string; model: string };
-    let candidate: Candidate | undefined;
-    // Under READ COMMITTED a candidate statement's snapshot may predate another
-    // worker committing its offer and releasing the presence lock. Re-read after
-    // acquiring the lock before inserting, rather than failing the unique index.
-    // Materialize xmin too: EvalPlanQual skips rows changed since selection
-    // instead of locking an already-reserved driver from a stale join snapshot.
-    // xmin is compared only within this statement, never persisted or exposed.
-    for (let attempt = 0; attempt < 5; attempt++) {
-    const [selected]: Candidate[] = await manager.query(`WITH candidates AS MATERIALIZED (
+    // Lock eligible presences before creating a bounded broadcast. Other requests
+    // skip these rows; acceptance still serializes on this request's row lock.
+    const selected: Candidate[] = await manager.query(`WITH candidates AS MATERIALIZED (
       SELECT p."driverId", p.xmin AS "presenceVersion", v.id AS "vehicleId", v.brand, v.model,
         ST_Distance(p.position, ST_SetSRID(ST_MakePoint($4,$5),4326)::geography) AS distance,
         CASE WHEN v.id = p."vehicleId" THEN p.seats
@@ -366,26 +359,25 @@ export class DriverDispatchService {
         WHERE o."driverId" = p."driverId" AND o.status = 'pending')
       ) SELECT c."driverId", c."vehicleId", c.brand, c.model, c.seats FROM candidates c
       JOIN driver_dispatch_presence locked ON locked."driverId" = c."driverId" AND locked.xmin = c."presenceVersion"
-      ORDER BY c.distance, c."driverId" LIMIT 1 FOR UPDATE OF locked SKIP LOCKED`, [request.passengerId, request.vehicleType, request.numberOfSeats,
+      ORDER BY c.distance, c."driverId" LIMIT 50 FOR UPDATE OF locked SKIP LOCKED`, [request.passengerId, request.vehicleType, request.numberOfSeats,
       request.departurePoint.coordinates[0], request.departurePoint.coordinates[1], this.radiusMeters, requestId]);
-    if (!selected) break;
-    const occupied = await manager.query(`SELECT 1 FROM trip_request_dispatch_offers
-      WHERE "driverId" = $1 AND status = 'pending' LIMIT 1`, [selected.driverId]);
-    if (!occupied.length) { candidate = selected; break; }
-    }
-    if (!candidate) return;
-    // Eligibility, current KYC and vehicle are already
-    // filtered in the candidate SQL. Delivery and acceptance revalidate them.
-    // A missing sound capability uses an ordinary visible push, not exclusion.
-    const offer = { ...candidate, id: randomUUID() };
-    await manager.query(`UPDATE driver_dispatch_presence SET "vehicleId" = $2, seats = $3
-      WHERE "driverId" = $1`, [offer.driverId, offer.vehicleId, offer.seats]);
-    // Each successor gets its own full response window, bounded by the request.
+    if (!selected.length) return;
+    // A READ COMMITTED selection snapshot can precede another allocation's
+    // commit. Re-read pending offers after locking the presence rows.
+    const occupied: { driverId: string }[] = await manager.query(`SELECT "driverId" FROM trip_request_dispatch_offers
+      WHERE "driverId" = ANY($1::uuid[]) AND status = 'pending'`, [selected.map(x => x.driverId)]);
+    const busy = new Set(occupied.map(x => x.driverId));
+    const offers = selected.filter(x => !busy.has(x.driverId)).map(x => ({ ...x, id: randomUUID() }));
+    if (!offers.length) return;
     const expiresAt = new Date(Math.min(Date.now() + this.responseSeconds * 1000, request.departureDateMax.getTime()));
     if (expiresAt.getTime() <= Date.now()) return;
+    await manager.query(`UPDATE driver_dispatch_presence p SET "vehicleId" = v.vehicle, seats = v.seats
+      FROM unnest($1::uuid[], $2::uuid[], $3::int[]) AS v(driver, vehicle, seats) WHERE p."driverId" = v.driver`,
+      [offers.map(x => x.driverId), offers.map(x => x.vehicleId), offers.map(x => x.seats)]);
     await manager.query(`INSERT INTO trip_request_dispatch_offers (id,"requestId","driverId","vehicleId",seats,"expiresAt")
-      VALUES ($1,$2,$3,$4,$5,$6)`, [offer.id, requestId, offer.driverId, offer.vehicleId, offer.seats, expiresAt]);
-    await enqueueTransactionalNotification(manager, {
+      SELECT v.id,$1,v.driver,v.vehicle,v.seats,$2 FROM unnest($3::uuid[],$4::uuid[],$5::uuid[],$6::int[]) AS v(id,driver,vehicle,seats)`,
+      [requestId, expiresAt, offers.map(x => x.id), offers.map(x => x.driverId), offers.map(x => x.vehicleId), offers.map(x => x.seats)]);
+    await enqueueTransactionalNotifications(manager, offers.map(offer => ({
       eventKey: `dispatch-offer:${offer.id}`, userId: offer.driverId,
       title: 'Commande de trajet à proximité',
       body: `${request.departureLocation} → ${request.arrivalLocation} · ${request.numberOfSeats} place(s) · ${request.maxPricePerSeat} FC/place · ${offer.brand} ${offer.model}. Accepter ou refuser ?`,
@@ -394,6 +386,6 @@ export class DriverDispatchService {
           seats: request.numberOfSeats, departureAt: request.departureDateMin,
           pricePerSeat: request.maxPricePerSeat, priceKind: 'budget' }),
         expiresAt: expiresAt.toISOString(), role: 'driver' },
-    });
+    })));
   }
 }

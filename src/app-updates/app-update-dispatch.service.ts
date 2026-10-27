@@ -9,7 +9,8 @@ export async function isAppUpdateDeliverable(manager: EntityManager, releaseId: 
   if (typeof releaseId !== 'string' || !/^\d{1,18}$/.test(releaseId) || !userId) return false;
   const rows: unknown[] = await manager.query(`SELECT 1 FROM app_store_releases r
     JOIN app_update_clients c ON c.platform = r.platform JOIN users u ON u.id = c."userId"
-    WHERE r.id = $1 AND c."userId" = $2 AND ${UPDATE_CLIENT_ELIGIBLE_SQL}`, [releaseId, userId]);
+    WHERE r.id = $1 AND c."userId" = $2 AND ${UPDATE_CLIENT_ELIGIBLE_SQL}
+      AND NOT EXISTS (SELECT 1 FROM app_update_installations i WHERE i."tokenHash" = c."tokenHash")`, [releaseId, userId]);
   return rows.length > 0;
 }
 
@@ -32,6 +33,7 @@ export class AppUpdateDispatchService {
           false, 'pending', true
         FROM app_store_releases r JOIN app_update_clients c ON c.platform = r.platform JOIN users u ON u.id = c."userId"
         WHERE ${UPDATE_CLIENT_ELIGIBLE_SQL}
+          AND NOT EXISTS (SELECT 1 FROM app_update_installations i WHERE i."tokenHash" = c."tokenHash")
           AND NOT EXISTS (SELECT 1 FROM notifications n WHERE n."eventKey" = 'app-update:' || r.id || ':' || c."userId")
         ORDER BY c."userId" LIMIT 100 ON CONFLICT ("eventKey") DO NOTHING`);
     } catch { this.logger.warn('Impossible de préparer les annonces de mise à jour ; nouvelle tentative au prochain passage.'); }

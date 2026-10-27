@@ -8,9 +8,7 @@ export const ELIGIBLE_DRIVER_ACCOUNT_SQL = `
     AND u.role = 'driver' AND u."isActive" = true AND u.status NOT IN ('suspended', 'inactive')
     AND u."fcmToken" IS NOT NULL AND u."fcmToken" <> ''
     AND (SELECT k.status FROM kyc_documents k WHERE k."userId" = u.id
-      ORDER BY k."createdAt" DESC, k.id DESC LIMIT 1) = 'approved')
-  AND NOT EXISTS (SELECT 1 FROM nearby_driver_ring_state ring_state
-    WHERE ring_state."driverId" = p."driverId" AND ring_state."mutedUntil" > now())`;
+      ORDER BY k."createdAt" DESC, k.id DESC LIMIT 1) = 'approved')`;
 
 export const ELIGIBLE_NEARBY_DRIVER_SQL = `${ELIGIBLE_DRIVER_ACCOUNT_SQL}
   AND NOT EXISTS (SELECT 1 FROM trips t WHERE t."driverId" = p."driverId" AND

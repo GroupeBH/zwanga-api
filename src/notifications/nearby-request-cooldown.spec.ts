@@ -8,21 +8,28 @@ import {
 import { NearbyRequestRingingCooldown1780000087000 } from '../database/migrations/1780000087000-NearbyRequestRingingCooldown';
 
 jest.mock('./nearby-request-cooldown', () => ({
-  ...jest.requireActual('./nearby-request-cooldown'),
+  ...jest.requireActual<typeof import('./nearby-request-cooldown')>(
+    './nearby-request-cooldown',
+  ),
   prepareNearbyRequestRinging: jest.fn(),
   reconcileNearbyRequestCooldowns: jest.fn(),
 }));
 
 const fixture = (expo = false) => {
-  const notices = { save: jest.fn(async (n) => n), manager: {} };
+  const notices = {
+    save: jest.fn((n: unknown) => Promise.resolve(n)),
+    manager: {},
+  };
   const users = {
-    findOne: jest.fn(async () => ({
-      role: 'driver',
-      isActive: true,
-      status: 'active',
-      fcmToken: expo ? 'ExponentPushToken[fixture]' : 'fixture',
-    })),
-    count: jest.fn(async () => 1),
+    findOne: jest.fn(() =>
+      Promise.resolve({
+        role: 'driver',
+        isActive: true,
+        status: 'active',
+        fcmToken: expo ? 'ExponentPushToken[fixture]' : 'fixture',
+      }),
+    ),
+    count: jest.fn(() => Promise.resolve(1)),
   };
   const service = new NotificationService(
     { get: jest.fn() } as never,
@@ -36,8 +43,11 @@ const fixture = (expo = false) => {
   const apns = jest
     .spyOn(service as any, 'sendExpoPushNotification')
     .mockResolvedValue('message');
+  const internal = service as unknown as {
+    deliverSavedNotification: (notice: unknown) => Promise<boolean>;
+  };
   const deliver = (type: string) =>
-    (service as any).deliverSavedNotification({
+    internal.deliverSavedNotification({
       id: 'fixture',
       userId: 'driver',
       data: { type, tripRequestId: 'order', passengerId: 'passenger' },
@@ -46,7 +56,7 @@ const fixture = (expo = false) => {
   return { notices, deliver, fcm, apns, service };
 };
 
-describe('nearby ringing cooldown delivery boundary', () => {
+describe('nearby ringing per-request delivery boundary', () => {
   beforeEach(() => {
     jest.mocked(prepareNearbyRequestRinging).mockReset();
     jest.mocked(reconcileNearbyRequestCooldowns).mockReset();
@@ -59,7 +69,7 @@ describe('nearby ringing cooldown delivery boundary', () => {
     },
   );
   it.each([false, true])(
-    'stops both transports before sending when the server pauses ringing (Expo=%s)',
+    'stops both transports before sending when the request is invalid or already handled (Expo=%s)',
     async (expo) => {
       const f = fixture(expo);
       jest.mocked(prepareNearbyRequestRinging).mockResolvedValue(false);
@@ -70,7 +80,7 @@ describe('nearby ringing cooldown delivery boundary', () => {
       expect(f.notices.save).toHaveBeenLastCalledWith(
         expect.objectContaining({
           isActive: false,
-          errorMessage: 'NEARBY_REQUEST_RINGING_PAUSED_OR_HANDLED',
+          errorMessage: 'NEARBY_REQUEST_INVALID_OR_HANDLED',
         }),
       );
     },
@@ -81,7 +91,7 @@ describe('nearby ringing cooldown delivery boundary', () => {
     'trip_request_accepted',
     'trip_started',
     'driver_near_pickup',
-  ])('preserves %s without querying the counter', async (type) => {
+  ])('preserves %s without querying nearby request events', async (type) => {
     const f = fixture();
     jest.mocked(prepareNearbyRequestRinging).mockResolvedValue(false);
     expect(await f.deliver(type)).toBe(true);
@@ -99,7 +109,7 @@ describe('nearby ringing cooldown delivery boundary', () => {
       expect.objectContaining({ status: NotificationStatus.FAILED }),
     );
   });
-  it('allows the existing transport when not muted', async () => {
+  it('allows the existing transport for an actionable new request', async () => {
     const f = fixture();
     jest.mocked(prepareNearbyRequestRinging).mockResolvedValue(true);
     expect(await f.deliver('trip_request_nearby')).toBe(true);
@@ -123,7 +133,9 @@ describe('nearby ringing cooldown delivery boundary', () => {
     expect(reconcileNearbyRequestCooldowns).toHaveBeenCalledTimes(2);
   });
   it('migration is additive, indexed and uniquely identifies one driver/order; down removes only its new tables', async () => {
-    const query = jest.fn(async (_sql: string) => undefined);
+    const query = jest
+      .fn<Promise<void>, [string]>()
+      .mockResolvedValue(undefined);
     const migration = new NearbyRequestRingingCooldown1780000087000();
     await migration.up({ query } as never);
     const sql = query.mock.calls.map(([sql]) => sql).join('\n');

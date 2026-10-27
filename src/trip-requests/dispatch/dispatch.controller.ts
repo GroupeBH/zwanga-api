@@ -4,7 +4,7 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { SensitiveThrottle } from '../../common/decorators/sensitive-throttle.decorator';
 import { UserRole } from '../../users/entities/user.entity';
 import { DriverDispatchService } from './dispatch.service';
-import { DispatchResponseDto, DriverPositionDto, DriverPresenceDto, NotificationCapabilityDto } from './dispatch.dto';
+import { DispatchResponseDto, DriverPositionDto, DriverPresenceDto, NotificationCapabilityDto, NotificationReceiptDto } from './dispatch.dto';
 
 @Controller('driver-dispatch')
 @Auth()
@@ -34,8 +34,8 @@ export class DriverDispatchController {
   @Post('notifications/:id/received')
   @Roles(UserRole.DRIVER)
   @SensitiveThrottle(60, 60000)
-  received(@Request() req: { user: { userId: string } }, @Param('id', ParseUUIDPipe) id: string) {
-    return this.dispatch.acknowledgeNotification(req.user.userId, id);
+  received(@Request() req: { user: { userId: string } }, @Param('id', ParseUUIDPipe) id: string, @Body() body: NotificationReceiptDto) {
+    return this.dispatch.acknowledgeNotification(req.user.userId, id, body.stage, body);
   }
 
   @Put('position')
