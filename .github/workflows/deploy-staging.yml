@@ -49,12 +49,13 @@ jobs:
       - uses: actions/setup-node@v4
         if: inputs.action == 'deploy' || inputs.action == 'bootstrap'
         with:
-          node-version: '22'
+          node-version-file: '.nvmrc'
           cache: npm
       - name: Test and compile backend before starting the paid server
         if: inputs.action == 'deploy' || inputs.action == 'bootstrap'
         run: |
           npm ci --legacy-peer-deps
+          npm run test:dependencies
           npm run test -- --runInBand
           npm run build
 
