@@ -58,7 +58,10 @@ describe('backend-first ride notification compatibility', () => {
     if (version === 6) expect(push.data.nativeAlert).toBe('driver-v6');
     else expect(push.data.nativeAlert).toBeUndefined();
     if ([3, 4, 5, 6].includes(version)) expect(push.data.delivery).toBe('driver-phone-v3');
-    if ([0, 1, 2].includes(version)) expect(push.notification).toMatchObject({ title: 'Zwanga' });
+    if ([0, 1, 2].includes(version)) {
+      expect(push.notification.title.replace(/[\u202f\u00a0]/g, ' ')).toBe('Zwanga · Budget : 2 500 FC / place');
+      expect(push.notification.body).toContain('Destination de test');
+    }
     // Scheduled commands still open their detail; never authorize quick instant-dispatch acceptance.
     expect(push.data.actionProtocol).toBeUndefined();
   });

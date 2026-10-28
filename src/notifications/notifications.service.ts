@@ -1,3 +1,4 @@
+import { rideCardContent } from './ride-card-content';
 import { sequentialInvitationSql } from '../trip-requests/dispatch/sequential-policy';
 import { requestDriverVisibilitySql } from '../trip-requests/target-driver-policy';
 import { sendBoundedFirebase } from './bounded-firebase-send';
@@ -481,10 +482,7 @@ export class NotificationService implements OnModuleInit {
     }
     return send({
       token: pushToken,
-      notification: {
-        title: notification.title,
-        body: notification.body,
-      },
+      notification: rideCardContent(notification),
       data: this.stringifyNotificationData(passengerRing
         ? this.passengerRingData(notification) : nearbyRing
           ? { ...notification.data, ringUntil: this.driverRingUntil(notification) } : notification.data),
@@ -526,8 +524,7 @@ export class NotificationService implements OnModuleInit {
       },
       body: JSON.stringify({
         to: pushToken,
-        title: notification.title,
-        body: notification.body,
+        ...rideCardContent(notification),
         data: driverActions ? { ...notification.data, actionProtocol: 'driver-v1',
           ...(version >= 2 ? { ringVersion: 'v2', ringUntil } : {}) }
           : passengerRing ? this.passengerRingData(notification)
