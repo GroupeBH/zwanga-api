@@ -755,8 +755,6 @@ export class NotificationService implements OnModuleInit {
 
   @Cron('*/5 * * * * *')
   async dispatchUrgentNotifications(): Promise<void> {
-    try { await recoverUnacknowledgedRides(this.notificationRepository.manager); }
-    catch { this.logger.warn('Native delivery acknowledgement recovery deferred.'); }
     // Starting push delivery must never occupy the realtime lane's capacity.
     void this.dispatchRealtimeNotifications().catch(() => this.logger.warn('Ride realtime delivery deferred.'));
     // Drain a broadcast promptly when the provider is fast, without increasing
@@ -766,6 +764,18 @@ export class NotificationService implements OnModuleInit {
       const processed = await this.dispatchNotificationLane(true);
       if (processed === 0 || Date.now() - startedAt >= 2_000) break;
     }
+  }
+
+  private recoveringRideAcknowledgements = false;
+  /** Recovery of older messages must not sit in front of a freshly committed invitation. */
+  @Cron('*/5 * * * * *')
+  async recoverRideAcknowledgements(): Promise<void> {
+    if (this.recoveringRideAcknowledgements) return;
+    this.recoveringRideAcknowledgements = true;
+    try {
+      await recoverUnacknowledgedRides(this.notificationRepository.manager);
+    } catch { this.logger.warn('Native delivery acknowledgement recovery deferred.'); }
+    finally { this.recoveringRideAcknowledgements = false; }
   }
 
   private async dispatchNotificationLane(urgent: boolean): Promise<number> {
@@ -991,7 +1001,8 @@ export class NotificationService implements OnModuleInit {
       if (this.configService.get<string>('DRIVER_DISPATCH_ENABLED') !== 'true') return false;
       const rows: { passengerId: string }[] = await this.notificationRepository.manager.query(`SELECT r."passengerId" FROM trip_request_dispatch_offers o
         JOIN trip_requests r ON r.id = o."requestId" WHERE o.id = $1 AND o."driverId" = $2
-        AND o.status = 'pending' AND o.phase = 'driver' AND o."expiresAt" > clock_timestamp() AND r.status = 'pending' AND r."passengerId" <> $2
+        AND o.status = 'pending' AND o.phase = 'driver' AND o."expiresAt" > clock_timestamp()
+        AND r.status IN ('pending', 'offers_received') AND r."passengerId" <> $2
         AND r."selectedDriverId" IS NULL AND r."tripId" IS NULL AND r."departureDateMax" > now()
         AND r."maxPricePerSeat" IS NOT NULL AND ${requestDriverVisibilitySql('r.id', '$2')}`,
         [notification.data?.offerId, notification.userId]);

@@ -3,7 +3,9 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { DataSource, EntityManager, In } from 'typeorm';
 import { Trip, TripStatus } from '../trips/entities/trip.entity';
@@ -22,22 +24,38 @@ import {
 import { assertSharedTripAvailable } from './shared-trip-policy';
 import { assertRequestTarget } from './target-driver-policy';
 import { NEARBY_DRIVER_RADIUS_METERS } from './dispatch/nearby-driver-policy';
+import { startPassengerDecision, silenceRequestInvitation } from './dispatch/request-acceptance';
+import { SequentialDispatchService } from './dispatch/sequential-dispatch.service';
+import { NotificationService } from '../notifications/notifications.service';
+import { RideAlertChanges } from '../notifications/ride-alert-changes';
 
 @Injectable()
 export class SharedTripOffersService {
+  private readonly logger = new Logger(SharedTripOffersService.name);
   constructor(
     private readonly db: DataSource,
     private readonly bookings: BookingsService,
+    @Optional() private readonly sequential?: SequentialDispatchService,
+    @Optional() private readonly notifications?: NotificationService,
+    @Optional() private readonly changes?: RideAlertChanges,
   ) {}
+
+  private async afterCommit(requestId: string, terminal = false) {
+    this.changes?.enqueue({ kind: 'request', id: requestId, terminal });
+    if (this.notifications) void this.notifications.dispatchUrgentNotifications()
+      .catch(() => this.logger.warn('Shared request notification deferred to outbox.'));
+    await this.sequential?.advance(requestId);
+  }
 
   private async validate(
     manager: EntityManager,
     request: TripRequest,
     trip: Trip,
     driverId: string,
+    phases: string[] = ['driver'],
   ) {
     assertRequestTarget(request, driverId);
-    await assertSequentialInvitation(manager, request, driverId);
+    await assertSequentialInvitation(manager, request, driverId, phases);
     const driver = await manager.findOneBy(User, { id: driverId });
     if (!driver) throw new NotFoundException('Conducteur introuvable.');
     await assertDriverCanOperate(manager, driver);
@@ -75,7 +93,7 @@ export class SharedTripOffersService {
     });
     if (!trip) return { hasOngoingTrip: false, trip: null, reason: null };
     try {
-      await this.validate(this.db.manager, request, trip, driverId);
+      await this.validate(this.db.manager, request, trip, driverId, ['driver', 'passenger']);
       return {
         hasOngoingTrip: true,
         trip: {
@@ -93,7 +111,7 @@ export class SharedTripOffersService {
   }
 
   async propose(driverId: string, requestId: string, tripId: string) {
-    return this.db.transaction(async (manager) => {
+    const result = await this.db.transaction(async (manager) => {
       // Consistent order with request edits/acceptance: request -> trip -> offers.
       const request = await manager.findOne(TripRequest, {
         where: { id: requestId },
@@ -105,18 +123,21 @@ export class SharedTripOffersService {
         lock: { mode: 'pessimistic_write' },
       });
       if (!trip) throw new NotFoundException('Trajet introuvable.');
-      await this.validate(manager, request, trip, driverId);
       const previous = await manager.findOneBy(DriverOffer, {
         tripRequestId: requestId,
         driverId,
         status: In([DriverOfferStatus.PENDING, DriverOfferStatus.ACCEPTED]),
       });
-      if (previous?.existingTripId === tripId)
+      if (previous?.existingTripId === tripId) {
+        if (previous.status === DriverOfferStatus.PENDING)
+          await this.validate(manager, request, trip, driverId, ['passenger']);
         return { offerId: previous.id, status: previous.status };
+      }
       if (previous)
         throw new ConflictException(
           'Vous avez déjà une offre pour cette commande.',
         );
+      await this.validate(manager, request, trip, driverId);
       const offer = await manager.save(
         DriverOffer,
         manager.create(DriverOffer, {
@@ -139,8 +160,9 @@ export class SharedTripOffersService {
             'Rejoindre un trajet déjà en cours, partagé avec d’autres passagers. Votre accord est nécessaire.',
         }),
       );
-      // Immediate requests keep receiving independent invitations until the
-      // passenger actually accepts a shared offer.
+      // In sequential mode a proposal reserves a passenger decision window;
+      // no other driver rings while explicit sharing consent is pending.
+      await startPassengerDecision(manager, request, driverId);
       if (!request.immediateDispatch)
         await manager.update(TripRequest, requestId, {
           id: requestId,
@@ -162,6 +184,8 @@ export class SharedTripOffersService {
       });
       return { offerId: offer.id, status: offer.status };
     });
+    await this.afterCommit(requestId);
+    return result;
   }
 
   async accept(
@@ -236,7 +260,7 @@ export class SharedTripOffersService {
                 'La proposition a changé. Actualisez la commande.',
               );
             }
-            await this.validate(manager, request, trip, offer.driverId);
+            await this.validate(manager, request, trip, offer.driverId, ['passenger']);
           },
           selected: async (manager, booking) => {
             const now = new Date();
@@ -263,10 +287,11 @@ export class SharedTripOffersService {
               tripId: booking.tripId,
             });
             await manager.query(
-              `UPDATE trip_request_dispatch_offers SET status = 'cancelled'
+              `UPDATE trip_request_dispatch_offers SET status = CASE WHEN "driverId"=$2 THEN 'accepted' ELSE 'cancelled' END
             WHERE "requestId" = $1 AND status = 'pending'`,
-              [requestId],
+              [requestId, offer.driverId],
             );
+            if (request.sequentialDispatch) await silenceRequestInvitation(manager, requestId);
             for (const userId of [passengerId, offer.driverId])
               await enqueueTransactionalNotification(manager, {
                 eventKey: `shared-trip-accepted:${offer.id}:${userId}`,
@@ -293,6 +318,7 @@ export class SharedTripOffersService {
           },
         },
       );
+      await this.afterCommit(requestId, true);
       return {
         tripId: booking.tripId,
         bookingId: booking.id,
@@ -307,7 +333,7 @@ export class SharedTripOffersService {
   }
 
   async decline(passengerId: string, requestId: string, offerId: string) {
-    return this.db.transaction(async (manager) => {
+    const result = await this.db.transaction(async (manager) => {
       const request = await manager.findOne(TripRequest, {
         where: { id: requestId, passengerId },
         lock: { mode: 'pessimistic_write' },
@@ -327,8 +353,16 @@ export class SharedTripOffersService {
         status: DriverOfferStatus.REJECTED,
         rejectedAt: new Date(),
       });
+      if (request.sequentialDispatch) {
+        await manager.query(`UPDATE trip_request_dispatch_offers SET status='declined'
+          WHERE "requestId"=$1 AND "driverId"=$2 AND status='pending' AND phase='passenger'`,
+          [requestId, offer.driverId]);
+        await silenceRequestInvitation(manager, requestId, offer.driverId);
+      }
       return { status: 'rejected' };
     });
+    await this.afterCommit(requestId);
+    return result;
   }
 
   private async committedSelection(

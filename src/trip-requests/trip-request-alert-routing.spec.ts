@@ -19,14 +19,14 @@ describe('request creation alert routing', () => {
   it('routes immediate intent to geographic dispatch without a non-geographic fallback', async () => {
     const f = fixture(true, true); await f.run();
     expect(f.repository.create.mock.calls[0][0].immediateDispatch).toBe(true);
-    expect(f.driverDispatch.tick).toHaveBeenCalledTimes(1);
-    expect(f.driverDispatch.notifyScheduledRequest).not.toHaveBeenCalled();
+    expect(f.driverDispatch.tick).not.toHaveBeenCalled();
+    expect(f.driverDispatch.notifyScheduledRequest).toHaveBeenCalledWith('created', true);
     expect(f.service.notifyDriversAboutTripRequest).not.toHaveBeenCalled();
   });
   it('routes scheduled departure to an alert, not an immediate offer', async () => {
     const f = fixture(true, false); await f.run();
     expect(f.repository.create.mock.calls[0][0].immediateDispatch).toBe(false);
-    expect(f.driverDispatch.notifyScheduledRequest).toHaveBeenCalledWith('created');
+    expect(f.driverDispatch.notifyScheduledRequest).toHaveBeenCalledWith('created', false);
     expect(f.driverDispatch.tick).not.toHaveBeenCalled();
     expect(f.service.notifyDriversAboutTripRequest).not.toHaveBeenCalled();
   });

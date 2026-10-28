@@ -1,3 +1,4 @@
+import { rideCardContent } from './ride-card-content';
 import type { Notification } from './entities/notification.entity';
 
 /** Expo SDK54 presents title/message in an FCM data message natively while
@@ -23,10 +24,14 @@ export function androidDriverBackup(_notification: Notification, data: Record<st
     delete content.invitationText; delete content.rideDeparture; delete content.rideArrival;
   }
   const body = JSON.stringify(content);
-  // No secrets or imagery. Keep identity metadata intact within FCM's 4KB limit.
-  const payload = { ...content, title: kind === 'booking' ? 'Réservation à traiter' : 'Demande à consulter',
-    message: 'Ouvrez Zwanga pour voir les détails et répondre.',
+  const card = rideCardContent({ ..._notification, data: content } as Notification);
+  // Text only: preserve the recipient and action fields within FCM's payload limit.
+  const payload = { ...content, title: card.title?.slice(0, 80) || (kind === 'booking' ? 'Réservation à traiter' : 'Demande à consulter'),
+    message: card.body?.slice(0, 240) || 'Ouvrez Zwanga pour voir les détails et répondre.',
     body, channelId: 'driver-alert-backup-v1', tag: fallbackTag, autoDismiss: 'false', sound: 'none' };
+  if (Buffer.byteLength(JSON.stringify(payload), 'utf8') > 3600) {
+    payload.message = 'Ouvrez Zwanga pour voir les détails et répondre.';
+  }
   if (Buffer.byteLength(JSON.stringify(payload), 'utf8') > 3800) {
     // Never truncate recipient IDs or action/consent fields to make an invalid
     // notification fit. Fail this delivery for diagnosis, not FCM indefinitely.
