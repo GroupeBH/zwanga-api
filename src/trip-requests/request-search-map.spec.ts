@@ -14,10 +14,26 @@ describe('passenger request search map', () => {
     expect(query).not.toHaveBeenCalled();
   });
   it.each([{ status: 'cancelled' }, { status: 'expired' }, { selectedDriverId: 'driver' }, { tripId: 'trip' },
-    { departureDateMax: new Date(Date.now() - 4 * 3600000) }])('stops discovery for closed/assigned requests %j', async patch => {
+    { departureDateMax: new Date(Date.now() - 4 * 3600000) },
+    { departureDateMax: new Date(Date.now() - 60000) }])('stops discovery for closed/assigned/overdue requests %j', async patch => {
     const { manager, query } = setup({ ...open, ...patch });
     expect(await requestSearchMap(manager, 'owner', 'request')).toMatchObject({ searching: false, groups: [], total: 0 });
     expect(query).not.toHaveBeenCalled();
+  });
+
+  it('uses the dispatch deadline exactly, without expiring or deleting the editable request', async () => {
+    jest.useFakeTimers();
+    try {
+      const deadline = new Date('2026-10-28T12:00:00Z'); jest.setSystemTime(deadline);
+      const request = { ...open, departureDateMax: deadline };
+      const { manager, query } = setup(request);
+      expect((await requestSearchMap(manager, 'owner', 'request')).searching).toBe(false);
+      expect(request.status).toBe('pending'); expect(query).not.toHaveBeenCalled();
+      jest.setSystemTime(new Date(deadline.getTime() - 1));
+      expect((await requestSearchMap(manager, 'owner', 'request')).searching).toBe(true);
+      expect(query.mock.calls[0][0]).toContain('r."departureDateMax" > now()');
+      expect(query.mock.calls[0][0]).not.toContain("interval '3 hours'");
+    } finally { jest.useRealTimers(); }
   });
   it('returns one exact last-known position per vehicle without account or contact fields', async () => {
     const positionUpdatedAt = new Date();

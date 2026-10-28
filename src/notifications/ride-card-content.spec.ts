@@ -34,4 +34,16 @@ describe('price and route as text only', () => {
     expect(rideCardContent(n).body).not.toContain('<b>');
     expect(Buffer.byteLength(JSON.stringify(nativeAndroidDriverPush(n,'synthetic',new Date().toISOString()).data))).toBeLessThan(4000);
   });
+  it('keeps seats and Kinshasa departure time in every structured card, including without a price', () => {
+    for (const price of ['2500', undefined]) {
+      const n = fixture({ ridePricePerSeat: price, rideSeats: '2', rideDepartureAt: '2026-10-28T09:00:00.000Z' });
+      const card = rideCardContent(n);
+      expect(card.body).toContain('2 places'); expect(card.body).toContain('10:00');
+      expect(card.body).toContain('28/10');
+      const alert = iosDriverPush(n, 'synthetic', new Date(Date.now()+60000).toISOString()).apns!.payload.aps.alert as any;
+      expect(alert.body).toContain('2 places'); expect(alert.body).toContain('10:00');
+    }
+    const invalid = rideCardContent(fixture({ rideSeats: '0', rideDepartureAt: 'invalid' }));
+    expect(invalid.body).not.toContain('0 place'); expect(invalid.body).not.toContain('Invalid Date');
+  });
 });

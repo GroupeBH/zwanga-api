@@ -61,6 +61,32 @@ describe('driver notification transport', () => {
     expect(query).not.toHaveBeenCalled();
     expect(send.mock.calls[0][0].data.actionProtocol).toBeUndefined();
   });
+
+  it.each(['new_booking', 'trip_request_nearby', 'driver_dispatch_offer'])('keeps price, time and seats visible through Expo and legacy FCM for %s', async type => {
+    const { service, send } = fixture(false);
+    const original = global.fetch;
+    const remote = jest.fn().mockResolvedValue({ ok: true, json: async () => ({ data: { status: 'ok', id: 'local-ticket' } }) });
+    global.fetch = remote;
+    const notification = { userId: 'driver', title: 'Demande de test', body: 'Texte ancien', data: {
+      type, ringAlert: 'nearby-request-v1', driverId: 'driver', passengerId: 'passenger', bookingId: 'booking', tripRequestId: 'request', offerId: 'offer',
+      expiresAt: new Date(Date.now() + 40000).toISOString(), ridePriceKind: 'budget', ridePricePerSeat: '2500',
+      rideSeats: '2', rideDepartureAt: '2026-10-28T09:00:00.000Z', rideDeparture: 'Départ de test', rideArrival: 'Arrivée de test',
+    } };
+    try {
+      await service.sendExpoPushNotification(notification, 'ExponentPushToken[test]');
+      await service.sendFirebaseNotification(notification, 'synthetic-token');
+      const expo = JSON.parse(remote.mock.calls[0][1].body), fcm = send.mock.calls[0][0];
+      for (const card of [expo, fcm.notification]) {
+        expect(card.title.replace(/[\u202f\u00a0]/g, ' ')).toContain('2 500');
+        expect(card.body).toContain('2 places'); expect(card.body).toContain('10:00');
+        expect(card.body).toContain('Départ de test → Arrivée de test');
+      }
+      expect(expo.data.driverId).toBe('driver');
+      // Legacy nearby clients without registered ringing capability keep their system sound.
+      expect(expo.sound).toBe(type === 'trip_request_nearby' ? 'default' : 'driver_ring.wav');
+      expect(fcm.android.ttl).toBeLessThanOrEqual(40000);
+    } finally { global.fetch = original; }
+  });
   it('GPS reminders remain ordinary notifications and are suppressed after recovery or dispatch shutdown', async () => {
     const { service, send, query } = fixture(true);
     const notification = { userId: 'driver', title: 'Position', body: 'Ouvrez Zwanga',

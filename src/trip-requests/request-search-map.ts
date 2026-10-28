@@ -12,7 +12,7 @@ export async function requestSearchMap(manager: EntityManager, passengerId: stri
   if (!request) throw new NotFoundException('Commande introuvable.');
   const base = { requestId, radiusKm: NEARBY_DRIVER_RADIUS_METERS / 1000, generatedAt: new Date().toISOString() };
   const searching = ['pending', 'offers_received'].includes(request.status) && !request.selectedDriverId && !request.tripId &&
-    new Date(request.departureDateMax).getTime() + 3 * 60 * 60 * 1000 > Date.now();
+    new Date(request.departureDateMax).getTime() > Date.now();
   if (!searching || !request.departurePoint) return { ...base, searching, groups: [], vehicles: [], total: 0, truncated: false };
   // The shared location policy honors explicit opt-outs and durable last-known positions.
   // ST_DWithin retains the geography index; cap native markers without merging vehicles.
@@ -24,7 +24,7 @@ export async function requestSearchMap(manager: EntityManager, passengerId: stri
     JOIN LATERAL (SELECT v.* FROM vehicles v WHERE v."ownerId" = p."driverId" AND v."isActive" = true AND v.type = r."vehicleType"
       ORDER BY (v.id = p."vehicleId") DESC, v."updatedAt" DESC, v.id LIMIT 1) v ON true
     WHERE r.status IN ('pending','offers_received') AND r."selectedDriverId" IS NULL AND r."tripId" IS NULL
-      AND r."departureDateMax" + interval '3 hours' > now()
+      AND r."departureDateMax" > now()
       AND p."driverId" <> r."passengerId" AND ${USABLE_DRIVER_LOCATION_SQL} AND ${ELIGIBLE_NEARBY_DRIVER_SQL}
       AND p."updatedAt" <= now() + interval '1 minute'
       AND (r."targetDriverId" IS NULL OR p."driverId" = r."targetDriverId")

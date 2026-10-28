@@ -13,6 +13,14 @@ export function rideCardContent(notification: Notification) {
   const label = (v: unknown) => typeof v === 'string' ? v.slice(0, 1600).replace(/<[^>]*>/g, ' ').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 100) : '';
   const from = label(d.rideDeparture), to = label(d.rideArrival);
   const route = to ? `${from ? from + ' → ' : 'Vers '}${to}` : from;
+  const seats = typeof d.rideSeats === 'string' && /^[1-9]\d?$/.test(d.rideSeats)
+    ? `${d.rideSeats} place${d.rideSeats === '1' ? '' : 's'}` : '';
+  const departureAt = typeof d.rideDepartureAt === 'string' ? Date.parse(d.rideDepartureAt) : NaN;
+  const schedule = Number.isFinite(departureAt) ? `Départ : ${new Date(departureAt).toLocaleString('fr-FR', {
+    timeZone: 'Africa/Kinshasa', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+  })}` : '';
+  const details = [seats, schedule].filter(Boolean).join(' · ');
   return { title: price ? `Zwanga · ${price}` : notification.title,
-    body: price && route ? `${route}\nOuvrez Zwanga pour accepter ou refuser.` : notification.body };
+    body: price ? [price, route, details, 'Ouvrez Zwanga pour répondre.'].filter(Boolean).join('\n')
+      : [notification.body, details].filter(Boolean).join('\n') };
 }
