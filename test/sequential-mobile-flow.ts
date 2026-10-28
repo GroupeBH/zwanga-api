@@ -19,7 +19,7 @@ import { Notification } from '../src/notifications/entities/notification.entity'
 import { User, UserRole } from '../src/users/entities/user.entity';
 import { Vehicle, VehicleType } from '../src/vehicles/entities/vehicle.entity';
 import { DriverOffer } from '../src/trip-requests/entities/driver-offer.entity';
-import { TripRequest } from '../src/trip-requests/entities/trip-request.entity';
+import { TripRequest, TripRequestStatus } from '../src/trip-requests/entities/trip-request.entity';
 import { RideNotificationReceipts1780000093000 } from '../src/database/migrations/1780000093000-RideNotificationReceipts';
 import { RideDeliveryRecovery1780000094000 } from '../src/database/migrations/1780000094000-RideDeliveryRecovery';
 
@@ -121,6 +121,7 @@ export function sequentialMobileFlow(context: () => Context) {
         };
         const clients = users.map(u => rideActionHttpClient(u.id, send));
         for (const client of clients) await client.endpoint('registerDriverNotifications', 6);
+        const creationStartedAt = Date.now();
         const created: any = await send({ url: '/trip-requests', method: 'POST', body: {
           departureLocation: 'DEPART TEST LOCAL', arrivalLocation: 'DESTINATION TEST LOCAL',
           departureCoordinates: [15.31, -4.3], arrivalCoordinates: [15.32, -4.3],
@@ -131,12 +132,16 @@ export function sequentialMobileFlow(context: () => Context) {
         ids.push(created.id);
         const messages = () => wire.filter(x => x.data?.tripRequestId === created.id &&
           ['trip_request_nearby', 'driver_dispatch_offer'].includes(x.data?.type));
-        const waitFor = async (count: number) => {
+        const waitFor = async (count: number, manualDrain = true) => {
           const end = Date.now() + 15000;
-          while (messages().length < count && Date.now() < end) { await delivery.dispatchUrgentNotifications(); await sleep(100); }
+          while (messages().length < count && Date.now() < end) {
+            if (manualDrain) await delivery.dispatchUrgentNotifications();
+            await sleep(100);
+          }
           expect(messages()).toHaveLength(count); return messages()[count - 1].data;
         };
-        const initial = await waitFor(1);
+        const initial = await waitFor(1, false);
+        console.log('[local-e2e] HTTP creation to mock FCM first delivery ms=' + (messages()[0].receivedAt - creationStartedAt));
         expect(initial.driverId).toBe(first.id); expect(initial.nativeAlert).toBe('driver-v6');
         const observed = await nativeReceipt(initial);
         expect(await clients[0].endpoint('recordRideNotificationReceipt', {
@@ -147,20 +152,26 @@ export function sequentialMobileFlow(context: () => Context) {
         })).toEqual({ received: false });
         await expect(send({ url: `/trip-requests/${created.id}` }, second.id)).rejects.toMatchObject({ status: 404 });
         const before = (await offers(created.id))[0];
-        if (timeout) {
-          // Actual Nest cron + elapsed 40-second deadline; no manual ticks, fake timers or SQL timestamp changes.
-          while (Date.now() < before.expiresAt.getTime() - 1200) {
-            expect(await offers(created.id)).toHaveLength(1); await sleep(500);
+        const waitForExpirationRelay = async (previous: any, expectedCount: number) => {
+          // Actual Nest cron + elapsed 40-second deadline. No manual tick/drain,
+          // fake timer, mobile timeout callback or SQL deadline manipulation.
+          while (Date.now() < previous.expiresAt.getTime() - 1200) {
+            expect(await offers(created.id)).toHaveLength(expectedCount - 1); await sleep(500);
           }
-          while ((await offers(created.id)).length === 1 && Date.now() < before.expiresAt.getTime() + 10000) {
+          while ((await offers(created.id)).length < expectedCount && Date.now() < previous.expiresAt.getTime() + 10000) {
             await sleep(250);
           }
+        };
+        if (timeout) {
+          // A previous counteroffer must not silence subsequent quick invitations.
+          await db.getRepository(TripRequest).update(created.id, { status: TripRequestStatus.OFFERS_RECEIVED });
+          await waitForExpirationRelay(before, 2);
         } else {
           const result = await clients[0].act({ data: initial }, 'driver-ignore-nearby');
           expect(result).toMatchObject({ decision: 'decline', confirmed: true });
           expect(clients[0].dismissed).toHaveLength(1);
         }
-        const next = await waitFor(2);
+        const next = await waitFor(2, false);
         expect(next.driverId).toBe(second.id);
         const rows = await offers(created.id);
         expect(rows[0].status).toBe(timeout ? 'expired' : 'declined');
@@ -175,15 +186,29 @@ export function sequentialMobileFlow(context: () => Context) {
           notificationId: next.notificationId, stage: 'displayed', ...nextReceipt,
         });
         if (timeout) {
-          const result = await clients[1].act({ data: next }, 'driver-accept');
+          // The second driver also ignores the request. This crosses the queue's
+          // 60-second TTL and verifies rediscovery, not just its first handoff.
+          await waitForExpirationRelay(rows[1], 3);
+          const last = await waitFor(3, false);
+          expect(last.driverId).toBe(third.id);
+          expect(new Set(messages().map(m => m.data.notificationId)).size).toBe(3);
+          const lastReceipt = await nativeReceipt(last);
+          await clients[2].endpoint('recordRideNotificationReceipt', {
+            notificationId: last.notificationId, stage: 'displayed', ...lastReceipt,
+          });
+          const elapsed = messages()[2].receivedAt - rows[1].createdAt.getTime();
+          expect(elapsed).toBeGreaterThanOrEqual(40000); expect(elapsed).toBeLessThan(50000);
+          console.log('[local-e2e] Second real 40-second relay latency ms=' + elapsed);
+          expect((await offers(created.id)).map(o => o.status)).toEqual(['expired', 'expired', 'pending']);
+          const result = await clients[2].act({ data: last }, 'driver-accept');
           expect(result).toMatchObject({ confirmed: true, decision: 'accept' });
           // Repeated native action must not send another mutation.
-          await clients[1].act({ data: next }, 'driver-accept');
-          expect(clients[1].requests.filter((r: any) => r.name === 'respondToDispatchOffer')).toHaveLength(1);
-          expect((await db.getRepository(TripRequest).findOneByOrFail({ id: created.id })).selectedDriverId).toBe(second.id);
-          await expect(send({ url: `/trip-requests/${created.id}` }, third.id)).rejects.toMatchObject({ status: 404 });
+          await clients[2].act({ data: last }, 'driver-accept');
+          expect(clients[2].requests.filter((r: any) => r.name === 'respondToDispatchOffer')).toHaveLength(1);
+          expect((await db.getRepository(TripRequest).findOneByOrFail({ id: created.id })).selectedDriverId).toBe(third.id);
+          await expect(send({ url: `/trip-requests/${created.id}` }, second.id)).rejects.toMatchObject({ status: 404 });
           await relay.deadlines(); await relay.advance(created.id); await delivery.dispatchUrgentNotifications();
-          expect(messages()).toHaveLength(2);
+          expect(messages()).toHaveLength(3);
         } else {
           // Replaying the first refusal cannot skip the current recipient.
           await clients[0].act({ data: initial }, 'driver-ignore-nearby');
@@ -191,7 +216,7 @@ export function sequentialMobileFlow(context: () => Context) {
           await expect(send({ url: `/trip-requests/${created.id}` }, first.id)).rejects.toMatchObject({ status: 404 });
         }
         expect(messages().some(x => [outside.id, passenger.id].includes(x.data.driverId))).toBe(false);
-        expect(await db.query('SELECT * FROM ride_notification_receipts')).toHaveLength(2);
+        expect(await db.query('SELECT * FROM ride_notification_receipts')).toHaveLength(timeout ? 3 : 2);
       } finally {
         await Promise.allSettled(deliveries);
         notifications.dispatchUrgentNotifications.mockImplementation(async () => undefined);
@@ -200,5 +225,5 @@ export function sequentialMobileFlow(context: () => Context) {
         for (const migration of migrations.reverse()) await migration.down(runner);
         await runner.release();
       }
-    }, 120000);
+    }, 150000);
 }

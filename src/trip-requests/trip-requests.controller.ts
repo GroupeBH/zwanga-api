@@ -76,6 +76,14 @@ export class TripRequestsController {
     return this.tripRequestsService.driverChoices(req.user.userId, query);
   }
 
+  @Get(':id/search-map')
+  @Auth()
+  @Header('Cache-Control', 'private, no-store')
+  @SensitiveThrottle(12, 60000)
+  async searchMap(@Request() req: { user: { userId: string } }, @Param('id', ParseUUIDPipe) id: string) {
+    return this.tripRequestsService.searchMap(req.user.userId, id);
+  }
+
   @Post(':id/open-search')
   @Auth()
   @SensitiveThrottle(10, 60000)

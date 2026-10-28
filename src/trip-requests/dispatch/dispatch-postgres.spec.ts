@@ -1,6 +1,7 @@
 import { RequestResponsePhases1780000098000 } from '../../database/migrations/1780000098000-RequestResponsePhases';
 import { SequentialRequestQueue1780000097000 } from '../../database/migrations/1780000097000-SequentialRequestQueue';
 import { findDriverChoices, validateTargetDriver } from '../driver-choices';
+import { requestSearchMap } from '../request-search-map';
 import { TargetTripRequestDriver1780000096000 } from '../../database/migrations/1780000096000-TargetTripRequestDriver';
 import { SharedTripOffersService } from '../shared-trip-offers.service';
 import { prepareNearbyRequestRinging } from '../../notifications/nearby-request-cooldown';
@@ -338,6 +339,49 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     jest.spyOn(edits as any, 'sanitizeDriverOffer').mockImplementation(async offer => offer);
     return edits;
   };
+
+
+  it('request map shows each last-known position, including older ones, without exposing account identifiers', async () => {
+    const first = await driver(15.311), second = await driver(15.3115), far = await driver(15.8), stale = await driver(15.32);
+    const r = await request(false);
+    await source.query(`UPDATE driver_dispatch_presence SET "updatedAt" = now() - interval '11 minutes' WHERE "driverId" = $1`, [stale.user.id]);
+    const map = await requestSearchMap(source.manager, r.passengerId, r.id);
+    expect(map.total).toBe(3); expect(map.groups).toHaveLength(1);
+    expect(map.groups[0]).toEqual({ id: '-4.3:15.31', latitude: -4.3, longitude: 15.31, count: 2 });
+    expect(map.vehicles.map(v => v.longitude)).toEqual([15.311, 15.3115, 15.32]);
+    expect(new Set(map.vehicles.map(v => v.id)).size).toBe(3);
+    expect(map.vehicles.every(v => v.latitude === -4.3 && v.vehicleType === 'car')).toBe(true);
+    expect(Date.now() - Date.parse(map.vehicles[2].positionUpdatedAt)).toBeGreaterThanOrEqual(11 * 60000);
+    expect(JSON.stringify(map)).not.toContain(first.vehicle.id);
+    expect(JSON.stringify(map)).not.toContain(first.user.id);
+    expect(JSON.stringify(map)).not.toContain(second.user.id);
+    await expect(requestSearchMap(source.manager, far.user.id, r.id)).rejects.toThrow('Commande introuvable');
+    await declineRequestForDriver(source.manager, first.user.id, r.id);
+    expect((await requestSearchMap(source.manager, r.passengerId, r.id)).total).toBe(2);
+    await source.getRepository(TripRequest).update(r.id, { status: TripRequestStatus.CANCELLED });
+    expect(await requestSearchMap(source.manager, r.passengerId, r.id)).toMatchObject({ searching: false, total: 0, groups: [], vehicles: [] });
+  });
+
+  it('request map preserves targeted audiences and never counts the passenger-driver as a nearby driver', async () => {
+    const chosen = await driver(15.311), other = await driver(15.32), r = await request(false);
+    await source.getRepository(TripRequest).update(r.id, { targetDriverId: chosen.user.id });
+    expect((await requestSearchMap(source.manager, r.passengerId, r.id)).total).toBe(1);
+    await source.getRepository(TripRequest).update(r.id, { targetDriverId: null, passengerId: chosen.user.id });
+    const map = await requestSearchMap(source.manager, chosen.user.id, r.id);
+    expect(map.total).toBe(1); expect(map.vehicles[0].longitude).toBe(15.32);
+    await service.setPresence(other.user.id, { available: false });
+    expect((await requestSearchMap(source.manager, chosen.user.id, r.id)).total).toBe(0);
+  });
+
+  it('request map keeps the ringing driver visible for this request but not another request', async () => {
+    await driver();
+    const r = await request(true);
+    await service.tick();
+    expect(await offers(r.id)).toHaveLength(1);
+    expect((await requestSearchMap(source.manager, r.passengerId, r.id)).total).toBe(1);
+    const another = await request(false);
+    expect((await requestSearchMap(source.manager, another.passengerId, another.id)).total).toBe(0);
+  });
 
 
   it('target choice searches nearby or a known driver without exposing private contact/location data', async () => {

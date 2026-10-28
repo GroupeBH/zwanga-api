@@ -1,3 +1,4 @@
+import { IndexRequestNotificationRetirement1780000099000 } from './1780000099000-IndexRequestNotificationRetirement';
 import { RequestResponsePhases1780000098000 } from './1780000098000-RequestResponsePhases';
 import { TargetTripRequestDriver1780000096000 } from './1780000096000-TargetTripRequestDriver';
 import { RememberDriverRequestRefusals1780000095000 } from './1780000095000-RememberDriverRequestRefusals';
@@ -202,4 +203,5 @@ export const databaseMigrations = [
   TargetTripRequestDriver1780000096000,
   SequentialRequestQueue1780000097000,
   RequestResponsePhases1780000098000,
+  IndexRequestNotificationRetirement1780000099000,
 ];

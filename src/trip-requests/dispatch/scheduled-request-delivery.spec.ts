@@ -31,6 +31,13 @@ describe('Scheduled request enqueue acknowledgement', () => {
     expect(enqueue).not.toHaveBeenCalled();
     expect(f.notifications.dispatchTransactionalNotifications).not.toHaveBeenCalled();
   });
+  it('keeps immediate creation working when only the legacy allocator is installed', async () => {
+    const f = fixture();
+    const allocate = jest.spyOn(f.service as any, 'allocate').mockResolvedValue(true);
+    await expect(f.service.notifyScheduledRequest('request', true)).resolves.toBe(true);
+    expect(allocate).toHaveBeenCalledWith('request'); expect(enqueue).not.toHaveBeenCalled();
+    expect(f.notifications.dispatchTransactionalNotifications).toHaveBeenCalledTimes(1);
+  });
 
   it('returns false when no nearby alert was queued; later ticks may find new drivers', async () => {
     const f = fixture(); enqueue.mockResolvedValue(false);

@@ -2,6 +2,7 @@ import { claimRequestAcceptance, completeRequestAcceptance, releaseRequestAccept
 import { sequentialInvitationSql, assertSequentialInvitation } from './dispatch/sequential-policy';
 import { DriverChoiceQuery } from './dto/driver-choice.dto';
 import { findDriverChoices, validateTargetDriver } from './driver-choices';
+import { requestSearchMap } from './request-search-map';
 import { assertRequestTarget } from './target-driver-policy';
 import { hasRefusedRequest } from './request-refusal';
 import { requestDriverVisibilitySql } from './target-driver-policy';
@@ -333,20 +334,18 @@ export class TripRequestsService {
     const saved = await this.tripRequestRepository.save(tripRequest);
     this.logger.log(`Trip request created: ${saved.id}`);
 
-    // Both request types use the Redis relay. Existing notification kinds retain mobile compatibility.
-    if (saved.immediateDispatch) void this.driverDispatch?.tick();
-    else {
-      let nearbyAlertQueued = false;
-      if (this.driverDispatch?.enabled) {
-        try { nearbyAlertQueued = await this.driverDispatch.notifyScheduledRequest(saved.id); }
-        catch { this.logger.warn('Nearby scheduled-request alert deferred to the dispatch worker.'); }
-      }
-      // When geographic dispatch is enabled, its cron continues the bounded
-      // relay. Never bypass it with a general broadcast when delivery is deferred.
-      if (!nearbyAlertQueued && !this.driverDispatch?.enabled) await this.notifyDriversAboutTripRequest(saved);
-    }
+    // Wake this request directly, even while the global discovery tick is busy.
+    // The durable outbox/cron recover a failure without broadening the audience.
+    if (this.driverDispatch?.enabled) {
+      try { await this.driverDispatch.notifyScheduledRequest(saved.id, saved.immediateDispatch); }
+      catch { this.logger.warn('Nearby request alert deferred to the dispatch worker.'); }
+    } else await this.notifyDriversAboutTripRequest(saved);
 
     return this.findOne(saved.id, passengerId);
+  }
+
+  async searchMap(passengerId: string, requestId: string) {
+    return requestSearchMap(this.tripRequestRepository.manager, passengerId, requestId);
   }
 
   async driverChoices(passengerId: string, query: DriverChoiceQuery) {
@@ -354,12 +353,12 @@ export class TripRequestsService {
   }
 
   async openToNearbyDrivers(passengerId: string, id: string) {
-    await this.tripRequestRepository.manager.transaction(async manager => {
+    const immediate = await this.tripRequestRepository.manager.transaction(async manager => {
       const repository = manager.getRepository(TripRequest);
       const request = await repository.findOne({ where: { id, passengerId }, lock: { mode: 'pessimistic_write' } });
       if (!request) throw new NotFoundException('Commande introuvable.');
       assertUnassignedRequest(request);
-      if (!request.targetDriverId) return;
+      if (!request.targetDriverId) return request.immediateDispatch;
       const linked = await manager.getRepository(Trip).exists({ where: {
         tripRequestId: id, status: In([TripStatus.PENDING, TripStatus.ACTIVE, TripStatus.COMPLETED]),
       } });
@@ -368,9 +367,11 @@ export class TripRequestsService {
       // Only the audience expands: keep the chosen driver's pending invitation actionable.
       // Prices, dates, existing refusals and first-acceptance-wins remain unchanged.
       await repository.update(id, { id, targetDriverId: null });
+      return request.immediateDispatch;
     });
-    void this.driverDispatch?.tick();
-    if (!this.driverDispatch?.enabled) {
+    if (this.driverDispatch?.enabled) {
+      await this.driverDispatch.notifyScheduledRequest(id, immediate);
+    } else {
       const request = await this.tripRequestRepository.findOneBy({ id, passengerId });
       if (request) await this.notifyDriversAboutTripRequest(request);
     }

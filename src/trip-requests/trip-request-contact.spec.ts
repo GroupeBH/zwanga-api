@@ -123,7 +123,7 @@ describe('Immediate request contact authorization query', () => {
     const [query, parameters] = db.query.mock.calls[0] as [string, string[]];
     expect(parameters).toEqual(['request', 'driver']);
     for (const clause of ['o."requestId" = $1', 'o."driverId" = $2', "o.status = 'pending'",
-      'o."expiresAt" > now()', "r.status = 'pending'", 'r."selectedDriverId" IS NULL', 'r."tripId" IS NULL', 'LIMIT 1']) {
+      'o."expiresAt" > now()', "r.status IN ('pending', 'offers_received')", 'r."selectedDriverId" IS NULL', 'r."tripId" IS NULL', 'LIMIT 1']) {
       expect(query).toContain(clause);
     }
     db.query.mockResolvedValueOnce([]);

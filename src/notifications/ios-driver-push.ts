@@ -1,3 +1,4 @@
+import { rideCardContent } from './ride-card-content';
 import type { Message } from 'firebase-admin/messaging';
 import type { Notification } from './entities/notification.entity';
 
@@ -11,6 +12,7 @@ export function iosDriverPush(notification: Notification, token: string, ringUnt
   }).filter(([, value]) => value !== undefined && value !== null)
     .map(([key, value]) => [key, String(value)]));
   for (const field of ['invitationText', 'rideDeparture', 'rideArrival']) if (data[field]) data[field] = data[field].slice(0, 120);
+  const card = rideCardContent(notification);
   const id = data.offerId ?? data.bookingId ?? data.tripRequestId;
   const expiry = Math.floor(Date.parse(ringUntil) / 1000);
   if (!Number.isFinite(expiry)) throw new Error('IOS_DRIVER_DEADLINE_INVALID');
@@ -20,7 +22,7 @@ export function iosDriverPush(notification: Notification, token: string, ringUnt
     payload: {
       // Preserve the Expo-compatible shape for the shared native action bridge.
       body: data,
-      aps: { alert: { title: notification.title.slice(0, 100), body: notification.body.slice(0, 300) },
+      aps: { alert: { title: card.title.slice(0, 100), body: card.body.slice(0, 300) },
         sound: 'driver_ring.wav', ...(response ? {} : { category: nearby ? 'driver-nearby-v1' : 'driver-offer-v2' }),
         'interruption-level': 'time-sensitive', threadId: 'zwanga-ride-requests' },
     },
