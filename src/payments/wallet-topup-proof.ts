@@ -3,6 +3,7 @@ import {
   PaymentStatus,
   PaymentTransaction,
 } from './entities/payment-transaction.entity';
+import { hasMatchingFlexPayTopUpIdentity } from './flexpay-topup-identity';
 
 const record = (value: unknown): Record<string, unknown> =>
   value && typeof value === 'object' && !Array.isArray(value)
@@ -29,7 +30,6 @@ export function hasVerifiedWalletTopUpProof(
       transaction.Code,
   );
   const amount = scalar(transaction.amount);
-  const reference = scalar(transaction.reference);
   const expectedAmount = Number(payment.amount);
   return (
     payment.purpose === PaymentPurpose.WALLET_TOP_UP &&
@@ -39,10 +39,7 @@ export function hasVerifiedWalletTopUpProof(
     payment.relatedEntityId === payment.userId &&
     scalar(proof.code ?? proof.Code) === '0' &&
     status === '0' &&
-    Boolean(payment.orderNumber) &&
-    scalar(transaction.orderNumber) === payment.orderNumber &&
-    Boolean(reference) &&
-    [payment.reference, payment.orderNumber].includes(reference) &&
+    hasMatchingFlexPayTopUpIdentity(payment, transaction) &&
     /^\d+(\.\d+)?$/.test(amount) &&
     Number.isFinite(expectedAmount) &&
     expectedAmount > 0 &&

@@ -13,12 +13,15 @@ function fixture() {
   return { query, repository: { createQueryBuilder: jest.fn(() => query), find: jest.fn() } as any };
 }
 describe('request/offer cursor pages', () => {
-  it('bounds request IDs before relation hydration and excludes accepted/immediate/expired/public self requests', async () => {
+  it('bounds request IDs before relation hydration and excludes accepted/expired/public self requests, not alert types', async () => {
     const f = fixture(); const page = await requestPageIds(f.repository, 'driver', false, { limit: 2 });
     expect(page.ids).toEqual(rows.slice(0, 2).map(row => row.id)); expect(page.total).toBe(3);
     expect(f.query.limit).toHaveBeenCalledWith(3);
     const conditions = f.query.andWhere.mock.calls.map(([sql]) => sql).join(' ');
-    expect(conditions).toContain('immediateDispatch = false'); expect(conditions).toContain('selectedDriverId IS NULL');
+    expect(conditions).not.toContain('immediateDispatch'); expect(conditions).not.toContain('trip_request_dispatch_offers');
+    expect(conditions).toContain('selectedDriverId IS NULL');
+    expect(conditions).toContain('ST_DWithin'); expect(conditions).toContain('5000');
+    expect(conditions).toContain('p."driverId" = (:userId)::uuid');
     expect(conditions).toContain('trip_request_driver_refusals'); expect(conditions).toContain('NOT EXISTS'); expect(conditions).toContain('departureDateMax > :cutoff');
     const context = historyContext({ before: page.nextCursor! }, 'requests-available');
     expect(context.cursor?.at).toBe(rows[1].at);
@@ -28,6 +31,7 @@ describe('request/offer cursor pages', () => {
   it('scopes personal requests and offers to their respective authenticated owner', async () => {
     const f = fixture(); await requestPageIds(f.repository, 'owner', true, { limit: 20 });
     expect(f.query.andWhere).toHaveBeenCalledWith('request.passengerId = :userId', { userId: 'owner' });
+    expect(f.query.andWhere.mock.calls.map(([sql]) => sql).join(' ')).not.toContain('ST_DWithin');
     await offerPageIds(f.repository, 'driver', { limit: 20 });
     expect(f.query.where).toHaveBeenCalledWith('offer.driverId = :driverId', { driverId: 'driver' });
   });

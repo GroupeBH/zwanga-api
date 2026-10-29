@@ -48,6 +48,7 @@ import { loadPaymentContext, PaymentContextDto } from './payment-context';
 import type { PaymentHistoryPageDto } from '../common/pagination/history-page';
 import { claimDriverPayoutPayment, commitFlexPayPayoutState } from './flexpay-payout-state';
 import { claimTopUpPayment, topUpReference } from './topup-payment-claim';
+import { claimBookingPayment } from './booking-payment-claim';
 import { recoverTopUpClaim } from './topup-recovery';
 import { commitFlexPayDepositState } from './flexpay-deposit-state';
 import { claimReferralPayoutPayment } from './referral-payout-claim';
@@ -272,10 +273,12 @@ export class PaymentsService {
     if (isIdempotentTopUp) transaction.reference = topUpReference(input.userId!, input.idempotencyKey!);
     const claim = isIdempotentTopUp
       ? await claimTopUpPayment(this.paymentTransactionRepository, transaction)
+      : input.purpose === PaymentPurpose.TRIP_BOOKING
+        ? await claimBookingPayment(this.paymentTransactionRepository, transaction)
       : { payment: await this.paymentTransactionRepository.save(transaction), created: true };
     if (!claim.created) {
       // A replay must reconcile the existing attempt, never initiate a new one.
-      return claim.payment.orderNumber
+      return isIdempotentTopUp && claim.payment.orderNumber
         ? this.checkPaymentStatus(claim.payment.orderNumber, input.userId!)
         : claim.payment;
     }
@@ -464,6 +467,35 @@ export class PaymentsService {
   }
 
   async handleFlexPayCallback(
+    dto: FlexPayCallbackDto,
+  ): Promise<PaymentTransaction> {
+    const payment = await this.verifyFlexPayCallback(dto);
+    // Keep settlement outside the provider-verification catch: a wallet failure
+    // must remain retryable, not become a successful callback acknowledgement.
+    await this.settleVerifiedFlexPayTopUp(payment);
+    return payment;
+  }
+
+  private async settleVerifiedFlexPayTopUp(
+    payment: PaymentTransaction,
+  ): Promise<void> {
+    if (
+      payment.provider !== PaymentProvider.FLEXPAY ||
+      payment.purpose !== PaymentPurpose.WALLET_TOP_UP ||
+      payment.status !== PaymentStatus.SUCCEEDED
+    )
+      return;
+    if (!hasVerifiedWalletTopUpProof(payment)) {
+      throw new BadGatewayException(
+        'La recharge doit être vérifiée avant de créditer les jetons',
+      );
+    }
+    // The wallet handler owns ledger idempotency. Reuse it on callback/retry,
+    // without initiating a new charge or changing the purchased token quantity.
+    await this.settlementRegistry.apply(payment);
+  }
+
+  private async verifyFlexPayCallback(
     dto: FlexPayCallbackDto,
   ): Promise<PaymentTransaction> {
     const callback = this.normalizeFlexPayCallback(dto);
@@ -656,11 +688,15 @@ export class PaymentsService {
         // Retry the business settlement if a previous callback saved the status
         // but failed before crediting the wallet/booking/subscription.
         await this.settlementRegistry.apply(transaction);
+      } else {
+        await this.settleVerifiedFlexPayTopUp(transaction);
       }
       return transaction;
     }
 
-    return this.checkTransactionAndApply(transaction);
+    const checked = await this.checkTransactionAndApply(transaction);
+    await this.settleVerifiedFlexPayTopUp(checked);
+    return checked;
   }
 
   async findUserTransactions(userId: string): Promise<PaymentTransaction[]> {

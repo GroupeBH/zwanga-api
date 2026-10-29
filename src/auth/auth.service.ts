@@ -212,6 +212,11 @@ export class AuthService {
 
     await this.referralsService.assertReferralAttribution(referralAttribution);
 
+    const isPhoneVerified = await this.registrationPhoneVerified(
+      phone,
+      registerDto.phoneVerificationToken,
+    );
+
     // Hash the PIN
     const saltRounds = 10;
     const hashedPin = await bcrypt.hash(pin, saltRounds);
@@ -258,8 +263,8 @@ export class AuthService {
       isDriver: driverState.isDriver,
       driverOnboardingRequestedAt: role === UserRole.DRIVER ? new Date() : null,
       status: UserStatus.PENDING_KYC,
-      // Registration currently allows access without a phone OTP.
-      isPhoneVerified: false,
+      // Never trust a client-supplied verified flag or another person's OTP.
+      isPhoneVerified,
     };
 
     if (profilePicturePath) {
@@ -1059,6 +1064,7 @@ export class AuthService {
     signupOptions?: Pick<
       GoogleMobileAuthDto,
       | 'role'
+      | 'phoneVerificationToken'
       | 'isDriver'
       | 'vehicle'
       | 'firstName'
@@ -1093,6 +1099,7 @@ export class AuthService {
     signupOptions?: Pick<
       GoogleMobileAuthDto,
       | 'role'
+      | 'phoneVerificationToken'
       | 'isDriver'
       | 'vehicle'
       | 'firstName'
@@ -1142,6 +1149,7 @@ export class AuthService {
         user.isEmailVerified = true;
 
         // If phone provided and user has no phone, set it
+        let verifiedPhone: boolean | undefined;
         if (phone && !user.phone) {
           const phoneOwner = await this.userRepository.findOne({
             where: { phone },
@@ -1152,6 +1160,10 @@ export class AuthService {
             );
           }
           user.phone = phone;
+          verifiedPhone = await this.registrationPhoneVerified(
+            phone,
+            signupOptions?.phoneVerificationToken,
+          );
         }
 
         if (!user.profilePicture && profilePicture) {
@@ -1161,6 +1173,7 @@ export class AuthService {
           googleId: user.googleId,
           isEmailVerified: user.isEmailVerified,
           phone: user.phone,
+          ...(verifiedPhone !== undefined ? { isPhoneVerified: verifiedPhone } : {}),
           profilePicture: user.profilePicture,
         });
       } else {
@@ -1234,7 +1247,10 @@ export class AuthService {
             role === UserRole.DRIVER ? new Date() : null,
           status: UserStatus.PENDING_KYC,
           isEmailVerified: true,
-          isPhoneVerified: false,
+          isPhoneVerified: await this.registrationPhoneVerified(
+            phone,
+            signupOptions?.phoneVerificationToken,
+          ),
         });
 
         let afterCommit: (() => Promise<void>) | undefined;
@@ -1487,6 +1503,7 @@ export class AuthService {
     signupOptions?: Pick<
       AppleMobileAuthDto,
       | 'gender'
+      | 'phoneVerificationToken'
       | 'role'
       | 'isDriver'
       | 'vehicle'
@@ -1530,6 +1547,7 @@ export class AuthService {
       user.appleId = appleId;
       user.isEmailVerified = user.isEmailVerified || emailVerified;
 
+      let verifiedPhone: boolean | undefined;
       if (phone && !user.phone) {
         const phoneOwner = await this.userRepository.findOne({
           where: { phone },
@@ -1540,6 +1558,10 @@ export class AuthService {
           );
         }
         user.phone = phone;
+        verifiedPhone = await this.registrationPhoneVerified(
+          phone,
+          signupOptions?.phoneVerificationToken,
+        );
       }
 
       if (firstName && !user.firstName) {
@@ -1554,6 +1576,7 @@ export class AuthService {
         appleId: user.appleId,
         isEmailVerified: user.isEmailVerified,
         phone: user.phone,
+        ...(verifiedPhone !== undefined ? { isPhoneVerified: verifiedPhone } : {}),
         firstName: user.firstName,
         lastName: user.lastName,
       });
@@ -1621,7 +1644,10 @@ export class AuthService {
           role === UserRole.DRIVER ? new Date() : null,
         status: UserStatus.PENDING_KYC,
         isEmailVerified: emailVerified,
-        isPhoneVerified: false,
+        isPhoneVerified: await this.registrationPhoneVerified(
+          phone,
+          signupOptions?.phoneVerificationToken,
+        ),
       });
 
       let afterCommit: (() => Promise<void>) | undefined;
@@ -1648,6 +1674,33 @@ export class AuthService {
       accessToken: tokens.accessToken,
       refreshToken: tokens.refreshToken,
     };
+  }
+
+  private async registrationPhoneVerified(
+    phone: string,
+    token?: string,
+  ): Promise<boolean> {
+    const required = String(
+      this.configService.get('REGISTRATION_PHONE_OTP_REQUIRED') ?? 'false',
+    ).trim().toLowerCase() === 'true';
+    if (!token) {
+      if (required) {
+        throw new BadRequestException({
+          code: 'PHONE_VERIFICATION_REQUIRED',
+          message: 'Vérifiez votre numéro par SMS avant de créer votre compte.',
+        });
+      }
+      return false;
+    }
+    if (!(await this.otpService.consumePhoneVerificationProof(phone, token))) {
+      throw new BadRequestException({
+        code: 'PHONE_VERIFICATION_INVALID',
+        message: 'La vérification du numéro a expiré ou a déjà été utilisée. Demandez un nouveau code.',
+      });
+    }
+    // Consume before writing the account; fail closed on DB failure. A failed
+    // registration then needs a new OTP, never a reusable identity assertion.
+    return true;
   }
 
   private async generateTokens(user: User, manager?: EntityManager) {

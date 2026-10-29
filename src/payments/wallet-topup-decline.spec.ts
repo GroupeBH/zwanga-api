@@ -173,10 +173,16 @@ describe('confirmed FlexPay top-up refusals', () => {
     },
   );
 
-  it.each(['0'])(
-    'keeps complete-proof requirements for a successful status %s',
-    async (status) => {
-      const env = environment({ status });
+  it.each([
+    { reference: 'WALTEST' },
+    { amount: null },
+    { currency: null },
+    { reference: null },
+    { orderNumber: 'OTHER' },
+  ])(
+    'keeps correlation, amount and currency requirements for a successful result: %p',
+    async (patch) => {
+      const env = environment({ status: '0', ...patch });
       env.result.message = 'Transaction found';
       await expect(
         env.service.checkPaymentStatus('ORDERTEST', 'passenger-test'),
@@ -184,6 +190,19 @@ describe('confirmed FlexPay top-up refusals', () => {
       expect(env.repository.save).not.toHaveBeenCalled();
     },
   );
+
+  it('accepts a verified success whose reference is the checked provider order', async () => {
+    const env = environment({ status: '0' });
+    env.result.message = 'Transaction found';
+    const paid = await env.service.checkPaymentStatus(
+      'ORDERTEST',
+      'passenger-test',
+    );
+    expect(paid.status).toBe(PaymentStatus.SUCCEEDED);
+    expect(paid.orderNumber).toBe('ORDERTEST');
+    expect(hasVerifiedWalletTopUpProof(paid)).toBe(true);
+    expect(paid.rawCheckResponse!.transaction).not.toHaveProperty('orderNumber');
+  });
 
   it.each(['2', '4', null])(
     'keeps a correlated non-final status %s pending without demanding credit proof',

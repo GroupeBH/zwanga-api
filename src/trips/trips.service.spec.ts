@@ -1,4 +1,5 @@
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, ConflictException } from '@nestjs/common';
+import * as tripDetailWrites from './save-trip-details-update';
 import { TripsService } from './trips.service';
 import { User, UserRole } from '../users/entities/user.entity';
 import { TripStatus } from './entities/trip.entity';
@@ -59,6 +60,7 @@ describe('TripsService daily trip publication quota', () => {
       findOne: jest.fn(),
     };
     tripRepository.manager = { transaction: jest.fn(async (_isolation, work) => work({
+      query: jest.fn().mockResolvedValue([{ busy: false }]),
       getRepository: (entity) => entity === User ? userRepository : {
         save: async (trips) => [await tripRepository.save(trips)],
       },
@@ -102,6 +104,30 @@ describe('TripsService daily trip publication quota', () => {
     );
 
     jest.spyOn(service, 'findOne').mockResolvedValue({ id: 'trip-1' });
+    // This suite covers service validation/notifications; database locking is
+    // exercised by save-trip-details-update.spec and the real PostgreSQL suite.
+    jest.spyOn(tripDetailWrites, 'saveTripDetailsUpdate').mockImplementation(
+      async (_repository, _before, edited) => { await tripRepository.save(edited); return edited; },
+    );
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  it('passes the pre-edit snapshot to the schedule guard and emits nothing on conflict', async () => {
+    const departureDate = new Date('2030-01-01T08:00:00Z');
+    const trip = { id: 'trip-1', driverId: 'driver-1', tripRequestId: null,
+      status: TripStatus.PENDING, bookings: [], departureDate };
+    tripRepository.findOne.mockResolvedValue(trip);
+    jest.mocked(tripDetailWrites.saveTripDetailsUpdate).mockRejectedValueOnce(
+      new ConflictException({ code: 'DRIVER_SCHEDULE_CONFLICT' }),
+    );
+    await expect(service.update(trip.id, trip.driverId, { departureDate: '2030-01-01T12:00:00Z' }))
+      .rejects.toMatchObject({ response: { code: 'DRIVER_SCHEDULE_CONFLICT' } });
+    expect(tripDetailWrites.saveTripDetailsUpdate).toHaveBeenCalledWith(tripRepository,
+      expect.objectContaining({ departureDate }),
+      expect.objectContaining({ departureDate: new Date('2030-01-01T12:00:00Z') }));
+    expect(tripRepository.save).not.toHaveBeenCalled();
+    expect(cacheService.del).not.toHaveBeenCalled();
+    expect(notificationService.sendNotificationToUser).not.toHaveBeenCalled();
   });
 
   function mockPublishedTodayCount(count: number) {
@@ -806,6 +832,13 @@ describe('TripsService trip deletion rules', () => {
         },
       ],
     };
+    const manager = {
+      query: jest.fn().mockResolvedValue([]),
+      find: jest.fn().mockResolvedValue(trip.bookings),
+      findOne: jest.fn().mockResolvedValue(trip),
+      update: jest.fn(async (_entity, where, value) => tripRepository.update(where, value)),
+    };
+    Object.assign(tripRepository, { manager: { transaction: async work => work(manager) } });
     tripRepository.findOne.mockResolvedValue(trip);
     jest.spyOn(service, 'findOne').mockResolvedValue({ id: trip.id });
 

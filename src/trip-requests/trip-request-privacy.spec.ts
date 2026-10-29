@@ -59,7 +59,7 @@ function buildService() {
   );
   request.driverOffers = offers;
   const requests = {
-    manager: { query: jest.fn().mockResolvedValue([]) },
+    manager: { query: jest.fn(async (sql: string) => sql.includes('ST_DWithin') && request.departurePoint ? [{ exists: 1 }] : []) },
     find: jest.fn().mockResolvedValue([request]),
     findOne: jest.fn().mockResolvedValue(request),
     update: jest.fn(),
@@ -300,7 +300,8 @@ describe('Trip request privacy', () => {
     const { service, request } = buildService();
     request.departurePoint = null;
     request.arrivalPoint = null;
-    const result = await service.findOne('request', 'driver');
+    await expect(service.findOne('request', 'driver')).rejects.toBeInstanceOf(NotFoundException);
+    const result = await service.findOne('request', 'passenger');
     expect(result.departureCoordinates).toBeNull();
     expect(result.arrivalCoordinates).toBeNull();
     expect(result.departureLocation).toBe(request.departureLocation);

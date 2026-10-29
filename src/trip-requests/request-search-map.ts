@@ -2,7 +2,8 @@ import { NotFoundException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import type { EntityManager } from 'typeorm';
 import { TripRequest } from './entities/trip-request.entity';
-import { ELIGIBLE_NEARBY_DRIVER_SQL, NEARBY_DRIVER_RADIUS_METERS } from './dispatch/nearby-driver-policy';
+import { ELIGIBLE_DRIVER_ACCOUNT_SQL, NEARBY_DRIVER_RADIUS_METERS } from './dispatch/nearby-driver-policy';
+import { driverRequestConflictSql } from './dispatch/driver-schedule-policy';
 import { USABLE_DRIVER_LOCATION_SQL } from './dispatch/driver-location-policy';
 import { requestNotRefusedSql } from './request-refusal';
 
@@ -25,7 +26,8 @@ export async function requestSearchMap(manager: EntityManager, passengerId: stri
       ORDER BY (v.id = p."vehicleId") DESC, v."updatedAt" DESC, v.id LIMIT 1) v ON true
     WHERE r.status IN ('pending','offers_received') AND r."selectedDriverId" IS NULL AND r."tripId" IS NULL
       AND r."departureDateMax" > now()
-      AND p."driverId" <> r."passengerId" AND ${USABLE_DRIVER_LOCATION_SQL} AND ${ELIGIBLE_NEARBY_DRIVER_SQL}
+      AND p."driverId" <> r."passengerId" AND ${USABLE_DRIVER_LOCATION_SQL} AND ${ELIGIBLE_DRIVER_ACCOUNT_SQL}
+      AND NOT ${driverRequestConflictSql('p."driverId"', 'r.id')}
       AND p."updatedAt" <= now() + interval '1 minute'
       AND (r."targetDriverId" IS NULL OR p."driverId" = r."targetDriverId")
       AND ${requestNotRefusedSql('r.id', 'p."driverId"')}

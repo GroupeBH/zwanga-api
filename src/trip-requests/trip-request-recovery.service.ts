@@ -1,4 +1,4 @@
-import { requestDriverVisibilitySql } from './target-driver-policy';
+import { nearbyRequestDriverVisibilitySql } from './request-proximity';
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, IsNull, Not, Raw, Repository } from 'typeorm';
@@ -154,7 +154,7 @@ export class TripRequestRecoveryService {
 
       const drivers = await this.userRepository.find({
         where: { role: UserRole.DRIVER, isActive: true,
-          id: Raw(alias => requestDriverVisibilitySql(':refusedRequestId', alias), { refusedRequestId: tripRequest.id }) },
+          id: Raw(alias => nearbyRequestDriverVisibilitySql(':refusedRequestId', alias), { refusedRequestId: tripRequest.id }) },
         select: ['id', 'fcmToken'],
       });
       const driversWithTokens = drivers.filter(

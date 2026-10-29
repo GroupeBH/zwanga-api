@@ -60,9 +60,9 @@ export class TripRequestsController {
   @Roles(UserRole.DRIVER)
   @SensitiveThrottle(30, 60000)
   @ApiOperation({
-    summary: 'Get available, unexpired trip requests',
+    summary: 'Get available, unexpired trip requests within 5 km of the driver',
     description:
-      'Conducteurs authentifiés uniquement. Exclut les demandes expirées, y compris lorsque leur délai est dépassé avant la mise à jour du statut. Adresses et coordonnées exactes visibles ; aucun téléphone avant acceptation.',
+      'Conducteurs authentifiés uniquement, à 5 km maximum du départ selon leur dernière position connue. Sans position utilisable, la liste est vide. Exclut les demandes expirées même avant la mise à jour du statut. Aucun téléphone dans la liste.',
   })
   async findAll(@Request() req: { user: { userId: string } }) {
     return this.tripRequestsService.findAll(req.user.userId);
@@ -147,6 +147,7 @@ export class TripRequestsController {
   @Auth()
   @Roles(UserRole.DRIVER)
   @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'Demandes disponibles à 5 km maximum de la dernière position connue ; aucune sans position utilisable.' })
   async availablePage(@Request() req, @Query() options: HistoryPageQuery) {
     return this.tripRequestsService.findRequestPage(req.user.userId, false, options);
   }
@@ -173,7 +174,7 @@ export class TripRequestsController {
   @ApiOperation({
     summary: 'Get a trip request by ID',
     description:
-      'Récupère une demande de trajet spécifique. Tant qu’aucune offre n’est acceptée, tous les drivers peuvent la voir (avec uniquement leurs offres). Après acceptation, seule la passager et le driver sélectionné y ont accès.',
+      'Le passager consulte sa demande. Avant acceptation, seuls les conducteurs autorisés à 5 km maximum du départ peuvent la voir, avec leurs propres offres. Après acceptation, le passager et le conducteur sélectionné conservent l’accès indépendamment de la distance.',
   })
   async findOne(@Param('id') id: string, @Request() req) {
     return this.tripRequestsService.findOne(id, req.user.userId);

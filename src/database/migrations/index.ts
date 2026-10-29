@@ -1,3 +1,5 @@
+import { IndexRealtimePaymentReceipts1780000100000 } from './1780000100000-IndexRealtimePaymentReceipts';
+import { SeparateRequestAttentionLease1780000101000 } from './1780000101000-SeparateRequestAttentionLease';
 import { IndexRequestNotificationRetirement1780000099000 } from './1780000099000-IndexRequestNotificationRetirement';
 import { RequestResponsePhases1780000098000 } from './1780000098000-RequestResponsePhases';
 import { TargetTripRequestDriver1780000096000 } from './1780000096000-TargetTripRequestDriver';
@@ -204,4 +206,6 @@ export const databaseMigrations = [
   SequentialRequestQueue1780000097000,
   RequestResponsePhases1780000098000,
   IndexRequestNotificationRetirement1780000099000,
+  IndexRealtimePaymentReceipts1780000100000,
+  SeparateRequestAttentionLease1780000101000,
 ];

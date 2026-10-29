@@ -2,6 +2,7 @@ import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { In, Repository } from 'typeorm';
 import { User } from '../users/entities/user.entity';
 import { Trip } from './entities/trip.entity';
+import { assertPublicationRequestSchedule } from '../trip-requests/dispatch/driver-schedule-policy';
 
 export function assertDriverPublicationPhoto(
   driver: Pick<User, 'profilePicture'>,
@@ -59,6 +60,7 @@ export async function savePublicationsWithPhotoPolicy(
       !driver.profilePicture?.trim() && await publications.existsBy({ driverId, isPrivate: false })
     );
     assertDriverPublicationPhoto(driver, alreadyPublished || trips.length > 1);
+    for (const trip of trips) await assertPublicationRequestSchedule(manager, trip);
     const saved = await publications.save(trips);
     if (!driver.hasPublishedTrip) await users.update(driverId, { hasPublishedTrip: true });
     // No geocoding, notifications or cache I/O while holding the lock.

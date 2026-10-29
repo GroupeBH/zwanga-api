@@ -22,15 +22,17 @@ function fixture() {
   );
   const jwt = { signAsync: jest.fn(async () => 'test-token') };
   const vehicles = { create: jest.fn(), createForRegistration: jest.fn() };
+  const otp = { consumePhoneVerificationProof: jest.fn().mockResolvedValue(true) };
+  const config = { get: jest.fn() };
   const service = new AuthService(
     users as any,
     {} as any,
     jwt as any,
-    { get: jest.fn() } as any,
+    config as any,
     {} as any,
     vehicles as any,
     { assertReferralAttribution: jest.fn(), registerUser: jest.fn(), registerUserInTransaction: jest.fn() } as any,
-    {} as any,
+    otp as any,
     {} as any,
   );
   const signup = (
@@ -38,9 +40,10 @@ function fixture() {
     role: UserRole,
     isDriver: boolean,
     vehicle?: any,
+    phoneVerificationToken?: string,
   ) => {
     const details = { firstName: 'Test', lastName: 'Compte' };
-    const options = { ...details, role, isDriver, vehicle };
+    const options = { ...details, role, isDriver, vehicle, phoneVerificationToken };
     if (provider === 'phone')
       return service.register({
         ...options,
@@ -70,8 +73,53 @@ function fixture() {
       options,
     );
   };
-  return { users, jwt, vehicles, signup };
+  return { users, jwt, vehicles, signup, otp, config };
 }
+
+describe.each(['phone', 'google', 'apple'])('%s registration phone proof', provider => {
+  const token = 'x'.repeat(43);
+  it('marks only an account backed by a consumed phone-bound proof as verified', async () => {
+    const f = fixture();
+    await f.signup(provider, UserRole.PASSENGER, false, undefined, token);
+    expect(f.otp.consumePhoneVerificationProof).toHaveBeenCalledWith('+243900000000', token);
+    expect(f.users.create).toHaveBeenCalledWith(expect.objectContaining({ isPhoneVerified: true }));
+  });
+  it('rejects invalid/expired/replayed proof before creating an account', async () => {
+    const f = fixture();
+    f.otp.consumePhoneVerificationProof.mockResolvedValue(false);
+    await expect(f.signup(provider, UserRole.PASSENGER, false, undefined, token))
+      .rejects.toMatchObject({ status: 400, response: { code: 'PHONE_VERIFICATION_INVALID' } });
+    expect(f.users.save).not.toHaveBeenCalled();
+    expect(f.jwt.signAsync).not.toHaveBeenCalled();
+  });
+  it('preserves old clients without fabricating phone verification', async () => {
+    const f = fixture();
+    await f.signup(provider, UserRole.PASSENGER, false);
+    expect(f.otp.consumePhoneVerificationProof).not.toHaveBeenCalled();
+    expect(f.users.create).toHaveBeenCalledWith(expect.objectContaining({ isPhoneVerified: false }));
+  });
+  it('can require proof later without changing the login contract', async () => {
+    const f = fixture();
+    f.config.get.mockImplementation(key => key === 'REGISTRATION_PHONE_OTP_REQUIRED' ? 'true' : undefined);
+    await expect(f.signup(provider, UserRole.PASSENGER, false))
+      .rejects.toMatchObject({ status: 400, response: { code: 'PHONE_VERIFICATION_REQUIRED' } });
+    expect(f.users.save).not.toHaveBeenCalled();
+  });
+  if (provider !== 'phone') {
+    it('does not overwrite phone verification when linking an existing account by email', async () => {
+      const f = fixture();
+      f.config.get.mockImplementation(key => key === 'REGISTRATION_PHONE_OTP_REQUIRED' ? 'true' : undefined);
+      f.users.findOne.mockResolvedValueOnce(null).mockResolvedValueOnce({
+        id: 'existing', phone: '+243900000000', isPhoneVerified: false,
+        isActive: true, status: UserStatus.ACTIVE, role: UserRole.PASSENGER,
+      } as any);
+      await f.signup(provider, UserRole.PASSENGER, false);
+      expect(f.users.create).not.toHaveBeenCalled();
+      expect(f.otp.consumePhoneVerificationProof).not.toHaveBeenCalled();
+      for (const [, update] of f.users.update.mock.calls) expect(update).not.toHaveProperty('isPhoneVerified');
+    });
+  }
+});
 
 it.each([UserStatus.ACTIVE, UserStatus.PENDING_KYC])(
   'preserves the duplicate phone response and adds an actionable code (%s)',

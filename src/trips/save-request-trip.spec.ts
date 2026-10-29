@@ -26,6 +26,7 @@ describe('Direct acceptance serializes its final trip insert with request edits'
       manager: {
         transaction: jest.fn(async (work) =>
           work({
+            query: jest.fn(async (sql: string) => sql.includes('AS busy') ? [{ busy: false }] : sql.includes('ST_DWithin') ? [{ allowed: 1 }] : []),
             getRepository: (entity: unknown) =>
               entity === TripRequest
                 ? requests

@@ -1,6 +1,6 @@
 import { ConflictException } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
-import { EntityManager, In } from 'typeorm';
+import { EntityManager, In, QueryFailedError } from 'typeorm';
 import { TripRequest, TripRequestStatus } from '../entities/trip-request.entity';
 import { Trip, TripStatus } from '../../trips/entities/trip.entity';
 import { Booking, BookingStatus } from '../../bookings/entities/booking.entity';
@@ -8,6 +8,7 @@ import { DriverOffer, DriverOfferStatus } from '../entities/driver-offer.entity'
 import { assertRequestSnapshot, assertUnassignedRequest } from '../request-edit-policy';
 import { assertSequentialInvitation } from './sequential-policy';
 import { enqueueTransactionalNotification } from '../../notifications/transactional-notification';
+import { claimInAppRequest } from './claim-in-app-request';
 
 export const ACCEPTANCE_LEASE_MS = 120_000;
 export const PASSENGER_DECISION_MS = 120_000;
@@ -36,18 +37,21 @@ export async function releaseRequestAcceptance(manager: EntityManager, requestId
 }
 
 /** Fence slow preparation before routing/geocoding; the token never comes from HTTP. */
-export async function claimRequestAcceptance(manager: EntityManager, snapshot: TripRequest, driverId: string) {
+export async function claimRequestAcceptance(manager: EntityManager, snapshot: TripRequest, driverId: string,
+  vehicle?: { vehicleId: string; seats: number }) {
   if (!snapshot.sequentialDispatch) return undefined;
   return manager.transaction(async tx => {
     const request = await tx.findOne(TripRequest, { where: { id: snapshot.id }, lock: { mode: 'pessimistic_write' } });
     assertRequestSnapshot(request, snapshot); assertUnassignedRequest(request!);
-    await assertSequentialInvitation(tx, request!, driverId);
     const token = randomUUID();
-    await tx.query(`UPDATE trip_request_dispatch_offers SET phase='accepting', "acceptanceToken"=$3,
-      "expiresAt"=clock_timestamp()+$4*interval '1 millisecond'
-      WHERE "requestId"=$1 AND "driverId"=$2 AND status='pending'`, [snapshot.id, driverId, token, ACCEPTANCE_LEASE_MS]);
-    await silenceRequestInvitation(tx, snapshot.id, driverId);
+    await claimInAppRequest(tx, request!, driverId, token, ACCEPTANCE_LEASE_MS, vehicle);
+    await silenceRequestInvitation(tx, snapshot.id);
     return token;
+  }).catch((error: unknown) => {
+    if (error instanceof QueryFailedError && 'constraint' in error.driverError &&
+        error.driverError.constraint === 'dispatch_one_pending_response_idx')
+      throw new ConflictException('Une autre réponse est en cours. Terminez-la avant de réessayer.');
+    throw error;
   });
 }
 

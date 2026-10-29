@@ -20,6 +20,12 @@ import { MarkNotificationsAsReadDto } from './dto/notification.dto';
 export class NotificationsController {
   constructor(private readonly notificationService: NotificationService) {}
 
+  @Get('driver-payments')
+  @ApiOperation({ summary: 'Paiements reçus non lus du conducteur connecté (20 maximum)' })
+  async driverPayments(@Request() req) {
+    return this.notificationService.findDriverPayments(req.user.userId);
+  }
+
   @Get()
   @ApiOperation({ summary: 'Récupérer toutes les notifications de l\'utilisateur' })
   @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Nombre de notifications à récupérer' })

@@ -181,6 +181,8 @@ export class ProServiceStore {
         status: item.status,
         createdAt: item.createdAt,
         fullName: item.application.fullName,
+        phone: item.application.phone ?? '',
+        documentCodes: Array.isArray(item.application.documents) ? item.application.documents : [],
         customerMessage: item.customerMessage,
       }));
     const last = records[19];

@@ -3,6 +3,7 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -11,6 +12,7 @@ import { KeccelOtpService } from '../keccel-otp/keccel-otp.service';
 import { OTP_SMS_MESSAGES } from '../keccel-otp/otp-messages';
 import { normalizeOtpPhone } from './otp-phone.util';
 import { reserveOtpSend } from './otp-send-budget';
+import { MobishastraOtpService } from './mobishastra-otp.service';
 import {
   OtpChallenge,
   OtpPurpose,
@@ -33,6 +35,7 @@ export class OtpService {
     private readonly configService: ConfigService,
     private readonly redisService: RedisService,
     private readonly keccelOtpService: KeccelOtpService,
+    @Optional() private readonly mobishastraOtpService?: MobishastraOtpService,
   ) {}
 
   async sendOtp(
@@ -41,10 +44,19 @@ export class OtpService {
   ): Promise<SendOtpResponse> {
     const normalizedPhone = this.normalizePhone(phone);
     return this.withPhoneLock(normalizedPhone, async () => {
+      const useMobishastra =
+        purpose === 'phone_verification' &&
+        this.configService.get<string>('OTP_PROVIDER')?.trim().toLowerCase() ===
+          'mobishastra';
+      if (useMobishastra) this.mobishastra().assertConfigured();
       // A denied resend must not invalidate the still-usable previous code.
-      await reserveOtpSend(this.redisService, this.configService, normalizedPhone);
-      // Temporary backend-only cutover: even legacy OTP_PROVIDER=didit must
-      // use SMS. KYC configuration and endpoints are completely independent.
+      await reserveOtpSend(
+        this.redisService,
+        this.configService,
+        normalizedPhone,
+      );
+      // Legacy Didit settings still route to Keccel. Mobishastra is an explicit
+      // opt-in for phone verification only; PIN reset/admin remain unchanged.
       const message =
         purpose === 'pin_reset'
           ? OTP_SMS_MESSAGES.pinReset
@@ -57,6 +69,12 @@ export class OtpService {
       for (const previousPurpose of OTP_PURPOSES) {
         await this.redisService.del(
           this.challengeKey(normalizedPhone, previousPurpose),
+        );
+      }
+      if (useMobishastra) {
+        return this.mobishastra().send(
+          normalizedPhone,
+          this.challengeKey(normalizedPhone, purpose),
         );
       }
       const response = await this.keccelOtpService.sendOtp(
@@ -96,6 +114,20 @@ export class OtpService {
       const key = this.challengeKey(normalizedPhone, purpose);
       const stored = await this.redisService.get<OtpChallenge>(key);
 
+      // Verify with the issuing provider, even if configuration changed since
+      // sending. Local registration codes must never authorize PIN/admin flows.
+      if (
+        stored?.provider === 'mobishastra' &&
+        purpose === 'phone_verification'
+      ) {
+        return this.mobishastra().verify(
+          normalizedPhone,
+          otp.trim(),
+          key,
+          stored,
+        );
+      }
+
       // A code issued by Didit cannot be validated by Keccel. Request a fresh
       // SMS instead of consulting Didit or accepting an unbound provider code.
       if (stored?.provider !== 'keccel') return invalid;
@@ -127,6 +159,29 @@ export class OtpService {
       phone,
       this.configService.get<string>('DEFAULT_COUNTRY_CODE') || '+243',
     );
+  }
+
+  async consumePhoneVerificationProof(
+    phone: string,
+    token: string,
+  ): Promise<boolean> {
+    const normalized = this.normalizePhone(phone);
+    return this.withPhoneLock(normalized, () =>
+      this.mobishastra().consumeProof(
+        normalized,
+        token,
+        this.challengeKey(normalized, 'phone_verification'),
+      ),
+    );
+  }
+
+  private mobishastra(): MobishastraOtpService {
+    if (!this.mobishastraOtpService) {
+      throw new ServiceUnavailableException(
+        'Service OTP momentanément indisponible.',
+      );
+    }
+    return this.mobishastraOtpService;
   }
 
   private challengeKey(phone: string, purpose: OtpPurpose): string {

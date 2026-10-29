@@ -150,7 +150,7 @@ export function sequentialMobileFlow(context: () => Context) {
         expect(await clients[1].endpoint('recordRideNotificationReceipt', {
           notificationId: initial.notificationId, stage: 'displayed', ...observed,
         })).toEqual({ received: false });
-        await expect(send({ url: `/trip-requests/${created.id}` }, second.id)).rejects.toMatchObject({ status: 404 });
+        await expect(send({ url: `/trip-requests/${created.id}` }, second.id)).resolves.toMatchObject({ id: created.id, status: 'pending' });
         const before = (await offers(created.id))[0];
         const waitForExpirationRelay = async (previous: any, expectedCount: number) => {
           // Actual Nest cron + elapsed 40-second deadline. No manual tick/drain,

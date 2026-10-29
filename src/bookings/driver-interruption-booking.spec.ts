@@ -1,6 +1,6 @@
 import { BookingsService } from './bookings.service';
 import { calculateInterruptionFare } from './interruption-fare';
-import { BookingPaymentStatus, BookingStatus } from './entities/booking.entity';
+import { Booking, BookingPaymentStatus, BookingStatus } from './entities/booking.entity';
 import { TripPaymentMode } from '../payments/enums/trip-payment-mode.enum';
 
 describe('interruption booking settlement', () => {
@@ -93,6 +93,12 @@ describe('interruption booking settlement', () => {
     f.booking.paymentStatus = BookingPaymentStatus.SUCCEEDED;
     await f.service.applyDriverInterruptionFare(f.booking, f.quote, f.manager);
     f.service.bookingRepository.save = jest.fn(async (value) => value);
+    f.booking.paymentMode = TripPaymentMode.ELECTRONIC;
+    f.booking.paymentTransactionId = 'payment';
+    f.service.dataSource = { transaction: async work => work({
+      findOne: async entity => entity === Booking ? f.booking : f.booking.trip,
+      save: f.service.bookingRepository.save,
+    }) };
     f.service.finalizeCompletedBooking = jest.fn();
     await f.service.applyPaymentToBooking(f.booking, {
       id: 'payment', reference: 'reference', amount: 10000, currency: 'CDF', status: 'succeeded',

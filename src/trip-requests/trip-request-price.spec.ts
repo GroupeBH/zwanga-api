@@ -41,7 +41,8 @@ describe('Confirmed request price propagation', () => {
       pricePerSeat: price,
       requiresPassengerKyc: false,
     };
-    const manager = { getRepository: jest.fn(), transaction: jest.fn() };
+    const manager = { query: jest.fn(async (sql: string) => sql.includes('ST_DWithin') ? [{ allowed: 1 }] : []),
+      getRepository: jest.fn(), transaction: jest.fn() };
     const repository = {
       manager,
       findOne: jest.fn().mockResolvedValue(request),

@@ -1,3 +1,5 @@
+import { driverScheduleConflictSql } from './driver-schedule-policy';
+
 export const NEARBY_DRIVER_RADIUS_METERS = 5000;
 // Bounds transaction time, not total recipients: later ticks select unsent drivers.
 export const NEARBY_DRIVER_BATCH_SIZE = 50;
@@ -11,8 +13,4 @@ export const ELIGIBLE_DRIVER_ACCOUNT_SQL = `
       ORDER BY k."createdAt" DESC, k.id DESC LIMIT 1) = 'approved')`;
 
 export const ELIGIBLE_NEARBY_DRIVER_SQL = `${ELIGIBLE_DRIVER_ACCOUNT_SQL}
-  AND NOT EXISTS (SELECT 1 FROM trips t WHERE t."driverId" = p."driverId" AND
-    (t.status = 'ongoing' OR (t.status = 'upcoming' AND
-      t."departureDate" BETWEEN now() - interval '2 hours' AND now() + interval '30 minutes')))
-  AND NOT EXISTS (SELECT 1 FROM trip_requests assigned WHERE assigned."selectedDriverId" = p."driverId"
-    AND assigned.status = 'driver_selected' AND assigned."departureDateMax" > now() - interval '2 hours')`;
+  AND NOT ${driverScheduleConflictSql('p."driverId"', 'now()', "now() + interval '2 hours'")}`;

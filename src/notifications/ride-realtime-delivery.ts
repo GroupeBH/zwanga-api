@@ -8,7 +8,8 @@ export async function claimRideRealtimeNotifications(manager: EntityManager): Pr
     LEFT JOIN ride_realtime_deliveries d ON d."notificationId" = n.id
     WHERE n."eventKey" IS NOT NULL AND n."isActive" = true
       AND n."createdAt" > now() - interval '60 seconds'
-      AND n.data ->> 'type' IN ('driver_dispatch_offer','trip_request_nearby','new_booking')
+      AND (n.data ->> 'type' IN ('driver_dispatch_offer','trip_request_nearby','new_booking','driver_booking_payment_confirmed')
+        OR (n.data ->> 'type' = 'cash_payment_confirmed' AND n.data ->> 'role' = 'driver'))
       AND (d."notificationId" IS NULL OR (d."completedAt" IS NULL AND d."attemptedAt" < now() - interval '5 seconds'))
     ORDER BY n."createdAt", n.id LIMIT 100
     ON CONFLICT ("notificationId") DO UPDATE

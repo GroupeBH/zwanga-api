@@ -44,6 +44,14 @@ describe.each(scenarios)('$dto.name legacy email compatibility', ({ dto, body })
     await expect(transform({ ...body, vehicle: { type: 'car', unexpected: true } }))
       .rejects.toBeInstanceOf(BadRequestException);
   });
+
+  it('accepts an opaque phone proof, but rejects malformed proofs and client verification flags', async () => {
+    const phoneVerificationToken = 'x'.repeat(43);
+    expect(await transform({ ...body, phoneVerificationToken })).toMatchObject({ phoneVerificationToken });
+    for (const extra of [{ phoneVerificationToken: '12345' }, { phoneVerificationToken: {} }, { isPhoneVerified: true }]) {
+      await expect(transform({ ...body, ...extra })).rejects.toBeInstanceOf(BadRequestException);
+    }
+  });
 });
 
 describe('Apple email provenance', () => {

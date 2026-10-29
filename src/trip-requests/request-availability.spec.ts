@@ -73,7 +73,6 @@ describe('Search/Home request availability independent of expiration persistence
             TripRequestStatus.OFFERS_RECEIVED,
           ]),
           departureDateMax: MoreThan(cutoff),
-          immediateDispatch: false,
           selectedDriverId: IsNull(),
           tripId: IsNull(),
         },
@@ -96,7 +95,6 @@ describe('Search/Home request availability independent of expiration persistence
   it.each([
     { status: TripRequestStatus.EXPIRED },
     { status: TripRequestStatus.CANCELLED },
-    { immediateDispatch: true },
     { selectedDriverId: 'driver' },
     { tripId: 'trip' },
     { driverOffers: [{ status: DriverOfferStatus.ACCEPTED }] },
@@ -118,6 +116,16 @@ describe('Search/Home request availability independent of expiration persistence
       { cutoff },
     );
     expect((service as any).sanitizeTripRequest).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])('lists available requests without an invitation (immediate=%s)', async immediateDispatch => {
+    const row = request({ immediateDispatch, sequentialDispatch: true });
+    const { service, query } = fixture([row]);
+    expect(await service.findAll('driver')).toEqual([row]);
+    expect((await service.findRequestPage('driver', false, { limit: 20 })).data).toEqual([row]);
+    const filters = query.andWhere.mock.calls.map(([sql]) => sql).join(' ');
+    expect(filters).not.toContain('trip_request_dispatch_offers');
+    expect(filters).not.toContain('immediateDispatch');
   });
 
   it('keeps expired requests in personal history and accepts genuinely reprogrammed requests', async () => {

@@ -1,8 +1,9 @@
 import type { EntityManager } from 'typeorm';
 import { TripRequest } from '../entities/trip-request.entity';
 import { requestDriverVisibilitySql } from '../target-driver-policy';
-import { USABLE_DRIVER_LOCATION_SQL } from './driver-location-policy';
-import { ELIGIBLE_DRIVER_ACCOUNT_SQL, ELIGIBLE_NEARBY_DRIVER_SQL, NEARBY_DRIVER_RADIUS_METERS } from './nearby-driver-policy';
+import { ONGOING_DRIVER_POSITION_SQL, STALE_ONGOING_POSITION_RANK_SQL, STALE_PRESENCE_RANK_SQL, USABLE_DRIVER_LOCATION_SQL } from './driver-location-policy';
+import { ELIGIBLE_DRIVER_ACCOUNT_SQL, NEARBY_DRIVER_RADIUS_METERS } from './nearby-driver-policy';
+import { driverRequestConflictSql } from './driver-schedule-policy';
 
 export interface QueueCandidate { driverId: string; vehicleId: string; seats: number; existingTripId: string | null }
 /** Only discovery searches/ranks the area. Redis retains this bounded ordering. */
@@ -36,7 +37,7 @@ async function candidates(manager: EntityManager, request: TripRequest, driverId
     SELECT p."driverId", v.id AS "vehicleId",
     CASE WHEN v.id = p."vehicleId" THEN p.seats WHEN v.type = 'motorcycle_2_wheels' THEN 2
       WHEN v.type = 'motorcycle_3_wheels' THEN 3 ELSE 4 END AS seats,
-      NULL::uuid AS "existingTripId", p.position
+      NULL::uuid AS "existingTripId", p.position, ${STALE_PRESENCE_RANK_SQL} AS "stalePosition"
     FROM driver_dispatch_presence p
     JOIN LATERAL (SELECT * FROM vehicles v WHERE v."ownerId" = p."driverId" AND v."isActive" = true
       AND v.type = $2 ORDER BY (v.id = p."vehicleId") DESC, v.id LIMIT 1) v ON true
@@ -44,13 +45,13 @@ async function candidates(manager: EntityManager, request: TripRequest, driverId
       ${driverIds ? 'AND p."driverId" = (SELECT id FROM queued_driver)' : ''}
       AND (CASE WHEN v.id = p."vehicleId" THEN p.seats WHEN v.type = 'motorcycle_2_wheels' THEN 2
         WHEN v.type = 'motorcycle_3_wheels' THEN 3 ELSE 4 END) >= $3
-      AND (EXISTS (SELECT 1 FROM trip_requests target WHERE target.id = $7 AND target."targetDriverId" = p."driverId")
-        OR ST_DWithin(p.position, ST_SetSRID(ST_MakePoint($4,$5),4326)::geography, $6))
+      AND ST_DWithin(p.position, ST_SetSRID(ST_MakePoint($4,$5),4326)::geography, $6)
       AND ${requestDriverVisibilitySql('$7', 'p."driverId"')}
-      AND ${ELIGIBLE_NEARBY_DRIVER_SQL}
+      AND ${ELIGIBLE_DRIVER_ACCOUNT_SQL}
+      AND NOT ${driverRequestConflictSql('p."driverId"', '$7::uuid')}
 
     UNION ALL
-    SELECT t."driverId", v.id, t."availableSeats", t.id, COALESCE(t."currentLocation", p.position)
+    SELECT t."driverId", v.id, t."availableSeats", t.id, ${ONGOING_DRIVER_POSITION_SQL}, ${STALE_ONGOING_POSITION_RANK_SQL}
     FROM trips t
     JOIN vehicles v ON v.id = t."vehicleId"::uuid AND v."ownerId" = t."driverId" AND v."isActive" = true
     LEFT JOIN driver_dispatch_presence p ON p."driverId" = t."driverId"
@@ -65,7 +66,7 @@ async function candidates(manager: EntityManager, request: TripRequest, driverId
       AND p."discoveryEnabled" IS DISTINCT FROM false
       AND ${ELIGIBLE_DRIVER_ACCOUNT_SQL.replaceAll('p."driverId"', 't."driverId"')}
       AND ${requestDriverVisibilitySql('$7', 't."driverId"')}
-      AND ST_DWithin(COALESCE(t."currentLocation", p.position),
+      AND ST_DWithin(${ONGOING_DRIVER_POSITION_SQL},
         ST_SetSRID(ST_MakePoint($4,$5),4326)::geography, $6)
     )
     ${driverIds ? `SELECT q.id AS "driverId", e."vehicleId", e.seats, e."existingTripId"
@@ -74,7 +75,7 @@ async function candidates(manager: EntityManager, request: TripRequest, driverId
     FROM eligible e JOIN users driver ON driver.id = e."driverId"
     WHERE NOT EXISTS (SELECT 1 FROM trip_request_dispatch_offers o WHERE o."requestId" = $7 AND o."driverId" = e."driverId")
       AND NOT EXISTS (SELECT 1 FROM trip_request_dispatch_offers o WHERE o."driverId" = e."driverId" AND o.status = 'pending')
-    ORDER BY ST_Distance(e.position, ST_SetSRID(ST_MakePoint($4,$5),4326)::geography), e."driverId", e."existingTripId"
+    ORDER BY e."stalePosition", ST_Distance(e.position, ST_SetSRID(ST_MakePoint($4,$5),4326)::geography), e."driverId", e."existingTripId"
     LIMIT 50`}`,
     [request.passengerId, request.vehicleType, request.numberOfSeats, ...request.departurePoint.coordinates,
       NEARBY_DRIVER_RADIUS_METERS, request.id, request.departureDateMin, request.maxPricePerSeat, request.paymentMode,
