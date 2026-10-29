@@ -16,6 +16,26 @@ describe('sequential discovery versus queued validation', () => {
     expect(params).toHaveLength(10);
   });
 
+  it('invites recently located drivers first without excluding older durable positions', async () => {
+    const manager = { query: jest.fn().mockResolvedValue([]) };
+    await sequentialCandidates(manager as never, request);
+    const [sql] = manager.query.mock.calls[0];
+    expect(sql).toContain(`p."updatedAt" < now() - interval '30 minutes') AS "stalePosition"`);
+    expect(sql).toContain('ORDER BY e."stalePosition", ST_Distance(');
+    // Ranking only: old ongoing GPS must not masquerade as a fresh position.
+    expect(sql.match(/"stalePosition"/g)).toHaveLength(2);
+    expect(sql).not.toMatch(/t\.id, \(CASE[\s\S]*?END\), false/);
+    expect(sql).toContain('THEN t."lastLocationUpdateAt"');
+  });
+
+  it('keeps the queued validation independent from freshness ranking', async () => {
+    const manager = { query: jest.fn().mockResolvedValue([]) };
+    await lockNextQueuedCandidate(manager as never, request, ['driver']);
+    const [sql] = manager.query.mock.calls[0];
+    expect(sql).not.toContain('ORDER BY e."stalePosition"');
+    expect(sql).toContain('ORDER BY e."existingTripId" LIMIT 1');
+  });
+
   it('checks only one Redis ID without re-ranking; mutable restrictions and the driver lock remain', async () => {
     const candidate = { driverId: 'driver', vehicleId: 'vehicle', seats: 4, existingTripId: null };
     const manager = { query: jest.fn().mockResolvedValue([candidate]) };

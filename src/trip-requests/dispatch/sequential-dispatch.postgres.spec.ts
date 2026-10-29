@@ -133,7 +133,8 @@ const redisPort = Number(process.env.DISPATCH_TEST_REDIS_PORT);
     const vehicle = await db.getRepository(Vehicle).findOneByOrFail({ ownerId: first.id });
     const trip = await db.getRepository(Trip).save({ driverId: first.id, vehicleId: vehicle.id,
       departureLocation: 'A', arrivalLocation: 'B', departureDate: new Date(), status: TripStatus.ACTIVE,
-      totalSeats: 2, availableSeats: 2, pricePerSeat: 1000, currentLocation: r.departurePoint });
+      totalSeats: 2, availableSeats: 2, pricePerSeat: 1000, currentLocation: r.departurePoint,
+      lastLocationUpdateAt: new Date() });
     const bookings = Object.assign(Object.create(BookingsService.prototype), {
       bookingRepository: db.getRepository(Booking), tripRepository: db.getRepository(Trip),
       userRepository: db.getRepository(User), dataSource: db,
@@ -353,6 +354,14 @@ const redisPort = Number(process.env.DISPATCH_TEST_REDIS_PORT);
       VALUES ($1,$2,$3,$4,4,now() + interval '60 seconds',false)`,
       [randomUUID(),r.id,second.id,vehicle.id])).rejects.toMatchObject({ code: '23505' });
     expect(await offers(r.id)).toHaveLength(1);
+  });
+  it('candidate ranking cache expires before the next 40-second relay', async () => {
+    const r = await request(), claim = await queue.claim(r.id, 'test-freshness');
+    expect(claim).not.toBeNull();
+    expect(await queue.seed(r.id, claim!.token, 'test-freshness', [randomUUID()])).toBe(true);
+    const ttl = await redis.ttl('ride-requests:{' + r.id + '}:waiting');
+    expect(ttl).toBeGreaterThan(0); expect(ttl).toBeLessThanOrEqual(30);
+    await queue.release(r.id, claim!.token);
   });
   it('a stale Redis lease cannot delete or consume the new worker queue', async () => {
     const r = await request(), old = await queue.lock(r.id);

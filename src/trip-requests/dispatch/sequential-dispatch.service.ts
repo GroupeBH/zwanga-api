@@ -103,7 +103,7 @@ export class SequentialDispatchService {
       token = claim.token;
       let drivers = claim.drivers;
       if (!drivers.length) {
-        // Rebuild only on exhaustion, a request edit or the bounded 60-second freshness TTL.
+        // Rebuild on exhaustion, an edit or the 30-second TTL (before the next 40-second handoff).
         const candidates = await sequentialCandidates(this.db.manager, state.request);
         drivers = [...new Set(candidates.map(candidate => candidate.driverId))];
         if (!await this.cache(() => this.queue.seed(id, token!, version, drivers), false)) {

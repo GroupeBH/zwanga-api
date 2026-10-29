@@ -1,5 +1,6 @@
 import { claimRequestAcceptance, completeRequestAcceptance, releaseRequestAcceptance, startPassengerDecision } from './dispatch/request-acceptance';
 import { assertSequentialInvitation } from './dispatch/sequential-policy';
+import { assertDriverRequestSchedule } from './dispatch/driver-schedule-policy';
 import { DriverChoiceQuery } from './dto/driver-choice.dto';
 import { findDriverChoices, validateTargetDriver } from './driver-choices';
 import { requestSearchMap } from './request-search-map';
@@ -1219,6 +1220,9 @@ export class TripRequestsService {
       const offers = manager.getRepository(DriverOffer);
       if (await offers.exists({ where: { tripRequestId, driverId, status: DriverOfferStatus.PENDING } }))
         throw new ConflictException('Vous avez déjà une offre en attente pour cette commande.');
+      // A new private course must fit the driver's schedule. Shared-trip offers
+      // use their existing trip/seat/consent checks, not this independent-course guard.
+      await assertDriverRequestSchedule(manager, driverId, current!.id);
       const result = await offers.save(offer);
       await startPassengerDecision(manager, current!, driverId);
       await requests.update(tripRequestId, { id: tripRequestId, status: TripRequestStatus.OFFERS_RECEIVED });
@@ -1435,6 +1439,7 @@ export class TripRequestsService {
       if (await manager.getRepository(Trip).exists({ where: { driverId: offer.driverId, status: TripStatus.ACTIVE } }))
         throw new ConflictException({ code: 'SHARED_TRIP_OFFER_REQUIRED',
           message: 'Ce conducteur est maintenant en trajet. Il doit proposer un partage que vous pourrez accepter explicitement.' });
+      await assertDriverRequestSchedule(manager, offer.driverId, current!.id);
       if (await manager.getRepository(Trip).exists({ where: { tripRequestId,
         status: In([TripStatus.PENDING, TripStatus.ACTIVE, TripStatus.COMPLETED]) } }))
         throw new ConflictException('Une prise en charge existe déjà pour cette commande.');

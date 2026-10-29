@@ -2,7 +2,8 @@ import { requestDriverVisibilitySql } from '../target-driver-policy';
 import type { EntityManager } from 'typeorm';
 import { TripRequest, TripRequestStatus } from '../entities/trip-request.entity';
 import { enqueueTransactionalNotifications } from '../../notifications/transactional-notification';
-import { ELIGIBLE_NEARBY_DRIVER_SQL, NEARBY_DRIVER_BATCH_SIZE } from './nearby-driver-policy';
+import { ELIGIBLE_DRIVER_ACCOUNT_SQL, NEARBY_DRIVER_BATCH_SIZE } from './nearby-driver-policy';
+import { driverRequestConflictSql } from './driver-schedule-policy';
 import { USABLE_DRIVER_LOCATION_SQL } from './driver-location-policy';
 import { rideSpeechData } from '../../notifications/ride-speech-data';
 
@@ -21,7 +22,8 @@ export async function enqueueScheduledRequestAlert(manager: EntityManager, reque
     WHERE ${USABLE_DRIVER_LOCATION_SQL} AND p."driverId" <> $1::uuid
     AND ST_DWithin(p.position, ST_SetSRID(ST_MakePoint($2,$3),4326)::geography, $4)
     AND ${requestDriverVisibilitySql('$7', 'p."driverId"')}
-    AND ${ELIGIBLE_NEARBY_DRIVER_SQL}
+    AND ${ELIGIBLE_DRIVER_ACCOUNT_SQL}
+    AND NOT ${driverRequestConflictSql('p."driverId"', '$7::uuid')}
     AND EXISTS (SELECT 1 FROM vehicles v WHERE v."ownerId" = p."driverId" AND v."isActive" = true
       AND v.type = $5 AND (CASE WHEN v.id = p."vehicleId" THEN p.seats
         WHEN v.type = 'motorcycle_2_wheels' THEN 2 WHEN v.type = 'motorcycle_3_wheels' THEN 3 ELSE 4 END) >= $6)

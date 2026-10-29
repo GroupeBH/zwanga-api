@@ -2,6 +2,7 @@ import { assertSequentialInvitation } from '../trip-requests/dispatch/sequential
 import { assertRequestTarget } from '../trip-requests/target-driver-policy';
 import { assertRequestDriverProximity } from '../trip-requests/request-proximity';
 import { hasRefusedRequest } from '../trip-requests/request-refusal';
+import { assertDriverRequestSchedule } from '../trip-requests/dispatch/driver-schedule-policy';
 import { ConflictException } from '@nestjs/common';
 import { In, Repository } from 'typeorm';
 import { Trip, TripStatus } from './entities/trip.entity';
@@ -58,6 +59,7 @@ export function saveRequestTrip(
       throw new ConflictException(
         'Une prise en charge existe déjà pour cette demande.',
       );
+    await assertDriverRequestSchedule(manager, trip.driverId, request!.id);
     return trips.save(trip);
   });
 }

@@ -74,6 +74,7 @@ describe('BookingsService trip payments', () => {
   let service: BookingsService;
   let boardingCandidates: Map<string, unknown>;
   let financialManager: {
+    find: jest.Mock;
     exists: jest.Mock;
     update: jest.Mock;
     findOne: jest.Mock;
@@ -201,6 +202,7 @@ describe('BookingsService trip payments', () => {
 
     let lockedBooking: any = null;
     financialManager = {
+      find: jest.fn().mockResolvedValue([]),
       exists: jest.fn().mockResolvedValue(false),
       update: jest.fn((entity, id, patch) => entity === Trip ? tripRepository.update(id, patch) : bookingRepository.update(id, patch)),
       query: jest.fn().mockResolvedValue([]),
@@ -1055,6 +1057,7 @@ describe('BookingsService trip payments', () => {
       droppedOff: true,
       paymentMode: TripPaymentMode.POINTS,
       paymentStatus: BookingPaymentStatus.PENDING,
+      cashCommissionTokenValue: 10,
       trip: {
         ...booking.trip,
         driverId: 'driver-1',
@@ -1065,6 +1068,8 @@ describe('BookingsService trip payments', () => {
       .mockResolvedValueOnce([{ count: 0 }])
       .mockResolvedValueOnce([{ count: 0 }]);
     bookingRepository.findOne.mockResolvedValue(strandedBooking);
+    financialManager.find.mockResolvedValue([{ type: 'booking_payment', amount: -500, currency: 'PTS', createdAt: new Date() }]);
+    driverSettlementsService.recordCompletedBookingEarningWithManager.mockResolvedValue({ id: 'earning-1' });
 
     const result = await service.reconcileTokenTripSettlements();
 
@@ -1075,10 +1080,9 @@ describe('BookingsService trip payments', () => {
       unsafeAnomalies: 0,
       walletBalanceMismatches: 0,
     });
-    expect(walletService.payForBookingWithManager).toHaveBeenCalledWith(
-      financialManager,
-      expect.objectContaining({ id: 'booking-1' }),
-      5000,
+    expect(walletService.payForBookingWithManager).not.toHaveBeenCalled();
+    expect(driverSettlementsService.recordCompletedBookingEarningWithManager).toHaveBeenCalledWith(
+      financialManager, expect.objectContaining({ id: 'booking-1', paymentStatus: BookingPaymentStatus.SUCCEEDED }),
     );
     expect(walletService.payForBooking).not.toHaveBeenCalled();
   });
@@ -1094,6 +1098,17 @@ describe('BookingsService trip payments', () => {
     expect(result.unsafeAnomalies).toBe(2);
     expect(walletService.payForBookingWithManager).not.toHaveBeenCalled();
     expect(walletService.payForBooking).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])('only counts a paid booking as repaired when its earning exists (created=%s)', async created => {
+    bookingRepository.findOne.mockResolvedValue({ ...booking, status: BookingStatus.COMPLETED,
+      paymentStatus: BookingPaymentStatus.SUCCEEDED, paymentMode: TripPaymentMode.POINTS,
+      cashCommissionTokenValue: 10, trip: { ...booking.trip, driverId: 'driver-1' } });
+    dataSource.query.mockResolvedValueOnce([{ id: booking.id }]).mockResolvedValue([]);
+    financialManager.find.mockResolvedValue([{ type: 'booking_payment', amount: -500, currency: 'PTS', createdAt: new Date() }]);
+    driverSettlementsService.recordCompletedBookingEarningWithManager.mockResolvedValue(created ? { id: 'earning' } : null);
+    expect(await service.reconcileTokenTripSettlements()).toMatchObject({ repaired: created ? 1 : 0, failed: created ? 0 : 1 });
+    expect(walletService.payForBookingWithManager).not.toHaveBeenCalled();
   });
 
   it('keeps the booking unpaid when the points balance is insufficient', async () => {

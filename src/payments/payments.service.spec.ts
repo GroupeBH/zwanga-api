@@ -220,16 +220,21 @@ describe('PaymentsService', () => {
   });
 
   it('verifies cash-redeemable topups even when optional callback verification is disabled', async () => {
+    const settle = jest.fn().mockResolvedValue(undefined);
+    service.registerSettlement(PaymentPurpose.WALLET_TOP_UP, settle);
     paymentTransactionRepository.findOne.mockResolvedValue({
       id: 'topup',
+      userId: 'user',
       purpose: 'wallet_top_up',
+      relatedEntityType: 'wallet_top_up',
+      relatedEntityId: 'user',
       reference: 'WAL123',
       orderNumber: 'ORDER',
       status: PaymentStatus.INITIATED,
       amount: 5000,
       currency: 'CDF',
     });
-    flexPayService.checkTransaction.mockResolvedValue({
+    const proof = {
       code: '0',
       transaction: {
         reference: 'WAL123',
@@ -238,8 +243,8 @@ describe('PaymentsService', () => {
         currency: 'CDF',
         status: '0',
       },
-      raw: {},
-    });
+    };
+    flexPayService.checkTransaction.mockResolvedValue({ ...proof, raw: proof });
     flexPayService.isSuccessfulTransaction.mockReturnValue(true);
     const result = await service.handleFlexPayCallback({
       code: '0',
@@ -248,6 +253,7 @@ describe('PaymentsService', () => {
     });
     expect(flexPayService.checkTransaction).toHaveBeenCalledWith('ORDER');
     expect(result.status).toBe(PaymentStatus.SUCCEEDED);
+    expect(settle).toHaveBeenCalledWith(result);
   });
 
   it.each([{ orderNumber: 'OTHER' }, { reference: 'OTHER' }])(
@@ -303,6 +309,8 @@ describe('PaymentsService', () => {
   });
 
   it('rechecks an old succeeded topup lacking verification instead of trusting its terminal status', async () => {
+    const settle = jest.fn().mockResolvedValue(undefined);
+    service.registerSettlement(PaymentPurpose.WALLET_TOP_UP, settle);
     paymentTransactionRepository.findOne.mockResolvedValue({
       id: 'topup',
       userId: 'user',
@@ -331,6 +339,7 @@ describe('PaymentsService', () => {
     const result = await service.checkPaymentStatus('ORDER', 'user');
     expect(flexPayService.checkTransaction).toHaveBeenCalledWith('ORDER');
     expect(result.rawCheckResponse).toEqual(proof);
+    expect(settle).toHaveBeenCalledWith(result);
   });
 
   it.each(['wallet_payout', 'driver_payout', 'referral_payout'])(

@@ -4,6 +4,7 @@ import {
   type PaymentTransaction,
 } from './entities/payment-transaction.entity';
 import type { FlexPayTransactionStatus } from './flexpay.service';
+import { hasMatchingFlexPayTopUpIdentity } from './flexpay-topup-identity';
 
 /** Only a successful credit needs complete proof. Other states still require correlation. */
 export function assertWalletTopUpCheckEvidence(
@@ -37,9 +38,7 @@ export function assertWalletTopUpCheckEvidence(
     return;
   }
   if (
-    !provider.reference?.trim() ||
-    !provider.orderNumber?.trim() ||
-    provider.orderNumber.trim() !== payment.orderNumber ||
+    !hasMatchingFlexPayTopUpIdentity(payment, provider) ||
     provider.amount == null ||
     !provider.currency?.trim()
   ) {

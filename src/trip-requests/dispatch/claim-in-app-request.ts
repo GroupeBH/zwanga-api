@@ -4,6 +4,7 @@ import type { EntityManager } from 'typeorm';
 import type { TripRequest } from '../entities/trip-request.entity';
 import { assertRequestTarget } from '../target-driver-policy';
 import { hasRefusedRequest } from '../request-refusal';
+import { assertDriverRequestSchedule } from './driver-schedule-policy';
 
 /** Caller owns the request lock. Attention is not an exclusive right to respond. */
 export async function claimInAppRequest(
@@ -40,6 +41,7 @@ export async function claimInAppRequest(
     throw new ConflictException(
       'Choisissez votre véhicule pour accepter la demande.',
     );
+  await assertDriverRequestSchedule(tx, driverId, request.id);
   await tx.query(
     `UPDATE trip_request_dispatch_offers SET status='cancelled'
     WHERE "requestId"=$1 AND status='pending' AND phase='driver'`,

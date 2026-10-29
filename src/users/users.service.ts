@@ -939,7 +939,7 @@ export class UsersService {
    */
   async sendPhoneVerificationOtp(
     sendOtpDto: SendPhoneVerificationOtpDto,
-  ): Promise<{ message: string }> {
+  ): Promise<{ message: string; codeLength?: number; expiresInSeconds?: number }> {
     const phone = sendOtpDto.phone.trim();
     const existingUser = await this.userRepository.findOne({
       where: { phone },
@@ -954,8 +954,12 @@ export class UsersService {
         'Aucun compte trouvé avec ce numéro de téléphone',
       );
     }
-    await this.otpService.sendOtp(phone, 'phone_verification');
-    return { message: 'Code de vérification envoyé avec succès' };
+    const delivery = await this.otpService.sendOtp(phone, 'phone_verification');
+    return {
+      message: 'Code de vérification envoyé avec succès',
+      ...(delivery.codeLength !== undefined ? { codeLength: delivery.codeLength } : {}),
+      ...(delivery.expiresInSeconds !== undefined ? { expiresInSeconds: delivery.expiresInSeconds } : {}),
+    };
   }
 
   /**
@@ -965,7 +969,7 @@ export class UsersService {
    */
   async verifyPhoneOtp(
     verifyOtpDto: VerifyPhoneOtpDto,
-  ): Promise<{ message: string; valid: boolean }> {
+  ): Promise<{ message: string; valid: boolean; verificationToken?: string; expiresInSeconds?: number }> {
     const phone = verifyOtpDto.phone.trim();
     const verification = await this.otpService.verifyOtp(
       phone,
@@ -978,8 +982,8 @@ export class UsersService {
       );
     }
     // Keep eligibility in the UPDATE: a concurrent suspension/deactivation
-    // must not be bypassed after the provider call. A pre-registration OTP
-    // does not create a proof for an account that does not yet exist.
+    // must not be bypassed after verification. Mobishastra also returns a
+    // one-use proof for registration; it is not a login or PIN reset token.
     await this.userRepository.update(
       {
         phone,
@@ -989,7 +993,13 @@ export class UsersService {
       },
       { isPhoneVerified: true },
     );
-    return { message: 'Code OTP vérifié avec succès', valid: true };
+    return {
+      message: 'Code OTP vérifié avec succès', valid: true,
+      ...(verification.verificationToken ? {
+        verificationToken: verification.verificationToken,
+        expiresInSeconds: verification.expiresInSeconds,
+      } : {}),
+    };
   }
 
   // ==================== PIN Management Methods ====================

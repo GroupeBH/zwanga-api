@@ -1,4 +1,6 @@
 import { RequestResponsePhases1780000098000 } from '../../database/migrations/1780000098000-RequestResponsePhases';
+import { driverSchedulePostgresTests } from '../../../test/driver-schedule-postgres';
+import { tripUpdateSchedulePostgresTests } from '../../../test/trip-update-schedule-postgres';
 import { SequentialRequestQueue1780000097000 } from '../../database/migrations/1780000097000-SequentialRequestQueue';
 import { findDriverChoices, validateTargetDriver } from '../driver-choices';
 import { assertRequestDriverProximity } from '../request-proximity';
@@ -168,6 +170,8 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
       numberOfSeats: seats, maxPricePerSeat: 1000, vehicleType: VehicleType.CAR });
   };
   const offers = (requestId: string) => source.query('SELECT * FROM trip_request_dispatch_offers WHERE "requestId" = $1 ORDER BY "createdAt"', [requestId]);
+  driverSchedulePostgresTests(() => ({ source, driver, request }));
+  tripUpdateSchedulePostgresTests(() => ({ source, driver, request }));
 
   it('does not let 30 requests without pickup points or a missing immediate price starve a valid request', async () => {
     await driver();
@@ -397,6 +401,18 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
       position = ST_SetSRID(ST_MakePoint(25.2,0.52),4326)::geography WHERE "driverId" = $1`, [d.user.id]);
     expect(await edits.findAll(d.user.id)).toHaveLength(0);
     expect(await sequentialCandidates(source.manager, r)).toHaveLength(0);
+  });
+
+  it('ranks recently located drivers before a closer two-day-old position, without excluding it', async () => {
+    const nearOld = await driver(15.3101), middle = await driver(15.315), far = await driver(15.33), r = await request();
+    await source.query(`UPDATE driver_dispatch_presence SET "updatedAt" = now() - interval '2 days',
+      "expiresAt" = now() - interval '2 days', "discoveryEnabled" = true WHERE "driverId" = $1`, [nearOld.user.id]);
+    expect((await sequentialCandidates(source.manager, r)).map(c => c.driverId))
+      .toEqual([middle.user.id, far.user.id, nearOld.user.id]);
+    // A fresh fix restores plain distance ordering immediately.
+    await source.query(`UPDATE driver_dispatch_presence SET "updatedAt" = now() WHERE "driverId" = $1`, [nearOld.user.id]);
+    expect((await sequentialCandidates(source.manager, r)).map(c => c.driverId))
+      .toEqual([nearOld.user.id, middle.user.id, far.user.id]);
   });
 
   it('rechecks queued candidates and pending push delivery when the driver leaves the pickup radius', async () => {

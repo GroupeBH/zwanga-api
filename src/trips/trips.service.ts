@@ -3,7 +3,9 @@ import { expirePendingTrip } from './expire-pending-trip';
 import { enqueueTripReminder, TripReminderKind } from './trip-reminders';
 import { cancelEmptyRequestTrip } from './cancel-empty-request-trip';
 import { saveRequestTrip } from './save-request-trip';
+import { saveTripDetailsUpdate } from './save-trip-details-update';
 import { canReprogramTrip } from './trip-reprogram-policy';
+import { completeTripTransaction } from './complete-trip-transaction';
 import {
   Injectable,
   NotFoundException,
@@ -1023,6 +1025,7 @@ export class TripsService {
       throw new NotFoundException('Trajet non trouvé');
     }
     const updateSnapshot = this.getTripUpdateSnapshot(trip);
+    const beforeUpdate = { ...trip };
 
     // For request-linked trips the passenger has already confirmed the fare.
     // Reject changes before geocoding, status transitions or any other writes.
@@ -1222,7 +1225,7 @@ export class TripsService {
     }
 
     Object.assign(trip, restPayload);
-    await this.tripRepository.save(trip);
+    Object.assign(trip, await saveTripDetailsUpdate(this.tripRepository, beforeUpdate, trip));
 
     // Invalidate cache
     await this.cacheService.del(CacheService.getTripKey(id));
@@ -1493,11 +1496,11 @@ export class TripsService {
 
     const previousStatus = trip.status;
     const completedAt = new Date();
-    const completionResult = await this.tripRepository.update(
-      { id: tripId, driverId, status: TripStatus.ACTIVE },
-      { status: TripStatus.COMPLETED, completedAt },
+    const completed = await completeTripTransaction(
+      this.tripRepository, tripId, driverId, completedAt,
+      booking => this.hasBookingBeenDroppedOff(booking),
     );
-    if (completionResult.affected !== 1) {
+    if (!completed) {
       return this.findOne(tripId);
     }
     trip.status = TripStatus.COMPLETED;

@@ -3,6 +3,7 @@ import { trustedContactMessagesEnabled } from '../safety/trusted-contact-policy'
 import { TOKEN_VALUE_CDF } from '../wallet/token-value.policy';
 import { CoalescedRideProgress } from './coalesced-ride-progress';
 import { withBookableTrip } from './bookable-trip-transaction';
+import { canApplyBookingPayment } from './booking-payment-transition';
 import { finishEmptyPrivateTrip } from './private-trip-cancellation';
 import {
   Injectable,
@@ -71,6 +72,7 @@ import {
 import { PaymentsService } from '../payments/payments.service';
 import { TripPaymentMode } from '../payments/enums/trip-payment-mode.enum';
 import { WalletService } from '../wallet/wallet.service';
+import { WalletLedgerEntry, WalletLedgerEntryType } from '../wallet/entities/wallet-ledger-entry.entity';
 import {
   DriverSettlementsService,
   type DriverTripRevenueSummary,
@@ -301,7 +303,7 @@ export class BookingsService implements OnModuleInit {
           LEFT JOIN driver_earnings earning
             ON earning."bookingId" = b.id
           WHERE b."paymentMode" = $3
-            AND (b.status = $4 OR b."droppedOff" = true)
+            AND b.status = $4
             AND NOT EXISTS (
               SELECT 1
               FROM wallet_ledger_entries refund
@@ -335,7 +337,11 @@ export class BookingsService implements OnModuleInit {
             failed += 1;
             continue;
           }
-          await this.capturePointsPaymentForBooking(booking, booking.trip);
+          await this.capturePointsPaymentForBooking(
+            booking,
+            booking.trip,
+            true,
+          );
           repaired += 1;
         } catch (error) {
           failed += 1;
@@ -2180,42 +2186,41 @@ export class BookingsService implements OnModuleInit {
       `Initiating trip payment for booking ${bookingId} by passenger ${passengerId}`,
     );
 
-    const booking = await this.bookingRepository.findOne({
-      where: { id: bookingId },
-      relations: ['trip', 'passenger'],
-    });
-
-    if (!booking) {
-      throw new NotFoundException('Réservation non trouvée');
-    }
-
-    this.ensurePassengerOwnsBooking(booking, passengerId);
-    this.prepareBookingForElectronicPayment(booking);
-
     const currency = this.getTripPaymentCurrency();
-
-    booking.paymentCurrency = currency;
-
-    if (booking.paymentStatus !== BookingPaymentStatus.SUCCEEDED) {
-      await this.applyFirstTripSubsidyPolicy(booking, booking.trip);
-      await this.saveBookingWithFirstTripSubsidyRaceFallback(
-        booking,
-        booking.trip,
-      );
-    }
-
-    const amount = Number(booking.paymentAmount ?? 0);
-
-    if (amount <= 0) {
-      booking.paymentStatus = BookingPaymentStatus.NOT_REQUIRED;
-      booking.paidAt = booking.paidAt ?? new Date();
-      const savedBooking =
-        await this.saveBookingWithFirstTripSubsidyRaceFallback(
-          booking,
-          booking.trip,
+    // Fare preparation must not save an old PENDING snapshot over a callback's
+    // SUCCEEDED state. Provider calls happen only after this short transaction.
+    const booking = await this.dataSource.transaction(async (manager) => {
+      const current = await manager.findOne(Booking, {
+        where: { id: bookingId },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!current) throw new NotFoundException('Réservation non trouvée');
+      this.ensurePassengerOwnsBooking(current, passengerId);
+      this.prepareBookingForElectronicPayment(current);
+      const trip = await manager.findOne(Trip, {
+        where: { id: current.tripId },
+      });
+      if (!trip) throw new NotFoundException('Trajet non trouvé');
+      current.trip = trip;
+      if (current.paymentStatus !== BookingPaymentStatus.SUCCEEDED) {
+        current.paymentCurrency = currency;
+        await this.applyFirstTripSubsidyPolicy(current, trip, manager);
+        if (Number(current.paymentAmount ?? 0) <= 0) {
+          current.paymentStatus = BookingPaymentStatus.NOT_REQUIRED;
+          current.paidAt = current.paidAt ?? new Date();
+        }
+        return this.saveBookingWithFirstTripSubsidyRaceFallback(
+          current,
+          trip,
+          manager,
         );
-      await this.invalidateBookingCaches(savedBooking);
-      const response = this.buildPaymentResponse(savedBooking, null);
+      }
+      return current;
+    });
+    const amount = Number(booking.paymentAmount ?? 0);
+    if (amount <= 0) {
+      await this.invalidateBookingCaches(booking);
+      const response = this.buildPaymentResponse(booking, null);
       this.logBookingPaymentResponse('Trip payment not required', response);
       return response;
     }
@@ -2756,8 +2761,10 @@ export class BookingsService implements OnModuleInit {
   private async capturePointsPaymentForBooking(
     booking: Booking,
     _trip: Trip,
+    recoveryOnly = false,
   ): Promise<Booking> {
     if (booking.paymentMode !== TripPaymentMode.POINTS) {
+      if (recoveryOnly) throw new ConflictException('Le mode de paiement a changé pendant la régularisation');
       return booking;
     }
 
@@ -2788,13 +2795,83 @@ export class BookingsService implements OnModuleInit {
       }
       lockedBooking.trip = lockedTrip;
 
+      if (recoveryOnly) {
+        // Recovery never reprices a historical fare or creates a new wallet debit.
+        // Recheck the proof and lifecycle under the booking lock, not just the cron snapshot.
+        if (
+          lockedBooking.status !== BookingStatus.COMPLETED ||
+          lockedBooking.paymentMode !== TripPaymentMode.POINTS ||
+          lockedBooking.tokenCashFallbackAt ||
+          !Number.isFinite(Number(lockedBooking.paymentAmount)) ||
+          !(Number(lockedBooking.paymentAmount) > 0)
+        ) {
+          throw new ConflictException(
+            'Règlement en jetons à vérifier manuellement',
+          );
+        }
+        const entries = await manager.find(WalletLedgerEntry, {
+          where: {
+            userId: lockedBooking.passengerId,
+            relatedEntityType: this.BOOKING_RELATED_ENTITY_TYPE,
+            relatedEntityId: lockedBooking.id,
+            type: In([
+              WalletLedgerEntryType.BOOKING_PAYMENT,
+              WalletLedgerEntryType.BOOKING_REFUND,
+            ]),
+          },
+        });
+        const debits = entries.filter(
+          (entry) =>
+            entry.type === WalletLedgerEntryType.BOOKING_PAYMENT &&
+            Number.isFinite(Number(entry.amount)) &&
+            Number(entry.amount) < 0 &&
+            ['PTS', 'POINTS'].includes(entry.currency),
+        );
+        if (
+          debits.length !== 1 ||
+          entries.some(
+            (entry) => entry.type === WalletLedgerEntryType.BOOKING_REFUND,
+          )
+        ) {
+          throw new ConflictException(
+            'Débit en jetons absent, ambigu ou remboursé',
+          );
+        }
+        const quotedValue = Number(lockedBooking.cashCommissionTokenValue);
+        if (
+          !Number.isFinite(quotedValue) ||
+          quotedValue <= 0 ||
+          this.roundMoney(-Number(debits[0].amount)) <
+            this.roundMoney(Number(lockedBooking.paymentAmount) / quotedValue)
+        ) {
+          throw new ConflictException(
+            'Le débit ne couvre pas le montant historique du trajet',
+          );
+        }
+        lockedBooking.paymentStatus = BookingPaymentStatus.SUCCEEDED;
+        lockedBooking.paidAt = lockedBooking.paidAt ?? debits[0].createdAt;
+        const settled = await manager.save(lockedBooking);
+        settled.trip = lockedTrip;
+        const earning =
+          await this.driverSettlementsService.recordCompletedBookingEarningWithManager(
+            manager,
+            settled,
+          );
+        if (!earning)
+          throw new ConflictException(
+            'Le gain conducteur n’a pas pu être régularisé',
+          );
+        return settled;
+      }
+
       if (lockedBooking.tokenCashFallbackAt) return lockedBooking;
       if (lockedBooking.paymentMode !== TripPaymentMode.POINTS) {
         throw new BadRequestException(
           'Le mode de paiement de la réservation a changé',
         );
       }
-      if (lockedBooking.paymentStatus === BookingPaymentStatus.SUCCEEDED) return lockedBooking;
+      if (lockedBooking.paymentStatus === BookingPaymentStatus.SUCCEEDED)
+        return lockedBooking;
       if (
         lockedBooking.status !== BookingStatus.COMPLETED &&
         !this.hasBookingBeenDroppedOffForTripEnd(lockedBooking) &&
@@ -2838,7 +2915,10 @@ export class BookingsService implements OnModuleInit {
 
       // Paying early does not complete a ride or release its driver earnings early.
       if (savedBooking.status === BookingStatus.COMPLETED) {
-        await this.driverSettlementsService.recordCompletedBookingEarningWithManager(manager, savedBooking);
+        await this.driverSettlementsService.recordCompletedBookingEarningWithManager(
+          manager,
+          savedBooking,
+        );
       }
 
       this.logger.log(
@@ -3408,22 +3488,8 @@ export class BookingsService implements OnModuleInit {
       return null;
     }
 
-    if (paymentMethod && payment.method !== paymentMethod) {
-      return null;
-    }
-
-    const expectedAmount = Number(booking.paymentAmount ?? 0);
-    const persistedPaymentAmount = Number(payment.amount ?? 0);
-    if (
-      Number.isFinite(expectedAmount) &&
-      expectedAmount > 0 &&
-      (!Number.isFinite(persistedPaymentAmount) ||
-        this.roundMoney(persistedPaymentAmount) !==
-          this.roundMoney(expectedAmount))
-    ) {
-      return null;
-    }
-
+    // Changing method or fare does not prove that the original debit failed.
+    // An uncertain/pending attempt must be resolved before another can be sent.
     return [PaymentStatus.PENDING, PaymentStatus.INITIATED].includes(
       payment.status,
     )
@@ -3471,56 +3537,75 @@ export class BookingsService implements OnModuleInit {
     booking: Booking,
     payment: PaymentTransaction,
   ): Promise<Booking> {
-    // A late refusal for the previous attempt must not undo an explicit cash
-    // choice or a token settlement. Successful callbacks still need settlement.
-    if ([PaymentStatus.FAILED, PaymentStatus.CANCELLED].includes(payment.status) &&
-        booking.paymentMode !== TripPaymentMode.ELECTRONIC) return booking;
-    const grossAmount = booking.trip
-      ? this.resolveBookingGrossPaymentAmount(booking, booking.trip)
-      : Number(booking.grossPaymentAmount ?? booking.paymentAmount ?? 0);
-    booking.paymentMode = TripPaymentMode.ELECTRONIC;
-    booking.paymentReference = payment.reference;
-    booking.paymentTransactionId = payment.id;
-    booking.grossPaymentAmount = this.roundMoney(Math.max(0, grossAmount));
-    // A repeated callback for a prepaid original fare must not overwrite an agreed interruption fare.
-    if (!booking.interruptionFareLocked) {
-      booking.paymentAmount = Number(payment.amount ?? booking.paymentAmount ?? 0);
-    }
-    if (this.isFirstTripSubsidyReserved(booking)) {
-      booking.zwangaSubsidyAmount = this.roundMoney(
-        Math.max(
-          0,
-          Number(booking.grossPaymentAmount ?? 0) - Number(booking.paymentAmount ?? 0),
-        ),
-      );
-      booking.passengerPaymentRate =
-        booking.passengerPaymentRate ??
-        (booking.grossPaymentAmount && booking.grossPaymentAmount > 0
-          ? this.roundMoney(Number(booking.paymentAmount ?? 0) / booking.grossPaymentAmount)
-          : this.getFirstTripPassengerPaymentRate());
-    }
-    booking.paymentCurrency =
-      payment.currency ||
-      booking.paymentCurrency ||
-      this.getTripPaymentCurrency();
-    booking.paymentStatus = this.mapPaymentStatus(payment.status);
+    const savedBooking = await this.dataSource.transaction(async (manager) => {
+      const current = await manager.findOne(Booking, {
+        where: { id: booking.id },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!current) throw new NotFoundException('Réservation non trouvée');
+      const trip = await manager.findOne(Trip, {
+        where: { id: current.tripId },
+      });
+      if (!trip) throw new NotFoundException('Trajet non trouvé');
+      current.trip = trip;
+      if (!canApplyBookingPayment(current, payment)) {
+        if (
+          payment.status === PaymentStatus.SUCCEEDED &&
+          current.paymentTransactionId !== payment.id
+        ) {
+          this.logger.warn(
+            `BOOKING_PAYMENT_REVIEW_REQUIRED bookingId=${current.id} paymentId=${payment.id}`,
+          );
+        }
+        return current;
+      }
+      booking = current;
+      const grossAmount = booking.trip
+        ? this.resolveBookingGrossPaymentAmount(booking, booking.trip)
+        : Number(booking.grossPaymentAmount ?? booking.paymentAmount ?? 0);
+      booking.paymentMode = TripPaymentMode.ELECTRONIC;
+      booking.paymentReference = payment.reference;
+      booking.paymentTransactionId = payment.id;
+      booking.grossPaymentAmount = this.roundMoney(Math.max(0, grossAmount));
+      // A repeated callback for a prepaid original fare must not overwrite an agreed interruption fare.
+      if (!booking.interruptionFareLocked) {
+        booking.paymentAmount = Number(
+          payment.amount ?? booking.paymentAmount ?? 0,
+        );
+      }
+      if (this.isFirstTripSubsidyReserved(booking)) {
+        booking.zwangaSubsidyAmount = this.roundMoney(
+          Math.max(
+            0,
+            Number(booking.grossPaymentAmount ?? 0) -
+              Number(booking.paymentAmount ?? 0),
+          ),
+        );
+        booking.passengerPaymentRate =
+          booking.passengerPaymentRate ??
+          (booking.grossPaymentAmount && booking.grossPaymentAmount > 0
+            ? this.roundMoney(
+                Number(booking.paymentAmount ?? 0) / booking.grossPaymentAmount,
+              )
+            : this.getFirstTripPassengerPaymentRate());
+      }
+      booking.paymentCurrency =
+        payment.currency ||
+        booking.paymentCurrency ||
+        this.getTripPaymentCurrency();
+      booking.paymentStatus = this.mapPaymentStatus(payment.status);
 
-    if (payment.status === PaymentStatus.SUCCEEDED) {
-      booking.paidAt = payment.paidAt ?? booking.paidAt ?? new Date();
-    }
+      if (payment.status === PaymentStatus.SUCCEEDED) {
+        booking.paidAt = payment.paidAt ?? booking.paidAt ?? new Date();
+      }
 
-    const savedBooking = await this.bookingRepository.save(booking);
+      return manager.save(booking);
+    });
     await this.invalidateBookingCaches(savedBooking);
 
-    if (
-      payment.status === PaymentStatus.FAILED ||
-      payment.status === PaymentStatus.CANCELLED
-    ) {
-      await this.referralsService.reverseBookingReward(
-        savedBooking.id,
-        `Paiement FlexPay ${payment.status}`,
-      );
-    }
+    // A failed attempt is not a refund. Reversing a booking-wide reward here
+    // could race with a successful retry. Explicit cancellations/refunds retain
+    // their own reversal workflows; unsuccessful attempts never earn a reward.
 
     if (
       savedBooking.status === BookingStatus.COMPLETED &&

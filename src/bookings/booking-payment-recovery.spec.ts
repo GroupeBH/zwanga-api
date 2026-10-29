@@ -1,5 +1,5 @@
 import { BookingsService } from './bookings.service';
-import { BookingPaymentStatus, BookingStatus } from './entities/booking.entity';
+import { Booking, BookingPaymentStatus, BookingStatus } from './entities/booking.entity';
 import { PaymentStatus } from '../payments/entities/payment-transaction.entity';
 import { TripPaymentMode } from '../payments/enums/trip-payment-mode.enum';
 
@@ -11,6 +11,10 @@ describe('booking payment mode recovery (service doubles, no production data)', 
     const payment = { id: 'p', status, orderNumber };
     const service = Object.create(BookingsService.prototype) as any;
     service.bookingRepository = { findOne: jest.fn().mockResolvedValue(booking) };
+    service.dataSource = { transaction: async work => work({
+      findOne: async entity => entity === Booking ? booking : { id: 'trip' },
+      save: async value => value,
+    }) };
     service.findCurrentPaymentForBooking = jest.fn().mockResolvedValue(payment);
     service.paymentsService = { checkPaymentStatus: jest.fn().mockResolvedValue(payment) };
     service.getTripPaymentCurrency = () => 'CDF';

@@ -55,7 +55,7 @@ export class UsersController {
   @ApiOperation({
     summary: 'Get current user profile',
     description:
-      'profileState v1 exposes server-owned identity status, driver eligibility and nextAction. Reading it never activates a driver. user.isPhoneVerified is factual; phoneVerificationRequired is false because OTP is only used for forgotten-PIN recovery in the app.',
+      'profileState v1 exposes server-owned identity status, driver eligibility and nextAction. Reading it never activates a driver. user.isPhoneVerified is factual; phoneVerificationRequired remains false for existing accounts. Optional phone verification and forgotten-PIN recovery use separate OTP purposes.',
   })
   async getProfile(@Request() req) {
     return this.usersService.getProfileSummary(req.user.userId);
@@ -222,7 +222,7 @@ export class UsersController {
   @ApiOperation({
     summary: 'Send an optional phone verification OTP by SMS',
     description:
-      'Legacy mobile contract retained with Keccel SMS. Signup does not require OTP. Forgotten PIN recovery uses /auth/pin/reset/request-otp.',
+      'SMS provider selected by OTP_PROVIDER. Mobishastra: 5 digits, 15 minutes, 5 attempts; response includes codeLength and expiresInSeconds. Forgotten PIN recovery uses /auth/pin/reset/request-otp.',
   })
   @ApiResponse({
     status: 200,
@@ -242,7 +242,7 @@ export class UsersController {
   @Public()
   @HttpCode(HttpStatus.OK)
   @SensitiveThrottle(10, 60000) // 10 requests per minute per IP
-  @ApiOperation({ summary: 'Verify an optional phone OTP through Keccel' })
+  @ApiOperation({ summary: 'Verify a phone OTP', description: 'Mobishastra returns a one-use verificationToken to pass as phoneVerificationToken at registration. The proof expires with the original OTP and cannot reset a PIN.' })
   @ApiResponse({
     status: 200,
     description: 'Phone verified; does not authorize resetting the PIN',

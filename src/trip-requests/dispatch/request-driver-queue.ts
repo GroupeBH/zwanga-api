@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { RedisService } from '../../common/services/redis.service';
 
 export const REQUEST_DEADLINES_KEY = 'ride-requests:deadlines';
+export const REQUEST_CANDIDATE_CACHE_SECONDS = 30;
 const key = (id: string) => 'ride-requests:{' + id + '}';
 
 /** Redis owns the ordered candidate queue and scheduling. SQL fences/reserves
@@ -27,8 +28,8 @@ export class RequestDriverQueue {
       if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
       redis.call('DEL', KEYS[2])
       for i = 3, #ARGV do redis.call('RPUSH', KEYS[2], ARGV[i]) end
-      redis.call('EXPIRE', KEYS[2], 60)
-      redis.call('SET', KEYS[3], ARGV[2], 'EX', 60)
+      redis.call('EXPIRE', KEYS[2], ${REQUEST_CANDIDATE_CACHE_SECONDS})
+      redis.call('SET', KEYS[3], ARGV[2], 'EX', ${REQUEST_CANDIDATE_CACHE_SECONDS})
       redis.call('PEXPIRE', KEYS[1], 10000)
       return 1`, { keys: [key(id) + ':lock', key(id) + ':waiting', key(id) + ':version'],
       arguments: [token, version, ...drivers] })) === 1;

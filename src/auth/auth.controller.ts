@@ -92,6 +92,10 @@ export class AuthController {
       type: 'object',
       properties: {
         phone: { type: 'string', example: '+243900000000' },
+        phoneVerificationToken: {
+          type: 'string',
+          description: 'Preuve à usage unique obtenue via users/phone/verify; liée au numéro de téléphone.',
+        },
         referralCode: {
           type: 'string',
           example: 'ZW7K9M2P4Q',

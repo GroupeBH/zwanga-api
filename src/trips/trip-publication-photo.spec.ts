@@ -18,7 +18,7 @@ function setup(overrides: Partial<User> = {}, history = false) {
   // Serial transaction mock models the owner lock; this is NOT a PostgreSQL integration test.
   let tail = Promise.resolve();
   const repository = { manager: { transaction: jest.fn((_isolation, work) => {
-    const run = tail.then(() => work({ getRepository: entity => entity === User ? users : trips }));
+    const run = tail.then(() => work({ query: jest.fn().mockResolvedValue([{ busy: false }]), getRepository: entity => entity === User ? users : trips }));
     tail = run.catch(() => undefined);
     return run;
   }) } };

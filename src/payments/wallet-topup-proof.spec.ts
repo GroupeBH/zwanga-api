@@ -51,6 +51,55 @@ describe('cash-redeemable wallet purchase proof', () => {
       ).toBe(false);
     },
   );
+  it('accepts the checked provider order in reference without inventing an orderNumber in the raw proof', () => {
+    const value = payment();
+    value.rawCheckResponse = {
+      code: '0',
+      transaction: {
+        status: '0',
+        reference: 'ORDER',
+        amount: '5000.0',
+        amountCustomer: '5125.0',
+        currency: 'CDF',
+      },
+    };
+    expect(hasVerifiedWalletTopUpProof(value)).toBe(true);
+    expect(value.rawCheckResponse.transaction).not.toHaveProperty(
+      'orderNumber',
+    );
+  });
+  it.each([
+    { reference: 'WAL123' },
+    { reference: 'OTHER' },
+    { reference: null },
+    { reference: '' },
+    { orderNumber: 'OTHER' },
+    { orderNumber: '' },
+    { orderNumber: {} },
+    { amount: '1' },
+    { amount: null },
+    { amount: 'Infinity' },
+    { currency: 'USD' },
+    { currency: null },
+    { status: '2' },
+    { status: '1' },
+  ])(
+    'rejects ambiguous or inconsistent order-as-reference proof: %p',
+    (patch) => {
+      const value = payment();
+      value.rawCheckResponse = {
+        code: '0',
+        transaction: {
+          status: '0',
+          reference: 'ORDER',
+          amount: '5000',
+          currency: 'CDF',
+          ...patch,
+        },
+      };
+      expect(hasVerifiedWalletTopUpProof(value)).toBe(false);
+    },
+  );
   it.each([
     { amount: '1' },
     { currency: 'USD' },
