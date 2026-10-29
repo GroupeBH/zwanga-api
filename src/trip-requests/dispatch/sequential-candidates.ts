@@ -1,7 +1,7 @@
 import type { EntityManager } from 'typeorm';
 import { TripRequest } from '../entities/trip-request.entity';
 import { requestDriverVisibilitySql } from '../target-driver-policy';
-import { USABLE_DRIVER_LOCATION_SQL } from './driver-location-policy';
+import { ONGOING_DRIVER_POSITION_SQL, USABLE_DRIVER_LOCATION_SQL } from './driver-location-policy';
 import { ELIGIBLE_DRIVER_ACCOUNT_SQL, ELIGIBLE_NEARBY_DRIVER_SQL, NEARBY_DRIVER_RADIUS_METERS } from './nearby-driver-policy';
 
 export interface QueueCandidate { driverId: string; vehicleId: string; seats: number; existingTripId: string | null }
@@ -44,13 +44,12 @@ async function candidates(manager: EntityManager, request: TripRequest, driverId
       ${driverIds ? 'AND p."driverId" = (SELECT id FROM queued_driver)' : ''}
       AND (CASE WHEN v.id = p."vehicleId" THEN p.seats WHEN v.type = 'motorcycle_2_wheels' THEN 2
         WHEN v.type = 'motorcycle_3_wheels' THEN 3 ELSE 4 END) >= $3
-      AND (EXISTS (SELECT 1 FROM trip_requests target WHERE target.id = $7 AND target."targetDriverId" = p."driverId")
-        OR ST_DWithin(p.position, ST_SetSRID(ST_MakePoint($4,$5),4326)::geography, $6))
+      AND ST_DWithin(p.position, ST_SetSRID(ST_MakePoint($4,$5),4326)::geography, $6)
       AND ${requestDriverVisibilitySql('$7', 'p."driverId"')}
       AND ${ELIGIBLE_NEARBY_DRIVER_SQL}
 
     UNION ALL
-    SELECT t."driverId", v.id, t."availableSeats", t.id, COALESCE(t."currentLocation", p.position)
+    SELECT t."driverId", v.id, t."availableSeats", t.id, ${ONGOING_DRIVER_POSITION_SQL}
     FROM trips t
     JOIN vehicles v ON v.id = t."vehicleId"::uuid AND v."ownerId" = t."driverId" AND v."isActive" = true
     LEFT JOIN driver_dispatch_presence p ON p."driverId" = t."driverId"
@@ -65,7 +64,7 @@ async function candidates(manager: EntityManager, request: TripRequest, driverId
       AND p."discoveryEnabled" IS DISTINCT FROM false
       AND ${ELIGIBLE_DRIVER_ACCOUNT_SQL.replaceAll('p."driverId"', 't."driverId"')}
       AND ${requestDriverVisibilitySql('$7', 't."driverId"')}
-      AND ST_DWithin(COALESCE(t."currentLocation", p.position),
+      AND ST_DWithin(${ONGOING_DRIVER_POSITION_SQL},
         ST_SetSRID(ST_MakePoint($4,$5),4326)::geography, $6)
     )
     ${driverIds ? `SELECT q.id AS "driverId", e."vehicleId", e.seats, e."existingTripId"

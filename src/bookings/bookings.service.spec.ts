@@ -1923,7 +1923,7 @@ describe('BookingsService trip payments', () => {
     expect(result.coordinates).toEqual([15.31, -4.31]);
   });
 
-  it('automatically confirms pickup when both users start together and then move in small coherent samples', async () => {
+  it.each([false, true])('automatically confirms pickup without rewriting an existing payment; prepaid=%s', async prepaid => {
     jest
       .spyOn(service as any, 'notifySelectedEmergencyContacts')
       .mockResolvedValue(undefined);
@@ -1943,8 +1943,8 @@ describe('BookingsService trip payments', () => {
     const pickup: [number, number] = [15.3, -4.3];
     const autoBooking = {
       ...booking,
-      paymentMode: TripPaymentMode.CASH,
-      paymentStatus: BookingPaymentStatus.NOT_REQUIRED,
+      paymentMode: prepaid ? TripPaymentMode.POINTS : TripPaymentMode.CASH,
+      paymentStatus: prepaid ? BookingPaymentStatus.SUCCEEDED : BookingPaymentStatus.NOT_REQUIRED,
       pickedUp: false,
       pickedUpConfirmedByPassenger: false,
       passengerOriginPoint: { type: 'Point', coordinates: pickup },
@@ -2035,6 +2035,12 @@ describe('BookingsService trip payments', () => {
     expect((autoBooking as any).pickupDetectionMethod).toBe(
       'automatic_shared_movement',
     );
+    if (prepaid) {
+      expect(autoBooking.paymentStatus).toBe(BookingPaymentStatus.SUCCEEDED);
+      const pickupWrite = bookingRepository.update.mock.calls.find(([, patch]) => patch.pickedUp === true)?.[1];
+      expect(pickupWrite).toBeDefined();
+      expect(pickupWrite).not.toHaveProperty('paymentStatus');
+    }
   });
 
   it('does not automatically confirm pickup when the driver leaves pickup without a fresh passenger location', async () => {

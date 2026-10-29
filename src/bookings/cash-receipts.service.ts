@@ -98,6 +98,10 @@ export class CashReceiptsService {
           data: {
             type: 'cash_payment_confirmed',
             bookingId: id,
+            tripId: booking.tripId,
+            driverId,
+            paymentMode: 'cash',
+            receiptKey: `booking-payment:${id}:cash`,
             amount,
             currency,
             role: recipient.role,

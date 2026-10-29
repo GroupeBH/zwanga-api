@@ -506,7 +506,7 @@ describe('TripRequestsService motorcycle capacity', () => {
   ])('rejects an oversized offer for %s', async (type, availableSeats) => {
     const now = Date.now();
     const tripRequestRepository = {
-      manager: { getRepository: () => ({ exists: jest.fn().mockResolvedValue(false) }) },
+      manager: { query: jest.fn().mockResolvedValue([{ allowed: 1 }]), getRepository: () => ({ exists: jest.fn().mockResolvedValue(false) }) },
       findOne: jest.fn().mockResolvedValue({
         id: 'request-1',
         passengerId: 'passenger-1',
@@ -563,7 +563,7 @@ describe('TripRequestsService motorcycle capacity', () => {
   it('rejects a driver vehicle that differs from the passenger choice', async () => {
     const now = Date.now();
     const tripRequestRepository = {
-      manager: { getRepository: () => ({ exists: jest.fn().mockResolvedValue(false) }) },
+      manager: { query: jest.fn().mockResolvedValue([{ allowed: 1 }]), getRepository: () => ({ exists: jest.fn().mockResolvedValue(false) }) },
       findOne: jest.fn().mockResolvedValue({
         id: 'request-1',
         passengerId: 'passenger-1',
@@ -876,7 +876,7 @@ describe('TripRequestsService failed provisional booking', () => {
           vehicleType: VehicleType.CAR, numberOfSeats: 1, maxPricePerSeat: 8500, driverOffers: [],
         };
         const failure = new Error('booking insert failed');
-        const requests = { manager: { getRepository: () => ({ exists: jest.fn().mockResolvedValue(false) }) },
+        const requests = { manager: { query: jest.fn(async (sql: string) => sql.includes('ST_DWithin') ? [{ allowed: 1 }] : []), getRepository: () => ({ exists: jest.fn().mockResolvedValue(false) }) },
           findOne: jest.fn().mockResolvedValue(request), save: jest.fn() };
         const trips = { create: jest.fn().mockResolvedValue({ id: 'trip-test' }),
           ensureDriverCanStartTrip: jest.fn(),
@@ -921,7 +921,7 @@ describe('TripRequestsService passenger KYC requirements', () => {
       driverOffers: [],
     };
     const tripRequestRepository = {
-      manager: { getRepository: () => ({ exists: jest.fn().mockResolvedValue(false) }) },
+      manager: { query: jest.fn(async (sql: string) => sql.includes('ST_DWithin') ? [{ allowed: 1 }] : []), getRepository: () => ({ exists: jest.fn().mockResolvedValue(false) }) },
       findOne: jest.fn().mockResolvedValue(tripRequest),
       save: jest.fn(),
     };

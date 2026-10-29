@@ -19,6 +19,7 @@ export enum NotificationStatus {
 @Entity('notifications')
 // PostgreSQL expression index managed by migration 99; preserve it on local sync.
 @Index('IDX_notifications_active_request_type', { synchronize: false })
+@Index('IDX_notifications_realtime_receipts', { synchronize: false })
 @Index(['userId', 'createdAt'])
 @Index(['userId', 'isRead'])
 @Index(['userId', 'isActive'])

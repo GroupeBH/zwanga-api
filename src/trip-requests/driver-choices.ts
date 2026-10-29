@@ -21,7 +21,7 @@ export async function findDriverChoices(manager: EntityManager, passengerId: str
       AND NOT EXISTS (SELECT 1 FROM trip_request_dispatch_offers o WHERE o."driverId" = u.id AND o.status = 'pending' AND o."expiresAt" > now())
       AND ($6::uuid IS NULL OR u.id = $6::uuid)
       AND ($7 = '' OR lower(concat_ws(' ', u."firstName", u."lastName")) LIKE $8 ESCAPE '!' OR u.id::text = $7)
-      AND ($6::uuid IS NOT NULL OR $7 <> '' OR ST_DWithin(p.position, ST_SetSRID(ST_MakePoint($2,$3),4326)::geography, $9))
+      AND ST_DWithin(p.position, ST_SetSRID(ST_MakePoint($2,$3),4326)::geography, $9)
     ORDER BY ST_Distance(p.position, ST_SetSRID(ST_MakePoint($2,$3),4326)::geography), u.id LIMIT 20`,
     [passengerId, query.longitude, query.latitude, query.vehicleType, query.seats, targetId ?? null, search, pattern, NEARBY_DRIVER_RADIUS_METERS]);
 }

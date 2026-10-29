@@ -4834,9 +4834,9 @@ export class BookingsService implements OnModuleInit {
         pickedUpAt,
         pickupDetectionMethod: detectionMethod,
         rejectionReason: null,
-        paymentStatus: paymentStatusAfterPickup,
         ...(paymentStatusAfterPickup !== BookingPaymentStatus.SUCCEEDED
           ? {
+              paymentStatus: paymentStatusAfterPickup,
               paidAt: null,
               paymentReference: null,
               paymentTransactionId: null,

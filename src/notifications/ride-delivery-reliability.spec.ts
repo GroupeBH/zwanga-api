@@ -83,7 +83,7 @@ describe('immutable incoming deadlines', () => {
     });
     expect(await service.isCriticalNotificationStillDeliverable(item)).toBe(false);
     expect(item.data!.expiresAt).toBe(expiry);
-    expect(query.mock.calls.every(([sql]) => !/UPDATE|INSERT/i.test(sql))).toBe(true);
+    expect(query.mock.calls.every(([sql]) => !/\b(?:UPDATE|INSERT)\b/i.test(sql))).toBe(true);
   });
 });
 

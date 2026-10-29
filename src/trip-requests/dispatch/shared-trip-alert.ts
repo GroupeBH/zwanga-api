@@ -1,4 +1,5 @@
 import { requestDriverVisibilitySql } from '../target-driver-policy';
+import { ONGOING_DRIVER_POSITION_SQL } from './driver-location-policy';
 import { EntityManager } from 'typeorm';
 import {
   TripRequest,
@@ -64,12 +65,12 @@ export async function enqueueSharedTripAlert(
       AND (t."isFree" = true OR (t."pricePerSeat" <= $5 AND $6 = ANY(t."acceptedPaymentModes")))
       AND p."discoveryEnabled" IS DISTINCT FROM false
       AND ${ELIGIBLE_DRIVER_ACCOUNT_SQL.replaceAll('p."driverId"', 't."driverId"')}
-      AND ST_DWithin(COALESCE(t."currentLocation", p.position),
+      AND ST_DWithin(${ONGOING_DRIVER_POSITION_SQL},
         ST_SetSRID(ST_MakePoint($7,$8),4326)::geography,$9)
       AND NOT EXISTS (SELECT 1 FROM driver_offers o WHERE o."tripRequestId" = $1 AND o."driverId" = t."driverId")
       AND NOT EXISTS (SELECT 1 FROM notifications n
         WHERE n."eventKey" = 'shared-trip-nearby:' || $1::text || ':' || t."driverId"::text)
-    ORDER BY ST_Distance(COALESCE(t."currentLocation", p.position),
+    ORDER BY ST_Distance(${ONGOING_DRIVER_POSITION_SQL},
       ST_SetSRID(ST_MakePoint($7,$8),4326)::geography), t."driverId"
     LIMIT ${NEARBY_DRIVER_BATCH_SIZE}`,
       [

@@ -23,6 +23,7 @@ import {
 } from './request-edit-policy';
 import { assertSharedTripAvailable } from './shared-trip-policy';
 import { assertRequestTarget } from './target-driver-policy';
+import { ONGOING_DRIVER_POSITION_SQL } from './dispatch/driver-location-policy';
 import { NEARBY_DRIVER_RADIUS_METERS } from './dispatch/nearby-driver-policy';
 import { startPassengerDecision, silenceRequestInvitation } from './dispatch/request-acceptance';
 import { SequentialDispatchService } from './dispatch/sequential-dispatch.service';
@@ -63,14 +64,13 @@ export class SharedTripOffersService {
       ? await manager.findOneBy(Vehicle, { id: trip.vehicleId })
       : null;
     assertSharedTripAvailable(request, trip, vehicle, driverId);
-    // Active navigation is the authoritative position. Otherwise retain the
-    // last known discovery position, as in the existing dispatch policy.
+    // Use the newest GPS fix, consistently with discovery and driver-facing lists.
     const [location] = await manager.query(
       `SELECT ST_DWithin(
-      COALESCE(t."currentLocation", p.position), r."departurePoint", $3) AS nearby
+      ${ONGOING_DRIVER_POSITION_SQL}, r."departurePoint", $3) AS nearby
       FROM trips t JOIN trip_requests r ON r.id = $2
       LEFT JOIN driver_dispatch_presence p ON p."driverId" = t."driverId"
-      WHERE t.id = $1`,
+      WHERE t.id = $1 AND p."discoveryEnabled" IS DISTINCT FROM false`,
       [trip.id, request.id, NEARBY_DRIVER_RADIUS_METERS],
     );
     if (!location?.nearby)

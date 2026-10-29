@@ -51,3 +51,52 @@ describe('Pro services intake', () => {
     expect(seeds.filter(args => args[1][3] === 'open')).toHaveLength(1);
   });
 });
+
+describe('Pro services list contract used by the admin table and CSV export', () => {
+  function fixture(records: Partial<ProServiceCase>[]) {
+    const query: any = {};
+    for (const method of ['select', 'andWhere', 'orderBy', 'addOrderBy', 'take']) query[method] = jest.fn(() => query);
+    query.getMany = jest.fn().mockResolvedValue(records);
+    const repository = { createQueryBuilder: jest.fn(() => query) };
+    const store = new ProServiceStore({ getRepository: () => repository } as any);
+    return { store, query };
+  }
+  const record = (id = payload.submissionKey): Partial<ProServiceCase> => ({
+    id, serviceCode: 'documents', status: 'submitted', createdAt: new Date('2026-10-29T10:00:00Z'), customerMessage: '',
+    application: { ...payload.application, documents: ['carte-rose', 'nouveau-permis'] },
+  });
+
+  it('includes the submitted document codes and contact in the existing list, without exposing the full application', async () => {
+    const row = record(), f = fixture([row]);
+    const result = await f.store.list({});
+    expect(result).toEqual({ items: [{ id: row.id, serviceCode: 'documents', status: 'submitted',
+      createdAt: row.createdAt, customerMessage: '', fullName: payload.application.fullName,
+      phone: payload.application.phone, documentCodes: ['carte-rose', 'nouveau-permis'] }], nextCursor: null });
+    expect(result.items[0]).not.toHaveProperty('application');
+    expect(result.items[0]).not.toHaveProperty('quote');
+    expect(f.query.getMany).toHaveBeenCalledTimes(1); // No per-row detail requests.
+  });
+
+  it('keeps missing historical document selections empty instead of inventing requested documents', async () => {
+    const row = record(); delete (row.application as any).documents; delete (row.application as any).phone;
+    const f = fixture([row]);
+    expect((await f.store.list({})).items[0]).toMatchObject({ phone: '', documentCodes: [] });
+  });
+
+  it('preserves owner/status filtering and bounded cursor pagination with documents on every row', async () => {
+    const records = Array.from({ length: 21 }, (_, index) => record(`00000000-0000-4000-8000-${String(index).padStart(12, '0')}`));
+    const f = fixture(records), page = await f.store.list({ status: 'submitted' }, 'owner');
+    expect(f.query.andWhere).toHaveBeenCalledWith('c."ownerId" = :ownerId', { ownerId: 'owner' });
+    expect(f.query.andWhere).toHaveBeenCalledWith('c.status = :status', { status: 'submitted' });
+    expect(f.query.take).toHaveBeenCalledWith(21);
+    expect(page.items).toHaveLength(20);
+    expect(page.items.every(item => item.documentCodes.length === 2)).toBe(true);
+    expect(JSON.parse(Buffer.from(page.nextCursor!, 'base64url').toString())).toEqual({
+      at: records[19].createdAt!.toISOString(), id: records[19].id,
+    });
+    await f.store.list({ cursor: page.nextCursor! }, 'owner');
+    expect(f.query.andWhere).toHaveBeenCalledWith('(c."createdAt", c.id) < (:at, :id)', {
+      at: records[19].createdAt!.toISOString(), id: records[19].id,
+    });
+  });
+});

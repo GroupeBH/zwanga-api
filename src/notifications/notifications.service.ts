@@ -1,6 +1,7 @@
 import { rideCardContent } from './ride-card-content';
+import { DRIVER_PAYMENT_NOTIFICATION_TYPE } from './driver-payment-notification';
 import { sequentialInvitationSql } from '../trip-requests/dispatch/sequential-policy';
-import { requestDriverVisibilitySql } from '../trip-requests/target-driver-policy';
+import { nearbyRequestDriverVisibilitySql } from '../trip-requests/request-proximity';
 import { sendBoundedFirebase } from './bounded-firebase-send';
 import { recoverUnacknowledgedRides } from './recover-unacknowledged-ride';
 import { nativeAndroidDriverPush } from './native-android-driver-push';
@@ -722,6 +723,15 @@ export class NotificationService implements OnModuleInit {
   private async publishRealtimeInvitation(notification: Notification): Promise<void> {
     if (!notification.userId || !notification.isActive ||
         !(await this.isCriticalNotificationStillDeliverable(notification))) return;
+    if (notification.data?.role === 'driver' &&
+        [DRIVER_PAYMENT_NOTIFICATION_TYPE, 'cash_payment_confirmed'].includes(notification.data?.type)) {
+      // A receipt is informational: never use the incoming-ride ringtone or require
+      // availability/KYC/subscription just to inform a driver of their own payment.
+      if (!this.rideAlerts?.publish(notification.userId, {
+        kind: 'payment', eventId: notification.id, bookingId: notification.data.bookingId,
+      })) throw new Error('Realtime transport unavailable');
+      return;
+    }
     const owner = await this.userRepository.findOne({ where: { id: notification.userId },
       select: ['id', 'role', 'isActive', 'status'] });
     if (!canReceiveDriverRequests(owner)) return;
@@ -975,7 +985,7 @@ export class NotificationService implements OnModuleInit {
       const rows: { passengerId: string }[] = await this.notificationRepository.manager.query(`SELECT r."passengerId" FROM trip_requests r
         WHERE r.id = $1 AND r.status IN ('pending', 'offers_received') AND r."selectedDriverId" IS NULL
           AND r."tripId" IS NULL AND r."departureDateMax" > now() AND r."passengerId" <> $2
-          AND ${requestDriverVisibilitySql('r.id', '$2')} AND ${sequentialInvitationSql('r.id', '$2')}
+          AND ${nearbyRequestDriverVisibilitySql('r.id', '$2')} AND ${sequentialInvitationSql('r.id', '$2')}
           AND (r."sequentialDispatch"=false OR EXISTS (SELECT 1 FROM trip_request_dispatch_offers active
             WHERE active."requestId"=r.id AND active."driverId"=$2 AND active.status='pending' AND active.phase='driver'))`,
         [notification.data?.tripRequestId ?? notification.data?.requestId, notification.userId]);
@@ -1001,7 +1011,7 @@ export class NotificationService implements OnModuleInit {
         AND o.status = 'pending' AND o.phase = 'driver' AND o."expiresAt" > clock_timestamp()
         AND r.status IN ('pending', 'offers_received') AND r."passengerId" <> $2
         AND r."selectedDriverId" IS NULL AND r."tripId" IS NULL AND r."departureDateMax" > now()
-        AND r."maxPricePerSeat" IS NOT NULL AND ${requestDriverVisibilitySql('r.id', '$2')}`,
+        AND r."maxPricePerSeat" IS NOT NULL AND ${nearbyRequestDriverVisibilitySql('r.id', '$2')}`,
         [notification.data?.offerId, notification.userId]);
       if (rows[0]?.passengerId) notification.data = { ...notification.data, passengerId: rows[0].passengerId };
       return rows.length > 0;
@@ -1372,6 +1382,19 @@ export class NotificationService implements OnModuleInit {
   }
 
   // ==================== Notification Retrieval ====================
+
+  async findDriverPayments(userId: string) {
+    // Existing user/read and user/date indexes bound this per-account inbox.
+    // Reading/acknowledging does not depend on successful push delivery.
+    const rows = await this.notificationRepository.createQueryBuilder('n')
+      .where('n."userId" = :userId', { userId })
+      .andWhere('n."isRead" = false AND n."isActive" = true')
+      .andWhere("n.data ->> 'role' = 'driver'")
+      .andWhere("n.data ->> 'driverId' = CAST(:userId AS text) AND n.data ? 'tripId'", { userId })
+      .andWhere("n.data ->> 'type' IN (:...types)", { types: [DRIVER_PAYMENT_NOTIFICATION_TYPE, 'cash_payment_confirmed'] })
+      .orderBy('n.createdAt', 'ASC').addOrderBy('n.id', 'ASC').take(20).getMany();
+    return { userId, notices: rows.map(row => ({ ...row.data, notificationId: row.id, createdAt: row.createdAt })) };
+  }
 
   async findAllByUser(
     userId: string,

@@ -14,7 +14,8 @@ function fixture() {
   const passenger = Object.assign(new User(), { id: 'passenger', firstName: 'Passager', lastName: 'Test', phone: '+243999000111', email: 'private@example.invalid' });
   const request = Object.assign(new TripRequest(), { id: 'request', passengerId: passenger.id, passenger,
     status: TripRequestStatus.PENDING, departureDateMax: new Date(Date.now() + 60_000), driverOffers: [] });
-  const requests = { findOne: jest.fn().mockResolvedValue(request), update: jest.fn() };
+  const requests = { findOne: jest.fn().mockResolvedValue(request), update: jest.fn(),
+    manager: { query: jest.fn(async (sql: string) => sql.includes('ST_DWithin') ? [{ allowed: 1 }] : []) } };
   const identity = { findOne: jest.fn().mockResolvedValue({ status: KycStatus.APPROVED }) };
   const vehicles = { exists: jest.fn().mockResolvedValue(true) };
   const users = { findOne: jest.fn().mockResolvedValue(driver), manager: { getRepository: jest.fn(entity => entity === KycDocument ? identity : vehicles) } };
@@ -24,6 +25,12 @@ function fixture() {
 }
 
 describe('Explicit passenger contact before request acceptance', () => {
+  it('does not disclose the contact when the driver is outside the pickup radius or has no location', async () => {
+    const f = fixture(); f.requests.manager.query.mockResolvedValue([]);
+    await expect(f.service.getPassengerContact('request', 'driver')).rejects.toBeInstanceOf(NotFoundException);
+    expect(f.requests.manager.query).toHaveBeenLastCalledWith(expect.stringContaining('ST_DWithin'), ['request', 'driver']);
+    expect(f.requests.update).not.toHaveBeenCalled();
+  });
   it('returns only the authorized contact and deadline without accepting, expiring or starting a trip', async () => {
     const f = fixture();
     const result = await f.service.getPassengerContact('request', 'driver');
@@ -89,23 +96,20 @@ describe('Explicit passenger contact before request acceptance', () => {
     await expect(f.service.getPassengerContact('request', 'driver')).rejects.toBeInstanceOf(NotFoundException);
   });
 
-  it('limits immediate requests to the active offer recipient and the offer deadline', async () => {
+  it('allows an available immediate request without any attention invitation', async () => {
     const f = fixture(); f.request.immediateDispatch = true;
-    const expiresAt = new Date(Date.now() + 10_000);
-    f.dispatch.getContactDeadline.mockResolvedValue(expiresAt);
+    f.dispatch.getContactDeadline.mockResolvedValue(null);
     const result = await f.service.getPassengerContact('request', 'driver');
-    expect(result.expiresAt).toBe(expiresAt.toISOString());
-    expect(f.dispatch.getContactDeadline).toHaveBeenCalledWith('driver', 'request');
-    f.dispatch.getContactDeadline.mockResolvedValueOnce(null);
-    await expect(f.service.getPassengerContact('request', 'driver')).rejects.toBeInstanceOf(NotFoundException);
-    f.dispatch.getContactDeadline.mockResolvedValueOnce(new Date(Date.now() - 1));
-    await expect(f.service.getPassengerContact('request', 'driver')).rejects.toBeInstanceOf(NotFoundException);
+    expect(result.expiresAt).toBe(new Date(f.request.departureDateMax.getTime() + 3 * 60 * 60_000).toISOString());
+    expect(f.dispatch.getContactDeadline).not.toHaveBeenCalled();
+    expect(f.requests.update).not.toHaveBeenCalled();
   });
 
-  it('does not extend an offer or access an unallocated immediate request', async () => {
-    const f = fixture(); f.request.immediateDispatch = true; f.dispatch.getContactDeadline.mockResolvedValue(null);
+  it('denies a personally refused request or a request targeted at another driver', async () => {
+    const f = fixture(); f.requests.manager.query.mockResolvedValue([{ allowed: 1 }]);
     await expect(f.service.getPassengerContact('request', 'driver')).rejects.toBeInstanceOf(NotFoundException);
-    expect(f.requests.update).not.toHaveBeenCalled();
+    f.requests.manager.query.mockResolvedValue([]); f.request.targetDriverId = 'another';
+    await expect(f.service.getPassengerContact('request', 'driver')).rejects.toBeInstanceOf(NotFoundException);
   });
 });
 

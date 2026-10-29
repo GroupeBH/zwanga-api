@@ -1,6 +1,9 @@
 import { RequestResponsePhases1780000098000 } from '../../database/migrations/1780000098000-RequestResponsePhases';
 import { SequentialRequestQueue1780000097000 } from '../../database/migrations/1780000097000-SequentialRequestQueue';
 import { findDriverChoices, validateTargetDriver } from '../driver-choices';
+import { assertRequestDriverProximity } from '../request-proximity';
+import { sequentialCandidates, lockNextQueuedCandidate } from './sequential-candidates';
+import { Trip, TripStatus } from '../../trips/entities/trip.entity';
 import { requestSearchMap } from '../request-search-map';
 import { TargetTripRequestDriver1780000096000 } from '../../database/migrations/1780000096000-TargetTripRequestDriver';
 import { SharedTripOffersService } from '../shared-trip-offers.service';
@@ -340,6 +343,93 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     return edits;
   };
 
+  const browsing = () => {
+    const edits = editor(); (edits.findOne as jest.Mock).mockRestore();
+    jest.spyOn(edits as any, 'sanitizeTripRequest').mockImplementation(async value => value);
+    return edits;
+  };
+
+  it('hides Kinshasa requests from Kisangani across legacy lists, pages, detail, contact and direct acceptance', async () => {
+    const d = await driver(), r = await request(false), edits = browsing();
+    await source.getRepository(TripRequest).update(r.id, { createdAt: new Date('2026-01-01T00:00:00Z') });
+    await source.query(`UPDATE driver_dispatch_presence SET position = ST_SetSRID(ST_MakePoint(25.2,0.52),4326)::geography WHERE "driverId" = $1`, [d.user.id]);
+    expect(await edits.findAll(d.user.id)).toHaveLength(0);
+    expect(await edits.findRequestPage(d.user.id, false, {})).toMatchObject({ data: [], total: 0 });
+    await expect(edits.findOne(r.id, d.user.id)).rejects.toMatchObject({ status: 404 });
+    await expect(edits.getPassengerContact(r.id, d.user.id)).rejects.toMatchObject({ status: 404 });
+    await expect(edits.acceptTripRequest(d.user.id, r.id, {})).rejects.toMatchObject({ status: 404 });
+    expect(await edits.findOne(r.id, r.passengerId)).toMatchObject({ id: r.id });
+    expect((await edits.findRequestPage(r.passengerId, true, {})).data).toHaveLength(1);
+    // Moving after acceptance must not hide an existing assignment or its history.
+    await source.getRepository(TripRequest).update(r.id, { status: TripRequestStatus.DRIVER_SELECTED, selectedDriverId: d.user.id, selectedAt: new Date() });
+    expect(await edits.findOne(r.id, d.user.id)).toMatchObject({ id: r.id });
+  });
+
+  it('enforces the 5 km boundary with durable old positions and fails closed without a usable position', async () => {
+    const d = await driver(), r = await request(false), edits = browsing();
+    await source.getRepository(TripRequest).update(r.id, { createdAt: new Date('2026-01-01T00:00:00Z') });
+    for (const [distance, count] of [[4999, 1], [5001, 0]]) {
+      await source.query(`UPDATE driver_dispatch_presence SET position = ST_Project(
+        ST_SetSRID(ST_MakePoint(15.31,-4.3),4326)::geography, $2::double precision, 0::double precision),
+        "updatedAt" = now() - interval '30 days', "expiresAt" = now() - interval '29 days' WHERE "driverId" = $1`, [d.user.id, distance]);
+      expect(await edits.findAll(d.user.id)).toHaveLength(count);
+      const page = await edits.findRequestPage(d.user.id, false, {});
+      expect(page.data).toHaveLength(count); expect(page.total).toBe(count);
+    }
+    await source.query(`UPDATE driver_dispatch_presence SET position = ST_SetSRID(ST_MakePoint(15.31,-4.3),4326)::geography,
+      "discoveryEnabled" = false WHERE "driverId" = $1`, [d.user.id]);
+    expect(await edits.findAll(d.user.id)).toHaveLength(0);
+    await source.query('DELETE FROM driver_dispatch_presence WHERE "driverId" = $1', [d.user.id]);
+    expect(await edits.findAll(d.user.id)).toHaveLength(0);
+    await expect(assertRequestDriverProximity(source.manager, r.id, d.user.id)).rejects.toMatchObject({ status: 404 });
+  });
+
+  it('uses the newest known location rather than allowing an older nearby location to bypass the radius', async () => {
+    const d = await driver(), r = await request(false), edits = browsing();
+    await source.query(`UPDATE driver_dispatch_presence SET "updatedAt" = now() - interval '1 hour' WHERE "driverId" = $1`, [d.user.id]);
+    const trip = await source.getRepository(Trip).save({ driverId: d.user.id, vehicleId: d.vehicle.id, status: TripStatus.ACTIVE,
+      departureLocation: 'Test', arrivalLocation: 'Test', departureDate: new Date(), availableSeats: 2, totalSeats: 4, pricePerSeat: 1000,
+      currentLocation: { type: 'Point', coordinates: [25.2, 0.52] }, lastLocationUpdateAt: new Date() });
+    expect(await edits.findAll(d.user.id)).toHaveLength(0);
+    await source.getRepository(Trip).update(trip.id, { currentLocation: r.departurePoint });
+    expect(await edits.findAll(d.user.id)).toHaveLength(1);
+    await source.query(`UPDATE driver_dispatch_presence SET "updatedAt" = now() + interval '1 second',
+      position = ST_SetSRID(ST_MakePoint(25.2,0.52),4326)::geography WHERE "driverId" = $1`, [d.user.id]);
+    expect(await edits.findAll(d.user.id)).toHaveLength(0);
+    expect(await sequentialCandidates(source.manager, r)).toHaveLength(0);
+  });
+
+  it('rechecks queued candidates and pending push delivery when the driver leaves the pickup radius', async () => {
+    const d = await driver(), r = await request();
+    expect((await sequentialCandidates(source.manager, r)).map(c => c.driverId)).toEqual([d.user.id]);
+    await source.query(`UPDATE driver_dispatch_presence SET position = ST_SetSRID(ST_MakePoint(25.2,0.52),4326)::geography WHERE "driverId" = $1`, [d.user.id]);
+    await source.transaction(async manager => {
+      expect(await lockNextQueuedCandidate(manager, r, [d.user.id])).toEqual({ driverId: d.user.id, candidate: null });
+    });
+    await source.query(`UPDATE driver_dispatch_presence SET position = ST_SetSRID(ST_MakePoint(15.31,-4.3),4326)::geography WHERE "driverId" = $1`, [d.user.id]);
+    await service.tick(); const [offer] = await offers(r.id);
+    const notification = await source.getRepository(Notification).findOneByOrFail({ eventKey: `dispatch-offer:${offer.id}` });
+    const delivery = new NotificationService(new ConfigService({ DRIVER_DISPATCH_ENABLED: 'true' }),
+      source.getRepository(Notification), source.getRepository(User), source.getRepository(TripRequest));
+    expect(await delivery['isCriticalNotificationStillDeliverable'](notification)).toBe(true);
+    await source.query(`UPDATE driver_dispatch_presence SET position = ST_SetSRID(ST_MakePoint(25.2,0.52),4326)::geography WHERE "driverId" = $1`, [d.user.id]);
+    expect(await delivery['isCriticalNotificationStillDeliverable'](notification)).toBe(false);
+    expect((await service.status(d.user.id)).pendingOfferId).toBeNull();
+    await expect(service.getOffer(d.user.id, offer.id)).rejects.toMatchObject({ status: 404 });
+    await expect(service.respond(d.user.id, offer.id, 'accept')).rejects.toMatchObject({ status: 404 });
+    expect((await source.getRepository(TripRequest).findOneByOrFail({ id: r.id })).selectedDriverId).toBeNull();
+  });
+
+  it('does not broadcast legacy request notifications nationwide', async () => {
+    const near = await driver(), far = await driver(25.2), r = await request(false), edits = editor();
+    const sendToMultiple = jest.fn().mockResolvedValue(undefined);
+    (edits as any).notificationService = { sendToMultiple };
+    await edits['notifyDriversAboutTripRequest'](r);
+    expect(sendToMultiple).toHaveBeenCalledTimes(1);
+    expect(sendToMultiple.mock.calls[0][4]).toEqual([near.user.id]);
+    expect(sendToMultiple.mock.calls[0][0]).not.toContain(far.user.fcmToken);
+  });
+
 
   it('request map shows each last-known position, including older ones, without exposing account identifiers', async () => {
     const first = await driver(15.311), second = await driver(15.3115), far = await driver(15.8), stale = await driver(15.32);
@@ -384,26 +474,32 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
   });
 
 
-  it('target choice searches nearby or a known driver without exposing private contact/location data', async () => {
+  it('target choice searches only nearby drivers, including name/ID searches, without exposing private contact/location data', async () => {
     const near = await driver(), far = await driver(15.8), owner = await passenger();
     await source.getRepository(User).update(far.user.id, { firstName: 'Known', lastName: 'Driver' });
     const query = { latitude: -4.3, longitude: 15.31, vehicleType: VehicleType.CAR, seats: 1 };
     const nearby = await findDriverChoices(source.manager, owner.id, query);
     expect(nearby.map(d => d.id)).toEqual([near.user.id]);
     expect(Object.keys(nearby[0]).sort()).toEqual(['distanceKm', 'id', 'name', 'vehicle']);
-    expect((await findDriverChoices(source.manager, owner.id, { ...query, search: 'Known' })).map(d => d.id)).toEqual([far.user.id]);
-    expect((await findDriverChoices(source.manager, owner.id, { ...query, search: far.user.id })).map(d => d.id)).toEqual([far.user.id]);
+    expect(await findDriverChoices(source.manager, owner.id, { ...query, search: 'Known' })).toEqual([]);
+    expect(await findDriverChoices(source.manager, owner.id, { ...query, search: far.user.id })).toEqual([]);
     expect(await findDriverChoices(source.manager, near.user.id, query)).toEqual([]);
     expect(await findDriverChoices(source.manager, owner.id, { ...query, search: "%' OR 1=1--" })).toEqual([]);
-    await expect(validateTargetDriver(source.manager, owner.id, far.user.id, query)).resolves.toBeUndefined();
+    await expect(validateTargetDriver(source.manager, owner.id, far.user.id, query)).rejects.toThrow();
+    await expect(validateTargetDriver(source.manager, owner.id, near.user.id, query)).resolves.toBeUndefined();
     await expect(validateTargetDriver(source.manager, near.user.id, near.user.id, query)).rejects.toThrow();
     await expect(validateTargetDriver(source.manager, owner.id, randomUUID(), query)).rejects.toThrow();
     await expect(validateTargetDriver(source.manager, owner.id, near.user.id, { ...query, seats: 5 })).rejects.toThrow();
   });
 
-  it.each([true, false])('targets only the chosen driver, even outside the default radius (immediate=%s)', async immediate => {
+  it.each([true, false])('targets only the chosen driver within 5 km (immediate=%s)', async immediate => {
     const chosen = await driver(15.8), other = await driver(), r = await request(immediate);
     await source.getRepository(TripRequest).update(r.id, { targetDriverId: chosen.user.id });
+    if (immediate) await service.tick(); else await service.notifyScheduledRequest(r.id);
+    expect(await offers(r.id)).toHaveLength(0);
+    expect(await source.query(`SELECT id FROM notifications WHERE data ->> 'tripRequestId' = $1`, [r.id])).toHaveLength(0);
+    expect(await sequentialCandidates(source.manager, { ...r, targetDriverId: chosen.user.id })).toHaveLength(0);
+    await source.query(`UPDATE driver_dispatch_presence SET position = ST_SetSRID(ST_MakePoint(15.311,-4.3),4326)::geography WHERE "driverId" = $1`, [chosen.user.id]);
     if (immediate) {
       await service.tick();
       expect((await offers(r.id)).map(o => o.driverId)).toEqual([chosen.user.id]);

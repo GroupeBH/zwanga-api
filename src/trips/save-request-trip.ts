@@ -1,5 +1,7 @@
 import { assertSequentialInvitation } from '../trip-requests/dispatch/sequential-policy';
 import { assertRequestTarget } from '../trip-requests/target-driver-policy';
+import { assertRequestDriverProximity } from '../trip-requests/request-proximity';
+import { hasRefusedRequest } from '../trip-requests/request-refusal';
 import { ConflictException } from '@nestjs/common';
 import { In, Repository } from 'typeorm';
 import { Trip, TripStatus } from './entities/trip.entity';
@@ -28,7 +30,10 @@ export function saveRequestTrip(
     assertRequestSnapshot(request, snapshot);
     assertUnassignedRequest(request!);
     assertRequestTarget(request!, trip.driverId);
+    if (await hasRefusedRequest(manager, trip.driverId, request!.id))
+      throw new ConflictException('Vous avez refusé cette demande.');
     await assertSequentialInvitation(manager, request!, trip.driverId, acceptanceToken ? ['accepting'] : ['driver'], acceptanceToken);
+    await assertRequestDriverProximity(manager, request!.id, trip.driverId);
     const trips = manager.getRepository(Trip);
     if (
       (await trips.exists({

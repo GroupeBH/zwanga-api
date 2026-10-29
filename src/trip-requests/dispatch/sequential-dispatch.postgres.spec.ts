@@ -1,4 +1,6 @@
 import { sequentialMobileFlow } from '../../../test/sequential-mobile-flow';
+import { availableRequestFlow } from '../../../test/available-request-flow';
+import { SeparateRequestAttentionLease1780000101000 } from '../../database/migrations/1780000101000-SeparateRequestAttentionLease';
 import { seedDispatchNotificationHistory } from '../../../test/notification-history';
 import { IndexRequestNotificationRetirement1780000099000 } from '../../database/migrations/1780000099000-IndexRequestNotificationRetirement';
 import { retireRequestInvitations, RETIRE_COUNTEROFFER_NOTIFICATIONS_SQL, RETIRE_REQUEST_NOTIFICATIONS_SQL } from './retire-request-invitations';
@@ -71,7 +73,7 @@ const redisPort = Number(process.env.DISPATCH_TEST_REDIS_PORT);
     execFileSync(executable('pg_ctl'), ['-D', directory, '-l', join(directory, 'postgres.log'), '-o', postgresTestServerOptions(port), '-w', 'start'],
       { windowsHide: true, stdio: 'ignore', timeout: 30000 }); started = true;
     db = new DataSource({ type: 'postgres', host: '127.0.0.1', port, username: 'dispatch_test', database: 'postgres',
-      entities: typeOrmEntities, synchronize: false });
+      entities: typeOrmEntities, synchronize: false, extra: { options: '-c timezone=UTC' } });
     await db.initialize(); await db.query('CREATE EXTENSION IF NOT EXISTS postgis'); await db.synchronize();
     await db.query('ALTER TABLE trip_requests DROP COLUMN "immediateDispatch", DROP COLUMN "sequentialDispatch"');
     const runner = db.createQueryRunner();
@@ -80,7 +82,7 @@ const redisPort = Number(process.env.DISPATCH_TEST_REDIS_PORT);
         new RetainDriverLastLocation1780000076000(), new NearbyRequestRingingCooldown1780000087000(),
         new RememberDriverRequestRefusals1780000095000(), new DispatchDeliveryResilience1780000088000(),
         new SequentialRequestQueue1780000097000(), new RequestResponsePhases1780000098000(),
-        new IndexRequestNotificationRetirement1780000099000()]) await migration.up(runner);
+        new IndexRequestNotificationRetirement1780000099000(), new SeparateRequestAttentionLease1780000101000()]) await migration.up(runner);
     } finally { await runner.release(); }
     redis = createClient({ socket: { host: '127.0.0.1', port: redisPort, connectTimeout: 3000, reconnectStrategy: false },
       password: process.env.DISPATCH_TEST_REDIS_PASSWORD });
@@ -93,7 +95,7 @@ const redisPort = Number(process.env.DISPATCH_TEST_REDIS_PORT);
     await db.query('TRUNCATE users CASCADE'); jest.clearAllMocks();
     relay = new SequentialDispatchService(db, config, queue, notifications as never, changes as never);
     dispatch = new DriverDispatchService(db, config, notifications as never, changes as never, relay);
-  });
+  }, 30000); // TRUNCATE cascades through the disposable schema; allow slow Windows test disks.
   afterEach(async () => { jest.restoreAllMocks(); for (const id of ids.splice(0)) await queue.close(id); });
   afterAll(async () => {
     try { if (redis?.isOpen) await redis.disconnect(); if (db?.isInitialized) await db.destroy(); }
@@ -125,6 +127,7 @@ const redisPort = Number(process.env.DISPATCH_TEST_REDIS_PORT);
   const privateTrip = (r: TripRequest, driverId: string) => db.getRepository(Trip).create({ driverId, tripRequestId: r.id,
     isPrivate: true, departureLocation: r.departureLocation, arrivalLocation: r.arrivalLocation,
     departureDate: r.departureDateMin, totalSeats: 4, availableSeats: 4, pricePerSeat: 1000 });
+  availableRequestFlow(() => ({ db, relay, dispatch, driver, request, offers }));
   const sharedFixture = async (immediate = false) => {
     const first = await driver(), second = await driver(15.311), r = await request(immediate);
     const vehicle = await db.getRepository(Vehicle).findOneByOrFail({ ownerId: first.id });
@@ -184,7 +187,9 @@ const redisPort = Number(process.env.DISPATCH_TEST_REDIS_PORT);
   it.each(['full', 'far', 'offline', 'wrong-vehicle', 'price', 'scheduled-later'])('skips an incompatible shared driver (%s)', async reason => {
     const { first, second, r, trip, vehicle } = await sharedFixture();
     if (reason === 'full') await db.getRepository(Trip).update(trip.id, { availableSeats: 0 });
-    if (reason === 'far') await db.getRepository(Trip).update(trip.id, { currentLocation: { type: 'Point', coordinates: [16.3, -4.3] } });
+    if (reason === 'far') await db.getRepository(Trip).update(trip.id, {
+      currentLocation: { type: 'Point', coordinates: [16.3, -4.3] }, lastLocationUpdateAt: new Date(),
+    });
     if (reason === 'offline') await db.query('UPDATE driver_dispatch_presence SET "discoveryEnabled"=false WHERE "driverId"=$1', [first.id]);
     if (reason === 'wrong-vehicle') await db.getRepository(Vehicle).update(vehicle.id, { type: VehicleType.MOTORCYCLE_TWO_WHEELS });
     if (reason === 'price') await db.getRepository(Trip).update(trip.id, { pricePerSeat: 2000 });
@@ -399,7 +404,7 @@ const redisPort = Number(process.env.DISPATCH_TEST_REDIS_PORT);
       expect((await offers(r.id)).map(o => o.status)).toEqual(['declined','pending']);
     } finally { await app.close(); }
   });
-  it('an invitation to a different request cannot grant read access', async () => {
+  it('an invitation to a different request cannot grant notification eligibility', async () => {
     const first = await driver(), second = await driver(15.311);
     const a = await request(false, first.id), b = await request(false, second.id);
     await relay.advance(a.id); await relay.advance(b.id);

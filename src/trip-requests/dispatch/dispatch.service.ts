@@ -1,6 +1,7 @@
 import { SequentialDispatchService } from './sequential-dispatch.service';
 import { assertSequentialInvitation } from './sequential-policy';
 import { assertRequestTarget } from '../target-driver-policy';
+import { assertRequestDriverProximity, requestDriverProximitySql } from '../request-proximity';
 import { recordRequestRefusal } from '../request-refusal';
 import { requestDriverVisibilitySql } from '../target-driver-policy';
 import { recordRideNotificationReceipt } from '../../notifications/ride-notification-receipt';
@@ -29,7 +30,7 @@ import { acknowledgeNearbyRequest, declineNearbyRequest } from '../../notificati
 
 interface DispatchOffer {
   id: string; requestId: string; driverId: string; vehicleId: string;
-  seats: number; status: string; expiresAt: Date;
+  seats: number; status: string; expiresAt: Date; phase?: 'driver' | 'passenger' | 'accepting';
 }
 
 @Injectable()
@@ -85,7 +86,8 @@ export class DriverDispatchService {
     const [offer] = await this.db.query(`SELECT o.id FROM trip_request_dispatch_offers o
       JOIN trip_requests r ON r.id = o."requestId"
       WHERE o."driverId" = $1 AND o.status = 'pending' AND o."expiresAt" > now()
-      AND r.status = 'pending' LIMIT 1`, [driverId]);
+      AND COALESCE(to_jsonb(o)->>'phase','driver')='driver'
+      AND r.status = 'pending' AND ${requestDriverProximitySql('r.id', '$1')} LIMIT 1`, [driverId]);
     const available = Boolean(presence) && !(await this.isBusy(this.db.manager, driverId));
     return { enabled: true, available, presence: presence ?? null,
       pendingOfferId: offer?.id ?? null, responseSeconds: this.responseSeconds,
@@ -197,10 +199,13 @@ export class DriverDispatchService {
     const request = await this.db.getRepository(TripRequest).findOne({ where: { id: offer.requestId }, relations: ['passenger'] });
     if (!request) throw new NotFoundException('Commande introuvable.');
     assertRequestTarget(request, driverId);
+    if (!request.selectedDriverId && !request.tripId &&
+        [TripRequestStatus.PENDING, TripRequestStatus.OFFERS_RECEIVED].includes(request.status))
+      await assertRequestDriverProximity(this.db.manager, request.id, driverId);
     const vehicle = await this.db.getRepository(Vehicle).findOneBy({ id: offer.vehicleId, ownerId: driverId });
     return { ...offer, serverNow: new Date().toISOString(),
       vehicleName: vehicle ? `${vehicle.brand} ${vehicle.model}` : null,
-      actionable: this.enabled && !request.selectedDriverId && !request.tripId &&
+      actionable: this.enabled && (!offer.phase || offer.phase === 'driver') && !request.selectedDriverId && !request.tripId &&
         request.departureDateMax.getTime() > Date.now() && request.maxPricePerSeat !== null &&
         dispatchOfferIsActionable(offer.status, offer.expiresAt, request.status),
       request: { id: request.id, passengerName: request.passenger.firstName,
@@ -231,6 +236,7 @@ export class DriverDispatchService {
       if (decision === 'accept') {
         // A prior driver's quick-action button cannot bypass the passenger consent phase.
         await assertSequentialInvitation(manager, request, driverId);
+        await assertRequestDriverProximity(manager, request.id, driverId);
         const [presence] = await manager.query(`SELECT * FROM driver_dispatch_presence WHERE "driverId" = $1 FOR UPDATE`, [driverId]);
         if (!hasUsableDriverLocation(presence) || presence.vehicleId !== offer.vehicleId)
           throw new ConflictException('Votre position ou votre véhicule ne sont plus valides. Rouvrez l’application pour actualiser votre position.');
@@ -385,8 +391,7 @@ export class DriverDispatchService {
       WHERE ${USABLE_DRIVER_LOCATION_SQL} AND p."driverId" <> $1::uuid
       AND (CASE WHEN v.id = p."vehicleId" THEN p.seats WHEN v.type = 'motorcycle_2_wheels' THEN 2
         WHEN v.type = 'motorcycle_3_wheels' THEN 3 ELSE 4 END) >= $3
-      AND (EXISTS (SELECT 1 FROM trip_requests target WHERE target.id = $7 AND target."targetDriverId" = p."driverId")
-        OR ST_DWithin(p.position, ST_SetSRID(ST_MakePoint($4,$5),4326)::geography, $6))
+      AND ST_DWithin(p.position, ST_SetSRID(ST_MakePoint($4,$5),4326)::geography, $6)
       AND ${requestDriverVisibilitySql('$7', 'p."driverId"')}
       AND ${ELIGIBLE_NEARBY_DRIVER_SQL}
       AND NOT EXISTS (SELECT 1 FROM trip_request_dispatch_offers o

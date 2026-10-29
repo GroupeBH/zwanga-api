@@ -2,6 +2,7 @@ import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { Booking, BookingStatus } from '../bookings/entities/booking.entity';
 import { Trip } from '../trips/entities/trip.entity';
 import { rideSpeechData } from './ride-speech-data';
+import { enqueueDriverPayment } from './driver-payment-notification';
 import {
   DataSource,
   EntitySubscriberInterface,
@@ -89,6 +90,16 @@ export class TransactionalNotificationsSubscriber
   }
 
   beforeUpdate(event: UpdateEvent<unknown>): void {
+    if (event.metadata.target === Booking) {
+      const next = event.entity as Partial<Booking> | undefined;
+      const previous = event.databaseEntity as Partial<Booking> | undefined;
+      const receiptChanged = next && ((next.paymentStatus === 'succeeded' && previous?.paymentStatus !== 'succeeded') ||
+        (next.mixedPaymentAt && !previous?.mixedPaymentAt));
+      if (receiptChanged && (!previous || !event.queryRunner.isTransactionActive)) {
+        throw new Error('Booking payment receipts require transactional save() with the previous entity');
+      }
+      return;
+    }
     if (!UPDATE_TARGETS.has(event.metadata.target)) return;
     const next = event.entity as
       { status?: string; recoveryBlocked?: boolean } | undefined;
@@ -109,6 +120,11 @@ export class TransactionalNotificationsSubscriber
   }
 
   async afterUpdate(event: UpdateEvent<unknown>): Promise<void> {
+    if (event.metadata.target === Booking) {
+      const booking = { ...(event.databaseEntity as object), ...(event.entity as object) } as Booking;
+      await enqueueDriverPayment(event.manager, booking, event.databaseEntity as Booking);
+      return;
+    }
     // Ledger rows are immutable; updates to technical fields do not create events.
     if (!UPDATE_TARGETS.has(event.metadata.target)) return;
     const next = event.entity as

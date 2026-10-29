@@ -52,7 +52,7 @@ async function main() {
   );
   const child = spawn(process.execPath, [join(root, 'node_modules/jest/bin/jest.js'), '--runInBand', ...suites], {
     cwd: root, windowsHide: true, stdio: 'inherit', env: minimalEnvironment({
-      NODE_ENV: 'test', AWS_EC2_METADATA_DISABLED: 'true',
+      NODE_ENV: 'test', TZ: 'UTC', AWS_EC2_METADATA_DISABLED: 'true',
       DISPATCH_TEST_POSTGRES_BIN: pgBin, DISPATCH_TEST_REDIS_PORT: String(port),
       DISPATCH_TEST_REDIS_PASSWORD: password,
       ...(process.env.DISPATCH_TEST_LOAD === '1' ? { DISPATCH_TEST_LOAD: '1' } : {}),
