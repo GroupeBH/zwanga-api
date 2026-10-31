@@ -1,0 +1,12 @@
+[Unit]
+Description=Mobishastra proxy local health heartbeat (no SMS)
+After=network-online.target squid.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/zwanga-mobishastra-proxy/health.py
+TimeoutStartSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true

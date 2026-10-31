@@ -6,7 +6,7 @@ import { assertDriverRequestSchedule } from '../trip-requests/dispatch/driver-sc
 import { ConflictException } from '@nestjs/common';
 import { In, Repository } from 'typeorm';
 import { Trip, TripStatus } from './entities/trip.entity';
-import { TripRequest } from '../trip-requests/entities/trip-request.entity';
+import { TripRequest, TripRequestStatus } from '../trip-requests/entities/trip-request.entity';
 import {
   DriverOffer,
   DriverOfferStatus,
@@ -29,10 +29,22 @@ export function saveRequestTrip(
       lock: { mode: 'pessimistic_write' },
     });
     assertRequestSnapshot(request, snapshot);
+    // Starting a previously accepted counteroffer must be fenced against a
+    // passenger changing driver while route preparation was still in flight.
+    if (request!.status === TripRequestStatus.DRIVER_SELECTED) {
+      if (request!.selectedDriverId !== trip.driverId || request!.tripId ||
+          !(await manager.exists(DriverOffer, { where: {
+            tripRequestId: snapshot.id, driverId: trip.driverId, status: DriverOfferStatus.ACCEPTED,
+          } })) || await manager.exists(Trip, { where: {
+            tripRequestId: snapshot.id, status: In([TripStatus.PENDING, TripStatus.ACTIVE, TripStatus.COMPLETED]),
+          } })) throw new ConflictException('Cette prise en charge a changé. Actualisez la commande.');
+      await assertDriverRequestSchedule(manager, trip.driverId, request!.id);
+      return manager.save(Trip, trip);
+    }
     assertUnassignedRequest(request!);
     assertRequestTarget(request!, trip.driverId);
     if (await hasRefusedRequest(manager, trip.driverId, request!.id))
-      throw new ConflictException('Vous avez refusé cette demande.');
+      throw new ConflictException('Cette demande n’est plus disponible pour vous.');
     await assertSequentialInvitation(manager, request!, trip.driverId, acceptanceToken ? ['accepting'] : ['driver'], acceptanceToken);
     await assertRequestDriverProximity(manager, request!.id, trip.driverId);
     const trips = manager.getRepository(Trip);

@@ -2345,6 +2345,37 @@ export class BookingsService implements OnModuleInit {
     );
   }
 
+  /** Internal only: request, booking and trip locks are held by the caller.
+   * Never sends money or performs external I/O inside the reassignment transaction. */
+  async cancelUnpaidBookingForDriverChange(manager: EntityManager, booking: Booking, trip: Trip): Promise<void> {
+    if (![BookingStatus.PENDING, BookingStatus.ACCEPTED].includes(booking.status) ||
+        booking.pickedUp || booking.pickedUpAt || booking.pickedUpConfirmedByPassenger ||
+        booking.pickedUpConfirmedAt || booking.droppedOff || booking.droppedOffAt ||
+        Object.keys(booking.rideDeclarations ?? {}).length || booking.rideEffectsPending?.length) {
+      throw new ConflictException({ code: 'REQUEST_DRIVER_CHANGE_PICKUP_STARTED',
+        message: 'Impossible de changer de conducteur : une prise en charge est déjà déclarée. Contactez l’assistance en cas de problème.' });
+    }
+    // Include historical/failed attempts: a late provider success is still possible.
+    // An unpaid booking's PENDING status alone is not a payment attempt.
+    if (booking.paidAt || booking.cashReceivedAt || Number(booking.cashReceivedAmount) > 0 ||
+        booking.mixedPaymentAt || Number(booking.mixedTokenQuantity) > 0 || Number(booking.mixedTokenAmount) > 0 ||
+        booking.paymentTransactionId || booking.paymentReference ||
+        [BookingPaymentStatus.INITIATED, BookingPaymentStatus.SUCCEEDED].includes(booking.paymentStatus) ||
+        await manager.exists(PaymentTransaction, { where: { relatedEntityType: 'booking', relatedEntityId: booking.id } }) ||
+        await manager.exists(WalletLedgerEntry, { where: { relatedEntityType: 'booking', relatedEntityId: booking.id } })) {
+      throw new ConflictException({ code: 'REQUEST_DRIVER_CHANGE_PAYMENT_ENGAGED',
+        message: 'Un paiement a déjà été engagé pour cette réservation. Contactez l’assistance avant de changer de conducteur.' });
+    }
+    this.releaseFirstTripSubsidyReservation(booking, trip);
+    await manager.update(Booking, booking.id, {
+      id: booking.id, status: BookingStatus.CANCELLED, cancelledAt: new Date(),
+      grossPaymentAmount: booking.grossPaymentAmount, paymentAmount: booking.paymentAmount,
+      firstTripSubsidyApplied: booking.firstTripSubsidyApplied,
+      passengerPaymentRate: booking.passengerPaymentRate, zwangaSubsidyAmount: booking.zwangaSubsidyAmount,
+    });
+    await this.recalculateAvailableSeatsForTrip(trip.id, manager);
+  }
+
   async cancel(bookingId: string, userId: string): Promise<void> {
     this.logger.log(`Cancelling booking ${bookingId} by user ${userId}`);
 

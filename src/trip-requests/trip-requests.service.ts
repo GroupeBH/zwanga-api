@@ -1,9 +1,14 @@
 import { claimRequestAcceptance, completeRequestAcceptance, releaseRequestAcceptance, startPassengerDecision } from './dispatch/request-acceptance';
+import { changeRequestDriver } from './change-request-driver';
+import { ChangeRequestDriverDto } from './dto/change-request-driver.dto';
 import { assertSequentialInvitation } from './dispatch/sequential-policy';
 import { assertDriverRequestSchedule } from './dispatch/driver-schedule-policy';
 import { DriverChoiceQuery } from './dto/driver-choice.dto';
 import { findDriverChoices, validateTargetDriver } from './driver-choices';
 import { requestSearchMap } from './request-search-map';
+import { targetMapDriver } from './target-map-driver';
+import { TargetMapDriverDto } from './dto/target-map-driver.dto';
+import { retireRequestInvitations } from './dispatch/retire-request-invitations';
 import { assertRequestTarget } from './target-driver-policy';
 import { hasRefusedRequest } from './request-refusal';
 import { assertRequestDriverProximity, nearbyRequestDriverVisibilitySql } from './request-proximity';
@@ -130,6 +135,7 @@ export interface SanitizedTripRequest {
   responseWindow?: { phase: 'driver' | 'passenger' | 'accepting'; expiresAt: string; serverNow: string };
   targetDriverId?: string | null;
   targetDriverName?: string | null;
+  targetDriverPriorityUntil?: Date | null;
   targetDriverDeclined?: boolean;
 
   immediateDispatch: boolean;
@@ -349,6 +355,14 @@ export class TripRequestsService {
     return requestSearchMap(this.tripRequestRepository.manager, passengerId, requestId);
   }
 
+  async targetDriverFromMap(passengerId: string, id: string, dto: TargetMapDriverDto) {
+    if (!this.driverDispatch?.enabled) throw new ConflictException('Le choix sur la carte est momentanément indisponible. La recherche continue.');
+    await targetMapDriver(this.tripRequestRepository.manager, passengerId, id, dto);
+    void this.notificationService.dispatchUrgentNotifications().catch(() => this.logger.warn('Map driver push deferred to outbox recovery'));
+    await this.driverDispatch.notifyScheduledRequest(id).catch(() => this.logger.warn('Map driver deadline recovered by SQL scan'));
+    return this.findOne(id, passengerId);
+  }
+
   async driverChoices(passengerId: string, query: DriverChoiceQuery) {
     return findDriverChoices(this.tripRequestRepository.manager, passengerId, query);
   }
@@ -365,9 +379,14 @@ export class TripRequestsService {
       } });
       if (linked || await manager.getRepository(DriverOffer).exists({ where: { tripRequestId: id, status: DriverOfferStatus.ACCEPTED } }))
         throw new ConflictException('Une prise en charge existe déjà pour cette commande.');
-      // Only the audience expands: keep the chosen driver's pending invitation actionable.
+      if (request.targetDriverPriorityUntil) {
+        const responding = await manager.query(`SELECT 1 FROM trip_request_dispatch_offers WHERE "requestId"=$1 AND status='pending' AND phase<>'driver'`, [id]);
+        if (responding.length) throw new ConflictException('Un conducteur est en train de répondre. Actualisez la demande.');
+        await retireRequestInvitations(manager, id, true);
+      }
+      // Legacy exclusive requests retain their current invitation; map priority is ended explicitly.
       // Prices, dates, existing refusals and first-acceptance-wins remain unchanged.
-      await repository.update(id, { id, targetDriverId: null });
+      await repository.update(id, { id, status: request.status, targetDriverId: null, targetDriverPriorityUntil: null });
       return request.immediateDispatch;
     });
     if (this.driverDispatch?.enabled) {
@@ -1215,6 +1234,8 @@ export class TripRequestsService {
       const current = await requests.findOne({ where: { id: tripRequestId }, lock: { mode: 'pessimistic_write' } });
       assertRequestSnapshot(current, tripRequest);
       assertUnassignedRequest(current!);
+      if (await hasRefusedRequest(manager, driverId, current!.id))
+        throw new NotFoundException('Commande introuvable.');
       await assertSequentialInvitation(manager, current!, driverId);
       await assertRequestDriverProximity(manager, current!.id, driverId);
       const offers = manager.getRepository(DriverOffer);
@@ -1578,6 +1599,7 @@ export class TripRequestsService {
       {
         isPrivate: true, // Trajet privé par défaut
         tripRequestId: tripRequest.id,
+        requestSnapshot: tripRequest,
       },
     );
 
@@ -1591,6 +1613,21 @@ export class TripRequestsService {
         passengerDestination: tripRequest.arrivalLocation,
         passengerDestinationReference: tripRequest.arrivalReference || undefined,
         paymentMode: tripRequest.paymentMode,
+      }, {
+        lockRequest: async manager => {
+          await manager.findOne(TripRequest, { where: { id: tripRequestId }, lock: { mode: 'pessimistic_write' } });
+        },
+        validate: async (manager, currentTrip) => {
+          const current = await manager.findOneByOrFail(TripRequest, { id: tripRequestId });
+          assertRequestSnapshot(current, tripRequest);
+          if (current.selectedDriverId !== driverId || current.status !== TripRequestStatus.DRIVER_SELECTED ||
+              currentTrip.tripRequestId !== tripRequestId || currentTrip.driverId !== driverId)
+            throw new ConflictException('Cette prise en charge a changé. Actualisez la commande.');
+        },
+        selected: async manager => {
+          const current = await manager.findOneByOrFail(TripRequest, { id: tripRequestId });
+          await completeRequestAcceptance(manager, current, await manager.findOneByOrFail(Trip, { id: trip.id }));
+        },
       });
     } catch (error) {
       // A failed booking must not leave an empty upcoming trip on the driver's Home.
@@ -1603,22 +1640,8 @@ export class TripRequestsService {
       throw error;
     }
 
-    // Accept the booking automatically
-    const bookings = await this.bookingsService.findAllByTrip(
-      trip.id,
-      driverId,
-    );
-    const passengerBooking = bookings.find(
-      (b) => b.passengerId === tripRequest.passengerId,
-    );
-    if (passengerBooking) {
-      await this.bookingsService.acceptBooking(passengerBooking.id, driverId);
-    }
-
-    // Update trip request with tripId
-    tripRequest.tripId = trip.id;
-    await this.tripRequestRepository.save(tripRequest);
-
+    // Booking acceptance and request linkage committed together above. Never
+    // save the old request snapshot here after a concurrent driver change.
     // Start the trip
     const startedTrip = await this.tripsService.startTrip(trip.id, driverId);
 
@@ -1928,6 +1951,8 @@ export class TripRequestsService {
           (current.tripId && current.tripId !== trip.id)) {
         throw new ConflictException('Cette commande a changé. Actualisez ses détails.');
       }
+      if (await hasRefusedRequest(manager, driverId, tripRequestId))
+        throw new ConflictException('Cette prise en charge n’est plus disponible.');
       await requests.save(tripRequest);
       if (current.sequentialDispatch) await manager.query(`UPDATE trip_request_dispatch_offers
         SET status = CASE WHEN "driverId" = $2 THEN 'accepted' ELSE 'cancelled' END
@@ -2017,19 +2042,37 @@ export class TripRequestsService {
       }
     }
 
-    tripRequest.status = TripRequestStatus.CANCELLED;
-    await this.tripRequestRepository.save(tripRequest);
-
-    // Cancel all offers that were still actionable, including the accepted one.
-    await this.driverOfferRepository.update(
-      {
-        tripRequestId,
-        status: In([DriverOfferStatus.PENDING, DriverOfferStatus.ACCEPTED]),
-      },
-      { status: DriverOfferStatus.CANCELLED },
-    );
+    // Do not restore an old selection if change-driver committed while booking
+    // cancellation was running. Only write the freshly locked request.
+    await this.tripRequestRepository.manager.transaction(async manager => {
+      const requests = manager.getRepository(TripRequest);
+      const current = await requests.findOne({ where: { id: tripRequestId, passengerId }, lock: { mode: 'pessimistic_write' } });
+      assertRequestSnapshot(current, tripRequest);
+      current!.status = TripRequestStatus.CANCELLED;
+      await requests.save(current!);
+      await manager.getRepository(DriverOffer).update(
+        { tripRequestId, status: In([DriverOfferStatus.PENDING, DriverOfferStatus.ACCEPTED]) },
+        { status: DriverOfferStatus.CANCELLED },
+      );
+    });
 
     this.logger.log(`Trip request ${tripRequestId} cancelled`);
+  }
+
+  async changeSelectedDriver(passengerId: string, tripRequestId: string, dto: ChangeRequestDriverDto): Promise<SanitizedTripRequest> {
+    const result = await changeRequestDriver(this.tripRequestRepository.manager, passengerId, tripRequestId, dto, this.bookingsService);
+    if (result.tripId) await this.tripsService.invalidateChangedRequestTrip(result.tripId)
+      .catch(() => this.logger.warn('Driver change trip cache invalidation deferred'));
+    // Dispatch scan and transactional outbox retry after a post-commit Redis/push outage.
+    for (const bookingId of result.bookingIds) {
+      await this.bookingsService.invalidateManualRideCaches(bookingId)
+        .catch(() => this.logger.warn('Driver change booking cache invalidation deferred'));
+    }
+    await this.driverDispatch?.notifyScheduledRequest(tripRequestId)
+      .catch(() => this.logger.warn('Driver change dispatch deferred to recovery'));
+    void this.notificationService.dispatchTransactionalNotifications()
+      .catch(() => this.logger.warn('Driver change push deferred to outbox recovery'));
+    return this.findOne(tripRequestId, passengerId);
   }
 
   async releaseOverdueSelectedDriver(
@@ -2728,6 +2771,7 @@ export class TripRequestsService {
       id: tripRequest.id,
       targetDriverId: tripRequest.targetDriverId ?? null,
       targetDriverName: tripRequest.targetDriver ? [tripRequest.targetDriver.firstName, tripRequest.targetDriver.lastName].filter(Boolean).join(' ') : null,
+      targetDriverPriorityUntil: tripRequest.targetDriverPriorityUntil,
       immediateDispatch: tripRequest.immediateDispatch ?? false,
       passenger,
       // Authenticated drivers need exact pickup/drop-off points before accepting.

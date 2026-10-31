@@ -1,0 +1,38 @@
+# Managed by Ansible. HTTPS CONNECT only; never intercept or decrypt TLS.
+http_port {{ proxy_config.private_ip }}:3128
+http_port 127.0.0.1:3128
+visible_hostname zwanga-mobishastra-proxy
+
+acl backend src {{ proxy_config.vpc_cidr }}
+acl local_probe src 127.0.0.1/32
+acl tunnel method CONNECT
+acl tls_port port 443
+# -n prevents reverse DNS authorizing an IP literal. No wildcard subdomains.
+acl mobishastra dstdomain -n valuesms.ae mshastra.com
+acl forbidden_dst dst 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 169.254.0.0/16 172.16.0.0/12 192.168.0.0/16 198.18.0.0/15 224.0.0.0/4 240.0.0.0/4 ::/0
+
+http_access deny !tunnel
+http_access deny !tls_port
+http_access deny !mobishastra
+http_access deny forbidden_dst
+http_access allow backend
+http_access allow local_probe
+http_access deny all
+
+# No cache, TLS interception, URL/header/body logging or provider credentials.
+cache deny all
+cache_mem 16 MB
+cache_store_log none
+logformat zwanga %ts.%03tu %tr %Ss/%03>Hs %<st
+access_log stdio:/var/log/squid/access.log zwanga
+cache_log /var/log/squid/cache.log
+logfile_rotate 0
+forwarded_for delete
+httpd_suppress_version_string on
+
+connect_timeout 5 seconds
+request_timeout 15 seconds
+read_timeout 30 seconds
+persistent_request_timeout 15 seconds
+shutdown_lifetime 3 seconds
+max_filedescriptors 1024

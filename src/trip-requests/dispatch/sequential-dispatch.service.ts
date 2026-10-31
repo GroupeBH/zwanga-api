@@ -1,4 +1,5 @@
 import { BookingsService } from '../../bookings/bookings.service';
+import { resumeExpiredMapPriority } from '../target-map-driver';
 import { recoverRequestAcceptance } from './request-acceptance';
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
@@ -76,7 +77,12 @@ export class SequentialDispatchService {
           request.sequentialDispatch = true;
         }
 
-        const changed = await this.retire(manager, id, false);
+        let changed = await this.retire(manager, id, false);
+        changed = await resumeExpiredMapPriority(manager, request) || changed;
+        // If the alert was dismissed or could not be delivered, keep the selected
+        // driver's exclusive response window until its durable server deadline.
+        if (request.targetDriverPriorityUntil && request.targetDriverPriorityUntil.getTime() > Date.now())
+          return { wait: request.targetDriverPriorityUntil.getTime(), changed };
         const [pending] = await manager.query(`SELECT "expiresAt" FROM trip_request_dispatch_offers
           WHERE "requestId" = $1 AND status = 'pending' AND "expiresAt" > now() LIMIT 1`, [id]);
         return pending ? { wait: new Date(pending.expiresAt).getTime(), changed } : { request, changed };
@@ -196,9 +202,12 @@ export class SequentialDispatchService {
           this.logger.warn('Redis request deadlines unavailable; checking SQL expirations.');
           return [] as string[];
         });
-      const rows: { requestId: string }[] = await this.db.query(`SELECT "requestId" FROM trip_request_dispatch_offers
+      const rows: { requestId: string }[] = await this.db.query(`SELECT "requestId" FROM (SELECT "requestId", "expiresAt" FROM trip_request_dispatch_offers
           WHERE sequential = true AND status = 'pending' AND "expiresAt" <= now()
-          ORDER BY "expiresAt", id LIMIT 50`).catch(() => {
+          UNION ALL SELECT id AS "requestId", "targetDriverPriorityUntil" AS "expiresAt" FROM trip_requests
+          WHERE "targetDriverPriorityUntil" IS NOT NULL AND "targetDriverPriorityUntil"<=now()
+            AND status IN ('pending','offers_received') AND "selectedDriverId" IS NULL AND "tripId" IS NULL) deadlines
+          ORDER BY "expiresAt", "requestId" LIMIT 50`).catch(() => {
             // An isolated failure of the recovery query must not discard an
             // already successful Redis read and stop every 40-second handoff.
             this.logger.warn('SQL request expiration scan deferred; processing Redis deadlines.');

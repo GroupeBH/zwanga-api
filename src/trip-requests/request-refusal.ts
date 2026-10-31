@@ -1,7 +1,8 @@
 import { ConflictException, NotFoundException } from '@nestjs/common';
 import type { EntityManager } from 'typeorm';
 
-/** Arguments are internal SQL expressions; identities are always bound parameters. */
+/** Request-scoped exclusions (driver refusal or passenger driver change).
+ * Arguments are internal SQL expressions; identities are always bound parameters. */
 export const requestNotRefusedSql = (requestId: string, driverId: string) =>
   `NOT EXISTS (SELECT 1 FROM trip_request_driver_refusals refusal
     WHERE refusal."requestId" = ${requestId} AND refusal."driverId" = ${driverId})`;
@@ -15,6 +16,9 @@ export async function hasRefusedRequest(manager: EntityManager, driverId: string
 export async function recordRequestRefusal(manager: EntityManager, driverId: string, requestId: string): Promise<void> {
   await manager.query(`INSERT INTO trip_request_driver_refusals ("driverId", "requestId")
     VALUES ($1, $2) ON CONFLICT ("driverId", "requestId") DO NOTHING`, [driverId, requestId]);
+  await manager.query(`UPDATE trip_requests SET "targetDriverId"=NULL,"targetDriverPriorityUntil"=NULL,"updatedAt"=clock_timestamp()
+    WHERE id=$2 AND "targetDriverId"=$1 AND "targetDriverPriorityUntil" IS NOT NULL
+      AND "selectedDriverId" IS NULL AND "tripId" IS NULL AND status IN ('pending','offers_received')`, [driverId, requestId]);
   await manager.query(`UPDATE notifications SET "isActive" = false
     WHERE "userId" = $1 AND "isActive" = true
       AND data ->> 'type' IN ('trip_request', 'new_trip_request', 'trip_request_nearby', 'driver_dispatch_offer')

@@ -1,0 +1,119 @@
+---
+- name: Configure the dedicated Mobishastra forward proxy
+  hosts: localhost
+  connection: local
+  become: true
+  gather_facts: true
+  vars:
+    proxy_root: /opt/zwanga-mobishastra-proxy
+    proxy_config: "{{ lookup('ansible.builtin.file', proxy_root + '/config.json') | from_json }}"
+  tasks:
+    - name: Refuse execution outside the intended Ubuntu ARM proxy
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == 'Ubuntu'
+          - ansible_distribution_major_version == '24'
+          - ansible_architecture == 'aarch64'
+          - proxy_config.region == 'eu-central-1'
+          - proxy_config.component == 'mobishastra-proxy'
+          - proxy_config.namespace == 'Zwanga/MobishastraProxy'
+          - proxy_config.private_ip in ansible_all_ipv4_addresses
+          - proxy_config.private_ip is match('^10[.]42[.][0-9]{1,3}[.][0-9]{1,3}$')
+          - proxy_config.vpc_cidr == '10.42.0.0/16'
+        fail_msg: This playbook may configure only the dedicated production proxy host.
+
+    - name: Install the proxy without starting the distribution default configuration
+      ansible.builtin.apt:
+        name: [squid, python3-boto3, ca-certificates, unattended-upgrades]
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+        policy_rc_d: 101
+
+    - name: Protect provisioning configuration
+      ansible.builtin.file:
+        path: "{{ proxy_root }}"
+        owner: root
+        group: root
+        mode: '0700'
+        state: directory
+
+    - name: Validate the restricted CONNECT configuration before replacing it
+      ansible.builtin.template:
+        src: squid.conf.j2
+        dest: /etc/squid/squid.conf
+        owner: root
+        group: root
+        mode: '0644'
+        validate: /usr/sbin/squid -k parse -f %s
+      notify: Restart Squid
+
+    - name: Create the service override directory
+      ansible.builtin.file:
+        path: /etc/systemd/system/squid.service.d
+        state: directory
+        mode: '0755'
+
+    - name: Install bounded restart policy
+      ansible.builtin.copy:
+        src: squid-override.conf
+        dest: /etc/systemd/system/squid.service.d/zwanga.conf
+        mode: '0644'
+      notify: Restart Squid
+
+    - name: Install a credential-free local health probe
+      ansible.builtin.copy:
+        src: health.py
+        dest: "{{ proxy_root }}/health.py"
+        owner: root
+        group: root
+        mode: '0700'
+        validate: /usr/bin/python3 -m py_compile %s
+
+    - name: Install the heartbeat systemd units
+      ansible.builtin.copy:
+        src: "{{ item }}"
+        dest: "/etc/systemd/system/zwanga-{{ item }}"
+        mode: '0644'
+      loop: [proxy-health.service, proxy-health.timer]
+
+    - name: Bound operational log retention without storing SMS bodies
+      ansible.builtin.copy:
+        src: squid-logrotate
+        dest: /etc/logrotate.d/squid
+        mode: '0644'
+
+    - name: Enable security updates without automatic reboot during SMS traffic
+      ansible.builtin.copy:
+        dest: /etc/apt/apt.conf.d/52zwanga-proxy-updates
+        mode: '0644'
+        content: |
+          APT::Periodic::Update-Package-Lists "1";
+          APT::Periodic::Unattended-Upgrade "1";
+          Unattended-Upgrade::Automatic-Reboot "false";
+
+    - name: Load units and apply the checked proxy configuration
+      ansible.builtin.systemd_service:
+        daemon_reload: true
+        name: squid
+        enabled: true
+        state: started
+    - name: Flush the validated proxy restart
+      ansible.builtin.meta: flush_handlers
+
+    - name: Require a successful local deny probe before reporting readiness
+      ansible.builtin.command: /usr/bin/python3 /opt/zwanga-mobishastra-proxy/health.py --check-only
+      changed_when: false
+
+    - name: Enable periodic health reporting
+      ansible.builtin.systemd_service:
+        name: zwanga-proxy-health.timer
+        enabled: true
+        state: started
+
+  handlers:
+    - name: Restart Squid
+      ansible.builtin.systemd_service:
+        name: squid
+        daemon_reload: true
+        state: restarted

@@ -23,6 +23,7 @@ import {
 } from './request-edit-policy';
 import { assertSharedTripAvailable } from './shared-trip-policy';
 import { assertRequestTarget } from './target-driver-policy';
+import { hasRefusedRequest } from './request-refusal';
 import { ONGOING_DRIVER_POSITION_SQL } from './dispatch/driver-location-policy';
 import { NEARBY_DRIVER_RADIUS_METERS } from './dispatch/nearby-driver-policy';
 import { startPassengerDecision, silenceRequestInvitation } from './dispatch/request-acceptance';
@@ -56,6 +57,8 @@ export class SharedTripOffersService {
     phases: string[] = ['driver'],
   ) {
     assertRequestTarget(request, driverId);
+    if (await hasRefusedRequest(manager, driverId, request.id))
+      throw new NotFoundException('Commande introuvable.');
     await assertSequentialInvitation(manager, request, driverId, phases);
     const driver = await manager.findOneBy(User, { id: driverId });
     if (!driver) throw new NotFoundException('Conducteur introuvable.');

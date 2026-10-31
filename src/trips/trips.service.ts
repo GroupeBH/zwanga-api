@@ -347,6 +347,11 @@ export class TripsService {
       await this.invalidateTripCaches(tripId);
   }
 
+  /** Post-commit invalidation, including a private trip cancelled before its first booking. */
+  async invalidateChangedRequestTrip(tripId: string): Promise<void> {
+    await this.invalidateTripCaches(tripId);
+  }
+
   async findAll(): Promise<SanitizedTrip[]> {
     this.logger.debug('Fetching all trips');
 

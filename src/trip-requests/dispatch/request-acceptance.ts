@@ -74,6 +74,7 @@ export async function completeRequestAcceptance(manager: EntityManager, request:
     selectedDriverId: trip.driverId, selectedVehicleId: trip.vehicleId,
     selectedPricePerSeat: trip.pricePerSeat, selectedDriverRequiresPassengerKyc: trip.requiresPassengerKyc,
     selectedAt, tripId: trip.id, driverPickupOverdueNotifiedAt: null });
+  await manager.update(TripRequest, request.id, { targetDriverPriorityUntil: null });
   await manager.query(`UPDATE trip_request_dispatch_offers SET status=CASE WHEN "driverId"=$2 THEN 'accepted' ELSE 'cancelled' END
     WHERE "requestId"=$1 AND status='pending'`, [request.id, trip.driverId]);
   await manager.update(DriverOffer, { tripRequestId: request.id, status: DriverOfferStatus.PENDING }, { status: DriverOfferStatus.REJECTED });
