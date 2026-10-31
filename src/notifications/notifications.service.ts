@@ -3,6 +3,7 @@ import { DRIVER_PAYMENT_NOTIFICATION_TYPE } from './driver-payment-notification'
 import { sequentialInvitationSql } from '../trip-requests/dispatch/sequential-policy';
 import { nearbyRequestDriverVisibilitySql } from '../trip-requests/request-proximity';
 import { sendBoundedFirebase } from './bounded-firebase-send';
+import { FirebaseDeliveryError } from './firebase-delivery-error';
 import { recoverUnacknowledgedRides } from './recover-unacknowledged-ride';
 import { nativeAndroidDriverPush } from './native-android-driver-push';
 import { PUSH_CLAIM_LEASE_MS, ownPushClaim, heartbeatPushClaim, renewPushClaim, saveNotificationResult } from './notification-push-claim';
@@ -414,10 +415,19 @@ export class NotificationService implements OnModuleInit {
         await this.clearInvalidPushToken(savedNotification.userId, pushToken);
         await this.clearInvalidInstallationToken(savedNotification, pushToken);
       }
-      this.logger.error(
-        `Error sending notification: ${message}`,
-        error instanceof Error ? error.stack : undefined,
-      );
+      if (error instanceof FirebaseDeliveryError) {
+        const { phase, transient, timeoutMs, httpStatus } = error.details;
+        const diagnostic = `FCM_DELIVERY_FAILED notificationId=${savedNotification.id} reason=${message} phase=${phase} transient=${transient} timeoutMs=${timeoutMs ?? 'n/a'} httpStatus=${httpStatus ?? 'n/a'}`;
+        // A provider deadline is recoverable, not a process crash. Keep the
+        // durable FAILED row, original event id/deadline and existing retry lane.
+        if (transient) this.logger.warn(diagnostic);
+        else this.logger.error(diagnostic);
+      } else {
+        this.logger.error(
+          `Error sending notification: ${message}`,
+          error instanceof Error ? error.stack : undefined,
+        );
+      }
       return false;
     }
   }

@@ -1,6 +1,7 @@
 import { NotificationStatus } from './entities/notification.entity';
 import { NotificationService } from './notifications.service';
 import { TripRequestStatus } from '../trip-requests/entities/trip-request.entity';
+import { FirebaseDeliveryError } from './firebase-delivery-error';
 
 describe('NotificationService critical push reliability', () => {
   const buildService = () => {
@@ -567,6 +568,45 @@ describe('NotificationService critical push reliability', () => {
     await f.service.dispatchTransactionalNotifications();
     expect(f.userRepository.findOne).not.toHaveBeenCalled();
     expectClaimedResult(f.notificationRepository, 'outbox', { isActive: false, status: NotificationStatus.FAILED });
+  });
+
+  it.each([false, true])('keeps a Firebase timeout retryable without changing the event or ring deadline (expired=%s)', async expired => {
+    const f = buildService();
+    const ringUntil = new Date(Date.now() + 60_000).toISOString();
+    const notification = { id: 'original-id', eventKey: 'response:original', userId: 'passenger',
+      status: NotificationStatus.PENDING, isActive: true,
+      data: { type: 'booking_response', bookingId: 'booking', ringUntil } };
+    f.userRepository.findOne.mockResolvedValue({ fcmToken: 'synthetic-device' });
+    const relevance = jest.spyOn(f.service as any, 'isCriticalNotificationStillDeliverable').mockResolvedValue(true);
+    const send = jest.spyOn(f.service as any, 'sendFirebaseNotification')
+      .mockRejectedValueOnce(new FirebaseDeliveryError('FCM_SEND_TIMEOUT', {
+        code: 'messaging/send-timeout', phase: 'send', transient: true, timeoutMs: 15_000,
+      })).mockResolvedValueOnce('local/receipt');
+    const warn = jest.spyOn((f.service as any).logger, 'warn').mockImplementation(() => {});
+    const error = jest.spyOn((f.service as any).logger, 'error').mockImplementation(() => {});
+    f.queryBuilder.getMany.mockResolvedValueOnce([notification]);
+    await f.service.dispatchUrgentNotifications();
+    expectClaimedResult(f.notificationRepository, notification.id, {
+      status: NotificationStatus.FAILED, errorMessage: 'FCM_SEND_TIMEOUT', isActive: true,
+    });
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('reason=FCM_SEND_TIMEOUT phase=send transient=true timeoutMs=15000'));
+    expect(error).not.toHaveBeenCalled();
+    expect(f.userRepository.update).not.toHaveBeenCalled();
+    expect((f.service as any).urgentWorkers).toBe(0);
+    expect(notification.data.ringUntil).toBe(ringUntil);
+
+    // Model a later outbox claim, not a second POST within the transport.
+    relevance.mockResolvedValue(!expired);
+    f.queryBuilder.getMany.mockResolvedValueOnce([notification]);
+    await f.service.dispatchUrgentNotifications();
+    expect(send).toHaveBeenCalledTimes(expired ? 1 : 2);
+    expectClaimedResult(f.notificationRepository, notification.id, expired
+      ? { status: NotificationStatus.FAILED, isActive: false }
+      : { status: NotificationStatus.SENT, messageId: 'local/receipt' });
+    expect(notification.id).toBe('original-id');
+    expect(notification.data.ringUntil).toBe(ringUntil);
+    expect((f.service as any).urgentWorkers).toBe(0);
   });
 
   it('isolates push failures between recipients and leaves the failed row retryable', async () => {
