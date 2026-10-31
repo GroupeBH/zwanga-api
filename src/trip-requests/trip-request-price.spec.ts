@@ -172,7 +172,17 @@ describe('Confirmed request price propagation', () => {
           pricePerSeat: Number(price),
           isFree: Number(price) === 0,
         }),
-        { isPrivate: true, tripRequestId: request.id },
+        {
+          isPrivate: true,
+          tripRequestId: request.id,
+          requestSnapshot: expect.objectContaining({
+            id: request.id,
+            status: TripRequestStatus.DRIVER_SELECTED,
+            selectedDriverId: 'driver-1',
+            selectedVehicleId: 'vehicle-1',
+            selectedPricePerSeat: price,
+          }),
+        },
       );
       expect(tripsService.startTrip).toHaveBeenCalledWith('trip-1', 'driver-1');
       expect(calculatePrice).not.toHaveBeenCalled();

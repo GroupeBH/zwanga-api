@@ -35,6 +35,10 @@
   heartbeat Python, vérifications réelles de Squid sur boucle locale, syntaxe
   Ansible, Terraform avec fournisseur simulé, compilation TypeScript et lint
   des fichiers concernés. Le plan réel et la recette SMS AWS restent à faire.
+- **Complément du 31 octobre :** alignement de la contrainte du fichier de
+  verrouillage AWS sur `~> 6.71` (version résolue inchangée : `6.71.0`) et ajout
+  des résultats détaillés de validation dans le guide du proxy. Aucune ressource
+  appliquée, aucun changement de workflow, ni activation du fournisseur OTP.
 
 
 ## INFRA-2026-10-27-003 — Exécuter les tests du relais Redis avant déploiement
