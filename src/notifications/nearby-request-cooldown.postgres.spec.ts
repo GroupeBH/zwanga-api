@@ -1,4 +1,5 @@
 import { TargetTripRequestDriver1780000096000 } from '../database/migrations/1780000096000-TargetTripRequestDriver';
+import { MapDriverPriority1780000103000 } from '../database/migrations/1780000103000-MapDriverPriority';
 import { RememberDriverRequestRefusals1780000095000 } from '../database/migrations/1780000095000-RememberDriverRequestRefusals';
 import { hasRefusedRequest, requestNotRefusedSql } from '../trip-requests/request-refusal';
 import { execFileSync, spawnSync } from 'node:child_process';
@@ -80,15 +81,18 @@ const pgBin = process.env.NEARBY_RING_TEST_POSTGRES_BIN;
       await db.initialize();
       await db.query(`CREATE TABLE users (id uuid PRIMARY KEY);
       CREATE TABLE trip_requests (id uuid PRIMARY KEY, "passengerId" uuid, status text,
-        "selectedDriverId" uuid, "tripId" uuid, "departureDateMax" timestamptz);
+        "selectedDriverId" uuid, "tripId" varchar, "departureDateMax" timestamptz,
+        "updatedAt" timestamp NOT NULL DEFAULT now());
       CREATE TABLE notifications (id uuid PRIMARY KEY, status text, "userId" uuid, "isActive" boolean DEFAULT true, data jsonb);
-      CREATE TABLE driver_offers ("tripRequestId" uuid, "driverId" uuid);
+      CREATE TABLE driver_offers ("tripRequestId" uuid, "driverId" uuid,
+        status text NOT NULL DEFAULT 'pending', "updatedAt" timestamp NOT NULL DEFAULT now());
       CREATE TABLE trip_request_dispatch_offers ("requestId" uuid, "driverId" uuid, status text, id uuid)`);
       const runner = db.createQueryRunner();
       try {
         await new NearbyRequestRingingCooldown1780000087000().up(runner);
         await new RememberDriverRequestRefusals1780000095000().up(runner);
         await new TargetTripRequestDriver1780000096000().up(runner);
+        await new MapDriverPriority1780000103000().up(runner);
         // Minimal schema here; complete migration up/down is covered by dispatch integration tests.
         await db.query(
           'ALTER TABLE nearby_driver_ring_events ADD COLUMN "receivedAt" timestamptz',
@@ -189,6 +193,21 @@ const pgBin = process.env.NEARBY_RING_TEST_POSTGRES_BIN;
       expect((await db.query('SELECT "isActive" FROM notifications'))[0].isActive).toBe(false);
       expect(await db.query('SELECT * FROM trip_request_driver_refusals')).toHaveLength(1);
       await expect(refuse(n, passenger)).rejects.toThrow();
+    });
+
+    it.each([true, false])('refusal releases temporary priority but preserves a private target (priority=%s)', async priority => {
+      const n = await create();
+      await db.query(`UPDATE trip_requests SET "targetDriverId"=$2,
+        "targetDriverPriorityUntil"=CASE WHEN $3 THEN now()+interval '5 minutes' ELSE NULL END
+        WHERE id=$1`, [n.data.tripRequestId, driver, priority]);
+      await db.query('INSERT INTO driver_offers ("tripRequestId", "driverId") VALUES ($1,$2)',
+        [n.data.tripRequestId, driver]);
+      await refuse(n);
+      const [request] = await db.query('SELECT "targetDriverId", "targetDriverPriorityUntil", status FROM trip_requests WHERE id=$1', [n.data.tripRequestId]);
+      expect(request).toMatchObject({ targetDriverId: priority ? null : driver, targetDriverPriorityUntil: null, status: 'pending' });
+      expect((await db.query('SELECT status FROM driver_offers'))[0].status).toBe('cancelled');
+      expect(await hasRefusedRequest(db.manager, driver, n.data.tripRequestId)).toBe(true);
+      expect(await hasRefusedRequest(db.manager, otherDriver, n.data.tripRequestId)).toBe(false);
     });
 
     it('records a deliberate refusal after an ignored ring without hiding merely ignored requests', async () => {
@@ -361,7 +380,7 @@ const pgBin = process.env.NEARBY_RING_TEST_POSTGRES_BIN;
       const answered = await create();
       await prepare(answered);
       await sent(answered);
-      await db.query('INSERT INTO driver_offers VALUES ($1,$2)', [
+      await db.query('INSERT INTO driver_offers ("tripRequestId", "driverId") VALUES ($1,$2)', [
         answered.data.tripRequestId,
         driver,
       ]);

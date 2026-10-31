@@ -13,6 +13,7 @@ import { Notification } from '../notifications/entities/notification.entity';
 import { SafetyAlert, SafetyAlertStatus, SafetyAlertType } from '../safety/entities/safety-alert.entity';
 import { EmergencyContact } from '../safety/entities/emergency-contact.entity';
 import { createPhoneShutdownAlert } from '../safety/phone-shutdown-alert';
+import { TripRequest, TripRequestStatus } from '../trip-requests/entities/trip-request.entity';
 
 const bin = process.env.RESILIENCE_TEST_POSTGRES_BIN;
 (bin ? describe : describe.skip)(
@@ -42,6 +43,8 @@ const bin = process.env.RESILIENCE_TEST_POSTGRES_BIN;
               isPrivate: { type: Boolean, default: false },
               status: { type: String },
               departureDate: { type: 'timestamptz' },
+              estimatedArrivalDate: { type: 'timestamp', nullable: true },
+              tripRequestId: { type: 'varchar', nullable: true },
               startedAt: { type: 'timestamptz', nullable: true },
               completedAt: { type: 'timestamptz', nullable: true },
               availableSeats: { type: Number },
@@ -51,6 +54,30 @@ const bin = process.env.RESILIENCE_TEST_POSTGRES_BIN;
               arrivalLocation: { type: String, default: 'Arrivée' },
               recurringTemplateId: { type: 'uuid', nullable: true },
               recurringOccurrenceDate: { type: 'date', nullable: true },
+            },
+          }),
+          // Minimal schedule tables used by the real publication guard. Keep
+          // UUID owners and legacy varchar trip references aligned with production.
+          new EntitySchema<TripRequest>({
+            name: 'TripRequest', target: TripRequest, tableName: 'trip_requests',
+            columns: {
+              id: { type: 'uuid', primary: true },
+              // TypeORM resolves the User join column to UUID.
+              selectedDriverId: { type: 'uuid', nullable: true },
+              tripId: { type: 'varchar', nullable: true },
+              status: { type: String },
+              departureDateMin: { type: 'timestamp' },
+              departureDateMax: { type: 'timestamp' },
+            },
+          }),
+          new EntitySchema({
+            name: 'DispatchScheduleReservation', tableName: 'trip_request_dispatch_offers',
+            columns: {
+              id: { type: 'uuid', primary: true },
+              requestId: { type: 'uuid' },
+              driverId: { type: 'uuid' },
+              status: { type: String },
+              phase: { type: String },
             },
           }),
           new EntitySchema<Booking>({
@@ -117,7 +144,7 @@ const bin = process.env.RESILIENCE_TEST_POSTGRES_BIN;
       await cluster.stop();
     }, 40000);
     beforeEach(async () => {
-      await db.query('TRUNCATE bookings, trips, users, notifications, safety_alerts, emergency_contacts');
+      await db.query('TRUNCATE bookings, trips, users, notifications, safety_alerts, emergency_contacts, trip_request_dispatch_offers, trip_requests');
     });
     async function setup() {
       const driverId = randomUUID();
@@ -262,6 +289,32 @@ const bin = process.env.RESILIENCE_TEST_POSTGRES_BIN;
         ),
       ).toEqual([]);
     });
+    it.each(['selected', 'preparing'] as const)(
+      'does not publish over an overlapping %s request reservation',
+      async (phase) => {
+        const trip = await setup();
+        const requestId = randomUUID();
+        await db.getRepository(TripRequest).save({
+          id: requestId,
+          selectedDriverId: phase === 'selected' ? trip.driverId : null,
+          status: phase === 'selected' ? TripRequestStatus.DRIVER_SELECTED : TripRequestStatus.PENDING,
+          departureDateMin: now,
+          departureDateMax: now,
+        });
+        if (phase === 'preparing') {
+          await db.query(`INSERT INTO trip_request_dispatch_offers (id,"requestId","driverId",status,phase)
+            VALUES ($1,$2,$3,'pending','accepting')`, [randomUUID(), requestId, trip.driverId]);
+        }
+        const candidate = db.getRepository(Trip).create({
+          driverId: trip.driverId, isPrivate: false, status: TripStatus.PENDING,
+          departureDate: now, totalSeats: 4, availableSeats: 4,
+          recurringTemplateId: randomUUID(), recurringOccurrenceDate: '2026-10-14',
+        });
+        await expect(savePublicationsWithPhotoPolicy(db.getRepository(Trip), trip.driverId, [candidate]))
+          .rejects.toMatchObject({ response: { code: 'DRIVER_SCHEDULE_CONFLICT' } });
+        expect(await db.getRepository(Trip).countBy({ recurringTemplateId: candidate.recurringTemplateId! })).toBe(0);
+      },
+    );
     it('rejects a stale booking request after expiry commits', async () => {
       const trip = await setup();
       await expirePendingTrip(db.getRepository(Trip), trip.id, cutoff, now);

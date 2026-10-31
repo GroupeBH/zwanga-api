@@ -220,6 +220,14 @@ Il nécessite Python/Jinja2, Squid 6 et ses ressources (`squid-common`,
 `squid-langpack`, bibliothèques indiquées par `ldd`). Tous les écouteurs sont
 locaux ; un relais parent fictif empêche tout accès à Mobishastra pendant ce test.
 
+Résultats de cette préparation : 92 tests applicatifs ciblés, 6 tests Python,
+10 refus Squid et 1 tunnel Squid autorisé réussis ; scénario Terraform simulé,
+syntaxe Ansible, compilation TypeScript, lint ciblé et contrôle documentaire
+réussis. Les tests applicatifs ont tourné sur le Node 24.11.0 disponible sur le
+poste ; la recette de livraison doit utiliser le Node 24.22.1 déclaré par le projet.
+Il ne s'agit pas d'une exécution de toute la suite du dépôt ni d'une validation
+du démarrage d'une EC2 ARM réelle. Le plan AWS réel et le test SMS restent à faire.
+
 Références : [Elastic IP AWS](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/elastic-ip-addresses-eip.html),
 [Session Manager](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager.html),
 [contrôles Squid](https://www.squid-cache.org/Doc/config/http_access/),
