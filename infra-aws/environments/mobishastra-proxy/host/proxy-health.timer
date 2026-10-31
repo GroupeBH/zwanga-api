@@ -1,0 +1,11 @@
+[Unit]
+Description=Check the dedicated proxy every two minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+RandomizedDelaySec=10
+Unit=zwanga-proxy-health.service
+
+[Install]
+WantedBy=timers.target

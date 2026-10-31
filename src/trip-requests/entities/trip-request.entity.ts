@@ -34,6 +34,10 @@ export class TripRequest {
   @Column({ type: 'uuid', nullable: true })
   targetDriverId: string | null;
 
+  @Index('IDX_request_target_priority', { where: '"targetDriverPriorityUntil" IS NOT NULL' })
+  @Column({ type: 'timestamptz', nullable: true })
+  targetDriverPriorityUntil: Date | null;
+
   @ManyToOne(() => User, { nullable: true, onDelete: 'RESTRICT' })
   @JoinColumn({ name: 'targetDriverId', foreignKeyConstraintName: 'FK_request_target_driver' })
   targetDriver: User | null;

@@ -1,4 +1,6 @@
 import { DriverChoiceQuery } from './dto/driver-choice.dto';
+import { TargetMapDriverDto } from './dto/target-map-driver.dto';
+import { ChangeRequestDriverDto } from './dto/change-request-driver.dto';
 import {
   Controller,
   Get,
@@ -89,6 +91,14 @@ export class TripRequestsController {
   @SensitiveThrottle(10, 60000)
   async openSearch(@Request() req: { user: { userId: string } }, @Param('id', ParseUUIDPipe) id: string) {
     return this.tripRequestsService.openToNearbyDrivers(req.user.userId, id);
+  }
+
+  @Post(':id/target-map-driver')
+  @Auth()
+  @SensitiveThrottle(3, 60000)
+  async targetMapDriver(@Request() req: { user: { userId: string } }, @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: TargetMapDriverDto) {
+    return this.tripRequestsService.targetDriverFromMap(req.user.userId, id, dto);
   }
 
   @Get('my-requests')
@@ -288,6 +298,19 @@ export class TripRequestsController {
   // @ApiBearerAuth()
   async startTripFromRequest(@Request() req, @Param('id') id: string) {
     return this.tripRequestsService.startTripFromRequest(id, req.user.userId);
+  }
+
+  @Put(':id/change-driver')
+  @Auth()
+  @SensitiveThrottle(5, 60000)
+  @ApiOperation({ summary: 'Changer de conducteur en conservant la commande',
+    description: 'Réservé au passager propriétaire, avant prise en charge et sans paiement engagé. Écarte l’ancien conducteur pour cette demande et relance la recherche. Renvoyer selectedDriver.id et selectedAt pour protéger les nouvelles affectations.' })
+  async changeSelectedDriver(
+    @Request() req: { user: { userId: string } },
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ChangeRequestDriverDto,
+  ) {
+    return this.tripRequestsService.changeSelectedDriver(req.user.userId, id, dto);
   }
 
   @Put(':id/release-driver')

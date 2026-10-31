@@ -1,7 +1,9 @@
 import { ConfigService } from '@nestjs/config';
 import { HttpService } from '@nestjs/axios';
 import { Logger } from '@nestjs/common';
-import { of, throwError } from 'rxjs';
+import { Observable, of, throwError } from 'rxjs';
+import type { AxiosRequestConfig } from 'axios';
+import { Agent } from 'node:https';
 import { MobishastraSmsService } from './mobishastra-sms.service';
 
 describe('Mobishastra JSON SMS transport (no real SMS)', () => {
@@ -14,7 +16,10 @@ describe('Mobishastra JSON SMS transport (no real SMS)', () => {
   const fixture = (extra = {}) => {
     const http = {
       post: jest
-        .fn()
+        .fn<
+          Observable<{ status: number; data: unknown }>,
+          [string, Record<string, string>[], AxiosRequestConfig]
+        >()
         .mockReturnValue(
           of({
             status: 200,
@@ -53,18 +58,69 @@ describe('Mobishastra JSON SMS transport (no real SMS)', () => {
         pwd: 'private-password',
         sender: 'ZWANGA',
         number: phone,
-        msg: expect.stringContaining('12345'),
+        msg: 'Zwanga : votre code de verification est 12345. Valable 15 minutes. Ne le partagez avec personne.',
         language: 'English',
       },
     ]);
     expect(body[0].msg).toMatch(/15 minutes/);
     expect(body[0].msg).toMatch(/^[\x20-\x7E]{1,160}$/);
     expect(options).toMatchObject({
+      proxy: false,
+      adapter: 'http',
       timeout: 10000,
       maxRedirects: 0,
       maxContentLength: 16384,
     });
     expect(warning).not.toHaveBeenCalled();
+  });
+
+  it('routes only the SMS request through the configured proxy, never the payload', async () => {
+    const { service, http } = fixture({
+      MOBISHASTRA_PROXY_URL: 'http://10.42.0.123:3128',
+      MOBISHASTRA_PROXY_REQUIRED: 'true',
+      NODE_ENV: 'production',
+    });
+    await service.sendCode(phone, '12345');
+    const [, body, options] = http.post.mock.calls[0];
+    expect(options.proxy).toBe(false);
+    const agent = options.httpsAgent as Agent;
+    expect((agent.options as { proxyEnv?: unknown }).proxyEnv).toEqual({
+      https_proxy: 'http://10.42.0.123:3128',
+    });
+    expect(agent.options.rejectUnauthorized).toBe(true);
+    expect(options.signal).toBeInstanceOf(AbortSignal);
+    expect(body[0]).not.toHaveProperty('proxy');
+    service.onModuleDestroy();
+  });
+
+  it('does not attempt direct delivery when a required proxy is missing', async () => {
+    const { service, http } = fixture({ MOBISHASTRA_PROXY_REQUIRED: 'true' });
+    await expect(service.sendCode(phone, '12345')).rejects.toMatchObject({
+      response: { code: 'OTP_SMS_PROXY_MISCONFIGURED' },
+    });
+    expect(http.post).not.toHaveBeenCalled();
+  });
+
+  it('fails closed on a Node runtime that cannot enforce the native proxy', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(
+      process.versions,
+      'node',
+    )!;
+    try {
+      Object.defineProperty(process.versions, 'node', {
+        ...descriptor,
+        value: '22.0.0',
+      });
+      const { service, http } = fixture({
+        MOBISHASTRA_PROXY_URL: 'http://10.42.0.123:3128',
+      });
+      await expect(service.sendCode(phone, '12345')).rejects.toMatchObject({
+        response: { code: 'OTP_SMS_PROXY_MISCONFIGURED' },
+      });
+      expect(http.post).not.toHaveBeenCalled();
+    } finally {
+      Object.defineProperty(process.versions, 'node', descriptor);
+    }
   });
 
   it.each(['Send Successful', 'SEND SUCCESS', ' send success '])(

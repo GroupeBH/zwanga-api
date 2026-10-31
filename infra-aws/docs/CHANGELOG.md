@@ -1,5 +1,42 @@
 # Journal détaillé des changements d'infrastructure AWS
 
+## INFRA-2026-10-31-001 — Proxy sortant Mobishastra avec Elastic IP
+
+- **Date, auteur, statut :** préparation locale les 30–31 octobre 2026,
+  Africa/Kinshasa, Codex à la demande du mainteneur. Non appliqué sur AWS.
+- **Contexte et état précédent :** ECS utilise des IP publiques renouvelables.
+  Mobishastra exige une liste blanche d'IP de sortie. L'ALB n'est pas une sortie
+  réseau pour ces appels. Objectif : stabiliser uniquement le trafic SMS.
+- **Configuration :** nouvelle racine `environments/mobishastra-proxy`, état S3
+  séparé, EC2 Ubuntu ARM `t4g.micro`, gp3 chiffré 8 Gio, ENI persistante, EIP
+  protégée. Ansible installe Squid CONNECT limité aux deux domaines Mobishastra,
+  refuse les réseaux privés/métadonnées, préserve TLS et désactive les logs de
+  contenu. Supervision systemd et métriques/alarmes CloudWatch.
+- **AWS/IAM :** ressources nouvelles uniquement, sauf une règle de sortie TCP
+  3128 ajoutée au groupe ECS vers le groupe proxy. Aucune route, tâche ECS, ALB,
+  RDS, Redis, permission OIDC ou workflow modifié. Rôle EC2 limité aux canaux
+  SSM et à une métrique dédiée ; pas de lecture de secrets. Aucun SSH public.
+- **Backend :** `MobishastraSmsService` accepte `MOBISHASTRA_PROXY_URL` et
+  `MOBISHASTRA_PROXY_REQUIRED`, documentées dans `.env.example`. Agent HTTPS
+  Node dédié, TLS vérifié, délais bornés, pas de proxy global, de répétition ou
+  de repli direct automatique. Aucune dépendance npm ajoutée. `.env`, SSM,
+  `OTP_PROVIDER` et l'obligation d'inscription OTP sont inchangés.
+- **Disponibilité et coûts :** aucune interruption avant activation. L'EC2
+  unique n'est pas hautement disponible ; sa maintenance/reconstruction coupe
+  temporairement les nouveaux SMS, pas les autres sorties du backend. Frais EC2,
+  EBS, IPv4 publique, supervision et trafic. L'IP reste facturée à l'arrêt.
+- **Données :** aucune migration SQL ni écriture utilisateur. Certificat de test
+  fictif hors compilation de production. Aucun SMS envoyé pendant la validation.
+- **Procédure et rollback :** [guide d'exploitation](../environments/mobishastra-proxy/README.md).
+  Valider le plan séparé, créer l'instance, vérifier cloud-init/Squid, faire
+  autoriser l'EIP, puis injecter les paramètres via le mécanisme SSM/ECS existant.
+  L'activation du fournisseur OTP reste séparée. Conserver l'EIP/ENI en rollback.
+- **Validation locale :** tests OTP et tunnel TLS, tests de configuration et
+  heartbeat Python, vérifications réelles de Squid sur boucle locale, syntaxe
+  Ansible, Terraform avec fournisseur simulé, compilation TypeScript et lint
+  des fichiers concernés. Le plan réel et la recette SMS AWS restent à faire.
+
+
 ## INFRA-2026-10-27-003 — Exécuter les tests du relais Redis avant déploiement
 
 - Date / statut : 27 octobre 2026 ; modification locale du workflow, aucun appel de déploiement.

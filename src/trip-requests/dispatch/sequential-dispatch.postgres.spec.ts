@@ -1,4 +1,8 @@
 import { sequentialMobileFlow } from '../../../test/sequential-mobile-flow';
+import { mapDriverPriorityFlow } from '../../../test/map-driver-priority-flow';
+import { MapDriverPriority1780000103000 } from '../../database/migrations/1780000103000-MapDriverPriority';
+import { changeRequestDriver } from '../change-request-driver';
+import { PassengerDriverChangeReason1780000102000 } from '../../database/migrations/1780000102000-PassengerDriverChangeReason';
 import { availableRequestFlow } from '../../../test/available-request-flow';
 import { SeparateRequestAttentionLease1780000101000 } from '../../database/migrations/1780000101000-SeparateRequestAttentionLease';
 import { seedDispatchNotificationHistory } from '../../../test/notification-history';
@@ -76,13 +80,15 @@ const redisPort = Number(process.env.DISPATCH_TEST_REDIS_PORT);
       entities: typeOrmEntities, synchronize: false, extra: { options: '-c timezone=UTC' } });
     await db.initialize(); await db.query('CREATE EXTENSION IF NOT EXISTS postgis'); await db.synchronize();
     await db.query('ALTER TABLE trip_requests DROP COLUMN "immediateDispatch", DROP COLUMN "sequentialDispatch"');
+    await db.query('ALTER TABLE trip_requests DROP COLUMN "targetDriverPriorityUntil"');
     const runner = db.createQueryRunner();
     try {
       for (const migration of [new AddDriverDispatch1780000048000(), new BroadcastDriverRequests1780000074000(),
         new RetainDriverLastLocation1780000076000(), new NearbyRequestRingingCooldown1780000087000(),
         new RememberDriverRequestRefusals1780000095000(), new DispatchDeliveryResilience1780000088000(),
         new SequentialRequestQueue1780000097000(), new RequestResponsePhases1780000098000(),
-        new IndexRequestNotificationRetirement1780000099000(), new SeparateRequestAttentionLease1780000101000()]) await migration.up(runner);
+        new IndexRequestNotificationRetirement1780000099000(), new SeparateRequestAttentionLease1780000101000(),
+        new PassengerDriverChangeReason1780000102000(), new MapDriverPriority1780000103000()]) await migration.up(runner);
     } finally { await runner.release(); }
     redis = createClient({ socket: { host: '127.0.0.1', port: redisPort, connectTimeout: 3000, reconnectStrategy: false },
       password: process.env.DISPATCH_TEST_REDIS_PASSWORD });
@@ -128,6 +134,34 @@ const redisPort = Number(process.env.DISPATCH_TEST_REDIS_PORT);
     isPrivate: true, departureLocation: r.departureLocation, arrivalLocation: r.arrivalLocation,
     departureDate: r.departureDateMin, totalSeats: 4, availableSeats: 4, pricePerSeat: 1000 });
   availableRequestFlow(() => ({ db, relay, dispatch, driver, request, offers }));
+  mapDriverPriorityFlow(() => ({ db, relay, queue, driver, request, offers }));
+  it('passenger driver change relays the same request to the next Redis candidate without ringing the old driver again', async () => {
+    const first = await driver(), second = await driver(15.311), r = await request();
+    expect(await relay.advance(r.id)).toBe(true);
+    expect((await offers(r.id))[0].driverId).toBe(first.id);
+    await db.transaction(async manager => {
+      const current = await manager.findOneOrFail(TripRequest, { where: { id: r.id }, lock: { mode: 'pessimistic_write' } });
+      const trip = await manager.save(Trip, privateTrip(r, first.id));
+      await manager.save(Booking, manager.create(Booking, { tripId: trip.id, passengerId: r.passengerId,
+        numberOfSeats: 1, status: BookingStatus.ACCEPTED }));
+      await completeRequestAcceptance(manager, current, trip);
+    });
+    const selected = await db.getRepository(TripRequest).findOneByOrFail({ id: r.id });
+    const old = { selectedDriverId: first.id, selectedAt: selected.selectedAt!.toISOString() };
+    const bookings = Object.create(BookingsService.prototype) as BookingsService;
+    await changeRequestDriver(db.manager, r.passengerId, r.id, old, bookings);
+    expect(await dispatch.notifyScheduledRequest(r.id)).toBe(true);
+    const pending = (await offers(r.id)).filter(o => o.status === 'pending');
+    expect(pending).toHaveLength(1);
+    expect(pending[0].driverId).toBe(second.id);
+    const alerts = await notices(r.id);
+    expect(alerts.find(n => n.userId === first.id && n.data?.ringAlert)?.isActive).toBe(false);
+    expect(alerts.find(n => n.userId === second.id && n.data?.ringAlert)?.isActive).toBe(true);
+    expect(notifications.dispatchUrgentNotifications).toHaveBeenCalled();
+    // A lost response/retry does not cancel the next driver's pending invitation.
+    expect((await changeRequestDriver(db.manager, r.passengerId, r.id, old, bookings)).changed).toBe(false);
+    expect((await offers(r.id)).filter(o => o.status === 'pending')).toHaveLength(1);
+  });
   const sharedFixture = async (immediate = false) => {
     const first = await driver(), second = await driver(15.311), r = await request(immediate);
     const vehicle = await db.getRepository(Vehicle).findOneByOrFail({ ownerId: first.id });

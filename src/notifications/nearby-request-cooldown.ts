@@ -170,6 +170,15 @@ export async function prepareNearbyRequestRinging(
     // Expired quiet backups do not create an invitation. The existing delivery policy
     // still decides whether the informational notification is useful.
     if (deadline <= now) return true;
+    // An explicit passenger selection is a new invitation, not a retry of an old
+    // expired ring. Fence it to the current offer ID; never revive an old push.
+    if (notification.data?.mapDriverPriority === true) await tx.query(`UPDATE nearby_driver_ring_events e
+      SET "notificationId"=$3,"responseDeadline"=$4,"receivedAt"=NULL,"processedAt"=NULL,"declinedAt"=NULL,outcome=NULL
+      WHERE e."driverId"=$1 AND e."requestId"=$2 AND e."notificationId"<>$3 AND EXISTS
+        (SELECT 1 FROM trip_requests r JOIN trip_request_dispatch_offers o ON o."requestId"=r.id
+         WHERE r.id=$2 AND r."targetDriverId"=$1 AND r."targetDriverPriorityUntil">clock_timestamp()
+           AND o.id=$5 AND o."driverId"=$1 AND o.status='pending' AND o.phase='driver' AND o."expiresAt">clock_timestamp())`,
+      [driverId, requestId, notification.id, new Date(deadline), notification.data.offerId]);
     await tx.query(
       `INSERT INTO nearby_driver_ring_events
       ("driverId", "requestId", "notificationId", "responseDeadline") VALUES ($1,$2,$3,$4)

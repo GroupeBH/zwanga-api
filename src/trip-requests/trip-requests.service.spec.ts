@@ -1054,8 +1054,9 @@ describe('TripRequestsService passenger KYC requirements', () => {
 
 describe('TripRequestsService cancellation after driver acceptance', () => {
   const buildService = (tripRequest: Record<string, unknown>, trip?: any) => {
+    tripRequest.updatedAt = new Date();
     const tripRequestRepository = {
-      manager: { getRepository: () => ({ exists: jest.fn().mockResolvedValue(false) }) },
+      manager: { getRepository: () => ({ exists: jest.fn().mockResolvedValue(false) }), transaction: jest.fn() },
       findOne: jest.fn().mockResolvedValue(tripRequest),
       save: jest.fn((payload: unknown) => Promise.resolve(payload)),
     };
@@ -1063,6 +1064,9 @@ describe('TripRequestsService cancellation after driver acceptance', () => {
       exists: jest.fn().mockResolvedValue(false),
       update: jest.fn().mockResolvedValue({ affected: 1 }),
     };
+    tripRequestRepository.manager.transaction.mockImplementation(work => work({
+      getRepository: entity => entity === TripRequest ? tripRequestRepository : driverOfferRepository,
+    }));
     const tripsService = {
       findOne: jest.fn().mockResolvedValue(trip),
     };
@@ -1117,6 +1121,17 @@ describe('TripRequestsService cancellation after driver acceptance', () => {
       }),
       { status: DriverOfferStatus.CANCELLED },
     );
+  });
+
+  it('rejects a stale complete cancellation after a concurrent driver change', async () => {
+    const request = { id: 'request', passengerId: 'passenger', selectedDriverId: 'first',
+      tripId: null, status: TripRequestStatus.DRIVER_SELECTED };
+    const dependencies = buildService(request);
+    dependencies.tripRequestRepository.findOne.mockResolvedValueOnce(request)
+      .mockResolvedValueOnce({ ...request, selectedDriverId: 'next' });
+    await expect(dependencies.service.cancel('passenger', request.id)).rejects.toMatchObject({ status: 409 });
+    expect(dependencies.tripRequestRepository.save).not.toHaveBeenCalled();
+    expect(dependencies.driverOfferRepository.update).not.toHaveBeenCalled();
   });
 
   it('cancels the accepted booking when the generated trip has not started', async () => {
