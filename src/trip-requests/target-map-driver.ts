@@ -124,7 +124,7 @@ export async function targetMapDriver(
           until,
         ],
       );
-      // Keep the rolling-deployment 40 s INSERT guard for ordinary invitations.
+      // Keep the rolling-deployment INSERT guard for ordinary invitations.
       // Only this owner-selected invitation receives the explicit three-minute lease.
       await manager.query(
         'UPDATE trip_request_dispatch_offers SET "expiresAt"=$2 WHERE id=$1',
@@ -146,6 +146,7 @@ export async function targetMapDriver(
           passengerId,
           role: 'driver',
           vehicleType: request.vehicleType,
+          vehicleTypes: JSON.stringify(requestVehicleTypes(request)),
           expiresAt,
           alertExpiresAt: expiresAt,
           ...rideSpeechData({
@@ -195,3 +196,4 @@ export async function resumeExpiredMapPriority(
   request.targetDriverPriorityUntil = null;
   return true;
 }
+import { requestVehicleTypes } from './request-vehicle-types';

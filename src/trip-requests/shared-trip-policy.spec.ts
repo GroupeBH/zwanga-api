@@ -38,6 +38,14 @@ const vehicle = {
 } as Vehicle;
 
 describe('shared ride consent and availability policy', () => {
+  it('accepts a secondary selected type without weakening sharing or capacity checks', () => {
+    const multiple = { ...request, vehicleTypes: [VehicleType.CAR, VehicleType.MOTORCYCLE_TWO_WHEELS] };
+    const motorcycle = { ...vehicle, type: VehicleType.MOTORCYCLE_TWO_WHEELS };
+    expect(() => assertSharedTripAvailable(multiple, { ...trip, totalSeats: 2 }, motorcycle, 'driver', now)).not.toThrow();
+    expect(() => assertSharedTripAvailable(multiple, trip, motorcycle, 'driver', now)).toThrow();
+    expect(() => assertSharedTripAvailable(multiple, { ...trip, totalSeats: 3 },
+      { ...vehicle, type: VehicleType.MOTORCYCLE_THREE_WHEELS }, 'driver', now)).toThrow();
+  });
   it('allows a compatible ongoing trip with seats and an unchanged payment mode', () => {
     expect(() =>
       assertSharedTripAvailable(request, trip, vehicle, 'driver', now),

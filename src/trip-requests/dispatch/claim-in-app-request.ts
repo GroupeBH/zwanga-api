@@ -64,7 +64,7 @@ export async function claimInAppRequest(
       durationMs,
     ],
   );
-  // The rolling-deployment INSERT trigger caps invitations at 40 s. Extend only
+  // The rolling-deployment INSERT trigger caps ordinary invitations. Extend only
   // our fenced preparation, in this same transaction, as the existing UPDATE path did.
   await tx.query(
     `UPDATE trip_request_dispatch_offers SET "expiresAt"=clock_timestamp()+$4*interval '1 millisecond'

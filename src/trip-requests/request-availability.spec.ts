@@ -60,6 +60,23 @@ describe('Search/Home request availability independent of expiration persistence
   beforeEach(() => jest.useFakeTimers({ now }));
   afterEach(() => jest.useRealTimers());
 
+  it('Home selects bounded IDs before hydration and rechecks a raced assignment', async () => {
+    const row = request({ selectedDriverId: 'other' });
+    const { service, repository, query } = fixture([row]);
+    expect(await service.findAll('driver', true)).toEqual([]);
+    expect(query.limit).toHaveBeenCalledWith(10);
+    expect(query.orderBy).toHaveBeenCalledWith(expect.stringContaining('ST_Distance'), 'ASC');
+    expect(query.getCount).not.toHaveBeenCalled();
+    expect(repository.find.mock.calls[0][0].where.id.objectLiteralParameters.homeRequestIds).toEqual([row.id]);
+    expect(service['sanitizeTripRequest']).not.toHaveBeenCalled();
+  });
+
+  it('Home with no eligible IDs performs no relation hydration', async () => {
+    const { service, repository } = fixture([]);
+    expect(await service.findAll('driver', true)).toEqual([]);
+    expect(repository.find).not.toHaveBeenCalled();
+  });
+
   it('filters deadlines in the legacy TypeORM query and preserves the existing three-hour grace period', async () => {
     const row = request(),
       { service, repository } = fixture([row]);

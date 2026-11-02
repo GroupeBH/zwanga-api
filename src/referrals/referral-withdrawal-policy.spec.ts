@@ -41,7 +41,7 @@ function fixture() {
           status: 'active',
         }),
     },
-    reserveWithdrawal: jest.fn().mockResolvedValue({ withdrawal, created: true }),
+    reserveWithdrawal: jest.fn(async (input) => ({ withdrawal: Object.assign(withdrawal, input), created: true })),
     getWithdrawalCallbackUrl: () => 'https://example.invalid/callback',
     paymentsService: payments,
     failWithdrawal: jest.fn(),

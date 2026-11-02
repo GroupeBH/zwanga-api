@@ -1,4 +1,4 @@
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { In, Repository } from 'typeorm';
 import { User } from '../users/entities/user.entity';
 import { Trip } from './entities/trip.entity';
@@ -60,7 +60,21 @@ export async function savePublicationsWithPhotoPolicy(
       !driver.profilePicture?.trim() && await publications.existsBy({ driverId, isPrivate: false })
     );
     assertDriverPublicationPhoto(driver, alreadyPublished || trips.length > 1);
-    for (const trip of trips) await assertPublicationRequestSchedule(manager, trip);
+    const eligible: Trip[] = [];
+    for (const trip of trips) {
+      try { await assertPublicationRequestSchedule(manager, trip); eligible.push(trip); }
+      catch (error) {
+        // A conflicting occurrence must not abort every future day. Only skip a
+        // confirmed business conflict for a NEW recurring occurrence, never a
+        // database failure or a manually published/edited trip.
+        if (!trip.id && trip.recurringTemplateId && trip.recurringOccurrenceDate &&
+            error instanceof ConflictException &&
+            (error.getResponse() as { code?: string }).code === 'DRIVER_SCHEDULE_CONFLICT') continue;
+        throw error;
+      }
+    }
+    trips = eligible;
+    if (!trips.length) return [];
     const saved = await publications.save(trips);
     if (!driver.hasPublishedTrip) await users.update(driverId, { hasPublishedTrip: true });
     // No geocoding, notifications or cache I/O while holding the lock.

@@ -1,5 +1,7 @@
 # FIN-TRIP-001 — Choix du véhicule et tarification d'une demande de trajet
 
+Évolution du 2 novembre 2026 : le choix peut désormais contenir plusieurs types, avec un budget commun et conservation du prix confirmé. Le contrat actuel et son activation sont décrits dans [Demandes avec plusieurs types de véhicule](../operations/trip-request-multiple-vehicles.md). Les sections ci-dessous retracent l’implémentation initiale à choix unique ; ses règles de recalcul et de sélection sont remplacées par cette évolution.
+
 Date : 18 août 2026  
 Statut : implémenté dans le code ; migration à exécuter avant activation  
 Périmètre : demandes de trajet, estimation tarifaire, offres conducteur et création du trajet

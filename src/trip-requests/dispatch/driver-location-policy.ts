@@ -3,8 +3,8 @@
 export const USABLE_DRIVER_LOCATION_SQL = `(p."discoveryEnabled" = true OR
   (p."discoveryEnabled" IS NULL AND p."expiresAt" > now()))`;
 
-/** Ranking only: an old durable position stays eligible, but drivers located recently
- * are invited first so a phone last seen days ago does not take the first 40-second turn. */
+/** Ranking only within the alert age window: drivers located recently are invited first.
+ * Alert eligibility is bounded separately in driver-alert-location-policy. */
 export const RECENT_DRIVER_POSITION_MINUTES = 30;
 export const STALE_PRESENCE_RANK_SQL = `(p."updatedAt" IS NULL OR
   p."updatedAt" < now() - interval '${RECENT_DRIVER_POSITION_MINUTES} minutes')`;

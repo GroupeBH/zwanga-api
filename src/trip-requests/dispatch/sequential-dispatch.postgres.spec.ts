@@ -1,4 +1,9 @@
 import { sequentialMobileFlow } from '../../../test/sequential-mobile-flow';
+import { DriverResponse75Seconds1780000107000 } from '../../database/migrations/1780000107000-DriverResponse75Seconds';
+import { DriverResponse40Seconds1780000108000 } from '../../database/migrations/1780000108000-DriverResponse40Seconds';
+import { ReceiptResponseWindow1780000110000 } from '../../database/migrations/1780000110000-ReceiptResponseWindow';
+import { multiVehicleRequestFlow } from '../../../test/multi-vehicle-request-flow';
+import { RequestVehicleTypes1780000104000 } from '../../database/migrations/1780000104000-RequestVehicleTypes';
 import { mapDriverPriorityFlow } from '../../../test/map-driver-priority-flow';
 import { MapDriverPriority1780000103000 } from '../../database/migrations/1780000103000-MapDriverPriority';
 import { changeRequestDriver } from '../change-request-driver';
@@ -81,6 +86,7 @@ const redisPort = Number(process.env.DISPATCH_TEST_REDIS_PORT);
     await db.initialize(); await db.query('CREATE EXTENSION IF NOT EXISTS postgis'); await db.synchronize();
     await db.query('ALTER TABLE trip_requests DROP COLUMN "immediateDispatch", DROP COLUMN "sequentialDispatch"');
     await db.query('ALTER TABLE trip_requests DROP COLUMN "targetDriverPriorityUntil"');
+    await db.query('ALTER TABLE trip_requests DROP COLUMN "vehicleTypes"');
     const runner = db.createQueryRunner();
     try {
       for (const migration of [new AddDriverDispatch1780000048000(), new BroadcastDriverRequests1780000074000(),
@@ -88,8 +94,12 @@ const redisPort = Number(process.env.DISPATCH_TEST_REDIS_PORT);
         new RememberDriverRequestRefusals1780000095000(), new DispatchDeliveryResilience1780000088000(),
         new SequentialRequestQueue1780000097000(), new RequestResponsePhases1780000098000(),
         new IndexRequestNotificationRetirement1780000099000(), new SeparateRequestAttentionLease1780000101000(),
-        new PassengerDriverChangeReason1780000102000(), new MapDriverPriority1780000103000()]) await migration.up(runner);
+        new PassengerDriverChangeReason1780000102000(), new MapDriverPriority1780000103000(),
+        new RequestVehicleTypes1780000104000()]) await migration.up(runner);
     } finally { await runner.release(); }
+    await db.transaction(manager => new DriverResponse75Seconds1780000107000().up(manager.queryRunner!));
+    await db.transaction(manager => new DriverResponse40Seconds1780000108000().up(manager.queryRunner!));
+    await db.transaction(manager => new ReceiptResponseWindow1780000110000().up(manager.queryRunner!));
     redis = createClient({ socket: { host: '127.0.0.1', port: redisPort, connectTimeout: 3000, reconnectStrategy: false },
       password: process.env.DISPATCH_TEST_REDIS_PASSWORD });
     redis.on('error', () => undefined); await redis.connect();
@@ -106,7 +116,8 @@ const redisPort = Number(process.env.DISPATCH_TEST_REDIS_PORT);
   afterAll(async () => {
     try { if (redis?.isOpen) await redis.disconnect(); if (db?.isInitialized) await db.destroy(); }
     finally {
-      if (started || (directory && existsSync(join(directory, 'postmaster.pid')))) execFileSync(executable('pg_ctl'), ['-D', directory, '-m', 'fast', '-w', 'stop'], { windowsHide: true, stdio: 'pipe', timeout: 30000 });
+      // Windows can spend >30s fsyncing this disposable schema during checkpoint.
+      if (started || (directory && existsSync(join(directory, 'postmaster.pid')))) execFileSync(executable('pg_ctl'), ['-D', directory, '-m', 'fast', '-w', 'stop'], { windowsHide: true, stdio: 'pipe', timeout: 60000 });
       if (directory && resolve(directory).startsWith(resolve(tmpdir()) + sep) && directory.includes('zwanga-sequential-test-'))
         rmSync(directory, { recursive: true, force: true });
     }
@@ -130,11 +141,45 @@ const redisPort = Number(process.env.DISPATCH_TEST_REDIS_PORT);
   };
   const offers = (id: string) => db.query('SELECT * FROM trip_request_dispatch_offers WHERE "requestId" = $1 ORDER BY "createdAt", id', [id]);
   const notices = (id: string) => db.getRepository(Notification).createQueryBuilder('n').where("n.data ->> 'tripRequestId' = :id", { id }).getMany();
+  it('does not spend the Redis lease while waiting 11 seconds for discovery; reacquires before seeding', async () => {
+    await driver(); const r = await request(true);
+    const transaction = db.transaction.bind(db); let calls = 0;
+    jest.spyOn(db, 'transaction').mockImplementation((async (work: any) => {
+      if (++calls === 2) {
+        const probe = await queue.claim(r.id, 'probe');
+        expect(probe).not.toBeNull();
+        await queue.release(r.id, probe!.token);
+        await new Promise(resolve => setTimeout(resolve, 11000));
+      }
+      return transaction(work);
+    }) as any);
+    expect(await relay.advance(r.id)).toBe(true);
+    expect(await offers(r.id)).toHaveLength(1);
+    expect(await notices(r.id)).toHaveLength(1);
+  }, 30000);
   const privateTrip = (r: TripRequest, driverId: string) => db.getRepository(Trip).create({ driverId, tripRequestId: r.id,
     isPrivate: true, departureLocation: r.departureLocation, arrivalLocation: r.arrivalLocation,
     departureDate: r.departureDateMin, totalSeats: 4, availableSeats: 4, pricePerSeat: 1000 });
   availableRequestFlow(() => ({ db, relay, dispatch, driver, request, offers }));
+  multiVehicleRequestFlow(() => ({ db, relay, dispatch, driver, request, offers }));
   mapDriverPriorityFlow(() => ({ db, relay, queue, driver, request, offers }));
+  it.each([false, true])('rings a 47-hour-old location through the Redis relay but excludes a 48-hour-old one (%s)', async immediate => {
+    const old = await driver(), eligible = await driver(15.311), r = await request(immediate);
+    await db.query(`UPDATE driver_dispatch_presence SET "updatedAt"=now()-interval '48 hours',
+      "expiresAt"=now()-interval '47 hours' WHERE "driverId"=$1`, [old.id]);
+    await db.query(`UPDATE driver_dispatch_presence SET "updatedAt"=now()-interval '47 hours',
+      "expiresAt"=now()-interval '46 hours' WHERE "driverId"=$1`, [eligible.id]);
+    expect(await relay.advance(r.id)).toBe(true);
+    expect((await offers(r.id)).map(o => o.driverId)).toEqual([eligible.id]);
+    expect((await notices(r.id)).map(n => [n.userId, n.data?.ringAlert]))
+      .toEqual([[eligible.id, 'nearby-request-v1']]);
+    expect(notifications.dispatchUrgentNotifications).toHaveBeenCalled();
+    // Refreshing GPS enables the skipped driver for a subsequent new request.
+    await dispatch.recordPosition(old.id, { latitude: -4.3, longitude: 15.31, accuracy: 20, recordedAt: new Date().toISOString() });
+    const next = await request(immediate);
+    expect(await relay.advance(next.id)).toBe(true);
+    expect((await offers(next.id)).map(o => o.driverId)).toEqual([old.id]);
+  });
   it('passenger driver change relays the same request to the next Redis candidate without ringing the old driver again', async () => {
     const first = await driver(), second = await driver(15.311), r = await request();
     expect(await relay.advance(r.id)).toBe(true);
@@ -254,7 +299,54 @@ const redisPort = Number(process.env.DISPATCH_TEST_REDIS_PORT);
     expect(rows[0].status).toBe('declined'); expect(rows[1].driverId).toBe(second.id);
     expect((await notices(r.id)).filter(n => n.isActive)).toHaveLength(1);
   });
-  it('recovers a missing Redis deadline after 40 seconds and rejects the former recipient', async () => {
+  it('holds the first driver until the real 40-second deadline then relays', async () => {
+    const first = await driver(), second = await driver(15.311), r = await request();
+    expect(await relay.advance(r.id)).toBe(true);
+    const [initial] = await offers(r.id);
+    const deadline = new Date(initial.expiresAt).getTime();
+    expect(deadline - Date.now()).toBeGreaterThan(35_000);
+    expect(deadline - Date.now()).toBeLessThanOrEqual(40_000);
+    expect(await redis.zScore(REQUEST_DEADLINES_KEY, r.id)).toBe(deadline);
+    expect((await notices(r.id))[0].data!.expiresAt).toBe(new Date(deadline).toISOString());
+    await new Promise(resolve => setTimeout(resolve, Math.max(0, deadline - 10_000 - Date.now())));
+    await relay.deadlines();
+    expect(await offers(r.id)).toHaveLength(1);
+    await expect(assertSequentialInvitation(db.manager, r, first.id)).resolves.toBeUndefined();
+    await new Promise(resolve => setTimeout(resolve, Math.max(0, deadline + 30 - Date.now())));
+    await relay.deadlines();
+    const rows = await offers(r.id);
+    expect(rows.map(o => o.status)).toEqual(['expired', 'pending']);
+    expect(rows[1].driverId).toBe(second.id);
+    await expect(assertSequentialInvitation(db.manager, r, first.id)).rejects.toThrow();
+  }, 100_000);
+
+  it('migration rollback changes future invitations only and never renews an existing deadline', async () => {
+    const drivers = [await driver(), await driver(15.311), await driver(15.312)];
+    const before = await request(), old = await request(), after = await request();
+    const migration = new DriverResponse40Seconds1780000108000();
+    // Simulate an old allocator still requesting 75s during a rolling deployment.
+    const insert = async (r: TripRequest, d: User) => {
+      const vehicle = await db.getRepository(Vehicle).findOneByOrFail({ ownerId: d.id });
+      await db.query(`INSERT INTO trip_request_dispatch_offers (id,"requestId","driverId","vehicleId",seats,"expiresAt")
+        VALUES ($1,$2,$3,$4,1,clock_timestamp()+interval '75 seconds')`, [randomUUID(), r.id, d.id, vehicle.id]);
+    };
+    await insert(before, drivers[0]);
+    const [first] = await offers(before.id);
+    expect(new Date(first.expiresAt).getTime() - Date.now()).toBeLessThanOrEqual(40_000);
+    try {
+      await db.transaction(manager => migration.down(manager.queryRunner!));
+      expect((await offers(before.id))[0].expiresAt).toEqual(first.expiresAt);
+      await insert(old, drivers[1]);
+      const [legacy] = await offers(old.id);
+      expect(new Date(legacy.expiresAt).getTime() - Date.now()).toBeGreaterThan(70_000);
+      await db.transaction(manager => migration.up(manager.queryRunner!));
+      expect((await offers(old.id))[0].expiresAt).toEqual(legacy.expiresAt);
+      await insert(after, drivers[2]);
+      expect(new Date((await offers(after.id))[0].expiresAt).getTime() - Date.now()).toBeLessThanOrEqual(40_000);
+    } finally { await db.transaction(manager => migration.up(manager.queryRunner!)); }
+  });
+
+  it('recovers a missing Redis deadline after expiration and rejects the former recipient', async () => {
     const first = await driver(), second = await driver(15.311), r = await request();
     await relay.advance(r.id);
     await db.query(`UPDATE trip_request_dispatch_offers SET "expiresAt" = now() - interval '1 second' WHERE "requestId" = $1`, [r.id]);
@@ -278,7 +370,7 @@ const redisPort = Number(process.env.DISPATCH_TEST_REDIS_PORT);
     expect((await db.getRepository(TripRequest).findOneByOrFail({ id: r.id })).selectedDriverId).toBe(first.id);
     expect((await notices(r.id)).filter(n => n.data?.type === 'trip_request_accepted')).toHaveLength(1);
   });
-  it('a post-commit Redis outage does not lose push; SQL expires safely and Redis resumes the queue', async () => {
+  it('a post-commit Redis outage does not lose push; SQL relays expiry before Redis resumes', async () => {
     await driver(); await driver(15.311); const r = await request();
     jest.spyOn(queue, 'schedule').mockRejectedValue(new Error('offline'));
     jest.spyOn(queue, 'due').mockRejectedValue(new Error('offline'));
@@ -288,20 +380,60 @@ const redisPort = Number(process.env.DISPATCH_TEST_REDIS_PORT);
     expect(notifications.dispatchUrgentNotifications).toHaveBeenCalledTimes(1);
     await db.query(`UPDATE trip_request_dispatch_offers SET "expiresAt"=now()-interval '1 second' WHERE "requestId"=$1`, [r.id]);
     await relay.deadlines();
-    expect((await offers(r.id)).map(o => o.status)).toEqual(['expired']);
-    expect(notifications.dispatchUrgentNotifications).toHaveBeenCalledTimes(1);
+    expect((await offers(r.id)).map(o => o.status)).toEqual(['expired', 'pending']);
+    expect(notifications.dispatchUrgentNotifications).toHaveBeenCalledTimes(2);
     jest.restoreAllMocks();
     relay = new SequentialDispatchService(db, config, queue, notifications as never, changes as never);
-    expect(await relay.advance(r.id)).toBe(true);
+    expect(await relay.advance(r.id)).toBe(false);
     expect((await offers(r.id)).map(o => o.status)).toEqual(['expired', 'pending']);
     expect(notifications.dispatchUrgentNotifications).toHaveBeenCalledTimes(2);
   });
-  it('does not bypass Redis with a SQL-only selection while the queue is unavailable', async () => {
+  it('continues with one durable SQL invitation when Redis is unavailable', async () => {
     await driver(); const r = await request();
     jest.spyOn(queue, 'claim').mockRejectedValue(new Error('queue offline'));
+    expect(await relay.advance(r.id)).toBe(true);
+    expect(await offers(r.id)).toHaveLength(1);
+    expect(await notices(r.id)).toHaveLength(1);
+    expect(notifications.dispatchUrgentNotifications).toHaveBeenCalledTimes(1);
+    expect(await relay.advance(r.id)).toBe(false);
+  });
+  it('SQL fallback across replicas keeps one recipient, relays expiry and rejoins Redis without duplicates', async () => {
+    const first = await driver(), second = await driver(15.311), r = await request();
+    jest.spyOn(queue, 'claim').mockRejectedValue(new Error('queue offline'));
+    const other = new SequentialDispatchService(db, config, queue, notifications as never, changes as never);
+    await Promise.all([relay.advance(r.id), other.advance(r.id), relay.advance(r.id)]);
+    expect(await offers(r.id)).toHaveLength(1); expect(await notices(r.id)).toHaveLength(1);
+    expect((await offers(r.id))[0].driverId).toBe(first.id);
+    await db.query(`UPDATE trip_request_dispatch_offers SET "expiresAt"=now()-interval '1 second' WHERE "requestId"=$1`, [r.id]);
+    await Promise.all([relay.deadlines(), other.deadlines()]);
+    expect((await offers(r.id)).map(o => o.status)).toEqual(['expired', 'pending']);
+    expect((await offers(r.id))[1].driverId).toBe(second.id);
+    jest.restoreAllMocks();
+    const restored = new SequentialDispatchService(db, config, queue, notifications as never, changes as never);
+    expect(await restored.advance(r.id)).toBe(false);
+    expect(await notices(r.id)).toHaveLength(2);
+  });
+  it('healthy Redis contention does not activate SQL fallback', async () => {
+    await driver(); const r = await request();
+    jest.spyOn(queue, 'claim').mockResolvedValue(null);
     expect(await relay.advance(r.id)).toBe(false);
     expect(await offers(r.id)).toHaveLength(0);
-    expect(notifications.dispatchUrgentNotifications).not.toHaveBeenCalled();
+  });
+  it('SQL fallback preserves a targeted driver exclusion and cancellation', async () => {
+    await driver(); const chosen = await driver(15.311), r = await request(false, chosen.id);
+    jest.spyOn(queue, 'claim').mockRejectedValue(new Error('queue offline'));
+    expect(await relay.advance(r.id)).toBe(true);
+    expect((await offers(r.id))[0].driverId).toBe(chosen.id);
+    await db.getRepository(TripRequest).update(r.id, { status: TripRequestStatus.CANCELLED });
+    expect(await relay.advance(r.id)).toBe(false);
+    expect((await offers(r.id)).filter(o => o.status === 'pending')).toHaveLength(0);
+  });
+  it('SQL fallback cannot invite one driver for two concurrent requests', async () => {
+    await driver(); const a = await request(), b = await request();
+    jest.spyOn(queue, 'claim').mockRejectedValue(new Error('queue offline'));
+    const other = new SequentialDispatchService(db, config, queue, notifications as never, changes as never);
+    await Promise.all([relay.advance(a.id), other.advance(b.id)]);
+    expect((await offers(a.id)).length + (await offers(b.id)).length).toBe(1);
   });
   it('refusal consumes the next cached Redis candidate without rebuilding the list', async () => {
     const first = await driver(), second = await driver(15.311); await driver(15.312);
@@ -343,7 +475,16 @@ const redisPort = Number(process.env.DISPATCH_TEST_REDIS_PORT);
     for (let n = 0; n < 8; n++) await driver(15.31 + n * 0.0001);
     const requests = await Promise.all(Array.from({ length: 8 }, () => request()));
     const outcomes = await Promise.allSettled(requests.map(r => relay.advance(r.id)));
-    expect(outcomes.every(r => r.status === 'fulfilled' && r.value)).toBe(true);
+    expect(outcomes.every(r => r.status === 'fulfilled')).toBe(true);
+    // Discovery has a per-process budget; deferred work keeps its Redis wakeup
+    // and is retried without reserving a second driver for accepted work.
+    for (let i = 0; i < outcomes.length; i++) {
+      const outcome = outcomes[i];
+      if (outcome.status === 'fulfilled' && !outcome.value) {
+        expect(await redis.zScore(REQUEST_DEADLINES_KEY, requests[i].id)).not.toBeNull();
+        expect(await relay.advance(requests[i].id)).toBe(true);
+      }
+    }
     const rows = await db.query(`SELECT "driverId","requestId" FROM trip_request_dispatch_offers WHERE status='pending'`);
     expect(rows).toHaveLength(8);
     expect(new Set(rows.map(r => r.driverId)).size).toBe(8);

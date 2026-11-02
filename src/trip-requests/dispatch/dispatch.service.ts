@@ -1,5 +1,6 @@
 import { SequentialDispatchService } from './sequential-dispatch.service';
-import { assertSequentialInvitation } from './sequential-policy';
+import { requestAcceptsVehicle, requestVehicleTypes } from '../request-vehicle-types';
+import { assertSequentialInvitation, REQUEST_RESPONSE_MS } from './sequential-policy';
 import { assertRequestTarget } from '../target-driver-policy';
 import { assertRequestDriverProximity, requestDriverProximitySql } from '../request-proximity';
 import { recordRequestRefusal } from '../request-refusal';
@@ -26,6 +27,8 @@ import { rideSpeechData } from '../../notifications/ride-speech-data';
 import { ELIGIBLE_DRIVER_ACCOUNT_SQL, NEARBY_DRIVER_RADIUS_METERS } from './nearby-driver-policy';
 import { enqueueStaleLocationReminders } from './stale-location-reminder';
 import { hasUsableDriverLocation, USABLE_DRIVER_LOCATION_SQL } from './driver-location-policy';
+import { PRESENCE_ALERT_LOCATION_SQL, ONGOING_ALERT_LOCATION_SQL, DRIVER_ALERT_LOCATION_MAX_AGE_HOURS } from './driver-alert-location-policy';
+import { startReceivedResponseWindow } from './receipt-response-window';
 import { acknowledgeNearbyRequest, declineNearbyRequest } from '../../notifications/nearby-request-cooldown';
 import { assertDriverRequestSchedule, driverRequestConflictSql, driverScheduleConflictSql } from './driver-schedule-policy';
 
@@ -57,11 +60,17 @@ export class DriverDispatchService {
     return this.declineNearbyRequest(driverId, requestId);
   }
   async acknowledgeNotification(driverId: string, notificationId: string, stage: 'received' | 'displayed' = 'received', detail?: import('../../notifications/ride-notification-receipt').RideReceiptDetail) {
-    const result = await recordRideNotificationReceipt(this.db.manager, driverId, notificationId, stage, detail);
-    if (result.received) await acknowledgeNearbyRequest(this.db.manager, driverId, notificationId);
-    return result;
+    return this.db.transaction(async manager => {
+      await manager.query("SET LOCAL lock_timeout = '2s'");
+      await manager.query("SET LOCAL statement_timeout = '5s'");
+      // Acquire business locks before recording telemetry (same order as retirement).
+      const responseWindow = await startReceivedResponseWindow(manager, driverId, notificationId);
+      const result = await recordRideNotificationReceipt(manager, driverId, notificationId, stage, detail);
+      if (result.received) await acknowledgeNearbyRequest(manager, driverId, notificationId);
+      return { ...result, ...(result.received && responseWindow ? { responseWindow } : {}) };
+    });
   }
-  private get responseSeconds() { if (this.sequential) return 40; return boundedInteger(this.config.get('DRIVER_DISPATCH_RESPONSE_SECONDS'), 60, 60, 120); }
+  private get responseSeconds() { if (this.sequential) return REQUEST_RESPONSE_MS / 1000; return boundedInteger(this.config.get('DRIVER_DISPATCH_RESPONSE_SECONDS'), 60, 60, 120); }
   private get presenceSeconds() { return boundedInteger(this.config.get('DRIVER_DISPATCH_PRESENCE_SECONDS'), 90, 45, 180); }
   private get radiusMeters() { return NEARBY_DRIVER_RADIUS_METERS; }
   // Compatibility/freshness metadata only. Durable positions do not expire.
@@ -82,7 +91,9 @@ export class DriverDispatchService {
 
   async status(driverId: string) {
     if (!this.enabled) return { enabled: false, available: false, pendingOfferId: null };
-    const [presence] = await this.db.query(`SELECT "vehicleId", "leaseId", seats, "expiresAt", "updatedAt", "discoveryEnabled"
+    const [presence] = await this.db.query(`SELECT "vehicleId", "leaseId", seats, "expiresAt", "updatedAt", "discoveryEnabled",
+      (${PRESENCE_ALERT_LOCATION_SQL} OR EXISTS (SELECT 1 FROM trips t WHERE t."driverId"=p."driverId"
+        AND t.status='ongoing' AND ${ONGOING_ALERT_LOCATION_SQL})) AS "alertLocationFresh"
       FROM driver_dispatch_presence p WHERE "driverId" = $1 AND ${USABLE_DRIVER_LOCATION_SQL}`, [driverId]);
     const [offer] = await this.db.query(`SELECT o.id FROM trip_request_dispatch_offers o
       JOIN trip_requests r ON r.id = o."requestId"
@@ -93,6 +104,8 @@ export class DriverDispatchService {
     return { enabled: true, available, presence: presence ?? null,
       pendingOfferId: offer?.id ?? null, responseSeconds: this.responseSeconds,
       automatic: true, positionFreshSeconds: this.positionSeconds,
+      needsLocationRefresh: presence?.alertLocationFresh !== true,
+      alertLocationMaxAgeSeconds: DRIVER_ALERT_LOCATION_MAX_AGE_HOURS * 3600,
       locationPolicy: 'last_known', positionExpires: presence?.discoveryEnabled !== true };
   }
 
@@ -210,7 +223,7 @@ export class DriverDispatchService {
       request: { id: request.id, passengerName: request.passenger.firstName,
         departure: request.departureLocation, arrival: request.arrivalLocation,
         seats: request.numberOfSeats, pricePerSeat: request.maxPricePerSeat == null ? null : Number(request.maxPricePerSeat),
-        paymentMode: request.paymentMode, vehicleType: request.vehicleType },
+        paymentMode: request.paymentMode, vehicleType: request.vehicleType, vehicleTypes: requestVehicleTypes(request) },
     };
   }
 
@@ -244,7 +257,7 @@ export class DriverDispatchService {
         if (!driver) throw new NotFoundException('Conducteur introuvable.');
         await assertDriverCanOperate(manager, driver);
         const vehicle = await manager.getRepository(Vehicle).findOneBy({ id: offer.vehicleId, ownerId: driverId, isActive: true });
-        if (!vehicle || vehicle.type !== request.vehicleType || offer.seats < request.numberOfSeats ||
+        if (!vehicle || !requestAcceptsVehicle(request, vehicle.type) || offer.seats < request.numberOfSeats ||
             (getVehicleMaxSeats(vehicle.type) ?? 20) < offer.seats || await this.isBusy(manager, driverId, request.id))
           throw new ConflictException('Vous ou votre véhicule ne pouvez plus prendre en charge cette commande.');
         if (request.maxPricePerSeat === null) throw new ConflictException('Le tarif de la commande est indisponible.');
@@ -386,9 +399,11 @@ export class DriverDispatchService {
         WHEN v.type = 'motorcycle_2_wheels' THEN 2 WHEN v.type = 'motorcycle_3_wheels' THEN 3 ELSE 4 END AS seats
       FROM driver_dispatch_presence p
       JOIN LATERAL (SELECT v.* FROM vehicles v WHERE v."ownerId" = p."driverId"
-        AND v."isActive" = true AND v.type = $2
+        AND v."isActive" = true AND v.type::text = ANY($2::text[])
+        AND (CASE WHEN v.id = p."vehicleId" THEN p.seats WHEN v.type = 'motorcycle_2_wheels' THEN 2
+          WHEN v.type = 'motorcycle_3_wheels' THEN 3 ELSE 4 END) >= $3
         ORDER BY (v.id = p."vehicleId") DESC, v."updatedAt" DESC, v.id LIMIT 1) v ON true
-      WHERE ${USABLE_DRIVER_LOCATION_SQL} AND p."driverId" <> $1::uuid
+      WHERE ${PRESENCE_ALERT_LOCATION_SQL} AND p."driverId" <> $1::uuid
       AND (CASE WHEN v.id = p."vehicleId" THEN p.seats WHEN v.type = 'motorcycle_2_wheels' THEN 2
         WHEN v.type = 'motorcycle_3_wheels' THEN 3 ELSE 4 END) >= $3
       AND ST_DWithin(p.position, ST_SetSRID(ST_MakePoint($4,$5),4326)::geography, $6)
@@ -401,7 +416,7 @@ export class DriverDispatchService {
         WHERE o."driverId" = p."driverId" AND o.status = 'pending')
       ) SELECT c."driverId", c."vehicleId", c.brand, c.model, c.seats FROM candidates c
       JOIN driver_dispatch_presence locked ON locked."driverId" = c."driverId" AND locked.xmin = c."presenceVersion"
-      ORDER BY c.distance, c."driverId" LIMIT ${request.sequentialDispatch ? 1 : 50} FOR UPDATE OF locked SKIP LOCKED`, [request.passengerId, request.vehicleType, request.numberOfSeats,
+      ORDER BY c.distance, c."driverId" LIMIT ${request.sequentialDispatch ? 1 : 50} FOR UPDATE OF locked SKIP LOCKED`, [request.passengerId, requestVehicleTypes(request), request.numberOfSeats,
       request.departurePoint.coordinates[0], request.departurePoint.coordinates[1], this.radiusMeters, requestId]);
     if (!selected.length) return false;
     // A READ COMMITTED selection snapshot can precede another allocation's

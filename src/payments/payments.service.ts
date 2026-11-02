@@ -52,6 +52,7 @@ import { claimBookingPayment } from './booking-payment-claim';
 import { recoverTopUpClaim } from './topup-recovery';
 import { commitFlexPayDepositState } from './flexpay-deposit-state';
 import { claimReferralPayoutPayment } from './referral-payout-claim';
+import { adminPayoutReference, claimAdminPayoutPayment } from './admin-payout-claim';
 
 export interface InitiatePaymentInput {
   tokenQuantity?: number;
@@ -228,6 +229,8 @@ export class PaymentsService {
   async initiatePayment(
     input: InitiatePaymentInput,
   ): Promise<PaymentTransaction> {
+    if (input.purpose === PaymentPurpose.ADMIN_PAYOUT)
+      throw new BadRequestException('Un virement administratif doit utiliser le parcours de décaissement.');
     this.ensurePaymentInputIsUsable(input);
     const providers = this.resolveProviders(input.method, 'deposits', input.preferredProvider);
     if (providers.length === 0) {
@@ -314,7 +317,7 @@ export class PaymentsService {
           index < providers.length - 1 && canFailoverPaymentProvider(error);
         if (canFailover) {
           this.logger.warn(
-            `Deposit failover from ${provider} to ${providers[index + 1]}: paymentId=${savedTransaction.id}, message=${this.getErrorMessage(error)}`,
+            `Deposit failover from ${provider} to ${providers[index + 1]}: paymentId=${savedTransaction.id}`,
           );
           continue;
         }
@@ -359,11 +362,14 @@ export class PaymentsService {
     // balance must never reach FlexPay/PawaPay as a new cash withdrawal.
     assertPayoutPurposeAllowed(input);
     this.ensurePayoutInputIsUsable(input);
-    const providers = this.resolveProviders(
+    const availableProviders = this.resolveProviders(
       PaymentMethod.MOBILE_MONEY,
       'payouts',
       input.preferredProvider,
     );
+    const providers = input.purpose === PaymentPurpose.ADMIN_PAYOUT
+      ? availableProviders.filter(provider => provider === PaymentProvider.FLEXPAY)
+      : availableProviders;
     if (providers.length === 0) {
       throw new BadRequestException(
         "Aucun prestataire de versement n'est disponible",
@@ -378,7 +384,8 @@ export class PaymentsService {
       provider: providers[0],
       method: PaymentMethod.MOBILE_MONEY,
       status: PaymentStatus.PENDING,
-      reference: this.generatePaymentReference(
+      reference: input.purpose === PaymentPurpose.ADMIN_PAYOUT
+        ? adminPayoutReference(input.userId, input.relatedEntityId!) : this.generatePaymentReference(
         input.referencePrefix,
         input.userId,
       ),
@@ -402,7 +409,9 @@ export class PaymentsService {
       paidAt: null,
     });
 
-    const claim = transaction.purpose === PaymentPurpose.DRIVER_PAYOUT &&
+    const claim = transaction.purpose === PaymentPurpose.ADMIN_PAYOUT
+      ? await claimAdminPayoutPayment(this.paymentTransactionRepository, transaction)
+      : transaction.purpose === PaymentPurpose.DRIVER_PAYOUT &&
         transaction.relatedEntityType === 'driver_payout' && transaction.relatedEntityId
       ? await claimDriverPayoutPayment(this.paymentTransactionRepository, transaction)
       : transaction.purpose === PaymentPurpose.REFERRAL_PAYOUT && transaction.relatedEntityType === 'referral_withdrawal'
@@ -439,7 +448,7 @@ export class PaymentsService {
           canFailoverPaymentProvider(error);
         if (canFailover) {
           this.logger.warn(
-            `Payout failover from ${provider} to ${providers[index + 1]}: paymentId=${savedTransaction.id}, message=${this.getErrorMessage(error)}`,
+            `Payout failover from ${provider} to ${providers[index + 1]}: paymentId=${savedTransaction.id}`,
           );
           continue;
         }
@@ -451,8 +460,7 @@ export class PaymentsService {
           deliveryIsUncertain,
         );
         this.logger.error(
-          `Payout initiation failed: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, message=${this.getErrorMessage(error)}`,
-          this.getErrorStack(error),
+          `Payout initiation failed: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}`,
         );
         if (deliveryIsUncertain) {
           return savedTransaction;
@@ -574,10 +582,9 @@ export class PaymentsService {
 
       try {
         return await this.checkTransactionAndApply(transaction);
-      } catch (error) {
-        const errorMessage = this.getErrorMessage(error);
+      } catch {
         this.logger.warn(
-          `FlexPay callback verification failed: paymentId=${transaction.id}, reference=${transaction.reference}, orderNumber=${transaction.orderNumber}, message=${errorMessage}`,
+          `FlexPay callback verification failed: paymentId=${transaction.id}, reference=${transaction.reference}, orderNumber=${transaction.orderNumber}`,
         );
         transaction.providerMessage =
           'Notification de paiement reçue. Vérification du paiement en cours';
@@ -788,6 +795,12 @@ export class PaymentsService {
       return null;
     }
 
+    if (transaction.purpose === PaymentPurpose.ADMIN_PAYOUT) {
+      if (transaction.status === PaymentStatus.SUCCEEDED) return 'Virement administratif confirmé par le prestataire.';
+      if ([PaymentStatus.FAILED, PaymentStatus.CANCELLED].includes(transaction.status)) return 'Virement administratif échoué ou annulé. Vérifiez le dossier avant tout nouvel ordre.';
+      return 'Virement administratif en attente de confirmation. Aucun nouvel envoi automatique.';
+    }
+
     if (this.isPayoutTransaction(transaction)) {
       if (transaction.status === PaymentStatus.SUCCEEDED)
         return 'Zwanga a versé vos gains sur votre compte Mobile Money.';
@@ -989,7 +1002,7 @@ export class PaymentsService {
       const savedTransaction =
         await this.saveFlexPayDepositCheck(transaction);
       this.logger.warn(
-        `FlexPay check returned non-success code: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, code=${checkResult.code}, message=${checkResult.message ?? 'none'}, status=${savedTransaction.status}, providerResponse=${formatPaymentLogPayload(checkResult.raw)}, response=${formatPaymentLogPayload(this.formatPaymentLogResponse(savedTransaction))}`,
+        `FlexPay check returned non-success code: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, code=${checkResult.code}, status=${savedTransaction.status}, providerResponse=${formatPaymentLogPayload(checkResult.raw)}, response=${formatPaymentLogPayload(this.formatPaymentLogResponse(savedTransaction))}`,
       );
       return savedTransaction;
     }
@@ -1087,6 +1100,7 @@ export class PaymentsService {
     return (
       transaction.purpose === PaymentPurpose.DRIVER_PAYOUT ||
       transaction.purpose === PaymentPurpose.WALLET_PAYOUT ||
+      transaction.purpose === PaymentPurpose.ADMIN_PAYOUT ||
       transaction.purpose === PaymentPurpose.REFERRAL_PAYOUT
     );
   }
@@ -1371,8 +1385,7 @@ export class PaymentsService {
     const saved = await this.saveFlexPayDepositCheck(transaction, true);
     if (!this.isPayoutTransaction(transaction)) {
       this.logger.error(
-        `Payment initiation failed: paymentId=${transaction.id}, reference=${transaction.reference}, method=${transaction.method}, message=${errorMessage}`,
-        this.getErrorStack(error),
+        `Payment initiation failed: paymentId=${transaction.id}, reference=${transaction.reference}, method=${transaction.method}`,
       );
     }
     return saved;
@@ -1398,7 +1411,7 @@ export class PaymentsService {
       });
 
     this.logger.warn(
-      `FlexPay initiation received: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, code=${flexPayResponse.code}, orderNumber=${flexPayResponse.orderNumber ?? 'none'}, hasPaymentUrl=${Boolean(flexPayResponse.paymentUrl)}, message=${flexPayResponse.message ?? 'none'}, response=${formatPaymentLogPayload(flexPayResponse.raw)}`,
+      `FlexPay initiation received: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, code=${flexPayResponse.code}, orderNumber=${flexPayResponse.orderNumber ?? 'none'}, hasPaymentUrl=${Boolean(flexPayResponse.paymentUrl)}, response=${formatPaymentLogPayload(flexPayResponse.raw)}`,
     );
 
     savedTransaction.orderNumber = flexPayResponse.orderNumber;
@@ -1422,7 +1435,7 @@ export class PaymentsService {
       if (persisted.status === PaymentStatus.SUCCEEDED) return persisted;
       if (this.looksLikeFlexPayTokenError(flexPayResponse.message)) {
         this.logger.error(
-          `FlexPay token configuration rejected: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, code=${flexPayResponse.code}, message=${flexPayResponse.message ?? 'none'}, response=${formatPaymentLogPayload(flexPayResponse.raw)}`,
+          `FlexPay token configuration rejected: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, code=${flexPayResponse.code}, response=${formatPaymentLogPayload(flexPayResponse.raw)}`,
         );
         if (flexPayResponse.code && !flexPayResponse.orderNumber) {
           throw new PaymentGatewayUnavailableError(PaymentProvider.FLEXPAY,
@@ -1430,7 +1443,7 @@ export class PaymentsService {
         }
       }
       this.logger.warn(
-        `Payment refused by FlexPay: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, code=${flexPayResponse.code}, message=${flexPayResponse.message ?? 'none'}, response=${formatPaymentLogPayload(flexPayResponse.raw)}`,
+        `Payment refused by FlexPay: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, code=${flexPayResponse.code}, response=${formatPaymentLogPayload(flexPayResponse.raw)}`,
       );
       throw new BadRequestException(savedTransaction.providerMessage);
     }
@@ -1497,7 +1510,7 @@ export class PaymentsService {
         savedTransaction.callbackUrl || this.getGenericFlexPayCallbackUrl(),
     });
     this.logger.warn(
-      `FlexPay payout initiation received: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, code=${flexPayResponse.code}, orderNumber=${flexPayResponse.orderNumber ?? 'none'}, message=${flexPayResponse.message ?? 'none'}, response=${formatPaymentLogPayload(flexPayResponse.raw)}`,
+      `FlexPay payout initiation received: paymentId=${savedTransaction.id}, reference=${savedTransaction.reference}, code=${flexPayResponse.code}, orderNumber=${flexPayResponse.orderNumber ?? 'none'}, response=${formatPaymentLogPayload(flexPayResponse.raw)}`,
     );
 
     savedTransaction.orderNumber = flexPayResponse.orderNumber;
@@ -1776,10 +1789,6 @@ export class PaymentsService {
 
   private getErrorMessage(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
-  }
-
-  private getErrorStack(error: unknown): string | undefined {
-    return error instanceof Error ? error.stack : undefined;
   }
 
   private getInitiationSuccessMessage(

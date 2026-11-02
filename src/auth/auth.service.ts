@@ -322,7 +322,7 @@ export class AuthService {
 
     // Check if user has a password (PIN) set
     if (!user.password) {
-      this.logger.warn(`User ${phone} does not have a PIN set`);
+      this.logger.warn(`User ${user.id} does not have a PIN set`);
       return null;
     }
 
@@ -330,7 +330,7 @@ export class AuthService {
     const isPinValid = await bcrypt.compare(pin, user.password);
 
     if (!isPinValid) {
-      this.logger.warn(`Invalid PIN for user ${phone}`);
+      this.logger.warn(`Invalid PIN for user ${user.id}`);
       return null;
     }
 
@@ -355,7 +355,7 @@ export class AuthService {
 
     if (!user) {
       this.logger.warn(
-        `Login failed: User not found for phone: ${loginDto.phone}`,
+        'Login failed: account not found',
       );
       throw new UnauthorizedException(
         'Numéro de téléphone ou code PIN invalide',
@@ -610,7 +610,7 @@ export class AuthService {
 
     if (!user) {
       this.logger.warn(
-        `Admin login failed: User not found for phone: ${loginDto.phone}`,
+        'Admin login failed: account not found',
       );
       throw new UnauthorizedException(
         'Numéro de téléphone ou mot de passe invalide',
@@ -634,7 +634,7 @@ export class AuthService {
     const validatedUser = await this.validateUser(loginDto.phone, password);
     if (!validatedUser) {
       this.logger.warn(
-        `Admin login failed: Invalid password for phone: ${loginDto.phone}`,
+        `Admin login failed: Invalid password for user ${user.id}`,
       );
       throw new UnauthorizedException(
         'Numéro de téléphone ou mot de passe invalide',

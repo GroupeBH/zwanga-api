@@ -9,6 +9,7 @@ import { DataSource } from 'typeorm';
 import { Logger } from '@nestjs/common';
 import { typeOrmEntities } from './entities';
 import { AddDriverPayoutRecovery1780000046000 } from './migrations/1780000046000-AddDriverPayoutRecovery';
+import { PayoutRetries1780000105000 } from './migrations/1780000105000-PayoutRetries';
 import { DriverPayoutRecoveryService } from '../driver-settlements/driver-payout-recovery.service';
 import { DriverSettlementsService } from '../driver-settlements/driver-settlements.service';
 import { DriverPayout } from '../driver-settlements/entities/driver-payout.entity';
@@ -119,6 +120,7 @@ const pgBin = process.env.PAYOUT_TEST_POSTGRES_BIN;
       const runner = source.createQueryRunner();
       await migration.up(runner);
       await runner.release();
+      await source.transaction(manager => new PayoutRetries1780000105000().up(manager.queryRunner!));
       await source.query('INSERT INTO users VALUES ($1),($2)', [driver, admin]);
       const payments: any = {
         findLatestTransactionForRelatedEntity: async (_type, id, userId) =>
@@ -306,6 +308,17 @@ const pgBin = process.env.PAYOUT_TEST_POSTGRES_BIN;
       } finally {
         await runner.release();
       }
+    });
+
+    it('shows recent pending payouts and resolved sources without changing the legacy review queue', async () => {
+      await source.getRepository(DriverPayout).update(payoutId, { requestedAt: new Date(), createdAt: new Date() });
+      await source.getRepository(PaymentTransaction).update(paymentId, { orderNumber: 'TEST-RECENT-ORDER' });
+      expect((await recovery.list({ limit: 25, offset: 0 })).data).toHaveLength(0);
+      expect((await recovery.list({ limit: 25, offset: 0, view: 'pending' })).data.map(p => p.id)).toEqual([payoutId]);
+      expect((await recovery.list({ limit: 25, offset: 1, view: 'pending' })).data).toHaveLength(0);
+      await source.getRepository(DriverPayout).update(payoutId, { status: 'cancelled' as any });
+      expect((await recovery.list({ limit: 25, offset: 0, view: 'pending' })).total).toBe(0);
+      expect((await recovery.list({ limit: 25, offset: 0, view: 'resolved' })).data.map(p => p.id)).toEqual([payoutId]);
     });
   },
 );

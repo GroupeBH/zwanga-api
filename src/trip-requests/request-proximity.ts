@@ -2,14 +2,17 @@ import { NotFoundException } from '@nestjs/common';
 import type { EntityManager } from 'typeorm';
 import { NEARBY_DRIVER_RADIUS_METERS } from './dispatch/nearby-driver-policy';
 import { USABLE_DRIVER_LOCATION_SQL } from './dispatch/driver-location-policy';
+import { driverAlertLocationTimeSql } from './dispatch/driver-alert-location-policy';
 import { requestDriverVisibilitySql } from './target-driver-policy';
+import { requestVehicleTypesSql } from './request-vehicle-types';
 
 /** Internal SQL expressions only; identifiers supplied by clients stay bound parameters.
  * Use one location, never an OR between an old nearby point and a newer distant one.
- * Discovery consent is respected, but durable last-known positions have no age limit.
+ * Browsing keeps durable locations. Alert delivery additionally checks the age of
+ * the newest position, without falling back to an older point when it is invalid.
  */
-export const latestDriverPositionSql = (driverId: string) => `(
-  SELECT location.position FROM (
+export const latestDriverPositionSql = (driverId: string, forAlert = false) => `(
+  SELECT latest.position FROM (SELECT location.position, location.recorded_at FROM (
     SELECT p.position, p."updatedAt" AS recorded_at, 0 AS priority
     FROM driver_dispatch_presence p
     WHERE p."driverId" = (${driverId})::uuid AND ${USABLE_DRIVER_LOCATION_SQL}
@@ -19,16 +22,21 @@ export const latestDriverPositionSql = (driverId: string) => `(
     WHERE t."driverId" = (${driverId})::uuid AND t.status = 'ongoing'
       AND t."destinationReachedAt" IS NULL AND t."currentLocation" IS NOT NULL
       AND p."discoveryEnabled" IS DISTINCT FROM false
-  ) location ORDER BY location.recorded_at DESC NULLS LAST, location.priority DESC LIMIT 1
+  ) location ORDER BY location.recorded_at DESC NULLS LAST, location.priority DESC LIMIT 1) latest
+  ${forAlert ? `WHERE ${driverAlertLocationTimeSql('latest.recorded_at')}` : ''}
 )`;
 
-export const requestDriverProximitySql = (requestId: string, driverId: string) => `EXISTS (
+export const requestDriverProximitySql = (requestId: string, driverId: string, forAlert = false) => `EXISTS (
   SELECT 1 FROM trip_requests nearby_request WHERE nearby_request.id = ${requestId} AND
-    ST_DWithin(nearby_request."departurePoint", ${latestDriverPositionSql(driverId)}, ${NEARBY_DRIVER_RADIUS_METERS})
+    ST_DWithin(nearby_request."departurePoint", ${latestDriverPositionSql(driverId, forAlert)}, ${NEARBY_DRIVER_RADIUS_METERS})
 )`;
 
-export const nearbyRequestDriverVisibilitySql = (requestId: string, driverId: string) =>
-  `${requestDriverVisibilitySql(requestId, driverId)} AND ${requestDriverProximitySql(requestId, driverId)}`;
+export const nearbyRequestDriverVisibilitySql = (requestId: string, driverId: string, forAlert = false) =>
+  `${requestDriverVisibilitySql(requestId, driverId)} AND ${requestDriverProximitySql(requestId, driverId, forAlert)}
+    AND EXISTS (SELECT 1 FROM trip_requests vehicle_request JOIN vehicles v
+      ON v."ownerId" = (${driverId})::uuid AND v."isActive" = true
+      AND v.type::text = ANY(${requestVehicleTypesSql('vehicle_request')})
+      WHERE vehicle_request.id = ${requestId})`;
 
 /** Recheck before exposing contact details or committing a new pickup. Existing
  * assignments/history are deliberately not gated by the driver's current position. */

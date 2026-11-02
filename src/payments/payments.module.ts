@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { HttpModule } from '@nestjs/axios';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { PaymentTransaction } from './entities/payment-transaction.entity';
+import { PayoutRetry } from './entities/payout-retry.entity';
 import { PawaPayRefund } from './entities/pawapay-refund.entity';
 import { FlexPayService } from './flexpay.service';
 import { PawaPayService } from './pawapay.service';
@@ -15,7 +16,7 @@ import { PaymentReconciliationService } from './payment-reconciliation.service';
 @Module({
   imports: [
     HttpModule,
-    TypeOrmModule.forFeature([PaymentTransaction, PawaPayRefund]),
+    TypeOrmModule.forFeature([PaymentTransaction, PawaPayRefund, PayoutRetry]),
   ],
   controllers: [PaymentsController, PawaPayOperationsController],
   providers: [

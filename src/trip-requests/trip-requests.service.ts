@@ -1,5 +1,6 @@
 import { claimRequestAcceptance, completeRequestAcceptance, releaseRequestAcceptance, startPassengerDecision } from './dispatch/request-acceptance';
 import { changeRequestDriver } from './change-request-driver';
+import { requestVehicleTypes, resolveRequestVehicleTypes, requestVehicleTypeFilter, requestAcceptsVehicle } from './request-vehicle-types';
 import { ChangeRequestDriverDto } from './dto/change-request-driver.dto';
 import { assertSequentialInvitation } from './dispatch/sequential-policy';
 import { assertDriverRequestSchedule } from './dispatch/driver-schedule-policy';
@@ -72,6 +73,7 @@ import { ACCEPTED_REQUEST_EXPIRATION_MS, UNACCEPTED_REQUEST_EXPIRATION_MS, asser
 import { enqueueTransactionalNotification } from '../notifications/transactional-notification';
 import { HistoryPageQuery, orderHistory } from '../common/history-page';
 import { requestPageIds, offerPageIds } from './request-pages';
+import { homeRequestIds } from './home-request-ids';
 
 export interface SanitizedUser {
   id: string;
@@ -125,6 +127,7 @@ export interface SanitizedDriverOfferWithTripRequest extends SanitizedDriverOffe
     numberOfSeats: number;
     maxPricePerSeat: number | null;
     vehicleType: VehicleType;
+    vehicleTypes: VehicleType[];
     paymentMode: TripPaymentMode;
     status: TripRequestStatus;
     passenger: SanitizedUser;
@@ -152,6 +155,7 @@ export interface SanitizedTripRequest {
   numberOfSeats: number;
   maxPricePerSeat: number | null;
   vehicleType: VehicleType;
+  vehicleTypes: VehicleType[];
   paymentMode: TripPaymentMode;
   description: string | null;
   status: TripRequestStatus;
@@ -261,17 +265,17 @@ export class TripRequestsService {
     }
 
     this.ensurePassengerKycForExtraSeats(passenger, numberOfSeats);
-    this.assertRequestedVehicleSeatCapacity(
-      createTripRequestDto.vehicleType,
-      numberOfSeats,
-    );
+    const vehicleTypes = resolveRequestVehicleTypes(createTripRequestDto);
+    const vehicleType = vehicleTypes[0];
+    vehicleTypes.forEach(type => this.assertRequestedVehicleSeatCapacity(type, numberOfSeats));
 
     const {
       departureCoordinates,
       arrivalCoordinates,
       departureDateMin,
       departureDateMax,
-      vehicleType,
+      vehicleType: _legacyVehicleType,
+      vehicleTypes: _vehicleTypes,
       ...rest
     } = createTripRequestDto;
 
@@ -320,7 +324,7 @@ export class TripRequestsService {
     if (createTripRequestDto.targetDriverId) {
       if (!departurePoint) throw new BadRequestException('Choisissez le point de départ avant le conducteur.');
       await validateTargetDriver(this.tripRequestRepository.manager, passengerId, createTripRequestDto.targetDriverId,
-        { longitude: departurePoint.coordinates[0], latitude: departurePoint.coordinates[1], vehicleType, seats: numberOfSeats });
+        { longitude: departurePoint.coordinates[0], latitude: departurePoint.coordinates[1], vehicleType, vehicleTypes, seats: numberOfSeats });
     }
 
     const tripRequest = this.tripRequestRepository.create({
@@ -330,6 +334,7 @@ export class TripRequestsService {
       paymentMode: rest.paymentMode ?? TripPaymentMode.CASH,
       maxPricePerSeat: recommendedPrice,
       vehicleType,
+      vehicleTypes,
       numberOfSeats,
       passengerId,
       departurePoint,
@@ -585,7 +590,7 @@ export class TripRequestsService {
     }
 
     const snapshot = { ...tripRequest };
-    for (const field of ['departureLocation', 'arrivalLocation', 'departureDateMin', 'departureDateMax', 'numberOfSeats', 'vehicleType', 'paymentMode'] as const) {
+    for (const field of ['departureLocation', 'arrivalLocation', 'departureDateMin', 'departureDateMax', 'numberOfSeats', 'vehicleType', 'vehicleTypes', 'paymentMode'] as const) {
       if (updateTripRequestDto[field] === null)
         throw new BadRequestException(`Le champ ${field} ne peut pas être null.`);
     }
@@ -607,7 +612,7 @@ export class TripRequestsService {
 
     const resultingNumberOfSeats =
       updateTripRequestDto.numberOfSeats ?? tripRequest.numberOfSeats;
-    const resultingVehicleType = vehicleType ?? tripRequest.vehicleType;
+    const resultingVehicleTypes = resolveRequestVehicleTypes(updateTripRequestDto, tripRequest);
     if (!Number.isInteger(resultingNumberOfSeats) || resultingNumberOfSeats < 1 || updateTripRequestDto.numberOfSeats === null) {
       throw new BadRequestException('Le nombre de places doit être au moins 1');
     }
@@ -615,10 +620,7 @@ export class TripRequestsService {
       passengerId,
       resultingNumberOfSeats,
     );
-    this.assertRequestedVehicleSeatCapacity(
-      resultingVehicleType,
-      resultingNumberOfSeats,
-    );
+    resultingVehicleTypes.forEach(type => this.assertRequestedVehicleSeatCapacity(type, resultingNumberOfSeats));
 
     // Update departure location and coordinates if provided
     if (updateTripRequestDto.departureLocation !== undefined) {
@@ -705,8 +707,9 @@ export class TripRequestsService {
       tripRequest.maxPricePerSeat = updateTripRequestDto.maxPricePerSeat;
     }
 
-    if (vehicleType !== undefined) {
-      tripRequest.vehicleType = vehicleType;
+    if (vehicleType !== undefined || updateTripRequestDto.vehicleTypes !== undefined) {
+      tripRequest.vehicleType = resultingVehicleTypes[0];
+      tripRequest.vehicleTypes = resultingVehicleTypes;
     }
 
     if (updateTripRequestDto.paymentMode !== undefined) {
@@ -720,7 +723,7 @@ export class TripRequestsService {
     // Persist only editable fields: never write a stale status/assignment snapshot.
     const editable = ['departureLocation', 'departureReference', 'departurePoint',
       'arrivalLocation', 'arrivalReference', 'arrivalPoint', 'departureDateMin', 'departureDateMax',
-      'numberOfSeats', 'maxPricePerSeat', 'vehicleType', 'paymentMode', 'description'] as const;
+      'numberOfSeats', 'maxPricePerSeat', 'vehicleType', 'vehicleTypes', 'paymentMode', 'description'] as const;
     const patch: Partial<Pick<TripRequest, typeof editable[number] | 'immediateDispatch' | 'expirationNotificationSent'>> = {};
     for (const field of editable) {
       if (JSON.stringify(tripRequest[field]) !== JSON.stringify(snapshot[field]))
@@ -767,7 +770,7 @@ export class TripRequestsService {
       // Get all active drivers with FCM tokens, excluding the passenger who created the request
       const drivers = await this.userRepository.find({
         where: {
-          id: Raw(alias => nearbyRequestDriverVisibilitySql(':refusedRequestId', alias), { refusedRequestId: tripRequest.id }),
+          id: Raw(alias => nearbyRequestDriverVisibilitySql(':refusedRequestId', alias, true), { refusedRequestId: tripRequest.id }),
           role: UserRole.DRIVER,
           isActive: true,
         },
@@ -801,6 +804,7 @@ export class TripRequestsService {
         arrivalLocation: 'Point d’arrivée',
         numberOfSeats: tripRequest.numberOfSeats.toString(),
         vehicleType: tripRequest.vehicleType ?? VehicleType.CAR,
+        vehicleTypes: JSON.stringify(requestVehicleTypes(tripRequest)),
         maxPricePerSeat: Number(tripRequest.maxPricePerSeat ?? 0).toString(),
         departureDateMin: tripRequest.departureDateMin.toISOString(),
         departureDateMax: tripRequest.departureDateMax.toISOString(),
@@ -825,8 +829,10 @@ export class TripRequestsService {
     }
   }
 
-  async findAll(driverId: string): Promise<SanitizedTripRequest[]> {
+  async findAll(driverId: string, home = false): Promise<SanitizedTripRequest[]> {
     await this.assertDriverViewer(driverId);
+    const ids = home ? await homeRequestIds(this.tripRequestRepository, driverId) : undefined;
+    if (ids && !ids.length) return [];
     this.logger.debug('Fetching all trip requests');
 
     // Search/Home still use this legacy endpoint. Filter elapsed deadlines in
@@ -841,7 +847,8 @@ export class TripRequestsService {
         'driverOffers.vehicle',
       ],
       where: {
-        id: Raw(alias => nearbyRequestDriverVisibilitySql(alias, ':refusingDriverId'), { refusingDriverId: driverId }),
+        id: Raw(alias => `${ids ? `${alias} IN (:...homeRequestIds) AND ` : ''}${nearbyRequestDriverVisibilitySql(alias, ':refusingDriverId')}`,
+          { refusingDriverId: driverId, ...(ids ? { homeRequestIds: ids } : {}) }),
         status: In([
           TripRequestStatus.PENDING,
           TripRequestStatus.OFFERS_RECEIVED,
@@ -858,7 +865,7 @@ export class TripRequestsService {
     // Recheck the deadline after hydration, including a raced expiration update
     // that affected zero rows and therefore left this snapshot unchanged.
     const now = new Date();
-    const visibleTripRequests = tripRequests.filter(
+    const visibleTripRequests = (ids ? orderHistory(ids, tripRequests) : tripRequests).filter(
       (tr) => this.isAvailableRequest(tr, now),
     );
 
@@ -1185,13 +1192,13 @@ export class TripRequestsService {
         where: {
           ownerId: driverId,
           isActive: true,
-          type: tripRequest.vehicleType ?? VehicleType.CAR,
+          type: requestVehicleTypeFilter(tripRequest),
         },
       });
 
       if (!vehicle) {
         throw new BadRequestException(
-          `Vous devez sélectionner un véhicule actif de type ${this.VEHICLE_TYPE_DISPLAY_NAMES[tripRequest.vehicleType ?? VehicleType.CAR]}`,
+          `Vous devez sélectionner un véhicule actif parmi : ${requestVehicleTypes(tripRequest).map(type => this.VEHICLE_TYPE_DISPLAY_NAMES[type]).join(', ')}`,
         );
       }
 
@@ -1781,7 +1788,7 @@ export class TripRequestsService {
         where: {
           ownerId: driverId,
           isActive: true,
-          type: tripRequest.vehicleType ?? VehicleType.CAR,
+          type: requestVehicleTypeFilter(tripRequest),
         },
       });
 
@@ -2555,12 +2562,13 @@ export class TripRequestsService {
     vehicle: Vehicle,
     tripRequest: TripRequest,
   ): void {
-    const requestedType = tripRequest.vehicleType ?? VehicleType.CAR;
-    if ((vehicle.type ?? VehicleType.CAR) !== requestedType) {
+    if (!requestAcceptsVehicle(tripRequest, vehicle.type ?? VehicleType.CAR)) {
       throw new BadRequestException({
         error: 'Type de véhicule incompatible',
         code: 'TRIP_REQUEST_VEHICLE_TYPE_MISMATCH',
-        message: `Cette commande nécessite le type ${this.VEHICLE_TYPE_DISPLAY_NAMES[requestedType]}. Sélectionnez un véhicule actif correspondant.`,
+        message: requestVehicleTypes(tripRequest).length === 1
+          ? `Cette commande nécessite le type ${this.VEHICLE_TYPE_DISPLAY_NAMES[tripRequest.vehicleType]}. Sélectionnez un véhicule actif correspondant.`
+          : `Cette commande accepte : ${requestVehicleTypes(tripRequest).map(type => this.VEHICLE_TYPE_DISPLAY_NAMES[type]).join(', ')}. Sélectionnez un véhicule actif correspondant.`,
       });
     }
   }
@@ -2735,6 +2743,7 @@ export class TripRequestsService {
           ? Number(offer.tripRequest.maxPricePerSeat)
           : null,
         vehicleType: offer.tripRequest.vehicleType ?? VehicleType.CAR,
+        vehicleTypes: requestVehicleTypes(offer.tripRequest),
         paymentMode: offer.tripRequest.paymentMode,
         status: offer.tripRequest.status,
         passenger,
@@ -2789,6 +2798,7 @@ export class TripRequestsService {
         ? Number(tripRequest.maxPricePerSeat)
         : null,
       vehicleType: tripRequest.vehicleType ?? VehicleType.CAR,
+      vehicleTypes: requestVehicleTypes(tripRequest),
       paymentMode: tripRequest.paymentMode,
       description: tripRequest.description,
       status: tripRequest.status,

@@ -2,9 +2,10 @@ import { NotificationStatus } from './entities/notification.entity';
 import { NotificationService } from './notifications.service';
 import { TripRequestStatus } from '../trip-requests/entities/trip-request.entity';
 import { FirebaseDeliveryError } from './firebase-delivery-error';
+import * as boundedFirebase from './bounded-firebase-send';
 
 describe('NotificationService critical push reliability', () => {
-  const buildService = () => {
+  const buildService = (capacity: unknown = 5) => {
     const queryBuilder = {
       where: jest.fn().mockReturnThis(),
       andWhere: jest.fn().mockReturnThis(),
@@ -48,7 +49,7 @@ describe('NotificationService critical push reliability', () => {
     const tripRequestRepository = {
       findOne: jest.fn(),
     };
-    const configService = { get: jest.fn() };
+    const configService = { get: jest.fn((key: string) => key === 'URGENT_PUSH_WORKERS' ? capacity : undefined) };
     const service = new NotificationService(
       configService as any,
       notificationRepository as any,
@@ -68,6 +69,30 @@ describe('NotificationService critical push reliability', () => {
 
   afterEach(() => {
     jest.restoreAllMocks();
+    jest.useRealTimers();
+  });
+
+  it('synthetic slow-provider burst: eight bounded slots start 16 alerts before their 40s deadlines', async () => {
+    jest.useFakeTimers();
+    const f = buildService(undefined);
+    const waiting = Array.from({ length: 16 }, (_, i) => ({ id: String(i), createdAt: new Date(), data: { type: i % 2 ? 'trip_request_nearby' : 'driver_dispatch_offer' } }));
+    f.queryBuilder.getMany.mockImplementation(async () => waiting.splice(0, Number(f.queryBuilder.take.mock.lastCall![0])) as never[]);
+    jest.spyOn(f.service as any, 'isCriticalNotificationStillDeliverable').mockResolvedValue(true);
+    const started: number[] = [], start = Date.now(); let active = 0, peak = 0;
+    jest.spyOn(f.service as any, 'deliverSavedNotification').mockImplementation(async () => {
+      active++; peak = Math.max(peak, active); started.push(Date.now() - start);
+      await new Promise(resolve => setTimeout(resolve, 15_000)); active--; return true;
+    });
+    // undefined selects the default, not the fixture's explicit legacy capacity.
+    (f.service as any).configService.get.mockReturnValue(undefined);
+    const first = f.service.dispatchUrgentNotifications();
+    await jest.advanceTimersByTimeAsync(15_000); await first;
+    const second = f.service.dispatchUrgentNotifications();
+    await jest.advanceTimersByTimeAsync(15_000); await second;
+    expect(started).toHaveLength(16); expect(peak).toBe(8);
+    expect(Math.max(...started)).toBe(15_000);
+    expect(f.queryBuilder.orderBy).toHaveBeenCalledWith('notification.createdAt', 'ASC');
+    expect(jest.getTimerCount()).toBe(0);
   });
 
   const expectClaimedResult = (
@@ -365,10 +390,38 @@ describe('NotificationService critical push reliability', () => {
     expect(transactionalRepository.save).toHaveBeenCalledWith([
       expect.objectContaining({
         status: NotificationStatus.PENDING,
-        errorMessage: 'CRITICAL_PUSH_RETRY_CLAIMED',
+        errorMessage: expect.stringMatching(/^CRITICAL_PUSH_RETRY_CLAIMED:/),
       }),
     ]);
     expect(claimed).toHaveLength(1);
+    const firstToken = failedNotification.errorMessage;
+    await (service as any).claimCriticalFinancialNotifications();
+    expect(failedNotification.errorMessage).not.toBe(firstToken);
+  });
+
+  it('critical retries use the bounded FCM transport and do not overlap on the same worker', async () => {
+    const f = buildService();
+    Object.assign(f.service, { firebaseApp: {} });
+    const item = { id: 'retry-payment', userId: 'synthetic-user', title: 'Paiement reçu', body: 'Test',
+      status: NotificationStatus.FAILED, data: { type: 'payment_received' } };
+    f.queryBuilder.getMany.mockResolvedValue([item] as never[]);
+    f.userRepository.findOne.mockResolvedValue({ fcmToken: 'synthetic-device' });
+    let release!: (message: string) => void;
+    const transport = jest.spyOn(boundedFirebase, 'sendBoundedFirebase')
+      .mockImplementation(() => new Promise(resolve => { release = resolve; }));
+    const work = f.service.retryCriticalFinancialNotifications();
+    await new Promise(resolve => setImmediate(resolve));
+    expect(transport).toHaveBeenCalledTimes(1);
+    await f.service.retryCriticalFinancialNotifications();
+    expect(f.queryBuilder.getMany).toHaveBeenCalledTimes(1);
+    release('synthetic-message'); await work;
+    expect(f.notificationRepository.save).not.toHaveBeenCalled();
+    expect(f.notificationRepository.update).toHaveBeenCalledWith(expect.objectContaining({
+      id: item.id, errorMessage: expect.stringMatching(/^CRITICAL_PUSH_RETRY_CLAIMED:/),
+    }), expect.objectContaining({ status: NotificationStatus.SENT, messageId: 'synthetic-message' }));
+    f.queryBuilder.getMany.mockResolvedValue([]);
+    await f.service.retryCriticalFinancialNotifications();
+    expect(f.queryBuilder.getMany).toHaveBeenCalledTimes(2);
   });
 
   it('delivers a committed outbox row only after releasing its claim transaction', async () => {
@@ -446,7 +499,8 @@ describe('NotificationService critical push reliability', () => {
     queryBuilder.getMany.mockResolvedValueOnce([row]);
     await service.retryCriticalFinancialNotifications();
     expect(fetchSpy).toHaveBeenCalledTimes(1);
-    expect(notificationRepository.save).toHaveBeenLastCalledWith(
+    expect(notificationRepository.update).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: 'outbox', errorMessage: expect.stringMatching(/^CRITICAL_PUSH_RETRY_CLAIMED:/) }),
       expect.objectContaining({ status: NotificationStatus.SENT }),
     );
   });
@@ -521,7 +575,8 @@ describe('NotificationService critical push reliability', () => {
     ]);
     await service.retryCriticalFinancialNotifications();
     expect(userRepository.findOne).not.toHaveBeenCalled();
-    expect(notificationRepository.save).toHaveBeenCalledWith(
+    expect(notificationRepository.update).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'outbox', errorMessage: expect.stringMatching(/^CRITICAL_PUSH_RETRY_CLAIMED:/) }),
       expect.objectContaining({ isActive: false }),
     );
   });
@@ -671,9 +726,9 @@ describe('NotificationService critical push reliability', () => {
     await service.retryCriticalFinancialNotifications();
 
     expect(userRepository.findOne).not.toHaveBeenCalled();
-    expect(notificationRepository.save).toHaveBeenCalledWith(
+    expect(notificationRepository.update).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'notification-overdue', errorMessage: expect.stringMatching(/^CRITICAL_PUSH_RETRY_CLAIMED:/) }),
       expect.objectContaining({
-        id: 'notification-overdue',
         status: NotificationStatus.FAILED,
         isActive: false,
         messageId: null,

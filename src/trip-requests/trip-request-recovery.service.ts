@@ -178,6 +178,7 @@ export class TripRequestRecoveryService {
           arrivalLocation: 'Point d’arrivée',
           numberOfSeats: String(tripRequest.numberOfSeats),
           vehicleType: tripRequest.vehicleType,
+          vehicleTypes: JSON.stringify(requestVehicleTypes(tripRequest)),
           maxPricePerSeat: String(Number(tripRequest.maxPricePerSeat ?? 0)),
           departureDateMin: tripRequest.departureDateMin.toISOString(),
           departureDateMax: tripRequest.departureDateMax.toISOString(),
@@ -194,3 +195,4 @@ export class TripRequestRecoveryService {
     }
   }
 }
+import { requestVehicleTypes } from './request-vehicle-types';

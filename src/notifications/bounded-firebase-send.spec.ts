@@ -135,6 +135,19 @@ describe('Firebase deadlines and safe failure diagnostics (no provider calls)', 
     expect(send).toHaveBeenCalledTimes(1);
   });
 
+  it('propagates a provider Retry-After lower bound to the durable retry owner', async () => {
+    jest.spyOn(global, 'fetch').mockResolvedValue(new Response('', { status: 429, headers: { 'Retry-After': '120' } }));
+    await expect(sendBoundedFirebase(app(), { token: 'test' })).rejects.toMatchObject({ details: { retryAt: Date.now() + 120000 } });
+  });
+
+  it('does not POST if an invitation expires during OAuth refresh', async () => {
+    const a = app();
+    (a.options.credential!.getAccessToken as jest.Mock).mockImplementation(() => new Promise(resolve => setTimeout(() => resolve({ access_token: 'synthetic', expires_in: 3600 }), 1000)));
+    const send = jest.spyOn(global, 'fetch');
+    const work = expect(sendBoundedFirebase(a, { token: 'test' }, undefined, Date.now() + 500)).rejects.toMatchObject({ message: 'FCM_INVITATION_EXPIRED' });
+    await jest.advanceTimersByTimeAsync(1000); await work; expect(send).not.toHaveBeenCalled();
+  });
+
   it.each(['null', '{}', '{'])('does not record malformed success %s as delivery', async body => {
     jest.spyOn(global, 'fetch').mockResolvedValue(new Response(body, { status: 200 }));
     await expect(sendBoundedFirebase(app(), { token: 'test' })).rejects.toMatchObject({ message: 'FCM_INVALID_RESPONSE' });

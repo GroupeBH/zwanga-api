@@ -74,12 +74,10 @@ const bin = process.env.MIXED_CASH_TEST_POSTGRES_BIN;
       expect((await f.service.findDriverPayments(f.passenger.id)).notices).toHaveLength(0);
     } finally { if (runner.isTransactionActive) await runner.rollbackTransaction(); await runner.release(); }
   });
-  it('socket hints reload an authenticated REST receipt; a missed socket is recovered by REST and acknowledgement is durable', async () => {
+  async function verifySocketAndRest(mobileRoot?: string) {
     const f = await fixture();
     const controller = new NotificationsController(f.service);
-    const mobileRoot = process.env.RIDE_AUDIT_MOBILE_ROOT;
-    if (!mobileRoot) throw new Error('Set RIDE_AUDIT_MOBILE_ROOT for the cross-repository check');
-    const { io } = require(`${mobileRoot}/node_modules/socket.io-client`);
+    const { io } = require('socket.io-client');
     let http: HttpServer | undefined, sockets: Server | undefined, client: any;
     // Identity is a fixture, not production JWT login. No provider or remote network.
     try {
@@ -112,12 +110,15 @@ const bin = process.env.MIXED_CASH_TEST_POSTGRES_BIN;
       expect(hint).toEqual({ kind: 'payment', recipientId: f.driver.id, eventId: row.id, bookingId: f.booking.id });
       const read = async (userId = f.driver.id) => (await fetch(`${base}/notifications/driver-payments`, { headers: { 'x-test-user': userId } })).json();
       const snapshot = await read(); expect(snapshot.notices).toHaveLength(1);
-      const { loader } = require(`${mobileRoot}/tests/helpers/loadTypeScript.cjs`);
-      const load = loader();
-      expect(load('features/notifications/rideRealtime.ts').parseRideRealtimeEvent(hint)?.kind).toBe('payment');
-      const notices = load('features/driver-payments/paymentInbox.ts').paymentInbox(snapshot, f.driver.id);
-      expect(notices[0]).toMatchObject({ amount: 800, bookingId: f.booking.id, mode: 'points' });
-      expect(load('features/arrival-payment/paymentAnnouncement.ts').driverPaymentAnnouncement(notices[0]).text).toContain('800 francs congolais');
+      expect(snapshot.notices[0]).toMatchObject({ amount: 800, bookingId: f.booking.id, paymentMode: 'points' });
+      if (mobileRoot) {
+        const { loader } = require(`${mobileRoot}/tests/helpers/loadTypeScript.cjs`);
+        const load = loader();
+        expect(load('features/notifications/rideRealtime.ts').parseRideRealtimeEvent(hint)?.kind).toBe('payment');
+        const notices = load('features/driver-payments/paymentInbox.ts').paymentInbox(snapshot, f.driver.id);
+        expect(notices[0]).toMatchObject({ amount: 800, bookingId: f.booking.id, mode: 'points' });
+        expect(load('features/arrival-payment/paymentAnnouncement.ts').driverPaymentAnnouncement(notices[0]).text).toContain('800 francs congolais');
+      }
       client.disconnect();
       expect((await read()).notices).toHaveLength(1);
       await fetch(`${base}/notifications/mark-as-read`, { method: 'PUT', headers: { 'x-test-user': f.passenger.id, 'content-type': 'application/json' }, body: JSON.stringify({ notificationIds: [row.id] }) });
@@ -125,7 +126,12 @@ const bin = process.env.MIXED_CASH_TEST_POSTGRES_BIN;
       await fetch(`${base}/notifications/mark-as-read`, { method: 'PUT', headers: { 'x-test-user': f.driver.id, 'content-type': 'application/json' }, body: JSON.stringify({ notificationIds: [row.id] }) });
       expect((await read()).notices).toHaveLength(0);
     } finally { client?.disconnect(); http?.closeAllConnections(); if (sockets) await new Promise<void>(resolve => sockets!.close(() => resolve())); http?.close(); }
-  });
+  }
+  it('socket hints reload an authenticated REST receipt; a missed socket is recovered by REST and acknowledgement is durable',
+    () => verifySocketAndRest());
+  const mobileRoot = process.env.RIDE_AUDIT_MOBILE_ROOT;
+  (mobileRoot ? it : it.skip)('cross-repository: real mobile parsers and payment speech consume the socket/REST receipt',
+    () => verifySocketAndRest(mobileRoot));
   it('only the real cash receipt is shown, not the choice of cash', async () => {
     const f = await fixture();
     await db.getRepository(Booking).save({ ...f.booking, paymentMode: TripPaymentMode.CASH, paymentStatus: BookingPaymentStatus.NOT_REQUIRED });

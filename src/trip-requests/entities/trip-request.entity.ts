@@ -114,6 +114,10 @@ export class TripRequest {
   })
   vehicleType: VehicleType; // Type de véhicule explicitement choisi par le passager
 
+  // NULL preserves the legacy single choice. New writes also retain vehicleType.
+  @Column({ type: 'text', array: true, nullable: true })
+  vehicleTypes: VehicleType[] | null;
+
   @Column({ type: 'varchar', length: 30, default: TripPaymentMode.CASH })
   paymentMode: TripPaymentMode;
 

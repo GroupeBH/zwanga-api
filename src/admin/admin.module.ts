@@ -29,6 +29,11 @@ import { VehiclesModule } from '../vehicles/vehicles.module';
 import { AdminVehiclesController } from './admin-vehicles.controller';
 import { AdminVehiclesService } from './admin-vehicles.service';
 import { StoreManagementModule } from '../store-management/store-management.module';
+import { PaymentsModule } from '../payments/payments.module';
+import { AdminPaymentsController } from './admin-payments.controller';
+import { AdminPaymentReconciliationService } from './admin-payment-reconciliation.service';
+import { AdminDirectPayoutService } from './admin-direct-payout.service';
+import { AdminDirectPayoutController } from './admin-direct-payout.controller';
 
 @Module({
   imports: [
@@ -57,13 +62,16 @@ import { StoreManagementModule } from '../store-management/store-management.modu
     WalletModule,
     ReferralsModule,
     VehiclesModule,
+    PaymentsModule,
   ],
-  controllers: [AdminController, AdminVehiclesController],
+  controllers: [AdminController, AdminVehiclesController, AdminPaymentsController, AdminDirectPayoutController],
   providers: [
     AdminService,
     AdminReferralsService,
     TripStatementService,
     AdminVehiclesService,
+    AdminPaymentReconciliationService,
+    AdminDirectPayoutService,
   ],
   exports: [AdminService],
 })

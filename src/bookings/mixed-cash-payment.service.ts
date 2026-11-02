@@ -107,23 +107,19 @@ export class MixedCashPaymentService {
         throw new ConflictException(
           'Le montant ou le tarif des jetons a changé. Actualisez avant de payer.',
         );
-      // A terminal refusal is not a live collection. Keep unresolved and paid
-      // transactions blocking; do not strand the user after a confirmed failure.
+      // Only a direct collection for THIS booking can double-charge the fare.
+      // Wallet purchases (including a pending complement) only credit the wallet;
+      // a late success must remain reconcilable, not block spending existing tokens.
+      // The booking lock and immutable split prevent later full token settlement.
+      // Preserve direct unresolved/paid guards and allow confirmed terminal failures.
       if (
         await manager.exists(PaymentTransaction, {
-          where: [
-            {
-              purpose: PaymentPurpose.TRIP_BOOKING,
-              relatedEntityType: 'booking',
-              relatedEntityId: id,
-              status: In([PaymentStatus.PENDING, PaymentStatus.INITIATED, PaymentStatus.SUCCEEDED]),
-            },
-            {
-              purpose: PaymentPurpose.WALLET_TOP_UP,
-              userId: passengerId,
-              status: In([PaymentStatus.PENDING, PaymentStatus.INITIATED]),
-            },
-          ],
+          where: {
+            purpose: PaymentPurpose.TRIP_BOOKING,
+            relatedEntityType: 'booking',
+            relatedEntityId: id,
+            status: In([PaymentStatus.PENDING, PaymentStatus.INITIATED, PaymentStatus.SUCCEEDED]),
+          },
         })
       )
         throw new ConflictException(

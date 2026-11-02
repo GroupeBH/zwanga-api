@@ -1,5 +1,220 @@
 # Versements conducteur et résolution des retraits bloqués
 
+## Virement libre et retrait existant : deux opérations distinctes
+
+Le super admin dispose de deux parcours, sans changement des styles de Zwanga Admin :
+
+- **Retrait existant** : ouvrir « Suivi / relance », fournir le motif, la preuve
+  définitive FlexPaie de non-exécution et la confirmation de non-réception, puis
+  « Débloquer et relancer au même numéro ». L'ancien retrait est clôturé comme
+  non payé ; un seul remplacement est créé. Montant, téléphone et soldes sont
+  contrôlés par le serveur. Le statut historique de la transaction prestataire
+  n'est pas falsifié. Le délai de sécurité de quinze minutes reste applicable.
+- **Virement libre** : dans **Paiements → Transactions → Virement libre**, saisir
+  un numéro Mobile Money RDC (`+2438…` ou `+2439…`), un montant CDF, un motif,
+  puis confirmer. Ce décaissement utilise exclusivement FlexPaie et les fonds
+  Zwanga. Il ne débite aucun compte utilisateur et ne clôture aucun retrait.
+  Ne pas l'utiliser pour contourner les réservations d'un retrait existant.
+
+Le nouveau contrat est `POST /api/v1/admin/payments/direct-payouts` :
+
+```json
+{
+  "idempotencyKey": "UUID_V4_A_CONSERVER_POUR_CET_ORDRE",
+  "phone": "+243891234567",
+  "amount": 10000,
+  "currency": "CDF",
+  "reason": "Motif administratif documenté",
+  "confirmed": true
+}
+```
+
+Montant de 1 à 99 999 999,99 CDF (limite de représentation du registre,
+pas une garantie d'acceptation de l'opérateur), deux décimales maximum ; motif
+de 5 à 500 caractères. L'API exige un super admin actif, un mot de passe
+administrateur régularisé et limite la création à trois appels par minute.
+Le rôle est revérifié sous verrou lors de l'enregistrement. L'identité de
+l'acteur, la date, le motif et les coordonnées du versement sont conservés dans
+`payment_transactions`, sous le type `admin_payout`, filtrable dans l'admin.
+Le `userId` est ici l'administrateur initiateur, pas le bénéficiaire du numéro.
+
+Une référence unique déterministe, liée à l'acteur et à l'UUID de l'ordre,
+est enregistrée **avant** l'appel externe. La transaction PostgreSQL est courte
+et aucun verrou n'est conservé pendant HTTP. Réutiliser l'ordre ne renvoie jamais
+l'argent ; changer ses paramètres provoque un conflit 409. Un crash après
+enregistrement et avant envoi nécessite un rapprochement : aucun renvoi aveugle.
+Une nouvelle clé désigne une nouvelle opération : elle ne doit pas servir à
+réessayer un résultat incertain.
+
+`GET /api/v1/admin/payments/direct-payouts/:idempotencyKey` retrouve l'ordre
+du même acteur sans envoi. Le rapprochement par UUID de transaction réutilise
+`POST /api/v1/admin/payments/:paymentId/reconcile` et le contrôle **payout**.
+L'admin mémorise uniquement la clé dans `sessionStorage`, pas les coordonnées.
+Après fermeture/réouverture de la fenêtre, il retrouve le dossier. En cas de
+réponse perdue, « Reprendre le même ordre » conserve impérativement la clé ;
+la protection en base reste déterminante. Fermer complètement la session du
+navigateur peut effacer ce repère : consulter alors le registre des paiements.
+
+Une réponse `pending` ou `initiated` n'est pas un versement reçu, et un HTTP 200
+peut contenir un état `failed`. Ni virement libre ni relance ne doit forcer un
+état « payé ». Les confirmations restent vérifiées chez FlexPaie.
+
+**Livraison** : appliquer la migration additive
+`1780000109000-AdminDirectPayouts` avant le backend, puis livrer l'admin.
+Elle raccorde ce type au worker durable de rapprochement existant ; son rollback
+retire seulement son déclencheur et conserve tous les paiements et travaux.
+Ne pas revenir à un backend ignorant `admin_payout` tant que ces opérations
+restent à rapprocher. Les identifiants `FLEXPAY_PAYOUT_*` existants sont réutilisés.
+Aucun appel réel, transfert historique, modification Terraform ou déploiement
+n'est effectué par cette implémentation locale.
+
+## Vérification d’une transaction depuis le registre central
+
+Le bouton **Paiements → Détails → Vérifier chez le prestataire** appelle maintenant
+`POST /api/v1/admin/payments/:paymentId/reconcile`. `paymentId` est l’UUID Zwanga,
+pas le numéro de commande FlexPaie. Le backend retrouve lui-même cette référence.
+L’accès exige un super admin actif authentifié ; la limite est de dix appels par minute.
+
+Cette action vérifie l’opération existante et applique son règlement métier
+idempotent. Elle **n’envoie pas à nouveau d’argent**. Un `wallet_top_up` utilise le
+contrôle d’encaissement ; les gains conducteur et retraits de parrainage utilisent
+le contrôle payout. PawaPay conserve son parcours de rapprochement existant.
+
+La réponse expose `paymentId`, `status`, `paidAt`, `updatedAt`, `completed`, `code`
+et `message`, sans réponse brute du prestataire. `RECONCILED` signifie règlement
+métier appliqué : consulter aussi `status`, qui peut être `failed` ou `cancelled`.
+`MISSING_PROVIDER_ORDER` ou `UNRESOLVED` avec `completed=false` signifie résultat
+encore indéterminé. Une réponse HTTP 200 n’est donc pas une preuve de paiement.
+Les incidents réseau, de configuration ou de règlement restent des erreurs ;
+aucun solde n’est libéré sur le seul constat d’un timeout ou d’un compte marchand vide.
+
+L’admin garde le détail ouvert et affiche ce résultat, distingue les erreurs de
+session, de droits, de fréquence et de prestataire, et rafraîchit les vues financières.
+Pour **réémettre** un retrait, utiliser le dossier **Suivi / relance** décrit ci-dessous,
+avec les preuves requises. Les actions sont journalisées avec l’acteur, l’UUID et le résultat.
+Cette route ne nécessite pas de migration financière supplémentaire. Livrer le
+backend avant l’admin ; aucune modification AWS, Terraform ou CI/CD n’a été réalisée.
+
+## Relance par le super admin du 2 novembre 2026
+
+Le super admin peut demander un nouveau versement de gains conducteur ou de
+parrainage depuis le dossier du retrait non reçu. Il doit obtenir la confirmation
+du bénéficiaire **et une preuve définitive de non-exécution du prestataire**.
+Un compte marchand vide, un délai dépassé ou une simple déclaration de
+non-réception ne suffisent pas : le premier virement pourrait encore aboutir.
+
+### Utilisation dans Zwanga Admin
+
+1. Depuis **Paiements → Retraits de gains conducteur** ou **Parrainage → Retraits**, cliquer sur **Suivi / relance** et vérifier l’état du dossier.
+2. Obtenir la confirmation définitive FlexPaie et conserver sa preuve dans le
+   dossier de support. Ne jamais saisir un secret marchand dans les champs.
+3. Renseigner le motif et la référence de preuve, puis cocher les attestations
+   de non-exécution et de non-réception.
+4. Cliquer sur **Relancer au même numéro** et confirmer le montant affiché.
+5. Cliquer sur **Suivre le versement de remplacement**. « Relance enregistrée »
+   signifie que la demande est enregistrée, pas que le Mobile Money a reçu l'argent.
+
+La section de relance est réservée au super admin. Lorsqu’elle est bloquée, le
+bouton reste visible mais désactivé, avec le motif et, pour un retrait récent,
+l’heure de fin du délai de sécurité. Un ancien backend sans `canAdminRetry`
+affiche une consigne de mise à jour ; aucune autorisation n’est déduite du statut.
+Les styles existants sont réutilisés sans modification CSS. Les routes mobiles et leurs
+contrats restent inchangés ; cette action ne nécessite pas une mise à jour mobile.
+
+La liste conducteur affiche par défaut **tous** les retraits `pending` et
+`initiated`, y compris récents ou munis d’un numéro de commande. Les filtres
+**Signalements et incidents** et **Échecs et annulations** permettent de retrouver
+les autres dossiers, notamment si une tentative a été résolue mais que la nouvelle
+réservation a échoué. La pagination existante est conservée.
+
+### API et traçabilité
+
+Les nouvelles routes, sous `/api/v1`, sont :
+
+- `POST /admin/driver-payouts/:id/retry`
+- `POST /admin/referrals/withdrawals/:id/retry`
+
+```json
+{
+  "expectedReference": "REFERENCE_ORIGINALE_DU_DOSSIER",
+  "reason": "Non-réception et non-exécution confirmées",
+  "evidenceReference": "REFERENCE_DE_CONFIRMATION_DEFINITIVE_FLEXPAIE",
+  "confirmedNotPaid": true,
+  "confirmedNotReceived": true
+}
+```
+
+Le backend impose le rôle super admin, une limitation de fréquence et les
+contrôles financiers existants. Aucun montant, bénéficiaire ou numéro alternatif
+n'est accepté par ce contrat : le versement conserve ceux du retrait d'origine.
+Le parrainage conserve aussi son nombre de jetons et son taux historique.
+Une devise historique différente de la devise actuelle des gains conducteur
+nécessite un rapprochement séparé.
+
+La première tentative est résolue comme non payée par le mécanisme existant
+(délai minimal de 15 minutes lorsqu'elle est encore en attente), puis une nouvelle
+réservation est créée sur le solde réellement disponible, avec KYC encore valide.
+La libération et la nouvelle réservation sont deux transactions distinctes :
+si le solde a été utilisé entre-temps, la relance est refusée. Aucun gain ni
+bonus supplémentaire n'est crédité.
+
+`payout_retries` relie les deux retraits et enregistre l'acteur, la référence,
+le motif, la preuve et la date dans la transaction de réservation. Son unicité
+impose un seul remplacement par retrait. Les répétitions HTTP retrouvent ce
+remplacement ; elles ne créent pas une nouvelle tentative. Si ce remplacement
+échoue, une nouvelle intervention porte sur son propre dossier et exige une
+nouvelle preuve. Les détails exposent `retry`, `retryOf` et `canAdminRetry`.
+
+Les détails conducteur et parrainage ajoutent `adminRetry: { code, message,
+availableAt }`. Les codes `SAFETY_DELAY`, `ALREADY_PAID`, `ALREADY_RETRIED`,
+`RECOVERY_BLOCKED`, `PAYMENT_MISMATCH`, `UNSUPPORTED_PROVIDER` et `INVALID_STATE`
+expliquent un blocage ; `AVAILABLE` indique seulement que la préparation est
+possible. Le solde, le KYC et toute la chaîne de relances sont revérifiés à
+l’exécution, pas garantis par ce champ. Aucun envoi automatique après quinze minutes.
+
+`GET /admin/driver-payouts?view=pending|review|resolved` ajoute le filtre facultatif.
+Sans `view`, la file historique à examiner reste inchangée pour les anciens clients.
+Livrer le backend avant l’admin pour activer ce filtre. Cette amélioration de
+visibilité n’ajoute pas de migration ; la migration de relance `105` ci-dessous
+reste nécessaire si elle n’a pas encore été appliquée.
+
+Le verrou propriétaire et les contrôles avant soumission empêchent les doubles
+réservations et bloquent un succès tardif **déjà enregistré** d'une tentative
+antérieure, y compris dans une chaîne de relances. Les appels réseau restent hors
+transaction SQL, conformément au guide PostgreSQL. Une preuve erronée suivie d'un
+succès encore inconnu du backend peut toujours provoquer un double versement :
+les callbacks et le rapprochement des succès tardifs restent indispensables.
+L'action n'annule aucun virement chez FlexPaie et ne modifie pas la transaction
+prestataire d'origine. Les notifications financières utilisent l'outbox existante.
+
+### Migration et vérification
+
+Appliquer `1780000105000-PayoutRetries`, après les migrations précédentes, avant
+le nouveau backend. Elle crée seulement une table d'audit et ses index : aucun
+solde n'est recalculé et aucun virement n'est lancé. Les contrôles de soumission
+utilisent aussi cette table pour les retraits ordinaires ; elle ne doit donc pas
+être omise lors de la livraison. Aucune nouvelle variable d'environnement requise.
+
+Le rollback SQL est possible tant que cette table est vide et refusé après
+utilisation pour préserver l'historique financier. Un retour au binaire précédent
+doit conserver la table et les nouveaux retraits ; ne pas les supprimer en SQL.
+
+Les tests `payout-retry.spec.ts` et `payout-retry-postgres.spec.ts` couvrent le rôle,
+les attestations, les appels concurrents, les réponses perdues, le solde
+insuffisant, le taux historique et les succès tardifs. PostgreSQL est jetable et
+les transports de paiement sont simulés. Les tests React de `zwanga-admin`
+couvrent les confirmations et les contrats. Aucun versement réel, changement
+AWS, Terraform, CI/CD ou déploiement n'est effectué par ces tests.
+
+Validation de l’amélioration de visibilité du 2 novembre : **58 tests unitaires
+backend**, **20 tests PostgreSQL isolés** et **37 tests admin** réussis (dont
+25 sur les retraits), ainsi que TypeScript backend de production et admin.
+Les scénarios couvrent les deux types de retrait, une seule soumission malgré
+plusieurs clics/appels concurrents, le refus après succès tardif, le suivi du
+remplacement, les dossiers récents et les filtres paginés. Les tests admin
+utilisent le rendu React et des gestionnaires simulés ; la recette navigateur
+avec un compte super admin et un prestataire réel reste à effectuer séparément.
+
 ## 23 octobre 2026 — Résolution du parrainage et prévention des retraits sans provision
 
 Le parcours de résolution couvre maintenant les **gains conducteur** et les

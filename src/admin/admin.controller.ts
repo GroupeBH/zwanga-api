@@ -31,6 +31,7 @@ import { spreadsheetHeaders, type SpreadsheetFile } from './spreadsheet';
 import { VehicleType } from '../vehicles/entities/vehicle.entity';
 import { ADMIN_USER_SORT_FIELDS } from './dto/admin-users.dto';
 import { ResolvePayoutNotPaidDto } from '../payments/dto/resolve-payout-not-paid.dto';
+import { RetryPayoutDto } from '../payments/dto/retry-payout.dto';
 
 interface AuthenticatedAdminRequest {
   user: { userId: string };
@@ -518,6 +519,15 @@ export class AdminController {
     @Body() dto: ResolvePayoutNotPaidDto,
   ) {
     return this.adminReferralsService.resolveWithdrawalNotPaid(req.user.userId, withdrawalId, dto);
+  }
+
+  @Post('referrals/withdrawals/:withdrawalId/retry')
+  @Auth()
+  @Roles(UserRole.SUPER_ADMIN)
+  @SensitiveThrottle(3, 60000)
+  @ApiOperation({ summary: 'Relancer un retrait non reçu, au même numéro et montant, sur preuve de non-exécution' })
+  retryReferralWithdrawal(@Request() req: AuthenticatedAdminRequest, @Param('withdrawalId', ParseUUIDPipe) id: string, @Body() dto: RetryPayoutDto) {
+    return this.adminReferralsService.retryWithdrawal(req.user.userId, id, dto);
   }
 
   @Get('users/:userId/details')

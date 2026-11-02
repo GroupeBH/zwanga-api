@@ -20,6 +20,8 @@ import {
 } from '../referrals/entities/referral-withdrawal.entity';
 import { User, UserStatus } from '../users/entities/user.entity';
 import { isSuperAdminRole } from '../users/user-role.policy';
+import { RetryPayoutDto } from '../payments/dto/retry-payout.dto';
+import { payoutRetryDetails } from '../payments/payout-retry';
 import {
   buildReferralAccountsSpreadsheet,
   buildReferralRewardsSpreadsheet,
@@ -269,6 +271,7 @@ export class AdminReferralsService {
     );
     return {
       ...this.serializeWithdrawal(withdrawal),
+      ...await payoutRetryDetails(this.withdrawalRepository.manager, 'referral_withdrawal', withdrawal, withdrawal.paymentTransaction),
       resolution,
       lateSuccessAfterRelease: !!resolution && withdrawal.status === ReferralWithdrawalStatus.SUCCEEDED,
     };
@@ -278,6 +281,12 @@ export class AdminReferralsService {
     await this.ensureSuperAdmin(adminId);
     await this.referralsService.resolveWithdrawalNotPaid(adminId, withdrawalId, dto);
     return this.getWithdrawalDetail(withdrawalId);
+  }
+
+  async retryWithdrawal(adminId: string, withdrawalId: string, dto: RetryPayoutDto) {
+    await this.ensureSuperAdmin(adminId);
+    const replacement = await this.referralsService.retryWithdrawal(adminId, withdrawalId, dto);
+    return this.getWithdrawalDetail(replacement.id);
   }
 
   async exportAccounts(search?: string): Promise<SpreadsheetFile> {

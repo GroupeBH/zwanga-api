@@ -1,5 +1,6 @@
 import { requestDriverVisibilitySql } from '../target-driver-policy';
 import { ONGOING_DRIVER_POSITION_SQL } from './driver-location-policy';
+import { ONGOING_ALERT_LOCATION_SQL } from './driver-alert-location-policy';
 import { EntityManager } from 'typeorm';
 import {
   TripRequest,
@@ -13,6 +14,7 @@ import {
 } from './nearby-driver-policy';
 import { rideSpeechData } from '../../notifications/ride-speech-data';
 import { isUUID } from 'class-validator';
+import { requestVehicleTypes, requestVehicleTypesSql } from '../request-vehicle-types';
 
 /** Recheck queued alerts; a trip may finish or fill up before the push is sent. */
 export async function sharedTripAlertIsDeliverable(manager: EntityManager, driverId: string | null,
@@ -23,7 +25,7 @@ export async function sharedTripAlertIsDeliverable(manager: EntityManager, drive
     JOIN trip_requests r ON r.id = $2
     JOIN vehicles v ON v.id = t."vehicleId"::uuid AND v."ownerId" = t."driverId" AND v."isActive" = true
     WHERE t.id = $3 AND t."driverId" = $1 AND t.status = 'ongoing' AND t."destinationReachedAt" IS NULL
-      AND t."availableSeats" >= r."numberOfSeats" AND v.type = r."vehicleType"
+      AND t."availableSeats" >= r."numberOfSeats" AND v.type::text = ANY(${requestVehicleTypesSql('r')})
       AND r.status IN ('pending','offers_received') AND r."tripId" IS NULL
       AND r."selectedDriverId" IS NULL AND r."passengerId" <> $1 AND r."departureDateMax" > now()`,
     [driverId, requestId, tripId]);
@@ -59,11 +61,12 @@ export async function enqueueSharedTripAlert(
     LEFT JOIN driver_dispatch_presence p ON p."driverId" = t."driverId"
     WHERE t.status = 'ongoing' AND t."destinationReachedAt" IS NULL
       AND ${requestDriverVisibilitySql('$1', 't."driverId"')}
-      AND t."availableSeats" >= $2 AND v.type = $3 AND t."driverId" <> $4
+      AND t."availableSeats" >= $2 AND v.type::text = ANY($3::text[]) AND t."driverId" <> $4
       AND t."totalSeats" <= CASE WHEN v.type = 'motorcycle_2_wheels' THEN 2
         WHEN v.type = 'motorcycle_3_wheels' THEN 3 ELSE 20 END
       AND (t."isFree" = true OR (t."pricePerSeat" <= $5 AND $6 = ANY(t."acceptedPaymentModes")))
       AND p."discoveryEnabled" IS DISTINCT FROM false
+      AND ${ONGOING_ALERT_LOCATION_SQL}
       AND ${ELIGIBLE_DRIVER_ACCOUNT_SQL.replaceAll('p."driverId"', 't."driverId"')}
       AND ST_DWithin(${ONGOING_DRIVER_POSITION_SQL},
         ST_SetSRID(ST_MakePoint($7,$8),4326)::geography,$9)
@@ -76,7 +79,7 @@ export async function enqueueSharedTripAlert(
       [
         requestId,
         request.numberOfSeats,
-        request.vehicleType,
+        requestVehicleTypes(request),
         request.passengerId,
         request.maxPricePerSeat,
         request.paymentMode,

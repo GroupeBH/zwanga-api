@@ -30,6 +30,7 @@ describe('FlexPay payout durable state', () => {
       status: 'pending',
     };
     manager = {
+      findOneBy: jest.fn().mockResolvedValue(null),
       findOne: jest.fn(async (entity) =>
         entity === User
           ? { id: 'driver' }

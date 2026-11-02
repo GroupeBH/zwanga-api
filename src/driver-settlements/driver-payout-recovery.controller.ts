@@ -16,6 +16,7 @@ import { RolesGuard } from '../common/guards/roles.guard';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
 import { UserRole } from '../users/entities/user.entity';
 import { DriverPayoutRecoveryService } from './driver-payout-recovery.service';
+import { RetryPayoutDto } from '../payments/dto/retry-payout.dto';
 import {
   ClosePayoutIncidentDto,
   PayoutRecoveryListDto,
@@ -60,8 +61,8 @@ export class DriverPayoutRecoveryController {
 
 @ApiTags('Admin Driver Payout Recovery')
 @Controller('admin/driver-payouts')
-@Auth()
 @UseGuards(RolesGuard)
+@Auth()
 @Roles(UserRole.ADMIN)
 export class AdminDriverPayoutRecoveryController {
   constructor(private readonly recovery: DriverPayoutRecoveryService) {}
@@ -105,6 +106,14 @@ export class AdminDriverPayoutRecoveryController {
     @Body() dto: ResolveDriverPayoutDto,
   ) {
     return this.recovery.resolveNotPaid(req.user.userId, id, dto);
+  }
+
+  @Post(':id/retry')
+  @Roles(UserRole.SUPER_ADMIN)
+  @SensitiveThrottle(3, 60_000)
+  @ApiOperation({ summary: 'Relancer au même numéro après non-réception et non-exécution définitive confirmées' })
+  retry(@Request() req: AuthenticatedRequest, @Param('id', ParseUUIDPipe) id: string, @Body() dto: RetryPayoutDto) {
+    return this.recovery.retry(req.user.userId, id, dto);
   }
 
   @Post(':id/close-late-success')

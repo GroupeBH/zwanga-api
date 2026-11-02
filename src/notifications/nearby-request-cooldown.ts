@@ -1,4 +1,5 @@
 import { requestDriverVisibilitySql } from '../trip-requests/target-driver-policy';
+import { REQUEST_RESPONSE_MS } from '../trip-requests/dispatch/sequential-policy';
 import { declineRequestForDriver } from '../trip-requests/request-refusal';
 import type { EntityManager } from 'typeorm';
 import type { Notification } from './entities/notification.entity';
@@ -157,7 +158,7 @@ export async function prepareNearbyRequestRinging(
     const state = await lockState(tx, driverId);
     await reconcile(tx, state);
     const now = new Date(state.now).getTime();
-    let deadline = now + 60_000;
+    let deadline = now + REQUEST_RESPONSE_MS;
     for (const value of [
       notification.data?.expiresAt,
       notification.data?.alertExpiresAt,

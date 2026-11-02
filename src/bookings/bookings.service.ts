@@ -5,6 +5,7 @@ import { CoalescedRideProgress } from './coalesced-ride-progress';
 import { withBookableTrip } from './bookable-trip-transaction';
 import { canApplyBookingPayment } from './booking-payment-transition';
 import { finishEmptyPrivateTrip } from './private-trip-cancellation';
+import { WALLET_BALANCE_MISMATCH_SQL } from '../wallet/wallet-integrity';
 import {
   Injectable,
   NotFoundException,
@@ -377,18 +378,9 @@ export class BookingsService implements OnModuleInit {
         ],
       )) as Array<{ count: number | string }>;
       const unsafeAnomalies = Number(anomalyRows[0]?.count ?? 0);
-      const walletMismatchRows = (await this.dataSource.query(`
-        SELECT COUNT(*)::int AS count
-        FROM wallet_accounts account
-        LEFT JOIN LATERAL (
-          SELECT ledger."balanceAfter"
-          FROM wallet_ledger_entries ledger
-          WHERE ledger."accountId" = account.id
-          ORDER BY ledger."createdAt" DESC, ledger.id DESC
-          LIMIT 1
-        ) latest ON true
-        WHERE account.balance <> COALESCE(latest."balanceAfter", 0)
-      `)) as Array<{ count: number | string }>;
+      const walletMismatchRows = (await this.dataSource.query(
+        WALLET_BALANCE_MISMATCH_SQL,
+      )) as Array<{ count: number | string }>;
       const walletBalanceMismatches = Number(walletMismatchRows[0]?.count ?? 0);
 
       if (unsafeAnomalies > 0) {

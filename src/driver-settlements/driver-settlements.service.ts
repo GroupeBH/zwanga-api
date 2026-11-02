@@ -10,6 +10,8 @@ import { ConfigService } from '@nestjs/config';
 import { Cron } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'crypto';
+import { PayoutRetry } from '../payments/entities/payout-retry.entity';
+import { PayoutRetryContext, recordPayoutRetry, validatePayoutRetrySource } from '../payments/payout-retry';
 import { DataSource, EntityManager, In, IsNull, Not, Repository } from 'typeorm';
 import {
   Booking,
@@ -27,7 +29,7 @@ import { PaymentsService } from '../payments/payments.service';
 import { TripPaymentMode } from '../payments/enums/trip-payment-mode.enum';
 import { Trip, TripStatus } from '../trips/entities/trip.entity';
 import { KycDocument } from '../users/entities/kyc-document.entity';
-import { User } from '../users/entities/user.entity';
+import { User, UserStatus } from '../users/entities/user.entity';
 import {
   DriverEarning,
   DriverEarningStatus,
@@ -776,6 +778,21 @@ export class DriverSettlementsService implements OnModuleInit {
       dto.idempotencyKey?.trim() || randomUUID(),
     );
 
+    return this.submitReservedPayout(payout);
+  }
+
+  /** Internal admin workflow; amount/recipient/currency come from the original withdrawal. */
+  async retryResolvedPayout(source: DriverPayout, context: PayoutRetryContext) {
+    if (source.currency !== this.getCurrency())
+      throw new BadRequestException('La devise historique nécessite un rapprochement avant relance.');
+    const payout = await this.reservePayout(source.driverId, Number(source.amount), source.phone, randomUUID(), context);
+    return this.submitReservedPayout(payout);
+  }
+
+  private async submitReservedPayout(payout: DriverPayout): Promise<DriverPayoutResponse> {
+    const driverId = payout.driverId;
+    const amount = Number(payout.amount);
+
     if (
       [
         DriverPayoutStatus.SUCCEEDED,
@@ -1053,6 +1070,7 @@ export class DriverSettlementsService implements OnModuleInit {
     amount: number,
     requestedPhone: string | undefined,
     idempotencyKey: string,
+    retry?: PayoutRetryContext,
   ): Promise<DriverPayout> {
     return this.dataSource.transaction(async (manager) => {
       // Le verrou du compte conducteur serialise tous ses retraits. Deux cles
@@ -1064,6 +1082,18 @@ export class DriverSettlementsService implements OnModuleInit {
       });
       if (!driver) {
         throw new NotFoundException('Chauffeur introuvable');
+      }
+
+      let retrySource: DriverPayout | undefined;
+      if (retry) {
+        if (!driver.isActive || [UserStatus.INACTIVE, UserStatus.SUSPENDED].includes(driver.status))
+          throw new BadRequestException('Ce compte ne peut pas recevoir une relance de retrait.');
+        const previous = await manager.findOneBy(PayoutRetry, { kind: retry.kind, sourceId: retry.sourceId });
+        if (previous) return manager.findOneByOrFail(DriverPayout, { id: previous.replacementId, driverId });
+        retrySource = await validatePayoutRetrySource(manager, retry) as DriverPayout;
+        if (retry.kind !== 'driver_payout' || retrySource.driverId !== driverId ||
+            Number(retrySource.amount) !== amount || retrySource.phone !== requestedPhone)
+          throw new ConflictException('Les paramètres du retrait ont changé.');
       }
 
       const rawPhone = requestedPhone?.trim() || driver.phone?.trim();
@@ -1114,7 +1144,7 @@ export class DriverSettlementsService implements OnModuleInit {
         driverId,
         idempotencyKey,
         amount,
-        currency: this.getCurrency(),
+        currency: retrySource?.currency ?? this.getCurrency(),
         phone,
         status: DriverPayoutStatus.PENDING,
         paymentTransactionId: null,
@@ -1122,7 +1152,9 @@ export class DriverSettlementsService implements OnModuleInit {
         processedAt: null,
         failureReason: null,
       });
-      return manager.save(payout);
+      const saved = await manager.save(payout);
+      if (retry) await recordPayoutRetry(manager, retry, saved.id);
+      return saved;
     });
   }
 

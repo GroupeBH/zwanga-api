@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Repository } from 'typeorm';
+import { assertPayoutRetryMaySubmit } from './payout-retry';
 import { User } from '../users/entities/user.entity';
 import {
   ReferralWithdrawal,
@@ -70,6 +71,7 @@ export async function claimReferralPayoutPayment(
       withdrawal.paymentTransactionId
     )
       throw new ConflictException('Ce retrait ne peut plus être envoyé');
+    await assertPayoutRetryMaySubmit(manager, 'referral_withdrawal', withdrawal.id);
     const payment = await manager.save(PaymentTransaction, draft);
     withdrawal.paymentTransactionId = payment.id;
     await manager.save(ReferralWithdrawal, withdrawal);

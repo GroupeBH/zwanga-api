@@ -7,6 +7,9 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { DataSource, EntityManager } from 'typeorm';
 import { PaymentsService } from '../payments/payments.service';
+import { RetryPayoutDto } from '../payments/dto/retry-payout.dto';
+import { PayoutRetry } from '../payments/entities/payout-retry.entity';
+import { authorizePayoutRetry, payoutRetryDetails } from '../payments/payout-retry';
 import { isPayoutRecoveryCheckUnavailable } from '../payments/payout-recovery-actions';
 import {
   PaymentProvider,
@@ -43,6 +46,15 @@ export class DriverPayoutRecoveryService {
     private readonly config: ConfigService,
   ) {}
 
+  async retry(actorId: string, id: string, dto: RetryPayoutDto) {
+    await authorizePayoutRetry(this.source.manager, actorId, dto);
+    const existing = await this.source.manager.findOneBy(PayoutRetry, { kind: 'driver_payout', sourceId: id });
+    if (existing) return (await this.detail(existing.replacementId)).payout;
+    await this.resolveNotPaid(actorId, id, dto);
+    const source = await this.find(id);
+    return this.settlements.retryResolvedPayout(source, { actorId, kind: 'driver_payout', sourceId: id, proof: dto });
+  }
+
   async list(query: PayoutRecoveryListDto) {
     const cutoff = new Date(
       Date.now() -
@@ -51,15 +63,22 @@ export class DriverPayoutRecoveryService {
         ) *
           60_000,
     );
-    const [rows, total] = await this.source
+    const builder = this.source
       .getRepository(DriverPayout)
       .createQueryBuilder('p')
-      .leftJoinAndSelect('p.paymentTransaction', 'payment')
-      .where(
+      .leftJoinAndSelect('p.paymentTransaction', 'payment');
+    if (query.view === 'pending' || query.view === 'resolved') {
+      builder.where('p.status IN (:...statuses)', {
+        statuses: query.view === 'pending' ? ['pending', 'initiated'] : ['failed', 'cancelled'],
+      });
+    } else {
+      builder.where(
         `p."recoveryBlocked" = true OR (p.status IN (:...pending) AND
         (p."reviewRequestedAt" IS NOT NULL OR p."createdAt" <= :cutoff OR payment."orderNumber" IS NULL))`,
         { pending: ['pending', 'initiated'], cutoff },
-      )
+      );
+    }
+    const [rows, total] = await builder
       .orderBy('p.createdAt', 'ASC')
       .addOrderBy('p.id', 'ASC')
       .take(query.limit)
@@ -82,7 +101,8 @@ export class DriverPayoutRecoveryService {
       take: 100,
     });
     return {
-      payout: this.settlements.formatPayoutForClient(payout, payment),
+      payout: { ...this.settlements.formatPayoutForClient(payout, payment),
+        ...await payoutRetryDetails(this.source.manager, 'driver_payout', payout, payment) },
       events,
     };
   }

@@ -19,6 +19,9 @@ export function assertPayoutPurposeAllowed(input: {
   currency?: string;
 }): void {
   const purpose = input.purpose || PaymentPurpose.DRIVER_PAYOUT;
+  // Treasury payments are separately authorized again under lock before any send.
+  if (purpose === PaymentPurpose.ADMIN_PAYOUT && input.relatedEntityType === 'admin_direct_payout' && input.relatedEntityId)
+    return;
   if (
     purpose === PaymentPurpose.REFERRAL_PAYOUT &&
     input.relatedEntityType === 'referral_withdrawal' &&

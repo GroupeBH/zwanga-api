@@ -2,6 +2,14 @@ import { hasUsableDriverLocation } from './driver-location-policy';
 import { DriverDispatchService } from './dispatch.service';
 
 describe('last known driver location', () => {
+  it.each([true, false])('separates durable availability from alert location freshness (%s)', async fresh => {
+    const query = jest.fn().mockResolvedValueOnce([{ discoveryEnabled: true, alertLocationFresh: fresh }])
+      .mockResolvedValueOnce([]).mockResolvedValueOnce([{ busy: false }]);
+    const service = new DriverDispatchService({ query, manager: { query } } as never, { get: () => 'true' } as never, {} as never);
+    expect(await service.status('driver')).toMatchObject({ available: true, positionExpires: false,
+      needsLocationRefresh: !fresh, alertLocationMaxAgeSeconds: 48 * 3600 });
+    expect(query.mock.calls[0][0]).toContain("t.status='ongoing'");
+  });
   it('uses opted-in locations regardless of their former deadline', () => {
     expect(hasUsableDriverLocation({ discoveryEnabled: true, expiresAt: new Date(0) })).toBe(true);
   });

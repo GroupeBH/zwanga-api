@@ -92,6 +92,7 @@ import { DriverSettlementsService } from '../driver-settlements/driver-settlemen
 import { WalletService } from '../wallet/wallet.service';
 import { assertDriverCanOperate } from '../users/driver-activation';
 import { assertDriverPublicationPhoto, savePublicationsWithPhotoPolicy } from './trip-publication-photo';
+import { pauseUnavailableRecurring } from './pause-unavailable-recurring';
 import {
   buildPointFromCoordinate,
   isCoordinateAllowedForTrip,
@@ -2497,6 +2498,15 @@ export class TripsService {
       try {
         await this.generateTripsForTemplate(template);
       } catch (error: any) {
+        if (error instanceof BadRequestException &&
+            (error.getResponse() as { code?: string }).code === 'RECURRING_VEHICLE_UNAVAILABLE') {
+          try {
+            await pauseUnavailableRecurring(this.recurringTripTemplateRepository.manager, template);
+            continue;
+          } catch (pauseError) {
+            this.logger.warn('Recurring template pause deferred; the next generation cycle will retry.');
+          }
+        }
         this.logger.error(
           `Failed to generate recurring trips for template ${template.id}: ${error.message}`,
           error.stack,
@@ -2697,9 +2707,8 @@ export class TripsService {
         where: { id: template.vehicleId, ownerId: template.driverId },
       }));
     if (!vehicle || !vehicle.isActive) {
-      throw new BadRequestException(
-        'Le véhicule du trajet récurrent est introuvable ou inactif',
-      );
+      throw new BadRequestException({ code: 'RECURRING_VEHICLE_UNAVAILABLE',
+        message: 'Le véhicule du trajet récurrent est introuvable ou inactif' });
     }
     this.assertVehicleSeatCapacity(vehicle, template.totalSeats);
 

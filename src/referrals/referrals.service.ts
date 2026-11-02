@@ -16,7 +16,10 @@ import { HttpService } from '@nestjs/axios';
 import { ConfigService } from '@nestjs/config';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { InjectRepository } from '@nestjs/typeorm';
-import { randomBytes } from 'crypto';
+import { randomBytes, randomUUID } from 'crypto';
+import { PayoutRetry } from '../payments/entities/payout-retry.entity';
+import { RetryPayoutDto } from '../payments/dto/retry-payout.dto';
+import { authorizePayoutRetry, PayoutRetryContext, recordPayoutRetry, validatePayoutRetrySource } from '../payments/payout-retry';
 import { firstValueFrom } from 'rxjs';
 import {
   DataSource,
@@ -919,6 +922,28 @@ export class ReferralsService implements OnModuleInit {
     // provider identifier exists yet; crash recovery must never send blindly.
     if (!reservation.created) return withdrawal;
 
+    return this.submitReservedWithdrawal(withdrawal);
+  }
+
+  async retryWithdrawal(actorId: string, id: string, dto: RetryPayoutDto) {
+    await authorizePayoutRetry(this.dataSource.manager, actorId, dto);
+    const existing = await this.dataSource.manager.findOneBy(PayoutRetry, { kind: 'referral_withdrawal', sourceId: id });
+    if (existing) return this.withdrawalRepository.findOneByOrFail({ id: existing.replacementId });
+    const source = await this.resolveWithdrawalNotPaid(actorId, id, dto);
+    // Preserve the original amount AND token conversion, including historical rates.
+    const reservation = await this.reserveWithdrawal({
+      userId: source.userId, tokens: Number(source.tokens), amount: Number(source.amount),
+      currency: source.currency, moneyPerToken: Number(source.moneyPerToken), phone: source.phone,
+      idempotencyKey: randomUUID(),
+      retry: { actorId, kind: 'referral_withdrawal', sourceId: id, proof: dto },
+    });
+    return reservation.created ? this.submitReservedWithdrawal(reservation.withdrawal) : reservation.withdrawal;
+  }
+
+  private async submitReservedWithdrawal(withdrawal: ReferralWithdrawal): Promise<ReferralWithdrawal> {
+    const { userId, phone, currency } = withdrawal;
+    const tokens = Number(withdrawal.tokens), amount = Number(withdrawal.amount);
+
     let payment: PaymentTransaction;
     try {
       payment = await this.paymentsService.initiatePayout({
@@ -1318,12 +1343,22 @@ export class ReferralsService implements OnModuleInit {
     moneyPerToken: number;
     phone: string;
     idempotencyKey?: string | null;
+    retry?: PayoutRetryContext;
   }): Promise<{ withdrawal: ReferralWithdrawal; created: boolean }> {
     return this.dataSource.transaction(async (manager) => {
       // Same user-first ordering as KYC decisions; recheck inside reservation.
       const user = await manager.findOne(User, { where: { id: input.userId }, lock: { mode: 'pessimistic_write' } });
       if (!user || !this.isUserEligibleAsReferrer(user)) {
         throw new BadRequestException('Ce compte ne peut pas demander de retrait.');
+      }
+      if (input.retry) {
+        const previous = await manager.findOneBy(PayoutRetry, { kind: input.retry.kind, sourceId: input.retry.sourceId });
+        if (previous) return { withdrawal: await manager.findOneByOrFail(ReferralWithdrawal, { id: previous.replacementId, userId: input.userId }), created: false };
+        const source = await validatePayoutRetrySource(manager, input.retry) as ReferralWithdrawal;
+        if (input.retry.kind !== 'referral_withdrawal' || source.userId !== input.userId ||
+            Number(source.amount) !== input.amount || Number(source.tokens) !== input.tokens ||
+            Number(source.moneyPerToken) !== input.moneyPerToken || source.currency !== input.currency || source.phone !== input.phone)
+          throw new ConflictException('Les paramètres du retrait ont changé.');
       }
       if (input.idempotencyKey) {
         const existing = await manager.findOne(ReferralWithdrawal, { where: { userId: input.userId, idempotencyKey: input.idempotencyKey } });
@@ -1378,6 +1413,7 @@ export class ReferralsService implements OnModuleInit {
         failureReason: null,
       });
       withdrawal = await manager.save(withdrawal);
+      if (input.retry) await recordPayoutRetry(manager, input.retry, withdrawal.id);
 
       account.availableTokens = balances.availableTokens;
       await manager.save(account);
