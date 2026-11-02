@@ -29,6 +29,9 @@ import { ReferralProfile } from '../referrals/entities/referral-profile.entity';
 import { ReferralAccount } from '../referrals/entities/referral-account.entity';
 import { ReferralLedgerEntry } from '../referrals/entities/referral-ledger-entry.entity';
 import { ReferralAttributionAudit1780000082000 } from './migrations/1780000082000-ReferralAttributionAudit';
+import { RideNotificationReceipts1780000093000 } from './migrations/1780000093000-RideNotificationReceipts';
+import { RideDeliveryRecovery1780000094000 } from './migrations/1780000094000-RideDeliveryRecovery';
+import { AlertDeliveryReliability1780000106000 } from './migrations/1780000106000-AlertDeliveryReliability';
 
 // Explicit opt-in: fresh disposable loopback cluster, never an app URL or .env.
 const pgBin = process.env.NOTIFICATIONS_TEST_POSTGRES_BIN;
@@ -155,16 +158,17 @@ const pgBin = process.env.NOTIFICATIONS_TEST_POSTGRES_BIN;
         "diditSessionId" varchar, "diditSessionNumber" integer, "diditWorkflowId" varchar,
         "diditVendorData" varchar, "diditSessionStatus" varchar, "diditLastSyncedAt" timestamp, "providerMetadata" jsonb,
         "createdAt" timestamp DEFAULT now(), "updatedAt" timestamp DEFAULT now());`);
-      const runner = source.createQueryRunner();
-      try {
+      // Use the real migrations: ORM inserts include retry columns even when
+      // the producer leaves their values to the database defaults.
+      await source.transaction(async (manager) => {
+        const runner = manager.queryRunner!;
         await migration.up(runner);
-        await runner.startTransaction();
         await new HardenPushOwnershipAndPriority1780000051000().up(runner);
         await new ReferralAttributionAudit1780000082000().up(runner);
-        await runner.commitTransaction();
-      } finally {
-        await runner.release();
-      }
+        await new RideNotificationReceipts1780000093000().up(runner);
+        await new RideDeliveryRecovery1780000094000().up(runner);
+        await new AlertDeliveryReliability1780000106000().up(runner);
+      });
       new TransactionalNotificationsSubscriber(source);
       users = {
         count: jest.fn().mockResolvedValue(1),
@@ -204,7 +208,7 @@ const pgBin = process.env.NOTIFICATIONS_TEST_POSTGRES_BIN;
       referralNotifications.sendNotification.mockReset().mockResolvedValue(true);
       await source.query('UPDATE users SET "fcmToken" = NULL');
       await source.query(
-        'TRUNCATE notifications, wallet_ledger_entries, wallet_accounts, kyc_documents, referral_profiles, referral_accounts, referral_ledger_entries, trip_requests, bookings, trips',
+        'TRUNCATE ride_notification_receipts, ride_notification_retries, notifications, wallet_ledger_entries, wallet_accounts, kyc_documents, referral_profiles, referral_accounts, referral_ledger_entries, trip_requests, bookings, trips',
       );
       await source.query(
         "INSERT INTO wallet_accounts (id,\"userId\",type,balance,currency) VALUES ($1,$2,'points',100,'PTS')",
@@ -242,6 +246,22 @@ const pgBin = process.env.NOTIFICATIONS_TEST_POSTGRES_BIN;
       title: 'Solde ajusté',
       body: '25 jetons ajoutés.',
       data: { type: 'wallet_admin_adjustment' },
+    });
+
+    it('keeps the migrated fixture aligned with Notification columns and retry defaults', async () => {
+      const columns: { column_name: string }[] = await source.query(
+        `SELECT column_name FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = 'notifications'`,
+      );
+      const names = new Set(columns.map((column) => column.column_name));
+      expect(source.getMetadata(Notification).columns
+        .filter((column) => !names.has(column.databaseName))
+        .map((column) => column.databaseName)).toEqual([]);
+      await source.transaction((manager) =>
+        enqueueTransactionalNotification(manager, event('retry-defaults')),
+      );
+      expect(await source.getRepository(Notification).findOneByOrFail({ eventKey: 'retry-defaults' }))
+        .toMatchObject({ pushAttempts: 0, pushRetryAt: null, pushPermanentFailure: false });
     });
 
     const acceptedRequest = async (tripStatus: 'upcoming' | 'ongoing' | null = 'upcoming') => {
@@ -588,6 +608,9 @@ const pgBin = process.env.NOTIFICATIONS_TEST_POSTGRES_BIN;
         await runner.rollbackTransaction();
         expect(await source.getRepository(Notification).count()).toBe(0);
       } finally {
+        // An assertion or SQL failure must not return an aborted transaction
+        // to the pool and cause unrelated tests to fail in beforeEach.
+        if (runner.isTransactionActive) await runner.rollbackTransaction();
         await runner.release();
       }
     });
@@ -747,6 +770,11 @@ const pgBin = process.env.NOTIFICATIONS_TEST_POSTGRES_BIN;
       expect((await repo.findOneByOrFail({ id: document.id })).status).toBe(KycStatus.APPROVED);
       expect(await source.getRepository(Notification).findOneByOrFail({ userId })).toMatchObject({ status: NotificationStatus.FAILED });
       await source.query(`UPDATE notifications SET "updatedAt" = now() - interval '6 minutes' WHERE "userId" = $1`, [userId]);
+      // Aging the old lease must not bypass the provider retry deadline.
+      await source.query(`UPDATE notifications SET "pushRetryAt" = now() + interval '1 hour' WHERE "userId" = $1`, [userId]);
+      await notifications.retryCriticalFinancialNotifications();
+      expect(send).toHaveBeenCalledTimes(1);
+      await source.query(`UPDATE notifications SET "pushRetryAt" = now() - interval '1 second' WHERE "userId" = $1`, [userId]);
       await notifications.retryCriticalFinancialNotifications();
       expect(send).toHaveBeenCalledTimes(2);
       expect(await source.getRepository(Notification).count()).toBe(1);
