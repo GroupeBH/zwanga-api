@@ -212,7 +212,9 @@ describe('TripRequestsService recommended price', () => {
 });
 
 describe('TripRequestsService optional seat count', () => {
-  it.each([undefined, 0, 1945, 2000, 6000])('stores one seat and preserves the confirmed price %s', async (confirmedPrice) => {
+  it.each([undefined, 0, 1945, 2000, 6000].flatMap(price => [
+    [price, undefined], [price, [VehicleType.CAR, VehicleType.MOTORCYCLE_TWO_WHEELS]],
+  ] as const))('stores one seat and preserves the confirmed price %s with types %j', async (confirmedPrice, vehicleTypes) => {
     const tripRequestRepository = {
       manager: { getRepository: () => ({ exists: jest.fn().mockResolvedValue(false) }) },
       create: jest.fn().mockImplementation((request) => request),
@@ -262,10 +264,12 @@ describe('TripRequestsService optional seat count', () => {
       departureDateMax: new Date(now + 90 * 60 * 1000).toISOString(),
       vehicleType: VehicleType.CAR,
       ...(confirmedPrice !== undefined ? { maxPricePerSeat: confirmedPrice } : {}),
+      ...(vehicleTypes ? { vehicleTypes: [...vehicleTypes] } : {}),
     });
 
     expect(tripRequestRepository.create).toHaveBeenCalledWith(
-      expect.objectContaining({ numberOfSeats: 1, maxPricePerSeat: confirmedPrice ?? 2500 }),
+      expect.objectContaining({ numberOfSeats: 1, maxPricePerSeat: confirmedPrice ?? 2500,
+        vehicleType: VehicleType.CAR, vehicleTypes: vehicleTypes ?? [VehicleType.CAR] }),
     );
     expect(calculatePrice).toHaveBeenCalledTimes(confirmedPrice === undefined ? 1 : 0);
   });

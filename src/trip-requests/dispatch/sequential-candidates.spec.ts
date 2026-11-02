@@ -1,5 +1,6 @@
 import { lockNextQueuedCandidate, sequentialCandidates } from './sequential-candidates';
 import { TripRequest } from '../entities/trip-request.entity';
+import { PRESENCE_ALERT_LOCATION_SQL, ONGOING_ALERT_LOCATION_SQL } from './driver-alert-location-policy';
 
 describe('sequential discovery versus queued validation', () => {
   const request = { id: 'request', passengerId: 'passenger', vehicleType: 'car', numberOfSeats: 1,
@@ -16,7 +17,7 @@ describe('sequential discovery versus queued validation', () => {
     expect(params).toHaveLength(10);
   });
 
-  it('invites recently located drivers first without excluding older durable positions', async () => {
+  it('invites recently located drivers first within the 48-hour window', async () => {
     const manager = { query: jest.fn().mockResolvedValue([]) };
     await sequentialCandidates(manager as never, request);
     const [sql] = manager.query.mock.calls[0];
@@ -26,6 +27,8 @@ describe('sequential discovery versus queued validation', () => {
     expect(sql.match(/"stalePosition"/g)).toHaveLength(2);
     expect(sql).not.toMatch(/t\.id, \(CASE[\s\S]*?END\), false/);
     expect(sql).toContain('THEN t."lastLocationUpdateAt"');
+    expect(sql).toContain(PRESENCE_ALERT_LOCATION_SQL);
+    expect(sql).toContain(ONGOING_ALERT_LOCATION_SQL);
   });
 
   it('keeps the queued validation independent from freshness ranking', async () => {
@@ -34,6 +37,8 @@ describe('sequential discovery versus queued validation', () => {
     const [sql] = manager.query.mock.calls[0];
     expect(sql).not.toContain('ORDER BY e."stalePosition"');
     expect(sql).toContain('ORDER BY e."existingTripId" LIMIT 1');
+    expect(sql).toContain(PRESENCE_ALERT_LOCATION_SQL);
+    expect(sql).toContain(ONGOING_ALERT_LOCATION_SQL);
   });
 
   it('checks only one Redis ID without re-ranking; mutable restrictions and the driver lock remain', async () => {

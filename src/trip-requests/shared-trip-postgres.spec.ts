@@ -129,6 +129,7 @@ const bin = process.env.DISPATCH_TEST_POSTGRES_BIN;
           pricePerSeat: 1000,
           isPrivate: true,
           currentLocation: point,
+          lastLocationUpdateAt: new Date(),
         });
       const originalPassenger = await user();
       const originalBooking = await db
@@ -174,6 +175,16 @@ const bin = process.env.DISPATCH_TEST_POSTGRES_BIN;
         expect(publish).toHaveBeenCalledWith(f.passenger.id, { kind: 'changed', requestId: f.request.id, terminal: true });
       } finally { changes.onModuleDestroy(); }
     });
+    it.each([47, 48, null])('bounds shared-trip alerts by navigation position age (%s hours)', async hours => {
+      const f = await fixture(true);
+      await db.getRepository(Trip).update(f.trip.id, {
+        lastLocationUpdateAt: hours === null ? null : new Date(Date.now() - hours * 3600000),
+      });
+      expect(await db.transaction(m => enqueueSharedTripAlert(m, f.request.id))).toBe(hours === 47);
+      expect(await db.getRepository(Notification).count()).toBe(hours === 47 ? 1 : 0);
+      expect((await db.getRepository(Trip).findOneByOrFail({ id: f.trip.id })).status).toBe(TripStatus.ACTIVE);
+    });
+
     it('notifies an ongoing driver from the active-trip position even without discovery GPS; never assigns', async () => {
       const f = await fixture(true);
       // Wait for both transactions even on failure before the next TRUNCATE.

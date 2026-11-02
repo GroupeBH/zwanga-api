@@ -1,9 +1,11 @@
 import type { EntityManager } from 'typeorm';
 import { TripRequest } from '../entities/trip-request.entity';
 import { requestDriverVisibilitySql } from '../target-driver-policy';
-import { ONGOING_DRIVER_POSITION_SQL, STALE_ONGOING_POSITION_RANK_SQL, STALE_PRESENCE_RANK_SQL, USABLE_DRIVER_LOCATION_SQL } from './driver-location-policy';
+import { ONGOING_DRIVER_POSITION_SQL, STALE_ONGOING_POSITION_RANK_SQL, STALE_PRESENCE_RANK_SQL } from './driver-location-policy';
+import { ONGOING_ALERT_LOCATION_SQL, PRESENCE_ALERT_LOCATION_SQL } from './driver-alert-location-policy';
 import { ELIGIBLE_DRIVER_ACCOUNT_SQL, NEARBY_DRIVER_RADIUS_METERS } from './nearby-driver-policy';
 import { driverRequestConflictSql } from './driver-schedule-policy';
+import { requestVehicleTypes } from '../request-vehicle-types';
 
 export interface QueueCandidate { driverId: string; vehicleId: string; seats: number; existingTripId: string | null }
 /** Only discovery searches/ranks the area. Redis retains this bounded ordering. */
@@ -40,8 +42,10 @@ async function candidates(manager: EntityManager, request: TripRequest, driverId
       NULL::uuid AS "existingTripId", p.position, ${STALE_PRESENCE_RANK_SQL} AS "stalePosition"
     FROM driver_dispatch_presence p
     JOIN LATERAL (SELECT * FROM vehicles v WHERE v."ownerId" = p."driverId" AND v."isActive" = true
-      AND v.type = $2 ORDER BY (v.id = p."vehicleId") DESC, v.id LIMIT 1) v ON true
-    WHERE ${USABLE_DRIVER_LOCATION_SQL} AND p."driverId" <> $1
+      AND v.type::text = ANY($2::text[])
+      AND (CASE WHEN v.id = p."vehicleId" THEN p.seats WHEN v.type = 'motorcycle_2_wheels' THEN 2
+        WHEN v.type = 'motorcycle_3_wheels' THEN 3 ELSE 4 END) >= $3 ORDER BY (v.id = p."vehicleId") DESC, v.id LIMIT 1) v ON true
+    WHERE ${PRESENCE_ALERT_LOCATION_SQL} AND p."driverId" <> $1
       ${driverIds ? 'AND p."driverId" = (SELECT id FROM queued_driver)' : ''}
       AND (CASE WHEN v.id = p."vehicleId" THEN p.seats WHEN v.type = 'motorcycle_2_wheels' THEN 2
         WHEN v.type = 'motorcycle_3_wheels' THEN 3 ELSE 4 END) >= $3
@@ -56,7 +60,7 @@ async function candidates(manager: EntityManager, request: TripRequest, driverId
     JOIN vehicles v ON v.id = t."vehicleId"::uuid AND v."ownerId" = t."driverId" AND v."isActive" = true
     LEFT JOIN driver_dispatch_presence p ON p."driverId" = t."driverId"
     WHERE t.status = 'ongoing' AND t."destinationReachedAt" IS NULL
-      AND t."driverId" <> $1 AND v.type = $2 AND t."availableSeats" >= $3 AND t."totalSeats" > 0
+      AND t."driverId" <> $1 AND v.type::text = ANY($2::text[]) AND t."availableSeats" >= $3 AND t."totalSeats" > 0
       ${driverIds ? 'AND t."driverId" = (SELECT id FROM queued_driver)' : ''}
       AND t."totalSeats" <= CASE WHEN v.type = 'motorcycle_2_wheels' THEN 2
         WHEN v.type = 'motorcycle_3_wheels' THEN 3 ELSE 20 END
@@ -64,6 +68,7 @@ async function candidates(manager: EntityManager, request: TripRequest, driverId
       AND (t."isFree" = true OR (t."pricePerSeat" >= 0 AND t."pricePerSeat" <= $9
         AND (t."pricePerSeat" = 0 OR $10 = ANY(t."acceptedPaymentModes"))))
       AND p."discoveryEnabled" IS DISTINCT FROM false
+      AND ${ONGOING_ALERT_LOCATION_SQL}
       AND ${ELIGIBLE_DRIVER_ACCOUNT_SQL.replaceAll('p."driverId"', 't."driverId"')}
       AND ${requestDriverVisibilitySql('$7', 't."driverId"')}
       AND ST_DWithin(${ONGOING_DRIVER_POSITION_SQL},
@@ -77,7 +82,7 @@ async function candidates(manager: EntityManager, request: TripRequest, driverId
       AND NOT EXISTS (SELECT 1 FROM trip_request_dispatch_offers o WHERE o."driverId" = e."driverId" AND o.status = 'pending')
     ORDER BY e."stalePosition", ST_Distance(e.position, ST_SetSRID(ST_MakePoint($4,$5),4326)::geography), e."driverId", e."existingTripId"
     LIMIT 50`}`,
-    [request.passengerId, request.vehicleType, request.numberOfSeats, ...request.departurePoint.coordinates,
+    [request.passengerId, requestVehicleTypes(request), request.numberOfSeats, ...request.departurePoint.coordinates,
       NEARBY_DRIVER_RADIUS_METERS, request.id, request.departureDateMin, request.maxPricePerSeat, request.paymentMode,
       ...(driverIds ? [driverIds] : [])]);
 }

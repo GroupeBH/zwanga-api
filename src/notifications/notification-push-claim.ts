@@ -12,6 +12,10 @@ export function ownPushClaim(notification: Notification, token: string): void {
   claims.set(notification, token);
 }
 
+export function isRetryPushClaim(notification: Notification): boolean {
+  return claims.get(notification)?.startsWith('CRITICAL_PUSH_RETRY_CLAIMED:') === true;
+}
+
 /** Never renew or complete a replacement worker's claim. No HTTP under a lock. */
 export async function renewPushClaim(
   repository: Repository<Notification>,

@@ -380,7 +380,10 @@ describe('SubscriptionsService points payments', () => {
     });
   });
 
-  it('limits the list to subscriptions started in the current Kinshasa month', async () => {
+  it.each(['2026-10-13T12:00:00.000Z', '2026-10-31T23:30:00.000Z', '2026-12-31T23:30:00.000Z'])(
+    'limits subscriptions to the current Kinshasa month at %s', async (instant) => {
+    jest.useFakeTimers({ now: new Date(instant) });
+    try {
     const query = {
       leftJoin: jest.fn(),
       addSelect: jest.fn(),
@@ -406,7 +409,7 @@ describe('SubscriptionsService points payments', () => {
     }
     (subscriptionRepository as { createQueryBuilder?: jest.Mock }).createQueryBuilder =
       jest.fn().mockReturnValue(query);
-    const month = kinshasaCalendarMonth(new Date('2026-10-13T12:00:00.000Z'));
+    const month = kinshasaCalendarMonth(new Date(instant));
 
     await service.listActiveProSubscriptions(1, 25, undefined, 'current');
 
@@ -417,5 +420,6 @@ describe('SubscriptionsService points payments', () => {
         monthTo: month.to,
       }),
     );
+    } finally { jest.useRealTimers(); }
   });
 });

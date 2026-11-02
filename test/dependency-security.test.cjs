@@ -5,6 +5,19 @@ const express = require('express');
 const multer = require('multer');
 const grpc = require('@grpc/grpc-js');
 
+test('security patches retain Joi validation and the PM2 systeminformation API', () => {
+  const semver = require('semver');
+  const Joi = require('joi');
+  const system = require('systeminformation');
+  assert.ok(semver.gte(Joi.version, '17.13.9'));
+  assert.ok(semver.gte(require('systeminformation/package.json').version, '5.33.16'));
+  const schema = Joi.object({ port: Joi.number().port().required(), enabled: Joi.boolean().default(false) });
+  assert.deepEqual(schema.validate({ port: '5200' }).value, { port: 5200, enabled: false });
+  assert.ok(schema.validate({ port: -1 }).error);
+  assert.equal(typeof system.services, 'function');
+  assert.equal(typeof system.currentLoad, 'function');
+});
+
 test('updated Express and Multer accept a file and reject oversized uploads', async t => {
   const app = express();
   app.post('/upload', multer({ storage: multer.memoryStorage(), limits: { fileSize: 1024 } }).single('file'),

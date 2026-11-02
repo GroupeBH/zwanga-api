@@ -234,7 +234,7 @@ export function driverSchedulePostgresTests(
       fresh = await driver(15.32),
       wanted = await request(false);
     await source.query(
-      `UPDATE driver_dispatch_presence SET "updatedAt"=now()-interval '2 days' WHERE "driverId"=$1`,
+      `UPDATE driver_dispatch_presence SET "updatedAt"=now()-interval '47 hours' WHERE "driverId"=$1`,
       [old.user.id],
     );
     await source.getRepository(Trip).save({
@@ -242,7 +242,7 @@ export function driverSchedulePostgresTests(
       tripRequestId: null,
       vehicleId: old.vehicle.id,
       currentLocation: { type: 'Point', coordinates: [15.3101, -4.3] },
-      lastLocationUpdateAt: at(-48),
+      lastLocationUpdateAt: at(-47),
     });
     expect(
       (await sequentialCandidates(source.manager, wanted)).map(

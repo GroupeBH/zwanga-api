@@ -4,8 +4,9 @@ import { TripRequest, TripRequestStatus } from '../entities/trip-request.entity'
 import { enqueueTransactionalNotifications } from '../../notifications/transactional-notification';
 import { ELIGIBLE_DRIVER_ACCOUNT_SQL, NEARBY_DRIVER_BATCH_SIZE } from './nearby-driver-policy';
 import { driverRequestConflictSql } from './driver-schedule-policy';
-import { USABLE_DRIVER_LOCATION_SQL } from './driver-location-policy';
+import { PRESENCE_ALERT_LOCATION_SQL } from './driver-alert-location-policy';
 import { rideSpeechData } from '../../notifications/ride-speech-data';
+import { requestVehicleTypes } from '../request-vehicle-types';
 
 /** Notification only: never creates an exclusive offer or changes a driver's availability. */
 export async function enqueueScheduledRequestAlert(manager: EntityManager, requestId: string,
@@ -19,13 +20,13 @@ export async function enqueueScheduledRequestAlert(manager: EntityManager, reque
   await manager.getRepository(TripRequest).update(request.id, { dispatchCheckedAt: new Date(), updatedAt: () => '"updatedAt"' });
   const candidates: { driverId: string }[] = await manager.query(`
     SELECT p."driverId" FROM driver_dispatch_presence p
-    WHERE ${USABLE_DRIVER_LOCATION_SQL} AND p."driverId" <> $1::uuid
+    WHERE ${PRESENCE_ALERT_LOCATION_SQL} AND p."driverId" <> $1::uuid
     AND ST_DWithin(p.position, ST_SetSRID(ST_MakePoint($2,$3),4326)::geography, $4)
     AND ${requestDriverVisibilitySql('$7', 'p."driverId"')}
     AND ${ELIGIBLE_DRIVER_ACCOUNT_SQL}
     AND NOT ${driverRequestConflictSql('p."driverId"', '$7::uuid')}
     AND EXISTS (SELECT 1 FROM vehicles v WHERE v."ownerId" = p."driverId" AND v."isActive" = true
-      AND v.type = $5 AND (CASE WHEN v.id = p."vehicleId" THEN p.seats
+      AND v.type::text = ANY($5::text[]) AND (CASE WHEN v.id = p."vehicleId" THEN p.seats
         WHEN v.type = 'motorcycle_2_wheels' THEN 2 WHEN v.type = 'motorcycle_3_wheels' THEN 3 ELSE 4 END) >= $6)
     AND NOT EXISTS (SELECT 1 FROM trip_request_dispatch_offers o
       WHERE o."driverId" = p."driverId" AND o.status = 'pending' AND o."expiresAt" > now())
@@ -34,7 +35,7 @@ export async function enqueueScheduledRequestAlert(manager: EntityManager, reque
       OR (n."eventKey" = 'nearby-scheduled-request:' || $7::text AND n."userId"::text = p."driverId"::text))
     ORDER BY ST_Distance(p.position, ST_SetSRID(ST_MakePoint($2,$3),4326)::geography), p."driverId"
     LIMIT ${NEARBY_DRIVER_BATCH_SIZE}`, [request.passengerId, request.departurePoint.coordinates[0], request.departurePoint.coordinates[1],
-      radiusMeters, request.vehicleType, request.numberOfSeats, request.id]);
+      radiusMeters, requestVehicleTypes(request), request.numberOfSeats, request.id]);
   if (!candidates.length) return false;
   // Sound capability selects the transport at delivery, never the recipients.
   // The shared SQL applies the same eligibility/busy policy before
@@ -50,7 +51,7 @@ export async function enqueueScheduledRequestAlert(manager: EntityManager, reque
         ...rideSpeechData({ departure: request.departureLocation, arrival: request.arrivalLocation,
           seats: request.numberOfSeats, departureAt: request.departureDateMin,
           pricePerSeat: request.maxPricePerSeat, priceKind: 'budget' }),
-        driverId: candidate.driverId, role: 'driver', vehicleType: request.vehicleType, alertExpiresAt },
+        driverId: candidate.driverId, role: 'driver', vehicleType: request.vehicleType, vehicleTypes: JSON.stringify(requestVehicleTypes(request)), alertExpiresAt },
     })));
   return candidates.length > 0;
 }

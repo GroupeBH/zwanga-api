@@ -11,6 +11,8 @@ import {
   ArrayMaxSize,
   IsBoolean,
   IsUUID,
+  ArrayUnique,
+  ValidateIf,
 } from 'class-validator';
 import { ApiProperty, OmitType } from '@nestjs/swagger';
 import { TripPaymentMode } from '../../payments/enums/trip-payment-mode.enum';
@@ -129,17 +131,24 @@ export class CreateTripRequestDto {
   maxPricePerSeat?: number;
 
   @ApiProperty({
-    required: true,
+    required: false,
     enum: VehicleType,
     enumName: 'VehicleType',
     description:
-      'Type de véhicule choisi par le passager. Le prix est toujours recalculé côté serveur.',
+      'Choix unique historique. Avec vehicleTypes, le premier type sert de référence au tarif estimé.',
     example: VehicleType.CAR,
   })
+  @ValidateIf(o => o.vehicleType !== undefined || o.vehicleTypes === undefined)
   @IsEnum(VehicleType, {
     message: 'Le type de véhicule sélectionné est invalide',
   })
-  vehicleType: VehicleType;
+  vehicleType?: VehicleType;
+
+  @ApiProperty({ required: false, enum: VehicleType, isArray: true, minItems: 1, maxItems: 3,
+    description: 'Types acceptés. Le premier reste le type de référence pour les anciens clients et le tarif estimé.' })
+  @ValidateIf(o => o.vehicleTypes !== undefined)
+  @IsArray() @ArrayMinSize(1) @ArrayMaxSize(3) @ArrayUnique() @IsEnum(VehicleType, { each: true })
+  vehicleTypes?: VehicleType[];
 
   @ApiProperty({
     required: false,
@@ -463,6 +472,10 @@ export class AcceptTripRequestDto {
 }
 
 export class UpdateTripRequestDto {
+  @ApiProperty({ required: false, enum: VehicleType, isArray: true, minItems: 1, maxItems: 3 })
+  @ValidateIf(o => o.vehicleTypes !== undefined)
+  @IsArray() @ArrayMinSize(1) @ArrayMaxSize(3) @ArrayUnique() @IsEnum(VehicleType, { each: true })
+  vehicleTypes?: VehicleType[];
   @ApiProperty({ required: false, description: 'updatedAt lu à l’ouverture du formulaire ; refuse une modification concurrente.' })
   @IsOptional()
   @IsDateString()

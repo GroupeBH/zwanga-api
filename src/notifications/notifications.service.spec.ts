@@ -2,6 +2,7 @@ import { NotificationStatus } from './entities/notification.entity';
 import { NotificationService } from './notifications.service';
 import { TripRequestStatus } from '../trip-requests/entities/trip-request.entity';
 import { FirebaseDeliveryError } from './firebase-delivery-error';
+import * as boundedFirebase from './bounded-firebase-send';
 
 describe('NotificationService critical push reliability', () => {
   const buildService = () => {
@@ -365,10 +366,38 @@ describe('NotificationService critical push reliability', () => {
     expect(transactionalRepository.save).toHaveBeenCalledWith([
       expect.objectContaining({
         status: NotificationStatus.PENDING,
-        errorMessage: 'CRITICAL_PUSH_RETRY_CLAIMED',
+        errorMessage: expect.stringMatching(/^CRITICAL_PUSH_RETRY_CLAIMED:/),
       }),
     ]);
     expect(claimed).toHaveLength(1);
+    const firstToken = failedNotification.errorMessage;
+    await (service as any).claimCriticalFinancialNotifications();
+    expect(failedNotification.errorMessage).not.toBe(firstToken);
+  });
+
+  it('critical retries use the bounded FCM transport and do not overlap on the same worker', async () => {
+    const f = buildService();
+    Object.assign(f.service, { firebaseApp: {} });
+    const item = { id: 'retry-payment', userId: 'synthetic-user', title: 'Paiement reçu', body: 'Test',
+      status: NotificationStatus.FAILED, data: { type: 'payment_received' } };
+    f.queryBuilder.getMany.mockResolvedValue([item] as never[]);
+    f.userRepository.findOne.mockResolvedValue({ fcmToken: 'synthetic-device' });
+    let release!: (message: string) => void;
+    const transport = jest.spyOn(boundedFirebase, 'sendBoundedFirebase')
+      .mockImplementation(() => new Promise(resolve => { release = resolve; }));
+    const work = f.service.retryCriticalFinancialNotifications();
+    await new Promise(resolve => setImmediate(resolve));
+    expect(transport).toHaveBeenCalledTimes(1);
+    await f.service.retryCriticalFinancialNotifications();
+    expect(f.queryBuilder.getMany).toHaveBeenCalledTimes(1);
+    release('synthetic-message'); await work;
+    expect(f.notificationRepository.save).not.toHaveBeenCalled();
+    expect(f.notificationRepository.update).toHaveBeenCalledWith(expect.objectContaining({
+      id: item.id, errorMessage: expect.stringMatching(/^CRITICAL_PUSH_RETRY_CLAIMED:/),
+    }), expect.objectContaining({ status: NotificationStatus.SENT, messageId: 'synthetic-message' }));
+    f.queryBuilder.getMany.mockResolvedValue([]);
+    await f.service.retryCriticalFinancialNotifications();
+    expect(f.queryBuilder.getMany).toHaveBeenCalledTimes(2);
   });
 
   it('delivers a committed outbox row only after releasing its claim transaction', async () => {
@@ -446,7 +475,8 @@ describe('NotificationService critical push reliability', () => {
     queryBuilder.getMany.mockResolvedValueOnce([row]);
     await service.retryCriticalFinancialNotifications();
     expect(fetchSpy).toHaveBeenCalledTimes(1);
-    expect(notificationRepository.save).toHaveBeenLastCalledWith(
+    expect(notificationRepository.update).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: 'outbox', errorMessage: expect.stringMatching(/^CRITICAL_PUSH_RETRY_CLAIMED:/) }),
       expect.objectContaining({ status: NotificationStatus.SENT }),
     );
   });
@@ -521,7 +551,8 @@ describe('NotificationService critical push reliability', () => {
     ]);
     await service.retryCriticalFinancialNotifications();
     expect(userRepository.findOne).not.toHaveBeenCalled();
-    expect(notificationRepository.save).toHaveBeenCalledWith(
+    expect(notificationRepository.update).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'outbox', errorMessage: expect.stringMatching(/^CRITICAL_PUSH_RETRY_CLAIMED:/) }),
       expect.objectContaining({ isActive: false }),
     );
   });
@@ -671,9 +702,9 @@ describe('NotificationService critical push reliability', () => {
     await service.retryCriticalFinancialNotifications();
 
     expect(userRepository.findOne).not.toHaveBeenCalled();
-    expect(notificationRepository.save).toHaveBeenCalledWith(
+    expect(notificationRepository.update).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'notification-overdue', errorMessage: expect.stringMatching(/^CRITICAL_PUSH_RETRY_CLAIMED:/) }),
       expect.objectContaining({
-        id: 'notification-overdue',
         status: NotificationStatus.FAILED,
         isActive: false,
         messageId: null,

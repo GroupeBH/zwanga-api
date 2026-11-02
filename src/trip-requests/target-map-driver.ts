@@ -146,6 +146,7 @@ export async function targetMapDriver(
           passengerId,
           role: 'driver',
           vehicleType: request.vehicleType,
+          vehicleTypes: JSON.stringify(requestVehicleTypes(request)),
           expiresAt,
           alertExpiresAt: expiresAt,
           ...rideSpeechData({
@@ -195,3 +196,4 @@ export async function resumeExpiredMapPriority(
   request.targetDriverPriorityUntil = null;
   return true;
 }
+import { requestVehicleTypes } from './request-vehicle-types';

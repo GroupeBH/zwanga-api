@@ -6,7 +6,8 @@ import { sendBoundedFirebase } from './bounded-firebase-send';
 import { FirebaseDeliveryError } from './firebase-delivery-error';
 import { recoverUnacknowledgedRides } from './recover-unacknowledged-ride';
 import { nativeAndroidDriverPush } from './native-android-driver-push';
-import { PUSH_CLAIM_LEASE_MS, ownPushClaim, heartbeatPushClaim, renewPushClaim, saveNotificationResult } from './notification-push-claim';
+import { PUSH_CLAIM_LEASE_MS, ownPushClaim, heartbeatPushClaim, renewPushClaim, saveNotificationResult, isRetryPushClaim } from './notification-push-claim';
+import { retryPushBatch } from './retry-push-batch';
 import { isAppUpdateDeliverable } from '../app-updates/app-update-dispatch.service';
 import { installationUpdateToken } from '../app-updates/installation-update.policy';
 import { isRideResponseDeliverable } from './ride-response-delivery';
@@ -138,6 +139,7 @@ export class NotificationService implements OnModuleInit {
   private readonly logger = new Logger(NotificationService.name);
   private firebaseApp: App;
   private dispatchingTransactionalNotifications = false;
+  private retryingCriticalNotifications = false;
   private dispatchingUrgentNotifications = false;
   private urgentWorkers = 0;
   private dispatchingRealtime = false;
@@ -439,17 +441,17 @@ export class NotificationService implements OnModuleInit {
     if (!this.firebaseApp) {
       throw new Error('FCM non configuré sur le serveur');
     }
+    const send = (message: import('firebase-admin/messaging').Message) =>
+      URGENT_NOTIFICATION_TYPES.includes(notification.data?.type) || isRetryPushClaim(notification)
+        ? sendBoundedFirebase(this.firebaseApp, message) : getMessaging(this.firebaseApp).send(message);
     if (notification.data?.type === 'app_update') {
-      return getMessaging(this.firebaseApp).send({ token: pushToken,
+      return send({ token: pushToken,
         notification: { title: notification.title, body: notification.body },
         data: this.stringifyNotificationData(notification.data),
         android: { priority: 'normal', ttl: 86_400_000, notification: { channelId: 'zwanga_default' } },
         apns: { headers: { 'apns-expiration': String(Math.floor(Date.now() / 1000) + 86_400) }, payload: { aps: { sound: 'default' } } },
       });
     }
-    const send = (message: import('firebase-admin/messaging').Message) =>
-      URGENT_NOTIFICATION_TYPES.includes(notification.data?.type)
-        ? sendBoundedFirebase(this.firebaseApp, message) : getMessaging(this.firebaseApp).send(message);
     const version = await this.driverActionVersion(notification, pushToken);
     if (version === 6 || (this.isNearbyRequestRing(notification) && await this.ringClientVersion(notification, pushToken) === 6)) {
       notification.data = { ...notification.data, nativeDeliveryVersion: 6 };
@@ -899,13 +901,15 @@ export class NotificationService implements OnModuleInit {
 
   @Cron(CronExpression.EVERY_5_MINUTES)
   async retryCriticalFinancialNotifications(): Promise<void> {
+    if (this.retryingCriticalNotifications) return;
+    this.retryingCriticalNotifications = true;
+    try {
     const notifications = await this.claimCriticalFinancialNotifications();
     if (notifications.length === 0) {
       return;
     }
 
-    let delivered = 0;
-    for (const notification of notifications) {
+    const delivered = await retryPushBatch(this.notificationRepository, notifications, async notification => {
       if (!(await this.isCriticalNotificationStillDeliverable(notification))) {
         await this.suppressCriticalNotification(
           notification,
@@ -913,7 +917,7 @@ export class NotificationService implements OnModuleInit {
             ? 'Notification transactionnelle remplacée par un état plus récent'
             : 'Notification critique obsolete: demande de trajet non recuperable',
         );
-        continue;
+        return false;
       }
 
       if (!notification.userId && !(notification.data?.type === 'app_update' && notification.data?.installationId)) {
@@ -921,16 +925,15 @@ export class NotificationService implements OnModuleInit {
           notification,
           'Notification financiere sans utilisateur destinataire',
         );
-        continue;
+        return false;
       }
-      if (await this.deliverSavedNotification(notification)) {
-        delivered += 1;
-      }
-    }
+      return this.deliverSavedNotification(notification);
+    }, () => this.logger.warn('Critical push retry deferred; durable claim retained.'));
 
     this.logger.log(
       `CRITICAL_PUSH_RETRY processed=${notifications.length} delivered=${delivered} failed=${notifications.length - delivered}`,
     );
+    } finally { this.retryingCriticalNotifications = false; }
   }
 
   private async claimCriticalFinancialNotifications(): Promise<Notification[]> {
@@ -962,9 +965,9 @@ export class NotificationService implements OnModuleInit {
 
       for (const notification of notifications) {
         notification.status = NotificationStatus.PENDING;
-        // Force an UPDATE even for a stale PENDING row. Once the transaction
-        // commits, updatedAt prevents another ECS task from claiming it again.
-        notification.errorMessage = 'CRITICAL_PUSH_RETRY_CLAIMED';
+        // A unique token forces an UPDATE even after a worker died while PENDING.
+        // Completion/heartbeat can never modify a replacement worker's attempt.
+        notification.errorMessage = `CRITICAL_PUSH_RETRY_CLAIMED:${randomUUID()}`;
       }
       return notifications.length > 0
         ? repository.save(notifications)
@@ -995,7 +998,7 @@ export class NotificationService implements OnModuleInit {
       const rows: { passengerId: string }[] = await this.notificationRepository.manager.query(`SELECT r."passengerId" FROM trip_requests r
         WHERE r.id = $1 AND r.status IN ('pending', 'offers_received') AND r."selectedDriverId" IS NULL
           AND r."tripId" IS NULL AND r."departureDateMax" > now() AND r."passengerId" <> $2
-          AND ${nearbyRequestDriverVisibilitySql('r.id', '$2')} AND ${sequentialInvitationSql('r.id', '$2')}
+          AND ${nearbyRequestDriverVisibilitySql('r.id', '$2', true)} AND ${sequentialInvitationSql('r.id', '$2')}
           AND (r."sequentialDispatch"=false OR EXISTS (SELECT 1 FROM trip_request_dispatch_offers active
             WHERE active."requestId"=r.id AND active."driverId"=$2 AND active.status='pending' AND active.phase='driver'))`,
         [notification.data?.tripRequestId ?? notification.data?.requestId, notification.userId]);
@@ -1021,7 +1024,7 @@ export class NotificationService implements OnModuleInit {
         AND o.status = 'pending' AND o.phase = 'driver' AND o."expiresAt" > clock_timestamp()
         AND r.status IN ('pending', 'offers_received') AND r."passengerId" <> $2
         AND r."selectedDriverId" IS NULL AND r."tripId" IS NULL AND r."departureDateMax" > now()
-        AND r."maxPricePerSeat" IS NOT NULL AND ${nearbyRequestDriverVisibilitySql('r.id', '$2')}`,
+        AND r."maxPricePerSeat" IS NOT NULL AND ${nearbyRequestDriverVisibilitySql('r.id', '$2', true)}`,
         [notification.data?.offerId, notification.userId]);
       if (rows[0]?.passengerId) notification.data = { ...notification.data, passengerId: rows[0].passengerId };
       return rows.length > 0;

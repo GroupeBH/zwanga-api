@@ -6,6 +6,7 @@ import {
   getVehicleMaxSeats,
 } from '../vehicles/entities/vehicle.entity';
 import { assertUnassignedRequest } from './request-edit-policy';
+import { requestAcceptsVehicle } from './request-vehicle-types';
 
 export function assertSharedTripAvailable(
   request: TripRequest,
@@ -23,7 +24,7 @@ export function assertSharedTripAvailable(
     !vehicle?.isActive ||
     vehicle.ownerId !== driverId ||
     trip.vehicleId !== vehicle.id ||
-    vehicle.type !== request.vehicleType ||
+    !requestAcceptsVehicle(request, vehicle.type) ||
     !trip.totalSeats ||
     trip.availableSeats < request.numberOfSeats ||
     trip.totalSeats > (getVehicleMaxSeats(vehicle.type) ?? 20) ||

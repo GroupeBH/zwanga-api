@@ -15,12 +15,14 @@ import { RequestDriverQueue } from './request-driver-queue';
 import { lockNextQueuedCandidate, sequentialCandidates } from './sequential-candidates';
 import { REQUEST_RESPONSE_MS } from './sequential-policy';
 import { retireRequestInvitations } from './retire-request-invitations';
+import { requestVehicleTypes } from '../request-vehicle-types';
 
 @Injectable()
 export class SequentialDispatchService {
   private readonly logger = new Logger(SequentialDispatchService.name);
   private ticking = false;
   private cacheUnavailableUntil = 0;
+  private sqlFallbackWorkers = 0;
   constructor(private readonly db: DataSource, private readonly config: ConfigService,
     private readonly queue: RequestDriverQueue, private readonly notifications: NotificationService,
     private readonly changes: RideAlertChanges, private readonly bookings?: BookingsService) {}
@@ -35,7 +37,7 @@ export class SequentialDispatchService {
     return manager.getRepository(TripRequest).findOne({ where: { id }, lock: { mode: 'pessimistic_write' } });
   }
   private queueVersion(request: TripRequest) {
-    return createHash('sha256').update(JSON.stringify([request.departurePoint, request.vehicleType,
+    return createHash('sha256').update(JSON.stringify([request.departurePoint, requestVehicleTypes(request),
       request.numberOfSeats, request.targetDriverId, request.paymentMode, request.maxPricePerSeat,
       request.departureDateMin, request.departureDateMax])).digest('hex');
   }
@@ -45,7 +47,7 @@ export class SequentialDispatchService {
     try { return await operation(); }
     catch {
       this.cacheUnavailableUntil = Date.now() + 5000;
-      this.logger.warn('Request queue unavailable; SQL expiration recovery remains active.');
+      this.logger.warn('Request queue unavailable; bounded SQL relay recovery active.');
       return fallback;
     }
   }
@@ -57,10 +59,11 @@ export class SequentialDispatchService {
     if (!this.enabled) return false;
     return await this.cache(() => this.queue.isDue(id), true) ? this.advance(id) : false;
   }
-  /** Redis owns candidate order. SQL reserves one eligible queued driver and its notification atomically. */
+  /** Redis caches ordering; SQL remains the authority for exclusive invitation + outbox. */
   async advance(id: string): Promise<boolean> {
     if (!this.enabled) return false;
     let token: string | undefined, selectedDriverId: string | undefined, resetQueue = false;
+    let sqlFallback = false;
     try {
       const state = await this.db.transaction(async manager => {
         const request = await this.lock(manager, id);
@@ -101,18 +104,27 @@ export class SequentialDispatchService {
       const version = this.queueVersion(state.request);
       const claim = await this.cache(() => this.queue.claim(id, version), null);
       if (!claim) {
-        // Another worker may be between queue claim and SQL commit, or may have
-        // crashed. Retry via Redis after its lease, not only the global 25-row scan.
-        await this.cache(() => this.queue.schedule(id, Date.now() + 1000), undefined);
-        return false;
+        // Only a Redis failure enables SQL discovery. A healthy, contended lease
+        // must retain its owner's ordering, rather than trigger a second search.
+        if (Date.now() < this.cacheUnavailableUntil && this.sqlFallbackWorkers < 3) {
+          this.sqlFallbackWorkers++; sqlFallback = true;
+        } else {
+          // Another worker may be between queue claim and SQL commit, or may have
+          // crashed. Retry via Redis after its lease, not only the global 25-row scan.
+          await this.cache(() => this.queue.schedule(id, Date.now() + 1000), undefined);
+          return false;
+        }
       }
-      token = claim.token;
-      let drivers = claim.drivers;
+      token = claim?.token;
+      let drivers = claim?.drivers ?? [];
       if (!drivers.length) {
         // Rebuild on exhaustion, an edit or the 30-second TTL (before the next 40-second handoff).
-        const candidates = await sequentialCandidates(this.db.manager, state.request);
+        const candidates = sqlFallback ? await this.db.transaction(async manager => {
+          await manager.query("SET LOCAL statement_timeout = '3s'");
+          return sequentialCandidates(manager, state.request);
+        }) : await sequentialCandidates(this.db.manager, state.request);
         drivers = [...new Set(candidates.map(candidate => candidate.driverId))];
-        if (!await this.cache(() => this.queue.seed(id, token!, version, drivers), false)) {
+        if (!sqlFallback && !await this.cache(() => this.queue.seed(id, token!, version, drivers), false)) {
           await this.cache(() => this.queue.schedule(id, Date.now() + 1000), undefined);
           return false;
         }
@@ -164,7 +176,7 @@ export class SequentialDispatchService {
           data: { type: request.immediateDispatch && !candidate.existingTripId ? 'driver_dispatch_offer' : 'trip_request_nearby',
             ...(candidate.existingTripId ? { sharedTrip: true, existingTripId: candidate.existingTripId } : {}),
             ringAlert: 'nearby-request-v1', tripRequestId: id, offerId, driverId, passengerId: request.passengerId,
-            role: 'driver', vehicleType: request.vehicleType, expiresAt, alertExpiresAt: expiresAt,
+            role: 'driver', vehicleType: request.vehicleType, vehicleTypes: JSON.stringify(requestVehicleTypes(request)), expiresAt, alertExpiresAt: expiresAt,
             ...rideSpeechData({ departure: request.departureLocation, arrival: request.arrivalLocation,
               seats: request.numberOfSeats, departureAt: request.departureDateMin,
               pricePerSeat: request.maxPricePerSeat, priceKind: 'budget' }) } });
@@ -187,6 +199,7 @@ export class SequentialDispatchService {
       await this.cache(() => this.queue.schedule(id, Date.now() + 1000), undefined);
       return false;
     } finally {
+      if (sqlFallback) this.sqlFallbackWorkers--;
       if (token) await this.queue.release(id, token, selectedDriverId, resetQueue)
         .catch(() => this.logger.warn('Request queue lease release deferred; lease expires automatically.'));
     }

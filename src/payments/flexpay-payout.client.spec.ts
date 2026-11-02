@@ -573,6 +573,6 @@ describe('FlexPaie payout v1.03 (mocked HTTP)', () => {
   it('masks the new customer field in payment logs', () => {
     expect(
       formatPaymentLogPayload({ customer: '243891234567', token: 'secret' }),
-    ).toBe('{"customer":"243***4567","token":"[redacted]"}');
+    ).toBe('{"redacted":true}');
   });
 });

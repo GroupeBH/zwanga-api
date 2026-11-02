@@ -1,4 +1,5 @@
 import { SequentialDispatchService } from './sequential-dispatch.service';
+import { requestAcceptsVehicle, requestVehicleTypes } from '../request-vehicle-types';
 import { assertSequentialInvitation } from './sequential-policy';
 import { assertRequestTarget } from '../target-driver-policy';
 import { assertRequestDriverProximity, requestDriverProximitySql } from '../request-proximity';
@@ -26,6 +27,7 @@ import { rideSpeechData } from '../../notifications/ride-speech-data';
 import { ELIGIBLE_DRIVER_ACCOUNT_SQL, NEARBY_DRIVER_RADIUS_METERS } from './nearby-driver-policy';
 import { enqueueStaleLocationReminders } from './stale-location-reminder';
 import { hasUsableDriverLocation, USABLE_DRIVER_LOCATION_SQL } from './driver-location-policy';
+import { PRESENCE_ALERT_LOCATION_SQL } from './driver-alert-location-policy';
 import { acknowledgeNearbyRequest, declineNearbyRequest } from '../../notifications/nearby-request-cooldown';
 import { assertDriverRequestSchedule, driverRequestConflictSql, driverScheduleConflictSql } from './driver-schedule-policy';
 
@@ -210,7 +212,7 @@ export class DriverDispatchService {
       request: { id: request.id, passengerName: request.passenger.firstName,
         departure: request.departureLocation, arrival: request.arrivalLocation,
         seats: request.numberOfSeats, pricePerSeat: request.maxPricePerSeat == null ? null : Number(request.maxPricePerSeat),
-        paymentMode: request.paymentMode, vehicleType: request.vehicleType },
+        paymentMode: request.paymentMode, vehicleType: request.vehicleType, vehicleTypes: requestVehicleTypes(request) },
     };
   }
 
@@ -244,7 +246,7 @@ export class DriverDispatchService {
         if (!driver) throw new NotFoundException('Conducteur introuvable.');
         await assertDriverCanOperate(manager, driver);
         const vehicle = await manager.getRepository(Vehicle).findOneBy({ id: offer.vehicleId, ownerId: driverId, isActive: true });
-        if (!vehicle || vehicle.type !== request.vehicleType || offer.seats < request.numberOfSeats ||
+        if (!vehicle || !requestAcceptsVehicle(request, vehicle.type) || offer.seats < request.numberOfSeats ||
             (getVehicleMaxSeats(vehicle.type) ?? 20) < offer.seats || await this.isBusy(manager, driverId, request.id))
           throw new ConflictException('Vous ou votre véhicule ne pouvez plus prendre en charge cette commande.');
         if (request.maxPricePerSeat === null) throw new ConflictException('Le tarif de la commande est indisponible.');
@@ -386,9 +388,11 @@ export class DriverDispatchService {
         WHEN v.type = 'motorcycle_2_wheels' THEN 2 WHEN v.type = 'motorcycle_3_wheels' THEN 3 ELSE 4 END AS seats
       FROM driver_dispatch_presence p
       JOIN LATERAL (SELECT v.* FROM vehicles v WHERE v."ownerId" = p."driverId"
-        AND v."isActive" = true AND v.type = $2
+        AND v."isActive" = true AND v.type::text = ANY($2::text[])
+        AND (CASE WHEN v.id = p."vehicleId" THEN p.seats WHEN v.type = 'motorcycle_2_wheels' THEN 2
+          WHEN v.type = 'motorcycle_3_wheels' THEN 3 ELSE 4 END) >= $3
         ORDER BY (v.id = p."vehicleId") DESC, v."updatedAt" DESC, v.id LIMIT 1) v ON true
-      WHERE ${USABLE_DRIVER_LOCATION_SQL} AND p."driverId" <> $1::uuid
+      WHERE ${PRESENCE_ALERT_LOCATION_SQL} AND p."driverId" <> $1::uuid
       AND (CASE WHEN v.id = p."vehicleId" THEN p.seats WHEN v.type = 'motorcycle_2_wheels' THEN 2
         WHEN v.type = 'motorcycle_3_wheels' THEN 3 ELSE 4 END) >= $3
       AND ST_DWithin(p.position, ST_SetSRID(ST_MakePoint($4,$5),4326)::geography, $6)
@@ -401,7 +405,7 @@ export class DriverDispatchService {
         WHERE o."driverId" = p."driverId" AND o.status = 'pending')
       ) SELECT c."driverId", c."vehicleId", c.brand, c.model, c.seats FROM candidates c
       JOIN driver_dispatch_presence locked ON locked."driverId" = c."driverId" AND locked.xmin = c."presenceVersion"
-      ORDER BY c.distance, c."driverId" LIMIT ${request.sequentialDispatch ? 1 : 50} FOR UPDATE OF locked SKIP LOCKED`, [request.passengerId, request.vehicleType, request.numberOfSeats,
+      ORDER BY c.distance, c."driverId" LIMIT ${request.sequentialDispatch ? 1 : 50} FOR UPDATE OF locked SKIP LOCKED`, [request.passengerId, requestVehicleTypes(request), request.numberOfSeats,
       request.departurePoint.coordinates[0], request.departurePoint.coordinates[1], this.radiusMeters, requestId]);
     if (!selected.length) return false;
     // A READ COMMITTED selection snapshot can precede another allocation's

@@ -1,3 +1,4 @@
+import { requestVehicleTypesSql } from './request-vehicle-types';
 import { NotFoundException } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import type { EntityManager } from 'typeorm';
@@ -48,7 +49,9 @@ export function requestMapCandidates(manager: EntityManager, passengerId: string
         WHEN v.type='motorcycle_3_wheels' THEN 3 ELSE 4 END AS seats
     FROM driver_dispatch_presence p
     JOIN trip_requests r ON r.id = $1::uuid AND r."passengerId" = $2::uuid
-    JOIN LATERAL (SELECT v.* FROM vehicles v WHERE v."ownerId" = p."driverId" AND v."isActive" = true AND v.type = r."vehicleType"
+    JOIN LATERAL (SELECT v.* FROM vehicles v WHERE v."ownerId" = p."driverId" AND v."isActive" = true AND v.type::text = ANY(${requestVehicleTypesSql('r')})
+      AND (CASE WHEN v.id = p."vehicleId" THEN p.seats WHEN v.type = 'motorcycle_2_wheels' THEN 2
+        WHEN v.type = 'motorcycle_3_wheels' THEN 3 ELSE 4 END) >= r."numberOfSeats"
       ORDER BY (v.id = p."vehicleId") DESC, v."updatedAt" DESC, v.id LIMIT 1) v ON true
     WHERE r.status IN ('pending','offers_received') AND r."selectedDriverId" IS NULL AND r."tripId" IS NULL
       AND r."departureDateMax" > now()

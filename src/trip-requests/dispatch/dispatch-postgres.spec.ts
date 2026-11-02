@@ -1,5 +1,6 @@
 import { RequestResponsePhases1780000098000 } from '../../database/migrations/1780000098000-RequestResponsePhases';
 import { driverSchedulePostgresTests } from '../../../test/driver-schedule-postgres';
+import { driverAlertLocationPostgresTests } from '../../../test/driver-alert-location-postgres';
 import { tripUpdateSchedulePostgresTests } from '../../../test/trip-update-schedule-postgres';
 import { SequentialRequestQueue1780000097000 } from '../../database/migrations/1780000097000-SequentialRequestQueue';
 import { findDriverChoices, validateTargetDriver } from '../driver-choices';
@@ -171,6 +172,7 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
   };
   const offers = (requestId: string) => source.query('SELECT * FROM trip_request_dispatch_offers WHERE "requestId" = $1 ORDER BY "createdAt"', [requestId]);
   driverSchedulePostgresTests(() => ({ source, driver, request }));
+  driverAlertLocationPostgresTests(() => ({ source, service, driver, request, offers }));
   tripUpdateSchedulePostgresTests(() => ({ source, driver, request }));
 
   it('does not let 30 requests without pickup points or a missing immediate price starve a valid request', async () => {
@@ -403,9 +405,9 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     expect(await sequentialCandidates(source.manager, r)).toHaveLength(0);
   });
 
-  it('ranks recently located drivers before a closer two-day-old position, without excluding it', async () => {
+  it('ranks recently located drivers before a closer 47-hour-old position, without excluding it', async () => {
     const nearOld = await driver(15.3101), middle = await driver(15.315), far = await driver(15.33), r = await request();
-    await source.query(`UPDATE driver_dispatch_presence SET "updatedAt" = now() - interval '2 days',
+    await source.query(`UPDATE driver_dispatch_presence SET "updatedAt" = now() - interval '47 hours',
       "expiresAt" = now() - interval '2 days', "discoveryEnabled" = true WHERE "driverId" = $1`, [nearOld.user.id]);
     expect((await sequentialCandidates(source.manager, r)).map(c => c.driverId))
       .toEqual([middle.user.id, far.user.id, nearOld.user.id]);
@@ -496,7 +498,8 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     const query = { latitude: -4.3, longitude: 15.31, vehicleType: VehicleType.CAR, seats: 1 };
     const nearby = await findDriverChoices(source.manager, owner.id, query);
     expect(nearby.map(d => d.id)).toEqual([near.user.id]);
-    expect(Object.keys(nearby[0]).sort()).toEqual(['distanceKm', 'id', 'name', 'vehicle']);
+    expect(Object.keys(nearby[0]).sort()).toEqual(['distanceKm', 'id', 'name', 'vehicle', 'vehicleType']);
+    expect(nearby[0].vehicleType).toBe(VehicleType.CAR);
     expect(await findDriverChoices(source.manager, owner.id, { ...query, search: 'Known' })).toEqual([]);
     expect(await findDriverChoices(source.manager, owner.id, { ...query, search: far.user.id })).toEqual([]);
     expect(await findDriverChoices(source.manager, near.user.id, query)).toEqual([]);
@@ -975,10 +978,10 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     expect('presence' in state && state.presence.vehicleId).toBe(car.id);
     await expect(service.respond(d.user.id, offer.id, 'accept')).resolves.toMatchObject({ status: 'accepted' });
   });
-  it.each([true, false])('uses an old received position for dispatch without an age limit (immediate=%s)', async immediate => {
+  it.each([true, false])('alerts with a 47-hour-old position despite its expired legacy lease (immediate=%s)', async immediate => {
     const d = await driver();
     await source.query('DELETE FROM driver_dispatch_presence WHERE "driverId" = $1', [d.user.id]);
-    const recordedAt = new Date(Date.now() - 90 * 86_400_000).toISOString();
+    const recordedAt = new Date(Date.now() - 47 * 3_600_000).toISOString();
     const state = await service.recordPosition(d.user.id, { latitude: -4.3, longitude: 15.31, accuracy: 20, recordedAt });
     expect(state).toMatchObject({ available: true, locationPolicy: 'last_known', positionExpires: false });
     const r = await request(immediate);

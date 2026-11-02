@@ -53,6 +53,7 @@ describe('PaymentsService', () => {
           amount: draft.amount, currency: draft.currency, phone: draft.phone, status: 'pending' };
         return { id: draft?.userId };
       },
+      findOneBy: jest.fn().mockResolvedValue(null),
       save: async (entity: unknown, value: any) => entity === PaymentTransaction ? paymentTransactionRepository.save(value) : value,
     };
     paymentTransactionRepository = {

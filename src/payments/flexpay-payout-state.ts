@@ -4,6 +4,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { Repository } from 'typeorm';
+import { assertPayoutRetryMaySubmit } from './payout-retry';
 import { User } from '../users/entities/user.entity';
 import {
   DriverPayout,
@@ -99,6 +100,7 @@ export async function claimDriverPayoutPayment(
     ) {
       throw new ConflictException('Ce retrait ne peut plus être envoyé');
     }
+    await assertPayoutRetryMaySubmit(manager, 'driver_payout', payout.id);
     const payment = await manager.save(PaymentTransaction, draft);
     payout.paymentTransactionId = payment.id;
     await manager.save(DriverPayout, payout);

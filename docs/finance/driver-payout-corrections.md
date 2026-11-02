@@ -1,5 +1,94 @@
 # Versements conducteur et résolution des retraits bloqués
 
+## Relance par le super admin du 2 novembre 2026
+
+Le super admin peut demander un nouveau versement de gains conducteur ou de
+parrainage depuis le dossier du retrait non reçu. Il doit obtenir la confirmation
+du bénéficiaire **et une preuve définitive de non-exécution du prestataire**.
+Un compte marchand vide, un délai dépassé ou une simple déclaration de
+non-réception ne suffisent pas : le premier virement pourrait encore aboutir.
+
+### Utilisation dans Zwanga Admin
+
+1. Ouvrir le dossier depuis Paiements ou Parrainage et vérifier son état.
+2. Obtenir la confirmation définitive FlexPaie et conserver sa preuve dans le
+   dossier de support. Ne jamais saisir un secret marchand dans les champs.
+3. Renseigner le motif et la référence de preuve, puis cocher les attestations
+   de non-exécution et de non-réception.
+4. Cliquer sur **Relancer au même numéro** et confirmer le montant affiché.
+5. Consulter la référence du versement de remplacement. « Relance enregistrée »
+   signifie que la demande est enregistrée, pas que le Mobile Money a reçu l'argent.
+
+Le bouton est réservé au super admin et absent avec un ancien backend sans
+`canAdminRetry`. Les styles existants sont réutilisés. Les routes mobiles et leurs
+contrats restent inchangés ; cette action ne nécessite pas une mise à jour mobile.
+
+### API et traçabilité
+
+Les nouvelles routes, sous `/api/v1`, sont :
+
+- `POST /admin/driver-payouts/:id/retry`
+- `POST /admin/referrals/withdrawals/:id/retry`
+
+```json
+{
+  "expectedReference": "REFERENCE_ORIGINALE_DU_DOSSIER",
+  "reason": "Non-réception et non-exécution confirmées",
+  "evidenceReference": "REFERENCE_DE_CONFIRMATION_DEFINITIVE_FLEXPAIE",
+  "confirmedNotPaid": true,
+  "confirmedNotReceived": true
+}
+```
+
+Le backend impose le rôle super admin, une limitation de fréquence et les
+contrôles financiers existants. Aucun montant, bénéficiaire ou numéro alternatif
+n'est accepté par ce contrat : le versement conserve ceux du retrait d'origine.
+Le parrainage conserve aussi son nombre de jetons et son taux historique.
+Une devise historique différente de la devise actuelle des gains conducteur
+nécessite un rapprochement séparé.
+
+La première tentative est résolue comme non payée par le mécanisme existant
+(délai minimal de 15 minutes lorsqu'elle est encore en attente), puis une nouvelle
+réservation est créée sur le solde réellement disponible, avec KYC encore valide.
+La libération et la nouvelle réservation sont deux transactions distinctes :
+si le solde a été utilisé entre-temps, la relance est refusée. Aucun gain ni
+bonus supplémentaire n'est crédité.
+
+`payout_retries` relie les deux retraits et enregistre l'acteur, la référence,
+le motif, la preuve et la date dans la transaction de réservation. Son unicité
+impose un seul remplacement par retrait. Les répétitions HTTP retrouvent ce
+remplacement ; elles ne créent pas une nouvelle tentative. Si ce remplacement
+échoue, une nouvelle intervention porte sur son propre dossier et exige une
+nouvelle preuve. Les détails exposent `retry`, `retryOf` et `canAdminRetry`.
+
+Le verrou propriétaire et les contrôles avant soumission empêchent les doubles
+réservations et bloquent un succès tardif **déjà enregistré** d'une tentative
+antérieure, y compris dans une chaîne de relances. Les appels réseau restent hors
+transaction SQL, conformément au guide PostgreSQL. Une preuve erronée suivie d'un
+succès encore inconnu du backend peut toujours provoquer un double versement :
+les callbacks et le rapprochement des succès tardifs restent indispensables.
+L'action n'annule aucun virement chez FlexPaie et ne modifie pas la transaction
+prestataire d'origine. Les notifications financières utilisent l'outbox existante.
+
+### Migration et vérification
+
+Appliquer `1780000105000-PayoutRetries`, après les migrations précédentes, avant
+le nouveau backend. Elle crée seulement une table d'audit et ses index : aucun
+solde n'est recalculé et aucun virement n'est lancé. Les contrôles de soumission
+utilisent aussi cette table pour les retraits ordinaires ; elle ne doit donc pas
+être omise lors de la livraison. Aucune nouvelle variable d'environnement requise.
+
+Le rollback SQL est possible tant que cette table est vide et refusé après
+utilisation pour préserver l'historique financier. Un retour au binaire précédent
+doit conserver la table et les nouveaux retraits ; ne pas les supprimer en SQL.
+
+Les tests `payout-retry.spec.ts` et `payout-retry-postgres.spec.ts` couvrent le rôle,
+les attestations, les appels concurrents, les réponses perdues, le solde
+insuffisant, le taux historique et les succès tardifs. PostgreSQL est jetable et
+les transports de paiement sont simulés. Les tests React de `zwanga-admin`
+couvrent les confirmations et les contrats. Aucun versement réel, changement
+AWS, Terraform, CI/CD ou déploiement n'est effectué par ces tests.
+
 ## 23 octobre 2026 — Résolution du parrainage et prévention des retraits sans provision
 
 Le parcours de résolution couvre maintenant les **gains conducteur** et les

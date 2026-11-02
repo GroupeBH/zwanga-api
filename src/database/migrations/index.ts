@@ -1,6 +1,8 @@
 import { IndexRealtimePaymentReceipts1780000100000 } from './1780000100000-IndexRealtimePaymentReceipts';
 import { PassengerDriverChangeReason1780000102000 } from './1780000102000-PassengerDriverChangeReason';
 import { MapDriverPriority1780000103000 } from './1780000103000-MapDriverPriority';
+import { RequestVehicleTypes1780000104000 } from './1780000104000-RequestVehicleTypes';
+import { PayoutRetries1780000105000 } from './1780000105000-PayoutRetries';
 import { SeparateRequestAttentionLease1780000101000 } from './1780000101000-SeparateRequestAttentionLease';
 import { IndexRequestNotificationRetirement1780000099000 } from './1780000099000-IndexRequestNotificationRetirement';
 import { RequestResponsePhases1780000098000 } from './1780000098000-RequestResponsePhases';
@@ -212,4 +214,6 @@ export const databaseMigrations = [
   SeparateRequestAttentionLease1780000101000,
   PassengerDriverChangeReason1780000102000,
   MapDriverPriority1780000103000,
+  RequestVehicleTypes1780000104000,
+  PayoutRetries1780000105000,
 ];
