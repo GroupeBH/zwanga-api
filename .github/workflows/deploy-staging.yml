@@ -51,6 +51,15 @@ jobs:
         with:
           node-version-file: '.nvmrc'
           cache: npm
+      - name: Enable disposable PostgreSQL payment tests
+        if: inputs.action == 'deploy' || inputs.action == 'bootstrap'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y postgresql-16 postgresql-16-postgis-3
+          echo "MIXED_CASH_TEST_POSTGRES_BIN=/usr/lib/postgresql/16/bin" >> "${GITHUB_ENV}"
+
       - name: Test and compile backend before starting the paid server
         if: inputs.action == 'deploy' || inputs.action == 'bootstrap'
         run: |

@@ -1,6 +1,8 @@
 import { RequestResponsePhases1780000098000 } from '../../database/migrations/1780000098000-RequestResponsePhases';
+import { ReceiptResponseWindow1780000110000 } from '../../database/migrations/1780000110000-ReceiptResponseWindow';
 import { driverSchedulePostgresTests } from '../../../test/driver-schedule-postgres';
 import { driverAlertLocationPostgresTests } from '../../../test/driver-alert-location-postgres';
+import { homeDiscoveryPostgresTests } from '../../../test/home-discovery-postgres';
 import { tripUpdateSchedulePostgresTests } from '../../../test/trip-update-schedule-postgres';
 import { SequentialRequestQueue1780000097000 } from '../../database/migrations/1780000097000-SequentialRequestQueue';
 import { findDriverChoices, validateTargetDriver } from '../driver-choices';
@@ -97,7 +99,9 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
   const executable = (name: string) => join(pgBin!, process.platform === 'win32' ? `${name}.exe` : name);
   beforeAll(async () => {
     directory = mkdtempSync(join(tmpdir(), 'zwanga-dispatch-test-'));
-    execFileSync(executable('initdb'), ['-D', directory, '-U', 'dispatch_test', '-A', 'trust', '--no-locale', '-E', 'UTF8'], { windowsHide: true, stdio: 'pipe', timeout: 30000 });
+    // Disposable cluster preparation can exceed 30 s on Windows under local load.
+    // This is not a request-latency assertion and changes no dispatch deadline.
+    execFileSync(executable('initdb'), ['-D', directory, '-U', 'dispatch_test', '-A', 'trust', '--no-locale', '-E', 'UTF8'], { windowsHide: true, stdio: 'pipe', timeout: 120000 });
     const port = await new Promise<number>(done => {
       const server = createServer(); server.listen(0, '127.0.0.1', () => {
         const port = (server.address() as { port: number }).port;
@@ -128,11 +132,12 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
       await new DispatchDeliveryResilience1780000088000().up(runner);
       await new SequentialRequestQueue1780000097000().up(runner);
       await new RequestResponsePhases1780000098000().up(runner);
+      await source.transaction(manager => new ReceiptResponseWindow1780000110000().up(manager.queryRunner!));
     } finally { await runner.release(); }
     service = new DriverDispatchService(source, new ConfigService({ DRIVER_DISPATCH_ENABLED: 'true' }),
       notifications as never);
     dispatchCycles = jest.spyOn(service, 'tick');
-  }, 60000);
+  }, 180000);
   beforeEach(async () => {
     await waitForDispatchCycles();
     await source.query('TRUNCATE users CASCADE');
@@ -146,8 +151,14 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     }
     finally {
       dispatchCycles?.mockRestore();
-      if (started || (directory && existsSync(join(directory, 'postmaster.pid'))))
-        execFileSync(executable('pg_ctl'), ['-D', directory, '-m', 'fast', '-w', 'stop'], { windowsHide: true, stdio: 'ignore', timeout: 30000 });
+      if (started || (directory && existsSync(join(directory, 'postmaster.pid')))) {
+        // Windows can spend minutes fsyncing this disposable, frequently
+        // truncated schema. Wait for a confirmed shutdown before removing it;
+        // this budget does not change any application/test latency assertion.
+        const shutdownSeconds = process.platform === 'win32' ? 240 : 30;
+        execFileSync(executable('pg_ctl'), ['-D', directory, '-m', 'fast', '-t', String(shutdownSeconds), '-w', 'stop'],
+          { windowsHide: true, stdio: 'pipe', timeout: (shutdownSeconds + 5) * 1000 });
+      }
       if (directory && resolve(directory).startsWith(resolve(tmpdir()) + sep) && directory.includes('zwanga-dispatch-test-'))
         rmSync(directory, { recursive: true, force: true });
     }
@@ -354,6 +365,8 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     jest.spyOn(edits as any, 'sanitizeTripRequest').mockImplementation(async value => value);
     return edits;
   };
+
+  homeDiscoveryPostgresTests(() => ({ source, driver, request, browsing }));
 
   it('hides Kinshasa requests from Kisangani across legacy lists, pages, detail, contact and direct acceptance', async () => {
     const d = await driver(), r = await request(false), edits = browsing();
@@ -735,6 +748,7 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     try {
       await migration.up(runner);
       await new RideDeliveryRecovery1780000094000().up(runner);
+      await runner.query(`ALTER TABLE ride_notification_receipts ADD COLUMN "audioEvents" jsonb NOT NULL DEFAULT '{}'::jsonb`);
       const d = await driver(), r = await request(); await service['allocate'](r.id);
       const n = await source.getRepository(Notification).findOneByOrFail({ userId: d.user.id });
       expect(await recordRideNotificationReceipt(source.manager, randomUUID(), n.id, 'displayed')).toEqual({ received: false });
@@ -752,6 +766,7 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
   it('retries an unacknowledged v6 delivery once across replicas, preserves deadlines, and skips displayed/iOS', async () => {
     const runner=source.createQueryRunner(), receiptMigration=new RideNotificationReceipts1780000093000(), recovery=new RideDeliveryRecovery1780000094000();
     await receiptMigration.up(runner); await recovery.up(runner);
+    await runner.query(`ALTER TABLE ride_notification_receipts ADD COLUMN "audioEvents" jsonb NOT NULL DEFAULT '{}'::jsonb`);
     try {
       const d=await driver(), r=await request(); await service['allocate'](r.id);
       const n=await source.getRepository(Notification).findOneByOrFail({userId:d.user.id});
@@ -777,6 +792,7 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
   it('local E2E: nearby allocation -> HTTP push -> native card (optional emulator) -> HTTP receipt -> decline/accept', async () => {
     const runner=source.createQueryRunner(), receiptMigration=new RideNotificationReceipts1780000093000(), recovery=new RideDeliveryRecovery1780000094000();
     await receiptMigration.up(runner); await recovery.up(runner);
+    await runner.query(`ALTER TABLE ride_notification_receipts ADD COLUMN "audioEvents" jsonb NOT NULL DEFAULT '{}'::jsonb`);
     const wire: any[]=[]; const realFetch=global.fetch;
     const provider=createHttpServer(async(req,res)=>{
       let body='';for await(const part of req) body+=part; wire.push(JSON.parse(body).message);
@@ -862,14 +878,36 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     send.mockRestore();
   });
 
-  it('recovers realtime messages at 45 seconds but not after the original 60-second window', async () => {
+  it.each([
+    ['driver_dispatch_offer', 35, 41], ['trip_request_nearby', 35, 41], ['new_booking', 55, 61],
+  ])('recovers realtime %s within its own window, not another notification type window', async (type, within, expired) => {
     const d = await driver(), r = await request(); await service['allocate'](r.id);
     const n = await source.getRepository(Notification).findOneByOrFail({ userId: d.user.id });
-    await source.query(`UPDATE notifications SET "createdAt" = now() - interval '45 seconds' WHERE id = $1`, [n.id]);
+    await source.query(`UPDATE notifications SET data=jsonb_set(data,'{type}',to_jsonb($2::text)),
+      "createdAt" = now() - $3 * interval '1 second' WHERE id = $1`, [n.id, type, within]);
     expect(await claimRideRealtimeNotifications(source.manager)).toContain(n.id);
     await source.query('DELETE FROM ride_realtime_deliveries');
-    await source.query(`UPDATE notifications SET "createdAt" = now() - interval '61 seconds' WHERE id = $1`, [n.id]);
+    await source.query(`UPDATE notifications SET "createdAt" = now() - $2 * interval '1 second' WHERE id = $1`, [n.id, expired]);
     expect(await claimRideRealtimeNotifications(source.manager)).not.toContain(n.id);
+  });
+
+  it.each([
+    ['driver_dispatch_offer', 35, 41], ['trip_request_nearby', 35, 41], ['new_booking', 43, 46],
+  ])('ACK recovery preserves the separate request/booking windows for %s', async (type, within, expired) => {
+    const runner = source.createQueryRunner(), receipt = new RideNotificationReceipts1780000093000(), recovery = new RideDeliveryRecovery1780000094000();
+    await receipt.up(runner); await recovery.up(runner);
+    try {
+      const d = await driver(), r = await request(); await service['allocate'](r.id);
+      const n = await source.getRepository(Notification).findOneByOrFail({ userId: d.user.id });
+      await source.query(`UPDATE notifications SET status='sent',
+        data=jsonb_set(data,'{type}',to_jsonb($2::text)) || '{"nativeDeliveryVersion":6}'::jsonb,
+        "createdAt"=now()-$3*interval '1 second',"updatedAt"=now()-interval '13 seconds' WHERE id=$1`, [n.id, type, within]);
+      expect(await recoverUnacknowledgedRides(source.manager)).toBe(1);
+      await source.query('DELETE FROM ride_notification_retries');
+      await source.query(`UPDATE notifications SET status='sent',"updatedAt"=now()-interval '13 seconds',
+        "createdAt"=now()-$2*interval '1 second' WHERE id=$1`, [n.id, expired]);
+      expect(await recoverUnacknowledgedRides(source.manager)).toBe(0);
+    } finally { await recovery.down(runner); await receipt.down(runner); await runner.release(); }
   });
 
   it('broadcasts to nearby drivers, deduplicates ticks and cancels siblings after the first acceptance', async () => {

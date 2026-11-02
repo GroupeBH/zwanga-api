@@ -80,6 +80,9 @@ export async function saveNotificationResult(
       fcmToken: notification.fcmToken,
       data: notification.data,
       isActive: notification.isActive,
+      pushAttempts: notification.pushAttempts,
+      pushRetryAt: notification.pushRetryAt,
+      pushPermanentFailure: notification.pushPermanentFailure,
     },
   );
   return result.affected === 1;

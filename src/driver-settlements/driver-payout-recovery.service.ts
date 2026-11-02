@@ -63,15 +63,22 @@ export class DriverPayoutRecoveryService {
         ) *
           60_000,
     );
-    const [rows, total] = await this.source
+    const builder = this.source
       .getRepository(DriverPayout)
       .createQueryBuilder('p')
-      .leftJoinAndSelect('p.paymentTransaction', 'payment')
-      .where(
+      .leftJoinAndSelect('p.paymentTransaction', 'payment');
+    if (query.view === 'pending' || query.view === 'resolved') {
+      builder.where('p.status IN (:...statuses)', {
+        statuses: query.view === 'pending' ? ['pending', 'initiated'] : ['failed', 'cancelled'],
+      });
+    } else {
+      builder.where(
         `p."recoveryBlocked" = true OR (p.status IN (:...pending) AND
         (p."reviewRequestedAt" IS NOT NULL OR p."createdAt" <= :cutoff OR payment."orderNumber" IS NULL))`,
         { pending: ['pending', 'initiated'], cutoff },
-      )
+      );
+    }
+    const [rows, total] = await builder
       .orderBy('p.createdAt', 'ASC')
       .addOrderBy('p.id', 'ASC')
       .take(query.limit)

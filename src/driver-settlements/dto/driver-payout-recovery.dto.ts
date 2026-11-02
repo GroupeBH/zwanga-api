@@ -2,6 +2,7 @@ import { ApiProperty } from '@nestjs/swagger';
 import { Transform, Type } from 'class-transformer';
 import {
   IsInt,
+  IsIn,
   IsOptional,
   IsString,
   Max,
@@ -57,6 +58,11 @@ export class ClosePayoutIncidentDto extends RequestPayoutReviewDto {
 }
 
 export class PayoutRecoveryListDto {
+  @ApiProperty({ required: false, enum: ['review', 'pending', 'resolved'], description: 'Sans filtre : file historique à examiner. pending inclut tous les retraits en attente ; resolved inclut les échecs et annulations.' })
+  @IsOptional()
+  @IsIn(['review', 'pending', 'resolved'])
+  view?: 'review' | 'pending' | 'resolved';
+
   @IsOptional()
   @Type(() => Number)
   @IsInt()

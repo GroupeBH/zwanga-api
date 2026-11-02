@@ -86,6 +86,7 @@ export function mapDriverPriorityFlow(get: () => Fixture) {
     expect(
       new Date(pending.expiresAt).getTime() - Date.now(),
     ).toBeLessThanOrEqual(40000);
+    expect(new Date(pending.expiresAt).getTime() - Date.now()).toBeGreaterThan(35000);
     expect(
       (await db.getRepository(TripRequest).findOneByOrFail({ id: r.id }))
         .targetDriverId,

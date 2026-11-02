@@ -146,7 +146,7 @@ export function sequentialMobileFlow(context: () => Context) {
         const observed = await nativeReceipt(initial);
         expect(await clients[0].endpoint('recordRideNotificationReceipt', {
           notificationId: initial.notificationId, stage: 'displayed', ...observed,
-        })).toEqual({ received: true });
+        })).toMatchObject({ received: true, responseWindow: { offerId: initial.offerId } });
         expect(await clients[1].endpoint('recordRideNotificationReceipt', {
           notificationId: initial.notificationId, stage: 'displayed', ...observed,
         })).toEqual({ received: false });
@@ -177,7 +177,7 @@ export function sequentialMobileFlow(context: () => Context) {
         expect(rows[0].status).toBe(timeout ? 'expired' : 'declined');
         expect(rows[1].driverId).toBe(second.id);
         if (timeout) {
-          const elapsed = messages()[1].receivedAt - before.createdAt.getTime();
+          const elapsed = messages()[1].receivedAt - before.responseStartedAt.getTime();
           expect(elapsed).toBeGreaterThanOrEqual(40000); expect(elapsed).toBeLessThan(50000);
           console.log('[local-e2e] Real 40-second relay latency ms=' + elapsed);
         }
@@ -187,8 +187,9 @@ export function sequentialMobileFlow(context: () => Context) {
         });
         if (timeout) {
           // The second driver also ignores the request. This crosses the queue's
-          // 60-second TTL and verifies rediscovery, not just its first handoff.
-          await waitForExpirationRelay(rows[1], 3);
+          // candidate cache TTL and verifies rediscovery, not just its first handoff.
+          const secondWindow = (await offers(created.id))[1];
+          await waitForExpirationRelay(secondWindow, 3);
           const last = await waitFor(3, false);
           expect(last.driverId).toBe(third.id);
           expect(new Set(messages().map(m => m.data.notificationId)).size).toBe(3);
@@ -196,7 +197,7 @@ export function sequentialMobileFlow(context: () => Context) {
           await clients[2].endpoint('recordRideNotificationReceipt', {
             notificationId: last.notificationId, stage: 'displayed', ...lastReceipt,
           });
-          const elapsed = messages()[2].receivedAt - rows[1].createdAt.getTime();
+          const elapsed = messages()[2].receivedAt - secondWindow.responseStartedAt.getTime();
           expect(elapsed).toBeGreaterThanOrEqual(40000); expect(elapsed).toBeLessThan(50000);
           console.log('[local-e2e] Second real 40-second relay latency ms=' + elapsed);
           expect((await offers(created.id)).map(o => o.status)).toEqual(['expired', 'expired', 'pending']);
@@ -225,5 +226,5 @@ export function sequentialMobileFlow(context: () => Context) {
         for (const migration of migrations.reverse()) await migration.down(runner);
         await runner.release();
       }
-    }, 150000);
+    }, 240000);
 }

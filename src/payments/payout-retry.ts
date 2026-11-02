@@ -16,7 +16,7 @@ import {
 } from './entities/payment-transaction.entity';
 import { PayoutRetry, PayoutRetryKind } from './entities/payout-retry.entity';
 import { RetryPayoutDto } from './dto/retry-payout.dto';
-import { payoutRecoveryActions } from './payout-recovery-actions';
+import { payoutRetryAvailability } from './payout-retry-availability';
 
 export interface PayoutRetryContext {
   actorId: string;
@@ -180,14 +180,6 @@ export async function payoutRetryDetails(
   return {
     retry,
     retryOf,
-    canAdminRetry:
-      !retry &&
-      (!('recoveryBlocked' in source) || !source.recoveryBlocked) &&
-      (!payment || payment.provider === PaymentProvider.FLEXPAY) &&
-      payment?.status !== PaymentStatus.SUCCEEDED &&
-      (!source.paymentTransactionId ||
-        source.paymentTransactionId === payment?.id) &&
-      (['failed', 'cancelled'].includes(source.status) ||
-        payoutRecoveryActions(source, payment).canResolveNotPaid),
+    ...payoutRetryAvailability(kind, source, payment, !!retry),
   };
 }

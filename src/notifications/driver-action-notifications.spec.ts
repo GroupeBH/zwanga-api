@@ -259,13 +259,13 @@ describe('driver notification transport', () => {
     expect(payload.android.ttl).toBeLessThanOrEqual(60000);
     expect(Date.parse(payload.data.ringUntil)).toBeLessThanOrEqual(Date.now() + 60000);
   });
-  it.each(['new_booking', 'driver_dispatch_offer'])('v3 %s retains the existing actions and 30s deadline', async type => {
+  it.each(['new_booking', 'driver_dispatch_offer'])('v3 %s retains its actions and type-specific deadline', async type => {
     const { service, send, query } = fixture(true); query.mockResolvedValue([{ version: 3 }]);
     await service.sendFirebaseNotification({ userId: 'driver', body: 'Test', data: { type, driverId: 'driver' } }, 'token');
     const payload = send.mock.calls[0][0];
     expect(payload.notification).toBeUndefined();
     expect(payload.data).toMatchObject({ actionProtocol: 'driver-v1', ringVersion: 'v2' });
-    expect(payload.android.ttl).toBeLessThanOrEqual(60000);
+    expect(payload.android.ttl).toBeLessThanOrEqual(type === 'driver_dispatch_offer' ? 40000 : 60000);
   });
   it('v3 does not turn the passenger acceptance into a driver phone ringtone', async () => {
     const { service, send, query } = fixture(true); query.mockResolvedValue([{ version: 3 }]);

@@ -109,6 +109,16 @@ describe('Trip requests HTTP access', () => {
     expect(Reflect.getMetadata('THROTTLER:LIMITdefault', TripRequestsController.prototype.getPassengerContact)).toBe(10);
   });
 
+  it('Home scope retains real authentication/role guards and ignores a supplied driver identity', async () => {
+    const path = '/trip-requests?scope=home&driverId=someone-else';
+    await request(server).get(path).expect(401);
+    await request(server).get(path).set('Authorization', `Bearer ${jwt.sign({ userId: 'passenger', role: UserRole.PASSENGER })}`).expect(403);
+    expect(service.findAll).not.toHaveBeenCalled();
+    await request(server).get(path).set('Authorization', `Bearer ${jwt.sign({ userId: 'driver', role: UserRole.DRIVER })}`)
+      .expect('Cache-Control', 'private, no-store').expect(200, []);
+    expect(service.findAll).toHaveBeenCalledWith('driver', true);
+  });
+
   it('denies passengers access to my-offers', async () => {
     const token = jwt.sign({ userId: 'passenger', role: UserRole.PASSENGER });
     await request(server)

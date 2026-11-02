@@ -33,7 +33,9 @@ export class PaymentSettlementRegistry {
       return;
     const handler = this.handlers.get(payment.purpose);
     if (!handler) {
-      if (payment.purpose !== PaymentPurpose.GENERIC) {
+      // A treasury transfer has no wallet, referral or earning ledger to settle.
+      // Its provider-verified PaymentTransaction is the financial/audit record.
+      if (payment.purpose !== PaymentPurpose.GENERIC && payment.purpose !== PaymentPurpose.ADMIN_PAYOUT) {
         throw new ServiceUnavailableException(
           'Finalisation du paiement temporairement indisponible',
         );

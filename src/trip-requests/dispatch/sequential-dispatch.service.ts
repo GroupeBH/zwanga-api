@@ -23,6 +23,7 @@ export class SequentialDispatchService {
   private ticking = false;
   private cacheUnavailableUntil = 0;
   private sqlFallbackWorkers = 0;
+  private discoveryWorkers = 0;
   constructor(private readonly db: DataSource, private readonly config: ConfigService,
     private readonly queue: RequestDriverQueue, private readonly notifications: NotificationService,
     private readonly changes: RideAlertChanges, private readonly bookings?: BookingsService) {}
@@ -118,15 +119,37 @@ export class SequentialDispatchService {
       token = claim?.token;
       let drivers = claim?.drivers ?? [];
       if (!drivers.length) {
-        // Rebuild on exhaustion, an edit or the 30-second TTL (before the next 40-second handoff).
-        const candidates = sqlFallback ? await this.db.transaction(async manager => {
-          await manager.query("SET LOCAL statement_timeout = '3s'");
-          return sequentialCandidates(manager, state.request);
-        }) : await sequentialCandidates(this.db.manager, state.request);
-        drivers = [...new Set(candidates.map(candidate => candidate.driverId))];
-        if (!sqlFallback && !await this.cache(() => this.queue.seed(id, token!, version, drivers), false)) {
+        // Discovery (including pool wait) must not consume the Redis lease. SQL
+        // revalidates the request/version and candidate before reserving anyone.
+        if (token) {
+          await this.cache(() => this.queue.release(id, token!), undefined);
+          token = undefined;
+        }
+        if (this.discoveryWorkers >= 3) {
           await this.cache(() => this.queue.schedule(id, Date.now() + 1000), undefined);
           return false;
+        }
+        this.discoveryWorkers++;
+        let candidates: Awaited<ReturnType<typeof sequentialCandidates>>;
+        try {
+          candidates = await this.db.transaction(async manager => {
+            await manager.query("SET LOCAL statement_timeout = '3s'");
+            return sequentialCandidates(manager, state.request);
+          });
+        } finally { this.discoveryWorkers--; }
+        drivers = [...new Set(candidates.map(candidate => candidate.driverId))];
+        if (!sqlFallback) {
+          const fresh = await this.cache(() => this.queue.claim(id, version), null);
+          if (!fresh) {
+            await this.cache(() => this.queue.schedule(id, Date.now() + 1000), undefined);
+            return false;
+          }
+          token = fresh.token;
+          if (fresh.drivers.length) drivers = fresh.drivers;
+          else if (!await this.cache(() => this.queue.seed(id, token!, version, drivers), false)) {
+            await this.cache(() => this.queue.schedule(id, Date.now() + 1000), undefined);
+            return false;
+          }
         }
       }
       if (!drivers.length) {
@@ -161,7 +184,12 @@ export class SequentialDispatchService {
               VALUES ($1,$2,$3,$4,$5,LEAST(clock_timestamp() + $6 * interval '1 millisecond', $7),true)
               ON CONFLICT DO NOTHING RETURNING "expiresAt"`,
               [offerId,id,candidate.driverId,candidate.vehicleId,candidate.seats,REQUEST_RESPONSE_MS,request.departureDateMax]);
-            if (offer) return { candidate, offerId, expiresAt: new Date(offer.expiresAt) };
+            if (offer) {
+              // INSERT trigger may cap the deadline during a rolling deployment.
+              // Freeze the actual delivery deadline; receipts can add 40s only once.
+              await manager.query('UPDATE trip_request_dispatch_offers SET "deliveryDeadlineAt"="expiresAt" WHERE id=$1', [offerId]);
+              return { candidate, offerId, expiresAt: new Date(offer.expiresAt) };
+            }
           }
           return null;
         })();
@@ -222,7 +250,7 @@ export class SequentialDispatchService {
             AND status IN ('pending','offers_received') AND "selectedDriverId" IS NULL AND "tripId" IS NULL) deadlines
           ORDER BY "expiresAt", "requestId" LIMIT 50`).catch(() => {
             // An isolated failure of the recovery query must not discard an
-            // already successful Redis read and stop every 40-second handoff.
+            // already successful Redis read and stop every timed handoff.
             this.logger.warn('SQL request expiration scan deferred; processing Redis deadlines.');
             return [] as { requestId: string }[];
           });

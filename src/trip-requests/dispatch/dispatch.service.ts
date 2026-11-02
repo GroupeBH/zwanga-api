@@ -1,6 +1,6 @@
 import { SequentialDispatchService } from './sequential-dispatch.service';
 import { requestAcceptsVehicle, requestVehicleTypes } from '../request-vehicle-types';
-import { assertSequentialInvitation } from './sequential-policy';
+import { assertSequentialInvitation, REQUEST_RESPONSE_MS } from './sequential-policy';
 import { assertRequestTarget } from '../target-driver-policy';
 import { assertRequestDriverProximity, requestDriverProximitySql } from '../request-proximity';
 import { recordRequestRefusal } from '../request-refusal';
@@ -27,7 +27,8 @@ import { rideSpeechData } from '../../notifications/ride-speech-data';
 import { ELIGIBLE_DRIVER_ACCOUNT_SQL, NEARBY_DRIVER_RADIUS_METERS } from './nearby-driver-policy';
 import { enqueueStaleLocationReminders } from './stale-location-reminder';
 import { hasUsableDriverLocation, USABLE_DRIVER_LOCATION_SQL } from './driver-location-policy';
-import { PRESENCE_ALERT_LOCATION_SQL } from './driver-alert-location-policy';
+import { PRESENCE_ALERT_LOCATION_SQL, ONGOING_ALERT_LOCATION_SQL, DRIVER_ALERT_LOCATION_MAX_AGE_HOURS } from './driver-alert-location-policy';
+import { startReceivedResponseWindow } from './receipt-response-window';
 import { acknowledgeNearbyRequest, declineNearbyRequest } from '../../notifications/nearby-request-cooldown';
 import { assertDriverRequestSchedule, driverRequestConflictSql, driverScheduleConflictSql } from './driver-schedule-policy';
 
@@ -59,11 +60,17 @@ export class DriverDispatchService {
     return this.declineNearbyRequest(driverId, requestId);
   }
   async acknowledgeNotification(driverId: string, notificationId: string, stage: 'received' | 'displayed' = 'received', detail?: import('../../notifications/ride-notification-receipt').RideReceiptDetail) {
-    const result = await recordRideNotificationReceipt(this.db.manager, driverId, notificationId, stage, detail);
-    if (result.received) await acknowledgeNearbyRequest(this.db.manager, driverId, notificationId);
-    return result;
+    return this.db.transaction(async manager => {
+      await manager.query("SET LOCAL lock_timeout = '2s'");
+      await manager.query("SET LOCAL statement_timeout = '5s'");
+      // Acquire business locks before recording telemetry (same order as retirement).
+      const responseWindow = await startReceivedResponseWindow(manager, driverId, notificationId);
+      const result = await recordRideNotificationReceipt(manager, driverId, notificationId, stage, detail);
+      if (result.received) await acknowledgeNearbyRequest(manager, driverId, notificationId);
+      return { ...result, ...(result.received && responseWindow ? { responseWindow } : {}) };
+    });
   }
-  private get responseSeconds() { if (this.sequential) return 40; return boundedInteger(this.config.get('DRIVER_DISPATCH_RESPONSE_SECONDS'), 60, 60, 120); }
+  private get responseSeconds() { if (this.sequential) return REQUEST_RESPONSE_MS / 1000; return boundedInteger(this.config.get('DRIVER_DISPATCH_RESPONSE_SECONDS'), 60, 60, 120); }
   private get presenceSeconds() { return boundedInteger(this.config.get('DRIVER_DISPATCH_PRESENCE_SECONDS'), 90, 45, 180); }
   private get radiusMeters() { return NEARBY_DRIVER_RADIUS_METERS; }
   // Compatibility/freshness metadata only. Durable positions do not expire.
@@ -84,7 +91,9 @@ export class DriverDispatchService {
 
   async status(driverId: string) {
     if (!this.enabled) return { enabled: false, available: false, pendingOfferId: null };
-    const [presence] = await this.db.query(`SELECT "vehicleId", "leaseId", seats, "expiresAt", "updatedAt", "discoveryEnabled"
+    const [presence] = await this.db.query(`SELECT "vehicleId", "leaseId", seats, "expiresAt", "updatedAt", "discoveryEnabled",
+      (${PRESENCE_ALERT_LOCATION_SQL} OR EXISTS (SELECT 1 FROM trips t WHERE t."driverId"=p."driverId"
+        AND t.status='ongoing' AND ${ONGOING_ALERT_LOCATION_SQL})) AS "alertLocationFresh"
       FROM driver_dispatch_presence p WHERE "driverId" = $1 AND ${USABLE_DRIVER_LOCATION_SQL}`, [driverId]);
     const [offer] = await this.db.query(`SELECT o.id FROM trip_request_dispatch_offers o
       JOIN trip_requests r ON r.id = o."requestId"
@@ -95,6 +104,8 @@ export class DriverDispatchService {
     return { enabled: true, available, presence: presence ?? null,
       pendingOfferId: offer?.id ?? null, responseSeconds: this.responseSeconds,
       automatic: true, positionFreshSeconds: this.positionSeconds,
+      needsLocationRefresh: presence?.alertLocationFresh !== true,
+      alertLocationMaxAgeSeconds: DRIVER_ALERT_LOCATION_MAX_AGE_HOURS * 3600,
       locationPolicy: 'last_known', positionExpires: presence?.discoveryEnabled !== true };
   }
 

@@ -1,4 +1,4 @@
-import { BadRequestException, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { User } from '../users/entities/user.entity';
 import { Trip } from './entities/trip.entity';
 import { assertDriverPublicationPhoto, savePublicationsWithPhotoPolicy } from './trip-publication-photo';
@@ -15,17 +15,36 @@ function setup(overrides: Partial<User> = {}, history = false) {
     existsBy: jest.fn(async () => history),
     save: jest.fn(async (items: Trip[]) => items.map((item, i) => ({ ...item, id: String(i) }))),
   };
+  const query = jest.fn().mockResolvedValue([{ busy: false }]);
   // Serial transaction mock models the owner lock; this is NOT a PostgreSQL integration test.
   let tail = Promise.resolve();
   const repository = { manager: { transaction: jest.fn((_isolation, work) => {
-    const run = tail.then(() => work({ query: jest.fn().mockResolvedValue([{ busy: false }]), getRepository: entity => entity === User ? users : trips }));
+    const run = tail.then(() => work({ query, getRepository: entity => entity === User ? users : trips }));
     tail = run.catch(() => undefined);
     return run;
   }) } };
-  return { driver, users, trips, repository: repository as any };
+  return { driver, users, trips, query, repository: repository as any };
 }
 
 describe('driver photo publication policy', () => {
+  it('skips a conflicting recurring day without discarding the other dates', async () => {
+    const ctx = setup({ profilePicture: 'photo.jpg' });
+    ctx.query.mockResolvedValueOnce([{ busy: true }]);
+    const occurrence = (date: string) => ({ ...trip(), recurringTemplateId: 'template', recurringOccurrenceDate: date });
+    const saved = await savePublicationsWithPhotoPolicy(ctx.repository, 'driver', [occurrence('2030-01-01'), occurrence('2030-01-02')]);
+    expect(saved).toHaveLength(1);
+    expect(saved[0].recurringOccurrenceDate).toBe('2030-01-02');
+  });
+  it('never suppresses a manual conflict or a technical database error', async () => {
+    const ctx = setup({ profilePicture: 'photo.jpg' });
+    ctx.query.mockResolvedValueOnce([{ busy: true }]);
+    await expect(savePublicationsWithPhotoPolicy(ctx.repository, 'driver', [trip()])).rejects.toBeInstanceOf(ConflictException);
+    ctx.query.mockRejectedValueOnce(new Error('database unavailable'));
+    await expect(savePublicationsWithPhotoPolicy(ctx.repository, 'driver', [
+      { ...trip(), recurringTemplateId: 'template', recurringOccurrenceDate: '2030-01-02' },
+    ])).rejects.toThrow('database unavailable');
+    expect(ctx.trips.save).not.toHaveBeenCalled();
+  });
   it('allows one public trip without a photo and records it atomically', async () => {
     const ctx = setup();
     const saved = await savePublicationsWithPhotoPolicy(ctx.repository, 'driver', [trip()]);

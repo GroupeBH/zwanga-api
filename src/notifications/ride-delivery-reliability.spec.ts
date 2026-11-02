@@ -52,13 +52,13 @@ describe('v4 Android native safety card', () => {
 });
 
 describe('immutable incoming deadlines', () => {
-  it.each(['new_booking', 'trip_request_nearby'])('a %s delivered after 45 seconds retains a positive sound window', type => {
+  it.each(['new_booking', 'trip_request_nearby'])('a %s delivered after 25 seconds retains its original sound window', type => {
     const service: any = Object.create(NotificationService.prototype);
-    const item = notification(type); item.createdAt = new Date(Date.now() - 45_000);
+    const item = notification(type); item.createdAt = new Date(Date.now() - 25_000);
     delete item.data!.expiresAt;
     const first = service.driverRingUntil(item);
     expect(Date.parse(first) - Date.now()).toBeGreaterThan(10_000);
-    expect(Date.parse(first) - item.createdAt.getTime()).toBe(60_000);
+    expect(Date.parse(first) - item.createdAt.getTime()).toBe(type === 'new_booking' ? 60_000 : 40_000);
     expect(service.driverRingUntil(item)).toBe(first);
   });
   it('a business expiry still caps the longer sound window', () => {
@@ -66,6 +66,18 @@ describe('immutable incoming deadlines', () => {
     const item = notification('driver_dispatch_offer'); item.createdAt = new Date();
     item.data!.expiresAt = new Date(Date.now() + 5000).toISOString();
     expect(service.driverRingUntil(item)).toBe(item.data!.expiresAt);
+  });
+  it.each(['driver_dispatch_offer', 'trip_request_nearby'])('%s remains deliverable at 35s without renewing the 40s deadline', type => {
+    const service: any = Object.create(NotificationService.prototype);
+    const item = notification(type);
+    item.createdAt = new Date(Date.now() - 35_000);
+    item.data!.expiresAt = new Date(item.createdAt.getTime() + 40_000).toISOString();
+    expect(service.driverRingUntil(item)).toBe(item.data!.expiresAt);
+    expect(Date.parse(service.driverRingUntil(item))).toBeGreaterThan(Date.now());
+    // A shorter invitation is never extended by this change.
+    item.data!.expiresAt = new Date(item.createdAt.getTime() + 30_000).toISOString();
+    expect(service.driverRingUntil(item)).toBe(item.data!.expiresAt);
+    expect(Date.parse(service.driverRingUntil(item))).toBeLessThan(Date.now());
   });
   it('a retry cannot restart the sound budget of the same booking notification', () => {
     const service: any = Object.create(NotificationService.prototype);

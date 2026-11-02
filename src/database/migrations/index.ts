@@ -3,6 +3,11 @@ import { PassengerDriverChangeReason1780000102000 } from './1780000102000-Passen
 import { MapDriverPriority1780000103000 } from './1780000103000-MapDriverPriority';
 import { RequestVehicleTypes1780000104000 } from './1780000104000-RequestVehicleTypes';
 import { PayoutRetries1780000105000 } from './1780000105000-PayoutRetries';
+import { AlertDeliveryReliability1780000106000 } from './1780000106000-AlertDeliveryReliability';
+import { DriverResponse75Seconds1780000107000 } from './1780000107000-DriverResponse75Seconds';
+import { DriverResponse40Seconds1780000108000 } from './1780000108000-DriverResponse40Seconds';
+import { AdminDirectPayouts1780000109000 } from './1780000109000-AdminDirectPayouts';
+import { ReceiptResponseWindow1780000110000 } from './1780000110000-ReceiptResponseWindow';
 import { SeparateRequestAttentionLease1780000101000 } from './1780000101000-SeparateRequestAttentionLease';
 import { IndexRequestNotificationRetirement1780000099000 } from './1780000099000-IndexRequestNotificationRetirement';
 import { RequestResponsePhases1780000098000 } from './1780000098000-RequestResponsePhases';
@@ -216,4 +221,9 @@ export const databaseMigrations = [
   MapDriverPriority1780000103000,
   RequestVehicleTypes1780000104000,
   PayoutRetries1780000105000,
+  AlertDeliveryReliability1780000106000,
+  DriverResponse75Seconds1780000107000,
+  DriverResponse40Seconds1780000108000,
+  AdminDirectPayouts1780000109000,
+  ReceiptResponseWindow1780000110000,
 ];

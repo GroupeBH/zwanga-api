@@ -6,8 +6,13 @@ import { AdminDriverPayoutRecoveryController } from '../driver-settlements/drive
 import { AdminController } from '../admin/admin.controller';
 import { UserRole } from '../users/entities/user.entity';
 import { RetryPayoutDto } from './dto/retry-payout.dto';
+import { GUARDS_METADATA } from '@nestjs/common/constants';
+import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 
 describe('Payout retry public contract', () => {
+  it('authenticates driver recovery routes before checking their role, even without global guards', () => {
+    expect(Reflect.getMetadata(GUARDS_METADATA, AdminDriverPayoutRecoveryController)).toEqual([JwtAuthGuard, RolesGuard]);
+  });
   const proof = {
     reason: 'Non-exécution confirmée',
     evidenceReference: 'TEST-EVIDENCE',

@@ -20,6 +20,7 @@ import {
   ReferralWithdrawalStatus,
 } from '../referrals/entities/referral-withdrawal.entity';
 import { PayoutRetry, PayoutRetryKind } from './entities/payout-retry.entity';
+import { payoutRetryDetails } from './payout-retry';
 import {
   PaymentTransaction,
   PaymentProvider,
@@ -254,6 +255,9 @@ const bin = process.env.PAYOUT_TEST_POSTGRES_BIN;
       (kind) => {
         it('serializes simultaneous admin retries, preserves value/recipient, and never resends on replay', async () => {
           const f = await fixture(kind);
+          expect(await payoutRetryDetails(db.manager, kind, f.original, f.payment)).toMatchObject({
+            canAdminRetry: true, adminRetry: { code: 'AVAILABLE' }, retry: null,
+          });
           const results = await Promise.all(
             Array.from({ length: 4 }, () => f.retry()),
           );
@@ -276,6 +280,10 @@ const bin = process.env.PAYOUT_TEST_POSTGRES_BIN;
             replacementId: results[0].id,
             actorId: f.admin.id,
             evidenceReference: f.proof.evidenceReference,
+          });
+          expect(await payoutRetryDetails(db.manager, kind, f.original, f.payment)).toMatchObject({
+            canAdminRetry: false, adminRetry: { code: 'ALREADY_RETRIED' },
+            retry: { replacementId: results[0].id },
           });
           expect((await f.retry()).id).toBe(results[0].id);
           expect(f.sent).toHaveBeenCalledTimes(1);

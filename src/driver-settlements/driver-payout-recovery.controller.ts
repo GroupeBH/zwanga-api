@@ -61,8 +61,8 @@ export class DriverPayoutRecoveryController {
 
 @ApiTags('Admin Driver Payout Recovery')
 @Controller('admin/driver-payouts')
-@Auth()
 @UseGuards(RolesGuard)
+@Auth()
 @Roles(UserRole.ADMIN)
 export class AdminDriverPayoutRecoveryController {
   constructor(private readonly recovery: DriverPayoutRecoveryService) {}

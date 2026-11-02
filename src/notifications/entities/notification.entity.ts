@@ -72,6 +72,15 @@ export class Notification {
   @Column({ type: 'text', nullable: true })
   errorMessage: string | null; // Message d'erreur si l'envoi a échoué
 
+  @Column({ type: 'integer', default: 0 })
+  pushAttempts: number;
+
+  @Column({ type: 'timestamptz', nullable: true })
+  pushRetryAt: Date | null;
+
+  @Column({ type: 'boolean', default: false })
+  pushPermanentFailure: boolean;
+
   @Column({ type: 'varchar', nullable: true })
   messageId: string | null; // ID du message retourné par FCM (si disponible)
 

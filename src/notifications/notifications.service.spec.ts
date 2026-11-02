@@ -5,7 +5,7 @@ import { FirebaseDeliveryError } from './firebase-delivery-error';
 import * as boundedFirebase from './bounded-firebase-send';
 
 describe('NotificationService critical push reliability', () => {
-  const buildService = () => {
+  const buildService = (capacity: unknown = 5) => {
     const queryBuilder = {
       where: jest.fn().mockReturnThis(),
       andWhere: jest.fn().mockReturnThis(),
@@ -49,7 +49,7 @@ describe('NotificationService critical push reliability', () => {
     const tripRequestRepository = {
       findOne: jest.fn(),
     };
-    const configService = { get: jest.fn() };
+    const configService = { get: jest.fn((key: string) => key === 'URGENT_PUSH_WORKERS' ? capacity : undefined) };
     const service = new NotificationService(
       configService as any,
       notificationRepository as any,
@@ -69,6 +69,30 @@ describe('NotificationService critical push reliability', () => {
 
   afterEach(() => {
     jest.restoreAllMocks();
+    jest.useRealTimers();
+  });
+
+  it('synthetic slow-provider burst: eight bounded slots start 16 alerts before their 40s deadlines', async () => {
+    jest.useFakeTimers();
+    const f = buildService(undefined);
+    const waiting = Array.from({ length: 16 }, (_, i) => ({ id: String(i), createdAt: new Date(), data: { type: i % 2 ? 'trip_request_nearby' : 'driver_dispatch_offer' } }));
+    f.queryBuilder.getMany.mockImplementation(async () => waiting.splice(0, Number(f.queryBuilder.take.mock.lastCall![0])) as never[]);
+    jest.spyOn(f.service as any, 'isCriticalNotificationStillDeliverable').mockResolvedValue(true);
+    const started: number[] = [], start = Date.now(); let active = 0, peak = 0;
+    jest.spyOn(f.service as any, 'deliverSavedNotification').mockImplementation(async () => {
+      active++; peak = Math.max(peak, active); started.push(Date.now() - start);
+      await new Promise(resolve => setTimeout(resolve, 15_000)); active--; return true;
+    });
+    // undefined selects the default, not the fixture's explicit legacy capacity.
+    (f.service as any).configService.get.mockReturnValue(undefined);
+    const first = f.service.dispatchUrgentNotifications();
+    await jest.advanceTimersByTimeAsync(15_000); await first;
+    const second = f.service.dispatchUrgentNotifications();
+    await jest.advanceTimersByTimeAsync(15_000); await second;
+    expect(started).toHaveLength(16); expect(peak).toBe(8);
+    expect(Math.max(...started)).toBe(15_000);
+    expect(f.queryBuilder.orderBy).toHaveBeenCalledWith('notification.createdAt', 'ASC');
+    expect(jest.getTimerCount()).toBe(0);
   });
 
   const expectClaimedResult = (

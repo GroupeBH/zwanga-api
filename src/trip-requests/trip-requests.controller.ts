@@ -66,8 +66,9 @@ export class TripRequestsController {
     description:
       'Conducteurs authentifiés uniquement, à 5 km maximum du départ selon leur dernière position connue. Sans position utilisable, la liste est vide. Exclut les demandes expirées même avant la mise à jour du statut. Aucun téléphone dans la liste.',
   })
-  async findAll(@Request() req: { user: { userId: string } }) {
-    return this.tripRequestsService.findAll(req.user.userId);
+  async findAll(@Request() req: { user: { userId: string } }, @Query('scope') scope?: string) {
+    return scope === 'home' ? this.tripRequestsService.findAll(req.user.userId, true)
+      : this.tripRequestsService.findAll(req.user.userId);
   }
 
   @Get('driver-choices')

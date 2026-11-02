@@ -309,5 +309,16 @@ const pgBin = process.env.PAYOUT_TEST_POSTGRES_BIN;
         await runner.release();
       }
     });
+
+    it('shows recent pending payouts and resolved sources without changing the legacy review queue', async () => {
+      await source.getRepository(DriverPayout).update(payoutId, { requestedAt: new Date(), createdAt: new Date() });
+      await source.getRepository(PaymentTransaction).update(paymentId, { orderNumber: 'TEST-RECENT-ORDER' });
+      expect((await recovery.list({ limit: 25, offset: 0 })).data).toHaveLength(0);
+      expect((await recovery.list({ limit: 25, offset: 0, view: 'pending' })).data.map(p => p.id)).toEqual([payoutId]);
+      expect((await recovery.list({ limit: 25, offset: 1, view: 'pending' })).data).toHaveLength(0);
+      await source.getRepository(DriverPayout).update(payoutId, { status: 'cancelled' as any });
+      expect((await recovery.list({ limit: 25, offset: 0, view: 'pending' })).total).toBe(0);
+      expect((await recovery.list({ limit: 25, offset: 0, view: 'resolved' })).data.map(p => p.id)).toEqual([payoutId]);
+    });
   },
 );

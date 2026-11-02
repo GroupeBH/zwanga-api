@@ -52,6 +52,7 @@ import { claimBookingPayment } from './booking-payment-claim';
 import { recoverTopUpClaim } from './topup-recovery';
 import { commitFlexPayDepositState } from './flexpay-deposit-state';
 import { claimReferralPayoutPayment } from './referral-payout-claim';
+import { adminPayoutReference, claimAdminPayoutPayment } from './admin-payout-claim';
 
 export interface InitiatePaymentInput {
   tokenQuantity?: number;
@@ -228,6 +229,8 @@ export class PaymentsService {
   async initiatePayment(
     input: InitiatePaymentInput,
   ): Promise<PaymentTransaction> {
+    if (input.purpose === PaymentPurpose.ADMIN_PAYOUT)
+      throw new BadRequestException('Un virement administratif doit utiliser le parcours de décaissement.');
     this.ensurePaymentInputIsUsable(input);
     const providers = this.resolveProviders(input.method, 'deposits', input.preferredProvider);
     if (providers.length === 0) {
@@ -359,11 +362,14 @@ export class PaymentsService {
     // balance must never reach FlexPay/PawaPay as a new cash withdrawal.
     assertPayoutPurposeAllowed(input);
     this.ensurePayoutInputIsUsable(input);
-    const providers = this.resolveProviders(
+    const availableProviders = this.resolveProviders(
       PaymentMethod.MOBILE_MONEY,
       'payouts',
       input.preferredProvider,
     );
+    const providers = input.purpose === PaymentPurpose.ADMIN_PAYOUT
+      ? availableProviders.filter(provider => provider === PaymentProvider.FLEXPAY)
+      : availableProviders;
     if (providers.length === 0) {
       throw new BadRequestException(
         "Aucun prestataire de versement n'est disponible",
@@ -378,7 +384,8 @@ export class PaymentsService {
       provider: providers[0],
       method: PaymentMethod.MOBILE_MONEY,
       status: PaymentStatus.PENDING,
-      reference: this.generatePaymentReference(
+      reference: input.purpose === PaymentPurpose.ADMIN_PAYOUT
+        ? adminPayoutReference(input.userId, input.relatedEntityId!) : this.generatePaymentReference(
         input.referencePrefix,
         input.userId,
       ),
@@ -402,7 +409,9 @@ export class PaymentsService {
       paidAt: null,
     });
 
-    const claim = transaction.purpose === PaymentPurpose.DRIVER_PAYOUT &&
+    const claim = transaction.purpose === PaymentPurpose.ADMIN_PAYOUT
+      ? await claimAdminPayoutPayment(this.paymentTransactionRepository, transaction)
+      : transaction.purpose === PaymentPurpose.DRIVER_PAYOUT &&
         transaction.relatedEntityType === 'driver_payout' && transaction.relatedEntityId
       ? await claimDriverPayoutPayment(this.paymentTransactionRepository, transaction)
       : transaction.purpose === PaymentPurpose.REFERRAL_PAYOUT && transaction.relatedEntityType === 'referral_withdrawal'
@@ -786,6 +795,12 @@ export class PaymentsService {
       return null;
     }
 
+    if (transaction.purpose === PaymentPurpose.ADMIN_PAYOUT) {
+      if (transaction.status === PaymentStatus.SUCCEEDED) return 'Virement administratif confirmé par le prestataire.';
+      if ([PaymentStatus.FAILED, PaymentStatus.CANCELLED].includes(transaction.status)) return 'Virement administratif échoué ou annulé. Vérifiez le dossier avant tout nouvel ordre.';
+      return 'Virement administratif en attente de confirmation. Aucun nouvel envoi automatique.';
+    }
+
     if (this.isPayoutTransaction(transaction)) {
       if (transaction.status === PaymentStatus.SUCCEEDED)
         return 'Zwanga a versé vos gains sur votre compte Mobile Money.';
@@ -1085,6 +1100,7 @@ export class PaymentsService {
     return (
       transaction.purpose === PaymentPurpose.DRIVER_PAYOUT ||
       transaction.purpose === PaymentPurpose.WALLET_PAYOUT ||
+      transaction.purpose === PaymentPurpose.ADMIN_PAYOUT ||
       transaction.purpose === PaymentPurpose.REFERRAL_PAYOUT
     );
   }

@@ -73,6 +73,7 @@ import { ACCEPTED_REQUEST_EXPIRATION_MS, UNACCEPTED_REQUEST_EXPIRATION_MS, asser
 import { enqueueTransactionalNotification } from '../notifications/transactional-notification';
 import { HistoryPageQuery, orderHistory } from '../common/history-page';
 import { requestPageIds, offerPageIds } from './request-pages';
+import { homeRequestIds } from './home-request-ids';
 
 export interface SanitizedUser {
   id: string;
@@ -828,8 +829,10 @@ export class TripRequestsService {
     }
   }
 
-  async findAll(driverId: string): Promise<SanitizedTripRequest[]> {
+  async findAll(driverId: string, home = false): Promise<SanitizedTripRequest[]> {
     await this.assertDriverViewer(driverId);
+    const ids = home ? await homeRequestIds(this.tripRequestRepository, driverId) : undefined;
+    if (ids && !ids.length) return [];
     this.logger.debug('Fetching all trip requests');
 
     // Search/Home still use this legacy endpoint. Filter elapsed deadlines in
@@ -844,7 +847,8 @@ export class TripRequestsService {
         'driverOffers.vehicle',
       ],
       where: {
-        id: Raw(alias => nearbyRequestDriverVisibilitySql(alias, ':refusingDriverId'), { refusingDriverId: driverId }),
+        id: Raw(alias => `${ids ? `${alias} IN (:...homeRequestIds) AND ` : ''}${nearbyRequestDriverVisibilitySql(alias, ':refusingDriverId')}`,
+          { refusingDriverId: driverId, ...(ids ? { homeRequestIds: ids } : {}) }),
         status: In([
           TripRequestStatus.PENDING,
           TripRequestStatus.OFFERS_RECEIVED,
@@ -861,7 +865,7 @@ export class TripRequestsService {
     // Recheck the deadline after hydration, including a raced expiration update
     // that affected zero rows and therefore left this snapshot unchanged.
     const now = new Date();
-    const visibleTripRequests = tripRequests.filter(
+    const visibleTripRequests = (ids ? orderHistory(ids, tripRequests) : tripRequests).filter(
       (tr) => this.isAvailableRequest(tr, now),
     );
 

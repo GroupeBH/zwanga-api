@@ -1,6 +1,8 @@
 import type { App } from 'firebase-admin/app';
 import type { Message } from 'firebase-admin/messaging';
-import { FirebaseDeliveryError } from './firebase-delivery-error';
+import { FirebaseDeliveryError, firebaseRetryAfter } from './firebase-delivery-error';
+import { invalidateFirebaseCredential } from './firebase-credential';
+export { firebaseRetryAfter } from './firebase-delivery-error';
 
 // FCM recommends a send timeout of at least 10 seconds. OAuth has its own
 // budget so a cold credential refresh cannot consume the HTTP send window.
@@ -51,9 +53,9 @@ function waitForToken(app: App, timeoutMs: number): Promise<string> {
       timeoutMs,
     );
     accessToken(app)
-      .then(resolve, () =>
+      .then(resolve, (error) =>
         reject(
-          new FirebaseDeliveryError('FCM_AUTH_FAILED', {
+          error instanceof FirebaseDeliveryError ? error : new FirebaseDeliveryError('FCM_AUTH_FAILED', {
             code: 'messaging/authentication-error',
             phase: 'auth',
             transient: false,
@@ -111,7 +113,13 @@ export async function sendBoundedFirebase(
   app: App,
   message: Message,
   budgetMs = FCM_SEND_TIMEOUT_MS,
+  expiresAt?: number,
 ): Promise<string> {
+  const assertFresh = () => {
+    if (expiresAt !== undefined && Number.isFinite(expiresAt) && Date.now() >= expiresAt)
+      throw new FirebaseDeliveryError('FCM_INVITATION_EXPIRED', { code: 'messaging/invitation-expired', phase: 'send', transient: false });
+  };
+  assertFresh();
   const project = app.options.projectId;
   if (
     !project ||
@@ -127,6 +135,7 @@ export async function sendBoundedFirebase(
     app,
     Math.min(timeoutMs, FCM_AUTH_TIMEOUT_MS),
   );
+  assertFresh(); // A cold OAuth refresh must not send a now-expired invitation.
   // Abort the actual request, not merely its caller. Outbox recovery is the
   // only retry owner; an aborted POST might already have been accepted by FCM.
   const controller = new AbortController();
@@ -145,7 +154,7 @@ export async function sendBoundedFirebase(
       },
     );
     // Even an HTML/empty 401 must invalidate the cached access token.
-    if (response.status === 401) tokens.delete(app);
+    if (response.status === 401) { tokens.delete(app); invalidateFirebaseCredential(app.options.credential); }
     const result = (await response.json().catch(() => null)) as {
       name?: string;
       error?: { details?: { errorCode?: string }[] };
@@ -164,6 +173,7 @@ export async function sendBoundedFirebase(
         phase: 'send',
         transient: response.status === 429 || response.status >= 500,
         httpStatus: response.status,
+        retryAt: firebaseRetryAfter(response.headers.get('retry-after'), response.status),
       });
     }
     if (typeof result?.name !== 'string' || !result.name) {

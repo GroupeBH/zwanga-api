@@ -1,5 +1,43 @@
 # Journal des modifications financières
 
+## 2026-11-02 — Cohérence du journal et du paiement mixte mobile
+
+- Le contrôle périodique compare le solde au total signé des crédits/débits dans un même instantané SQL, plutôt qu'à une écriture choisie par date puis UUID aléatoire. Des écritures simultanées ne sont plus arbitrairement ordonnées. Aucun solde ni historique réécrit ; une divergence véritable reste une alerte à investiguer en lecture seule, notamment celle observée en production.
+- Le mobile distingue une recharge en attente d'un encaissement direct du trajet. Le panneau de récupération permet de choisir explicitement les jetons disponibles plus les espèces, avec confirmation ensuite sur le formulaire existant. La référence de recharge est conservée ; un succès tardif reste un crédit du portefeuille, pas une nouvelle dépense automatique du trajet après paiement mixte confirmé. Les paiements directs en attente et les intentions mixtes incertaines restent protégés contre les doubles débits.
+- PostgreSQL : 11 régressions isolées réussies dans la suite de cohérence (dont égalité des dates, UUID opposés à l'ordre de crédit, divergence réelle, comptes vides et migration des délais). Pas de correction de données de production ni d'appel Mobile Money. Voir le complément du document d'exploitation `docs/operations/driver-alert-reliability-fixes-2026-11-02.md` pour les limites et l'ordre de déploiement.
+
+## 2026-11-02 — Paiement mixte non bloqué par une recharge du portefeuille
+
+- **Problème :** `MixedCashPaymentService.pay` bloquait jetons + espèces à cause de n’importe quelle recharge Mobile Money en attente du passager, même sans encaissement direct du trajet. Reproduction PostgreSQL avant correctif avec 3 500 FC et 65 jetons : conflit 409, message exact de la capture.
+- **Correctif :** `src/bookings/mixed-cash-payment.service.ts` limite le verrou métier aux transactions directes `trip_booking` de la réservation en attente, initiées ou réussies. Les recharges ne sont ni annulées ni modifiées ; une confirmation tardive crédite le portefeuille sans modifier le partage déjà enregistré. API inchangée, pas de migration ni de déploiement ; compatible avec le mobile existant.
+- **Conservé :** arrivée, propriétaire, modes acceptés, contrôle des montants/solde, verrou de réservation, ordre de verrouillage, idempotence, protection contre un second encaissement direct et confirmation distincte des espèces. Aucun changement des commissions, du parrainage ou du cash intégral ; aucun appel prestataire sous transaction.
+- **Tests :** `test/mixed-cash-topup-regressions.ts`, intégré à `mixed-cash-payment-postgres.spec.ts`, ajoute huit scénarios PostgreSQL (recharges en attente, crédit avant/pendant/après partage, paiement direct protégé). **82 tests réussis sur quatre suites** via le banc local des paiements, dont les deux suites PostgreSQL ; **54 tests JavaScript mobiles réussis**, incluant la reprise après l’ancien conflit vers le reçu de 2 850 FC restants. Comptes fictifs, réseau distant interdit, aucun accès à la production. Le premier démarrage PostgreSQL limité par le bac à sable a été relancé avec autorisation. Pas de test prestataire ni d’appareil physique. Voir aussi le journal mobile `docs/CHANGEMENTS_TECHNIQUES.md`, entrée du même jour « Débloquer jetons + espèces face à une recharge en attente ».
+
+## 2026-11-02 — Virement libre super admin et relance explicite
+
+- Deux actions distinctes : relance liée à un retrait existant, ou nouveau virement libre CDF depuis les fonds FlexPaie Zwanga. Aucun débit de gains/jetons utilisateur pour un virement libre ; aucun retrait existant automatiquement clôturé par celui-ci.
+- Ajout des routes super admin `POST /admin/payments/direct-payouts` et `GET /admin/payments/direct-payouts/:idempotencyKey`. Motif/confirmation obligatoires, validation du numéro, rôle revérifié sous verrou, référence unique durable avant l'appel prestataire, paramètres liés à la clé, jamais de renvoi automatique après timeout.
+- Type `admin_payout` séparé, contrôle payout et rapprochement durable par la migration **109**, sans modifier les migrations déjà appliquées. Réutilisation du registre financier et des composants existants suivant les règles PostgreSQL : transaction courte et aucun appel HTTP sous verrou.
+- Admin : bouton « Virement libre », formulaires et confirmations utilisant les classes CSS existantes. Relance de retrait explicitement nommée « Débloquer et relancer », contrôle des coordonnées après relecture, conservation du remplacement après une erreur d'actualisation, messages distincts pour attente, succès et échec.
+- Livraison backend après migration, puis admin. Aucun changement AWS/Terraform/CI/CD ni versement réel. [Fonctionnement et limites](driver-payout-corrections.md#virement-libre-et-retrait-existant--deux-opérations-distinctes).
+- Vérification ciblée finale : **428 tests backend réussis sur 22 suites**, dont 20 scénarios PostgreSQL isolés (6 virements libres, 14 relances), et **60 tests admin réussis**, sans test ignoré dans ces campagnes. Compilations TypeScript de production backend et admin, lint des nouveaux composants serveur et contrôle des diffs réussis. Les démarrages PostgreSQL initialement trop lents ont été relancés séparément avec succès ; aucun accès à la base applicative ni appel prestataire réel.
+- Limite : la suite générale du projet n'a pas été relancée. Le contrôle TypeScript backend incluant tous les fichiers de tests signale encore des erreurs dans des tests non modifiés par ce correctif ; le contrôle de compilation de production est vert. Les parcours navigateur n'ont pas été validés manuellement.
+
+## 2026-11-02 — Vérification des transactions depuis l’administration
+
+- Ajout de `POST /api/v1/admin/payments/:paymentId/reconcile`, réservé au super admin actif, UUID validé et limité à dix appels par minute. Le rapprochement existant choisit le contrôle encaissement ou versement ; aucune initiation, annulation ou réémission n’est ajoutée.
+- Réponse limitée au statut et au résultat du rapprochement. `completed=false` ne confirme ni réception ni échec : sans référence prestataire, aucune vérification distante n’est possible. Les erreurs prestataire ne sont pas transformées en succès.
+- Zwanga Admin conserve le détail ouvert, actualise le statut retourné et affiche la cause de l’erreur plutôt qu’une accusation générique de route non déployée. Aucun style modifié. [Contrat et précautions](driver-payout-corrections.md#vérification-dune-transaction-depuis-le-registre-central).
+- Aucun appel réel aux prestataires ni déploiement. Campagne backend : 3 270 réussites, zéro échec, 717 ignorés ; contrôle ciblé final : 102 réussites ; admin : 43 réussites. TypeScript backend/admin réussi. [Rapport local et limites](../operations/driver-alert-reliability-fixes-2026-11-02.md).
+
+## 2026-11-02 — Relances de retraits visibles dans l’administration
+
+- Gains conducteur : filtre facultatif `view=pending|review|resolved`, conservant la file historique sans filtre. L’admin affiche par défaut tous les retraits en attente et permet aussi de retrouver les échecs/annulations.
+- Gains et parrainage : détail enrichi avec le motif d’indisponibilité de la relance et la fin du délai de sécurité. Bouton super admin visible, désactivé si nécessaire ; navigation vers le versement de remplacement. Aucun fichier CSS modifié.
+- Contrôles conservés : preuves de non-exécution et de non-réception, délai de 15 minutes, solde/KYC, montant et destinataire originaux, unicité du remplacement et contrôle des succès tardifs. Ni nouveau crédit ni nouvel envoi automatique.
+- Livraison : backend avant admin ; aucune migration supplémentaire pour cet affichage, mais `1780000105000-PayoutRetries` reste requise pour le mécanisme de relance. Aucun changement AWS/Terraform/CI/CD ou `.env`.
+- Vérifications : 58 tests unitaires backend, 20 tests PostgreSQL et 37 tests admin réussis, TypeScript backend/admin réussi. [Procédure et limites](driver-payout-corrections.md).
+
 ## 2026-10-21 — Reprises de retraits et commissions cash (local)
 
 - Retraits de parrainage : intention UUID facultative, unicité persistée, contrôle des paramètres sous verrou utilisateur, seul le créateur peut envoyer. Protection compatible des anciens clients sans clé, limitée pour leurs relances tardives après résultat terminal. Lecture du statut par UUID même sans numéro prestataire ; validation du téléphone RDC et du montant avant réservation.

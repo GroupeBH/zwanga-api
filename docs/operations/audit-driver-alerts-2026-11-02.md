@@ -1,5 +1,7 @@
 # Audit de fiabilité des alertes de demandes de trajet
 
+Suivi du 2 novembre 2026 : les correctifs locaux A01–A06 et leur recette sont décrits dans [le compte rendu de mise en œuvre](driver-alert-reliability-fixes-2026-11-02.md). Le texte ci-dessous conserve les constats de l’audit avant correction ; il ne décrit pas l’état corrigé ni la production.
+
 Date : 2 novembre 2026. Périmètre : code local du backend et de l’application `zwanga`, avec les modifications en cours, dont la sélection de plusieurs types de véhicule et la limite de fraîcheur de localisation de 48 heures. La version réellement déployée sur AWS n’a pas été comparée pendant cet audit.
 
 La chaîne protège correctement l’attribution d’une demande et dispose de reprises SQL, Redis, push et temps réel. Les tests existants passent. Elle conserve toutefois deux risques de retard sous charge, une politique de reprise Firebase incomplète, un risque de blocage du renouvellement OAuth et des limites de reprise et de diagnostic côté téléphone. Une sonnerie systématique n’est pas démontrée par ces tests.

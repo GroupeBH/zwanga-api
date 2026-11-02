@@ -30,6 +30,9 @@ export class NotificationCapabilityDto {
 }
 
 export class NotificationReceiptDto {
+  @IsOptional() @IsIn(['audio_started', 'audio_failed', 'audio_suppressed']) audioStage?: 'audio_started' | 'audio_failed' | 'audio_suppressed';
+  @IsOptional() @IsISO8601() audioObservedAt?: string;
+  @IsOptional() @IsIn(['PLAYER_STARTED', 'PLAYER_ERROR', 'AUDIO_FOCUS_DENIED', 'DEVICE_POLICY', 'BACKGROUND_START_DENIED', 'NOTIFICATIONS_DISABLED']) audioReason?: 'PLAYER_STARTED' | 'PLAYER_ERROR' | 'AUDIO_FOCUS_DENIED' | 'DEVICE_POLICY' | 'BACKGROUND_START_DENIED' | 'NOTIFICATIONS_DISABLED';
   @IsOptional() @IsIn(['received', 'displayed']) stage?: 'received' | 'displayed';
   @IsOptional() @IsISO8601() observedAt?: string;
   @IsOptional() @IsIn(['native', 'javascript']) source?: 'native' | 'javascript';

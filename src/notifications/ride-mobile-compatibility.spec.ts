@@ -1,6 +1,7 @@
-jest.mock('./bounded-firebase-send', () => ({ sendBoundedFirebase: (app: unknown, message: unknown) => require('firebase-admin/messaging').getMessaging(app).send(message) }));
+jest.mock('./bounded-firebase-send', () => ({ sendBoundedFirebase: jest.fn((app: unknown, message: unknown) => require('firebase-admin/messaging').getMessaging(app).send(message)) }));
 jest.mock('firebase-admin/messaging', () => ({ getMessaging: jest.fn() }));
 import { getMessaging } from 'firebase-admin/messaging';
+import { sendBoundedFirebase } from './bounded-firebase-send';
 import { NotificationService } from './notifications.service';
 import { Notification } from './entities/notification.entity';
 import { androidDriverBackup, androidDriverBackupTtl } from './android-driver-backup';
@@ -21,6 +22,7 @@ function service(version: number) {
 }
 
 describe('backend-first ride notification compatibility', () => {
+  beforeEach(() => jest.clearAllMocks());
   afterEach(() => jest.restoreAllMocks());
   it('keys a scheduled safety card by request, even when a sequential offer ID is also present', () => {
     const n = item();
@@ -39,6 +41,19 @@ describe('backend-first ride notification compatibility', () => {
   it('keeps the existing five-minute silent fallback for bookings without a business expiry', () => {
     expect(androidDriverBackupTtl(item('new_booking'))).toBe(300_000);
   });
+  it('does not apply the invitation transport cutoff to a still-actionable booking safety card', async () => {
+    (getMessaging as jest.Mock).mockReturnValue({ send: jest.fn().mockResolvedValue('accepted') });
+    const n = item('new_booking');
+    n.createdAt = new Date(Date.now() - 90_000);
+    await service(4).sendFirebaseNotification(n, 'synthetic-token');
+    expect(sendBoundedFirebase).toHaveBeenCalledWith(expect.anything(), expect.anything(), undefined, undefined);
+  });
+  it.each(['trip_request_nearby', 'driver_dispatch_offer'])('rechecks %s expiry after OAuth', async type => {
+    (getMessaging as jest.Mock).mockReturnValue({ send: jest.fn().mockResolvedValue('accepted') });
+    const n = item(type);
+    await service(6).sendFirebaseNotification(n, 'synthetic-token');
+    expect(sendBoundedFirebase).toHaveBeenCalledWith(expect.anything(), expect.anything(), undefined, Date.parse(n.data!.alertExpiresAt));
+  });
   it.each([0, 1, 2, 3, 4, 5, 6])('preserves the declared capability v%s for scheduled requests', async version => {
     const send = jest.fn().mockResolvedValue('provider-accepted');
     (getMessaging as jest.Mock).mockReturnValue({ send });
@@ -53,6 +68,7 @@ describe('backend-first ride notification compatibility', () => {
     } else {
       expect(push.android.priority).toBe('high');
       expect(push.android.ttl).toBeLessThanOrEqual(40_000);
+      expect(push.android.ttl).toBeGreaterThan(35_000);
       expect(push.android.ttl).toBeGreaterThan(0);
     }
     if (version === 6) expect(push.data.nativeAlert).toBe('driver-v6');
@@ -85,6 +101,7 @@ describe('backend-first ride notification compatibility', () => {
     const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
     expect(body.data.type).toBe('trip_request_nearby');
     expect(body.ttl).toBeLessThanOrEqual(40);
+    expect(body.ttl).toBeGreaterThan(35);
     if (version === 2) {
       expect(body.sound).toBe('driver_ring.wav');
     }

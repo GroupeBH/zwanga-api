@@ -30,6 +30,7 @@ import { CashReceiptsService } from './cash-receipts.service';
 import { Notification } from '../notifications/entities/notification.entity';
 import { recoverTopUpClaim } from '../payments/topup-recovery';
 import { claimTopUpPayment, topUpReference } from '../payments/topup-payment-claim';
+import { mixedCashTopUpRegressions } from '../../test/mixed-cash-topup-regressions';
 
 // Explicit disposable loopback cluster. No app .env, provider HTTP or production DB.
 const bin = process.env.MIXED_CASH_TEST_POSTGRES_BIN;
@@ -162,11 +163,14 @@ const bin = process.env.MIXED_CASH_TEST_POSTGRES_BIN;
         passenger,
         driver,
         settlements,
+        wallet,
         bookings,
         input,
         repo,
       };
     }
+
+    mixedCashTopUpRegressions(fixture, () => db);
 
     it('atomically records 58 tokens, 3920 cash and 551 driver receivable; concurrent retries debit once', async () => {
       const f = await fixture();
