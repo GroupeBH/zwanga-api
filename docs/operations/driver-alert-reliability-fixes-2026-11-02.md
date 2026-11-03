@@ -1,5 +1,63 @@
 # Fiabilisation des alertes conducteur — correctifs du 2 novembre 2026
 
+## 3 novembre — contrôle avant sonnerie après une coupure réseau
+
+Le push est un signal, pas une preuve que la demande est toujours disponible.
+Un message déjà confié à FCM peut être reçu après une annulation ou attribution.
+La désactivation SQL de la notification ne rappelle pas ce message sur le téléphone.
+
+- Le backend ajoute `ringValidationToken` aux invitations `driver_dispatch_offer`
+  et `trip_request_nearby` (FCM, Expo et temps réel). Cette capacité HMAC,
+  signée avec `JWT_SECRET` existant et une séparation de domaine, concerne une
+  seule notification et un seul destinataire, jusqu'à l'échéance sonore d'origine.
+  Ce n'est pas un JWT de connexion et elle n'autorise aucune acceptation de trajet.
+- `POST /api/v1/notifications/ride-alerts/validate`, corps `{ "token": "…" }`,
+  répond `{ "allowed": true|false }`, sans données personnelles ni cache HTTP.
+  Cette route n'exige pas de session utilisateur, mais exige la signature valide
+  avant toute lecture SQL. Limite dédiée : 300 appels/minute/IP.
+  Le contrôle réutilise les règles métier existantes : notification active,
+  destinataire éligible, demande disponible, invitation encore en phase conducteur,
+  non expirée et non attribuée. Une erreur de base n'est jamais une autorisation.
+- Lectures ciblées par identifiants, sans migration ni transaction longue ; pas
+  de nouvel appel externe sous verrou SQL. Aucun changement de Terraform ou AWS.
+- Android natif vérifie avant de publier la carte sonore, même sans React démarré.
+  L'URL vient de la configuration de l'application, jamais du push ; HTTPS en
+  release, pas de redirections ni de stockage du refresh token. Échec réseau :
+  silence et reprise par le worker existant, dans la fenêtre initiale. Réponse
+  négative : aucune sonnerie. Les retours de publication trop tardifs sont rejetés.
+- JavaScript applique le même contrôle avant publication, à la restauration et
+  à la reconnexion. Une annulation temps réel invalide aussi la vérification en
+  cours lorsque la carte n'est pas encore connue. Les vérifications simultanées
+  partagent la requête, sans réutiliser une ancienne approbation HTTP.
+- Les délais de 40 secondes, accusés de réception, réservations classiques,
+  réponses passager et contrôles d'acceptation restent en place. Un aller-retour
+  API supplémentaire est nécessaire avant une nouvelle sonnerie de demande.
+
+Ordre de livraison : **backend d'abord, puis nouveau binaire Android**, avec
+réouverture de l'application pour lier l'adresse API au récepteur natif.
+Pas de nouvelle variable d'environnement (clé JWT existante d'au moins 32 caractères).
+Un nouveau mobile connecté à un ancien backend, ou recevant un ancien push sans
+capacité, reste silencieux pour cette demande. Les listes restent consultables.
+Les versions Android déjà installées ne gagnent pas le contrôle natif par un
+simple déploiement backend. Le son iOS de fond reste contrôlé par APNs : ce
+correctif ne promet pas sa validation HTTP préalable. Une annulation qui survient
+juste après une réponse positive conserve une petite course réseau/publication ;
+ce n'est pas une garantie absolue d'absence de son après toute annulation.
+
+Recette à effectuer sur appareil : couper Internet du conducteur, créer une
+demande, l'annuler (puis refaire avec une acceptation par un autre conducteur),
+rétablir Internet avant et après 40 secondes ; vérifier l'absence de sonnerie.
+Vérifier également une demande toujours disponible, une nouvelle génération sur
+la même demande, l'application fermée, l'écran verrouillé et le changement de compte.
+Vérifications : suite notifications **328 tests réussis, 28 ignorés** (3 suites
+d'intégration non configurées), puis **15 tests ciblés réussis** après ajout du
+contrôle DTO et de l'assertion de conservation de la télémétrie v6 (recouvrement
+avec la première suite). **110 tests mobile/JVM réussis**, TypeScript backend et
+mobile, lint mobile ciblé, frontière réseau RTK Query et parité native validés.
+Compilation Java du banc Android isolé réussie, sans installation sur appareil.
+Ces contrôles ne remplacent pas la recette FCM/appareil. Aucune notification réelle ni
+opération de production n'a été déclenchée pendant cette intervention.
+
 ## Complément — cohérence backend AWS / code local / mobile
 
 - **Compatibilité mobile :** les requêtes de création, modification et recherche de conducteur avec un seul type utilisent `vehicleType`, compatible avec l'ancien DTO strict. Les sélections multiples restent intactes ; un ancien serveur qui les refuse produit un message invitant à sélectionner un type, sans nouvelle tentative automatique de création ni réduction silencieuse du choix.

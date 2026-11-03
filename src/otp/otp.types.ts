@@ -1,9 +1,13 @@
-export type OtpPurpose = 'phone_verification' | 'pin_reset' | 'admin_bootstrap';
+export type OtpPurpose =
+  'phone_verification' | 'pin_reset' | 'pin_change' | 'admin_bootstrap';
+export type MobishastraOtpPurpose = Exclude<OtpPurpose, 'admin_bootstrap'>;
 
 export type OtpProvider = 'keccel' | 'didit' | 'mobishastra';
 
 export interface MobishastraChallenge {
   provider: 'mobishastra';
+  // Missing only on historical phone-verification challenges.
+  purpose?: MobishastraOtpPurpose;
   requestId: string;
   state: 'pending' | 'sent' | 'verified';
   codeHash?: string;

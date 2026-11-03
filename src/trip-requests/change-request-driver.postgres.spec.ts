@@ -1,6 +1,7 @@
 import { Logger } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { DataSource } from 'typeorm';
+import type { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
 import { IsolatedPostgres } from '../../test/isolated-postgres';
 import { typeOrmEntities } from '../database/entities';
 import { AddDriverDispatch1780000048000 } from '../database/migrations/1780000048000-AddDriverDispatch';
@@ -333,7 +334,7 @@ const bin = process.env.DISPATCH_TEST_POSTGRES_BIN;
       },
       { rideEffectsPending: ['pickup'] },
       { status: BookingStatus.COMPLETED },
-    ] as Partial<Booking>[])(
+    ] as QueryDeepPartialEntity<Booking>[])(
       'blocks boarding or a pending ride declaration: %j',
       async (patch) => {
         const f = await fixture();
@@ -357,7 +358,7 @@ const bin = process.env.DISPATCH_TEST_POSTGRES_BIN;
       { paymentStatus: BookingPaymentStatus.INITIATED },
       { paymentStatus: BookingPaymentStatus.SUCCEEDED },
       { mixedTokenQuantity: 10 },
-    ] as Partial<Booking>[])(
+    ] as QueryDeepPartialEntity<Booking>[])(
       'blocks committed or initiated payment: %j',
       async (patch) => {
         const f = await fixture();

@@ -10,6 +10,7 @@ import { randomUUID } from 'crypto';
 import type { Request, Response } from 'express';
 import { isHttpRequestAborted } from '../http-request-abort';
 import { safeRequestPath, safeRequestError } from '../safe-request-log';
+import { DriverScheduleConflictException } from '../driver-schedule-conflict';
 
 type ApiErrorMessage = string | string[];
 
@@ -72,11 +73,14 @@ export class ApiExceptionFilter implements ExceptionFilter {
     }
 
     response.setHeader('x-request-id', requestId);
+    const conflict = exception instanceof DriverScheduleConflictException
+      ? exception.forDriver((request.user as { userId?: string } | undefined)?.userId) : undefined;
     response.status(descriptor.statusCode).json({
       statusCode: descriptor.statusCode,
       error: descriptor.error,
       code: descriptor.code,
       message: descriptor.message,
+      ...(conflict ? { conflict } : {}),
       method: request.method,
       path: this.getPath(request),
       requestId,

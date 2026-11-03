@@ -46,7 +46,7 @@ describe('Trip loyalty: base token, paid bonus and replay protection', () => {
       travelledDistanceMeters: 4500,
       ...overrides,
     }) as Booking;
-  const trip = (overrides: Partial<Trip> = {}) =>
+  const trip = (overrides: Partial<Omit<Trip, 'startedAt' | 'completedAt'>> & { startedAt?: Date | null; completedAt?: Date | null } = {}) =>
     ({
       id: 'trip-1',
       driverId: 'driver-1',

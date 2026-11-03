@@ -28,7 +28,7 @@ describe('Android v6 native delivery', () => {
           ridePricePerSeat: '2500',
           rideArrival: 'Test',
         },
-      } as Notification;
+      } as unknown as Notification;
       const payload = nativeAndroidDriverPush(n, 'synthetic-token', until);
       expect(payload.data).toMatchObject({
         nativeAlert: 'driver-v6',
@@ -64,6 +64,8 @@ describe('Android v6 native delivery', () => {
       };
       await service.sendFirebaseNotification(n, 'synthetic-token');
       expect(send.mock.calls[0][0].data.nativeAlert).toBe('driver-v6');
+      expect(n.data?.nativeDeliveryVersion).toBe(6);
+      expect(n.data).not.toHaveProperty('ringValidationToken');
     },
   );
   it('keeps worst-case unicode prose below the FCM payload budget', () => {
@@ -79,7 +81,7 @@ describe('Android v6 native delivery', () => {
           rideArrival: '😀'.repeat(2000),
           rideDeparture: '😀'.repeat(2000),
         },
-      } as Notification,
+      } as unknown as Notification,
       'synthetic-token',
       new Date().toISOString(),
     );

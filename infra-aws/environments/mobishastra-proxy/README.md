@@ -42,7 +42,7 @@ la seule source réseau autorisée. La boucle locale sert à l'administration SS
 
 Le tunnel conserve TLS jusqu'au fournisseur : pas de `ssl_bump`, pas de certificat
 d'interception, pas de secret API dans Squid. L'application continue de contrôler
-l'URL exacte `/sendsms_api_json.aspx` et refuse les redirections ; un proxy CONNECT
+l'URL exacte `https://mshastra.com/sendurl.aspx` et refuse les redirections ; un proxy CONNECT
 ne peut pas contrôler le chemin HTTP chiffré.
 
 Les journaux d'accès contiennent uniquement date, durée, état et volume, jamais
@@ -61,6 +61,14 @@ restriction par domaine est appliquée par Squid, pas par le groupe de sécurit�
 | `MOBISHASTRA_PROXY_REQUIRED` | `true` pour refuser une URL manquante |
 
 Ces variables ne remplacent ni `MOBISHASTRA_SMS_URL`, ni les identifiants SMS.
+Depuis le correctif du 3 novembre 2026, définir `MOBISHASTRA_SMS_URL` à
+`https://mshastra.com/sendurl.aspx` si cette variable existe déjà dans SSM;
+l'ancien endpoint JSON n'est plus accepté par le nouveau backend. Le défaut
+sans variable est également cette URL. Déployer le code et renouveler les tâches
+pour charger ce changement. Aucun changement Terraform ou Squid n'est nécessaire
+pour ce domaine déjà autorisé. L'appel GET sensible n'émet pas de trace HTTP
+OpenTelemetry : sa query contient les identifiants et le message OTP, chiffrés
+dans le tunnel TLS. Ne jamais journaliser cette query ou activer un débogage HTTP.
 Elles ne modifient pas `OTP_PROVIDER` et ne rendent pas l'OTP obligatoire.
 Sans URL et sans obligation, le mode direct reste disponible. Une URL renseignée
 mais invalide échoue toujours, même si l'obligation est désactivée.
@@ -116,7 +124,7 @@ et pas l'ALB. Vérifier ensuite une connexion TLS sans envoyer de SMS :
 
 ```bash
 curl --proxy http://127.0.0.1:3128 --connect-timeout 5 --max-time 10 \
-  --head https://valuesms.ae/sendsms_api_json.aspx
+  --head https://mshastra.com/sendurl.aspx
 ```
 
 Un code HTTP de refus de méthode peut être normal pour HEAD : il ne valide pas

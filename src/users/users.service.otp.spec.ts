@@ -4,20 +4,100 @@ import { In, Not } from 'typeorm';
 import { UsersService } from './users.service';
 
 describe('UsersService OTP routes', () => {
+  it('never forwards provider codes, raw responses or OTPs to the mobile', async () => {
+    const service = {
+      userRepository: {
+        findOne: jest.fn().mockResolvedValue(null),
+        update: jest.fn(),
+      },
+      otpService: {
+        sendOtp: jest.fn().mockResolvedValue({
+          success: true,
+          codeLength: 5,
+          expiresInSeconds: 899,
+          otp: '12345',
+          code: '12345',
+          message: 'provider echoed 12345',
+          raw: { msgtext: '12345' },
+        }),
+        verifyOtp: jest.fn().mockResolvedValue({
+          valid: true,
+          otp: '12345',
+          code: '12345',
+          verificationToken: 'x'.repeat(43),
+          expiresInSeconds: 850,
+        }),
+      },
+    };
+    const sent = (await UsersService.prototype.sendPhoneVerificationOtp.call(
+      service,
+      {
+        phone: '+243900000000',
+        context: PhoneVerificationContext.REGISTRATION,
+      },
+    )) as Record<string, unknown>;
+    const verified = (await UsersService.prototype.verifyPhoneOtp.call(
+      service,
+      {
+        phone: '+243900000000',
+        otp: '12345',
+      },
+    )) as Record<string, unknown>;
+    expect(Object.keys(sent).sort()).toEqual([
+      'codeLength',
+      'expiresInSeconds',
+      'message',
+    ]);
+    expect(Object.keys(verified).sort()).toEqual([
+      'expiresInSeconds',
+      'message',
+      'valid',
+      'verificationToken',
+    ]);
+    expect(JSON.stringify({ sent, verified })).not.toContain('12345');
+  });
+
   it('passes Mobishastra expiry and length through the existing send endpoint', async () => {
-    const service = { userRepository: { findOne: jest.fn().mockResolvedValue(null) },
-      otpService: { sendOtp: jest.fn().mockResolvedValue({ success: true, codeLength: 5, expiresInSeconds: 899 }) } };
-    expect(await UsersService.prototype.sendPhoneVerificationOtp.call(service, {
-      phone: '+243900000000', context: PhoneVerificationContext.REGISTRATION,
-    })).toMatchObject({ codeLength: 5, expiresInSeconds: 899, message: expect.any(String) });
+    const service = {
+      userRepository: { findOne: jest.fn().mockResolvedValue(null) },
+      otpService: {
+        sendOtp: jest.fn().mockResolvedValue({
+          success: true,
+          codeLength: 5,
+          expiresInSeconds: 899,
+        }),
+      },
+    };
+    expect(
+      await UsersService.prototype.sendPhoneVerificationOtp.call(service, {
+        phone: '+243900000000',
+        context: PhoneVerificationContext.REGISTRATION,
+      }),
+    ).toMatchObject({
+      codeLength: 5,
+      expiresInSeconds: 899,
+      message: expect.any(String) as unknown,
+    });
   });
 
   it('returns the registration proof even when no account exists yet', async () => {
     const verificationToken = 'x'.repeat(43);
-    const service = { userRepository: { update: jest.fn().mockResolvedValue({ affected: 0 }) },
-      otpService: { verifyOtp: jest.fn().mockResolvedValue({ valid: true, verificationToken, expiresInSeconds: 850 }) } };
-    expect(await UsersService.prototype.verifyPhoneOtp.call(service, { phone: '+243900000000', otp: '12345' }))
-      .toMatchObject({ valid: true, verificationToken, expiresInSeconds: 850 });
+    const service = {
+      userRepository: { update: jest.fn().mockResolvedValue({ affected: 0 }) },
+      otpService: {
+        verifyOtp: jest.fn().mockResolvedValue({
+          valid: true,
+          verificationToken,
+          expiresInSeconds: 850,
+        }),
+      },
+    };
+    expect(
+      await UsersService.prototype.verifyPhoneOtp.call(service, {
+        phone: '+243900000000',
+        otp: '12345',
+      }),
+    ).toMatchObject({ valid: true, verificationToken, expiresInSeconds: 850 });
   });
   it.each([
     PhoneVerificationContext.REGISTRATION,

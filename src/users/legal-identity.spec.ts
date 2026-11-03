@@ -14,7 +14,7 @@ const createUser = (kycStatus?: KycStatus) =>
     status: UserStatus.ACTIVE,
     vehicles: [],
     kycDocuments: kycStatus ? [{ status: kycStatus }] : [],
-  }) as User;
+  }) as unknown as User;
 
 const createService = (user: User) => {
   const userRepository = {

@@ -13,7 +13,7 @@ describe('Ratings require a shared completed ride', () => {
       orderBy: jest.fn().mockReturnThis(),
       addOrderBy: jest.fn().mockReturnThis(),
       limit: jest.fn().mockReturnThis(),
-      getRawOne: jest.fn(async () => shared),
+      getRawOne: jest.fn(async (): Promise<{ tripId: string } | undefined> => shared),
     };
     const ratings = {
       exists: jest.fn(async () => false),

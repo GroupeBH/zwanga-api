@@ -136,6 +136,13 @@ export class PaymentsService {
     private readonly settlementRegistry: PaymentSettlementRegistry,
   ) {}
 
+  onModuleInit(): void {
+    if (this.configService.get<string>('FLEXPAY_VERIFY_CALLBACKS')?.trim().toLowerCase() === 'false' &&
+        this.configService.get<string>('NODE_ENV') !== 'test') {
+      throw new Error('FLEXPAY_VERIFY_CALLBACKS=false is only permitted in isolated tests. Enable provider verification before starting the server.');
+    }
+  }
+
   registerSettlement(
     purpose: string,
     handler: (payment: PaymentTransaction) => Promise<unknown>,
@@ -1750,10 +1757,9 @@ export class PaymentsService {
 
   private shouldVerifyFlexPayCallbacks(): boolean {
     const value = this.configService.get<string>('FLEXPAY_VERIFY_CALLBACKS');
-    // Les callbacks transportent un statut, pas une preuve cryptographique.
-    // La verification cote FlexPay est donc active par defaut et ne peut etre
-    // desactivee que volontairement (tests/sandbox controles).
-    return value?.trim().toLowerCase() !== 'false';
+    // A callback status is not payment proof. Never trust it alone outside tests,
+    // including when this service is instantiated without Nest lifecycle hooks.
+    return this.configService.get<string>('NODE_ENV') !== 'test' || value?.trim().toLowerCase() !== 'false';
   }
 
   private joinUrl(...parts: string[]): string {

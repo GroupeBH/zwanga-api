@@ -17,7 +17,7 @@ describe('OTP SMS wording and encoding (no real SMS)', () => {
   beforeEach(() => {
     jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
     jest.spyOn(Logger.prototype, 'debug').mockImplementation(() => undefined);
-    post = jest.fn(() =>
+    post = jest.fn<Observable<{ data: KeccelOtpGenerateResponse }>, [string, Record<string, unknown>, AxiosRequestConfig]>(() =>
       of({
         data: { status: 'SENT' as const, description: 'Message submitted' },
       }),

@@ -14,7 +14,7 @@ const notification = (type: string) => ({
   data: { type, driverId: uuid(2), passengerId: uuid(3), offerId: uuid(4),
     tripRequestId: uuid(5), bookingId: uuid(6), ringAlert: 'nearby-request-v1',
     expiresAt: new Date(Date.now() - 90_000).toISOString() },
-}) as Notification;
+}) as unknown as Notification;
 
 describe('v4 Android native safety card', () => {
   it.each(['new_booking', 'trip_request_nearby', 'driver_dispatch_offer'])('%s keeps both the Expo body and headless protocol', async type => {

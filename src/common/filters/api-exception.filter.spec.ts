@@ -1,9 +1,11 @@
 import { ArgumentsHost, BadRequestException, Logger } from '@nestjs/common';
 import { ApiExceptionFilter } from './api-exception.filter';
+import { DriverScheduleConflictException } from '../driver-schedule-conflict';
 
 function createHttpHost(options?: {
   aborted?: boolean;
   headersSent?: boolean;
+  userId?: string;
 }) {
   const request = {
     method: 'POST',
@@ -11,6 +13,7 @@ function createHttpHost(options?: {
     url: '/api/v1/users/kyc',
     headers: {},
     aborted: options?.aborted ?? false,
+    user: options?.userId ? { userId: options.userId } : undefined,
   };
   const response = {
     headersSent: options?.headersSent ?? false,
@@ -41,6 +44,30 @@ describe('ApiExceptionFilter', () => {
 
   afterEach(() => {
     jest.restoreAllMocks();
+  });
+
+  it('returns only the authenticated driver’s conflicting course summary, not the whole entity', () => {
+    const row = { kind: 'trip' as const, id: 'trip', driverId: 'driver', departure: 'Test A', arrival: 'Test B',
+      departureDate: new Date('2099-01-01T12:00:00Z'), status: 'upcoming', passengerPhone: 'must not escape' };
+    const { host, response } = createHttpHost({ userId: 'driver' });
+    filter.catch(new DriverScheduleConflictException(row), host);
+    expect(response.status).toHaveBeenCalledWith(409);
+    expect(response.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'DRIVER_SCHEDULE_CONFLICT', conflict: {
+      kind: 'trip', id: 'trip', driverId: 'driver', departure: 'Test A', arrival: 'Test B',
+      departureDate: '2099-01-01T12:00:00.000Z', status: 'upcoming',
+    } }));
+    expect(JSON.stringify(response.json.mock.calls)).not.toContain('must not escape');
+  });
+
+  it.each([undefined, 'passenger', 'other-driver'])('never reveals a driver’s schedule to %s', userId => {
+    const { host, response } = createHttpHost({ userId });
+    const exception = new DriverScheduleConflictException({ kind: 'request', id: 'request', driverId: 'driver',
+      departure: 'Private location', arrival: 'Private destination', departureDate: new Date(), status: 'driver_selected' });
+    filter.catch(exception, host);
+    expect(response.status).toHaveBeenCalledWith(409);
+    expect(response.json.mock.calls[0][0]).not.toHaveProperty('conflict');
+    expect(JSON.stringify(response.json.mock.calls)).not.toContain('Private');
+    expect(exception.getResponse()).not.toHaveProperty('conflict');
   });
 
   it('turns a protected cash hold into an actionable conflict without leaking SQL', () => {

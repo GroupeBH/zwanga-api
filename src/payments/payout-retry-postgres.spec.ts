@@ -167,7 +167,7 @@ const bin = process.env.PAYOUT_TEST_POSTGRES_BIN;
         }),
         formatLogPayload: () => '[synthetic]',
         formatPaymentLogResponse: () => ({}),
-        initiatePayout: jest.fn(async (input) => {
+        initiatePayout: jest.fn(async (input: Partial<PaymentTransaction>) => {
           await beforeClaim?.();
           const draft = db
             .getRepository(PaymentTransaction)

@@ -68,6 +68,7 @@ describe('PaymentsService', () => {
     };
     configService = {
       get: jest.fn((key: string) => {
+        if (key === 'NODE_ENV') return 'test';
         if (key === 'FLEXPAY_CALLBACK_BASE_URL') {
           return 'https://api.zwanga.cd/api/v1';
         }
@@ -109,6 +110,20 @@ describe('PaymentsService', () => {
   });
 
   afterEach(() => jest.restoreAllMocks());
+
+  it.each(['production', 'development', undefined])('rejects unverified callbacks in %s, even without lifecycle initialization', env => {
+    configService.get.mockImplementation((key: string) => key === 'NODE_ENV' ? env : key === 'FLEXPAY_VERIFY_CALLBACKS' ? 'false' : undefined);
+    expect(() => service.onModuleInit()).toThrow('only permitted in isolated tests');
+    expect((service as any).shouldVerifyFlexPayCallbacks()).toBe(true);
+  });
+
+  it('permits callback fixtures only in explicit tests and verifies callbacks by default', () => {
+    expect(() => service.onModuleInit()).not.toThrow();
+    expect((service as any).shouldVerifyFlexPayCallbacks()).toBe(false);
+    configService.get.mockReturnValue(undefined);
+    expect(() => service.onModuleInit()).not.toThrow();
+    expect((service as any).shouldVerifyFlexPayCallbacks()).toBe(true);
+  });
 
   it.each([
     [PaymentPurpose.WALLET_PAYOUT, PaymentProvider.FLEXPAY],

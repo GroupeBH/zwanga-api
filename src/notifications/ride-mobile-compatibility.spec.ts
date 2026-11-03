@@ -13,7 +13,7 @@ const item = (type = 'trip_request_nearby') => ({
     ...(type === 'new_booking' ? { bookingId: uuid(5) } : { offerId: uuid(6),
       expiresAt: new Date(Date.now() + 40_000).toISOString(), alertExpiresAt: new Date(Date.now() + 40_000).toISOString() }),
     ringAlert: 'nearby-request-v1', rideArrival: 'Destination de test', ridePricePerSeat: '2500', ridePriceKind: 'budget' },
-}) as Notification;
+}) as unknown as Notification;
 function service(version: number) {
   return Object.assign(Object.create(NotificationService.prototype), {
     firebaseApp: {}, configService: { get: () => 'true' },

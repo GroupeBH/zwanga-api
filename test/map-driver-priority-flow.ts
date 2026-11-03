@@ -82,6 +82,7 @@ export function mapDriverPriorityFlow(get: () => Fixture) {
     await declineRequestForDriver(db.manager, first.id, r.id);
     expect(await relay.advance(r.id)).toBe(true);
     const pending = (await offers(r.id)).find((o) => o.status === 'pending');
+    if (!pending) throw new Error('Expected a pending offer after refusal');
     expect(pending.driverId).toBe(second.id);
     expect(
       new Date(pending.expiresAt).getTime() - Date.now(),
@@ -135,6 +136,7 @@ export function mapDriverPriorityFlow(get: () => Fixture) {
     expect(await prepareNearbyRequestRinging(db.manager, old)).toBe(true);
     await select(r);
     const pending = (await offers(r.id)).find((o) => o.status === 'pending');
+    if (!pending || !old.userId) throw new Error('Expected a pending offer and its notification recipient');
     expect(pending.id).not.toBe(oldId);
     const fresh = (
       await db

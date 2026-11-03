@@ -27,7 +27,7 @@ export function homeDiscoveryPostgresTests(fixture: () => Fixture) {
     const found = await service.findAll(d.user.id, true);
     expect(found.map(row => row.id)).toEqual(nearest);
     expect(hydrate).toHaveBeenCalledTimes(1);
-    expect(hydrate.mock.calls[0][0]!.where['id'].objectLiteralParameters.homeRequestIds).toEqual(nearest);
+    expect(hydrate.mock.calls[0][0]?.where).toMatchObject({ id: { objectLiteralParameters: { homeRequestIds: nearest } } });
     // Scope is opt-in: the existing full discovery endpoint is unchanged.
     expect(await service.findAll(d.user.id)).toHaveLength(25);
   });

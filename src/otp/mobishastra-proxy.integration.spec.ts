@@ -49,7 +49,7 @@ describe('Mobishastra CONNECT integration (loopback only, no real SMS)', () => {
         MOBISHASTRA_PROFILE_ID: 'test-profile',
         MOBISHASTRA_PASSWORD: 'private-password',
         MOBISHASTRA_SENDER_ID: 'ZWANGA',
-        MOBISHASTRA_SMS_URL: 'https://valuesms.ae/sendsms_api_json.aspx',
+        MOBISHASTRA_SMS_URL: 'https://mshastra.com/sendurl.aspx',
         MOBISHASTRA_PROXY_REQUIRED: 'true',
         MOBISHASTRA_PROXY_URL: `http://127.0.0.1:${(proxy.address() as AddressInfo).port}`,
       }),
@@ -77,18 +77,18 @@ describe('Mobishastra CONNECT integration (loopback only, no real SMS)', () => {
         const chunks: Buffer[] = [];
         req.on('data', (chunk: Buffer) => chunks.push(chunk));
         req.on('end', () => {
-          bodies.push(JSON.parse(Buffer.concat(chunks).toString()));
+          expect(req.method).toBe('GET');
+          expect(Buffer.concat(chunks).length).toBe(0);
+          const url = new URL(req.url!, 'https://mshastra.com');
+          expect(url.pathname).toBe('/sendurl.aspx');
+          bodies.push(Object.fromEntries(url.searchParams));
           if (redirect) {
             res.writeHead(302, { Location: 'https://not-allowed.invalid/' });
             res.end();
             return;
           }
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(
-            JSON.stringify([
-              { number: phone, msg_id: 'test', response: 'send success' },
-            ]),
-          );
+          res.writeHead(200, { 'Content-Type': 'text/plain' });
+          res.end('000 - Send Successful');
         });
       },
     );
@@ -108,7 +108,7 @@ describe('Mobishastra CONNECT integration (loopback only, no real SMS)', () => {
     proxy.on('connect', (req, downstream, head) => {
       tunnels.push(req.url ?? '');
       proxyHeaders.push(req.rawHeaders.join('\n'));
-      if (mode === 'deny' || req.url !== 'valuesms.ae:443') {
+      if (mode === 'deny' || req.url !== 'mshastra.com:443') {
         downstream.end('HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n');
         return;
       }
@@ -152,16 +152,21 @@ describe('Mobishastra CONNECT integration (loopback only, no real SMS)', () => {
     jest.restoreAllMocks();
   });
 
-  it('sends a real HTTPS POST through CONNECT without exposing the SMS to the proxy', async () => {
+  it('sends a real HTTPS GET through CONNECT without exposing the OTP query to the proxy', async () => {
     await expect(fixture().sendCode(phone, '12345')).resolves.toBeUndefined();
-    expect(tunnels).toEqual(['valuesms.ae:443']);
+    expect(tunnels).toEqual(['mshastra.com:443']);
     expect(nonConnectRequests).toBe(0);
     expect(bodies).toHaveLength(1);
-    expect(bodies[0]).toMatchObject([
-      { pwd: 'private-password', number: phone },
-    ]);
+    expect(bodies[0]).toMatchObject({
+      pwd: 'private-password',
+      mobileno: phone,
+      senderid: 'ZWANGA',
+      CountryCode: 'ALL',
+      priority: 'High',
+      ShowError: 'C',
+    });
     expect(bodies[0]).toHaveProperty(
-      '0.msg',
+      'msgtext',
       'Zwanga : votre code de verification est 12345. Valable 15 minutes. Ne le partagez avec personne.',
     );
     expect(proxyHeaders.join('')).not.toMatch(
@@ -170,6 +175,8 @@ describe('Mobishastra CONNECT integration (loopback only, no real SMS)', () => {
     expect(Buffer.concat(wire).includes(Buffer.from('private-password'))).toBe(
       false,
     );
+    expect(Buffer.concat(wire).includes(Buffer.from('12345'))).toBe(false);
+    expect(Buffer.concat(wire).includes(Buffer.from(phone))).toBe(false);
   });
 
   it('keeps origin certificate verification enabled through the tunnel', async () => {
@@ -224,7 +231,7 @@ describe('Mobishastra CONNECT integration (loopback only, no real SMS)', () => {
     try {
       process.env.NO_PROXY = '*';
       await fixture().sendCode(phone, '12345');
-      expect(tunnels).toEqual(['valuesms.ae:443']);
+      expect(tunnels).toEqual(['mshastra.com:443']);
     } finally {
       if (previous === undefined) delete process.env.NO_PROXY;
       else process.env.NO_PROXY = previous;

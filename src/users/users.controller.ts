@@ -255,11 +255,26 @@ export class UsersController {
     return this.usersService.verifyPhoneOtp(verifyOtpDto);
   }
 
+  @Post('pin/change/request-otp')
+  @Auth()
+  @HttpCode(HttpStatus.OK)
+  @SensitiveThrottle(3, 60000)
+  @ApiOperation({
+    summary: 'Send a PIN change OTP to the authenticated account phone',
+    description:
+      'No phone parameter. Requires the old PIN plus this six-digit OTP on /users/pin/change. Mobishastra codes expire after 15 minutes.',
+  })
+  async requestPinChangeOtp(@Request() req) {
+    return this.usersService.requestPinChangeOtp(req.user.userId);
+  }
+
   @Post('pin/change')
   @Auth()
   @HttpCode(HttpStatus.OK)
   @SensitiveThrottle(5, 60000) // 5 requests per minute per IP
-  @ApiOperation({ summary: 'Change user PIN code' })
+  @ApiOperation({
+    summary: 'Change user PIN with the old PIN and a one-time PIN-change OTP',
+  })
   @ApiResponse({
     status: 200,
     description: 'PIN changed successfully',

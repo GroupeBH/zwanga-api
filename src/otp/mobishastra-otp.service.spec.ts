@@ -129,7 +129,7 @@ describe('Locally generated phone OTP', () => {
     expect(f.sms.assertConfigured).not.toHaveBeenCalled();
   });
 
-  it('keeps Keccel PIN reset/admin unchanged and opts in only phone verification', async () => {
+  it('routes phone and PIN flows through Mobishastra but keeps admin bootstrap on Keccel', async () => {
     const f = fixture();
     f.client.eval.mockResolvedValue(0); // send budget accepted
     const sending = jest
@@ -139,15 +139,80 @@ describe('Locally generated phone OTP', () => {
     expect(sending).toHaveBeenCalledWith(
       phone,
       expect.stringContaining('phone_verification'),
+      'phone_verification',
     );
     expect(f.keccel.sendOtp).not.toHaveBeenCalled();
     await f.otp.sendOtp(`+${phone}`, 'pin_reset');
+    await f.otp.sendOtp(`+${phone}`, 'pin_change');
     await f.otp.sendOtp(`+${phone}`, 'admin_bootstrap');
     expect(f.keccel.sendOtp.mock.calls.map((call) => call.slice(2))).toEqual([
       [6, 300],
-      [6, 300],
     ]);
+    expect(sending).toHaveBeenCalledWith(
+      phone,
+      expect.stringContaining('pin_reset'),
+      'pin_reset',
+    );
+    expect(sending).toHaveBeenCalledWith(
+      phone,
+      expect.stringContaining('pin_change'),
+      'pin_change',
+    );
   });
+
+  it('can enable Mobishastra for PIN only while phone OTP stays on Keccel', async () => {
+    const f = fixture();
+    f.config.set('OTP_PROVIDER', 'keccel');
+    f.config.set('OTP_PIN_RESET_PROVIDER', 'mobishastra');
+    f.client.eval.mockResolvedValue(0);
+    const send = jest
+      .spyOn(f.local, 'send')
+      .mockResolvedValue({ success: true, message: 'sent' });
+    for (const purpose of ['pin_reset', 'pin_change'] as const) {
+      await f.otp.sendOtp(phone, purpose);
+      expect(send).toHaveBeenLastCalledWith(
+        phone,
+        expect.stringContaining(purpose),
+        purpose,
+      );
+    }
+    await f.otp.sendOtp(phone);
+    expect(f.keccel.sendOtp).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['pin_reset', 'pin_change'] as const)(
+    'generates a six-digit %s code with a distinct HMAC and no registration proof',
+    async (purpose) => {
+      const f = fixture();
+      const result = await f.local.send(phone, 'key', purpose);
+      const code = f.sms.sendCode.mock.calls[0][1] as string;
+      expect(code).toMatch(/^[1-9]\d{5}$/);
+      expect(result).toMatchObject({ codeLength: 6, expiresInSeconds: 899 });
+      const stored = f.redis.set.mock.calls[0][1];
+      expect(stored.purpose).toBe(purpose);
+      expect(stored.codeHash).toBe(
+        createHmac('sha256', secret)
+          .update(JSON.stringify([purpose, phone, stored.requestId, code]))
+          .digest('hex'),
+      );
+      expect(await f.local.verify(phone, code, 'key', stored, purpose)).toEqual(
+        { valid: true, status: 'VALID' },
+      );
+      expect(f.client.eval.mock.calls.at(-1)[1].arguments).toEqual([
+        'verify-once',
+        stored.requestId,
+        stored.codeHash,
+        '',
+        purpose,
+      ]);
+      f.client.eval.mockClear();
+      expect(await f.local.verify(phone, code, 'other-key', stored)).toEqual({
+        valid: false,
+        status: 'INVALID',
+      });
+      expect(f.client.eval).not.toHaveBeenCalled();
+    },
+  );
 
   it('validates the stored provider even after switching back to Keccel', async () => {
     const f = fixture();

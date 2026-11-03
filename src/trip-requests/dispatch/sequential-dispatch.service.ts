@@ -63,6 +63,8 @@ export class SequentialDispatchService {
   /** Redis caches ordering; SQL remains the authority for exclusive invitation + outbox. */
   async advance(id: string): Promise<boolean> {
     if (!this.enabled) return false;
+    const startedAt = Date.now();
+    let discoveryMs = 0;
     let token: string | undefined, selectedDriverId: string | undefined, resetQueue = false;
     let sqlFallback = false;
     try {
@@ -130,13 +132,17 @@ export class SequentialDispatchService {
           return false;
         }
         this.discoveryWorkers++;
+        const discoveryStartedAt = Date.now();
         let candidates: Awaited<ReturnType<typeof sequentialCandidates>>;
         try {
           candidates = await this.db.transaction(async manager => {
             await manager.query("SET LOCAL statement_timeout = '3s'");
             return sequentialCandidates(manager, state.request);
           });
-        } finally { this.discoveryWorkers--; }
+        } finally {
+          discoveryMs = Date.now() - discoveryStartedAt;
+          this.discoveryWorkers--;
+        }
         drivers = [...new Set(candidates.map(candidate => candidate.driverId))];
         if (!sqlFallback) {
           const fresh = await this.cache(() => this.queue.claim(id, version), null);
@@ -211,8 +217,11 @@ export class SequentialDispatchService {
         return { offeredUntil: deadline.getTime(), driverId, reset: false };
       });
       // Start fresh push/realtime immediately after commit, before even one Redis round trip.
-      if ('offeredUntil' in result) void this.notifications.dispatchUrgentNotifications()
-        .catch(() => this.logger.warn('Queued request push deferred.'));
+      if ('offeredUntil' in result) {
+        void this.notifications.dispatchUrgentNotifications()
+          .catch(() => this.logger.warn('Queued request push deferred.'));
+        this.logger.log(`REQUEST_DISPATCH_TIMING requestId=${id} elapsedMs=${Date.now() - startedAt} discoveryMs=${discoveryMs}`);
+      }
       selectedDriverId = result.driverId;
       resetQueue = result.reset;
       await this.cache(() => this.queue.schedule(id, result.offeredUntil ?? result.wait!), undefined);

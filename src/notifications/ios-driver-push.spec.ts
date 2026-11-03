@@ -4,7 +4,7 @@ import type { Notification } from './entities/notification.entity';
 describe('native Firebase/APNs driver contract', () => {
   it.each(['new_booking', 'driver_dispatch_offer', 'trip_request_nearby'])('%s uses alert APNs, not a VoIP or critical payload', type => {
     const item = { title: 'Zwanga', body: 'Répondez à la demande', data: { type, bookingId: 'b',
-      offerId: 'o', tripRequestId: 'r', driverId: 'driver', rideArrival: 'Gare', ridePricePerSeat: '2000' } } as Notification;
+      offerId: 'o', tripRequestId: 'r', driverId: 'driver', rideArrival: 'Gare', ridePricePerSeat: '2000' } } as unknown as Notification;
     const until = '2026-10-22T12:00:30.000Z';
     const message: any = iosDriverPush(item, 'synthetic-token', until);
     expect(message.notification).toBeUndefined(); expect(message.android).toBeUndefined();
@@ -20,7 +20,7 @@ describe('native Firebase/APNs driver contract', () => {
   });
   it('passenger responses have no driver action buttons or invitation protocol', () => {
     const message: any = iosDriverPush({ title: 'Réservation acceptée', body: 'Consultez le trajet',
-      data: { type: 'booking_response', bookingId: 'b', passengerId: 'p', ringAlert: 'booking-response-v1' } } as Notification,
+      data: { type: 'booking_response', bookingId: 'b', passengerId: 'p', ringAlert: 'booking-response-v1' } } as unknown as Notification,
     'synthetic-token', '2026-10-22T12:00:30.000Z');
     expect(message.apns.payload.aps.category).toBeUndefined();
     expect(message.data.actionProtocol).toBeUndefined();

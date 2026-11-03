@@ -313,7 +313,7 @@ describe('PawaPay HTTP contract (no real transactions)', () => {
     const headers = Object.fromEntries(
       Object.entries(options.headers).map(([name, value]) => [
         name.toLowerCase(),
-        value,
+        String(value),
       ]),
     );
     expect(

@@ -11,7 +11,7 @@ export function androidDriverBackup(_notification: Notification, data: Record<st
   const fields = ['type', 'actionProtocol', 'notificationId', 'bookingId', 'tripId', 'tripRequestId', 'offerId',
     'driverId', 'passengerId', 'ringAlert', 'ringVersion', 'ringUntil', 'expiresAt', 'alertExpiresAt',
     'delivery', 'sharedTrip', 'existingTripId', 'rideSpeechVersion', 'rideDeparture', 'rideArrival',
-    'rideSeats', 'rideDepartureAt', 'ridePricePerSeat', 'ridePriceKind', 'invitationText'];
+    'rideSeats', 'rideDepartureAt', 'ridePricePerSeat', 'ridePriceKind', 'invitationText', 'ringValidationToken'];
   const content: Record<string, unknown> = { ...Object.fromEntries(fields
     .filter(field => data[field] !== undefined && data[field] !== null)
     .map(field => [field, data[field]])), alertDelivery: 'native-backup-v4', fallbackTag };
@@ -37,7 +37,7 @@ export function androidDriverBackup(_notification: Notification, data: Record<st
     // notification fit. Fail this delivery for diagnosis, not FCM indefinitely.
     throw new Error('DRIVER_ALERT_PAYLOAD_TOO_LARGE');
   }
-  return payload;
+  return payload as typeof payload & Record<string, unknown>;
 }
 
 export function androidDriverBackupTtl(notification: Notification, now = Date.now()): number {

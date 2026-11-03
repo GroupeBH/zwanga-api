@@ -66,6 +66,11 @@ function waitForToken(app: App, timeoutMs: number): Promise<string> {
   });
 }
 
+/** Uses the same cache/single-flight refresh as sends; no FCM message is emitted. */
+export async function prewarmFirebaseAccessToken(app: App): Promise<void> {
+  await waitForToken(app, FCM_AUTH_TIMEOUT_MS);
+}
+
 /** Public HTTP v1 wire format for the ride payloads built by this application. */
 export function firebaseWireMessage(message: Message): Record<string, unknown> {
   const copy = structuredClone(message);

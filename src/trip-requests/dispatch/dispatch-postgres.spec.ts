@@ -1,6 +1,7 @@
 import { RequestResponsePhases1780000098000 } from '../../database/migrations/1780000098000-RequestResponsePhases';
 import { ReceiptResponseWindow1780000110000 } from '../../database/migrations/1780000110000-ReceiptResponseWindow';
 import { driverSchedulePostgresTests } from '../../../test/driver-schedule-postgres';
+import { driverScheduleConflictPostgresTests } from '../../../test/driver-schedule-conflict-postgres';
 import { driverAlertLocationPostgresTests } from '../../../test/driver-alert-location-postgres';
 import { homeDiscoveryPostgresTests } from '../../../test/home-discovery-postgres';
 import { tripUpdateSchedulePostgresTests } from '../../../test/trip-update-schedule-postgres';
@@ -183,6 +184,7 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
   };
   const offers = (requestId: string) => source.query('SELECT * FROM trip_request_dispatch_offers WHERE "requestId" = $1 ORDER BY "createdAt"', [requestId]);
   driverSchedulePostgresTests(() => ({ source, driver, request }));
+  driverScheduleConflictPostgresTests(() => ({ source, driver, request }));
   driverAlertLocationPostgresTests(() => ({ source, service, driver, request, offers }));
   tripUpdateSchedulePostgresTests(() => ({ source, driver, request }));
 

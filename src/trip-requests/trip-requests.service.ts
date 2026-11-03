@@ -3,7 +3,8 @@ import { changeRequestDriver } from './change-request-driver';
 import { requestVehicleTypes, resolveRequestVehicleTypes, requestVehicleTypeFilter, requestAcceptsVehicle } from './request-vehicle-types';
 import { ChangeRequestDriverDto } from './dto/change-request-driver.dto';
 import { assertSequentialInvitation } from './dispatch/sequential-policy';
-import { assertDriverRequestSchedule } from './dispatch/driver-schedule-policy';
+import { assertDriverRequestSchedule, findDriverRequestConflict } from './dispatch/driver-schedule-policy';
+import { DriverScheduleConflictException } from '../common/driver-schedule-conflict';
 import { DriverChoiceQuery } from './dto/driver-choice.dto';
 import { findDriverChoices, validateTargetDriver } from './driver-choices';
 import { requestSearchMap } from './request-search-map';
@@ -300,18 +301,14 @@ export class TripRequestsService {
       );
     }
 
-    const departurePoint = await this.resolvePointFromCoordinatesOrAddress(
-      departureCoordinates,
-      rest.departureLocation,
-      rest.departureReference,
-      'trip request departure',
-    );
-    const arrivalPoint = await this.resolvePointFromCoordinatesOrAddress(
-      arrivalCoordinates,
-      rest.arrivalLocation,
-      rest.arrivalReference,
-      'trip request arrival',
-    );
+    const [departurePoint, arrivalPoint] = await Promise.all([
+      this.resolvePointFromCoordinatesOrAddress(
+        departureCoordinates, rest.departureLocation, rest.departureReference, 'trip request departure',
+      ),
+      this.resolvePointFromCoordinatesOrAddress(
+        arrivalCoordinates, rest.arrivalLocation, rest.arrivalReference, 'trip request arrival',
+      ),
+    ]);
     const recommendedPrice =
       rest.maxPricePerSeat ??
       (await this.calculateRecommendedPricePerSeat(
@@ -1677,8 +1674,8 @@ export class TripRequestsService {
     );
     if (await this.tripRequestRepository.manager.getRepository(Trip).exists({
       where: { driverId, status: TripStatus.ACTIVE },
-    })) throw new ConflictException({ code: 'SHARED_TRIP_OFFER_REQUIRED',
-      message: 'Vous avez un trajet en cours. Proposez son partage et attendez l’accord du passager.' });
+    })) throw new DriverScheduleConflictException(
+      await findDriverRequestConflict(this.tripRequestRepository.manager, driverId, tripRequestId), true);
 
     // Verify driver exists
     const driver = await this.userRepository.findOne({
@@ -2185,15 +2182,12 @@ export class TripRequestsService {
     vehicleType: VehicleType | undefined | null,
     context: string,
   ): Promise<number | null> {
-    const distanceMeters = await this.calculateRouteDistanceMeters(
-      departurePoint,
-      arrivalPoint,
-      context,
-    );
-    const weatherImpact = await this.weatherAwarenessService.getRouteImpact(
-      this.pointToCoordinates(departurePoint),
-      this.pointToCoordinates(arrivalPoint),
-    );
+    const [distanceMeters, weatherImpact] = await Promise.all([
+      this.calculateRouteDistanceMeters(departurePoint, arrivalPoint, context),
+      this.weatherAwarenessService.getRouteImpact(
+        this.pointToCoordinates(departurePoint), this.pointToCoordinates(arrivalPoint),
+      ),
+    ]);
 
     return this.buildRecommendedPricePerSeat(
       distanceMeters,

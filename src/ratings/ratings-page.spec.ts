@@ -19,7 +19,7 @@ function fixture() {
 
 describe('Public review pages', () => {
   it('preserves the legacy array while selecting only public author fields', async () => {
-    const find = jest.fn(async () => [{ id: ids[0] }]);
+    const find = jest.fn(async (_options: unknown) => [{ id: ids[0] }]);
     const service = new RatingsService({ find } as never, {} as never);
     expect(await service.findByUser(ids[0])).toEqual([{ id: ids[0] }]);
     expect(find.mock.calls[0]?.[0]).toMatchObject({

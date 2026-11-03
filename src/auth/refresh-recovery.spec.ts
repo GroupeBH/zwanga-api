@@ -16,7 +16,7 @@ describe('bounded refresh response recovery', () => {
     const entries = new Map<string, string>();
     const redis = {
       get: jest.fn(async (key) => entries.get(key) ?? null),
-      compareAndSet: jest.fn(async (key, _expected, value) => {
+      compareAndSet: jest.fn(async (key, _expected, value, _ttl: number) => {
         if (entries.has(key)) return false;
         entries.set(key, value);
         return true;

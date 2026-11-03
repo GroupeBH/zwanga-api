@@ -110,7 +110,7 @@ describe('Trip read privacy', () => {
       departureDate: new Date('2000-01-01'), canReprogram: true } as SanitizedTrip;
     const current = { ...stale, status: 'completed', startedAt: new Date('2000-01-01T09:00:00Z') } as SanitizedTrip;
     expect(tripResponseForViewer(stale, 'outsider', current).isExpired).toBe(false);
-    expect(tripResponseForViewer(stale, 'driver', current).canReprogram).toBe(false);
+    expect(tripResponseForViewer(stale, 'driver', current)).toMatchObject({ canReprogram: false });
     const rescheduled = { ...stale, departureDate: new Date('2099-01-01') };
     expect(tripResponseForViewer(stale, 'outsider', rescheduled).isExpired).toBe(false);
   });

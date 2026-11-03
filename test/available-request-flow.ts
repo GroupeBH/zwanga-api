@@ -215,7 +215,7 @@ export function availableRequestFlow(context: () => Context) {
     );
     await c.relay.deadlines();
     expect(
-      (await c.offers(r.id)).find((row) => row.status === 'pending').driverId,
+      (await c.offers(r.id)).find((row) => row.status === 'pending')?.driverId,
     ).toBe(second.id);
     const service = serviceFor(c);
     expect(

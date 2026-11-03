@@ -4,8 +4,8 @@ describe('activity booking list freshness', () => {
   const fixture = () => {
     const fresh = [{ id: 'current', status: 'completed' }];
     const stale = [{ id: 'current', status: 'accepted' }];
-    const cache = { get: jest.fn(async () => stale), set: jest.fn(async () => undefined) };
-    const repository = { find: jest.fn(async () => fresh) };
+    const cache = { get: jest.fn(async (): Promise<typeof stale | undefined> => stale), set: jest.fn(async () => undefined) };
+    const repository = { find: jest.fn(async (_options: { where: { passengerId: string }[] }) => fresh) };
     const attach = jest.fn(async () => undefined);
     const service: BookingsService = Object.assign(Object.create(BookingsService.prototype), {
       cacheService: cache, bookingRepository: repository, CACHE_TTL: 180,
