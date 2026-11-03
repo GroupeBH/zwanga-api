@@ -301,18 +301,14 @@ export class TripRequestsService {
       );
     }
 
-    const departurePoint = await this.resolvePointFromCoordinatesOrAddress(
-      departureCoordinates,
-      rest.departureLocation,
-      rest.departureReference,
-      'trip request departure',
-    );
-    const arrivalPoint = await this.resolvePointFromCoordinatesOrAddress(
-      arrivalCoordinates,
-      rest.arrivalLocation,
-      rest.arrivalReference,
-      'trip request arrival',
-    );
+    const [departurePoint, arrivalPoint] = await Promise.all([
+      this.resolvePointFromCoordinatesOrAddress(
+        departureCoordinates, rest.departureLocation, rest.departureReference, 'trip request departure',
+      ),
+      this.resolvePointFromCoordinatesOrAddress(
+        arrivalCoordinates, rest.arrivalLocation, rest.arrivalReference, 'trip request arrival',
+      ),
+    ]);
     const recommendedPrice =
       rest.maxPricePerSeat ??
       (await this.calculateRecommendedPricePerSeat(
@@ -2186,15 +2182,12 @@ export class TripRequestsService {
     vehicleType: VehicleType | undefined | null,
     context: string,
   ): Promise<number | null> {
-    const distanceMeters = await this.calculateRouteDistanceMeters(
-      departurePoint,
-      arrivalPoint,
-      context,
-    );
-    const weatherImpact = await this.weatherAwarenessService.getRouteImpact(
-      this.pointToCoordinates(departurePoint),
-      this.pointToCoordinates(arrivalPoint),
-    );
+    const [distanceMeters, weatherImpact] = await Promise.all([
+      this.calculateRouteDistanceMeters(departurePoint, arrivalPoint, context),
+      this.weatherAwarenessService.getRouteImpact(
+        this.pointToCoordinates(departurePoint), this.pointToCoordinates(arrivalPoint),
+      ),
+    ]);
 
     return this.buildRecommendedPricePerSeat(
       distanceMeters,

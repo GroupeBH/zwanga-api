@@ -3,7 +3,7 @@ import { issueRideRingPermit, readRideRingPermit, needsRideRingPermit } from './
 import { DRIVER_PAYMENT_NOTIFICATION_TYPE } from './driver-payment-notification';
 import { sequentialInvitationSql, REQUEST_RESPONSE_MS } from '../trip-requests/dispatch/sequential-policy';
 import { nearbyRequestDriverVisibilitySql } from '../trip-requests/request-proximity';
-import { sendBoundedFirebase } from './bounded-firebase-send';
+import { sendBoundedFirebase, prewarmFirebaseAccessToken } from './bounded-firebase-send';
 import { FirebaseDeliveryError } from './firebase-delivery-error';
 import { boundedFirebaseCredential } from './firebase-credential';
 import { recoverUnacknowledgedRides } from './recover-unacknowledged-ride';
@@ -25,7 +25,7 @@ import {
 } from 'firebase-admin/app';
 import { getMessaging, type MulticastMessage } from 'firebase-admin/messaging';
 import { createHash, randomUUID } from 'node:crypto';
-import { Injectable, OnModuleInit, Logger, Optional } from '@nestjs/common';
+import { Injectable, OnModuleInit, OnApplicationBootstrap, OnModuleDestroy, Logger, Optional } from '@nestjs/common';
 import { RideAlertRealtime } from './ride-alert-realtime.service';
 import { claimRideRealtimeNotifications } from './ride-realtime-delivery';
 import { iosDriverPush } from './ios-driver-push';
@@ -137,7 +137,7 @@ interface ExpoPushReceiptsResponse {
 }
 
 @Injectable()
-export class NotificationService implements OnModuleInit {
+export class NotificationService implements OnModuleInit, OnApplicationBootstrap, OnModuleDestroy {
   private readonly logger = new Logger(NotificationService.name);
   private firebaseApp: App;
   private dispatchingTransactionalNotifications = false;
@@ -145,6 +145,10 @@ export class NotificationService implements OnModuleInit {
   private dispatchingUrgentNotifications = false;
   private urgentWorkers = 0;
   private dispatchingRealtime = false;
+  private stopping = false;
+  private urgentWakePending = false;
+  private urgentWake?: NodeJS.Immediate;
+  private warmingFirebase = false;
 
   constructor(
     private configService: ConfigService,
@@ -210,6 +214,27 @@ export class NotificationService implements OnModuleInit {
         );
       }
     }
+  }
+
+  onApplicationBootstrap(): void {
+    // Never block HTTP readiness on Google or send a notification to warm credentials.
+    if (process.env.NODE_ENV !== 'test') void this.prewarmFirebase();
+  }
+
+  @Cron('*/30 * * * * *')
+  async prewarmFirebase(): Promise<void> {
+    if (this.stopping || this.warmingFirebase || !this.firebaseApp) return;
+    this.warmingFirebase = true;
+    try { await prewarmFirebaseAccessToken(this.firebaseApp); }
+    catch { this.logger.warn('FCM credential prewarm unavailable; normal bounded delivery remains active.'); }
+    finally { this.warmingFirebase = false; }
+  }
+
+  onModuleDestroy(): void {
+    this.stopping = true;
+    this.urgentWakePending = false;
+    if (this.urgentWake) clearImmediate(this.urgentWake);
+    this.urgentWake = undefined;
   }
 
   async sendNotification(
@@ -327,6 +352,7 @@ export class NotificationService implements OnModuleInit {
   private async deliverSavedNotification(
     savedNotification: Notification,
   ): Promise<boolean> {
+    const preparationStartedAt = Date.now();
     if (savedNotification.data?.type === 'app_update' && savedNotification.data?.installationId) {
       // Resolve the fresh token again at the last boundary, including retries.
       const token = this.configService.get<string>('APP_UPDATES_ENABLED') === 'true'
@@ -396,6 +422,8 @@ export class NotificationService implements OnModuleInit {
         `Sending notification through ${this.isExpoPushToken(pushToken) ? 'Expo' : 'FCM'} - Title: ${savedNotification.title}`,
       );
       if (!await renewPushClaim(this.notificationRepository, savedNotification)) return false;
+      if (URGENT_NOTIFICATION_TYPES.includes(savedNotification.data?.type))
+        this.logger.log(`URGENT_PUSH_PREFLIGHT notificationId=${savedNotification.id} elapsedMs=${Date.now() - preparationStartedAt}`);
       const messageId = this.isExpoPushToken(pushToken)
         ? await this.sendExpoPushNotification(savedNotification, pushToken)
         : await this.sendFirebaseNotification(savedNotification, pushToken);
@@ -463,15 +491,19 @@ export class NotificationService implements OnModuleInit {
         apns: { headers: { 'apns-expiration': String(Math.floor(Date.now() / 1000) + 86_400) }, payload: { aps: { sound: 'default' } } },
       });
     }
-    const version = await this.driverActionVersion(notification, pushToken);
-    if (version === 6 || (this.isNearbyRequestRing(notification) && await this.ringClientVersion(notification, pushToken) === 6)) {
+    // Resolve capabilities once per send, never cache them across token rotations/retries.
+    const nearbyAlert = this.isNearbyRequestRing(notification);
+    const passengerResponse = this.isPassengerRideResponse(notification);
+    const clientVersion = this.isDriverRingInvitation(notification) || nearbyAlert || passengerResponse
+      ? await this.ringClientVersion(notification, pushToken) : 0;
+    const version = this.isDriverRingInvitation(notification) ? clientVersion : 0;
+    if (version === 6 || (nearbyAlert && clientVersion === 6)) {
       // Preserve existing durable v6 delivery telemetry, but never persist the capability.
       savedNotification.data = { ...savedNotification.data, nativeDeliveryVersion: 6 };
       notification.data = { ...notification.data, nativeDeliveryVersion: 6 };
       return send(nativeAndroidDriverPush(notification, pushToken, this.driverRingUntil(notification)));
     }
-    if (version === 5 || ((this.isNearbyRequestRing(notification) || this.isPassengerRideResponse(notification)) &&
-        await this.ringClientVersion(notification, pushToken) === 5)) {
+    if (version === 5 || ((nearbyAlert || passengerResponse) && clientVersion === 5)) {
       const iosNotification = this.isPassengerRideResponse(notification)
         ? { ...notification, data: this.passengerRingData(notification) } : notification;
       return send(iosDriverPush(iosNotification, pushToken, this.driverRingUntil(notification)));
@@ -487,10 +519,8 @@ export class NotificationService implements OnModuleInit {
         android: { priority: 'high', ttl: version >= 4 ? androidDriverBackupTtl(notification) : this.driverNotificationTtl(notification, ringUntil) * 1000 },
       });
     }
-    const passengerRing = this.isPassengerRideResponse(notification) &&
-      await this.ringClientVersion(notification, pushToken) >= 2;
-    const nearbyVersion = this.isNearbyRequestRing(notification)
-      ? await this.ringClientVersion(notification, pushToken) : 0;
+    const passengerRing = passengerResponse && clientVersion >= 2;
+    const nearbyVersion = nearbyAlert ? clientVersion : 0;
     const nearbyRing = nearbyVersion >= 2;
     // Capability registration may be delayed, or invalidated by token rotation.
     // Preserve an OS-visible alert for those devices instead of relying on JS.
@@ -529,13 +559,14 @@ export class NotificationService implements OnModuleInit {
     pushToken: string,
   ): Promise<string> {
     notification = this.withRideRingPermit(notification);
-    const version = await this.driverActionVersion(notification, pushToken);
-    const driverActions = version > 0;
-    const passengerRing = this.isPassengerRideResponse(notification) &&
-      await this.ringClientVersion(notification, pushToken) >= 2;
     const nearbyAlert = this.isNearbyRequestRing(notification);
-    const nearbyRing = nearbyAlert &&
-      await this.ringClientVersion(notification, pushToken) >= 2;
+    const passengerResponse = this.isPassengerRideResponse(notification);
+    const clientVersion = this.isDriverRingInvitation(notification) || nearbyAlert || passengerResponse
+      ? await this.ringClientVersion(notification, pushToken) : 0;
+    const version = this.isDriverRingInvitation(notification) ? clientVersion : 0;
+    const driverActions = version > 0;
+    const passengerRing = passengerResponse && clientVersion >= 2;
+    const nearbyRing = nearbyAlert && clientVersion >= 2;
     // APNs can request a bundled sound independently of interactive JS support.
     // An older iOS binary without the file falls back to the system sound. Keep
     // categories and time-sensitive entitlement usage gated by client capability.
@@ -643,11 +674,6 @@ export class NotificationService implements OnModuleInit {
   private driverNotificationTtl(notification: Notification, ringUntil?: string): number {
     const deadline = Date.parse(ringUntil ?? String(notification.data?.expiresAt ?? ''));
     return Number.isFinite(deadline) ? Math.max(1, Math.ceil((deadline - Date.now()) / 1000)) : 3600;
-  }
-
-  private async driverActionVersion(notification: Notification, pushToken: string): Promise<number> {
-    if (!this.isDriverRingInvitation(notification)) return 0;
-    return this.ringClientVersion(notification, pushToken);
   }
 
   private isDriverRingInvitation(notification: Notification): boolean {
@@ -821,8 +847,14 @@ export class NotificationService implements OnModuleInit {
 
   @Cron('*/5 * * * * *')
   async dispatchUrgentNotifications(): Promise<void> {
+    if (this.stopping) return;
     // Starting push delivery must never occupy the realtime lane's capacity.
     void this.dispatchRealtimeNotifications().catch(() => this.logger.warn('Ride realtime delivery deferred.'));
+    await this.drainUrgentNotifications();
+  }
+
+  private async drainUrgentNotifications(): Promise<void> {
+    if (this.stopping) return;
     // Drain a broadcast promptly when the provider is fast, without increasing
     // the configured worker cap or claiming a large backlog behind a slow request.
     const startedAt = Date.now();
@@ -830,6 +862,23 @@ export class NotificationService implements OnModuleInit {
       const processed = await this.dispatchNotificationLane(true);
       if (processed === 0 || Date.now() - startedAt >= 2_000) break;
     }
+  }
+
+  /** Coalesce wakeups; durable SQL remains authoritative if the process stops.
+   * A free slot must not wait for the slowest HTTP request or the next cron. */
+  private scheduleUrgentDrain(): void {
+    if (this.stopping || !this.urgentWakePending || this.urgentWake || this.dispatchingUrgentNotifications ||
+        this.urgentWorkers >= urgentPushWorkers(this.configService.get('URGENT_PUSH_WORKERS'))) return;
+    this.urgentWake = setImmediate(() => {
+      this.urgentWake = undefined;
+      if (this.stopping || !this.urgentWakePending) return;
+      this.urgentWakePending = false;
+      // A push slot release is not a new business event: do not rescan the
+      // realtime outbox too. Its own event wakeups and cron remain independent.
+      void this.drainUrgentNotifications().catch(() =>
+        this.logger.warn('Urgent push wake deferred to durable outbox recovery.'));
+    });
+    this.urgentWake.unref();
   }
 
   private recoveringRideAcknowledgements = false;
@@ -845,9 +894,14 @@ export class NotificationService implements OnModuleInit {
   }
 
   private async dispatchNotificationLane(urgent: boolean): Promise<number> {
+    if (this.stopping) return 0;
     const capacity = urgentPushWorkers(this.configService.get('URGENT_PUSH_WORKERS'));
     if (urgent) {
-      if (this.dispatchingUrgentNotifications || this.urgentWorkers >= capacity) return 0;
+      if (this.dispatchingUrgentNotifications || this.urgentWorkers >= capacity) {
+        this.urgentWakePending = true;
+        return 0;
+      }
+      this.urgentWakePending = false;
       this.dispatchingUrgentNotifications = true;
     } else {
       if (this.dispatchingTransactionalNotifications) return 0;
@@ -899,6 +953,8 @@ export class NotificationService implements OnModuleInit {
         this.urgentWorkers += workerCount;
         this.dispatchingUrgentNotifications = false;
         claimReleased = true;
+        // A request may have committed while this SQL claim was in progress.
+        this.scheduleUrgentDrain();
       }
       let next = 0;
       await Promise.all(Array.from({ length: workerCount }, async () => {
@@ -939,7 +995,11 @@ export class NotificationService implements OnModuleInit {
             }
           }
         } finally {
-          if (urgent) this.urgentWorkers -= 1;
+          if (urgent) {
+            this.urgentWorkers -= 1;
+            this.urgentWakePending = true;
+            this.scheduleUrgentDrain();
+          }
         }
       }));
       return notifications.length;

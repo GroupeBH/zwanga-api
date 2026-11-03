@@ -5,6 +5,7 @@ import { FirebaseDeliveryError } from './firebase-delivery-error';
 import * as boundedFirebase from './bounded-firebase-send';
 
 describe('NotificationService critical push reliability', () => {
+  const services: NotificationService[] = [];
   const buildService = (capacity: unknown = 5) => {
     const queryBuilder = {
       where: jest.fn().mockReturnThis(),
@@ -56,6 +57,7 @@ describe('NotificationService critical push reliability', () => {
       userRepository as any,
       tripRequestRepository as any,
     );
+    services.push(service);
 
     return {
       service,
@@ -68,6 +70,7 @@ describe('NotificationService critical push reliability', () => {
   };
 
   afterEach(() => {
+    for (const service of services.splice(0)) service.onModuleDestroy();
     jest.restoreAllMocks();
     jest.useRealTimers();
   });
@@ -92,6 +95,8 @@ describe('NotificationService critical push reliability', () => {
     expect(started).toHaveLength(16); expect(peak).toBe(8);
     expect(Math.max(...started)).toBe(15_000);
     expect(f.queryBuilder.orderBy).toHaveBeenCalledWith('notification.createdAt', 'ASC');
+    // Completion schedules one coalesced check for newly available work.
+    await jest.advanceTimersByTimeAsync(1);
     expect(jest.getTimerCount()).toBe(0);
   });
 

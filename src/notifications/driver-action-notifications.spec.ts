@@ -62,6 +62,32 @@ describe('driver notification transport', () => {
     expect(send.mock.calls[0][0].data.actionProtocol).toBeUndefined();
   });
 
+  it.each([0, 1, 2, 3, 4, 5, 6])('reads capability once per transport attempt for client version %s', async version => {
+    const { service, query } = fixture(true);
+    query.mockResolvedValue(version ? [{ version }] : []);
+    const remote = jest.spyOn(global, 'fetch').mockResolvedValue({
+      ok: true, json: async () => ({ data: { status: 'ok', id: 'local-ticket' } }),
+    } as Response);
+    try {
+      for (const type of ['new_booking', 'driver_dispatch_offer', 'trip_request_nearby', 'trip_request_accepted']) {
+        const notification = { userId: 'driver', title: 'Test', body: 'Test', data: {
+          type, driverId: 'driver', ringAlert: 'nearby-request-v1', tripRequestId: 'request',
+          offerId: 'offer', expiresAt: new Date(Date.now() + 40_000).toISOString(),
+        } };
+        query.mockClear();
+        await service.sendFirebaseNotification(notification, 'fixture-token');
+        expect(query).toHaveBeenCalledTimes(1);
+        await service.sendExpoPushNotification(notification, 'ExponentPushToken[test]');
+        expect(query).toHaveBeenCalledTimes(2);
+        // A token rotation must be checked again, not served from an old capability cache.
+        query.mockResolvedValueOnce([]);
+        await service.sendFirebaseNotification(notification, 'fixture-token-rotated');
+        expect(query).toHaveBeenCalledTimes(3);
+        expect(query.mock.calls[2][1][1]).toBe(createHash('sha256').update('fixture-token-rotated').digest('hex'));
+      }
+    } finally { remote.mockRestore(); }
+  });
+
   it.each(['new_booking', 'trip_request_nearby', 'driver_dispatch_offer'])('keeps price, time and seats visible through Expo and legacy FCM for %s', async type => {
     const { service, send } = fixture(false);
     const original = global.fetch;
