@@ -6,7 +6,13 @@ import {
   Request,
   Query,
   ParseIntPipe,
+  Post,
+  HttpCode,
+  Header,
 } from '@nestjs/common';
+import { Public } from '../common/decorators/public.decorator';
+import { RideRingCheckDto } from './dto/ride-ring-check.dto';
+import { Throttle } from '@nestjs/throttler';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
 import { UseGuards } from '@nestjs/common';
@@ -19,6 +25,18 @@ import { MarkNotificationsAsReadDto } from './dto/notification.dto';
 @ApiBearerAuth()
 export class NotificationsController {
   constructor(private readonly notificationService: NotificationService) {}
+
+  // A sleeping Android receiver has no account credentials. This endpoint
+  // accepts only a signed, expiring, invitation-scoped capability.
+  @Public()
+  @Post('ride-alerts/validate')
+  @HttpCode(200)
+  @Throttle({ default: { limit: 300, ttl: 60_000 } })
+  @Header('Cache-Control', 'no-store')
+  @ApiOperation({ summary: 'Confirmer la disponibilité d’une invitation avant sa sonnerie' })
+  async validateRideAlert(@Body() dto: RideRingCheckDto) {
+    return this.notificationService.validateRideRing(dto.token);
+  }
 
   @Get('driver-payments')
   @ApiOperation({ summary: 'Paiements reçus non lus du conducteur connecté (20 maximum)' })

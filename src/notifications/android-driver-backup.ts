@@ -11,7 +11,7 @@ export function androidDriverBackup(_notification: Notification, data: Record<st
   const fields = ['type', 'actionProtocol', 'notificationId', 'bookingId', 'tripId', 'tripRequestId', 'offerId',
     'driverId', 'passengerId', 'ringAlert', 'ringVersion', 'ringUntil', 'expiresAt', 'alertExpiresAt',
     'delivery', 'sharedTrip', 'existingTripId', 'rideSpeechVersion', 'rideDeparture', 'rideArrival',
-    'rideSeats', 'rideDepartureAt', 'ridePricePerSeat', 'ridePriceKind', 'invitationText'];
+    'rideSeats', 'rideDepartureAt', 'ridePricePerSeat', 'ridePriceKind', 'invitationText', 'ringValidationToken'];
   const content: Record<string, unknown> = { ...Object.fromEntries(fields
     .filter(field => data[field] !== undefined && data[field] !== null)
     .map(field => [field, data[field]])), alertDelivery: 'native-backup-v4', fallbackTag };

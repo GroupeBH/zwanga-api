@@ -64,6 +64,8 @@ describe('Android v6 native delivery', () => {
       };
       await service.sendFirebaseNotification(n, 'synthetic-token');
       expect(send.mock.calls[0][0].data.nativeAlert).toBe('driver-v6');
+      expect(n.data?.nativeDeliveryVersion).toBe(6);
+      expect(n.data).not.toHaveProperty('ringValidationToken');
     },
   );
   it('keeps worst-case unicode prose below the FCM payload budget', () => {

@@ -1,4 +1,5 @@
 import { rideCardContent } from './ride-card-content';
+import { issueRideRingPermit, readRideRingPermit, needsRideRingPermit } from './ride-ring-permit';
 import { DRIVER_PAYMENT_NOTIFICATION_TYPE } from './driver-payment-notification';
 import { sequentialInvitationSql, REQUEST_RESPONSE_MS } from '../trip-requests/dispatch/sequential-policy';
 import { nearbyRequestDriverVisibilitySql } from '../trip-requests/request-proximity';
@@ -441,6 +442,8 @@ export class NotificationService implements OnModuleInit {
     notification: Notification,
     pushToken: string,
   ): Promise<string> {
+    const savedNotification = notification;
+    notification = this.withRideRingPermit(notification);
     if (!this.firebaseApp) {
       throw new Error('FCM non configuré sur le serveur');
     }
@@ -462,6 +465,8 @@ export class NotificationService implements OnModuleInit {
     }
     const version = await this.driverActionVersion(notification, pushToken);
     if (version === 6 || (this.isNearbyRequestRing(notification) && await this.ringClientVersion(notification, pushToken) === 6)) {
+      // Preserve existing durable v6 delivery telemetry, but never persist the capability.
+      savedNotification.data = { ...savedNotification.data, nativeDeliveryVersion: 6 };
       notification.data = { ...notification.data, nativeDeliveryVersion: 6 };
       return send(nativeAndroidDriverPush(notification, pushToken, this.driverRingUntil(notification)));
     }
@@ -523,6 +528,7 @@ export class NotificationService implements OnModuleInit {
     notification: Notification,
     pushToken: string,
   ): Promise<string> {
+    notification = this.withRideRingPermit(notification);
     const version = await this.driverActionVersion(notification, pushToken);
     const driverActions = version > 0;
     const passengerRing = this.isPassengerRideResponse(notification) &&
@@ -603,6 +609,32 @@ export class NotificationService implements OnModuleInit {
     const window = ['driver_dispatch_offer', 'trip_request_nearby'].includes(notification.data?.type) ? REQUEST_RESPONSE_MS : 60_000;
     const deadline = (Number.isFinite(createdAt) ? createdAt : Date.now()) + window;
     return new Date(Number.isFinite(expiry) ? Math.min(expiry, deadline) : deadline).toISOString();
+  }
+
+  private withRideRingPermit(notification: Notification): Notification {
+    if (!needsRideRingPermit(notification.data) || !notification.userId) return notification;
+    const ringValidationToken = issueRideRingPermit(this.configService.get('JWT_SECRET'),
+      notification.id, notification.userId, Date.parse(this.driverRingUntil(notification)));
+    return { ...notification, data: { ...notification.data, ringValidationToken } } as Notification;
+  }
+
+  /** Read-only delivery-time check. Never trusts the push's claimed business state. */
+  async validateRideRing(token: string): Promise<{ allowed: boolean }> {
+    const permit = readRideRingPermit(this.configService.get('JWT_SECRET'), token);
+    if (!permit) return { allowed: false };
+    const notification = await this.notificationRepository.findOne({
+      where: { id: permit.notificationId, userId: permit.userId, isActive: true },
+      select: ['id', 'userId', 'data', 'createdAt', 'isActive', 'eventKey'],
+    });
+    if (!notification || !needsRideRingPermit(notification.data) ||
+        Date.parse(this.driverRingUntil(notification)) <= Date.now()) return { allowed: false };
+    const owner = await this.userRepository.findOne({ where: { id: permit.userId },
+      select: ['id', 'role', 'isActive', 'status'] });
+    if (!canReceiveDriverRequests(owner)) return { allowed: false };
+    const available = await this.isCriticalNotificationStillDeliverable(notification);
+    // A slow database must not turn an expired capability into a fresh ring window.
+    return { allowed: available && permit.until > Date.now() &&
+      Date.parse(this.driverRingUntil(notification)) > Date.now() };
   }
 
   private driverNotificationTtl(notification: Notification, ringUntil?: string): number {
@@ -765,7 +797,8 @@ export class NotificationService implements OnModuleInit {
         !await prepareNearbyRequestRinging(this.notificationRepository.manager, notification)) return;
     const ringUntil = this.driverRingUntil(notification);
     if (Date.parse(ringUntil) <= Date.now()) return;
-    if (!this.rideAlerts?.publish(notification.userId, {
+    notification = this.withRideRingPermit(notification);
+    if (!this.rideAlerts?.publish(notification.userId!, {
       kind: 'incoming', eventId: notification.id,
       data: { ...notification.data, actionProtocol: 'driver-v1', delivery: 'driver-phone-v3',
         invitationText: notification.body, ringVersion: 'v2', ringUntil },

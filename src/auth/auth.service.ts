@@ -407,11 +407,11 @@ export class AuthService {
       return { message: PIN_RESET_GENERIC_MESSAGE };
     }
 
-    await this.otpService.sendOtp(dto.phone, 'pin_reset');
+    const delivery = await this.otpService.sendOtp(dto.phone, 'pin_reset');
     await this.redisService.set(
       this.getPinResetOtpKey(user.id),
       PIN_RESET_OTP_PENDING_VALUE,
-      PIN_RESET_TOKEN_TTL_SECONDS,
+      delivery.expiresInSeconds ?? PIN_RESET_TOKEN_TTL_SECONDS,
     );
 
     return { message: PIN_RESET_GENERIC_MESSAGE };

@@ -215,7 +215,10 @@ export class AuthController {
   @Public()
   @SensitiveThrottle(3, 60000)
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Send an OTP to reset a forgotten PIN' })
+  @ApiOperation({
+    summary: 'Send an OTP to reset a forgotten PIN',
+    description: 'OTP_PIN_RESET_PROVIDER selects the PIN provider; otherwise OTP_PROVIDER is used. Mobishastra: 6 digits, 15 minutes, 5 attempts. Unknown/ineligible accounts receive the same generic success body.',
+  })
   @ApiResponse({
     status: 200,
     description: 'Generic response whether or not the account exists',

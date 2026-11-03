@@ -1,11 +1,13 @@
 import { createClient } from 'redis';
-import { createHash } from 'crypto';
+import { createHash, createHmac } from 'crypto';
 import { ConfigService } from '@nestjs/config';
 import { RedisService } from '../common/services/redis.service';
 import { KeccelOtpService } from '../keccel-otp/keccel-otp.service';
 import { MobishastraSmsService } from './mobishastra-sms.service';
 import { MobishastraOtpService } from './mobishastra-otp.service';
-import { MobishastraChallenge } from './otp.types';
+import { MobishastraChallenge, MobishastraOtpPurpose } from './otp.types';
+import { AuthService } from '../auth/auth.service';
+import { UserRole, UserStatus } from '../users/entities/user.entity';
 import { OtpService } from './otp.service';
 
 const enabled = Boolean(
@@ -35,7 +37,9 @@ const enabled = Boolean(
     });
     const sms = {
       assertConfigured: jest.fn(),
-      sendCode: jest.fn().mockResolvedValue(undefined),
+      sendCode: jest
+        .fn<Promise<void>, [string, string, MobishastraOtpPurpose?]>()
+        .mockResolvedValue(undefined),
     };
     const local = new MobishastraOtpService(
       config,
@@ -49,7 +53,7 @@ const enabled = Boolean(
       keccel as unknown as KeccelOtpService,
       local,
     );
-    const lastCode = () => sms.sendCode.mock.calls.at(-1)![1] as string;
+    const lastCode = () => sms.sendCode.mock.calls.at(-1)![1];
     const snapshot = async () =>
       (await redis.get<MobishastraChallenge>(key)) as MobishastraChallenge;
     beforeAll(async () => {
@@ -75,11 +79,43 @@ const enabled = Boolean(
       const initialTtl = await client.pTTL(key);
       expect(initialTtl).toBeGreaterThan(890000);
       expect(initialTtl).toBeLessThanOrEqual(900000);
+      const sent = await snapshot();
+      // Assert the complete persisted schema: neither OTP nor SMS body can hide
+      // in a newly added property. Only a purpose/phone/challenge-bound HMAC.
+      expect(sent).toEqual({
+        provider: 'mobishastra',
+        purpose: 'phone_verification',
+        requestId: sent.requestId,
+        state: 'sent',
+        attemptsRemaining: 5,
+        codeHash: createHmac(
+          'sha256',
+          config.get<string>('OTP_CODE_HMAC_SECRET')!,
+        )
+          .update(
+            JSON.stringify([
+              'phone_verification',
+              phone,
+              sent.requestId,
+              lastCode(),
+            ]),
+          )
+          .digest('hex'),
+      });
       const result = await otp.verifyOtp(`+${phone}`, lastCode());
       expect(result.valid).toBe(true);
       expect(result.verificationToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
       expect(await client.pTTL(key)).toBeLessThanOrEqual(initialTtl);
-      expect(await snapshot()).not.toHaveProperty('codeHash');
+      expect(await snapshot()).toEqual({
+        provider: 'mobishastra',
+        purpose: 'phone_verification',
+        requestId: sent.requestId,
+        state: 'verified',
+        attemptsRemaining: 5,
+        proofHash: createHash('sha256')
+          .update(JSON.stringify([phone, result.verificationToken]))
+          .digest('hex'),
+      });
       expect(await otp.verifyOtp(`+${phone}`, lastCode())).toEqual({
         valid: false,
         status: 'INVALID',
@@ -106,6 +142,112 @@ const enabled = Boolean(
         ),
       ).toBe(false);
       expect(keccel.verifyOtp).not.toHaveBeenCalled();
+    });
+
+    it.each(['pin_reset', 'pin_change'] as const)(
+      'consumes a %s code once, never as a phone proof or another PIN purpose',
+      async (purpose) => {
+        const pinKey = key.replace('phone_verification', purpose);
+        await otp.sendOtp(phone, purpose);
+        expect(lastCode()).toMatch(/^\d{6}$/);
+        const stored = (await redis.get<MobishastraChallenge>(pinKey))!;
+        expect(
+          await local.verify(
+            phone,
+            lastCode(),
+            pinKey,
+            stored,
+            'phone_verification',
+          ),
+        ).toEqual({ valid: false, status: 'INVALID' });
+        const other = purpose === 'pin_reset' ? 'pin_change' : 'pin_reset';
+        expect(
+          await local.verify(phone, lastCode(), pinKey, stored, other),
+        ).toEqual({ valid: false, status: 'INVALID' });
+        const results = await Promise.all(
+          Array.from({ length: 20 }, () =>
+            local.verify(phone, lastCode(), pinKey, stored, purpose),
+          ),
+        );
+        expect(results.filter((result) => result.valid)).toHaveLength(1);
+        expect(results.find((result) => result.valid)).toEqual({
+          valid: true,
+          status: 'VALID',
+        });
+        expect(await client.exists(pinKey)).toBe(0);
+      },
+    );
+
+    it.each(['pin_reset', 'pin_change'] as const)(
+      'expires %s and enforces five attempts without renewing the TTL',
+      async (purpose) => {
+        const pinKey = key.replace('phone_verification', purpose);
+        await otp.sendOtp(phone, purpose);
+        await client.pExpire(pinKey, 30000);
+        for (let attempt = 0; attempt < 5; attempt++) {
+          expect(await otp.verifyOtp(phone, '000000', purpose)).toEqual({
+            valid: false,
+            status: 'INVALID',
+          });
+          if (attempt < 4)
+            expect(await client.pTTL(pinKey)).toBeLessThanOrEqual(30000);
+        }
+        expect(await client.exists(pinKey)).toBe(0);
+        await client.del(budgetKey);
+        await otp.sendOtp(phone, purpose);
+        await client.pExpire(pinKey, 0);
+        expect(await otp.verifyOtp(phone, lastCode(), purpose)).toEqual({
+          valid: false,
+          status: 'INVALID',
+        });
+      },
+    );
+
+    it('keeps historical Mobishastra phone challenges valid without allowing PIN recovery', async () => {
+      await otp.sendOtp(phone);
+      const legacy = await snapshot();
+      delete legacy.purpose;
+      await client.set(key, JSON.stringify(legacy), { KEEPTTL: true });
+      expect(
+        await local.verify(phone, lastCode(), key, legacy, 'pin_reset'),
+      ).toEqual({ valid: false, status: 'INVALID' });
+      expect(await otp.verifyOtp(phone, lastCode())).toMatchObject({
+        valid: true,
+      });
+    });
+
+    it('keeps the pending reset window for fifteen minutes but issues a five-minute reset token', async () => {
+      const user = {
+        id: 'pin-reset-user',
+        phone: `+${phone}`,
+        role: UserRole.PASSENGER,
+        status: UserStatus.ACTIVE,
+        isActive: true,
+      };
+      const auth = Object.create(AuthService.prototype) as AuthService;
+      Object.assign(auth, {
+        userRepository: { findOne: jest.fn().mockResolvedValue(user) },
+        otpService: otp,
+        redisService: redis,
+        logger: { log: jest.fn() },
+      });
+      await auth.requestPinResetOtp({ phone: user.phone });
+      const pendingKey = `auth:pin-reset-otp:${user.id}`;
+      const proofKey = `auth:pin-reset:${user.id}`;
+      try {
+        expect(await client.ttl(pendingKey)).toBeGreaterThan(890);
+        const result = await auth.verifyPinResetOtp({
+          phone: user.phone,
+          otp: lastCode(),
+        });
+        expect(result.expiresInSeconds).toBe(300);
+        expect(await client.exists(pendingKey)).toBe(0);
+        await expect(
+          auth.verifyPinResetOtp({ phone: user.phone, otp: lastCode() }),
+        ).rejects.toMatchObject({ status: 400 });
+      } finally {
+        await client.del([pendingKey, proofKey]);
+      }
     });
 
     it('deletes the challenge after exactly five wrong attempts without extending its TTL', async () => {

@@ -1,5 +1,31 @@
 # Journal détaillé des changements d'infrastructure AWS
 
+## INFRA-2026-11-03-001 — Documentation du transport OTP unitaire Mobishastra
+
+- **Date / statut / périmètre :** 3 novembre 2026, Africa/Kinshasa ; correction
+  applicative locale et mise à jour du guide proxy, aucune opération AWS.
+- **Contexte :** l'URL JSON précédemment choisie est documentée page 19 du PDF,
+  mais l'opérateur a confirmé l'URL unitaire `https://mshastra.com/sendurl.aspx`
+  (pages 13–14). Elle utilise une query HTTPS contenant les secrets et le SMS.
+- **Changements :** endpoint et paramètres du client NestJS, validation stricte de
+  la réponse, suppression ciblée des traces HTTP OpenTelemetry pour cet envoi,
+  tests de confidentialité et mise à jour des guides/configurations d'exemple.
+- **Infra / IAM / coûts / données :** aucun fichier Terraform, Ansible, Squid ou
+  workflow modifié; aucun changement de ressources, permissions ou migration SQL.
+  Le domaine est déjà autorisé dans Squid, sans interception TLS. Aucun SMS réel envoyé.
+- **Déploiement ultérieur :** remplacer l'ancienne valeur de `MOBISHASTRA_SMS_URL`
+  dans SSM si elle existe, puis livrer le code et renouveler les tâches ECS. Ne
+  pas activer automatiquement le fournisseur ni l'obligation d'OTP. Une URL JSON
+  laissée dans la configuration fera échouer les envois du nouveau transport.
+- **Validation :** tests locaux du transport, du tunnel TLS et des traces; recette
+  opérateur/SMS et déploiement réels restent à effectuer. Voir
+  [le guide OTP](../../docs/auth/otp-providers.md) pour les limites de confidentialité.
+- **Surveillance / retour arrière :** surveiller `MOBISHASTRA_SMS_NOT_CONFIRMED` et
+  la réception des SMS sans exporter les URL ni les codes. Un retour d'image doit
+  s'accompagner d'une configuration d'endpoint compatible, uniquement si ce transport
+  est validé pour le compte; sinon conserver un fournisseur déjà testé. Ne pas
+  supprimer le secret HMAC ou le proxy tant que des challenges/tâches les utilisent.
+
 ## INFRA-2026-11-02-001 — Ne plus ignorer les suites de paiement PostgreSQL en CI
 
 - **Date / statut / périmètre :** 2 novembre 2026, Africa/Kinshasa ; correctif local des workflows de livraison production et staging, non exécuté sur GitHub Actions, aucun déploiement AWS.

@@ -24,6 +24,7 @@ const DEFAULT_OTP_TTL_SECONDS = 300;
 const OTP_PURPOSES: OtpPurpose[] = [
   'phone_verification',
   'pin_reset',
+  'pin_change',
   'admin_bootstrap',
 ];
 // Exceeds the provider's bounded request duration, including Redis bookkeeping.
@@ -44,10 +45,7 @@ export class OtpService {
   ): Promise<SendOtpResponse> {
     const normalizedPhone = this.normalizePhone(phone);
     return this.withPhoneLock(normalizedPhone, async () => {
-      const useMobishastra =
-        purpose === 'phone_verification' &&
-        this.configService.get<string>('OTP_PROVIDER')?.trim().toLowerCase() ===
-          'mobishastra';
+      const useMobishastra = this.usesMobishastra(purpose);
       if (useMobishastra) this.mobishastra().assertConfigured();
       // A denied resend must not invalidate the still-usable previous code.
       await reserveOtpSend(
@@ -55,10 +53,10 @@ export class OtpService {
         this.configService,
         normalizedPhone,
       );
-      // Legacy Didit settings still route to Keccel. Mobishastra is an explicit
-      // opt-in for phone verification only; PIN reset/admin remain unchanged.
+      // PIN flows can use Mobishastra independently of registration activation.
+      // Admin bootstrap and legacy Didit values retain Keccel.
       const message =
-        purpose === 'pin_reset'
+        purpose === 'pin_reset' || purpose === 'pin_change'
           ? OTP_SMS_MESSAGES.pinReset
           : purpose === 'admin_bootstrap'
             ? OTP_SMS_MESSAGES.adminBootstrap
@@ -71,10 +69,11 @@ export class OtpService {
           this.challengeKey(normalizedPhone, previousPurpose),
         );
       }
-      if (useMobishastra) {
+      if (useMobishastra && purpose !== 'admin_bootstrap') {
         return this.mobishastra().send(
           normalizedPhone,
           this.challengeKey(normalizedPhone, purpose),
+          purpose,
         );
       }
       const response = await this.keccelOtpService.sendOtp(
@@ -115,16 +114,14 @@ export class OtpService {
       const stored = await this.redisService.get<OtpChallenge>(key);
 
       // Verify with the issuing provider, even if configuration changed since
-      // sending. Local registration codes must never authorize PIN/admin flows.
-      if (
-        stored?.provider === 'mobishastra' &&
-        purpose === 'phone_verification'
-      ) {
+      // sending. Every local code is cryptographically bound to its purpose.
+      if (stored?.provider === 'mobishastra' && purpose !== 'admin_bootstrap') {
         return this.mobishastra().verify(
           normalizedPhone,
           otp.trim(),
           key,
           stored,
+          purpose,
         );
       }
 
@@ -159,6 +156,16 @@ export class OtpService {
       phone,
       this.configService.get<string>('DEFAULT_COUNTRY_CODE') || '+243',
     );
+  }
+
+  private usesMobishastra(purpose: OtpPurpose): boolean {
+    if (purpose === 'admin_bootstrap') return false;
+    const provider =
+      purpose === 'pin_reset' || purpose === 'pin_change'
+        ? this.configService.get<string>('OTP_PIN_RESET_PROVIDER')?.trim() ||
+          this.configService.get<string>('OTP_PROVIDER')
+        : this.configService.get<string>('OTP_PROVIDER');
+    return provider?.trim().toLowerCase() === 'mobishastra';
   }
 
   async consumePhoneVerificationProof(

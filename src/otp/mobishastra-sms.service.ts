@@ -9,13 +9,20 @@ import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
 import { Agent, type AgentOptions } from 'node:https';
 import type { AxiosProxyConfig } from 'axios';
+import { context } from '@opentelemetry/api';
+import { suppressTracing } from '@opentelemetry/core';
 import { mobishastraProxy } from './mobishastra-proxy';
+import { MobishastraOtpPurpose } from './otp.types';
 
-const DEFAULT_URL = 'https://valuesms.ae/sendsms_api_json.aspx';
-const ALLOWED_URLS = new Set([
-  DEFAULT_URL,
-  'https://mshastra.com/sendsms_api_json.aspx',
-]);
+const DEFAULT_URL = 'https://mshastra.com/sendurl.aspx';
+
+/** PDF pp.13–14: a successful HTTP response alone does not confirm submission. */
+function isAcceptedResponse(value: unknown): boolean {
+  return (
+    typeof value === 'string' &&
+    /^(?:000(?:\s*-\s*Send Successful)?|Send Successful)$/i.test(value.trim())
+  );
+}
 
 /** SMS transport only. Code generation and validation never leave Zwanga. */
 @Injectable()
@@ -65,13 +72,7 @@ export class MobishastraSmsService implements OnModuleDestroy {
     const sender = this.config.get<string>('MOBISHASTRA_SENDER_ID')?.trim();
     const url =
       this.config.get<string>('MOBISHASTRA_SMS_URL')?.trim() || DEFAULT_URL;
-    if (
-      !user ||
-      !pwd ||
-      !sender ||
-      sender.length > 13 ||
-      !ALLOWED_URLS.has(url)
-    ) {
+    if (!user || !pwd || !sender || sender.length > 13 || url !== DEFAULT_URL) {
       throw new ServiceUnavailableException(
         'Le service SMS est momentanément indisponible.',
       );
@@ -92,28 +93,42 @@ export class MobishastraSmsService implements OnModuleDestroy {
     return { user, pwd, sender, url, proxy };
   }
 
-  async sendCode(phone: string, code: string): Promise<void> {
+  async sendCode(
+    phone: string,
+    code: string,
+    purpose: MobishastraOtpPurpose = 'phone_verification',
+  ): Promise<void> {
     const { url, proxy, ...credentials } = this.settings();
-    if (!/^[1-9]\d{6,14}$/.test(phone) || !/^[1-9]\d{4}$/.test(code)) {
+    const codePattern =
+      purpose === 'phone_verification' ? /^[1-9]\d{4}$/ : /^[1-9]\d{5}$/;
+    if (!/^[1-9]\d{6,14}$/.test(phone) || !codePattern.test(code)) {
       throw new ServiceUnavailableException(
         'Envoi OTP momentanément indisponible.',
       );
     }
+    const operation =
+      purpose === 'phone_verification'
+        ? 'verification'
+        : purpose === 'pin_reset'
+          ? 'reinitialisation du PIN'
+          : 'modification du PIN';
     try {
-      // PDF v1.3 p.19: JSON array, international digits, English/Unicode.
-      // ASCII text fits one GSM SMS. Never put credentials or the code in a URL.
-      const result = await firstValueFrom(
-        this.http.post<unknown>(
-          url,
-          [
-            {
-              ...credentials,
-              number: phone,
-              msg: `Zwanga : votre code de verification est ${code}. Valable 15 minutes. Ne le partagez avec personne.`,
-              language: 'English',
+      // The selected single-message API uses HTTPS GET (PDF pp.13–14).
+      // Its query contains secrets: suppress HTTP spans (ADOT/X-Ray), including
+      // async subscription, and never expose Axios errors or the provider body.
+      const result = await context.with(suppressTracing(context.active()), () =>
+        firstValueFrom(
+          this.http.get<string>(url, {
+            params: {
+              user: credentials.user,
+              pwd: credentials.pwd,
+              senderid: credentials.sender,
+              mobileno: phone,
+              msgtext: `Zwanga : votre code de ${operation} est ${code}. Valable 15 minutes. Ne le partagez avec personne.`,
+              priority: 'High',
+              CountryCode: 'ALL',
+              ShowError: 'C',
             },
-          ],
-          {
             // Node owns the tunnel and its lifecycle; Axios must not install a
             // second proxy agent or inherit HTTP(S)_PROXY/NO_PROXY globally.
             adapter: 'http',
@@ -125,34 +140,19 @@ export class MobishastraSmsService implements OnModuleDestroy {
             maxRedirects: 0,
             maxContentLength: 16 * 1024,
             maxBodyLength: 4096,
+            responseType: 'text',
             headers: {
-              'Content-Type': 'application/json',
-              Accept: 'application/json',
+              Accept: 'text/plain',
+              'Cache-Control': 'no-store',
             },
-          },
+          }),
         ),
       );
-      const rows = result.data;
-      const candidate: unknown =
-        Array.isArray(rows) && rows.length === 1 ? rows[0] : null;
-      const row =
-        candidate && typeof candidate === 'object'
-          ? (candidate as Record<string, unknown>)
-          : null;
-      if (
-        result.status !== 200 ||
-        !row ||
-        typeof row !== 'object' ||
-        String(row.number) !== phone ||
-        typeof row.msg_id !== 'string' ||
-        !row.msg_id.trim() ||
-        typeof row.response !== 'string' ||
-        !/^send success(?:ful)?$/i.test(row.response.trim())
-      ) {
+      if (result.status !== 200 || !isAcceptedResponse(result.data)) {
         throw new Error('SMS_NOT_ACCEPTED');
       }
     } catch {
-      // Axios errors contain the request body (password, phone and OTP).
+      // Axios errors contain query parameters (password, phone and OTP).
       // HTTP 200 can also contain a provider error. Never log raw errors/data.
       this.logger.warn('MOBISHASTRA_SMS_NOT_CONFIRMED');
       // No automatic retry or fallback: a timeout can follow an accepted SMS.

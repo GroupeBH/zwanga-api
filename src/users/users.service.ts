@@ -2,6 +2,7 @@ import {
   Injectable,
   NotFoundException,
   BadRequestException,
+  ConflictException,
   Logger,
   UnauthorizedException,
 } from '@nestjs/common';
@@ -1004,18 +1005,49 @@ export class UsersService {
 
   // ==================== PIN Management Methods ====================
 
-  async changePin(userId: string, changePinDto: ChangePinDto): Promise<void> {
-    this.logger.log(`Changing PIN for user ${userId}`);
+  async requestPinChangeOtp(userId: string): Promise<{
+    message: string;
+    codeLength: number;
+    expiresInSeconds: number;
+  }> {
+    const user = await this.pinChangeUser(userId);
+    const delivery = await this.otpService.sendOtp(user.phone, 'pin_change');
+    return {
+      message: 'Code de modification envoyé par SMS au numéro de votre compte.',
+      codeLength: 6,
+      expiresInSeconds: delivery.expiresInSeconds ?? 300,
+    };
+  }
 
-    const user = await this.userRepository.findOne({ where: { id: userId },
-      select: ['id', 'role', 'password'] });
+  private async pinChangeUser(userId: string): Promise<User> {
+    const user = await this.userRepository.findOne({
+      where: { id: userId },
+      select: ['id', 'role', 'phone', 'password', 'isActive', 'status'],
+    });
     if (!user) throw new NotFoundException('Utilisateur introuvable');
-
     if (isAdminRole(user.role)) {
       throw new BadRequestException(
         'Utilisez le changement de mot de passe administrateur pour ce compte',
       );
     }
+    if (
+      !user.isActive ||
+      [UserStatus.INACTIVE, UserStatus.SUSPENDED].includes(user.status)
+    ) {
+      throw new BadRequestException('Ce compte ne peut pas modifier son code PIN.');
+    }
+    if (!user.phone || !user.password) {
+      throw new BadRequestException(
+        'Utilisez la réinitialisation par OTP pour définir votre code PIN.',
+      );
+    }
+    return user;
+  }
+
+  async changePin(userId: string, changePinDto: ChangePinDto): Promise<void> {
+    this.logger.log(`Changing PIN for user ${userId}`);
+
+    const user = await this.pinChangeUser(userId);
 
     // Keep a defensive runtime check in addition to DTO validation.
     if (!changePinDto.oldPin) {
@@ -1050,14 +1082,50 @@ export class UsersService {
       );
     }
 
+    if (!/^\d{6}$/.test(changePinDto.otp || '')) {
+      throw new BadRequestException({
+        code: 'PIN_CHANGE_OTP_REQUIRED',
+        message:
+          'Un code SMS est requis. Actualisez l’application ou utilisez « PIN oublié ».',
+      });
+    }
+    const verification = await this.otpService.verifyOtp(
+      user.phone,
+      changePinDto.otp,
+      'pin_change',
+    );
+    if (!verification.valid) {
+      throw new BadRequestException({
+        code: 'PIN_CHANGE_OTP_INVALID',
+        message: 'Code OTP invalide ou expiré.',
+      });
+    }
+
     const saltRounds = 10;
     const hashedNewPin = await bcrypt.hash(changePinDto.newPin, saltRounds);
 
-    await this.userRepository.update(userId, {
-      password: hashedNewPin,
-      refreshToken: null,
-      accessToken: null,
-    });
+    // Compare-and-set: do not overwrite a concurrent phone/PIN/account change.
+    // The external OTP call and bcrypt run outside any database row lock.
+    const updated = await this.userRepository.update(
+      {
+        id: userId,
+        phone: user.phone,
+        password: user.password,
+        role: user.role,
+        isActive: true,
+        status: Not(In([UserStatus.INACTIVE, UserStatus.SUSPENDED])),
+      },
+      {
+        password: hashedNewPin,
+        refreshToken: null,
+        accessToken: null,
+      },
+    );
+    if (updated.affected !== 1) {
+      throw new ConflictException(
+        'Le compte a changé pendant la vérification. Recommencez avec un nouveau code.',
+      );
+    }
 
     this.logger.log(`PIN changed successfully for user ${userId}`);
   }

@@ -193,6 +193,16 @@ describe('PIN reset security', () => {
     );
   });
 
+  it('aligns the pending window with Mobishastra without exposing provider metadata or the OTP', async () => {
+    otpService.sendOtp.mockResolvedValue({ success: true, codeLength: 6, expiresInSeconds: 895, otp: '123456' });
+    const sent = await service.requestPinResetOtp({ phone: user.phone });
+    expect(redisService.set).toHaveBeenCalledWith(`auth:pin-reset-otp:${userId}`, 'pending', 895);
+    userRepository.findOne.mockResolvedValueOnce(null);
+    expect(await service.requestPinResetOtp({ phone: user.phone })).toEqual(sent);
+    expect(Object.keys(sent)).toEqual(['message']);
+    expect(JSON.stringify(sent)).not.toContain('123456');
+  });
+
   it('completes forgotten-PIN recovery through the real Keccel adapter without invoking Didit', async () => {
     // Only HTTP and storage are simulated; AuthService, OtpService and Keccel's
     // request/response handling run together. No real SMS or database writes.

@@ -257,6 +257,17 @@ export class PublicUserInfoDto {
 
 export class ChangePinDto {
   @ApiProperty({
+    example: '123456',
+    description: 'OTP reçu pour la modification du PIN (6 chiffres)',
+  })
+  @IsString()
+  @IsNotEmpty()
+  @Matches(/^\d{6}$/, {
+    message: 'Le code de modification doit contenir exactement 6 chiffres.',
+  })
+  otp: string;
+
+  @ApiProperty({
     example: '1234',
     description: 'Ancien PIN (4 chiffres)',
   })

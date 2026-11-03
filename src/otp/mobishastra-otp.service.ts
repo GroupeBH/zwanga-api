@@ -11,6 +11,7 @@ import { RedisService } from '../common/services/redis.service';
 import { MobishastraSmsService } from './mobishastra-sms.service';
 import {
   MobishastraChallenge,
+  MobishastraOtpPurpose,
   SendOtpResponse,
   VerifyOtpResponse,
 } from './otp.types';
@@ -25,7 +26,10 @@ export const MOBISHASTRA_CHALLENGE_SCRIPT = `
   if not raw or ttl <= 0 then return 0 end
   local item = cjson.decode(raw)
   if item.provider ~= 'mobishastra' then return 0 end
+  local purpose = item.purpose or 'phone_verification'
+  if purpose ~= ARGV[5] then return 0 end
   if ARGV[1] == 'consume-proof' then
+    if purpose ~= 'phone_verification' then return 0 end
     if item.state ~= 'verified' or item.proofHash ~= ARGV[2] then return 0 end
     redis.call('DEL', KEYS[1])
     return 1
@@ -34,13 +38,19 @@ export const MOBISHASTRA_CHALLENGE_SCRIPT = `
   if ARGV[1] == 'ready' then
     if item.state ~= 'pending' then return 0 end
     item.state = 'sent'
-  elseif ARGV[1] == 'verify' then
+  elseif ARGV[1] == 'verify' or ARGV[1] == 'verify-once' then
+    if ARGV[1] == 'verify' and purpose ~= 'phone_verification' then return 0 end
+    if ARGV[1] == 'verify-once' and purpose ~= 'pin_reset' and purpose ~= 'pin_change' then return 0 end
     if item.state ~= 'sent' or item.attemptsRemaining <= 0 then return 0 end
     if item.codeHash ~= ARGV[3] then
       item.attemptsRemaining = item.attemptsRemaining - 1
       if item.attemptsRemaining <= 0 then redis.call('DEL', KEYS[1])
       else redis.call('SET', KEYS[1], cjson.encode(item), 'PX', ttl) end
       return 0
+    end
+    if ARGV[1] == 'verify-once' then
+      redis.call('DEL', KEYS[1])
+      return ttl
     end
     item.state = 'verified'
     item.codeHash = nil
@@ -73,9 +83,14 @@ export class MobishastraOtpService {
     return secret;
   }
 
-  private digest(phone: string, requestId: string, code: string): string {
+  private digest(
+    phone: string,
+    requestId: string,
+    code: string,
+    purpose: MobishastraOtpPurpose,
+  ): string {
     return createHmac('sha256', this.secret())
-      .update(JSON.stringify(['phone_verification', phone, requestId, code]))
+      .update(JSON.stringify([purpose, phone, requestId, code]))
       .digest('hex');
   }
 
@@ -86,24 +101,31 @@ export class MobishastraOtpService {
   }
 
   /** Called under OtpService's per-phone distributed lock and send budget. */
-  async send(phone: string, key: string): Promise<SendOtpResponse> {
-    const code = String(randomInt(10000, 100000));
+  async send(
+    phone: string,
+    key: string,
+    purpose: MobishastraOtpPurpose = 'phone_verification',
+  ): Promise<SendOtpResponse> {
+    // Retain six digits on existing PIN screens, five for phone verification.
+    const codeLength = purpose === 'phone_verification' ? 5 : 6;
+    const code = String(randomInt(10 ** (codeLength - 1), 10 ** codeLength));
     const challenge: MobishastraChallenge = {
       provider: 'mobishastra',
+      purpose,
       requestId: randomUUID(),
       state: 'pending',
       codeHash: '',
       attemptsRemaining: 5,
     };
-    challenge.codeHash = this.digest(phone, challenge.requestId, code);
+    challenge.codeHash = this.digest(phone, challenge.requestId, code, purpose);
     try {
       // If Redis fails, do not incur a paid SMS. Pending codes cannot verify.
       await this.redis.set(key, challenge, MOBISHASTRA_OTP_TTL_SECONDS);
-      await this.sms.sendCode(phone, code);
+      await this.sms.sendCode(phone, code, purpose);
       const ttl = Number(
         await this.redis.getClient().eval(MOBISHASTRA_CHALLENGE_SCRIPT, {
           keys: [key],
-          arguments: ['ready', challenge.requestId],
+          arguments: ['ready', challenge.requestId, '', '', purpose],
         }),
       );
       if (!(ttl > 0)) throw new Error('CHALLENGE_EXPIRED');
@@ -111,7 +133,7 @@ export class MobishastraOtpService {
         success: true,
         status: 'SENT',
         message: 'Code de vérification envoyé par SMS.',
-        codeLength: 5,
+        codeLength,
         expiresInSeconds: Math.floor(ttl / 1000),
       };
     } catch {
@@ -132,20 +154,30 @@ export class MobishastraOtpService {
     code: string,
     key: string,
     challenge: MobishastraChallenge,
+    purpose: MobishastraOtpPurpose = 'phone_verification',
   ): Promise<VerifyOtpResponse> {
+    if ((challenge.purpose ?? 'phone_verification') !== purpose) {
+      return { valid: false, status: 'INVALID' };
+    }
     const verificationToken = randomBytes(32).toString('base64url');
     try {
       const ttl = Number(
         await this.redis.getClient().eval(MOBISHASTRA_CHALLENGE_SCRIPT, {
           keys: [key],
           arguments: [
-            'verify',
+            purpose === 'phone_verification' ? 'verify' : 'verify-once',
             challenge.requestId,
-            this.digest(phone, challenge.requestId, code),
-            this.proofHash(phone, verificationToken),
+            this.digest(phone, challenge.requestId, code, purpose),
+            purpose === 'phone_verification'
+              ? this.proofHash(phone, verificationToken)
+              : '',
+            purpose,
           ],
         }),
       );
+      if (purpose !== 'phone_verification') {
+        return { valid: ttl > 0, status: ttl > 0 ? 'VALID' : 'INVALID' };
+      }
       return ttl > 0
         ? {
             valid: true,
@@ -171,7 +203,13 @@ export class MobishastraOtpService {
       return (
         (await this.redis.getClient().eval(MOBISHASTRA_CHALLENGE_SCRIPT, {
           keys: [key],
-          arguments: ['consume-proof', this.proofHash(phone, token)],
+          arguments: [
+            'consume-proof',
+            this.proofHash(phone, token),
+            '',
+            '',
+            'phone_verification',
+          ],
         })) === 1
       );
     } catch {
