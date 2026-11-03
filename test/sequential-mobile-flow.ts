@@ -20,8 +20,6 @@ import { User, UserRole } from '../src/users/entities/user.entity';
 import { Vehicle, VehicleType } from '../src/vehicles/entities/vehicle.entity';
 import { DriverOffer } from '../src/trip-requests/entities/driver-offer.entity';
 import { TripRequest, TripRequestStatus } from '../src/trip-requests/entities/trip-request.entity';
-import { RideNotificationReceipts1780000093000 } from '../src/database/migrations/1780000093000-RideNotificationReceipts';
-import { RideDeliveryRecovery1780000094000 } from '../src/database/migrations/1780000094000-RideDeliveryRecovery';
 
 type Context = { db: DataSource; relay: SequentialDispatchService; dispatch: DriverDispatchService;
   notifications: { dispatchUrgentNotifications: jest.Mock; dispatchTransactionalNotifications: jest.Mock };
@@ -57,9 +55,7 @@ export function sequentialMobileFlow(context: () => Context) {
     'local cross-repository flow: HTTP creation, real push publisher, mobile action, relay (timeout=%s)', async timeout => {
       const { db, dispatch, relay, notifications, driver, ids, offers } = context();
       const { rideActionHttpClient } = require(join(enabled!, 'tests/helpers/rideActionHttpClient.cjs'));
-      const runner = db.createQueryRunner();
-      const migrations = [new RideNotificationReceipts1780000093000(), new RideDeliveryRecovery1780000094000()];
-      for (const migration of migrations) await migration.up(runner);
+      // The parent fixture installs the current receipt schema through real migrations.
       const wire: any[] = [], deliveries: Promise<unknown>[] = [];
       const realFetch = global.fetch;
       const provider = createServer(async (req, res) => {
@@ -223,8 +219,6 @@ export function sequentialMobileFlow(context: () => Context) {
         notifications.dispatchUrgentNotifications.mockImplementation(async () => undefined);
         if (app) await app.close(); transport.mockRestore();
         provider.closeAllConnections(); await new Promise<void>(done => provider.close(() => done()));
-        for (const migration of migrations.reverse()) await migration.down(runner);
-        await runner.release();
       }
     }, 240000);
 }

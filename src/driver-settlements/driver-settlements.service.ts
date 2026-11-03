@@ -70,6 +70,7 @@ export interface DriverTripRevenueSummary {
   confirmedAmount: number;
   creditPendingAmount: number;
   ledgerVerified: true;
+  cashReceivedAmount: number;
   cashToCollectAmount: number;
   electronicPendingAmount: number;
   pointsPendingAmount: number;
@@ -253,6 +254,7 @@ export class DriverSettlementsService implements OnModuleInit {
           confirmedAmount: summary.confirmedAmount,
           creditPendingAmount: summary.creditPendingAmount,
           ledgerVerified: summary.ledgerVerified,
+          cashReceivedAmount: summary.cashReceivedAmount,
           cashToCollectAmount: summary.cashToCollectAmount,
           electronicPendingAmount: summary.electronicPendingAmount,
           pointsPendingAmount: summary.pointsPendingAmount,
@@ -283,6 +285,7 @@ export class DriverSettlementsService implements OnModuleInit {
     let creditPendingAmount = 0;
     const earningsByBooking = new Map(earnings.map((earning) => [earning.bookingId, earning]));
     let cashToCollectAmount = 0;
+    let cashReceivedAmount = 0;
     let electronicPendingAmount = 0;
     let pointsPendingAmount = 0;
     let zwangaSubsidyAmount = 0;
@@ -306,10 +309,13 @@ export class DriverSettlementsService implements OnModuleInit {
         confirmedAmount += this.roundMoney(Number(earning.netAmount));
       }
       if (booking.paymentMode === TripPaymentMode.CASH) {
-        cashToCollectAmount += this.resolveTripBookingPassengerAmount(
-          booking,
-          trip,
-        );
+        const cashAmount = this.resolveTripBookingPassengerAmount(booking, trip);
+        // Receipt evidence is separate from the earnings ledger. Cash never credits it.
+        const receiptAmount = booking.cashReceivedAt ? Number(booking.cashReceivedAmount) : 0;
+        const received = Number.isFinite(receiptAmount)
+          ? this.roundMoney(Math.min(cashAmount, Math.max(0, receiptAmount))) : 0;
+        cashReceivedAmount += received;
+        cashToCollectAmount += cashAmount - received;
         if (!earning) creditPendingAmount += this.resolveCashSubsidyEarningAmount(booking);
         continue;
       }
@@ -328,6 +334,7 @@ export class DriverSettlementsService implements OnModuleInit {
     confirmedAmount = this.roundMoney(confirmedAmount);
     creditPendingAmount = this.roundMoney(creditPendingAmount);
     cashToCollectAmount = this.roundMoney(cashToCollectAmount);
+    cashReceivedAmount = this.roundMoney(cashReceivedAmount);
     electronicPendingAmount = this.roundMoney(electronicPendingAmount);
     pointsPendingAmount = this.roundMoney(pointsPendingAmount);
     zwangaSubsidyAmount = this.roundMoney(zwangaSubsidyAmount);
@@ -340,12 +347,13 @@ export class DriverSettlementsService implements OnModuleInit {
       confirmedAmount,
       creditPendingAmount,
       ledgerVerified: true,
+      cashReceivedAmount,
       cashToCollectAmount,
       electronicPendingAmount,
       pointsPendingAmount,
       zwangaSubsidyAmount,
       totalExpectedAmount: this.roundMoney(
-        confirmedAmount + creditPendingAmount + cashToCollectAmount + electronicPendingAmount + pointsPendingAmount,
+        confirmedAmount + creditPendingAmount + cashReceivedAmount + cashToCollectAmount + electronicPendingAmount + pointsPendingAmount,
       ),
       completedBookings,
       generatedAt: new Date().toISOString(),
@@ -459,6 +467,11 @@ export class DriverSettlementsService implements OnModuleInit {
     if (summary.confirmedAmount > 0) {
       parts.push(
         `${this.formatMoney(summary.confirmedAmount)} ${summary.currency} crédités dans vos gains`,
+      );
+    }
+    if (summary.cashReceivedAmount > 0) {
+      parts.push(
+        `${this.formatMoney(summary.cashReceivedAmount)} ${summary.currency} reçus du passager en cash`,
       );
     }
     if (summary.cashToCollectAmount > 0) {

@@ -50,6 +50,9 @@ import { Trip } from '../../trips/entities/trip.entity';
 import { saveRequestTrip } from '../../trips/save-request-trip';
 import { Notification } from '../../notifications/entities/notification.entity';
 import { NotificationService } from '../../notifications/notifications.service';
+import { RideNotificationReceipts1780000093000 } from '../../database/migrations/1780000093000-RideNotificationReceipts';
+import { RideDeliveryRecovery1780000094000 } from '../../database/migrations/1780000094000-RideDeliveryRecovery';
+import { AlertDeliveryReliability1780000106000 } from '../../database/migrations/1780000106000-AlertDeliveryReliability';
 import { RequestDriverQueue, REQUEST_DEADLINES_KEY } from './request-driver-queue';
 import { SequentialDispatchService } from './sequential-dispatch.service';
 import { DriverDispatchService } from './dispatch.service';
@@ -97,6 +100,17 @@ const redisPort = Number(process.env.DISPATCH_TEST_REDIS_PORT);
         new PassengerDriverChangeReason1780000102000(), new MapDriverPriority1780000103000(),
         new RequestVehicleTypes1780000104000()]) await migration.up(runner);
     } finally { await runner.release(); }
+    // ORM synchronization already added the provider retry columns, but not the
+    // migration-only receipt tables. Recreate both through the real migrations,
+    // once per disposable suite, rather than an obsolete per-test schema.
+    await db.transaction(async manager => {
+      await manager.query(`ALTER TABLE notifications DROP COLUMN "pushAttempts",
+        DROP COLUMN "pushRetryAt", DROP COLUMN "pushPermanentFailure"`);
+      for (const migration of [new RideNotificationReceipts1780000093000(),
+        new RideDeliveryRecovery1780000094000(), new AlertDeliveryReliability1780000106000()]) {
+        await migration.up(manager.queryRunner!);
+      }
+    });
     await db.transaction(manager => new DriverResponse75Seconds1780000107000().up(manager.queryRunner!));
     await db.transaction(manager => new DriverResponse40Seconds1780000108000().up(manager.queryRunner!));
     await db.transaction(manager => new ReceiptResponseWindow1780000110000().up(manager.queryRunner!));
