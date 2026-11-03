@@ -632,7 +632,7 @@ describe('TripRequestsService motorcycle capacity', () => {
 describe('TripRequestsService unaccepted request expiration', () => {
   beforeEach(() => jest.mocked(enqueueTransactionalNotification).mockReset());
   const buildService = (
-    tripRequestRepository: Record<string, jest.Mock>,
+    tripRequestRepository: Record<string, unknown>,
     notificationService: Record<string, jest.Mock> = {},
   ) =>
     new TripRequestsService(

@@ -23,7 +23,7 @@ function buildService() {
     role: UserRole.DRIVER,
     phone: '+243000000003',
   });
-  const request = Object.assign(new TripRequest(), {
+  const request: TripRequest = Object.assign(new TripRequest(), {
     id: 'request',
     passengerId: passenger.id,
     passenger,

@@ -27,7 +27,7 @@ describe('Admin user financial actions contract', () => {
     const referrals = {
       attachReferrer: jest.fn().mockResolvedValue({ newlyAttached: true }),
     };
-    const controller = new AdminController({} as any, referrals as any);
+    const controller = new AdminController({} as any, referrals as any, {} as any);
     const dto = {
       referrerUserId: 'parent',
       reason: 'Correction après vérification',

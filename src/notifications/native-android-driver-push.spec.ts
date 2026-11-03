@@ -28,7 +28,7 @@ describe('Android v6 native delivery', () => {
           ridePricePerSeat: '2500',
           rideArrival: 'Test',
         },
-      } as Notification;
+      } as unknown as Notification;
       const payload = nativeAndroidDriverPush(n, 'synthetic-token', until);
       expect(payload.data).toMatchObject({
         nativeAlert: 'driver-v6',
@@ -81,7 +81,7 @@ describe('Android v6 native delivery', () => {
           rideArrival: '😀'.repeat(2000),
           rideDeparture: '😀'.repeat(2000),
         },
-      } as Notification,
+      } as unknown as Notification,
       'synthetic-token',
       new Date().toISOString(),
     );

@@ -5,7 +5,7 @@ import type { Notification } from './entities/notification.entity';
 const fixture = (data: Record<string, unknown> = {}) => ({ id: 'local-notification', title: 'Nouvelle demande', body: 'Ancien texte : 2500 FC',
   data: { type: 'trip_request_nearby', driverId: 'driver', tripRequestId: 'request',
     ridePriceKind: 'budget', ridePricePerSeat: '2500', rideDeparture: 'Départ test', rideArrival: 'Arrivée test', ...data },
-}) as Notification;
+}) as unknown as Notification;
 describe('price and route as text only', () => {
   it.each(['new_booking','trip_request_nearby','driver_dispatch_offer'])('shows price and route for %s in native Android and APNs', type => {
     const n = fixture({ type }), until = new Date(Date.now()+60000).toISOString();
@@ -13,10 +13,10 @@ describe('price and route as text only', () => {
     const ios = iosDriverPush(n, 'synthetic', until);
     expect(android.data.title.replace(/[\u202f\u00a0]/g,' ')).toBe('Zwanga · Budget : 2 500 FC / place');
     expect(android.data.message).toContain('Départ test → Arrivée test');
-    expect(ios.apns?.payload.aps.alert).toMatchObject({ title: android.data.title, body: android.data.message });
+    expect(ios.apns?.payload?.aps.alert).toMatchObject({ title: android.data.title, body: android.data.message });
     expect(android.data.driverId).toBe('driver'); expect(android.data.ringUntil).toBe(until);
     expect(android.data).not.toHaveProperty('rideMapUrl');
-    expect(ios.apns?.payload.aps).not.toHaveProperty('mutableContent');
+    expect(ios.apns?.payload?.aps).not.toHaveProperty('mutableContent');
     expect(Buffer.byteLength(JSON.stringify(android.data))).toBeLessThan(4000);
   });
   it('distinguishes a known free ride from a missing or invalid amount', () => {
@@ -40,7 +40,7 @@ describe('price and route as text only', () => {
       const card = rideCardContent(n);
       expect(card.body).toContain('2 places'); expect(card.body).toContain('10:00');
       expect(card.body).toContain('28/10');
-      const alert = iosDriverPush(n, 'synthetic', new Date(Date.now()+60000).toISOString()).apns!.payload.aps.alert as any;
+      const alert = iosDriverPush(n, 'synthetic', new Date(Date.now()+60000).toISOString()).apns!.payload!.aps.alert as any;
       expect(alert.body).toContain('2 places'); expect(alert.body).toContain('10:00');
     }
     const invalid = rideCardContent(fixture({ rideSeats: '0', rideDepartureAt: 'invalid' }));

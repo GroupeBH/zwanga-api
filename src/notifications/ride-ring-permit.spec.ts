@@ -87,4 +87,33 @@ describe('Delivery-time ride ringing permission', () => {
     }
     expect(validateSync(Object.assign(new RideRingCheckDto(), { token: setup().token }))).toEqual([]);
   });
+
+  it('REST recovery returns the original recipient-bound permit, without persisting or extending it', async () => {
+    jest.useFakeTimers();
+    const { service, row } = setup();
+    service.logger = { debug: jest.fn() };
+    const query = { orderBy: jest.fn().mockReturnThis(), take: jest.fn().mockReturnThis(), skip: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(), getManyAndCount: jest.fn().mockResolvedValue([[row], 1]), getCount: jest.fn().mockResolvedValue(1) };
+    service.buildInboxQuery = jest.fn().mockReturnValue(query);
+    const before = JSON.stringify(row);
+    const result = await service.findAllByUser(user, { limit: 20, scope: 'critical' });
+    const permit = readRideRingPermit(secret, result.notifications[0].data.ringValidationToken);
+    expect(permit).toEqual({ notificationId: id, userId: user, until: Date.parse(row.data.expiresAt) });
+    expect(result.notifications[0].data.ringUntil).toBe(row.data.expiresAt);
+    expect(service.buildInboxQuery).toHaveBeenCalledWith(user, 'critical');
+    expect(JSON.stringify(row)).toBe(before);
+    jest.advanceTimersByTime(40_000);
+    const expired = await service.findAllByUser(user);
+    expect(expired.notifications[0].data).not.toHaveProperty('ringValidationToken');
+    expect(JSON.stringify(row)).toBe(before);
+  });
+
+  it('preserves an explicitly shorter transport deadline on rehydration', () => {
+    const { service, row } = setup();
+    const until = Date.now() + 5000;
+    const short = { ...row, data: { ...row.data, ringUntil: new Date(until).toISOString() } };
+    const result = service.withRideRingPermit(short);
+    expect(readRideRingPermit(secret, result.data.ringValidationToken)?.until).toBe(until);
+    expect(result.data.ringUntil).toBe(short.data.ringUntil);
+  });
 });

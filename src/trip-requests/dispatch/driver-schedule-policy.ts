@@ -1,5 +1,6 @@
 import { ConflictException } from '@nestjs/common';
 import type { EntityManager } from 'typeorm';
+import { DriverScheduleConflictException, type DriverScheduleConflict } from '../../common/driver-schedule-conflict';
 
 // A departure window is not an arrival time. Until a reliable arrival estimate
 // exists, reserve two hours after its latest departure, plus a 30-minute transfer.
@@ -19,34 +20,64 @@ const overlaps = (
   `(${start} < ${wantedEnd} + interval '${DRIVER_TRANSFER_MINUTES} minutes'
     AND ${end} + interval '${DRIVER_TRANSFER_MINUTES} minutes' > ${wantedStart})`;
 
-export function driverScheduleConflictSql(
+function scheduleConflicts(
   driver: string,
   start: string,
   end: string,
   exceptRequest = 'NULL::uuid',
   exceptTrip = 'NULL::uuid',
   requestsOnly = false,
-): string {
-  return `(EXISTS (SELECT 1 FROM trips busy_trip WHERE busy_trip."driverId" = ${driver}
+  select: [string, string, string] = ['1', '1', '1'],
+): string[] {
+  return [`SELECT ${select[0]} FROM trips busy_trip WHERE busy_trip."driverId" = ${driver}
     AND (${exceptTrip} IS NULL OR busy_trip.id <> ${exceptTrip})
     AND (${exceptRequest} IS NULL OR busy_trip."tripRequestId" IS DISTINCT FROM (${exceptRequest})::text)
     ${requestsOnly ? 'AND (busy_trip."isPrivate" = true OR busy_trip."tripRequestId" IS NOT NULL)' : ''}
     AND (busy_trip.status = 'ongoing' OR (busy_trip.status = 'upcoming'
-      AND ${overlaps('busy_trip."departureDate"', endOf('busy_trip."departureDate"', 'busy_trip."estimatedArrivalDate"'), start, end)})))
-    OR EXISTS (SELECT 1 FROM trip_requests assigned WHERE assigned."selectedDriverId" = ${driver}
+      AND ${overlaps('busy_trip."departureDate"', endOf('busy_trip."departureDate"', 'busy_trip."estimatedArrivalDate"'), start, end)}))`,
+    `SELECT ${select[1]} FROM trip_requests assigned WHERE assigned."selectedDriverId" = ${driver}
       AND assigned.status = 'driver_selected' AND (${exceptRequest} IS NULL OR assigned.id <> ${exceptRequest})
       AND NOT EXISTS (SELECT 1 FROM trips linked WHERE linked."driverId" = assigned."selectedDriverId"
         AND (linked."tripRequestId" = assigned.id::text
         OR linked.id = CASE WHEN assigned."tripId" ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
           THEN assigned."tripId"::uuid ELSE NULL END))
-      AND ${overlaps('assigned."departureDateMin"', endOf('assigned."departureDateMax"'), start, end)})
-    OR EXISTS (SELECT 1 FROM trip_request_dispatch_offers preparation
+      AND ${overlaps('assigned."departureDateMin"', endOf('assigned."departureDateMax"'), start, end)}`,
+    `SELECT ${select[2]} FROM trip_request_dispatch_offers preparation
       JOIN trip_requests preparing ON preparing.id = preparation."requestId"
       WHERE preparation."driverId" = ${driver} AND preparation.status = 'pending'
         AND preparation.phase IN ('accepting','passenger')
         AND (${exceptRequest} IS NULL OR preparing.id <> ${exceptRequest})
         AND preparing.status IN ('pending','offers_received','driver_selected')
-        AND ${overlaps('preparing."departureDateMin"', endOf('preparing."departureDateMax"'), start, end)}))`;
+        AND ${overlaps('preparing."departureDateMin"', endOf('preparing."departureDateMax"'), start, end)}`];
+}
+
+export function driverScheduleConflictSql(
+  driver: string, start: string, end: string,
+  exceptRequest = 'NULL::uuid', exceptTrip = 'NULL::uuid', requestsOnly = false,
+): string {
+  return `(${scheduleConflicts(driver, start, end, exceptRequest, exceptTrip, requestsOnly)
+    .map(query => `EXISTS (${query})`).join(' OR ')})`;
+}
+
+/** Read only on rejection, using the exact same predicates as admission. */
+export async function findDriverRequestConflict(manager: EntityManager, driverId: string, requestId: string) {
+  const summary = (alias: string, kind: 'trip' | 'request', date: string, status = `${alias}.status::text`) =>
+    `'${kind}'::text AS kind, ${alias}.id, $1::uuid AS "driverId",
+      ${alias}."departureLocation" AS departure, ${alias}."arrivalLocation" AS arrival,
+      ${alias}."${date}" AS "departureDate", ${status} AS status`;
+  const queries = scheduleConflicts('$1::uuid', 'GREATEST(wanted."departureDateMin", now())',
+    endOf('GREATEST(wanted."departureDateMax", now())'), '$2::uuid', 'NULL::uuid', false, [
+      summary('busy_trip', 'trip', 'departureDate'),
+      summary('assigned', 'request', 'departureDateMin'),
+      summary('preparing', 'request', 'departureDateMin', "'preparing'::text"),
+    ]);
+  const [conflict] = await manager.query<DriverScheduleConflict[]>(`
+    SELECT conflict.* FROM trip_requests wanted
+    CROSS JOIN LATERAL (${queries.join(' UNION ALL ')}) conflict
+    WHERE wanted.id = $2::uuid
+    ORDER BY (conflict.status = 'ongoing') DESC, conflict."departureDate", conflict.kind, conflict.id
+    LIMIT 1`, [driverId, requestId]);
+  return conflict;
 }
 
 export function driverRequestConflictSql(
@@ -77,11 +108,8 @@ export async function assertDriverRequestSchedule(
     [driverId, requestId],
   );
   if (!result || result.busy)
-    throw new ConflictException({
-      code: 'DRIVER_SCHEDULE_CONFLICT',
-      message:
-        'Vous avez déjà une course à cette heure. Choisissez une demande à un autre horaire.',
-    });
+    throw new DriverScheduleConflictException(result?.busy
+      ? await findDriverRequestConflict(manager, driverId, requestId) : undefined);
 }
 
 /** Public-trip owner is already locked. Preserve public/public publication

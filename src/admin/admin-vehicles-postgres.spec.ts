@@ -182,7 +182,7 @@ const bin = process.env.AUDIT_TEST_POSTGRES_BIN;
         .map((vehicle) => vehicle.id)
         .sort()
         .reverse();
-      const result = [];
+      const result: string[] = [];
       for (const page of [1, 2, 3, 4]) {
         const value = await service.list(admin.id, { page, limit: 1 });
         expect(value.total).toBe(3);

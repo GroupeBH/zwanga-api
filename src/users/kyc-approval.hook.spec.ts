@@ -96,7 +96,7 @@ describe('internal KYC approval hook', () => {
     await expect(applyKycApprovalHook(f.manager, f.kyc)).rejects.toThrow(
       'db unavailable',
     );
-    f.manager.queryRunner!.isTransactionActive = false;
+    Object.defineProperty(f.manager.queryRunner!, 'isTransactionActive', { value: false });
     await expect(applyKycApprovalHook(f.manager, f.kyc)).rejects.toThrow(
       'requires a transaction',
     );

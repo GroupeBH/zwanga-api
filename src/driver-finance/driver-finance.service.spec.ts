@@ -1,5 +1,6 @@
 import { DriverFinanceService } from './driver-finance.service';
 import { Trip } from '../trips/entities/trip.entity';
+import { TripPaymentMode } from '../payments/enums/trip-payment-mode.enum';
 import { Booking } from '../bookings/entities/booking.entity';
 import { WalletAccount } from '../wallet/entities/wallet-account.entity';
 
@@ -118,7 +119,7 @@ describe('driver finance API projections', () => {
       expect(
         (
           await service.tripOptions('passenger', 'trip')
-        ).availablePaymentModes.includes('cash'),
+        ).availablePaymentModes.includes(TripPaymentMode.CASH),
       ).toBe(allowed);
     },
   );

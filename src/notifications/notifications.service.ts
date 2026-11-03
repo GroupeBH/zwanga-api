@@ -613,9 +613,12 @@ export class NotificationService implements OnModuleInit {
 
   private withRideRingPermit(notification: Notification): Notification {
     if (!needsRideRingPermit(notification.data) || !notification.userId) return notification;
+    const original = Date.parse(String(notification.data?.ringUntil ?? ''));
+    const deadline = Math.min(Date.parse(this.driverRingUntil(notification)), Number.isFinite(original) ? original : Infinity);
+    if (deadline <= Date.now()) return notification;
     const ringValidationToken = issueRideRingPermit(this.configService.get('JWT_SECRET'),
-      notification.id, notification.userId, Date.parse(this.driverRingUntil(notification)));
-    return { ...notification, data: { ...notification.data, ringValidationToken } } as Notification;
+      notification.id, notification.userId, deadline);
+    return { ...notification, data: { ...notification.data, ringUntil: new Date(deadline).toISOString(), ringValidationToken } } as Notification;
   }
 
   /** Read-only delivery-time check. Never trusts the push's claimed business state. */
@@ -1484,7 +1487,9 @@ export class NotificationService implements OnModuleInit {
       .getCount();
 
     return {
-      notifications,
+      // Rehydrate the same short-lived capability as push delivery. Never renew
+      // its original deadline or persist the transport token on the inbox row.
+      notifications: notifications.map(notification => this.withRideRingPermit(notification)),
       total,
       unreadCount,
     };

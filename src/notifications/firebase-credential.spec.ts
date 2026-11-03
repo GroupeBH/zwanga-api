@@ -23,10 +23,10 @@ describe('cancellable Firebase OAuth refresh', () => {
   it('invalidates a rejected cached token without exposing credentials in errors', async () => {
     const auth = jest
       .spyOn(JWT.prototype, 'authorize')
-      .mockResolvedValue({
+      .mockImplementation(async () => ({
         access_token: 'synthetic',
         expiry_date: Date.now() + 3600000,
-      });
+      }));
     const credential = boundedFirebaseCredential(account);
     await credential.getAccessToken();
     await credential.getAccessToken();
@@ -35,7 +35,7 @@ describe('cancellable Firebase OAuth refresh', () => {
     await credential.getAccessToken();
     expect(auth).toHaveBeenCalledTimes(2);
     invalidateFirebaseCredential(credential);
-    auth.mockRejectedValue({ message: 'SECRET', response: { status: 401 } });
+    auth.mockImplementation(async () => { throw { message: 'SECRET', response: { status: 401 } }; });
     await expect(credential.getAccessToken()).rejects.toMatchObject({
       message: 'FCM_AUTH_FAILED',
       details: { transient: false, httpStatus: 401 },

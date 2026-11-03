@@ -37,7 +37,7 @@ export function androidDriverBackup(_notification: Notification, data: Record<st
     // notification fit. Fail this delivery for diagnosis, not FCM indefinitely.
     throw new Error('DRIVER_ALERT_PAYLOAD_TOO_LARGE');
   }
-  return payload;
+  return payload as typeof payload & Record<string, unknown>;
 }
 
 export function androidDriverBackupTtl(notification: Notification, now = Date.now()): number {

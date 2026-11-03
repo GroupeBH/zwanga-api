@@ -56,7 +56,7 @@ describe('Automatic notification coordination', () => {
       .fn()
       .mockResolvedValueOnce(batch)
       .mockResolvedValueOnce([{ id: 'last', fcmToken: ' ' }]);
-    const seen = [];
+    const seen: string[] = [];
     for await (const user of activePushUsers({ find } as never))
       seen.push(user.id);
     expect(seen).toHaveLength(100);

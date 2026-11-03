@@ -72,7 +72,7 @@ describe('driver welcome bonus notification-only migration', () => {
 
   it('requires a transaction before accessing the database', async () => {
     const f = fixture();
-    f.runner.isTransactionActive = false;
+    Object.defineProperty(f.runner, 'isTransactionActive', { value: false });
     await expect(migration.up(f.runner)).rejects.toThrow(
       'requires a transaction',
     );

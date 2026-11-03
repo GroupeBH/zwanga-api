@@ -88,7 +88,7 @@ describe('future 200-token welcome bonus migration', () => {
 
   it('requires a transaction and refuses reversal of financial history', async () => {
     const f = await fixture();
-    f.runner.isTransactionActive = false;
+    Object.defineProperty(f.runner, 'isTransactionActive', { value: false });
     await expect(migration.up(f.runner)).rejects.toThrow(
       'requires a transaction',
     );

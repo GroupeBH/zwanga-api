@@ -119,7 +119,7 @@ describe('User gender', () => {
       status: UserStatus.ACTIVE,
       vehicles: [],
       kycDocuments: [],
-    } as User;
+    } as unknown as User;
     const userRepository = {
       findOne: jest.fn().mockResolvedValue(user),
       update: jest.fn().mockResolvedValue({ affected: 1 }),

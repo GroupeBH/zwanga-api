@@ -1,4 +1,5 @@
 import { DataSource } from 'typeorm';
+import type { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
 import { ConfigService } from '@nestjs/config';
 import { IsolatedPostgres } from '../../test/isolated-postgres';
 import { AddStoreManagement1780000077000 } from '../database/migrations/1780000077000-AddStoreManagement';
@@ -383,7 +384,7 @@ const bin = process.env.AUDIT_TEST_POSTGRES_BIN;
       });
       const queued = await repository.enqueue({
         ...job('reply', 'reply'),
-        input: { recordId: record.id, reply, revision: 1 },
+        input: { ...job().input, recordId: record.id, reply, revision: 1 },
       });
       await db.getRepository(StoreReviewWorkflow).save({
         recordId: record.id,
@@ -410,14 +411,15 @@ const bin = process.env.AUDIT_TEST_POSTGRES_BIN;
       ).completedAt!;
       await db.getRepository(StoreRecord).update(record.id, {
         syncedAt: new Date(completed.getTime() + 1000),
-        content: { response: 'Un autre texte.' },
+        // TypeORM's deep-partial conditional does not model this jsonb dictionary.
+        content: { response: 'Un autre texte.' } as unknown as QueryDeepPartialEntity<StoreRecord>['content'],
       });
       await expect(operations.reconcileReply(actor, record.id)).rejects.toThrow(
         'Relancez',
       );
       await db
         .getRepository(StoreRecord)
-        .update(record.id, { content: { response: reply } });
+        .update(record.id, { content: { response: reply } as unknown as QueryDeepPartialEntity<StoreRecord>['content'] });
       expect((await operations.reconcileReply(actor, record.id)).status).toBe(
         'responded',
       );

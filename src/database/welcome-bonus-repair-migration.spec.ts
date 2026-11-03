@@ -91,7 +91,7 @@ describe('welcome bonus repair migrations', () => {
     'requires a transaction and rejects unsafe rollback (%s)',
     async (migration) => {
       const f = await fixture();
-      f.runner.isTransactionActive = false;
+      Object.defineProperty(f.runner, 'isTransactionActive', { value: false });
       await expect(migration.up(f.runner)).rejects.toThrow(
         'requires a transaction',
       );

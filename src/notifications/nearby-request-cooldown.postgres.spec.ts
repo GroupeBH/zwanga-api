@@ -433,8 +433,8 @@ const pgBin = process.env.NEARBY_RING_TEST_POSTGRES_BIN;
       const rows: { outcome: string; count: number }[] = await db.query(
         'SELECT outcome, count(*)::int AS count FROM nearby_driver_ring_events GROUP BY outcome',
       );
-      expect(rows.find((row) => row.outcome === 'declined').count).toBe(7);
-      expect(rows.find((row) => row.outcome === 'answered').count).toBe(1);
+      expect(rows.find((row) => row.outcome === 'declined')?.count).toBe(7);
+      expect(rows.find((row) => row.outcome === 'answered')?.count).toBe(1);
       expect(rows.some((row) => row.outcome === 'muted')).toBe(false);
       expect(await prepare(await create())).toBe(true);
     });

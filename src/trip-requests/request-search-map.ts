@@ -8,8 +8,14 @@ import { driverRequestConflictSql } from './dispatch/driver-schedule-policy';
 import { USABLE_DRIVER_LOCATION_SQL } from './dispatch/driver-location-policy';
 import { requestNotRefusedSql } from './request-refusal';
 
+type SearchMapResult = {
+  requestId: string; radiusKm: number; generatedAt: string; searching: boolean; total: number; truncated: boolean;
+  groups: { id: string; latitude: number; longitude: number; count: number }[];
+  vehicles: { id: string; latitude: number; longitude: number; vehicleType: string; positionUpdatedAt: string }[];
+};
+
 /** Owner-only last-known positions. Marker IDs are scoped to this request, not user IDs. */
-export async function requestSearchMap(manager: EntityManager, passengerId: string, requestId: string) {
+export async function requestSearchMap(manager: EntityManager, passengerId: string, requestId: string): Promise<SearchMapResult> {
   const request = await manager.getRepository(TripRequest).findOne({ where: { id: requestId, passengerId } });
   if (!request) throw new NotFoundException('Commande introuvable.');
   const base = { requestId, radiusKm: NEARBY_DRIVER_RADIUS_METERS / 1000, generatedAt: new Date().toISOString() };
