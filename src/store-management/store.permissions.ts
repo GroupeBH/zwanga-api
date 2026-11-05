@@ -30,6 +30,14 @@ export const STORE_PERMISSIONS = [
   'store.alerts.read',
   'store.alerts.manage',
   'store.access.manage',
+  'mobile.analytics.read',
+  'mobile.installations.read',
+  'mobile.policies.manage',
+  'mobile.campaigns.read',
+  'mobile.campaigns.create',
+  'mobile.campaigns.approve',
+  'mobile.campaigns.launch',
+  'mobile.audit.read',
 ] as const;
 export type StorePermissionName = (typeof STORE_PERMISSIONS)[number];
 const READ_ONLY = STORE_PERMISSIONS.filter(
@@ -85,7 +93,7 @@ export class StoreAccess {
     role: unknown,
   ): Promise<readonly StorePermissionName[]> {
     if (!isBackOfficeRole(role)) return [];
-    if (role === UserRole.SUPER_ADMIN || !this.config.enabled)
+    if (role === UserRole.SUPER_ADMIN || (!this.config.enabled && this.config.value('MOBILE_OPERATIONS_ENABLED') !== 'true'))
       return storePermissions(role);
     const grant = await this.db
       .getRepository(StoreAccessGrant)

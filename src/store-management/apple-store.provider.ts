@@ -4,6 +4,7 @@ import { StoreAuth } from './store.auth';
 import { StoreConfig } from './store.config';
 import { decodeReport, StoreHttp } from './store.http';
 import { normalizeReport, parseReport } from './store.reports';
+import { appleSalesPartition } from './apple-sales';
 import {
   day,
   identifier,
@@ -18,6 +19,15 @@ import {
 } from './store.types';
 
 const API = 'https://api.appstoreconnect.apple.com/v1';
+// Apple catalog names can differ from the stable dataset names used by our
+// imports and analytics queries. Keep aliases on the same partition keys.
+const REPORT_NAME_ALIASES = new Map([
+  ['App Downloads', 'App Store Downloads'],
+  [
+    'App Store Installation and Deletion',
+    'App Store Installations and Deletions',
+  ],
+]);
 const fields = (value: any, keys: string[]) =>
   Object.fromEntries(keys.map((key) => [key, value?.[key] ?? null]));
 
@@ -69,7 +79,7 @@ export class AppleStoreProvider {
   ) {
     const data: any[] = [];
     for await (const page of this.pages(path, signal, params))
-      data.push(...page.data);
+      data.push(...page.data.map(r=>({...r, _included:page.included??[]})));
     return data;
   }
 
@@ -154,6 +164,7 @@ export class AppleStoreProvider {
       }
     }
     if (task === 'reports' || task === 'vitals') {
+      if (task === 'reports' && this.config.value('STORE_APPLE_SALES_REPORTS_ENABLED') === 'true') yield* this.sales(app,range,signal);
       yield* this.reports(app, task, range, signal, imported);
       return;
     }
@@ -170,7 +181,7 @@ export class AppleStoreProvider {
       const releases = await this.collect(
         `/apps/${identifier(app)}/appStoreVersions`,
         signal,
-        { 'filter[platform]': 'IOS' },
+        { 'filter[platform]': 'IOS', include: 'build,appStoreVersionPhasedRelease' },
       );
       const builds = await this.collect('/builds', signal, {
         'filter[app]': app,
@@ -191,7 +202,7 @@ export class AppleStoreProvider {
           ...releases.map((r) => ({
             kind: 'release' as const,
             externalId: textValue(r.id, 256),
-            content: fields(r.attributes, [
+            content: {...fields(r.attributes, [
               'versionString',
               'platform',
               'appStoreState',
@@ -199,6 +210,11 @@ export class AppleStoreProvider {
               'releaseType',
               'earliestReleaseDate',
             ]),
+              buildId:r.relationships?.build?.data?.id??null,
+              buildVersion:r._included?.find(i=>i.type==='builds'&&i.id===r.relationships?.build?.data?.id)?.attributes?.version??null,
+              phasedReleaseState:r._included?.find(i=>i.type==='appStoreVersionPhasedReleases'&&i.id===r.relationships?.appStoreVersionPhasedRelease?.data?.id)?.attributes?.phasedReleaseState??null,
+              territoryAvailability:null,
+            },
           })),
           ...builds.map((b) => ({
             kind: 'build' as const,
@@ -335,6 +351,31 @@ export class AppleStoreProvider {
     });
   }
 
+  private async *sales(app: string,range: StoreRange,signal: AbortSignal): AsyncGenerator<StoreBatch> {
+    const vendor=this.config.value('STORE_APPLE_VENDOR_NUMBER');
+    if (!/^\d{1,30}$/.test(vendor)) {
+      yield {items:[{kind:'report',externalId:'sales-summary-capability',content:{source:'Sales and Trends',state:'unavailable',errorCode:'APPLE_VENDOR_REQUIRED'}}]}; return;
+    }
+    const days=Math.floor((Date.parse(range.to)-Date.parse(range.from))/86400000)+1;
+    if (days>31) throw new StoreProviderError('SALES_REPORT_MAX_31_DAYS');
+    for (let offset=0;offset<days;offset++) {
+      const date=day(new Date(Date.parse(range.from)+offset*86400000));
+      try {
+        const bytes=await this.http.api<ArrayBuffer>(`${API}/salesReports`,this.auth.apple(),{signal,responseType:'arraybuffer',
+          headers:{Accept:'application/a-gzip'},params:{'filter[frequency]':'DAILY','filter[reportType]':'SALES',
+            'filter[reportSubType]':'SUMMARY','filter[version]':'1_0','filter[vendorNumber]':vendor,'filter[reportDate]':date}});
+        const decoded=await decodeReport(Buffer.from(bytes));
+        const partition=appleSalesPartition(decoded,app,date,new Date().toISOString());
+        yield {partitions:[partition],items:[{kind:'report',externalId:`sales-summary:${date}`,content:{source:'Sales and Trends / SALES SUMMARY',
+          date,state:'available',definition:'commercial_units_by_product_type_not_installations',rows:partition.points.length}}]};
+      } catch(e) {
+        if (e instanceof StoreProviderError && e.code==='PROVIDER_DATA_UNAVAILABLE') {
+          yield {items:[{kind:'report',externalId:`sales-summary:${date}`,content:{source:'Sales and Trends',date,state:'unavailable',errorCode:e.code}}]};
+        } else throw e;
+      }
+    }
+  }
+
   private async *reports(
     app: string,
     task: 'reports' | 'vitals',
@@ -365,10 +406,11 @@ export class AppleStoreProvider {
         signal,
       );
       for (const report of reports) {
-        const name = textValue(report.attributes?.name, 256).replace(
-          / Standard$/,
-          '',
-        );
+        const sourceName = textValue(report.attributes?.name, 256);
+        // Only Standard (or legacy unsuffixed) names are recognized. Detailed
+        // must retain its suffix so it cannot be mixed into the same counts.
+        const baseName = sourceName.replace(/ Standard$/, '');
+        const name = REPORT_NAME_ALIASES.get(baseName) ?? baseName;
         const format = formats[name as keyof typeof formats];
         if (!format) continue; // Never mix Standard and Detailed: that would double count.
         const reportId = textValue(report.id, 256);
@@ -470,6 +512,7 @@ export class AppleStoreProvider {
                 externalId,
                 content: {
                   name,
+                  sourceName,
                   instanceId,
                   reportId,
                   processingDate: revision,

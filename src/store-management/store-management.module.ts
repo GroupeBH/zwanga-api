@@ -19,6 +19,7 @@ import { StoreExportsService } from './store-exports.service';
 @Module({
   imports: [TypeOrmModule.forFeature(STORE_ENTITIES)],
   controllers: [StoreController, StoreOperationsController],
+  exports: [StoreConfig, StoreAccess, StorePermissionsGuard, StoreService, StoreAlertsService, StoreOperationsService],
   providers: [
     StoreConfig,
     StoreAuth,

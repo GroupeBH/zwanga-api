@@ -16,7 +16,18 @@ import {
   StoreSyncDto,
   storeRange,
 } from './store.dto';
-import { STORE_PLATFORMS, StoreJobTask, StorePlatform } from './store.types';
+import {
+  day,
+  STORE_PLATFORMS,
+  StoreJobTask,
+  StorePlatform,
+} from './store.types';
+import {
+  DOWNLOAD_METRICS,
+  DownloadDay,
+  downloadSummary,
+  StoreDownloads,
+} from './store-downloads';
 import { storePermissions } from './store.permissions';
 import { METRIC_CATALOG } from './store.reports';
 import {
@@ -39,11 +50,33 @@ export class StoreService {
       enabled: this.config.enabled,
       scheduled: this.config.scheduled,
       permissions,
+      features: {
+        reviewReplies:
+          this.config.enabled &&
+          this.config.value('STORE_REVIEW_REPLIES_ENABLED') === 'true',
+        googleTemporaryEdits:
+          this.config.enabled &&
+          this.config.value('STORE_GOOGLE_TEMPORARY_EDITS_ENABLED') === 'true',
+        mobileOperations:
+          this.config.value('MOBILE_OPERATIONS_ENABLED') === 'true',
+        mobileCampaigns:
+          this.config.value('MOBILE_OPERATIONS_ENABLED') === 'true' &&
+          this.config.value('MOBILE_CAMPAIGNS_ENABLED') === 'true',
+      },
       platforms: STORE_PLATFORMS.map((platform) => ({
         platform,
         appId: this.config.appId(platform) || null,
         configured: this.config.missing(platform).length === 0,
         missingVariables: this.config.missing(platform),
+        authMode:
+          platform === 'apple'
+            ? 'apple_team_key'
+            : ['aws_wif', 'adc', 'service_account'].includes(
+                  this.config.value('STORE_GOOGLE_AUTH_MODE') ||
+                    'service_account',
+                )
+              ? this.config.value('STORE_GOOGLE_AUTH_MODE') || 'service_account'
+              : 'invalid',
       })),
     };
   }
@@ -246,6 +279,96 @@ export class StoreService {
       page: query.page,
       limit: query.limit,
     };
+  }
+
+  async downloads(query: StoreRangeDto): Promise<StoreDownloads> {
+    this.config.assertEnabled();
+    const range = storeRange(query);
+    const today = day();
+    const revisions = await this.repository.db
+      .getRepository(StoreIntegration)
+      .find({
+        select: { platform: true, updatedAt: true },
+        order: { platform: 'ASC' },
+      });
+    const generation = revisions.map((r) => r.updatedAt.getTime()).join(':');
+    const filters = {
+      platform: query.platform ?? null,
+      country: query.country ?? null,
+      version: query.version ?? null,
+    };
+    const key = `store:downloads:v1:${JSON.stringify([generation, today, this.config.appId('google'), this.config.appId('apple'), range, filters])}`;
+    const cached = await this.cache.get<StoreDownloads>(key);
+    if (cached) return cached;
+    // Only local Store data. The latest day intentionally ignores the selected
+    // date range, but respects app/platform/country/version. No provider calls.
+    const metrics = await this.repository.db.transaction(
+      'REPEATABLE READ',
+      async (manager) => {
+        await manager.query("SET LOCAL statement_timeout = '5s'");
+        const result: StoreDownloads['metrics'] = [];
+        for (const definition of DOWNLOAD_METRICS.filter(
+          (m) => !query.platform || m.platform === query.platform,
+        )) {
+          const base = manager
+            .getRepository(StoreMetric)
+            .createQueryBuilder('m')
+            .select('m.date::text', 'date')
+            .addSelect('SUM(m.value)::text', 'value')
+            .addSelect('MAX(m.importedAt)', 'importedAt')
+            .where(
+              'm.platform = :platform AND m.appId = :app AND m.metric = :metric',
+              {
+                platform: definition.platform,
+                app: this.config.appId(definition.platform),
+                metric: definition.metric,
+              },
+            )
+            .andWhere('m.dataset = :dataset', {
+              dataset:
+                definition.platform === 'google'
+                  ? query.version
+                    ? 'installs_app_version'
+                    : 'installs'
+                  : 'App Store Downloads',
+            })
+            .andWhere('m.date <= :today', { today })
+            .groupBy('m.date');
+          if (query.country)
+            base.andWhere("m.dimension::jsonb->>'country' = :country", {
+              country: query.country,
+            });
+          if (query.version)
+            base.andWhere("m.dimension::jsonb->>'version' = :version", {
+              version: query.version,
+            });
+          const latest = await base
+            .clone()
+            .orderBy('m.date', 'DESC')
+            .limit(1)
+            .getRawOne<DownloadDay>();
+          const rows = await base
+            .clone()
+            .andWhere('m.date BETWEEN :from AND :to', range)
+            // PostgreSQL keeps the exact sum; do not round counts through JS floats.
+            .addSelect('SUM(SUM(m.value)) OVER ()::text', 'periodValue')
+            .orderBy('m.date', 'ASC')
+            .getRawMany<DownloadDay>();
+          result.push(downloadSummary(definition, range, latest, rows));
+        }
+        return result;
+      },
+    );
+    const result: StoreDownloads = {
+      ...range,
+      generatedAt: new Date().toISOString(),
+      filters,
+      latestScope: 'all_imported_dates_with_selected_dimensions',
+      comparableAcrossStores: false,
+      metrics,
+    };
+    await this.cache.set(key, result, 120);
+    return result;
   }
 
   async dashboard(query: StoreRangeDto) {

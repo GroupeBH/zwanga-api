@@ -2,12 +2,13 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  GoneException,
   Injectable,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { createHash } from 'crypto';
-import { DataSource } from 'typeorm';
+import { DataSource, EntityManager } from 'typeorm';
 import {
   InstallationUpdateDto,
   UpdateCampaignDto,
@@ -42,6 +43,7 @@ export class InstallationUpdatesService {
     id: string,
     secret: string | undefined,
     input: InstallationUpdateDto,
+    onRegistered?: (manager: EntityManager) => Promise<void>,
   ) {
     if (!secret || !/^[a-zA-Z0-9_-]{64,128}$/.test(secret))
       throw new ForbiddenException('Installation non reconnue.');
@@ -64,12 +66,14 @@ export class InstallationUpdatesService {
         tokenHash: string | null;
         sequence: string;
         enabled: boolean;
+        metadata?: { deletedAt?: string };
       }[] = await manager.query(
-        'SELECT "secretHash", "tokenHash", sequence, enabled FROM app_update_installations WHERE id=$1 FOR UPDATE',
+        'SELECT "secretHash", "tokenHash", sequence, enabled, to_jsonb(i)->\'mobileMetadata\' AS metadata FROM app_update_installations i WHERE id=$1 FOR UPDATE',
         [id],
       );
       if (current[0] && current[0].secretHash !== hash(secret))
         throw new ForbiddenException('Installation non reconnue.');
+      if (current[0]?.metadata?.deletedAt) throw new GoneException('Réinitialisez l’identifiant de cette installation.');
       if (current[0] && Number(current[0].sequence) >= input.sequence)
         return { registered: false, enabled: current[0].enabled };
       const tokenHash = token ? hash(token) : (current[0]?.tokenHash ?? null);
@@ -100,6 +104,7 @@ export class InstallationUpdatesService {
           );
         throw error;
       }
+      if (onRegistered) await onRegistered(manager);
       return { registered: true, enabled: input.enabled };
     });
   }

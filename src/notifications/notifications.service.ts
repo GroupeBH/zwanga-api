@@ -13,6 +13,7 @@ import { retryPushBatch } from './retry-push-batch';
 import { PUSH_RETRY_ELIGIBLE_SQL, recordPushFailure, urgentPushWorkers } from './push-retry-policy';
 import { isAppUpdateDeliverable } from '../app-updates/app-update-dispatch.service';
 import { installationUpdateToken } from '../app-updates/installation-update.policy';
+import { drainMobileCampaigns, mobileCampaignToken } from '../mobile-operations/mobile-campaign-delivery';
 import { isRideResponseDeliverable } from './ride-response-delivery';
 import { androidDriverBackup, androidDriverBackupTtl } from './android-driver-backup';
 import { isNearbyRingingRequest, prepareNearbyRequestRinging, reconcileNearbyRequestCooldowns } from './nearby-request-cooldown';
@@ -353,6 +354,12 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
     savedNotification: Notification,
   ): Promise<boolean> {
     const preparationStartedAt = Date.now();
+    if (savedNotification.data?.type === 'mobile_campaign') {
+      const token = !savedNotification.userId && this.configService.get('MOBILE_OPERATIONS_ENABLED') === 'true' && this.configService.get('MOBILE_CAMPAIGNS_ENABLED') === 'true'
+        ? await mobileCampaignToken(this.notificationRepository.manager, savedNotification.data) : null;
+      if (!token) { await this.suppressCriticalNotification(savedNotification, 'MOBILE_CAMPAIGN_NO_LONGER_ELIGIBLE'); return false; }
+      savedNotification.fcmToken = token;
+    }
     if (savedNotification.data?.type === 'app_update' && savedNotification.data?.installationId) {
       // Resolve the fresh token again at the last boundary, including retries.
       const token = this.configService.get<string>('APP_UPDATES_ENABLED') === 'true'
@@ -444,6 +451,8 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
       return completed;
     } catch (error) {
       const message = this.getErrorMessage(error);
+      if (savedNotification.data?.type === 'mobile_campaign' && this.isInvalidPushTokenError(error))
+        savedNotification.data = { ...savedNotification.data, deliveryFailureCode: 'INVALID_PUSH_TOKEN' };
       await this.markNotificationFailed(savedNotification, message, error);
       if (this.isInvalidPushTokenError(error)) {
         await this.clearInvalidPushToken(savedNotification.userId, pushToken);
@@ -483,6 +492,13 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
           ['driver_dispatch_offer', 'trip_request_nearby'].includes(notification.data?.type)
             ? Date.parse(this.driverRingUntil(notification)) : undefined)
         : getMessaging(this.firebaseApp).send(message);
+    if (notification.data?.type === 'mobile_campaign') {
+      const ttl = Math.max(0, Math.min(3600, Math.floor((Date.parse(notification.data.expiresAt) - Date.now()) / 1000)));
+      return send({ token: pushToken, notification: { title: notification.title, body: notification.body },
+        data: this.stringifyNotificationData(notification.data),
+        android: { priority: 'normal', ttl: ttl * 1000, notification: { channelId: 'zwanga_default', tag: notification.id } },
+        apns: { headers: { 'apns-priority': '5', 'apns-expiration': String(Math.floor(Date.now()/1000)+ttl), 'apns-collapse-id': notification.id } } });
+    }
     if (notification.data?.type === 'app_update') {
       return send({ token: pushToken,
         notification: { title: notification.title, body: notification.body },
@@ -748,7 +764,7 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
   }
 
   private async clearInvalidInstallationToken(notification: Notification, token: string): Promise<void> {
-    if (notification.data?.type !== 'app_update' || !notification.data?.installationId) return;
+    if (!['app_update','mobile_campaign'].includes(notification.data?.type) || !notification.data?.installationId) return;
     // A delayed provider error for an old token must not disable its replacement.
     await this.notificationRepository.manager.query(`UPDATE app_update_installations SET enabled=false, "pushToken"=NULL
       WHERE id=$1 AND "pushToken"=$2`, [notification.data.installationId, token]);
@@ -836,6 +852,15 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
 
   private reconcilingNearbyRequests = false;
 
+  @Cron('*/5 * * * * *', { waitForCompletion: true })
+  async dispatchMobileCampaignNotifications(): Promise<void> {
+    if (this.stopping || this.configService.get('MOBILE_OPERATIONS_ENABLED') !== 'true' || this.configService.get('MOBILE_CAMPAIGNS_ENABLED') !== 'true') return;
+    try {
+      await drainMobileCampaigns(this.notificationRepository, n => this.deliverSavedNotification(n),
+        () => this.logger.warn('Mobile campaign push deferred.'));
+    } catch { this.logger.warn('Mobile campaign lane unavailable; ride lanes unaffected.'); }
+  }
+
   @Cron(CronExpression.EVERY_MINUTE)
   async reconcileNearbyRequestRinging(): Promise<void> {
     if (this.reconcilingNearbyRequests) return;
@@ -916,6 +941,7 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
             const rows = await repository
               .createQueryBuilder('notification')
               .where('notification.eventKey IS NOT NULL')
+              .andWhere("COALESCE(notification.data ->> 'type', '') <> 'mobile_campaign'")
               .andWhere(urgent
                 ? "notification.data ->> 'type' IN (:...urgentTypes)"
                 : "COALESCE(notification.data ->> 'type', '') NOT IN (:...urgentTypes)",
@@ -1060,6 +1086,7 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
         .where('notification.status IN (:...statuses)', {
           statuses: [NotificationStatus.FAILED, NotificationStatus.PENDING],
         })
+        .andWhere("COALESCE(notification.data ->> 'type', '') <> 'mobile_campaign'")
         .andWhere(
           "(notification.eventKey IS NOT NULL OR notification.data ->> 'type' IN (:...types))",
           {

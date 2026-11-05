@@ -6,5 +6,5 @@ import { InstallationUpdatesController } from './installation-updates.controller
 import { InstallationUpdatesService } from './installation-updates.service';
 import { InstallationUpdateDispatchService } from './installation-update-dispatch.service';
 
-@Module({ controllers: [AppUpdatesController, InstallationUpdatesController], providers: [AppUpdatesService, AppUpdateDispatchService, InstallationUpdatesService, InstallationUpdateDispatchService] })
+@Module({ controllers: [AppUpdatesController, InstallationUpdatesController], providers: [AppUpdatesService, AppUpdateDispatchService, InstallationUpdatesService, InstallationUpdateDispatchService], exports: [InstallationUpdatesService, AppUpdatesService] })
 export class AppUpdatesModule {}

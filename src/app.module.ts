@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { MobileOperationsModule } from './mobile-operations/mobile-operations.module';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { ScheduleModule } from '@nestjs/schedule';
@@ -119,6 +120,7 @@ import { DriverFinanceModule } from './driver-finance/driver-finance.module';
     ActivityModule,
     ProServicesModule,
     AppUpdatesModule,
+    MobileOperationsModule,
     DriverFinanceModule,
   ],
   controllers: [AppController],

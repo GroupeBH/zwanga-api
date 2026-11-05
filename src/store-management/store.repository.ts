@@ -136,6 +136,7 @@ export class StoreRepository {
           .andWhere('kind IN (:...kinds)', { kinds: batch.replaceKinds })
           .execute();
       let processed = 0;
+      let partitionsChanged = false;
       for (const partition of batch.partitions ?? []) {
         const externalId = `partition:${createHash('sha256').update(`${partition.dataset}:${partition.date}`).digest('hex')}`;
         const marker = await records.findOneBy({
@@ -145,6 +146,7 @@ export class StoreRepository {
         });
         if (marker && String(marker.content.revision) > partition.revision)
           continue;
+        partitionsChanged = true;
         await metrics.delete({
           ...scope,
           dataset: partition.dataset,
@@ -236,7 +238,9 @@ export class StoreRepository {
       await manager
         .getRepository(StoreSyncJob)
         .increment({ id: job.id }, 'processed', processed);
-      if (processed)
+      // A correction can remove every point from a day. Its cached totals must
+      // disappear too, even though no new metric was counted as processed.
+      if (processed || partitionsChanged)
         await manager
           .getRepository(StoreIntegration)
           .update({ platform: job.platform }, { updatedAt: new Date() });

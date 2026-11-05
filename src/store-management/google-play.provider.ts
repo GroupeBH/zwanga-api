@@ -47,6 +47,10 @@ export class GooglePlayProvider {
     }
     const token = await this.auth.google('publisher');
     if (task === 'catalog') {
+      // Google requires an edit even for tracks.list; creating one invalidates
+      // another edit owned by the same principal. Require a dedicated identity and opt-in.
+      if (this.config.value('STORE_GOOGLE_TEMPORARY_EDITS_ENABLED') !== 'true')
+        throw new StoreProviderError('GOOGLE_CATALOG_TEMPORARY_EDIT_NOT_ALLOWED');
       // A dedicated service account is required. This temporary edit is NEVER committed.
       const edit = object(
         await this.http.api(`${this.base(app)}/edits`, token, {

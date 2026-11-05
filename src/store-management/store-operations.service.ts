@@ -303,6 +303,8 @@ export class StoreOperationsService {
   }
   async publish(actor: string, id: string, dto: StorePublishDto) {
     this.config.assertEnabled();
+    if (this.config.value('STORE_REVIEW_REPLIES_ENABLED') !== 'true')
+      throw new ForbiddenException('La publication des réponses Store est désactivée.');
     return this.db.transaction(async (m) => {
       const existing = await m
         .getRepository(StoreSyncJob)
@@ -494,9 +496,9 @@ export class StoreOperationsService {
   }
   async rules() {
     this.config.assertEnabled();
-    return this.db
-      .getRepository(StoreAlertRule)
-      .find({ order: { updatedAt: 'DESC' }, take: 100 });
+    // Raw projection includes optional Mobile Operations windows without requiring
+    // the additive migration when an older installation only runs Store Management.
+    return this.db.query(`SELECT * FROM store_alert_rules ORDER BY "updatedAt" DESC,id LIMIT 100`);
   }
   async rule(actor: string, id: string | null, dto: StoreAlertRuleDto) {
     this.config.assertEnabled();
@@ -539,6 +541,10 @@ export class StoreOperationsService {
     dto: StoreAlertRuleDto,
   ) {
     if (!dto.name.trim()) throw new BadRequestException('Nom requis.');
+    if (dto.type.startsWith('mobile_') && (dto.threshold === undefined ||
+      (dto.type.endsWith('_percent') && dto.threshold>100))) throw new BadRequestException('Seuil requis, pourcentage entre 0 et 100.');
+    if (dto.type==='mobile_registration_drop_percent' && dto.platform)
+      throw new BadRequestException('L’origine Store des inscriptions n’est pas attribuée : utiliser toutes les plateformes.');
     if (
       ['metric_above', 'metric_drop_percent'].includes(dto.type) &&
       (!METRIC_CATALOG.some((m) => m.id === dto.metric) ||
@@ -585,7 +591,14 @@ export class StoreOperationsService {
       metric: dto.metric ?? null,
       threshold: dto.threshold ?? null,
     });
+    if (dto.windowMinutes !== undefined || dto.confirmationMinutes !== undefined)
+      await m.query(`UPDATE store_alert_rules SET "windowMinutes"=COALESCE($2,"windowMinutes"),
+        "confirmationMinutes"=COALESCE($3,"confirmationMinutes") WHERE id=$1`,[rule.id,dto.windowMinutes??null,dto.confirmationMinutes??null]);
+    // A changed condition starts a fresh confirmation period, not an old breach.
+    if (dto.type.startsWith('mobile_'))
+      await m.query('DELETE FROM mobile_alert_state WHERE "ruleId"=$1', [rule.id]);
     await storeAudit(m, actor, 'alert.rule', rule.id, { ...dto });
-    return rule;
+    return {...rule,...(dto.windowMinutes === undefined ? {} : {windowMinutes:dto.windowMinutes}),
+      ...(dto.confirmationMinutes === undefined ? {} : {confirmationMinutes:dto.confirmationMinutes})};
   }
 }

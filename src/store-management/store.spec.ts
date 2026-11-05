@@ -248,7 +248,7 @@ describe('Store providers (mocked HTTP, no real credentials)', () => {
   beforeEach(() => {
     http = { api: jest.fn(), report: jest.fn() };
     const config = new StoreConfig(
-      new ConfigService({ STORE_GOOGLE_REPORTS_BUCKET: 'pubsite_prod_test' }),
+      new ConfigService({ STORE_GOOGLE_REPORTS_BUCKET: 'pubsite_prod_test', STORE_GOOGLE_TEMPORARY_EDITS_ENABLED: 'true' }),
     );
     google = new GooglePlayProvider(auth as any, http as any, config);
     apple = new AppleStoreProvider(auth as any, http as any, config);
