@@ -6,7 +6,7 @@ import type { Notification } from './entities/notification.entity';
 export function iosDriverPush(notification: Notification, token: string, ringUntil: string): Message {
   const type = notification.data?.type;
   const nearby = type === 'trip_request_nearby';
-  const response = type === 'booking_response' || type === 'trip_request_accepted';
+  const response = ['booking_response', 'trip_request_accepted', 'driver_offer', 'offer_accepted'].includes(type);
   const data = Object.fromEntries(Object.entries({ ...notification.data, ringUntil,
     ...(response ? {} : nearby ? { delivery: 'driver-phone-v3' } : { actionProtocol: 'driver-v1', ringVersion: 'v2' }),
   }).filter(([, value]) => value !== undefined && value !== null)

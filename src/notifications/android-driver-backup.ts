@@ -26,7 +26,7 @@ export function androidDriverBackup(_notification: Notification, data: Record<st
   const body = JSON.stringify(content);
   const card = rideCardContent({ ..._notification, data: content } as Notification);
   // Text only: preserve the recipient and action fields within FCM's payload limit.
-  const payload = { ...content, title: card.title?.slice(0, 80) || (kind === 'booking' ? 'Réservation à traiter' : 'Demande à consulter'),
+  const payload = { ...content, title: card.title?.slice(0, 80) || (kind === 'booking' ? 'Réservation à traiter' : 'Commande à consulter'),
     message: card.body?.slice(0, 240) || 'Ouvrez Zwanga pour voir les détails et répondre.',
     body, channelId: 'driver-alert-backup-v1', tag: fallbackTag, autoDismiss: 'false', sound: 'none' };
   if (Buffer.byteLength(JSON.stringify(payload), 'utf8') > 3600) {

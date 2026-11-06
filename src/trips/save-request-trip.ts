@@ -71,7 +71,7 @@ export function saveRequestTrip(
         }))
     )
       throw new ConflictException(
-        'Une prise en charge existe déjà pour cette demande.',
+        'Une prise en charge existe déjà pour cette commande.',
       );
     await assertDriverRequestSchedule(manager, trip.driverId, request!.id);
     return trips.save(trip);

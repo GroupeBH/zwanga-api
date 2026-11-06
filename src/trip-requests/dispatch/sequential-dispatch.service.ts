@@ -206,7 +206,7 @@ export class SequentialDispatchService {
           [driverId, candidate.vehicleId, candidate.seats]);
         const expiresAt = deadline.toISOString();
         await enqueueTransactionalNotification(manager, { eventKey: 'sequential-offer:' + offerId, userId: driverId,
-          title: 'Nouvelle demande de trajet', body: request.departureLocation + ' → ' + request.arrivalLocation + '. Accepter ou refuser ?',
+          title: 'Nouvelle commande de trajet', body: request.departureLocation + ' → ' + request.arrivalLocation + '. Accepter ou refuser ?',
           data: { type: request.immediateDispatch && !candidate.existingTripId ? 'driver_dispatch_offer' : 'trip_request_nearby',
             ...(candidate.existingTripId ? { sharedTrip: true, existingTripId: candidate.existingTripId } : {}),
             ringAlert: 'nearby-request-v1', tripRequestId: id, offerId, driverId, passengerId: request.passengerId,

@@ -47,5 +47,5 @@ export const nearbyRequestDriverVisibilitySql = (requestId: string, driverId: st
  * assignments/history are deliberately not gated by the driver's current position. */
 export async function assertRequestDriverProximity(manager: EntityManager, requestId: string, driverId: string) {
   const rows = await manager.query(`SELECT 1 WHERE ${requestDriverProximitySql('$1', '$2')}`, [requestId, driverId]);
-  if (!rows.length) throw new NotFoundException('Cette demande est hors de votre zone de prise en charge. Actualisez votre position.');
+  if (!rows.length) throw new NotFoundException('Cette commande est hors de votre zone de prise en charge. Actualisez votre position.');
 }

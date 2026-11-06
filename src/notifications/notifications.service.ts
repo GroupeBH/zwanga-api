@@ -63,7 +63,7 @@ const PUSH_DELIVERY_TIMEOUT_MS = 10_000;
 const CRITICAL_RETRY_DELAY_MS = 5 * 60 * 1000;
 const CRITICAL_RETRY_WINDOW_MS = 72 * 60 * 60 * 1000;
 const CRITICAL_RETRY_BATCH_SIZE = 25;
-const URGENT_NOTIFICATION_TYPES = ['new_booking', 'driver_dispatch_offer', 'trip_request_nearby', 'booking_response', 'trip_request_accepted', 'driver_offer'];
+const URGENT_NOTIFICATION_TYPES = ['new_booking', 'driver_dispatch_offer', 'trip_request_nearby', 'booking_response', 'trip_request_accepted', 'driver_offer', 'offer_accepted'];
 const EXPO_RECEIPT_DELAY_MS = 15 * 60 * 1000;
 const EXPO_RECEIPT_WINDOW_MS = 24 * 60 * 60 * 1000;
 const EXPO_RECEIPT_BATCH_SIZE = 100;
@@ -640,12 +640,16 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
 
   private isPassengerRideResponse(notification: Notification): boolean {
     return notification.data?.type === 'trip_request_accepted' ||
+      (notification.data?.type === 'offer_accepted' && notification.data.ringAlert === 'offer-accepted-v1') ||
       (notification.data?.type === 'driver_offer' && notification.data.ringAlert === 'counter-offer-v1') ||
       (notification.data?.type === 'booking_response' &&
         (!notification.data.status || ['accepted', 'rejected'].includes(notification.data.status)));
   }
 
   private passengerRingData(notification: Notification): Record<string, unknown> {
+    if (notification.data?.type === 'offer_accepted') return { ...notification.data,
+      driverId: notification.userId, role: 'driver', ringAlert: 'offer-accepted-v1',
+      ringUntil: this.driverRingUntil(notification) };
     return { ...notification.data, passengerId: notification.userId, role: 'passenger',
       ringAlert: notification.data?.type === 'driver_offer' ? 'counter-offer-v1' : notification.data?.type === 'booking_response' ? 'booking-response-v1' : 'request-accepted-v1',
       ringUntil: this.driverRingUntil(notification) };
@@ -830,7 +834,8 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
   private async publishRealtimeInvitation(notification: Notification): Promise<void> {
     if (!notification.userId || !notification.isActive ||
         !(await this.isCriticalNotificationStillDeliverable(notification))) return;
-    if (notification.data?.type === 'driver_offer' && notification.data.ringAlert === 'counter-offer-v1') {
+    if ((notification.data?.type === 'driver_offer' && notification.data.ringAlert === 'counter-offer-v1') ||
+        (notification.data?.type === 'offer_accepted' && notification.data.ringAlert === 'offer-accepted-v1')) {
       if (Date.parse(this.driverRingUntil(notification)) <= Date.now()) return;
       if (!this.rideAlerts?.publish(notification.userId, { kind: 'incoming', eventId: notification.id,
         data: this.passengerRingData(notification) })) throw new Error('Realtime transport unavailable');
@@ -1133,7 +1138,7 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
     notification: Notification,
   ): Promise<boolean> {
     const type = notification.data?.type;
-    if (type === 'booking_response' || type === 'trip_request_accepted' || type === 'driver_offer') {
+    if (type === 'booking_response' || type === 'trip_request_accepted' || type === 'driver_offer' || type === 'offer_accepted') {
       return isRideResponseDeliverable(this.notificationRepository.manager, notification);
     }
     if (type === 'driver_location_stale') {

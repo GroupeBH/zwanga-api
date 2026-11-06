@@ -26,7 +26,7 @@ export function rejectDriverOffer(database: EntityManager, passengerId: string, 
     const pending = await manager.countBy(DriverOffer, { tripRequestId: requestId, status: DriverOfferStatus.PENDING });
     await manager.update(TripRequest, requestId, { status: pending ? TripRequestStatus.OFFERS_RECEIVED : TripRequestStatus.PENDING });
     await enqueueTransactionalNotification(manager, { eventKey: `offer-rejected:${offer.id}`, userId: offer.driverId,
-      title: 'Prix refusé', body: 'Le passager n’a pas retenu votre proposition. Vous pouvez consulter les autres demandes.',
+      title: 'Prix refusé', body: 'Le passager n’a pas retenu votre proposition. Vous pouvez consulter les autres commandes.',
       data: { type: 'driver_offer_rejected', tripRequestId: requestId, offerId, driverId: offer.driverId } });
   });
 }

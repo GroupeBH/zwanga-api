@@ -112,7 +112,8 @@ const pgBin = process.env.NOTIFICATIONS_TEST_POSTGRES_BIN;
       CREATE TABLE driver_notification_clients ("userId" uuid PRIMARY KEY, "tokenHash" varchar);
       CREATE TABLE app_update_clients ("userId" uuid PRIMARY KEY, "tokenHash" varchar);
       CREATE TABLE trips (id uuid PRIMARY KEY, "driverId" uuid, status varchar, "tripRequestId" uuid);
-      CREATE TABLE bookings (id uuid PRIMARY KEY, "tripId" uuid, "passengerId" uuid, status varchar);
+      CREATE TABLE bookings (id uuid PRIMARY KEY, "tripId" uuid,
+        "passengerId" uuid NOT NULL REFERENCES users(id), status varchar);
       -- Match the deployed legacy schema: a request's trip reference is varchar, not uuid.
       CREATE TABLE trip_requests (id uuid PRIMARY KEY, "passengerId" uuid, "selectedDriverId" uuid,
         "tripId" varchar, status varchar, "selectedAt" timestamp);
@@ -206,7 +207,7 @@ const pgBin = process.env.NOTIFICATIONS_TEST_POSTGRES_BIN;
 
     beforeEach(async () => {
       referralNotifications.sendNotification.mockReset().mockResolvedValue(true);
-      await source.query('UPDATE users SET "fcmToken" = NULL');
+      await source.query(`UPDATE users SET "fcmToken" = NULL, "isActive" = true, status = 'active'`);
       await source.query(
         'TRUNCATE ride_notification_receipts, ride_notification_retries, notifications, wallet_ledger_entries, wallet_accounts, kyc_documents, referral_profiles, referral_accounts, referral_ledger_entries, trip_requests, bookings, trips',
       );
@@ -444,7 +445,10 @@ const pgBin = process.env.NOTIFICATIONS_TEST_POSTGRES_BIN;
     it('urgent SQL lane bypasses an older campaign and suppresses a booking after cancellation', async () => {
       const tripId = randomUUID(), bookingId = randomUUID();
       await source.query(`INSERT INTO trips (id, "driverId", status) VALUES ($1, $2, 'upcoming')`, [tripId, userId]);
-      await source.query(`INSERT INTO bookings (id, "tripId", status) VALUES ($1, $2, 'pending')`, [bookingId, tripId]);
+      // Real bookings always have a passenger; both participants must remain
+      // available when the delayed outbox notification is dispatched.
+      await source.query(`INSERT INTO bookings (id, "tripId", "passengerId", status)
+        VALUES ($1, $2, $3, 'pending')`, [bookingId, tripId, adminId]);
       await source.transaction(async manager => {
         for (let i = 0; i < 30; i++) await enqueueTransactionalNotification(manager, event(`regular:${i}`));
         await enqueueTransactionalNotification(manager, { ...event('booking:urgent'),
@@ -459,6 +463,33 @@ const pgBin = process.env.NOTIFICATIONS_TEST_POSTGRES_BIN;
       await notifications.dispatchUrgentNotifications();
       expect(send).toHaveBeenCalledTimes(1);
       expect((await source.getRepository(Notification).findOneByOrFail({ eventKey: 'booking:urgent' })).isActive).toBe(false);
+    });
+
+    it.each([
+      ['passenger', false, 'active'],
+      ['passenger', true, 'inactive'],
+      ['passenger', true, 'suspended'],
+      ['driver', false, 'active'],
+      ['driver', true, 'inactive'],
+      ['driver', true, 'suspended'],
+    ] as const)('suppresses a booking invitation for an unavailable %s (isActive=%s, status=%s)', async (participant, isActive, status) => {
+      const tripId = randomUUID(), bookingId = randomUUID();
+      await source.query(`INSERT INTO trips (id, "driverId", status) VALUES ($1, $2, 'upcoming')`, [tripId, userId]);
+      await source.query(`INSERT INTO bookings (id, "tripId", "passengerId", status)
+        VALUES ($1, $2, $3, 'pending')`, [bookingId, tripId, adminId]);
+      await source.query('UPDATE users SET "isActive"=$2, status=$3 WHERE id=$1', [
+        participant === 'driver' ? userId : adminId, isActive, status,
+      ]);
+      const send = jest.spyOn(notifications as any, 'sendExpoPushNotification').mockResolvedValue('unused');
+      await source.transaction(manager => enqueueTransactionalNotification(manager, {
+        ...event('booking:unavailable'), data: { type: 'new_booking', bookingId, driverId: userId, tripId },
+      }));
+
+      await notifications.dispatchUrgentNotifications();
+
+      expect(send).not.toHaveBeenCalled();
+      expect(await source.getRepository(Notification).findOneByOrFail({ eventKey: 'booking:unavailable' }))
+        .toMatchObject({ status: NotificationStatus.FAILED, isActive: false });
     });
 
     it('atomically adjusts the real wallet ledger and creates exactly one outbox row for concurrent admin retries', async () => {

@@ -1,5 +1,6 @@
 import { claimRequestAcceptance, completeRequestAcceptance, releaseRequestAcceptance, startPassengerDecision } from './dispatch/request-acceptance';
-import { changeRequestDriver } from './change-request-driver';
+import { changeRequestDriver, withdrawRequestDriver } from './change-request-driver';
+import { WithdrawRequestDriverDto } from './dto/withdraw-request-driver.dto';
 import { requestVehicleTypes, resolveRequestVehicleTypes, requestVehicleTypeFilter, requestAcceptsVehicle } from './request-vehicle-types';
 import { ChangeRequestDriverDto } from './dto/change-request-driver.dto';
 import { assertSequentialInvitation } from './dispatch/sequential-policy';
@@ -397,7 +398,7 @@ export class TripRequestsService {
         throw new ConflictException('Une prise en charge existe déjà pour cette commande.');
       if (request.targetDriverPriorityUntil) {
         const responding = await manager.query(`SELECT 1 FROM trip_request_dispatch_offers WHERE "requestId"=$1 AND status='pending' AND phase<>'driver'`, [id]);
-        if (responding.length) throw new ConflictException('Un conducteur est en train de répondre. Actualisez la demande.');
+        if (responding.length) throw new ConflictException('Un conducteur est en train de répondre. Actualisez la commande.');
         await retireRequestInvitations(manager, id, true);
       }
       // Legacy exclusive requests retain their current invitation; map priority is ended explicitly.
@@ -1407,58 +1408,6 @@ export class TripRequestsService {
     }
   }
 
-  private async notifyDriverAboutOfferAcceptance(
-    tripRequest: TripRequest,
-    offer: DriverOffer,
-  ): Promise<void> {
-    try {
-      // Get the driver with FCM token
-      const driver = await this.userRepository.findOne({
-        where: { id: offer.driverId },
-        select: ['id', 'fcmToken', 'firstName'],
-      });
-
-      if (!driver || !driver.fcmToken) {
-        this.logger.debug(
-          `Driver ${offer.driverId} has no FCM token, skipping notification`,
-        );
-        return;
-      }
-
-      const passengerName = tripRequest.passenger
-        ? `${tripRequest.passenger.firstName} ${tripRequest.passenger.lastName}`
-        : 'Un passager';
-      const title = '✅ Offre acceptée';
-      const body = `${passengerName} a accepté votre offre pour le trajet de ${tripRequest.departureLocation} à ${tripRequest.arrivalLocation}. Vous pouvez maintenant démarrer le trajet.`;
-
-      const data = {
-        type: 'offer_accepted',
-        tripRequestId: tripRequest.id,
-        offerId: offer.id,
-        passengerId: tripRequest.passengerId,
-        departureLocation: tripRequest.departureLocation,
-        arrivalLocation: tripRequest.arrivalLocation,
-        proposedDepartureDate: offer.proposedDepartureDate.toISOString(),
-      };
-
-      await this.notificationService.sendNotification(
-        driver.fcmToken,
-        title,
-        body,
-        data,
-        offer.driverId,
-      );
-      this.logger.log(
-        `Notified driver ${offer.driverId} about offer acceptance ${offer.id}`,
-      );
-    } catch (error) {
-      this.logger.error(
-        `Error notifying driver about offer acceptance ${offer.id}: ${error.message}`,
-        error.stack,
-      );
-      // Don't throw error, just log it - offer acceptance should succeed even if notification fails
-    }
-  }
 
   async acceptDriverOffer(
     passengerId: string,
@@ -1571,6 +1520,17 @@ export class TripRequestsService {
         SET status=CASE WHEN "driverId"=$2 THEN 'accepted' ELSE 'cancelled' END
         WHERE "requestId"=$1 AND status='pending'`, [tripRequestId, offer.driverId]);
       await manager.query(RETIRE_COUNTEROFFER_NOTIFICATIONS_SQL, [tripRequestId, [offer.id]]);
+      // The receipt survives a missing push token or a process exit after COMMIT.
+      await enqueueTransactionalNotification(manager, {
+        eventKey: `offer-accepted:${offer.id}`, userId: offer.driverId,
+        title: 'Le passager a accepté votre prix',
+        body: 'Ouvrez cette commande dans Zwanga pour préparer la prise en charge.',
+        data: { type: 'offer_accepted', ringAlert: 'offer-accepted-v1', role: 'driver',
+          tripRequestId, offerId: offer.id, driverId: offer.driverId, passengerId,
+          pricePerSeat: Number(offer.pricePerSeat), acceptedAt: acceptedAt.toISOString(),
+          ringUntil: new Date(acceptedAt.getTime() + 60_000).toISOString(),
+          alertExpiresAt: new Date(acceptedAt.getTime() + 180_000).toISOString() },
+      });
     });
 
     this.logger.log(
@@ -1579,8 +1539,7 @@ export class TripRequestsService {
 
     await this.driverDispatch?.notifyScheduledRequest(tripRequestId);
 
-    // Notify the driver that their offer was accepted
-    await this.notifyDriverAboutOfferAcceptance(tripRequest, offer);
+    // Durable push and realtime workers deliver the committed acceptance.
 
     return this.findOne(tripRequestId, passengerId);
   }
@@ -2152,6 +2111,18 @@ export class TripRequestsService {
 
   async changeSelectedDriver(passengerId: string, tripRequestId: string, dto: ChangeRequestDriverDto): Promise<SanitizedTripRequest> {
     const result = await changeRequestDriver(this.tripRequestRepository.manager, passengerId, tripRequestId, dto, this.bookingsService);
+    await this.afterRequestDriverChange(tripRequestId, result);
+    return this.findOne(tripRequestId, passengerId);
+  }
+
+  async withdrawSelectedDriver(driverId: string, tripRequestId: string, dto: WithdrawRequestDriverDto) {
+    const result = await withdrawRequestDriver(this.tripRequestRepository.manager, driverId, tripRequestId, dto, this.bookingsService);
+    await this.afterRequestDriverChange(tripRequestId, result);
+    // The former driver no longer has access to the reopened passenger request.
+    return { id: tripRequestId, withdrawn: true as const };
+  }
+
+  private async afterRequestDriverChange(tripRequestId: string, result: Awaited<ReturnType<typeof changeRequestDriver>>) {
     if (result.tripId) await this.tripsService.invalidateChangedRequestTrip(result.tripId)
       .catch(() => this.logger.warn('Driver change trip cache invalidation deferred'));
     // Dispatch scan and transactional outbox retry after a post-commit Redis/push outage.
@@ -2159,11 +2130,10 @@ export class TripRequestsService {
       await this.bookingsService.invalidateManualRideCaches(bookingId)
         .catch(() => this.logger.warn('Driver change booking cache invalidation deferred'));
     }
-    await this.driverDispatch?.notifyScheduledRequest(tripRequestId)
+    if (result.changed) await this.driverDispatch?.notifyScheduledRequest(tripRequestId)
       .catch(() => this.logger.warn('Driver change dispatch deferred to recovery'));
     void this.notificationService.dispatchTransactionalNotifications()
       .catch(() => this.logger.warn('Driver change push deferred to outbox recovery'));
-    return this.findOne(tripRequestId, passengerId);
   }
 
   async releaseOverdueSelectedDriver(

@@ -31,7 +31,7 @@ import { Notification } from '../notifications/entities/notification.entity';
 import * as outbox from '../notifications/transactional-notification';
 import { TripRequest, TripRequestStatus } from './entities/trip-request.entity';
 import { DriverOffer, DriverOfferStatus } from './entities/driver-offer.entity';
-import { changeRequestDriver } from './change-request-driver';
+import { changeRequestDriver, withdrawRequestDriver } from './change-request-driver';
 import { hasRefusedRequest } from './request-refusal';
 import { recoverRequestAcceptance } from './dispatch/request-acceptance';
 import { SharedTripOffersService } from './shared-trip-offers.service';
@@ -623,6 +623,60 @@ const bin = process.env.DISPATCH_TEST_POSTGRES_BIN;
             .findOneByOrFail({ title: 'Unrelated', userId: f.driver.id })
         ).isActive,
       ).toBe(true);
+    });
+
+    it.each([false, true])('driver withdrawal reopens the same order, before or after trip creation (%s)', async withTrip => {
+      const f = await fixture(withTrip);
+      if (withTrip) await db.getRepository(Trip).update(f.trip.id, { status: TripStatus.ACTIVE });
+      const run = () => withdrawRequestDriver(db.manager, f.driver.id, f.request.id, f.dto, bookings);
+      expect((await run()).changed).toBe(true);
+      expect(await db.getRepository(TripRequest).findOneByOrFail({ id: f.request.id })).toMatchObject({
+        status: TripRequestStatus.PENDING, selectedDriverId: null, tripId: null, targetDriverId: null,
+      });
+      expect(await hasRefusedRequest(db.manager, f.driver.id, f.request.id)).toBe(true);
+      if (withTrip) {
+        expect((await db.getRepository(Booking).findOneByOrFail({ id: f.booking.id })).status).toBe(BookingStatus.CANCELLED);
+        expect(await db.getRepository(Trip).findOneByOrFail({ id: f.trip.id })).toMatchObject({ status: TripStatus.CANCELLED, tripRequestId: null });
+      }
+      const messages = await notices(f.request.id);
+      expect(messages).toHaveLength(2);
+      expect(messages.find(n => n.userId === f.passenger.id)?.data).toMatchObject({ type: 'trip_request_reopened', reason: 'driver_cancelled_pickup' });
+      expect((await run()).changed).toBe(false);
+      expect(await notices(f.request.id)).toHaveLength(2);
+      // Replaying an old cancellation must leave a later driver selection intact.
+      const next = await db.getRepository(User).save({ firstName: 'Next', lastName: 'Driver' });
+      await db.getRepository(TripRequest).update(f.request.id, { status: TripRequestStatus.DRIVER_SELECTED, selectedDriverId: next.id, selectedAt: new Date(Date.now() + 1000) });
+      expect((await run()).changed).toBe(false);
+      expect((await db.getRepository(TripRequest).findOneByOrFail({ id: f.request.id })).selectedDriverId).toBe(next.id);
+    });
+
+    it('only the assigned driver with the current selection revision can withdraw', async () => {
+      const f = await fixture(false);
+      await expect(withdrawRequestDriver(db.manager, f.passenger.id, f.request.id, f.dto, bookings)).rejects.toMatchObject({ status: 404 });
+      await expect(withdrawRequestDriver(db.manager, randomUUID(), f.request.id, f.dto, bookings)).rejects.toMatchObject({ status: 404 });
+      await expect(withdrawRequestDriver(db.manager, f.driver.id, f.request.id,
+        { selectedAt: new Date(f.request.selectedAt!.getTime() - 1000).toISOString() }, bookings))
+        .rejects.toMatchObject({ response: { code: 'REQUEST_DRIVER_SELECTION_CHANGED' } });
+      expect(await notices(f.request.id)).toHaveLength(0);
+    });
+
+    it.each([
+      { pickedUp: true }, { pickedUpConfirmedByPassenger: true }, { rideEffectsPending: ['pickup'] },
+      { paidAt: new Date() }, { paymentStatus: BookingPaymentStatus.INITIATED }, { mixedTokenQuantity: 10 },
+    ] as QueryDeepPartialEntity<Booking>[])('driver withdrawal preserves boarding/payment protections: %j', async patch => {
+      const f = await fixture();
+      await db.getRepository(Booking).update(f.booking.id, patch);
+      await expect(withdrawRequestDriver(db.manager, f.driver.id, f.request.id, f.dto, bookings)).rejects.toMatchObject({ status: 409 });
+      expect((await db.getRepository(TripRequest).findOneByOrFail({ id: f.request.id })).selectedDriverId).toBe(f.driver.id);
+      expect(await notices(f.request.id)).toHaveLength(0);
+    });
+
+    it('concurrent passenger change and driver withdrawal produce one reopening', async () => {
+      const f = await fixture();
+      const results = await Promise.allSettled([f.run(), withdrawRequestDriver(db.manager, f.driver.id, f.request.id, f.dto, bookings)]);
+      expect(results.filter(r => r.status === 'fulfilled')).toHaveLength(1);
+      expect(await notices(f.request.id)).toHaveLength(2);
+      expect((await db.getRepository(Booking).findOneByOrFail({ id: f.booking.id })).status).toBe(BookingStatus.CANCELLED);
     });
 
     it('migration rollback keeps exclusions, and reapplying is supported', async () => {

@@ -94,10 +94,31 @@ export function counterOfferPostgresTests(context: () => Fixture) {
     const current = await source.getRepository(TripRequest).findOneByOrFail({ id: r.id });
     expect(current.status).toBe('driver_selected'); expect(current.selectedDriverId).toBe(d.user.id);
     expect(Number(current.selectedPricePerSeat)).toBe(1500);
+    const receipt = await source.getRepository(Notification).findOneByOrFail({ eventKey: `offer-accepted:${offer.id}` });
+    expect(receipt).toMatchObject({ userId: d.user.id, fcmToken: '', data: { type: 'offer_accepted',
+      role: 'driver', driverId: d.user.id, passengerId: r.passengerId, tripRequestId: r.id } });
+    expect(await isRideResponseDeliverable(source.manager, receipt)).toBe(true);
+    const publish = jest.fn().mockReturnValue(true);
+    const worker = new NotificationService(new ConfigService({}), source.getRepository(Notification),
+      source.getRepository(User), source.getRepository(TripRequest), { isBound: () => true, publish } as any);
+    await worker.dispatchRealtimeNotifications();
+    expect(publish).toHaveBeenCalledWith(d.user.id, expect.objectContaining({ kind: 'incoming', data: expect.objectContaining({
+      type: 'offer_accepted', offerId: offer.id, driverId: d.user.id, passengerId: r.passengerId }) }));
     expect((await notification(source, offer.id)).isActive).toBe(false);
     expect(await isRideResponseDeliverable(source.manager, await notification(source, offer.id))).toBe(false);
     await expect(declineRequestForDriver(source.manager, d.user.id, r.id)).rejects.toMatchObject({ status: 409 });
     await expect(rejectDriverOffer(source.manager, r.passengerId, r.id, offer.id)).rejects.toThrow();
+  });
+
+  it('counteroffer: acceptance rolls back if its driver receipt cannot be persisted', async () => {
+    const { source, d, r, edits, dto } = await prepare();
+    const offer = await edits.proposeCounterOffer(d.user.id, r.id, dto);
+    await source.query('ALTER TABLE notifications ADD CONSTRAINT acceptance_test_outbox CHECK (false) NOT VALID');
+    try {
+      await expect(edits.acceptDriverOffer(r.passengerId, r.id, { offerId: offer.id })).rejects.toThrow();
+      expect((await source.getRepository(DriverOffer).findOneByOrFail({ id: offer.id })).status).toBe('pending');
+      expect((await source.getRepository(TripRequest).findOneByOrFail({ id: r.id })).selectedDriverId).toBeNull();
+    } finally { await source.query('ALTER TABLE notifications DROP CONSTRAINT acceptance_test_outbox'); }
   });
 
   it.each(['reject', 'withdraw'])('counteroffer: %s retires the alert, releases a direct target and permits another driver', async decision => {

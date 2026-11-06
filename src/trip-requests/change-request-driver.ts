@@ -7,6 +7,7 @@ import { Notification } from '../notifications/entities/notification.entity';
 import { enqueueTransactionalNotification } from '../notifications/transactional-notification';
 import { Trip, TripStatus } from '../trips/entities/trip.entity';
 import { ChangeRequestDriverDto } from './dto/change-request-driver.dto';
+import { WithdrawRequestDriverDto } from './dto/withdraw-request-driver.dto';
 import { TripRequest, TripRequestStatus } from './entities/trip-request.entity';
 import { DriverOffer, DriverOfferStatus } from './entities/driver-offer.entity';
 import { retireRequestInvitations } from './dispatch/retire-request-invitations';
@@ -15,28 +16,35 @@ import { retireRequestInvitations } from './dispatch/retire-request-invitations'
  * All mutations/outbox entries commit together. No Redis, push or provider calls here. */
 export async function changeRequestDriver(
   database: EntityManager,
-  passengerId: string,
+  actorId: string,
   requestId: string,
   dto: ChangeRequestDriverDto,
   bookings: Pick<BookingsService, 'cancelUnpaidBookingForDriverChange'>,
+  actor: 'passenger' | 'driver' = 'passenger',
 ) {
   return database
     .transaction(async (manager) => {
       await manager.query("SET LOCAL lock_timeout = '3s'");
       const request = await manager.findOne(TripRequest, {
-        where: { id: requestId, passengerId },
+        where: { id: requestId, ...(actor === 'passenger' ? { passengerId: actorId } : {}) },
         lock: { mode: 'pessimistic_write' },
       });
       if (!request)
         throw new NotFoundException('Commande de trajet introuvable.');
-      const eventKey = `request-driver-change:${requestId}:${dto.selectedDriverId}:${new Date(dto.selectedAt).toISOString()}`;
+      const passengerId = request.passengerId;
+      const reason = actor === 'driver' ? 'driver_cancelled_pickup' : 'passenger_changed_driver';
+      const eventKey = `${actor === 'driver' ? 'request-driver-withdrawal' : 'request-driver-change'}:${requestId}:${dto.selectedDriverId}:${new Date(dto.selectedAt).toISOString()}`;
       // A retry after a lost HTTP response must not undo a later driver selection.
-      if (await manager.exists(Notification, { where: { eventKey } }))
+      if (await manager.exists(Notification, { where: {
+        eventKey: actor === 'driver' ? `${eventKey}:driver` : eventKey, userId: actorId,
+      } }))
         return {
           changed: false,
           bookingIds: [] as string[],
           tripId: null as string | null,
         };
+      if (actor === 'driver' && (request.selectedDriverId !== actorId || dto.selectedDriverId !== actorId))
+        throw new NotFoundException('Cette commande ne vous est plus attribuée.');
       if (
         request.status !== TripRequestStatus.DRIVER_SELECTED ||
         request.selectedDriverId !== dto.selectedDriverId ||
@@ -142,15 +150,15 @@ export async function changeRequestDriver(
       // No missed-ring penalty or synthetic driver refusal is recorded.
       await manager.query(
         `INSERT INTO trip_request_driver_refusals ("driverId", "requestId", reason)
-      VALUES ($1,$2,'passenger_changed_driver') ON CONFLICT ("driverId", "requestId") DO NOTHING`,
-        [dto.selectedDriverId, requestId],
+      VALUES ($1,$2,$3) ON CONFLICT ("driverId", "requestId") DO NOTHING`,
+        [dto.selectedDriverId, requestId, reason],
       );
       await manager.update(
         DriverOffer,
         { tripRequestId: requestId, status: DriverOfferStatus.ACCEPTED },
         {
           status: DriverOfferStatus.CANCELLED,
-          rejectionReason: 'passenger_changed_driver',
+          rejectionReason: reason,
         },
       );
       await retireRequestInvitations(manager, requestId, true);
@@ -198,20 +206,25 @@ export async function changeRequestDriver(
         eventKey,
         userId: passengerId,
         title: 'Recherche d’un autre conducteur',
-        body: 'Votre demande est conservée. Nous recherchons un autre conducteur.',
+        body: actor === 'driver'
+          ? 'Votre conducteur a annulé sa prise en charge. Votre commande est conservée : nous recherchons un autre conducteur.'
+          : 'Votre commande est conservée. Nous recherchons un autre conducteur.',
         data: {
           type: 'trip_request_reopened',
           tripRequestId: requestId,
-          reason: 'passenger_changed_driver',
+          reason,
         },
       });
       await enqueueTransactionalNotification(manager, {
         eventKey: `${eventKey}:driver`,
         userId: dto.selectedDriverId,
         title: 'Prise en charge annulée',
-        body: 'Le passager a choisi de chercher un autre conducteur pour cette demande.',
+        body: actor === 'driver'
+          ? 'Vous avez annulé votre prise en charge. Un autre conducteur sera recherché pour le passager.'
+          : 'Le passager a choisi de chercher un autre conducteur pour cette commande.',
         data: {
           type: 'trip_request_driver_changed',
+          reason,
           tripRequestId: requestId,
           previousTripId: linked?.id ?? null,
           cancelledTripId,
@@ -234,4 +247,14 @@ export async function changeRequestDriver(
       }
       throw error;
     });
+}
+
+/** Driver identity comes exclusively from authentication, never from the request body. */
+export function withdrawRequestDriver(
+  database: EntityManager, driverId: string, requestId: string,
+  dto: WithdrawRequestDriverDto,
+  bookings: Pick<BookingsService, 'cancelUnpaidBookingForDriverChange'>,
+) {
+  return changeRequestDriver(database, driverId, requestId,
+    { selectedDriverId: driverId, selectedAt: dto.selectedAt }, bookings, 'driver');
 }
