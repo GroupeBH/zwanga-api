@@ -911,7 +911,7 @@ export class TripsService {
         error: 'Publication non applicable',
         code: 'TRIP_NOT_CREATED_FROM_REQUEST',
         message:
-          "Ce trajet n'a pas été créé à partir d'une demande de trajet et ne peut pas être publié avec cette action.",
+          "Ce trajet n'a pas été créé à partir d'une commande de trajet et ne peut pas être publié avec cette action.",
       });
     }
 

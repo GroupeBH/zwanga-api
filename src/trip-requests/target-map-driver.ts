@@ -40,7 +40,7 @@ export async function targetMapDriver(
       assertUnassignedRequest(request);
       if (request.updatedAt.getTime() !== Date.parse(dto.expectedUpdatedAt))
         throw new ConflictException(
-          'Votre demande a changé. Actualisez avant de choisir un conducteur.',
+          'Votre commande a changé. Actualisez avant de choisir un conducteur.',
         );
       if (
         request.targetDriverPriorityUntil ||
@@ -69,7 +69,7 @@ export async function targetMapDriver(
         }))
       )
         throw new ConflictException(
-          'Un conducteur est déjà en train de répondre. Actualisez la demande.',
+          'Un conducteur est déjà en train de répondre. Actualisez la commande.',
         );
       const find = async () =>
         (await requestMapCandidates(manager, passengerId, requestId))
@@ -167,7 +167,7 @@ export async function targetMapDriver(
           : undefined;
       if (code && ['23505', '55P03', '40P01'].includes(code))
         throw new ConflictException(
-          'Une réponse est en cours ou ce conducteur vient d’être sollicité. Actualisez la demande.',
+          'Une réponse est en cours ou ce conducteur vient d’être sollicité. Actualisez la commande.',
         );
       throw error;
     });

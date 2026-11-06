@@ -2,6 +2,7 @@ import { DriverChoiceQuery } from './dto/driver-choice.dto';
 import { MapDriverQuery, TargetMapDriverDto } from './dto/target-map-driver.dto';
 import { CounterOfferDto } from './dto/counter-offer.dto';
 import { ChangeRequestDriverDto } from './dto/change-request-driver.dto';
+import { WithdrawRequestDriverDto } from './dto/withdraw-request-driver.dto';
 import {
   Controller,
   Get,
@@ -326,6 +327,20 @@ export class TripRequestsController {
   // @ApiBearerAuth()
   async startTripFromRequest(@Request() req, @Param('id') id: string) {
     return this.tripRequestsService.startTripFromRequest(id, req.user.userId);
+  }
+
+  @Put(':id/withdraw-driver')
+  @Auth()
+  @Roles(UserRole.DRIVER)
+  @SensitiveThrottle(5, 60000)
+  @ApiOperation({ summary: 'Annuler sa prise en charge et relancer la commande',
+    description: 'Conducteur sélectionné uniquement, avant embarquement et sans paiement engagé. Conserve la commande et les autres passagers éventuels.' })
+  async withdrawSelectedDriver(
+    @Request() req: { user: { userId: string } },
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: WithdrawRequestDriverDto,
+  ) {
+    return this.tripRequestsService.withdrawSelectedDriver(req.user.userId, id, dto);
   }
 
   @Put(':id/change-driver')

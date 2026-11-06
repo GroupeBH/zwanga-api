@@ -33,5 +33,5 @@ export async function findDriverChoices(manager: EntityManager, passengerId: str
 export async function validateTargetDriver(manager: EntityManager, passengerId: string, targetId: string | null | undefined, query: DriverChoiceQuery) {
   if (!targetId) return;
   if (targetId === passengerId || !(await findDriverChoices(manager, passengerId, query, targetId)).length)
-    throw new BadRequestException('Ce conducteur ne peut pas recevoir cette demande. Choisissez un autre conducteur ou les conducteurs proches.');
+    throw new BadRequestException('Ce conducteur ne peut pas recevoir cette commande. Choisissez un autre conducteur ou les conducteurs proches.');
 }

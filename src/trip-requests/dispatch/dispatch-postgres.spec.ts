@@ -358,7 +358,6 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
       {} as never, {} as never, {} as never, {} as never, {} as never);
     jest.spyOn(edits, 'findOne').mockImplementation(async id => source.getRepository(TripRequest).findOneByOrFail({ id }) as never);
     jest.spyOn(edits as any, 'notifyPassengerAboutDriverOffer').mockResolvedValue(undefined);
-    jest.spyOn(edits as any, 'notifyDriverAboutOfferAcceptance').mockResolvedValue(undefined);
     jest.spyOn(edits as any, 'sanitizeDriverOffer').mockImplementation(async offer => offer);
     return edits;
   };
@@ -637,6 +636,13 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     const publish = jest.fn(), changes = new RideAlertChanges(source, { publish } as any);
     try {
       await edits.acceptDriverOffer(r.passengerId, r.id, { offerId: offer.id });
+      const acceptance = await source.query(`SELECT * FROM notifications WHERE "eventKey"=$1`, [`offer-accepted:${offer.id}`]);
+      expect(acceptance).toHaveLength(1);
+      expect(acceptance[0]).toMatchObject({ userId: d.user.id, fcmToken: '', status: 'pending', data: {
+        type: 'offer_accepted', driverId: d.user.id, passengerId: r.passengerId, tripRequestId: r.id, offerId: offer.id,
+      } });
+      await expect(edits.acceptDriverOffer(r.passengerId, r.id, { offerId: offer.id })).rejects.toThrow();
+      expect(await source.query(`SELECT id FROM notifications WHERE "eventKey"=$1`, [`offer-accepted:${offer.id}`])).toHaveLength(1);
       for (let attempt = 0; attempt < 100 && publish.mock.calls.length < 2; attempt++)
         await new Promise(resolve => setTimeout(resolve, 20));
       expect(publish).toHaveBeenCalledWith(d.user.id, { kind: 'changed', requestId: r.id, terminal: true });

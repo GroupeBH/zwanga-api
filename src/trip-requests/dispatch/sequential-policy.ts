@@ -21,5 +21,5 @@ export async function assertSequentialInvitation(manager: EntityManager,
     WHERE "requestId" = $1 AND "driverId" = $2 AND status = 'pending' AND "expiresAt" > clock_timestamp()
       AND phase = ANY($3::varchar[]) AND ($4::uuid IS NULL OR "acceptanceToken"=$4)`, [request.id, driverId, phases, token ?? null]);
   if (!rows.length) throw new ConflictException({ code: 'REQUEST_INVITATION_EXPIRED',
-    message: 'Cette demande a été proposée à un autre conducteur.' });
+    message: 'Cette commande a été proposée à un autre conducteur.' });
 }

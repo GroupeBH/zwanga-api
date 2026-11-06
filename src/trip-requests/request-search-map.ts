@@ -51,7 +51,7 @@ export async function requestMapDriver(manager: EntityManager, passengerId: stri
   if (!request || !/^[a-f0-9]{64}$/.test(markerId)) throw new NotFoundException('Conducteur introuvable.');
   const rows = await requestMapCandidates(manager, passengerId, requestId);
   const row = rows.slice(0, 500).find(candidate => requestMapMarkerId(requestId, candidate.markerSeed) === markerId);
-  if (!row) throw new NotFoundException('Ce conducteur n’est plus disponible pour cette demande. Actualisez la carte.');
+  if (!row) throw new NotFoundException('Ce conducteur n’est plus disponible pour cette commande. Actualisez la carte.');
   return { driverId: row.driverId, vehicleType: row.vehicleType, positionUpdatedAt: new Date(row.positionUpdatedAt).toISOString() };
 }
 

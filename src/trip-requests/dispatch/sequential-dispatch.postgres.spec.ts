@@ -6,7 +6,7 @@ import { multiVehicleRequestFlow } from '../../../test/multi-vehicle-request-flo
 import { RequestVehicleTypes1780000104000 } from '../../database/migrations/1780000104000-RequestVehicleTypes';
 import { mapDriverPriorityFlow } from '../../../test/map-driver-priority-flow';
 import { MapDriverPriority1780000103000 } from '../../database/migrations/1780000103000-MapDriverPriority';
-import { changeRequestDriver } from '../change-request-driver';
+import { changeRequestDriver, withdrawRequestDriver } from '../change-request-driver';
 import { PassengerDriverChangeReason1780000102000 } from '../../database/migrations/1780000102000-PassengerDriverChangeReason';
 import { availableRequestFlow } from '../../../test/available-request-flow';
 import { SeparateRequestAttentionLease1780000101000 } from '../../database/migrations/1780000101000-SeparateRequestAttentionLease';
@@ -194,7 +194,7 @@ const redisPort = Number(process.env.DISPATCH_TEST_REDIS_PORT);
     expect(await relay.advance(next.id)).toBe(true);
     expect((await offers(next.id)).map(o => o.driverId)).toEqual([old.id]);
   });
-  it('passenger driver change relays the same request to the next Redis candidate without ringing the old driver again', async () => {
+  it.each(['passenger', 'driver'])('%s release relays the same request to the next Redis candidate without ringing the old driver again', async actor => {
     const first = await driver(), second = await driver(15.311), r = await request();
     expect(await relay.advance(r.id)).toBe(true);
     expect((await offers(r.id))[0].driverId).toBe(first.id);
@@ -208,7 +208,9 @@ const redisPort = Number(process.env.DISPATCH_TEST_REDIS_PORT);
     const selected = await db.getRepository(TripRequest).findOneByOrFail({ id: r.id });
     const old = { selectedDriverId: first.id, selectedAt: selected.selectedAt!.toISOString() };
     const bookings = Object.create(BookingsService.prototype) as BookingsService;
-    await changeRequestDriver(db.manager, r.passengerId, r.id, old, bookings);
+    const release = () => actor === 'driver' ? withdrawRequestDriver(db.manager, first.id, r.id, old, bookings)
+      : changeRequestDriver(db.manager, r.passengerId, r.id, old, bookings);
+    await release();
     expect(await dispatch.notifyScheduledRequest(r.id)).toBe(true);
     const pending = (await offers(r.id)).filter(o => o.status === 'pending');
     expect(pending).toHaveLength(1);
@@ -218,7 +220,7 @@ const redisPort = Number(process.env.DISPATCH_TEST_REDIS_PORT);
     expect(alerts.find(n => n.userId === second.id && n.data?.ringAlert)?.isActive).toBe(true);
     expect(notifications.dispatchUrgentNotifications).toHaveBeenCalled();
     // A lost response/retry does not cancel the next driver's pending invitation.
-    expect((await changeRequestDriver(db.manager, r.passengerId, r.id, old, bookings)).changed).toBe(false);
+    expect((await release()).changed).toBe(false);
     expect((await offers(r.id)).filter(o => o.status === 'pending')).toHaveLength(1);
   });
   const sharedFixture = async (immediate = false) => {

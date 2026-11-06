@@ -29,7 +29,7 @@ export async function claimInAppRequest(
   );
   if (active.length)
     throw new ConflictException(
-      'Une réponse est en cours. Actualisez la demande.',
+      'Une réponse est en cours. Actualisez la commande.',
     );
   const [previous] = await tx.query<{ vehicleId: string; seats: number }[]>(
     `SELECT "vehicleId",seats FROM trip_request_dispatch_offers
@@ -39,7 +39,7 @@ export async function claimInAppRequest(
   const selected = vehicle ?? previous;
   if (!selected)
     throw new ConflictException(
-      'Choisissez votre véhicule pour accepter la demande.',
+      'Choisissez votre véhicule pour accepter la commande.',
     );
   await assertDriverRequestSchedule(tx, driverId, request.id);
   await tx.query(

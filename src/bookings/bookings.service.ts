@@ -965,7 +965,7 @@ export class BookingsService implements OnModuleInit {
         case BookingStatus.REJECTED: {
           if (trip.tripRequestId) {
             throw new BadRequestException(
-              'Une réservation liée à une demande de trajet ne peut pas être rejetée par le conducteur. Le conducteur peut uniquement arrêter le trajet avant la prise en charge.',
+              'Une réservation liée à une commande de trajet ne peut pas être rejetée par le conducteur. Le conducteur peut uniquement arrêter le trajet avant la prise en charge.',
             );
           }
 
@@ -997,7 +997,7 @@ export class BookingsService implements OnModuleInit {
         case BookingStatus.CANCELLED: {
           if (trip.tripRequestId) {
             throw new BadRequestException(
-              'Une réservation liée à une demande de trajet ne peut pas être annulée par le conducteur. Le conducteur peut uniquement arrêter le trajet avant la prise en charge.',
+              'Une réservation liée à une commande de trajet ne peut pas être annulée par le conducteur. Le conducteur peut uniquement arrêter le trajet avant la prise en charge.',
             );
           }
 
@@ -2425,7 +2425,7 @@ export class BookingsService implements OnModuleInit {
 
     if (isDriver && booking.trip.tripRequestId) {
       throw new BadRequestException(
-        'Une réservation liée à une demande de trajet ne peut pas être annulée par le conducteur. Le conducteur peut uniquement arrêter le trajet avant la prise en charge.',
+        'Une réservation liée à une commande de trajet ne peut pas être annulée par le conducteur. Le conducteur peut uniquement arrêter le trajet avant la prise en charge.',
       );
     }
 

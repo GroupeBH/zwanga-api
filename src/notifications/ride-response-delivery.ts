@@ -7,6 +7,20 @@ import type { Notification } from './entities/notification.entity';
 export async function isRideResponseDeliverable(manager: EntityManager, notification: Notification): Promise<boolean> {
   const data = notification.data;
   if (!notification.userId || !data) return false;
+  if (data.type === 'offer_accepted') {
+    // Resolve identity from the saved offer/request, never from a push role.
+    const rows = await manager.query(`SELECT 1 FROM driver_offers o JOIN trip_requests r ON r.id=o."tripRequestId"
+      LEFT JOIN trips t ON t.id = CASE
+        WHEN r."tripId" ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+        THEN r."tripId"::uuid ELSE NULL END
+      WHERE o.id=$1 AND r.id=$2 AND o."driverId"=$3 AND o.status='accepted'
+        AND r.status='driver_selected' AND r."selectedDriverId"=o."driverId"
+        AND r."passengerId"<>o."driverId"
+        AND ${availableAccountSql('r."passengerId"')} AND ${availableAccountSql('o."driverId"')}
+        AND (r."tripId" IS NULL OR t.status IN ('upcoming','ongoing'))`,
+      [data.offerId, data.tripRequestId, notification.userId]);
+    return rows.length > 0;
+  }
   if (data.type === 'driver_offer') {
     const rows = await manager.query(`SELECT 1 FROM driver_offers o JOIN trip_requests r ON r.id=o."tripRequestId"
       WHERE o.id=$1 AND r.id=$2 AND r."passengerId"=$3 AND o.status='pending'
