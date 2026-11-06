@@ -1,5 +1,11 @@
 # Centre de supervision mobile Zwanga
 
+## 2026-11-05 — Profils de conducteurs et contre-propositions
+
+Le lot mobile/backend ajoute la résolution propriétaire d'un marqueur de carte, la demande directe depuis un profil et la négociation explicite du prix. Une contre-proposition crée une offre et une alerte durable dans la même transaction ; son acceptation, son rejet, son retrait et son expiration restent sérialisés avec l'affectation de la demande. Aucune nouvelle migration ni modification de paiement pour ce lot.
+
+Contrats, fichiers, compatibilité, vérifications (54 tests contrôleur/service, 44 tests de transport simulé, huit scénarios PostgreSQL isolés et 369 tests JavaScript mobile) et limites sont consignés dans le [journal spécialisé mobile/backend](../../zwanga/docs/DEMANDES_DIRECTES_CONTRE_PROPOSITIONS.md). Backend compatible à publier avant le mobile ; aucune publication, base de production ou notification réelle effectuée pendant ces travaux. Les essais automatisés ne remplacent pas la recette sonore sur Android/iPhone.
+
 ## État de la livraison locale — 5 novembre 2026
 
 Le module `src/mobile-operations` étend le backend existant. Il fournit les API du centre de supervision Admin et de son instrumentation mobile. L’interface correspondante est intégrée dans `zwanga-admin` à `/mobile-operations`, aux côtés des Stores à `/stores`. Il ne crée ni backend indépendant, ni service Go, ni nouvelle infrastructure de push.
@@ -238,10 +244,69 @@ L’index partiel ajouté à `notifications` est construit dans la migration tra
 - Pas de publication Store, déploiement AWS, provisioning de fédération, modification de secrets ou synchronisation réelle effectuée.
 - La disponibilité Apple par territoire et certains diagnostics détaillés ne sont pas importés. Les dimensions réellement disponibles restent celles retournées par chaque source existante.
 
-## Références officielles
+## Annonces automatiques des mises à jour Store — 5 novembre 2026
+
+Le catalogue Store alimente désormais le mécanisme existant `app_store_releases` → outbox de notifications → mobile. Aucune nouvelle file, campagne marketing ou publication Store n'est créée. L'annonce est enregistrée dans la transaction de **fin réussie** du job `catalog`, après les appels fournisseur et le nettoyage de l'edit Google. Un import incomplet/échoué ne déclenche rien. L'intégration désactivée pendant l'appel est revérifiée avant cette écriture.
+
+- Google : piste `production`, release `completed`, sans ciblage territorial ni déploiement partiel, un seul `versionCode` interprétable. Les pistes de test et distributions multi-APK ambiguës sont exclues. Le nom libre de la release n'est pas une version applicative fiable : `comparison=native_build` compare seulement le build Android. `version=0.0.0` est une valeur technique, pas un nom de version ; le mobile corrigé affiche « Une nouvelle version de Zwanga ».
+- Apple : plateforme iOS, état `READY_FOR_SALE` ou `READY_FOR_DISTRIBUTION`, build associé connu, pas de date future ni de déploiement progressif actif/suspendu. Comparaison numérique version puis build, compatible avec les annonces manuelles existantes.
+- Une seule annonce active par plateforme. Verrou transactionnel partagé avec l'administration, index uniques et clés d'événements existants protègent les imports concurrents et répétés. Un retrait manuel n'est pas réactivé par une synchronisation. Si le catalogue ne confirme plus une annonce automatique, elle est retirée ; les annonces manuelles ne sont pas retirées par ce contrôle.
+- Push uniquement pour les appareils connus avec une version/build plus ancienne et un token admissible. Les consentements des installations et protections anti-doublons existants sont réutilisés. Version, retrait, compte et token sont revérifiés avant livraison. Un message déjà remis à FCM ne peut pas être rappelé ; sa réception ne constitue pas une preuve de lecture.
+- Le modal existant reste sur l'accueil, non bloquant, avec « Mettre à jour » vers le store et « Plus tard » (report de 24 h, réévalué au retour à l'écran). Il cède la priorité au trajet et aux alertes conducteur. Une push reçue rafraîchit la décision serveur sans navigation automatique ; un appui ouvre l'écran de mise à jour. Sans autorisation push, le contrôle dans l'application reste possible.
+
+### Activation et vérification
+
+1. Déployer la migration `AutomaticStoreUpdateAnnouncements1780000112000` avec le backend correspondant. Elle ajoute deux colonnes à la table existante ; pas de copie d'utilisateurs. Son retour arrière conserve les lignes et désactive les annonces automatiques avant suppression des colonnes. Désactiver les traitements avant tout rollback.
+2. Publier le mobile mis à jour, notamment pour la comparaison Android par build. Les anciennes applications qui ignorent `comparison=native_build` peuvent recevoir la push et ouvrir le store, mais leur ancien modal ne sait pas interpréter cette annonce Google. Ne pas leur promettre un modal rétroactif sans mise à jour.
+3. Vérifier les identifiants, permissions et imports `catalog` de chaque intégration. Google conserve son opt-in `STORE_GOOGLE_TEMPORARY_EDITS_ENABLED` avec une identité appropriée : le mécanisme existant crée puis supprime un edit temporaire, sans commit. Ne pas activer cet accès sur une identité partageant des edits de publication en cours.
+4. Pour l'automatisation, configurer `APP_UPDATES_ENABLED=true`, `APP_UPDATES_FROM_STORES_ENABLED=true`, `STORE_MANAGEMENT_ENABLED=true` et `STORE_SYNC_ENABLED=true`, avec les intégrations concernées activées. Le nouveau flag reste `false` dans l'exemple. Les annonces manuelles ne dépendent pas de ce nouveau flag. Son passage à `false` arrête la création automatique, **pas** les annonces déjà actives : les retirer dans l'administration ou désactiver `APP_UPDATES_ENABLED` pour arrêter aussi ce flux.
+5. Vérifier l'historique des jobs et les audits `release.store.publish` / `release.store.withdraw`, puis tester avec un appareil ancien et un appareil à jour pour chaque plateforme. L'activation peut annoncer immédiatement la dernière version déjà publiée, pas uniquement les publications futures.
+
+Par défaut, le catalogue est synchronisé toutes les deux heures (cadence configurable), puis les dispatchers préparent les notifications toutes les 30 secondes. Ce n'est pas un webhook instantané des stores. Le mobile rafraîchit au retour sur l'écran si sa réponse a plus de 60 secondes, sur signal push et toutes les cinq minutes pendant l'activité de l'écran. La livraison reste dépendante de FCM/APNs, de l'autorisation système, du réseau et du fonctionnement du backend.
+
+Les exclusions de déploiements partiels sont conservatrices. La disponibilité exacte selon le pays du compte Store, le matériel et la version d'OS n'est pas encore vérifiée individuellement ; elle ne peut pas être garantie avec le catalogue actuel. Le store reste responsable de proposer effectivement la version compatible. Les données de statistiques/téléchargements ne déclenchent pas ces annonces.
+
+Implémentation locale uniquement : aucun changement de `.env`, Terraform, AWS, CI/CD ni envoi réel de notification dans cette passe. La migration a uniquement été exécutée dans des bases temporaires de test, pas sur la base applicative.
+
+Vérifications : 17 suites backend ciblées (184 tests réussis, aucun ignoré), avec PostgreSQL temporaire pour les annonces, les installations et Store Management ; 23 tests JavaScript mobile réussis ; TypeScript backend/mobile sans émission, ESLint des nouveaux fichiers backend et des fichiers mobile modifiés, contrôles de taille/frontière réseau mobile et `git diff --check`. Le guide PostgreSQL a orienté le verrou partagé et l'écriture transactionnelle afin de conserver l'idempotence entre synchronisation et publication manuelle. Pas de recette sur téléphone ni de validation de livraison FCM/APNs réelle dans cette passe.
+
+## Références officielles des mises à jour
+
+- [Google Play Tracks](https://developers.google.com/android-publisher/api-ref/rest/v3/edits.tracks) : `name`, `versionCodes`, état et ciblage des releases.
 
 - [Google Play Edits](https://developers.google.com/android-publisher/edits) : modèle transactionnel des pistes et effets des edits concurrents.
 - [Google Auth Library Node.js](https://docs.cloud.google.com/nodejs/docs/reference/google-auth-library/latest) : ADC et fédération.
 - [Versions App Store](https://developer.apple.com/documentation/appstoreconnectapi/get-v1-apps-_id_-appstoreversions) : relations builds et déploiement progressif.
 - [Apple Sales Reports API](https://developer.apple.com/documentation/appstoreconnectapi/get-v1-salesreports) et [définition du rapport Summary Sales](https://developer.apple.com/help/app-store-connect/reference/reporting/summary-sales-report/) : unités, dates et retours.
 - [Comprendre la livraison FCM](https://firebase.google.com/docs/cloud-messaging/understand-delivery) : acceptation, livraison et limites d’observation.
+
+## Recette locale des nouveautés backend et mobile — 5 novembre 2026
+
+Périmètre : commit backend `c209603` et modifications locales du jour, mobile `zwanga` et ses modifications non commitées. Contrôles sans démarrage de l'application réelle, sans lecture de `.env`, sans AWS, appel Store, SMS, paiement ou push réels. Bases PostgreSQL/PostGIS temporaires sur boucle locale ; Redis temporaires protégés, sans persistance. Les fournisseurs et interfaces natives sont simulés. Les tests Node sont lancés avec environnement réduit et garde réseau locale ; les lanceurs Redis existants construisent également leur propre environnement réduit.
+
+| Vérification | Résultat |
+| --- | --- |
+| Mobile, tous les 396 fichiers de tests JavaScript | 3 239 réussis, 0 échec, 1 ignoré (politique CocoaPods, Ruby absent) |
+| Backend, Stores / supervision mobile / mises à jour / OTP / notations | 419 réussis au premier passage ; 6 tests des mises à jour indisponibles à cause d'un délai `initdb`, puis tous les 6 réussis en relance isolée |
+| OTP sur Redis réel isolé | 15 réussis, complétant les 15 tests ignorés dans la passe précédente : **440 tests ciblés backend distincts validés** au total |
+| Dispatch PostgreSQL + Redis, en complément | 79 réussis ; 1 benchmark de charge optionnel non activé |
+| Compatibilité des dépendances backend | 6 réussis ; ce n'est pas une nouvelle analyse npm des vulnérabilités |
+| Build NestJS et TypeScript mobile | Réussis |
+| ESLint mobile, compatibilité Metro/décodeur, parité des sources natives, frontière réseau, taille des sources | Réussis ; 1 275 sources, aucun dépassement de 400 lignes |
+
+Couverture fonctionnelle : OTP expiré, tentatives concurrentes, preuve à usage unique, échec SMS simulé, compte non vérifié et changement de session ; noms des rapports Apple, données manquantes distinctes de zéro, périodes et dernières statistiques, fédération Google simulée ; permissions de supervision et consentement ; migrations réversibles sur bases temporaires ; annonces issues d'un catalogue réussi, ciblage des anciens builds, déduplication, retrait et mise à jour de l'appareil ; notation Store après paiement et notation de trajet vérifiée, rappel après trois nouvelles courses, absence de filtrage sur une note positive, priorité des autres écrans et isolation entre comptes.
+
+Ajout uniquement d'un test backend pendant cette recette : `src/ratings/rated-trips.http.spec.ts`, huit scénarios HTTP réels avec signature JWT de test, garde d'authentification et validation des DTO. Ils couvrent le contrat mobile, un jeton absent/expiré/mal signé, les UUID invalides/dupliqués, plus de 100 identifiants et la tentative de fournir un autre `userId`. Le service de données y est simulé ; les tests PostgreSQL séparés vérifient l'auteur réel de la notation. Pas de modification de logique métier, CI/CD ou infrastructure pendant cette recette.
+
+**La validation globale du dépôt n'est pas verte :**
+
+- Le contrôle TypeScript englobant les fichiers de tests relève 14 erreurs dans `mobile-postgres.spec.ts` et `store-aws-wif.spec.ts` (résultat d'analytics inféré `{}` et signatures des adaptateurs/mocks Google). Le build applicatif exclut ces tests et réussit ; Jest les transpile en mode isolé, leur réussite ne remplace donc pas ce contrôle de typage.
+- ESLint backend global relève 22 362 erreurs, notamment 14 880 de formatage et des accès/affectations non typés. Elles concernent très majoritairement des fichiers hors diff ; aucun `--fix` global n'a été exécuté.
+- Deux scénarios de `database/resilience-postgres.spec.ts` attendent une exception pour une occurrence récurrente en conflit. `trip-publication-photo.ts` ignore volontairement cette occurrence et renvoie `[]`. Ces attentes nécessitent un réalignement en conservant la vérification qu'aucun trajet conflictuel n'est publié.
+- La passe générale backend a été **interrompue**, pas validée intégralement : dépassements de délai `initdb` dans plusieurs fixtures Windows et erreur de suppression d'un dossier temporaire après la supervision mobile. Ce dernier groupe réussit en passe ciblée. Les six tests des mises à jour réussissent également lorsqu'ils sont rejoués seuls. Le processus PostgreSQL temporaire laissé par l'interruption a été identifié puis arrêté ; la base applicative n'a pas été touchée. L'export JSON de la première passe ciblée échoue sur la structure circulaire de l'erreur `initdb` ; le compte rendu texte et le JSON de la relance conservent les résultats.
+
+Artefacts locaux non versionnés : `tmp/verification-20261105/` (journaux, résumés des commandes, résultat JSON dispatch et relance PostgreSQL). Ne pas assimiler les avertissements/erreurs synthétiques des tests à des incidents de production.
+
+Reproduction sur ce PC depuis le backend : `node tmp/verify-20261105.cjs today` (39 suites ciblées), `node tmp/verify-20261105.cjs redis` (OTP puis dispatch isolés), `node tmp/verify-20261105.cjs mobile` (suite mobile entière) et `node tmp/verify-20261105.cjs checks` (build et contrôles statiques, sans correction automatique). Ce lanceur local non versionné utilise les binaires PostgreSQL 18 installés et Redis sous WSL/Ubuntu. Lancer les groupes PostgreSQL successivement pour limiter la concurrence d'initialisation ; la CI doit conserver ses propres installations et paramètres.
+
+Limites : environnement Windows avec Node `24.11.0`, alors que les manifestes demandent `>=24.22.1 <25` ; qualification CI avec la version déclarée encore nécessaire. L'émulateur connecté contient `1.0.18` / build `176`, installé le 28 octobre : aucun essai visuel des nouveautés sur ce binaire ancien, aucune installation ni compilation native effectuée. Pas de validation physique Android/iOS, ni de livraison SMS/FCM/APNs ou d'affichage effectif de la fenêtre native des stores. Le test e2e générique important `AppModule` n'a pas été lancé car il charge la configuration applicative et ses services ; les tests HTTP isolés ont été utilisés à sa place. Ces résultats ne constituent pas une garantie de déploiement sans incident.

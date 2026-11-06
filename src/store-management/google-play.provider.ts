@@ -98,6 +98,7 @@ export class GooglePlayProvider {
                   ),
                   userFraction:
                     typeof r.userFraction === 'number' ? r.userFraction : null,
+                  countryTargeting: r.countryTargeting ?? null,
                   releaseNotes: list(r.releaseNotes ?? []).map((n) => ({
                     language: textValue(n.language, 32),
                     text: textValue(n.text),

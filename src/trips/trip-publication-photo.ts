@@ -1,6 +1,7 @@
 import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { In, Repository } from 'typeorm';
 import { User } from '../users/entities/user.entity';
+import { assertAccountAvailable } from '../users/account-availability';
 import { Trip } from './entities/trip.entity';
 import { assertPublicationRequestSchedule } from '../trip-requests/dispatch/driver-schedule-policy';
 
@@ -32,10 +33,11 @@ export async function savePublicationsWithPhotoPolicy(
     const users = manager.getRepository(User);
     const driver = await users.findOne({
       where: { id: driverId },
-      select: ['id', 'profilePicture', 'hasPublishedTrip'],
+      select: ['id', 'profilePicture', 'hasPublishedTrip', 'isActive', 'status'],
       lock: { mode: 'pessimistic_write' },
     });
     if (!driver) throw new NotFoundException('Conducteur non trouvé');
+    assertAccountAvailable(driver);
     const publications = manager.getRepository(Trip);
     // Re-read occurrences under the owner lock: generation's earlier read may
     // predate a concurrent worker's publication of exactly the same occurrence.

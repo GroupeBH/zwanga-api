@@ -3,6 +3,7 @@ import {
   NotFoundException,
   Logger,
   BadRequestException,
+  ForbiddenException,
   InternalServerErrorException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -13,6 +14,7 @@ import {
   VehicleType,
 } from './entities/vehicle.entity';
 import { User } from '../users/entities/user.entity';
+import { lockAvailableAccounts } from '../users/account-availability';
 import { isAdminRole } from '../users/user-role.policy';
 import { activateRequestedDriver } from '../users/driver-activation';
 import { Trip, TripStatus } from '../trips/entities/trip.entity';
@@ -63,6 +65,13 @@ export class VehiclesService {
         `Failed to invalidate cache for owner ${ownerId}: ${message}`,
       );
     }
+  }
+
+  private saveAvailableVehicle(vehicle: Vehicle): Promise<Vehicle> {
+    return this.vehicleRepository.manager.transaction(async manager => {
+      await lockAvailableAccounts(manager, [vehicle.ownerId]);
+      return manager.getRepository(Vehicle).save(vehicle);
+    });
   }
 
   async create(
@@ -142,7 +151,7 @@ export class VehiclesService {
             : true,
       });
 
-      const savedVehicle = await this.vehicleRepository.save(vehicle);
+      const savedVehicle = await this.saveAvailableVehicle(vehicle);
       await this.ensureOwnerDriverProfile(owner);
       await this.invalidateVehicleCaches(ownerId);
 
@@ -153,6 +162,7 @@ export class VehiclesService {
     } catch (error) {
       if (
         error instanceof BadRequestException ||
+        error instanceof ForbiddenException ||
         error instanceof NotFoundException
       ) {
         throw error;
@@ -212,6 +222,8 @@ export class VehiclesService {
   }
 
   async findAllByOwner(ownerId: string): Promise<Vehicle[]> {
+    const owner = await this.userRepository.findOne({ where: { id: ownerId }, select: ['isActive', 'status'] });
+    if (!owner || !owner.isActive || ['inactive', 'suspended'].includes(owner.status)) return [];
     this.logger.debug(`Fetching vehicles for owner: ${ownerId}`);
 
     const cacheKey = CacheService.getVehiclesByOwnerKey(ownerId);
@@ -304,7 +316,7 @@ export class VehiclesService {
 
     let updatedVehicle: Vehicle;
     try {
-      updatedVehicle = await this.vehicleRepository.save(vehicle);
+      updatedVehicle = await this.saveAvailableVehicle(vehicle);
     } catch (error) {
       if (this.isUniqueConstraintError(error)) {
         throw new BadRequestException(
@@ -509,7 +521,7 @@ export class VehiclesService {
     vehicle.photoUrl = vehicleData.photoUrl ?? vehicle.photoUrl;
     vehicle.isActive = true;
 
-    const savedVehicle = await this.vehicleRepository.save(vehicle);
+    const savedVehicle = await this.saveAvailableVehicle(vehicle);
     await this.invalidateVehicleCaches(ownerId, vehicle.id);
     return savedVehicle;
   }

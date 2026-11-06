@@ -1,5 +1,6 @@
 import { DriverChoiceQuery } from './dto/driver-choice.dto';
-import { TargetMapDriverDto } from './dto/target-map-driver.dto';
+import { MapDriverQuery, TargetMapDriverDto } from './dto/target-map-driver.dto';
+import { CounterOfferDto } from './dto/counter-offer.dto';
 import { ChangeRequestDriverDto } from './dto/change-request-driver.dto';
 import {
   Controller,
@@ -100,6 +101,15 @@ export class TripRequestsController {
   async targetMapDriver(@Request() req: { user: { userId: string } }, @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: TargetMapDriverDto) {
     return this.tripRequestsService.targetDriverFromMap(req.user.userId, id, dto);
+  }
+
+  @Get(':id/map-driver')
+  @Auth()
+  @Header('Cache-Control', 'private, no-store')
+  @SensitiveThrottle(30, 60000)
+  async mapDriver(@Request() req: { user: { userId: string } }, @Param('id', ParseUUIDPipe) id: string,
+    @Query() query: MapDriverQuery) {
+    return this.tripRequestsService.mapDriver(req.user.userId, id, query.markerId);
   }
 
   @Get('my-requests')
@@ -262,6 +272,23 @@ export class TripRequestsController {
       tripRequestId,
       acceptDto,
     );
+  }
+
+  @Post(':id/counter-offer')
+  @Auth()
+  @Roles(UserRole.DRIVER)
+  @SensitiveThrottle(5, 60000)
+  async counterOffer(@Request() req: { user: { userId: string } }, @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CounterOfferDto) {
+    return this.tripRequestsService.proposeCounterOffer(req.user.userId, id, dto);
+  }
+
+  @Post(':id/offers/:offerId/reject')
+  @Auth()
+  @SensitiveThrottle(10, 60000)
+  async rejectOffer(@Request() req: { user: { userId: string } }, @Param('id', ParseUUIDPipe) id: string,
+    @Param('offerId', ParseUUIDPipe) offerId: string) {
+    return this.tripRequestsService.rejectOffer(req.user.userId, id, offerId);
   }
 
   @Post(':id/accept')

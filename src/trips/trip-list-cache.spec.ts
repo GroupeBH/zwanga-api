@@ -3,7 +3,10 @@ import { CacheService } from '../common/services/cache.service';
 
 describe('public trip list cache', () => {
   function fixture(cached: unknown) {
+    const query = { select: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(), getMany: jest.fn().mockResolvedValue(cached ?? []) };
     return Object.assign(Object.create(TripsService.prototype), {
+      tripRepository: { createQueryBuilder: jest.fn().mockReturnValue(query) },
       logger: { debug: jest.fn(), log: jest.fn() }, CACHE_TTL: 300,
       cacheService: { get: jest.fn().mockResolvedValue(cached), set: jest.fn() },
       search: jest.fn().mockResolvedValue([]),
@@ -32,5 +35,11 @@ describe('public trip list cache', () => {
     expect(service.search).toHaveBeenCalledTimes(1);
     expect(service.search).toHaveBeenCalledWith({});
     expect(service.cacheService.set).toHaveBeenCalledWith(CacheService.getTripsListKey('discovery-v2'), [], 300);
+  });
+
+  it('does not expose a retired owner from a previously populated cache', async () => {
+    const service = fixture([{ id: 'trip', status: 'upcoming', departureDate: '2099-01-01', isPrivate: false }]);
+    service.tripRepository.createQueryBuilder().getMany.mockResolvedValue([]);
+    expect(await service.findAll()).toEqual([]);
   });
 });

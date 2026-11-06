@@ -15,6 +15,7 @@ import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { RolesGuard } from './common/guards/roles.guard';
 import { IpThrottlerGuard } from './common/guards/throttler.guard';
+import { PreAuthThrottleGuard } from './common/guards/pre-auth-throttle.guard';
 import { RedisService } from './common/services/redis.service';
 import { RedisThrottlerStorage } from './common/services/redis-throttler.storage';
 import { AuthModule } from './auth/auth.module';
@@ -126,6 +127,10 @@ import { DriverFinanceModule } from './driver-finance/driver-finance.module';
   controllers: [AppController],
   providers: [
     AppService,
+    {
+      provide: APP_GUARD,
+      useClass: PreAuthThrottleGuard,
+    },
     {
       provide: APP_GUARD,
       useClass: JwtAuthGuard,

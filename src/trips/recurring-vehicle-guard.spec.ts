@@ -5,6 +5,7 @@ import { RecurringTripTemplateStatus } from './entities/recurring-trip-template.
 describe('resuming a recurring trip after vehicle deactivation', () => {
   const template = {
     id: 'template-1',
+    driverId: 'driver-1',
     vehicleId: 'vehicle-1',
     status: RecurringTripTemplateStatus.PAUSED,
   };
@@ -13,7 +14,11 @@ describe('resuming a recurring trip after vehicle deactivation', () => {
     const vehicleRepository = {
       findOne: jest.fn().mockResolvedValue(vehicle),
     };
-    const recurringTripTemplateRepository = { save: jest.fn() };
+    const ownerRead = jest.fn().mockResolvedValue({ isActive: true, status: 'active' });
+    const recurringTripTemplateRepository = { save: jest.fn(), manager: {} as any };
+    recurringTripTemplateRepository.manager.transaction = (run: any) => run({
+      findOne: ownerRead, getRepository: () => recurringTripTemplateRepository,
+    });
     const generateTripsForTemplate = jest.fn().mockResolvedValue(0);
     const service = Object.assign(Object.create(TripsService.prototype), {
       findRecurringTemplateEntity: jest.fn().mockResolvedValue({ ...template }),
@@ -27,6 +32,7 @@ describe('resuming a recurring trip after vehicle deactivation', () => {
       vehicleRepository,
       recurringTripTemplateRepository,
       generateTripsForTemplate,
+      ownerRead,
     };
   }
 
@@ -64,5 +70,15 @@ describe('resuming a recurring trip after vehicle deactivation', () => {
       expect.objectContaining({ status: RecurringTripTemplateStatus.ACTIVE }),
     );
     expect(generateTripsForTemplate).toHaveBeenCalled();
+  });
+
+  it('cannot resume after the owner was disabled while the request was in flight', async () => {
+    const ctx = serviceWithVehicle({ id: 'vehicle-1' });
+    ctx.ownerRead.mockResolvedValue({ isActive: false, status: 'suspended' });
+    await expect(ctx.service.resumeRecurring('template-1', 'driver-1')).rejects.toMatchObject({
+      response: { code: 'ACCOUNT_UNAVAILABLE' },
+    });
+    expect(ctx.recurringTripTemplateRepository.save).not.toHaveBeenCalled();
+    expect(ctx.generateTripsForTemplate).not.toHaveBeenCalled();
   });
 });

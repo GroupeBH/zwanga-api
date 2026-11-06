@@ -1,3 +1,4 @@
+import { applyAdminList } from '../common/pagination/admin-query';
 import {
   BadRequestException,
   ForbiddenException,
@@ -352,8 +353,8 @@ export class SupportService {
   }
 
   async listAdminTickets(query: ListAdminSupportTicketsQueryDto) {
-    const page = query.page ?? 1;
-    const limit = query.limit ?? 20;
+    const page = Math.max(1, Math.trunc(query.page ?? 1));
+    const limit = Math.min(100, Math.max(1, Math.trunc(query.limit ?? 20)));
     const skip = (page - 1) * limit;
 
     const qb = this.ticketRepository
@@ -365,6 +366,7 @@ export class SupportService {
       .take(limit);
 
     this.applyCommonTicketFilters(qb, query);
+    applyAdminList(qb, 'ticket', query, ['createdAt', 'updatedAt', 'status', 'priority', 'subject'], 'updatedAt:desc');
 
     if (query.userId) {
       qb.andWhere('ticket.userId = :userId', { userId: query.userId });
@@ -384,6 +386,9 @@ export class SupportService {
 
     return {
       data: tickets.map((ticket) => this.sanitizeTicketSummary(ticket)),
+      total,
+      page,
+      limit,
       meta: {
         page,
         limit,

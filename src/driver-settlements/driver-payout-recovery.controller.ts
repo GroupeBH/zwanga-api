@@ -17,6 +17,7 @@ import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decor
 import { UserRole } from '../users/entities/user.entity';
 import { DriverPayoutRecoveryService } from './driver-payout-recovery.service';
 import { RetryPayoutDto } from '../payments/dto/retry-payout.dto';
+import { RequireFinanceOtp } from '../otp/finance-otp.guard';
 import {
   ClosePayoutIncidentDto,
   PayoutRecoveryListDto,
@@ -109,6 +110,7 @@ export class AdminDriverPayoutRecoveryController {
   }
 
   @Post(':id/retry')
+  @RequireFinanceOtp('driver_payout_retry')
   @Roles(UserRole.SUPER_ADMIN)
   @SensitiveThrottle(3, 60_000)
   @ApiOperation({ summary: 'Relancer au même numéro après non-réception et non-exécution définitive confirmées' })

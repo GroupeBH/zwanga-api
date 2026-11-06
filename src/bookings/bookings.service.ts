@@ -1,8 +1,10 @@
 import { enqueueTransactionalNotification } from '../notifications/transactional-notification';
+import { acceptedBookingProposalTotal, validateBookingPriceProposal } from './booking-price-proposal';
 import { trustedContactMessagesEnabled } from '../safety/trusted-contact-policy';
 import { TOKEN_VALUE_CDF } from '../wallet/token-value.policy';
 import { CoalescedRideProgress } from './coalesced-ride-progress';
 import { withBookableTrip } from './bookable-trip-transaction';
+import { lockAvailableAccounts } from '../users/account-availability';
 import { canApplyBookingPayment } from './booking-payment-transition';
 import { finishEmptyPrivateTrip } from './private-trip-cancellation';
 import { WALLET_BALANCE_MISMATCH_SQL } from '../wallet/wallet-integrity';
@@ -865,6 +867,9 @@ export class BookingsService implements OnModuleInit {
         return booking;
       }
 
+      const proposedTotal = nextStatus === BookingStatus.ACCEPTED
+        ? acceptedBookingProposalTotal(booking, updateStatusDto.acceptedPricePerSeat) : null;
+
       if (invitationOnly) {
         if (oldStatus !== BookingStatus.PENDING || trip.tripRequestId) {
           throw new BadRequestException('Cette réservation a déjà été traitée. Actualisez les détails du trajet.');
@@ -940,6 +945,10 @@ export class BookingsService implements OnModuleInit {
             );
           }
 
+          if (proposedTotal !== null) {
+            booking.grossPaymentAmount = proposedTotal;
+            await this.applyFirstTripSubsidyPolicy(booking, trip, manager);
+          }
           booking.status = BookingStatus.ACCEPTED;
           booking.acceptedAt = booking.acceptedAt ?? new Date();
           booking.cancelledAt = null;
@@ -1321,6 +1330,11 @@ export class BookingsService implements OnModuleInit {
             )
           : trip.arrivalPoint;
 
+    const proposedPricePerSeat = validateBookingPriceProposal(
+      createBookingDto.proposedPricePerSeat, trip, createBookingDto.numberOfSeats);
+    if (sharedSelection && proposedPricePerSeat !== null) {
+      throw new BadRequestException('Cette réservation utilise déjà le tarif convenu pour la demande.');
+    }
     const grossPaymentAmount = this.calculateBookingPaymentAmount(
       trip,
       createBookingDto.numberOfSeats,
@@ -1352,6 +1366,7 @@ export class BookingsService implements OnModuleInit {
           : BookingPaymentStatus.NOT_REQUIRED,
       paymentAmount: grossPaymentAmount,
       grossPaymentAmount,
+      proposedPricePerSeat,
       paymentCurrency,
       paymentMode,
       cashCommissionTokenValue: paymentCurrency === 'CDF' ? TOKEN_VALUE_CDF : this.walletService.convertPointsToMoney(1, paymentCurrency),
@@ -1388,7 +1403,10 @@ export class BookingsService implements OnModuleInit {
         await sharedSelection?.selected(manager, saved);
         return saved;
       },
-      sharedSelection?.lockRequest,
+      async manager => {
+        await lockAvailableAccounts(manager, [passengerId, trip.driverId]);
+        await sharedSelection?.lockRequest(manager);
+      },
     );
 
     // Pending requests do not consume seats. Recalculating after commit could
@@ -1507,6 +1525,18 @@ export class BookingsService implements OnModuleInit {
     return bookings;
   }
 
+  async findOneForViewer(id: string, viewerId: string): Promise<Booking> {
+    // Check current ownership before touching the shared cache. Missing and
+    // inaccessible bookings have the same response; role alone grants no access.
+    if (!viewerId || !(await this.bookingRepository.exists({
+      where: [{ id, passengerId: viewerId }, { id, trip: { driverId: viewerId } }],
+    }))) {
+      throw new NotFoundException('Réservation non trouvée');
+    }
+    return this.findOne(id);
+  }
+
+  /** Internal read; HTTP viewers must use findOneForViewer. */
   async findOne(id: string): Promise<Booking> {
     this.logger.debug(`Fetching booking: ${id}`);
 
@@ -2541,9 +2571,10 @@ export class BookingsService implements OnModuleInit {
     }
   }
 
-  async acceptBooking(bookingId: string, driverId: string): Promise<Booking> {
+  async acceptBooking(bookingId: string, driverId: string, acceptedPricePerSeat?: number): Promise<Booking> {
     const booking = await this.updateStatus(bookingId, driverId, {
       status: BookingStatus.ACCEPTED,
+      acceptedPricePerSeat,
     });
     return booking;
   }

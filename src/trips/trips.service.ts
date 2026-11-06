@@ -47,6 +47,7 @@ import {
   RecurringTripTemplateStatus,
 } from './entities/recurring-trip-template.entity';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
+import { availableAccountSql, lockAvailableAccounts } from '../users/account-availability';
 import { Booking, BookingStatus } from '../bookings/entities/booking.entity';
 import {
   getVehicleMaxSeats,
@@ -361,10 +362,20 @@ export class TripsService {
 
     if (cached) {
       this.logger.debug(`Returning ${cached.length} trips from cache`);
-      // A departure can expire between cache creation and this read. Keep the
-      // same time/visibility predicate as the database without a DB round trip.
+      // Cache is a payload optimization, never authority over current ownership.
+      // One bounded read also covers already-disabled legacy owners and an
+      // invalidation racing a cache fill on another ECS task.
+      if (!cached.length) return [];
+      const live = await this.tripRepository.createQueryBuilder('trip')
+        .select('trip.id').where('trip.id IN (:...ids)', { ids: cached.map(t => t.id) })
+        .andWhere(availableAccountSql('trip."driverId"'))
+        .andWhere('trip.isPrivate = false')
+        .andWhere("((trip.status = 'upcoming' AND trip.departureDate > :now) OR (trip.status = 'ongoing' AND trip.availableSeats > 0))", { now: new Date() })
+        .andWhere('(trip.vehicleId IS NULL OR EXISTS (SELECT 1 FROM vehicles v WHERE v.id::text=trip."vehicleId"::text AND v."isActive"=true))')
+        .getMany();
+      const visibleIds = new Set(live.map(t => t.id));
       const nowMs = Date.now();
-      return cached.filter((trip) => !trip.isPrivate && (
+      return cached.filter((trip) => visibleIds.has(trip.id) && !trip.isPrivate && (
         (trip.status === TripStatus.PENDING && new Date(trip.departureDate).getTime() > nowMs) ||
         (trip.status === TripStatus.ACTIVE && trip.availableSeats > 0)
       ));
@@ -417,6 +428,8 @@ export class TripsService {
     const queryBuilder = this.tripRepository
       .createQueryBuilder('trip')
       .where('trip.isPrivate = :isPrivate', { isPrivate: false })
+      .andWhere(availableAccountSql('trip."driverId"'))
+      .andWhere('(trip.vehicleId IS NULL OR EXISTS (SELECT 1 FROM vehicles v WHERE v.id::text=trip."vehicleId"::text AND v."isActive"=true))')
       .andWhere(
         new Brackets((qb) => {
           qb.where(
@@ -607,6 +620,11 @@ export class TripsService {
         !access.bookings.some(booking => booking.passengerId === viewerId)) {
       throw new ForbiddenException('Accès à ce trajet refusé.');
     }
+    if (access.driverId !== viewerId && !access.bookings.some(b => b.passengerId === viewerId)) {
+      const owner = await this.userRepository.findOne({ where: { id: access.driverId }, select: ['isActive', 'status'] });
+      if (!owner?.isActive || [UserStatus.INACTIVE, UserStatus.SUSPENDED].includes(owner.status))
+        throw new NotFoundException('Ce trajet n’est plus disponible.');
+    }
     return tripResponseForViewer(await this.findOne(id), viewerId, access);
   }
 
@@ -771,8 +789,7 @@ export class TripsService {
       lastGeneratedDate: null,
     });
 
-    const savedTemplate =
-      await this.recurringTripTemplateRepository.save(template);
+    const savedTemplate = await this.saveAvailableRecurringTemplate(template);
     await this.generateTripsForTemplate(savedTemplate);
 
     this.logger.log(
@@ -847,11 +864,18 @@ export class TripsService {
 
     if (template.status !== RecurringTripTemplateStatus.ACTIVE) {
       template.status = RecurringTripTemplateStatus.ACTIVE;
-      await this.recurringTripTemplateRepository.save(template);
+      await this.saveAvailableRecurringTemplate(template);
     }
 
     await this.generateTripsForTemplate(template);
     return this.findRecurringById(template.id, driverId);
+  }
+
+  private saveAvailableRecurringTemplate(template: RecurringTripTemplate) {
+    return this.recurringTripTemplateRepository.manager.transaction(async manager => {
+      await lockAvailableAccounts(manager, [template.driverId]);
+      return manager.getRepository(RecurringTripTemplate).save(template);
+    });
   }
 
   /**

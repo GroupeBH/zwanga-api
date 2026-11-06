@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { FinanceOtpModule } from '../otp/finance-otp.module';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { PaymentsModule } from '../payments/payments.module';
 import { NotificationsModule } from '../notifications/notifications.module';
@@ -20,6 +21,7 @@ import {
 
 @Module({
   imports: [
+    FinanceOtpModule,
     TypeOrmModule.forFeature([
       DriverEarning,
       DriverPayout,

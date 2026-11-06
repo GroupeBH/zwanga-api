@@ -7,7 +7,7 @@ import { assertDriverRequestSchedule, findDriverRequestConflict } from './dispat
 import { DriverScheduleConflictException } from '../common/driver-schedule-conflict';
 import { DriverChoiceQuery } from './dto/driver-choice.dto';
 import { findDriverChoices, validateTargetDriver } from './driver-choices';
-import { requestSearchMap } from './request-search-map';
+import { requestSearchMap, requestMapDriver } from './request-search-map';
 import { targetMapDriver } from './target-map-driver';
 import { TargetMapDriverDto } from './dto/target-map-driver.dto';
 import { retireRequestInvitations } from './dispatch/retire-request-invitations';
@@ -62,7 +62,7 @@ import { BookingsService } from '../bookings/bookings.service';
 import { BookingStatus } from '../bookings/entities/booking.entity';
 import { GoogleMapsService } from '../google-maps/google-maps.service';
 import { TravelMode } from '../google-maps/dto/google-maps.dto';
-import { SubscriptionsService } from '../subscriptions/subscriptions.service';
+import { SubscriptionsService, PremiumSubscriptionFeatures } from '../subscriptions/subscriptions.service';
 import { WeatherAwarenessService } from '../weather/weather-awareness.service';
 import { WeatherRouteImpact } from '../weather/weather.types';
 import { TripPaymentMode } from '../payments/enums/trip-payment-mode.enum';
@@ -72,9 +72,16 @@ import { assertDriverCanOperate } from '../users/driver-activation';
 import { DriverDispatchService } from './dispatch/dispatch.service';
 import { ACCEPTED_REQUEST_EXPIRATION_MS, UNACCEPTED_REQUEST_EXPIRATION_MS, assertRequestSnapshot, assertUnassignedRequest } from './request-edit-policy';
 import { enqueueTransactionalNotification } from '../notifications/transactional-notification';
+import { lockAvailableAccounts } from '../users/account-availability';
 import { HistoryPageQuery, orderHistory } from '../common/history-page';
 import { requestPageIds, offerPageIds } from './request-pages';
 import { homeRequestIds } from './home-request-ids';
+import { randomUUID } from 'node:crypto';
+import { CounterOfferDto } from './dto/counter-offer.dto';
+import { RETIRE_COUNTEROFFER_NOTIFICATIONS_SQL } from './dispatch/retire-request-invitations';
+import { claimInAppRequest } from './dispatch/claim-in-app-request';
+import { PASSENGER_DECISION_MS } from './dispatch/request-acceptance';
+import { rejectDriverOffer } from './reject-driver-offer';
 
 export interface SanitizedUser {
   id: string;
@@ -340,7 +347,10 @@ export class TripRequestsService {
       departureDateMax: maxDate,
     });
 
-    const saved = await this.tripRequestRepository.save(tripRequest);
+    const saved = await this.tripRequestRepository.manager.transaction(async manager => {
+      await lockAvailableAccounts(manager, [passengerId]);
+      return manager.getRepository(TripRequest).save(tripRequest);
+    });
     this.logger.log(`Trip request created: ${saved.id}`);
 
     // Wake this request directly, even while the global discovery tick is busy.
@@ -355,6 +365,10 @@ export class TripRequestsService {
 
   async searchMap(passengerId: string, requestId: string) {
     return requestSearchMap(this.tripRequestRepository.manager, passengerId, requestId);
+  }
+
+  async mapDriver(passengerId: string, requestId: string, markerId: string) {
+    return requestMapDriver(this.tripRequestRepository.manager, passengerId, requestId, markerId);
   }
 
   async targetDriverFromMap(passengerId: string, id: string, dto: TargetMapDriverDto) {
@@ -957,6 +971,52 @@ export class TripRequestsService {
     return result;
   }
 
+  /** Internal admin projection only. Public/mobile reads keep findOne's checks.
+   * Hydrate in bounded batches instead of issuing one relational read per row. */
+  async findForAdminBatch(ids: string[]): Promise<SanitizedTripRequest[]> {
+    const result: SanitizedTripRequest[] = [];
+    const unique = [...new Set(ids)];
+    for (let offset = 0; offset < unique.length; offset += 100) {
+      const batch = unique.slice(offset, offset + 100);
+      const requests = await this.tripRequestRepository.find({ where: { id: In(batch) },
+        relations: ['passenger', 'targetDriver', 'selectedDriver', 'selectedVehicle',
+          'driverOffers', 'driverOffers.driver', 'driverOffers.vehicle'] });
+      await this.expireRequests(requests);
+      const users = new Set<string>();
+      for (const request of requests) {
+        if (request.passenger) users.add(request.passenger.id);
+        if (request.selectedDriver) users.add(request.selectedDriver.id);
+        for (const offer of request.driverOffers ?? []) if (offer.driver) users.add(offer.driver.id);
+      }
+      const premium = await this.subscriptionsService.getPremiumFeaturesForUsers([...users]);
+      const open = requests.filter(r => r.sequentialDispatch && !r.selectedDriverId).map(r => r.id);
+      const targeted = requests.filter(r => r.targetDriverId && !r.selectedDriverId).map(r => r.id);
+      const windows: Array<{ requestId: string; phase: 'passenger' | 'accepting'; expiresAt: Date; serverNow: Date }> = open.length
+        ? await this.tripRequestRepository.manager.query(`SELECT DISTINCT ON ("requestId")
+          "requestId",phase,"expiresAt",clock_timestamp() AS "serverNow" FROM trip_request_dispatch_offers
+          WHERE "requestId"=ANY($1::uuid[]) AND status='pending' AND phase IN ('passenger','accepting')
+          ORDER BY "requestId","expiresAt" DESC`, [open]) : [];
+      const refused: Array<{ requestId: string }> = targeted.length
+        ? await this.tripRequestRepository.manager.query(`SELECT f."requestId" FROM trip_request_driver_refusals f
+          JOIN trip_requests r ON r.id=f."requestId" AND r."targetDriverId"=f."driverId"
+          WHERE r.id=ANY($1::uuid[])`, [targeted]) : [];
+      const byId = new Map(requests.map(r => [r.id, r]));
+      const byWindow = new Map(windows.map(w => [w.requestId, w]));
+      const declined = new Set(refused.map(r => r.requestId));
+      for (const id of batch) {
+        const request = byId.get(id);
+        if (!request) continue; // A concurrent deletion must not fail the whole page.
+        const row = await this.sanitizeTripRequest(request, request.passengerId, false, premium);
+        const window = byWindow.get(id);
+        if (window) row.responseWindow = { phase: window.phase,
+          expiresAt: new Date(window.expiresAt).toISOString(), serverNow: new Date(window.serverNow).toISOString() };
+        if (request.targetDriverId && !request.selectedDriverId) row.targetDriverDeclined = declined.has(id);
+        result.push(row);
+      }
+    }
+    return result;
+  }
+
   async getOffersForTripRequest(
     tripRequestId: string,
     userId?: string,
@@ -1036,10 +1096,25 @@ export class TripRequestsService {
     );
   }
 
+  async proposeCounterOffer(driverId: string, requestId: string, dto: CounterOfferDto) {
+    const request = await this.tripRequestRepository.findOne({ where: { id: requestId } });
+    if (!request) throw new NotFoundException('Commande introuvable.');
+    const proposed = Math.max(Date.now(), new Date(request.departureDateMin).getTime());
+    return this.createDriverOffer(driverId, requestId, { vehicleId: dto.vehicleId, pricePerSeat: dto.pricePerSeat,
+      availableSeats: request.numberOfSeats, proposedDepartureDate: new Date(proposed).toISOString() }, true);
+  }
+
+  async rejectOffer(passengerId: string, requestId: string, offerId: string) {
+    await rejectDriverOffer(this.tripRequestRepository.manager, passengerId, requestId, offerId);
+    await this.driverDispatch?.notifyScheduledRequest(requestId);
+    return this.findOne(requestId, passengerId);
+  }
+
   async createDriverOffer(
     driverId: string,
     tripRequestId: string,
     createDriverOfferDto: CreateDriverOfferDto,
+    counterProposal = false,
   ): Promise<SanitizedDriverOffer> {
     this.logger.log(
       `Creating driver offer for trip request: ${tripRequestId} by driver: ${driverId}`,
@@ -1069,10 +1144,10 @@ export class TripRequestsService {
     }
 
     assertRequestTarget(tripRequest, driverId);
-    await assertSequentialInvitation(this.tripRequestRepository.manager, tripRequest, driverId);
+    if (!counterProposal) await assertSequentialInvitation(this.tripRequestRepository.manager, tripRequest, driverId);
     await this.expireRequests([tripRequest]);
 
-    if (tripRequest.immediateDispatch) {
+    if (tripRequest.immediateDispatch && !(counterProposal && tripRequest.sequentialDispatch)) {
       throw new BadRequestException('Répondez à la proposition de proximité qui vous a été personnellement adressée.');
     }
 
@@ -1146,7 +1221,7 @@ export class TripRequestsService {
 
     // Validate price if maxPricePerSeat is set
     if (
-      tripRequest.maxPricePerSeat !== null &&
+      !counterProposal && tripRequest.maxPricePerSeat !== null &&
       createDriverOfferDto.pricePerSeat > tripRequest.maxPricePerSeat
     ) {
       throw new BadRequestException(
@@ -1234,13 +1309,14 @@ export class TripRequestsService {
     });
 
     const saved = await this.tripRequestRepository.manager.transaction(async (manager) => {
+      await lockAvailableAccounts(manager, [driverId, tripRequest.passengerId]);
       const requests = manager.getRepository(TripRequest);
       const current = await requests.findOne({ where: { id: tripRequestId }, lock: { mode: 'pessimistic_write' } });
       assertRequestSnapshot(current, tripRequest);
       assertUnassignedRequest(current!);
       if (await hasRefusedRequest(manager, driverId, current!.id))
         throw new NotFoundException('Commande introuvable.');
-      await assertSequentialInvitation(manager, current!, driverId);
+      if (!counterProposal) await assertSequentialInvitation(manager, current!, driverId);
       await assertRequestDriverProximity(manager, current!.id, driverId);
       const offers = manager.getRepository(DriverOffer);
       if (await offers.exists({ where: { tripRequestId, driverId, status: DriverOfferStatus.PENDING } }))
@@ -1248,9 +1324,19 @@ export class TripRequestsService {
       // A new private course must fit the driver's schedule. Shared-trip offers
       // use their existing trip/seat/consent checks, not this independent-course guard.
       await assertDriverRequestSchedule(manager, driverId, current!.id);
+      if (counterProposal && current!.sequentialDispatch) await claimInAppRequest(manager, current!, driverId,
+        randomUUID(), PASSENGER_DECISION_MS, { vehicleId: vehicle!.id, seats: createDriverOfferDto.availableSeats });
       const result = await offers.save(offer);
-      await startPassengerDecision(manager, current!, driverId);
+      await startPassengerDecision(manager, current!, driverId, counterProposal ? ['accepting'] : ['driver']);
       await requests.update(tripRequestId, { id: tripRequestId, status: TripRequestStatus.OFFERS_RECEIVED });
+      if (counterProposal) await enqueueTransactionalNotification(manager, { eventKey: `counter-offer:${result.id}`,
+        userId: current!.passengerId, title: 'Un conducteur propose un autre prix',
+        body: `${createDriverOfferDto.pricePerSeat} FC par place. Ouvrez Zwanga pour accepter ou refuser.`,
+        data: { type: 'driver_offer', counterProposal: true, ringAlert: 'counter-offer-v1', role: 'passenger',
+          ringUntil: new Date(Math.min(Date.now() + 60000, current!.departureDateMax.getTime())).toISOString(),
+          tripRequestId, offerId: result.id, driverId,
+          passengerId: current!.passengerId, pricePerSeat: createDriverOfferDto.pricePerSeat,
+          alertExpiresAt: new Date(Math.min(Date.now() + PASSENGER_DECISION_MS, current!.departureDateMax.getTime())).toISOString() } });
       return result;
     });
 
@@ -1262,10 +1348,8 @@ export class TripRequestsService {
     });
 
     // Notify the passenger about the new driver offer
-    await this.notifyPassengerAboutDriverOffer(
-      tripRequest,
-      offerWithRelations!,
-    );
+    if (counterProposal) await this.driverDispatch?.notifyScheduledRequest(tripRequestId);
+    else await this.notifyPassengerAboutDriverOffer(tripRequest, offerWithRelations!);
 
     return this.sanitizeDriverOffer(offerWithRelations!, tripRequest, driverId);
   }
@@ -1416,7 +1500,7 @@ export class TripRequestsService {
       throw new BadRequestException("Cette commande n'accepte plus d'offres");
     }
 
-    if (tripRequest.immediateDispatch) {
+    if (tripRequest.immediateDispatch && !tripRequest.sequentialDispatch) {
       throw new BadRequestException('La sélection du conducteur est gérée par la recherche de proximité.');
     }
     const offer = tripRequest.driverOffers?.find(
@@ -1454,6 +1538,7 @@ export class TripRequestsService {
     }
 
     await this.tripRequestRepository.manager.transaction(async (manager) => {
+      await lockAvailableAccounts(manager, [passengerId, offer.driverId]);
       const requests = manager.getRepository(TripRequest);
       const current = await requests.findOne({ where: { id: tripRequestId }, lock: { mode: 'pessimistic_write' } });
       assertRequestSnapshot(current, tripRequest);
@@ -1485,6 +1570,7 @@ export class TripRequestsService {
       if (current!.sequentialDispatch) await manager.query(`UPDATE trip_request_dispatch_offers
         SET status=CASE WHEN "driverId"=$2 THEN 'accepted' ELSE 'cancelled' END
         WHERE "requestId"=$1 AND status='pending'`, [tripRequestId, offer.driverId]);
+      await manager.query(RETIRE_COUNTEROFFER_NOTIFICATIONS_SQL, [tripRequestId, [offer.id]]);
     });
 
     this.logger.log(
@@ -1948,6 +2034,7 @@ export class TripRequestsService {
     tripRequest.tripId = trip.id;
     tripRequest.driverPickupOverdueNotifiedAt = null;
     await this.tripRequestRepository.manager.transaction(async manager => {
+      await lockAvailableAccounts(manager, [driverId, tripRequest.passengerId]);
       const requests = manager.getRepository(TripRequest);
       const current = await requests.findOne({ where: { id: tripRequestId }, lock: { mode: 'pessimistic_write' } });
       if (!current || [TripRequestStatus.CANCELLED, TripRequestStatus.EXPIRED].includes(current.status) ||
@@ -2481,6 +2568,7 @@ export class TripRequestsService {
   private async sanitizeUser(
     user?: User,
     includePhone = false,
+    premiumByUser?: Map<string, PremiumSubscriptionFeatures>,
   ): Promise<SanitizedUser | null> {
     if (!user) {
       return null;
@@ -2489,7 +2577,7 @@ export class TripRequestsService {
     const profilePicture = user.profilePicture
       ? await this.fileUploadService.getPresignedUrlIfS3Key(user.profilePicture)
       : null;
-    const premium = await this.subscriptionsService.getPremiumOverview(user.id);
+    const premium = premiumByUser?.get(user.id) ?? await this.subscriptionsService.getPremiumOverview(user.id);
 
     return {
       id: user.id,
@@ -2653,6 +2741,7 @@ export class TripRequestsService {
     offer: DriverOffer,
     tripRequest?: TripRequest,
     viewerId?: string,
+    premiumByUser?: Map<string, PremiumSubscriptionFeatures>,
   ): Promise<SanitizedDriverOffer> {
     if (!offer.driver) {
       throw new Error(`Driver offer ${offer.id} has no driver associated`);
@@ -2664,7 +2753,7 @@ export class TripRequestsService {
         this.getSelectedDriverId(tripRequest) === offer.driverId &&
         this.canShareContact(tripRequest, viewerId),
     );
-    const driver = await this.sanitizeUser(offer.driver, accepted);
+    const driver = await this.sanitizeUser(offer.driver, accepted, premiumByUser);
     if (!driver) {
       throw new Error(`Failed to sanitize driver for offer ${offer.id}`);
     }
@@ -2749,6 +2838,7 @@ export class TripRequestsService {
     tripRequest: TripRequest,
     viewerId?: string,
     previewOnly = false,
+    premiumByUser?: Map<string, PremiumSubscriptionFeatures>,
   ): Promise<SanitizedTripRequest> {
     if (!tripRequest.passenger) {
       throw new Error(
@@ -2763,6 +2853,7 @@ export class TripRequestsService {
     const passenger = await this.sanitizeUser(
       tripRequest.passenger,
       shareContact,
+      premiumByUser,
     );
     if (!passenger) {
       throw new Error(
@@ -2799,6 +2890,7 @@ export class TripRequestsService {
       selectedDriver: await this.sanitizeUser(
         tripRequest.selectedDriver || undefined,
         shareContact,
+        premiumByUser,
       ),
       selectedVehicle: await this.sanitizeVehicle(
         tripRequest.selectedVehicle || undefined,
@@ -2823,6 +2915,7 @@ export class TripRequestsService {
                   offer,
                   tripRequest,
                   previewOnly ? undefined : viewerId,
+                  premiumByUser,
                 ),
               ),
           )

@@ -24,7 +24,7 @@ async function main() {
   try {
     if (command === 'prepare-legacy') await assertLegacyRolloutSafe(db);
     if (command.startsWith('prepare'))
-      await db.runMigrations({ transaction: 'all' });
+      await db.runMigrations();
     if (command === 'activate') await activateFinancialRollout(db);
     const [state] = await db.query(
       'SELECT enabled,"contractVersion" FROM financial_rollout WHERE id=true',

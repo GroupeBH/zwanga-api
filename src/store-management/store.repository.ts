@@ -1,10 +1,11 @@
-import { ConflictException, Injectable } from '@nestjs/common';
+import { ConflictException, Injectable, Optional } from '@nestjs/common';
 import { randomUUID, createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { DataSource, EntityManager } from 'typeorm';
 import type { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
 import { StoreMetric, StoreRecord, StoreSyncJob } from './store.entities';
 import { StoreBatch, StorePlatform, StoreProviderError } from './store.types';
+import { StoreReleaseAnnouncementsService } from './store-release-announcements.service';
 import {
   StoreAuditLog,
   StoreIntegration,
@@ -13,7 +14,10 @@ import {
 
 @Injectable()
 export class StoreRepository {
-  constructor(readonly db: DataSource) {}
+  constructor(
+    readonly db: DataSource,
+    @Optional() private readonly announcements?: StoreReleaseAnnouncementsService,
+  ) {}
 
   async enqueue(
     values: Pick<
@@ -296,6 +300,8 @@ export class StoreRepository {
         })
         .execute();
       if (!result.affected) return;
+      if (job.task === 'catalog' && state === 'succeeded')
+        await this.announcements?.catalogSucceeded(manager, job);
       if (job.task === 'reply' && state === 'succeeded')
         await manager
           .getRepository(StoreReviewWorkflow)

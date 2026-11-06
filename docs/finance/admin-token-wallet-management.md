@@ -184,4 +184,18 @@ Le code peut être redéployé sans exposer les routes. La migration ne peut êt
 
 ## Limites
 
+### Statistiques de transactions administrateur
+
+`GET /api/v1/admin/payments/stats?from=2026-10-01&to=2026-10-31&groupBy=provider`
+agrège les transactions en base (sans appel au prestataire). Les volumes sont
+séparés par devise : `requestedAmount` inclut tous les statuts et
+`succeededAmount` uniquement les succès confirmés. Ce dernier n'est pas un revenu
+net. `successRate` est le pourcentage de succès parmi toutes les transactions
+créées sur la période, y compris celles encore en attente ; il vaut `null` si la
+période est vide. `pendingPayouts` mesure l'âge depuis la création des retraits
+`pending`/`initiated` de cette période (gain, parrainage, portefeuille et virement
+admin), sans remettre leur compteur à zéro lors d'un rapprochement. Un opérateur
+non enregistré par le prestataire reste `unknown`. Les payloads bruts ne sont
+jamais renvoyés. Ces statistiques ne modifient ni soldes ni transactions.
+
 Cette fonctionnalité administre uniquement le portefeuille d'usage en jetons. Elle ne modifie pas les gains de parrainage, les revenus conducteurs, les paiements FlexPay ou les soldes retirables.

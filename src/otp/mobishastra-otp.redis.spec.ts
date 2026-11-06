@@ -203,6 +203,44 @@ const enabled = Boolean(
       },
     );
 
+    it('binds financial codes to the exact operation and consumes once across replicas', async () => {
+      const binding = 'a'.repeat(64);
+      const financeKey = key.replace('phone_verification', 'admin_finance');
+      await otp.sendOtp(phone, 'admin_finance', binding);
+      const code = lastCode();
+      expect(code).toMatch(/^\d{6}$/);
+      const stored = (await redis.get<MobishastraChallenge>(financeKey))!;
+      expect(stored.context).toBe(binding);
+      expect(Object.keys(stored).sort()).toEqual(['attemptsRemaining', 'codeHash', 'context', 'provider', 'purpose', 'requestId', 'state']);
+      expect(await otp.verifyOtp(phone, code, 'admin_finance', 'b'.repeat(64))).toMatchObject({ valid: false });
+      expect(await otp.verifyOtp(phone, code, 'pin_change')).toMatchObject({ valid: false });
+      const results = await Promise.all(Array.from({ length: 20 }, () =>
+        local.verify(phone, code, financeKey, stored, 'admin_finance', binding)));
+      expect(results.filter(result => result.valid)).toHaveLength(1);
+      expect(await client.exists(financeKey)).toBe(0);
+      expect(await otp.verifyOtp(phone, code, 'admin_finance', binding)).toMatchObject({ valid: false });
+      expect(keccel.verifyOtp).not.toHaveBeenCalled();
+    });
+
+    it('expires financial codes, limits attempts and forbids unbound provider fallback', async () => {
+      const binding = 'a'.repeat(64);
+      const financeKey = key.replace('phone_verification', 'admin_finance');
+      await otp.sendOtp(phone, 'admin_finance', binding);
+      await client.pExpire(financeKey, 30000);
+      for (let attempt = 0; attempt < 5; attempt++) {
+        expect(await otp.verifyOtp(phone, '000000', 'admin_finance', binding)).toMatchObject({ valid: false });
+        if (attempt < 4) expect(await client.pTTL(financeKey)).toBeLessThanOrEqual(30000);
+      }
+      expect(await client.exists(financeKey)).toBe(0);
+      await client.del(budgetKey);
+      await otp.sendOtp(phone, 'admin_finance', binding);
+      await client.pExpire(financeKey, 0);
+      expect(await otp.verifyOtp(phone, lastCode(), 'admin_finance', binding)).toMatchObject({ valid: false });
+      await redis.set(financeKey, { provider: 'keccel', requestId: 'unbound' }, 30);
+      expect(await otp.verifyOtp(phone, lastCode(), 'admin_finance', binding)).toMatchObject({ valid: false });
+      expect(keccel.verifyOtp).not.toHaveBeenCalled();
+    });
+
     it('keeps historical Mobishastra phone challenges valid without allowing PIN recovery', async () => {
       await otp.sendOtp(phone);
       const legacy = await snapshot();

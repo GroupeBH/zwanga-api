@@ -4,6 +4,7 @@ import { driverSchedulePostgresTests } from '../../../test/driver-schedule-postg
 import { driverScheduleConflictPostgresTests } from '../../../test/driver-schedule-conflict-postgres';
 import { driverAlertLocationPostgresTests } from '../../../test/driver-alert-location-postgres';
 import { homeDiscoveryPostgresTests } from '../../../test/home-discovery-postgres';
+import { counterOfferPostgresTests } from '../../../test/counter-offer-postgres';
 import { tripUpdateSchedulePostgresTests } from '../../../test/trip-update-schedule-postgres';
 import { SequentialRequestQueue1780000097000 } from '../../database/migrations/1780000097000-SequentialRequestQueue';
 import { findDriverChoices, validateTargetDriver } from '../driver-choices';
@@ -369,6 +370,7 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
   };
 
   homeDiscoveryPostgresTests(() => ({ source, driver, request, browsing }));
+  counterOfferPostgresTests(() => ({ source, driver, request, editor }));
 
   it('hides Kinshasa requests from Kisangani across legacy lists, pages, detail, contact and direct acceptance', async () => {
     const d = await driver(), r = await request(false), edits = browsing();

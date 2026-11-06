@@ -1,4 +1,5 @@
 import { rideCardContent } from './ride-card-content';
+import { availableAccountSql } from '../users/account-availability';
 import { issueRideRingPermit, readRideRingPermit, needsRideRingPermit } from './ride-ring-permit';
 import { DRIVER_PAYMENT_NOTIFICATION_TYPE } from './driver-payment-notification';
 import { sequentialInvitationSql, REQUEST_RESPONSE_MS } from '../trip-requests/dispatch/sequential-policy';
@@ -62,7 +63,7 @@ const PUSH_DELIVERY_TIMEOUT_MS = 10_000;
 const CRITICAL_RETRY_DELAY_MS = 5 * 60 * 1000;
 const CRITICAL_RETRY_WINDOW_MS = 72 * 60 * 60 * 1000;
 const CRITICAL_RETRY_BATCH_SIZE = 25;
-const URGENT_NOTIFICATION_TYPES = ['new_booking', 'driver_dispatch_offer', 'trip_request_nearby', 'booking_response', 'trip_request_accepted'];
+const URGENT_NOTIFICATION_TYPES = ['new_booking', 'driver_dispatch_offer', 'trip_request_nearby', 'booking_response', 'trip_request_accepted', 'driver_offer'];
 const EXPO_RECEIPT_DELAY_MS = 15 * 60 * 1000;
 const EXPO_RECEIPT_WINDOW_MS = 24 * 60 * 60 * 1000;
 const EXPO_RECEIPT_BATCH_SIZE = 100;
@@ -639,13 +640,14 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
 
   private isPassengerRideResponse(notification: Notification): boolean {
     return notification.data?.type === 'trip_request_accepted' ||
+      (notification.data?.type === 'driver_offer' && notification.data.ringAlert === 'counter-offer-v1') ||
       (notification.data?.type === 'booking_response' &&
         (!notification.data.status || ['accepted', 'rejected'].includes(notification.data.status)));
   }
 
   private passengerRingData(notification: Notification): Record<string, unknown> {
     return { ...notification.data, passengerId: notification.userId, role: 'passenger',
-      ringAlert: notification.data?.type === 'booking_response' ? 'booking-response-v1' : 'request-accepted-v1',
+      ringAlert: notification.data?.type === 'driver_offer' ? 'counter-offer-v1' : notification.data?.type === 'booking_response' ? 'booking-response-v1' : 'request-accepted-v1',
       ringUntil: this.driverRingUntil(notification) };
   }
 
@@ -653,9 +655,14 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
   private driverRingUntil(notification: Notification): string {
     const expiry = Date.parse(String(notification.data?.alertExpiresAt ?? notification.data?.expiresAt ?? ''));
     const createdAt = new Date(notification.createdAt).getTime();
-    const window = ['driver_dispatch_offer', 'trip_request_nearby'].includes(notification.data?.type) ? REQUEST_RESPONSE_MS : 60_000;
+    const invitation = ['driver_dispatch_offer', 'trip_request_nearby'].includes(notification.data?.type);
+    const window = invitation ? REQUEST_RESPONSE_MS : 60_000;
     const deadline = (Number.isFinite(createdAt) ? createdAt : Date.now()) + window;
-    return new Date(Number.isFinite(expiry) ? Math.min(expiry, deadline) : deadline).toISOString();
+    // The post-OAuth guard, ring permit and Android TTL must share the earliest
+    // invitation deadline. A later alertExpiresAt cannot extend a business lease.
+    const businessExpiry = invitation ? Date.parse(String(notification.data?.expiresAt ?? '')) : NaN;
+    return new Date(Math.min(deadline, Number.isFinite(expiry) ? expiry : Infinity,
+      Number.isFinite(businessExpiry) ? businessExpiry : Infinity)).toISOString();
   }
 
   private withRideRingPermit(notification: Notification): Notification {
@@ -823,6 +830,12 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
   private async publishRealtimeInvitation(notification: Notification): Promise<void> {
     if (!notification.userId || !notification.isActive ||
         !(await this.isCriticalNotificationStillDeliverable(notification))) return;
+    if (notification.data?.type === 'driver_offer' && notification.data.ringAlert === 'counter-offer-v1') {
+      if (Date.parse(this.driverRingUntil(notification)) <= Date.now()) return;
+      if (!this.rideAlerts?.publish(notification.userId, { kind: 'incoming', eventId: notification.id,
+        data: this.passengerRingData(notification) })) throw new Error('Realtime transport unavailable');
+      return;
+    }
     if (notification.data?.role === 'driver' &&
         [DRIVER_PAYMENT_NOTIFICATION_TYPE, 'cash_payment_confirmed'].includes(notification.data?.type)) {
       // A receipt is informational: never use the incoming-ride ringtone or require
@@ -1120,7 +1133,7 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
     notification: Notification,
   ): Promise<boolean> {
     const type = notification.data?.type;
-    if (type === 'booking_response' || type === 'trip_request_accepted') {
+    if (type === 'booking_response' || type === 'trip_request_accepted' || type === 'driver_offer') {
       return isRideResponseDeliverable(this.notificationRepository.manager, notification);
     }
     if (type === 'driver_location_stale') {
@@ -1150,6 +1163,7 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
       const rows: unknown[] = await this.notificationRepository.manager.query(`SELECT 1 FROM bookings b
         JOIN trips t ON t.id = b."tripId" WHERE b.id = $1 AND t."driverId" = $2
         AND b.status = 'pending' AND t.status IN ('upcoming', 'ongoing')
+        AND ${availableAccountSql('b."passengerId"')} AND ${availableAccountSql('t."driverId"')}
         AND t."tripRequestId" IS NULL`, [notification.data?.bookingId, notification.userId]);
       return rows.length > 0;
     }

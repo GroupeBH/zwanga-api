@@ -6,6 +6,13 @@ import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { KycDocument, KycStatus } from '../users/entities/kyc-document.entity';
 import { Vehicle, VehicleType } from '../vehicles/entities/vehicle.entity';
 import { AdminService } from './admin.service';
+import type { SpreadsheetDownload } from './spreadsheet';
+
+function smallExportXml(file: SpreadsheetDownload): string {
+  if (!('buffer' in file))
+    throw new Error('Small export should use the buffered path');
+  return file.buffer.toString('utf8');
+}
 
 // Opt-in disposable loopback cluster; never loads .env or an application DB URL.
 const bin = process.env.AUDIT_TEST_POSTGRES_BIN;
@@ -120,7 +127,7 @@ const bin = process.env.AUDIT_TEST_POSTGRES_BIN;
           undefined,
           type,
         );
-        const xml = file.buffer.toString('utf8');
+        const xml = smallExportXml(file);
         expect(xml.split(matching.id)).toHaveLength(2);
         for (const user of [inactiveOnly, other, noVehicle])
           expect(xml).not.toContain(user.id);
@@ -214,15 +221,15 @@ const bin = process.env.AUDIT_TEST_POSTGRES_BIN;
       expect(first.users.map((user) => user.id)).toEqual([newer.id]);
       expect(second.users.map((user) => user.id)).toEqual([older.id]);
       expect(third.users).toEqual([]);
-      const xml = (
+      const xml = smallExportXml(
         await service.exportUsersXls(
           undefined,
           undefined,
           undefined,
           undefined,
           'car',
-        )
-      ).buffer.toString('utf8');
+        ),
+      );
       expect(xml.match(/<Row>/g)).toHaveLength(3);
     });
 
@@ -251,7 +258,7 @@ const bin = process.env.AUDIT_TEST_POSTGRES_BIN;
         );
         expect(result.total).toBe(1);
         expect(result.users.map((u) => u.id)).toEqual([matching.id]);
-        const xml = (
+        const xml = smallExportXml(
           await service.exportUsersXls(
             undefined,
             undefined,
@@ -259,8 +266,8 @@ const bin = process.env.AUDIT_TEST_POSTGRES_BIN;
             undefined,
             undefined,
             status,
-          )
-        ).buffer.toString('utf8');
+          ),
+        );
         expect(xml).toContain(matching.id);
         for (const user of users.filter((u) => u.id !== matching.id))
           expect(xml).not.toContain(user.id);
@@ -317,7 +324,7 @@ const bin = process.env.AUDIT_TEST_POSTGRES_BIN;
           ids.push(result.users[0].id);
         }
         expect(ids).toEqual(expected.map((u) => u.id));
-        const xml = (
+        const xml = smallExportXml(
           await service.exportUsersXls(
             undefined,
             undefined,
@@ -327,8 +334,8 @@ const bin = process.env.AUDIT_TEST_POSTGRES_BIN;
             'suspended',
             'name',
             order,
-          )
-        ).buffer.toString('utf8');
+          ),
+        );
         const positions = expected.map((u) => xml.indexOf(u.id));
         expect(positions).toEqual([...positions].sort((a, b) => a - b));
       }
@@ -402,7 +409,7 @@ const bin = process.env.AUDIT_TEST_POSTGRES_BIN;
         displayName: 'Paul Mukendi',
         isDeleted: false,
       });
-      const xml = (
+      const xml = smallExportXml(
         await service.exportUsersXls(
           undefined,
           undefined,
@@ -410,8 +417,8 @@ const bin = process.env.AUDIT_TEST_POSTGRES_BIN;
           undefined,
           undefined,
           'inactive',
-        )
-      ).buffer.toString('utf8');
+        ),
+      );
       expect(xml).toContain('Mukendi');
       expect(xml).toContain('Supprimé (anonymisé)');
     });
@@ -454,15 +461,15 @@ const bin = process.env.AUDIT_TEST_POSTGRES_BIN;
           isQualifiedDriver: true,
         }),
       );
-      const xml = (
+      const xml = smallExportXml(
         await service.exportUsersXls(
           'driver',
           '2026-10-01',
           '2026-10-19',
           'ERIC',
           'car',
-        )
-      ).buffer.toString('utf8');
+        ),
+      );
       expect(xml).toContain(matching.id);
       for (const user of [noKyc, outOfRange, otherName, passenger])
         expect(xml).not.toContain(user.id);

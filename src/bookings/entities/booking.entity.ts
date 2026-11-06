@@ -172,6 +172,9 @@ export class Booking {
   @Column({ type: 'decimal', precision: 10, scale: 2, nullable: true })
   paymentAmount: number | null;
 
+  @Column({ type: 'integer', nullable: true, update: false })
+  proposedPricePerSeat: number | null;
+
   @Column({ type: 'decimal', precision: 10, scale: 2, nullable: true })
   grossPaymentAmount: number | null;
 

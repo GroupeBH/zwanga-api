@@ -7,6 +7,33 @@ import { MobileConfig } from './mobile.config';
 import { MobilePageDto } from './mobile.dto';
 import { nativeBuild } from './mobile-policy';
 
+type Counts<K extends string> = Record<K, number>;
+type InstallationCohort = Counts<
+  | 'installations'
+  | 'anonymous'
+  | 'linked'
+  | 'reachable'
+  | 'activeLast30Days'
+  | 'firstLinksInPeriod'
+>;
+type Adoption = {
+  platform: string;
+  version: string;
+  build: string;
+} & Counts<'installations'>;
+type DailyActivity = {
+  day: string | Date;
+  platform: string;
+} & Counts<'installations'>;
+type AuditRow = {
+  id: string;
+  actorId: string | null;
+  action: string;
+  subjectId: string;
+  details: unknown;
+  createdAt: Date;
+};
+
 export function mobileRange(q: MobilePageDto) {
   const to = q.to ?? new Date().toISOString().slice(0, 10);
   const from =
@@ -31,14 +58,26 @@ export class MobileAnalyticsService {
     const range = mobileRange(q),
       version = q.version ? nativeBuild(q.version) : null;
     const key = `mobile:analytics:v1:${range.from}:${range.to}:${q.platform ?? ''}:${version ?? ''}`;
-    const cached = await this.cache.get(key);
+    const cached =
+      await this.cache.get<
+        Awaited<ReturnType<MobileAnalyticsService['loadOverview']>>
+      >(key);
     if (cached) return cached;
+    const result = await this.loadOverview(q, range, version);
+    await this.cache.set(key, result, 60);
+    return result;
+  }
+  private async loadOverview(
+    q: MobilePageDto,
+    range: ReturnType<typeof mobileRange>,
+    version: string | null,
+  ) {
     const observedAt = new Date().toISOString();
     const local = await this.db.transaction(async (m) => {
       await m.query(`SET LOCAL statement_timeout='5s'`);
       const scope = `NOT (c."mobileMetadata" ? 'deletedAt') AND ($3::text IS NULL OR c.platform=$3) AND ($4::text IS NULL OR c.version=$4)`;
       const values = [range.from, range.to, q.platform ?? null, version];
-      const [cohort] = await m.query(
+      const [cohort] = await m.query<InstallationCohort[]>(
         `SELECT count(*)::int AS installations,
         count(*) FILTER (WHERE c."userId" IS NULL)::int AS anonymous,
         count(*) FILTER (WHERE c."userId" IS NOT NULL)::int AS linked,
@@ -48,19 +87,21 @@ export class MobileAnalyticsService {
         FROM app_update_installations c WHERE ${scope} AND c."createdAt">=$1::date AND c."createdAt"<$2::date+interval '1 day'`,
         values,
       );
-      const adoption = await m.query(
+      const adoption = await m.query<Adoption[]>(
         `SELECT c.platform,c.version,c.build,count(*)::int AS installations
         FROM app_update_installations c WHERE ${scope} AND c."updatedAt">=$1::date AND c."updatedAt"<$2::date+interval '1 day'
         GROUP BY c.platform,c.version,c.build ORDER BY installations DESC LIMIT 100`,
         values,
       );
-      const daily = await m.query(
+      const daily = await m.query<DailyActivity[]>(
         `SELECT d.day,d.platform,count(*)::int AS installations FROM mobile_installation_days d
         WHERE d.day BETWEEN $1::date AND $2::date AND ($3::text IS NULL OR d.platform=$3) AND ($4::text IS NULL OR d.version=$4)
         GROUP BY d.day,d.platform ORDER BY d.day`,
         values,
       );
-      const retention = await m.query(
+      const retention = await m.query<
+        Counts<'days' | 'eligible' | 'retained'>[]
+      >(
         `SELECT n.days,
         count(*)::int AS eligible,
         count(*) FILTER (WHERE EXISTS (SELECT 1 FROM mobile_installation_days d WHERE d."installationId"=c.id
@@ -71,26 +112,32 @@ export class MobileAnalyticsService {
         GROUP BY n.days ORDER BY n.days`,
         values,
       );
-      const [accounts] = await m.query(
+      const [accounts] = await m.query<
+        Counts<'registrations' | 'firstTripCompletedAsOfNow'>[]
+      >(
         `SELECT count(*)::int AS registrations,
         count(*) FILTER (WHERE EXISTS (SELECT 1 FROM bookings b WHERE b."passengerId"=u.id AND b.status='completed')
           OR EXISTS (SELECT 1 FROM trips t WHERE t."driverId"=u.id AND t.status='completed'))::int AS "firstTripCompletedAsOfNow"
         FROM users u WHERE u."createdAt">=$1::date AND u."createdAt"<$2::date+interval '1 day' AND u.role IN ('driver','passenger')`,
         [range.from, range.to],
       );
-      const [activity] = await m.query(
+      const [activity] = await m.query<
+        Counts<'activeDrivers' | 'activePassengers'>[]
+      >(
         `SELECT
         (SELECT count(DISTINCT "driverId")::int FROM trips WHERE status='completed' AND "completedAt">=$1::date AND "completedAt"<$2::date+interval '1 day') AS "activeDrivers",
         (SELECT count(DISTINCT b."passengerId")::int FROM bookings b JOIN trips t ON t.id=b."tripId" WHERE b.status='completed'
           AND t."completedAt">=$1::date AND t."completedAt"<$2::date+interval '1 day') AS "activePassengers"`,
         [range.from, range.to],
       );
-      const campaignActivity = await m.query(
+      const campaignActivity = await m.query<
+        ({ state: string } & Counts<'campaigns'>)[]
+      >(
         `SELECT m.state,count(*)::int AS campaigns FROM mobile_campaigns m
         WHERE m."createdAt">=$1::date AND m."createdAt"<$2::date+interval '1 day' GROUP BY m.state`,
         [range.from, range.to],
       );
-      const [obsolete] = await m.query(
+      const [obsolete] = await m.query<Counts<'installations'>[]>(
         `SELECT count(*)::int AS installations FROM app_update_installations c
         WHERE ${scope} AND c."updatedAt">=$1::date AND c."updatedAt"<$2::date+interval '1 day'
         AND EXISTS (SELECT 1 FROM mobile_update_policies p JOIN app_store_releases r ON r.id=p."releaseId"
@@ -128,8 +175,8 @@ export class MobileAnalyticsService {
         storeData = { availability: 'temporarily_unavailable', value: null };
       }
     }
-    const metric = (
-      value: unknown,
+    const metric = <T>(
+      value: T,
       definition: string,
       unit: string,
       source = 'Zwanga PostgreSQL',
@@ -206,12 +253,11 @@ export class MobileAnalyticsService {
         providerAcceptanceIsDeviceDelivery: false,
       },
     };
-    await this.cache.set(key, result, 60);
     return result;
   }
   async audit(q: MobilePageDto) {
     this.config.assertEnabled();
-    const items = await this.db.query(
+    const items = await this.db.query<AuditRow[]>(
       `SELECT id,"actorId",action,"subjectId",details,"createdAt" FROM store_audit_logs
       WHERE action LIKE 'mobile.%' ORDER BY "createdAt" DESC,id LIMIT $1 OFFSET $2`,
       [q.limit, (q.page - 1) * q.limit],

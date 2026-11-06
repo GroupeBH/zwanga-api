@@ -68,6 +68,19 @@ export class RatingsService {
     return ratings;
   }
 
+  async ratedTrips(userId: string, tripIds: string[]): Promise<{ userId: string; ratedTripIds: string[] }> {
+    if (!tripIds.length || tripIds.length > 100) throw new BadRequestException('Entre 1 et 100 trajets sont requis.');
+    // Reuses the partial verified-interaction index led by raterId. Never expose
+    // another person's reviews, nor filter by stars (no positive-review gating).
+    const rows = await this.ratingRepository.createQueryBuilder('rating')
+      .select('rating.tripId', 'tripId').distinct(true)
+      .where('rating.raterId = :userId', { userId })
+      .andWhere('rating.verificationVersion = 1')
+      .andWhere('rating.tripId IN (:...tripIds)', { tripIds })
+      .limit(100).getRawMany<{ tripId: string }>();
+    return { userId, ratedTripIds: rows.map(row => row.tripId) };
+  }
+
   async findPage(userId: string, options: HistoryPageDto) {
     const query = this.ratingRepository.createQueryBuilder('entry')
       .leftJoin('entry.rater', 'rater')

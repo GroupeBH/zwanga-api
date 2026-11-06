@@ -451,6 +451,15 @@ const bin =
       expect(data.installations.value.installations).toBe(1);
       expect(stores.dashboard).not.toHaveBeenCalled();
       expect(data.conversions.installationToNewSignupPercent).toBeNull();
+      cache.get.mockResolvedValue(data);
+      const transaction = jest.spyOn(db, 'transaction');
+      try {
+        expect(await analytics.overview(new MobilePageDto())).toBe(data);
+        expect(transaction).not.toHaveBeenCalled();
+        expect(stores.dashboard).not.toHaveBeenCalled();
+      } finally {
+        transaction.mockRestore();
+      }
     });
     it.each([undefined, 'android', 'ios'] as const)(
       'returns an empty overview on the migrated schema without mobile telemetry (platform=%s)',

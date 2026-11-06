@@ -17,6 +17,7 @@ import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decor
 import { UserRole } from '../users/entities/user.entity';
 import { AdminDirectPayoutService } from './admin-direct-payout.service';
 import { AdminDirectPayoutDto } from './dto/admin-direct-payout.dto';
+import { RequireFinanceOtp } from '../otp/finance-otp.guard';
 
 @ApiTags('Admin')
 @Controller('admin/payments/direct-payouts')
@@ -27,6 +28,7 @@ export class AdminDirectPayoutController {
   constructor(private readonly service: AdminDirectPayoutService) {}
 
   @Post()
+  @RequireFinanceOtp('direct_payout')
   @HttpCode(200)
   @SensitiveThrottle(3, 60_000)
   @ApiOperation({

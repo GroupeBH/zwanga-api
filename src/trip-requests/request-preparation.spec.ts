@@ -14,6 +14,11 @@ describe('parallel request preparation before dispatch (no external calls)', () 
       create: jest.fn(value => value),
       save: jest.fn(async value => ({ id: 'request', ...value })),
     };
+    const manager = {
+      findOne: jest.fn(async (_entity, options) => ({ id: options.where.id, isActive: true, status: 'active' })),
+      getRepository: () => repository,
+    };
+    Object.assign(repository, { manager: { transaction: async work => work(manager) } });
     const weather = { getRouteImpact: jest.fn().mockResolvedValue({ priceMultiplier: 1.3 }) };
     const dispatch = { enabled: true, notifyScheduledRequest: jest.fn().mockResolvedValue(undefined) };
     const service = new TripRequestsService(

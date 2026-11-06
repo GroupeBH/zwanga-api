@@ -3,6 +3,7 @@ import { HistoryPageDto } from '../common/pagination/history-page';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { RatingsService } from './ratings.service';
 import { CreateRatingDto } from './dto/rating.dto';
+import { RatedTripsDto } from './dto/rated-trips.dto';
 import { Auth } from '../auth/decorators/auth.decorator';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
 
@@ -17,6 +18,14 @@ export class RatingsController {
   @ApiOperation({ summary: 'Create a rating' })
   async create(@Request() req, @Body() createRatingDto: CreateRatingDto) {
     return this.ratingsService.create(req.user.userId, createRatingDto);
+  }
+
+  @Get('mine/trips')
+  @Auth()
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'Trajets déjà évalués par le compte connecté, sans notes ni commentaires' })
+  async ratedTrips(@Request() req, @Query() query: RatedTripsDto) {
+    return this.ratingsService.ratedTrips(req.user.userId, query.tripIds);
   }
 
   @Get('user/:userId')

@@ -1,8 +1,13 @@
-import { Equals } from 'class-validator';
+import { Equals, IsOptional, IsString, Matches } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { ResolvePayoutNotPaidDto } from './resolve-payout-not-paid.dto';
 
 export class RetryPayoutDto extends ResolvePayoutNotPaidDto {
+  @ApiProperty({ required: false, description: 'OTP du super admin requis pour la relance.' })
+  @IsOptional()
+  @IsString()
+  @Matches(/^\d{6}$/)
+  otpCode?: string;
   @ApiProperty({
     enum: [true],
     description:

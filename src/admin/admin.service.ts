@@ -2,11 +2,14 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Inject,
   Logger,
   NotFoundException,
   Optional,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { AccountLifecycleService } from '../users/account-lifecycle.service';
+import { AdminListOptions, applyAdminList, applyAdminRange, literalSearch } from '../common/pagination/admin-query';
 import { In, Point, Repository, SelectQueryBuilder } from 'typeorm';
 import * as bcrypt from 'bcrypt';
 import { Booking, BookingStatus } from '../bookings/entities/booking.entity';
@@ -83,6 +86,8 @@ import {
   buildWalletLedgerSpreadsheet,
 } from './admin-spreadsheets';
 import type { SpreadsheetFile } from './spreadsheet';
+import type { SpreadsheetDownload } from './spreadsheet';
+import { streamExport, exportCreatedPages, exportOffsetPages } from './streaming-export';
 import { KycEvidenceRepository } from '../users/kyc-evidence/kyc-evidence.repository';
 import { adminUserIdentity } from './admin-user-identity';
 
@@ -96,6 +101,8 @@ type AdminDriverQualification = DriverQualification & {
 
 @Injectable()
 export class AdminService {
+  @Inject(AccountLifecycleService)
+  private readonly accountLifecycle: AccountLifecycleService;
   private readonly logger = new Logger(AdminService.name);
   private readonly maxPageLimit = 200;
 
@@ -291,6 +298,7 @@ export class AdminService {
     limit: number = 25,
     status?: string,
     search?: string,
+    options: AdminListOptions = {},
   ) {
     const { pageNumber, pageSize } = this.normalizePagination(page, limit);
     const statusFilter = parseKycStatus(status);
@@ -298,9 +306,8 @@ export class AdminService {
       `Fetching KYC history - Page: ${pageNumber}, Limit: ${pageSize}, Status: ${statusFilter ?? 'all'}`,
     );
 
-    const query = this.createKycListQuery(statusFilter, search);
+    const query = applyAdminList(this.createKycListQuery(statusFilter, search), 'kyc', options);
     const [documents, total] = await query
-      .orderBy('kyc.createdAt', 'DESC')
       .skip((pageNumber - 1) * pageSize)
       .take(pageSize)
       .getManyAndCount();
@@ -372,11 +379,7 @@ export class AdminService {
     status?: string,
     sortBy?: string,
     sortOrder?: string,
-  ): Promise<{
-    buffer: Buffer;
-    filename: string;
-    contentType: string;
-  }> {
+  ): Promise<SpreadsheetDownload> {
     const roleFilter = parseAdminUserSegment(role);
     const vehicleTypeFilter = parseAdminVehicleType(vehicleType);
     const statusFilter = parseAdminUserStatus(status);
@@ -386,19 +389,16 @@ export class AdminService {
       `Exporting users spreadsheet - Role: ${roleFilter ?? 'all'}`,
     );
 
-    const users = await this.applyUsersListOrder(
+    const query = this.applyUsersListOrder(
       this.createUsersListQuery(roleFilter, registered, search, vehicleTypeFilter, statusFilter),
       sort,
-    ).getMany();
-    const serialized = await this.serializeUsersWithDriverQualification(
-      users, vehicleTypeFilter,
     );
-
-    return {
-      buffer: buildUsersSpreadsheet(serialized),
-      filename: usersSpreadsheetFilename(roleFilter),
+    const filename = usersSpreadsheetFilename(roleFilter);
+    return streamExport(exportOffsetPages(query, 'user'), async users => ({
+      buffer: buildUsersSpreadsheet(await this.serializeUsersWithDriverQualification(users, vehicleTypeFilter)),
+      filename,
       contentType: 'application/vnd.ms-excel; charset=utf-8',
-    };
+    }));
   }
 
   async getMarketingStats(actorId: string) {
@@ -527,12 +527,7 @@ export class AdminService {
   async deactivateAdminAccount(actorId: string, userId: string) {
     const account = await this.findManagedAdminAccount(actorId, userId);
 
-    account.status = UserStatus.SUSPENDED;
-    account.isActive = false;
-    account.accessToken = null;
-    account.refreshToken = null;
-    account.fcmToken = null;
-    const saved = await this.userRepository.save(account);
+    const saved = await this.accountLifecycle.deactivate(account.id, UserStatus.SUSPENDED);
 
     this.logger.warn(
       `Super admin ${actorId} deactivated admin account ${userId}`,
@@ -657,29 +652,26 @@ export class AdminService {
     };
   }
 
-  async exportWalletAccountsXls(search?: string): Promise<SpreadsheetFile> {
-    const accounts = await this.createWalletAccountsQuery(search)
-      .orderBy('account.updatedAt', 'DESC')
-      .getMany();
-    return buildWalletAccountsSpreadsheet(
+  async exportWalletAccountsXls(search?: string): Promise<SpreadsheetDownload> {
+    const query = this.createWalletAccountsQuery(search)
+      .orderBy('account.updatedAt', 'DESC').addOrderBy('account.id', 'DESC');
+    return streamExport(exportOffsetPages(query, 'account'), accounts => buildWalletAccountsSpreadsheet(
       (accounts as WalletAccountWithUser[]).map((account) =>
         this.serializeWalletAccount(account),
       ),
-    );
+    ));
   }
 
   async exportWalletLedgerXls(
     search?: string,
     requestedType?: string,
-  ): Promise<SpreadsheetFile> {
-    const entries = await this.createWalletLedgerQuery(search, requestedType)
-      .orderBy('entry.createdAt', 'DESC')
-      .getMany();
-    return buildWalletLedgerSpreadsheet(
+  ): Promise<SpreadsheetDownload> {
+    const query = this.createWalletLedgerQuery(search, requestedType);
+    return streamExport(exportCreatedPages(query, 'entry'), entries => buildWalletLedgerSpreadsheet(
       (entries as WalletLedgerEntryWithUser[]).map((entry) =>
         this.serializeWalletLedgerEntry(entry),
       ),
-    );
+    ));
   }
 
   async getAllPayments(
@@ -688,11 +680,12 @@ export class AdminService {
     status?: string,
     purpose?: string,
     search?: string,
+    options: AdminListOptions = {},
   ) {
     const { pageNumber, pageSize } = this.normalizePagination(page, limit);
-    const query = this.createPaymentsQuery(status, purpose, search);
+    const query = applyAdminList(this.createPaymentsQuery(status, purpose, search), 'payment', options,
+      ['createdAt', 'updatedAt', 'paidAt', 'status', 'amount', 'reference', 'provider']);
     const [payments, total] = await query
-      .orderBy('payment.createdAt', 'DESC')
       .skip((pageNumber - 1) * pageSize)
       .take(pageSize)
       .getManyAndCount();
@@ -704,7 +697,7 @@ export class AdminService {
       total,
       page: pageNumber,
       limit: pageSize,
-      summary: await this.summarizePayments(status, purpose, search),
+      summary: await this.summarizePayments(status, purpose, search, options),
       source: 'admin-api',
     };
   }
@@ -713,15 +706,13 @@ export class AdminService {
     status?: string,
     purpose?: string,
     search?: string,
-  ): Promise<SpreadsheetFile> {
-    const payments = await this.createPaymentsQuery(status, purpose, search)
-      .orderBy('payment.createdAt', 'DESC')
-      .getMany();
-    return buildPaymentsSpreadsheet(
+  ): Promise<SpreadsheetDownload> {
+    const query = this.createPaymentsQuery(status, purpose, search);
+    return streamExport(exportCreatedPages(query, 'payment'), payments => buildPaymentsSpreadsheet(
       (payments as PaymentWithUser[]).map((payment) =>
         this.serializeAdminPayment(payment),
       ),
-    );
+    ));
   }
 
   async getUserWallet(userId: string) {
@@ -804,11 +795,7 @@ export class AdminService {
       }),
     ]);
 
-    const detailedTripRequests = await Promise.all(
-      tripRequests.map((tripRequest) =>
-        this.tripRequestsService.findOne(tripRequest.id, tripRequest.passengerId),
-      ),
-    );
+    const detailedTripRequests = await this.tripRequestsService.findForAdminBatch(tripRequests.map(r => r.id));
 
     return {
       user: (await this.serializeUsersWithDriverQualification([user]))[0],
@@ -862,12 +849,7 @@ export class AdminService {
       );
     }
 
-    user.status = UserStatus.SUSPENDED;
-    user.isActive = false;
-    user.accessToken = null;
-    user.refreshToken = null;
-    user.fcmToken = null;
-    const suspendedUser = await this.userRepository.save(user);
+    const suspendedUser = await this.accountLifecycle.deactivate(user.id, UserStatus.SUSPENDED);
 
     this.logger.warn(`User ${userId} suspended by admin ${adminId}`);
     return {
@@ -906,31 +888,41 @@ export class AdminService {
   async getAllTrips(
     page: number = 1,
     limit: number = 10,
-  ): Promise<{ trips: Array<Record<string, unknown>>; total: number }> {
+    options: AdminListOptions & { search?: string; status?: string } = {},
+  ) {
     const { pageNumber, pageSize } = this.normalizePagination(page, limit);
     this.logger.debug(
       `Fetching all trips - Page: ${pageNumber}, Limit: ${pageSize}`,
     );
 
-    const [trips, total] = await this.tripRepository.findAndCount({
-      skip: (pageNumber - 1) * pageSize,
-      take: pageSize,
-      relations: ['driver', 'vehicle', 'bookings', 'bookings.passenger'],
-      order: { createdAt: 'DESC' },
-    });
+    const query = this.tripRepository.createQueryBuilder('trip')
+      .leftJoinAndSelect('trip.driver', 'driver')
+      .leftJoinAndSelect('trip.vehicle', 'vehicle')
+      .leftJoinAndSelect('trip.bookings', 'booking')
+      .leftJoinAndSelect('booking.passenger', 'passenger');
+    if (options.status && options.status !== 'all') {
+      if (!Object.values(TripStatus).includes(options.status as TripStatus)) throw new BadRequestException('Statut de trajet invalide');
+      query.andWhere('trip.status = :status', { status: options.status });
+    }
+    if (options.search !== undefined) {
+      if (typeof options.search !== 'string' || options.search.length > 160) throw new BadRequestException('Recherche invalide');
+      const term = options.search.trim();
+      if (term) query.andWhere(`(CAST(trip.id AS text) ILIKE :tripSearch OR trip.departureLocation ILIKE :tripSearch
+        OR trip.arrivalLocation ILIKE :tripSearch OR CONCAT_WS(' ', driver.firstName, driver.lastName) ILIKE :tripSearch
+        OR driver.phone ILIKE :tripSearch)`, { tripSearch: literalSearch(term) });
+    }
+    applyAdminList(query, 'trip', options, ['createdAt', 'updatedAt', 'departureDate', 'completedAt', 'status', 'pricePerSeat', 'departureLocation', 'arrivalLocation']);
+    const [trips, total] = await query.skip((pageNumber - 1) * pageSize).take(pageSize).getManyAndCount();
 
     this.logger.debug(`Fetched ${trips.length} trips (total: ${total})`);
-    return { trips: trips.map((trip) => this.sanitizeTrip(trip, true)), total };
+    return { trips: trips.map((trip) => this.sanitizeTrip(trip, true)), total, page: pageNumber, limit: pageSize };
   }
 
-  async exportTripsXls(): Promise<SpreadsheetFile> {
-    const trips = await this.tripRepository.find({
-      relations: ['driver', 'vehicle'],
-      order: { createdAt: 'DESC' },
-    });
-    return buildTripsSpreadsheet(
-      trips.map((trip) => this.sanitizeTrip(trip, false)!),
-    );
+  async exportTripsXls(): Promise<SpreadsheetDownload> {
+    const query = this.tripRepository.createQueryBuilder('trip')
+      .leftJoinAndSelect('trip.driver', 'driver');
+    return streamExport(exportCreatedPages(query, 'trip'), rows =>
+      buildTripsSpreadsheet(rows.map(trip => this.sanitizeTrip(trip, false)!)));
   }
 
   async updateTrip(tripId: string, adminId: string, updateTripDto: UpdateTripDto) {
@@ -959,17 +951,19 @@ export class AdminService {
     page: number = 1,
     limit: number = 10,
     status?: BookingStatus | string,
+    options: AdminListOptions = {},
   ) {
     const { pageNumber, pageSize } = this.normalizePagination(page, limit);
     const statusFilter = this.normalizeBookingStatus(status);
 
-    const [bookings, total] = await this.bookingRepository.findAndCount({
-      where: statusFilter ? { status: statusFilter } : {},
-      skip: (pageNumber - 1) * pageSize,
-      take: pageSize,
-      relations: ['passenger', 'trip', 'trip.driver', 'paymentTransaction'],
-      order: { createdAt: 'DESC' },
-    });
+    const query = this.bookingRepository.createQueryBuilder('booking')
+      .leftJoinAndSelect('booking.passenger', 'passenger')
+      .leftJoinAndSelect('booking.trip', 'trip')
+      .leftJoinAndSelect('trip.driver', 'driver')
+      .leftJoinAndSelect('booking.paymentTransaction', 'payment');
+    if (statusFilter) query.andWhere('booking.status = :status', { status: statusFilter });
+    applyAdminList(query, 'booking', options, ['createdAt', 'updatedAt', 'status', 'totalPrice', 'numberOfSeats']);
+    const [bookings, total] = await query.skip((pageNumber - 1) * pageSize).take(pageSize).getManyAndCount();
 
     return {
       bookings: bookings.map((booking) => this.sanitizeBooking(booking)),
@@ -979,16 +973,14 @@ export class AdminService {
     };
   }
 
-  async exportBookingsXls(status?: BookingStatus | string): Promise<SpreadsheetFile> {
+  async exportBookingsXls(status?: BookingStatus | string): Promise<SpreadsheetDownload> {
     const statusFilter = this.normalizeBookingStatus(status);
-    const bookings = await this.bookingRepository.find({
-      where: statusFilter ? { status: statusFilter } : {},
-      relations: ['passenger', 'trip', 'trip.driver', 'paymentTransaction'],
-      order: { createdAt: 'DESC' },
-    });
-    return buildBookingsSpreadsheet(
-      bookings.map((booking) => this.sanitizeBooking(booking)),
-    );
+    const query = this.bookingRepository.createQueryBuilder('booking')
+      .leftJoinAndSelect('booking.passenger', 'passenger').leftJoinAndSelect('booking.trip', 'trip')
+      .leftJoinAndSelect('trip.driver', 'driver').leftJoinAndSelect('booking.paymentTransaction', 'payment');
+    if (statusFilter) query.andWhere('booking.status = :status', { status: statusFilter });
+    return streamExport(exportCreatedPages(query, 'booking'), rows =>
+      buildBookingsSpreadsheet(rows.map(booking => this.sanitizeBooking(booking))));
   }
 
   async acceptBooking(bookingId: string, adminId: string) {
@@ -1039,22 +1031,17 @@ export class AdminService {
     page: number = 1,
     limit: number = 50,
     status?: string,
+    options: AdminListOptions = {},
   ) {
     const { pageNumber, pageSize } = this.normalizePagination(page, limit);
     const statusFilter = this.normalizeTripRequestStatus(status);
 
-    const [tripRequests, total] = await this.tripRequestRepository.findAndCount({
-      where: statusFilter ? { status: statusFilter } : {},
-      skip: (pageNumber - 1) * pageSize,
-      take: pageSize,
-      order: { createdAt: 'DESC' },
-    });
+    const query = this.tripRequestRepository.createQueryBuilder('request');
+    if (statusFilter) query.andWhere('request.status = :status', { status: statusFilter });
+    applyAdminList(query, 'request', options, ['createdAt', 'updatedAt', 'status', 'departureDateMin', 'departureDateMax', 'maxPricePerSeat']);
+    const [tripRequests, total] = await query.skip((pageNumber - 1) * pageSize).take(pageSize).getManyAndCount();
 
-    const sanitizedRequests = await Promise.all(
-      tripRequests.map((tripRequest) =>
-        this.tripRequestsService.findOne(tripRequest.id, tripRequest.passengerId),
-      ),
-    );
+    const sanitizedRequests = await this.tripRequestsService.findForAdminBatch(tripRequests.map(r => r.id));
 
     return {
       tripRequests: sanitizedRequests,
@@ -1064,15 +1051,13 @@ export class AdminService {
     };
   }
 
-  async exportTripRequestsXls(status?: string): Promise<SpreadsheetFile> {
+  async exportTripRequestsXls(status?: string): Promise<SpreadsheetDownload> {
     const statusFilter = this.normalizeTripRequestStatus(status);
-    const tripRequests = await this.tripRequestRepository.find({
-      where: statusFilter ? { status: statusFilter } : {},
-      relations: ['passenger', 'driverOffers'],
-      order: { createdAt: 'DESC' },
-    });
-
-    return buildTripRequestsSpreadsheet(
+    const query = this.tripRequestRepository.createQueryBuilder('request')
+      .leftJoinAndSelect('request.passenger', 'passenger')
+      .loadRelationCountAndMap('request.driverOffersCount', 'request.driverOffers');
+    if (statusFilter) query.andWhere('request.status = :status', { status: statusFilter });
+    return streamExport(exportCreatedPages(query, 'request'), tripRequests => buildTripRequestsSpreadsheet(
       tripRequests.map((tripRequest) => ({
         id: tripRequest.id,
         departureLocation: tripRequest.departureLocation,
@@ -1085,9 +1070,9 @@ export class AdminService {
         status: tripRequest.status,
         createdAt: tripRequest.createdAt,
         passenger: this.sanitizeUser(tripRequest.passenger),
-        driverOffersCount: tripRequest.driverOffers?.length ?? 0,
+        driverOffersCount: (tripRequest as TripRequest & { driverOffersCount: number }).driverOffersCount ?? 0,
       })),
-    );
+    ));
   }
 
   async getTripRequest(tripRequestId: string) {
@@ -1388,8 +1373,9 @@ export class AdminService {
     status?: string,
     purpose?: string,
     search?: string,
+    options: AdminListOptions = {},
   ) {
-    const rows = await this.createPaymentsQuery(status, purpose, search)
+    const rows = await applyAdminRange(this.createPaymentsQuery(status, purpose, search), 'payment.createdAt', options)
       .select('payment.status', 'status')
       .addSelect('payment.currency', 'currency')
       .addSelect('COUNT(payment.id)', 'count')

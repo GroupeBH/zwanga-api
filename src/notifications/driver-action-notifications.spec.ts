@@ -62,6 +62,25 @@ describe('driver notification transport', () => {
     expect(send.mock.calls[0][0].data.actionProtocol).toBeUndefined();
   });
 
+  it('transports a counteroffer to the passenger with a bounded ringtone through FCM and Expo', async () => {
+    const { service, send, query } = fixture(true); query.mockResolvedValue([{ version: 6 }]);
+    const remote = jest.spyOn(global, 'fetch').mockResolvedValue({ ok: true,
+      json: async () => ({ data: { status: 'ok', id: 'local-counteroffer-ticket' } }) } as Response);
+    const notification = { userId: 'passenger', title: 'Un conducteur propose un prix', body: '1500 FC par place', createdAt: new Date(),
+      data: { type: 'driver_offer', ringAlert: 'counter-offer-v1', tripRequestId: 'request', offerId: 'price-offer',
+        driverId: 'driver', pricePerSeat: 1500, alertExpiresAt: new Date(Date.now() + 120000).toISOString() } };
+    try {
+      await service.sendFirebaseNotification(notification, 'fixture-token');
+      const fcm = send.mock.calls[0][0];
+      expect(fcm.data).toMatchObject({ passengerId: 'passenger', ringAlert: 'counter-offer-v1', offerId: 'price-offer' });
+      expect(fcm.android).toMatchObject({ priority: 'high', ttl: 60000, notification: { channelId: 'booking-ring-v2', sound: 'driver_ring' } });
+      expect(Date.parse(fcm.data.ringUntil)).toBeLessThanOrEqual(notification.createdAt.getTime() + 60000);
+      await service.sendExpoPushNotification(notification, 'ExponentPushToken[test]');
+      const expo = JSON.parse(remote.mock.calls[0][1]!.body as string);
+      expect(expo).toMatchObject({ sound: 'driver_ring.wav', ttl: 60, data: { passengerId: 'passenger', ringAlert: 'counter-offer-v1' } });
+    } finally { remote.mockRestore(); }
+  });
+
   it.each([0, 1, 2, 3, 4, 5, 6])('reads capability once per transport attempt for client version %s', async version => {
     const { service, query } = fixture(true);
     query.mockResolvedValue(version ? [{ version }] : []);

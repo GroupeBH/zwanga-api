@@ -48,6 +48,9 @@ describe('VehiclesService vehicle creation', () => {
         ),
       },
     };
+    Object.assign(vehicleRepository, { manager: {
+      transaction: async (work: any) => work({ findOne: userRepository.findOne, getRepository: () => vehicleRepository }),
+    } });
     tripRepository = {
       find: jest.fn().mockResolvedValue([]),
     };

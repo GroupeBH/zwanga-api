@@ -1,5 +1,6 @@
 import { ConflictException, NotFoundException } from '@nestjs/common';
 import type { EntityManager } from 'typeorm';
+import { RETIRE_COUNTEROFFER_NOTIFICATIONS_SQL } from './dispatch/retire-request-invitations';
 
 /** Request-scoped exclusions (driver refusal or passenger driver change).
  * Arguments are internal SQL expressions; identities are always bound parameters. */
@@ -41,6 +42,14 @@ export async function declineRequestForDriver(manager: EntityManager, driverId: 
         WHERE "driverId" = $1 AND "requestId" = $2 AND status = 'pending'`, [driverId, requestId]);
       await tx.query(`UPDATE driver_offers SET status='cancelled', "updatedAt"=clock_timestamp()
         WHERE "driverId"=$1 AND "tripRequestId"=$2 AND status='pending'`, [driverId, requestId]);
+      const withdrawn: { id: string }[] = await tx.query(`SELECT id FROM driver_offers
+        WHERE "driverId"=$1 AND "tripRequestId"=$2 AND status='cancelled'`, [driverId, requestId]);
+      if (withdrawn.length) {
+        await tx.query(RETIRE_COUNTEROFFER_NOTIFICATIONS_SQL, [requestId, withdrawn.map(offer => offer.id)]);
+        // Withdrawing a negotiated offer releases even a directly addressed request.
+        await tx.query(`UPDATE trip_requests SET "targetDriverId"=NULL,"targetDriverPriorityUntil"=NULL,"updatedAt"=clock_timestamp()
+          WHERE id=$2 AND "targetDriverId"=$1 AND "selectedDriverId" IS NULL AND "tripId" IS NULL`, [driverId, requestId]);
+      }
       // A deliberate refusal after the ring deadline remains a refusal.
       await tx.query(`UPDATE nearby_driver_ring_events SET "declinedAt" = COALESCE("declinedAt", now()),
         "processedAt" = COALESCE("processedAt", now()), outcome = 'declined'

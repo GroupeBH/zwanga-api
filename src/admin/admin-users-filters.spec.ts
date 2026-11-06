@@ -110,6 +110,7 @@ describe('admin user list and export new filters', () => {
   let query: any, repository: any, service: AdminService;
   beforeEach(() => {
     query = {
+      clone: jest.fn().mockReturnThis(),
       andWhere: jest.fn().mockReturnThis(),
       orderBy: jest.fn().mockReturnThis(),
       addOrderBy: jest.fn().mockReturnThis(),
@@ -162,7 +163,8 @@ describe('admin user list and export new filters', () => {
       'name',
       'DESC',
     );
-    expect(query.andWhere).toHaveBeenCalledTimes(2);
+    expect(query.andWhere).toHaveBeenCalledTimes(3);
+    expect(query.andWhere).toHaveBeenCalledWith('user.createdAt <= :exportCutoff', { exportCutoff: expect.any(Date) });
     expect(query.andWhere).toHaveBeenCalledWith(
       'user.status = :adminUserStatus',
       { adminUserStatus: 'suspended' },
@@ -227,15 +229,11 @@ describe('admin user list and export new filters', () => {
     repository.findOne
       .mockResolvedValueOnce({ id: 'admin', role: UserRole.ADMIN })
       .mockResolvedValueOnce(user);
+    const deactivate = jest.fn().mockResolvedValue({ ...user, status: UserStatus.SUSPENDED, isActive: false });
+    Object.assign(service, { accountLifecycle: { deactivate } });
     const result = await service.suspendUser('user', 'admin');
-    expect(repository.save).toHaveBeenCalledWith(
-      expect.objectContaining({
-        firstName: 'Aline',
-        lastName: 'Mbuyi',
-        status: UserStatus.SUSPENDED,
-        isActive: false,
-      }),
-    );
+    expect(deactivate).toHaveBeenCalledWith('user', UserStatus.SUSPENDED);
+    expect(repository.save).not.toHaveBeenCalled();
     expect(result).toMatchObject({
       displayName: 'Aline Mbuyi',
       isDeleted: false,

@@ -56,18 +56,16 @@ describe('AdminService back-office account management', () => {
       .mockResolvedValueOnce(superAdmin)
       .mockResolvedValueOnce(adminAccount);
     userRepository.save.mockImplementation(async (user) => user);
+    const deactivate = jest.fn().mockResolvedValue({ ...adminAccount, isActive: false,
+      status: UserStatus.SUSPENDED, accessToken: null, refreshToken: null, fcmToken: null });
+    Object.assign(service, { accountLifecycle: { deactivate } });
 
     const result = await service.deactivateAdminAccount('super-1', 'admin-1');
 
     expect(result.isActive).toBe(false);
     expect(result.status).toBe(UserStatus.SUSPENDED);
-    expect(userRepository.save).toHaveBeenCalledWith(
-      expect.objectContaining({
-        accessToken: null,
-        refreshToken: null,
-        fcmToken: null,
-      }),
-    );
+    expect(deactivate).toHaveBeenCalledWith('admin-1', UserStatus.SUSPENDED);
+    expect(userRepository.save).not.toHaveBeenCalled();
   });
 
   it('refuses to deactivate the connected super admin', async () => {

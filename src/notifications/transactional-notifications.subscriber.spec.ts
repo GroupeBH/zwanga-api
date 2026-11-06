@@ -115,6 +115,17 @@ describe('transactional notification subscriber', () => {
     expect(f.dataSource.subscribers).toHaveLength(0);
   });
 
+  it('announces a booking price proposal as a budget, not the public fare', async () => {
+    const f = fixture();
+    f.manager.findOneBy.mockResolvedValue({ id: 'trip', driverId: 'driver', pricePerSeat: 3500 });
+    await f.subscriber.afterInsert(f.event(Booking, { id: 'booking', tripId: 'trip', status: 'pending',
+      numberOfSeats: 2, proposedPricePerSeat: 2000 }));
+    expect(f.builder.values.mock.calls[0][0]).toMatchObject({
+      data: { ridePricePerSeat: '2000', ridePriceKind: 'budget', rideSeats: '2' },
+      body: expect.stringContaining('2000 FC par place'),
+    });
+  });
+
   it('rejects non-transactional financial inserts before any SQL write', () => {
     const f = fixture();
     expect(() =>

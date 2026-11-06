@@ -32,6 +32,11 @@ const temporaryCredentials = () => ({
 const configFor = (overrides: Record<string, string> = {}) =>
   new StoreConfig(new ConfigService({ ...settings, ...overrides }));
 
+// These tests exercise the no-callback overload; Jest otherwise infers the void overload.
+const jwtPromisePrototype = JWT.prototype as unknown as {
+  getAccessToken(): Promise<{ token: string | null }>;
+};
+
 describe('Google AWS federation (no external requests or real credentials)', () => {
   const credentials = jest.fn();
   const destroy = jest.fn();
@@ -231,11 +236,8 @@ describe('Google AWS federation (no external requests or real credentials)', () 
           lifetime: '3600s',
         });
       }
-      return {
+      return Object.assign(new Response(null, { status: 200 }), {
         config: options,
-        status: 200,
-        statusText: 'OK',
-        headers: new Headers(),
         data: isSts
           ? {
               access_token: 'synthetic-federated',
@@ -246,9 +248,12 @@ describe('Google AWS federation (no external requests or real credentials)', () 
               accessToken: `synthetic-google-${++grants}`,
               expireTime: new Date(Date.now() + 3600_000).toISOString(),
             },
-      };
+      });
     });
-    client.transporter.defaults.adapter = adapter;
+    // Gaxios's adapter is generic; this fake only returns the token shapes asserted above.
+    client.transporter.defaults.adapter = adapter as NonNullable<
+      typeof client.transporter.defaults.adapter
+    >;
     const concurrent = await Promise.all(
       Array.from({ length: 5 }, () => client.getAccessToken()),
     );
@@ -302,11 +307,8 @@ describe('Google AWS federation (no external requests or real credentials)', () 
             );
           });
         }
-        return {
+        return Object.assign(new Response(null, { status: 200 }), {
           config: options,
-          status: 200,
-          statusText: 'OK',
-          headers: new Headers(),
           data: isSts
             ? {
                 access_token: 'synthetic-federated',
@@ -317,9 +319,11 @@ describe('Google AWS federation (no external requests or real credentials)', () 
                 accessToken: 'recovered-token',
                 expireTime: new Date(Date.now() + 3600_000).toISOString(),
               },
-        };
+        });
       });
-      client.transporter.defaults.adapter = adapter;
+      client.transporter.defaults.adapter = adapter as NonNullable<
+        typeof client.transporter.defaults.adapter
+      >;
       const result = client.getAccessToken();
       const rejected = expect(result).rejects.toThrow('bounded timeout');
       await jest.advanceTimersByTimeAsync(10_000);
@@ -339,7 +343,7 @@ describe('Google AWS federation (no external requests or real credentials)', () 
         return { token: 'synthetic-google-token' };
       });
     const jwt = jest
-      .spyOn(JWT.prototype, 'getAccessToken')
+      .spyOn(jwtPromisePrototype, 'getAccessToken')
       .mockRejectedValue(new Error('unexpected JWT'));
     const adc = jest
       .spyOn(GoogleAuth.prototype, 'getAccessToken')
@@ -396,7 +400,7 @@ describe('Google AWS federation (no external requests or real credentials)', () 
     });
     expect(legacy.assertReady('google')).toBe('com.zwanga');
     const jwt = jest
-      .spyOn(JWT.prototype, 'getAccessToken')
+      .spyOn(jwtPromisePrototype, 'getAccessToken')
       .mockResolvedValue({ token: 'legacy-token' });
     expect(await new StoreAuth(legacy).google('publisher')).toBe(
       'legacy-token',

@@ -5,7 +5,7 @@ import { assertDriverPublicationPhoto, savePublicationsWithPhotoPolicy } from '.
 
 const trip = () => ({ driverId: 'driver', isPrivate: false } as Trip);
 function setup(overrides: Partial<User> = {}, history = false) {
-  const driver = { id: 'driver', profilePicture: '', hasPublishedTrip: false, ...overrides };
+  const driver = { id: 'driver', isActive: true, status: 'active', profilePicture: '', hasPublishedTrip: false, ...overrides };
   const users = {
     findOne: jest.fn(async () => driver),
     update: jest.fn(async (_id, patch) => Object.assign(driver, patch)),

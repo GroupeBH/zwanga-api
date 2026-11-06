@@ -14,9 +14,9 @@ export const ACCEPTANCE_LEASE_MS = 120_000;
 export const PASSENGER_DECISION_MS = 120_000;
 
 /** Caller holds the request lock; an alternative offer counts as a driver response. */
-export async function startPassengerDecision(manager: EntityManager, request: TripRequest, driverId: string) {
+export async function startPassengerDecision(manager: EntityManager, request: TripRequest, driverId: string, phases = ['driver']) {
   if (!request.sequentialDispatch) return;
-  await assertSequentialInvitation(manager, request, driverId);
+  await assertSequentialInvitation(manager, request, driverId, phases);
   await manager.query(`UPDATE trip_request_dispatch_offers SET phase='passenger',
     "expiresAt"=LEAST(clock_timestamp()+$4*interval '1 millisecond',$3::timestamptz)
     WHERE "requestId"=$1 AND "driverId"=$2 AND status='pending'`,

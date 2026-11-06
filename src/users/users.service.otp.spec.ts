@@ -4,6 +4,38 @@ import { In, Not } from 'typeorm';
 import { UsersService } from './users.service';
 
 describe('UsersService OTP routes', () => {
+  it.each([UserStatus.ACTIVE, UserStatus.PENDING_KYC])(
+    'verifies an existing %s account after an app update without changing login or creating a new account',
+    async (status) => {
+      const phone = '+243000000000';
+      const update = jest.fn().mockResolvedValue({ affected: 1 });
+      const sendOtp = jest.fn().mockResolvedValue({ success: true, codeLength: 5, expiresInSeconds: 899 });
+      const verifyOtp = jest.fn().mockResolvedValue({ valid: false });
+      const service = {
+        userRepository: {
+          findOne: jest.fn().mockResolvedValue({ id: 'fixture-existing', isActive: true, status, isPhoneVerified: false }),
+          update,
+        },
+        otpService: { sendOtp, verifyOtp },
+      };
+      await expect(UsersService.prototype.sendPhoneVerificationOtp.call(service, {
+        phone, context: PhoneVerificationContext.UPDATE,
+      })).resolves.toMatchObject({ codeLength: 5 });
+      expect(sendOtp).toHaveBeenCalledWith(phone, 'phone_verification');
+      expect(update).not.toHaveBeenCalled();
+      await expect(UsersService.prototype.verifyPhoneOtp.call(service, { phone, otp: '12345' }))
+        .rejects.toThrow('invalide');
+      expect(update).not.toHaveBeenCalled();
+      verifyOtp.mockResolvedValue({ valid: true });
+      await expect(UsersService.prototype.verifyPhoneOtp.call(service, { phone, otp: '12345' }))
+        .resolves.toMatchObject({ valid: true });
+      expect(update).toHaveBeenCalledTimes(1);
+      expect(update).toHaveBeenCalledWith({ phone, isPhoneVerified: false, isActive: true,
+        status: Not(In([UserStatus.INACTIVE, UserStatus.SUSPENDED])),
+      }, { isPhoneVerified: true });
+    },
+  );
+
   it('never forwards provider codes, raw responses or OTPs to the mobile', async () => {
     const service = {
       userRepository: {

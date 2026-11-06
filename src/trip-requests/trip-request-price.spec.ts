@@ -42,6 +42,7 @@ describe('Confirmed request price propagation', () => {
       requiresPassengerKyc: false,
     };
     const manager = { query: jest.fn(async (sql: string) => sql.includes('ST_DWithin') ? [{ allowed: 1 }] : []),
+      findOne: jest.fn(async (_entity, options) => ({ id: options.where.id, isActive: true, status: 'active' })),
       getRepository: jest.fn(), transaction: jest.fn() };
     const repository = {
       manager,

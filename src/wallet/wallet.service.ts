@@ -434,13 +434,15 @@ export class WalletService implements OnModuleInit {
     return entry;
   }
 
-  async refundBookingPayment(booking: Booking): Promise<boolean> {
+  async refundBookingPayment(booking: Booking, manager?: EntityManager): Promise<boolean> {
     const paymentEntry = await this.findBookingEntry(
       booking.passengerId,
       booking.id,
       WalletLedgerEntryType.BOOKING_PAYMENT,
+      manager,
     );
     if (!paymentEntry) {
+      if (manager) throw new BadRequestException('Le débit en jetons de cette réservation doit être vérifié avant annulation.');
       return false;
     }
 
@@ -448,6 +450,7 @@ export class WalletService implements OnModuleInit {
       booking.passengerId,
       booking.id,
       WalletLedgerEntryType.BOOKING_REFUND,
+      manager,
     );
     if (refundEntry) {
       return false;
@@ -460,7 +463,7 @@ export class WalletService implements OnModuleInit {
       relatedEntityType: this.BOOKING_RELATED_ENTITY_TYPE,
       relatedEntityId: booking.id,
       description: `Remboursement en jetons pour la réservation ${booking.id}`,
-    });
+    }, manager);
     return true;
   }
 
@@ -1291,8 +1294,9 @@ export class WalletService implements OnModuleInit {
     userId: string,
     bookingId: string,
     type: WalletLedgerEntryType,
+    manager?: EntityManager,
   ): Promise<WalletLedgerEntry | null> {
-    return this.ledgerRepository.findOne({
+    return (manager?.getRepository(WalletLedgerEntry) ?? this.ledgerRepository).findOne({
       where: {
         userId,
         type,

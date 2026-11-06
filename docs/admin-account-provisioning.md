@@ -245,6 +245,37 @@ Content-Type: application/json
 - un admin simple ne peut pas suspendre, réactiver ou désactiver un autre admin
   ou le super administrateur.
 
+## Désactivation et suppression d’un compte
+
+La suspension administrateur et la suppression personnelle utilisent le même
+cycle de retrait des ressources, dans une transaction PostgreSQL :
+
+- révocation des sessions et désactivation des véhicules et de la présence conducteur ;
+- pause des trajets récurrents, annulation des trajets et réservations non embarquées ;
+- annulation des demandes appartenant au compte et des prises en charge qui lui sont attribuées ;
+- retrait des offres et invitations encore en attente et invalidation des alertes périmées ;
+- conservation des trajets terminés, écritures de portefeuille, paiements et gains pour l’audit.
+
+Si un passager est embarqué, si une déclaration d’embarquement reste à résoudre
+ou si sa réservation n’est pas clôturée, la réponse est HTTP 409,
+`ACCOUNT_HAS_UNFINISHED_RIDE`. Aucun changement partiel n’est conservé.
+Clôturer le trajet ou résoudre le litige avant de réessayer.
+
+Les paiements en jetons sont remboursés dans la même transaction, en conservant
+leur provenance et sans double crédit lors d’un nouvel essai. Une preuve de débit
+manquante bloque l’opération. Les paiements électroniques restent conservés pour
+rapprochement avec le prestataire : la désactivation ne vaut pas remboursement
+Mobile Money et n’en déclenche pas arbitrairement un.
+
+Une réactivation du compte ne republie pas ses anciens trajets, demandes ou
+véhicules. Les recherches publiques vérifient aussi l’état actuel du propriétaire,
+y compris pour les données anciennes et les résultats présents en cache.
+Les participants conservent l’accès à l’historique de leurs réservations.
+La suppression personnelle anonymise le profil ; la suspension conserve son nom.
+
+Aucune nouvelle migration ni modification Terraform n’est requise pour ce correctif.
+Les lignes historiques déjà présentes ne sont pas effacées rétroactivement.
+
 ## Après création
 
 1. Se connecter à `zwanga-admin` avec le `super_admin`.

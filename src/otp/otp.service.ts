@@ -26,6 +26,7 @@ const OTP_PURPOSES: OtpPurpose[] = [
   'pin_reset',
   'pin_change',
   'admin_bootstrap',
+  'admin_finance',
 ];
 // Exceeds the provider's bounded request duration, including Redis bookkeeping.
 const OPERATION_LOCK_SECONDS = 120;
@@ -42,7 +43,10 @@ export class OtpService {
   async sendOtp(
     phone: string,
     purpose: OtpPurpose = 'phone_verification',
+    context?: string,
   ): Promise<SendOtpResponse> {
+    if (purpose === 'admin_finance' && !/^[a-f0-9]{64}$/.test(context || ''))
+      throw new BadRequestException('Contexte financier requis.');
     const normalizedPhone = this.normalizePhone(phone);
     return this.withPhoneLock(normalizedPhone, async () => {
       const useMobishastra = this.usesMobishastra(purpose);
@@ -74,6 +78,7 @@ export class OtpService {
           normalizedPhone,
           this.challengeKey(normalizedPhone, purpose),
           purpose,
+          ...(context ? [context] : []),
         );
       }
       const response = await this.keccelOtpService.sendOtp(
@@ -103,7 +108,10 @@ export class OtpService {
     phone: string,
     otp: string,
     purpose: OtpPurpose = 'phone_verification',
+    context?: string,
   ): Promise<VerifyOtpResponse> {
+    if (purpose === 'admin_finance' && !/^[a-f0-9]{64}$/.test(context || ''))
+      return { valid: false, status: 'INVALID' };
     if (!otp || !/^\d{4,8}$/.test(otp.trim())) {
       throw new BadRequestException('Code OTP invalide');
     }
@@ -122,12 +130,13 @@ export class OtpService {
           key,
           stored,
           purpose,
+          ...(context ? [context] : []),
         );
       }
 
       // A code issued by Didit cannot be validated by Keccel. Request a fresh
       // SMS instead of consulting Didit or accepting an unbound provider code.
-      if (stored?.provider !== 'keccel') return invalid;
+      if (purpose === 'admin_finance' || stored?.provider !== 'keccel') return invalid;
 
       // Old replicas could have issued multiple Keccel purposes for one phone.
       // Their provider response cannot distinguish those codes: fail closed.
@@ -159,6 +168,7 @@ export class OtpService {
   }
 
   private usesMobishastra(purpose: OtpPurpose): boolean {
+    if (purpose === 'admin_finance') return true;
     if (purpose === 'admin_bootstrap') return false;
     const provider =
       purpose === 'pin_reset' || purpose === 'pin_change'

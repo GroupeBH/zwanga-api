@@ -20,7 +20,8 @@ export class AppUpdatesService {
   async latest(input: AppVersionDto): Promise<{ enabled: boolean; release: AppRelease | null }> {
     if (!this.enabled()) return { enabled: false, release: null };
     const value = this.normalize(input);
-    const rows: AppRelease[] = await this.db.query(`SELECT r.id, r.platform, r.version, r.build, r.notes, r.available, r."publishedAt" FROM app_store_releases r
+    const rows: AppRelease[] = await this.db.query(`SELECT r.id, r.platform, r.version, r.build, r.notes, r.available, r."publishedAt",
+      COALESCE(to_jsonb(r)->>'comparison','version_build') AS comparison FROM app_store_releases r
       CROSS JOIN (SELECT $2::text AS version, $3::text AS build) c
       WHERE r.available = true AND r.platform = $1 AND ${UPDATE_REQUIRED_SQL} LIMIT 1`,
       [value.platform, value.version, value.build]);
@@ -59,7 +60,9 @@ export class AppUpdatesService {
       if (existing[0]) return existing[0];
       const newer: AppRelease[] = await manager.query(`SELECT * FROM app_store_releases WHERE platform = $1
         AND (string_to_array(version, '.')::int[] > string_to_array($2, '.')::int[]
-        OR (version = $2 AND string_to_array(build, '.')::int[] >= string_to_array($3, '.')::int[])) LIMIT 1`,
+        OR (version = $2 AND string_to_array(build, '.')::int[] >= string_to_array($3, '.')::int[])
+        OR (platform='android' AND COALESCE(to_jsonb(app_store_releases)->>'comparison','version_build')='native_build'
+          AND string_to_array(build, '.')::int[] >= string_to_array($3, '.')::int[])) LIMIT 1`,
         [value.platform, value.version, value.build]);
       if (newer.length) throw new BadRequestException('Une version plus récente a déjà été annoncée.');
       await manager.query('UPDATE app_store_releases SET available = false WHERE platform = $1 AND available = true', [value.platform]);

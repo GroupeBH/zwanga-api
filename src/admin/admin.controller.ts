@@ -27,11 +27,15 @@ import { AdminAttachReferrerDto } from './dto/admin-referral.dto';
 import { AdminReferralsService } from './admin-referrals.service';
 import { TripStatementService } from './trip-statement.service';
 import { CreateAdminAccountDto, ResetAdminAccountPasswordDto } from './dto/admin-account.dto';
-import { spreadsheetHeaders, type SpreadsheetFile } from './spreadsheet';
+import { spreadsheetHeaders, type SpreadsheetDownload } from './spreadsheet';
 import { VehicleType } from '../vehicles/entities/vehicle.entity';
 import { ADMIN_USER_SORT_FIELDS } from './dto/admin-users.dto';
 import { ResolvePayoutNotPaidDto } from '../payments/dto/resolve-payout-not-paid.dto';
 import { RetryPayoutDto } from '../payments/dto/retry-payout.dto';
+import { AdminBulkBookingsDto } from './dto/admin-bulk-bookings.dto';
+import { runAdminBulk } from '../common/pagination/admin-bulk';
+import { ApiAdminListQuery } from '../common/pagination/admin-query';
+import { RequireFinanceOtp } from '../otp/finance-otp.guard';
 
 interface AuthenticatedAdminRequest {
   user: { userId: string };
@@ -46,8 +50,13 @@ export class AdminController {
     private readonly tripStatementService: TripStatementService,
   ) {}
 
-  private sendSpreadsheet(res: Response, file: SpreadsheetFile) {
+  private sendSpreadsheet(res: Response, file: SpreadsheetDownload) {
     res.set(spreadsheetHeaders(file));
+    if ('stream' in file) {
+      res.once('close', () => file.stream.destroy());
+      if (res.destroyed) file.stream.destroy();
+      return new StreamableFile(file.stream);
+    }
     return new StreamableFile(file.buffer);
   }
 
@@ -61,6 +70,7 @@ export class AdminController {
   }
 
   @Get('kyc')
+  @ApiAdminListQuery(['createdAt', 'updatedAt', 'status'])
   @Auth()
   @Roles(UserRole.ADMIN)
   @SensitiveThrottle(30, 60000)
@@ -72,8 +82,11 @@ export class AdminController {
     @Query('limit') limit: number = 25,
     @Query('status') status?: string,
     @Query('search') search?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('sort') sort?: string,
   ) {
-    return this.adminService.getKycDocuments(page, limit, status, search);
+    return this.adminService.getKycDocuments(page, limit, status, search, { from, to, sort });
   }
 
   @Get('kyc/:kycId')
@@ -346,6 +359,7 @@ export class AdminController {
   }
 
   @Get('payments')
+  @ApiAdminListQuery(['createdAt', 'updatedAt', 'paidAt', 'status', 'amount', 'reference', 'provider'])
   @Auth()
   @Roles(UserRole.ADMIN)
   @SensitiveThrottle(30, 60000)
@@ -356,8 +370,11 @@ export class AdminController {
     @Query('status') status?: string,
     @Query('purpose') purpose?: string,
     @Query('search') search?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('sort') sort?: string,
   ) {
-    return this.adminService.getAllPayments(page, limit, status, purpose, search);
+    return this.adminService.getAllPayments(page, limit, status, purpose, search, { from, to, sort });
   }
 
   @Get('payments/export')
@@ -522,6 +539,7 @@ export class AdminController {
   }
 
   @Post('referrals/withdrawals/:withdrawalId/retry')
+  @RequireFinanceOtp('referral_withdrawal_retry')
   @Auth()
   @Roles(UserRole.SUPER_ADMIN)
   @SensitiveThrottle(3, 60000)
@@ -605,6 +623,9 @@ export class AdminController {
   }
 
   @Get('trips')
+  @ApiAdminListQuery(['createdAt', 'updatedAt', 'departureDate', 'completedAt', 'status', 'pricePerSeat', 'departureLocation', 'arrivalLocation'])
+  @ApiQuery({ name: 'search', required: false, type: String, description: 'Trip ID, route, driver name or phone (max 160 characters)' })
+  @ApiQuery({ name: 'status', required: false, enum: ['upcoming', 'ongoing', 'completed', 'cancelled', 'all'] })
   @Auth()
   @Roles(UserRole.ADMIN)
   @SensitiveThrottle(30, 60000) // 30 requests per minute per IP
@@ -612,8 +633,13 @@ export class AdminController {
   async getAllTrips(
     @Query('page') page: number = 1,
     @Query('limit') limit: number = 10,
+    @Query('search') search?: string,
+    @Query('status') status?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('sort') sort?: string,
   ) {
-    return this.adminService.getAllTrips(page, limit);
+    return this.adminService.getAllTrips(page, limit, { search, status, from, to, sort });
   }
 
   @Get('trips/:tripId/statement')
@@ -668,6 +694,7 @@ export class AdminController {
   }
 
   @Get('bookings')
+  @ApiAdminListQuery(['createdAt', 'updatedAt', 'status', 'totalPrice', 'numberOfSeats'])
   @Auth()
   @Roles(UserRole.ADMIN)
   @SensitiveThrottle(30, 60000)
@@ -676,8 +703,23 @@ export class AdminController {
     @Query('page') page: number = 1,
     @Query('limit') limit: number = 10,
     @Query('status') status?: BookingStatus,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('sort') sort?: string,
   ) {
-    return this.adminService.getAllBookings(page, limit, status);
+    return this.adminService.getAllBookings(page, limit, status, { from, to, sort });
+  }
+
+  @Post('bookings/bulk-status')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(5, 60000)
+  @ApiOperation({ summary: 'Change up to 50 booking statuses using normal business checks; returns per-item outcomes' })
+  bulkBookings(@Request() req: AuthenticatedAdminRequest, @Body() dto: AdminBulkBookingsDto) {
+    return runAdminBulk(dto.ids, id => dto.status === 'accepted'
+      ? this.adminService.acceptBooking(id, req.user.userId)
+      : dto.status === 'rejected' ? this.adminService.rejectBooking(id, req.user.userId, dto.reason)
+      : this.adminService.cancelBooking(id, req.user.userId));
   }
 
   @Get('bookings/export')
@@ -725,6 +767,7 @@ export class AdminController {
   }
 
   @Get('trip-requests')
+  @ApiAdminListQuery(['createdAt', 'updatedAt', 'status', 'departureDateMin', 'departureDateMax', 'maxPricePerSeat'])
   @Auth()
   @Roles(UserRole.ADMIN)
   @SensitiveThrottle(30, 60000)
@@ -733,8 +776,11 @@ export class AdminController {
     @Query('page') page: number = 1,
     @Query('limit') limit: number = 50,
     @Query('status') status?: string,
+    @Query('from') from?: string,
+    @Query('to') to?: string,
+    @Query('sort') sort?: string,
   ) {
-    return this.adminService.getAllTripRequests(page, limit, status);
+    return this.adminService.getAllTripRequests(page, limit, status, { from, to, sort });
   }
 
   @Get('trip-requests/export')

@@ -1,4 +1,5 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, IntersectionType } from '@nestjs/swagger';
+import { AdminDateRangeDto } from '../../common/pagination/admin-query';
 import { Type } from 'class-transformer';
 import {
   IsBoolean,
@@ -94,7 +95,9 @@ export class ListSupportTicketsQueryDto {
   search?: string;
 }
 
-export class ListAdminSupportTicketsQueryDto extends ListSupportTicketsQueryDto {
+export class ListAdminSupportTicketsQueryDto extends IntersectionType(ListSupportTicketsQueryDto, AdminDateRangeDto) {
+  @ApiProperty({ required: false, example: 'updatedAt:desc' })
+  @IsOptional() @IsString() sort?: string;
   @ApiProperty({ required: false, description: 'Filtrer par utilisateur' })
   @IsUUID()
   @IsOptional()

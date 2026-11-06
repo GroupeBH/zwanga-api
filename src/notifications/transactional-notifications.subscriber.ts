@@ -173,11 +173,14 @@ export class TransactionalNotificationsSubscriber
         if (trip && !trip.tripRequestId) notification = {
           eventKey: `booking:${booking.id}:new`, userId: trip.driverId,
           title: 'Nouvelle réservation',
-          body: 'Un passager souhaite réserver votre trajet. Accepter ou refuser ?',
+          body: booking.proposedPricePerSeat != null
+            ? `Un passager propose ${booking.proposedPricePerSeat} FC par place. Ouvrez la réservation pour répondre.`
+            : 'Un passager souhaite réserver votre trajet. Accepter ou refuser ?',
           data: { type: 'new_booking', bookingId: booking.id, tripId: trip.id,
             ...rideSpeechData({ departure: booking.passengerOrigin || trip.departureLocation,
               arrival: booking.passengerDestination || trip.arrivalLocation, seats: booking.numberOfSeats,
-              departureAt: trip.departureDate, pricePerSeat: trip.pricePerSeat, priceKind: 'fare' }),
+              departureAt: trip.departureDate, pricePerSeat: booking.proposedPricePerSeat ?? trip.pricePerSeat,
+              priceKind: booking.proposedPricePerSeat != null ? 'budget' : 'fare' }),
             driverId: trip.driverId, role: 'driver' },
         };
       }

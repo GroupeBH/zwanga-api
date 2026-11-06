@@ -111,7 +111,9 @@ export class MobishastraSmsService implements OnModuleDestroy {
         ? 'verification'
         : purpose === 'pin_reset'
           ? 'reinitialisation du PIN'
-          : 'modification du PIN';
+          : purpose === 'admin_finance'
+            ? 'confirmation de virement administrateur'
+            : 'modification du PIN';
     try {
       // The selected single-message API uses HTTPS GET (PDF pp.13–14).
       // Its query contains secrets: suppress HTTP spans (ADOT/X-Ray), including

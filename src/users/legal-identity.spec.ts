@@ -42,6 +42,14 @@ const createService = (user: User) => {
 };
 
 describe('UsersService legal identity', () => {
+  it('does not allow a stolen admin session to redirect the financial OTP through profile editing', async () => {
+    const user = createUser(); user.role = UserRole.SUPER_ADMIN;
+    const { service, userRepository } = createService(user);
+    await expect(service.updateProfile(user.id, { phone: '+243900000001' })).rejects.toMatchObject({
+      response: { code: 'ADMIN_PHONE_CHANGE_REQUIRES_SUPPORT' },
+    });
+    expect(userRepository.update).not.toHaveBeenCalled();
+  });
   it('normalizes legal names before KYC approval', async () => {
     const user = createUser();
     const { service, userRepository } = createService(user);
