@@ -121,6 +121,7 @@ export class StoreWorker implements OnModuleDestroy {
     try {
       const signal = controller.signal;
       if (job.task === 'reply') {
+        if (this.config.value('STORE_REVIEW_REPLIES_ENABLED') !== 'true') throw new StoreProviderError('STORE_REPLIES_DISABLED');
         const [actor] = await this.repository.db.query(
           'SELECT id,role FROM users WHERE id=$1 AND "isActive"',
           [job.actorId],

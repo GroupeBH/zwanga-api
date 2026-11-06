@@ -5,6 +5,25 @@ const express = require('express');
 const multer = require('multer');
 const grpc = require('@grpc/grpc-js');
 
+test('patched glob preserves TypeORM file discovery and cancellation', async () => {
+  const { createRequire } = require('node:module');
+  const path = require('node:path');
+  const semver = require('semver');
+  for (const [name, pkg] of Object.entries(require('../package-lock.json').packages)) {
+    if (name.endsWith('/minimatch') && semver.gte(pkg.version, '7.0.0'))
+      assert.ok(semver.gte(pkg.version, '11.0.1'), `${name}: ${pkg.version}`);
+    if (name.endsWith('/glob') && semver.gte(pkg.version, '9.0.0'))
+      assert.ok(semver.gte(pkg.version, '14.0.2'), `${name}: ${pkg.version}`);
+  }
+  const fromTypeorm = createRequire(require.resolve('typeorm'));
+  const glob = fromTypeorm('glob');
+  const options = { cwd: path.resolve('src/users/entities') };
+  assert.ok(glob.sync('*.entity.ts', options).includes('user.entity.ts'));
+  assert.deepEqual(await glob.glob('*.entity.ts', options), glob.sync('*.entity.ts', options));
+  const controller = new AbortController(); controller.abort(new Error('test cancellation'));
+  await assert.rejects(glob.glob('**/*', { ...options, signal: controller.signal }), /test cancellation/);
+});
+
 test('security patches retain Joi validation and the PM2 systeminformation API', () => {
   const semver = require('semver');
   const Joi = require('joi');

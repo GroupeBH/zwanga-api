@@ -11,6 +11,7 @@ import { Trip, TripStatus } from '../trips/entities/trip.entity';
 import { Booking, BookingStatus } from '../bookings/entities/booking.entity';
 import { CreateEmergencyContactDto, UpdateEmergencyContactDto } from './dto/emergency-contact.dto';
 import { CreateSafetyAlertDto, UpdateSafetyAlertStatusDto, UpdateLocationDto } from './dto/safety-alert.dto';
+import { AdminDateRangeDto, adminRange, applyAdminList } from '../common/pagination/admin-query';
 import {
   CreateUserReportDto,
   ListAdminUserReportsQueryDto,
@@ -562,6 +563,7 @@ export class SafetyService {
       .orderBy('report.createdAt', 'DESC')
       .skip((page - 1) * limit)
       .take(limit);
+    applyAdminList(builder, 'report', query, ['createdAt', 'updatedAt', 'reviewedAt', 'status', 'reason']);
 
     if (query.status) {
       builder.andWhere('report.status = :status', { status: query.status });
@@ -594,6 +596,25 @@ export class SafetyService {
       page,
       limit,
     };
+  }
+
+  async adminReportStats(input: AdminDateRangeDto) {
+    const { from, to } = adminRange(input, true);
+    const rows = await this.userReportRepository.createQueryBuilder('report')
+      .select('report.reason', 'reason').addSelect('report.status', 'status').addSelect('COUNT(*)', 'count')
+      .where('report.createdAt >= :from AND report.createdAt < :to', { from, to })
+      .groupBy('report.reason').addGroupBy('report.status')
+      .getRawMany<{ reason: string; status: string; count: string }>();
+    const byReason = Object.fromEntries(Object.values(ReportReason).map(key => [key, 0]));
+    const byStatus = Object.fromEntries(Object.values(ReportStatus).map(key => [key, 0]));
+    let total = 0;
+    for (const row of rows) {
+      const count = Number(row.count);
+      byReason[row.reason] = (byReason[row.reason] ?? 0) + count;
+      byStatus[row.status] = (byStatus[row.status] ?? 0) + count;
+      total += count;
+    }
+    return { total, byReason, byStatus, period: { from, to, timezone: 'UTC', dateField: 'createdAt', toExclusive: true } };
   }
 
   async findOneUserReport(reportId: string, userId?: string): Promise<SanitizedUserReport> {

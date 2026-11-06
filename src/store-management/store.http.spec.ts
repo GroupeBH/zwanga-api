@@ -28,6 +28,7 @@ describe('Store admin HTTP contracts, existing authentication and roles', () => 
     [
       'status',
       'dashboard',
+      'downloads',
       'records',
       'metricCatalog',
       'metrics',
@@ -105,6 +106,7 @@ describe('Store admin HTTP contracts, existing authentication and roles', () => 
     for (const [method, path] of [
       ['get', 'status'],
       ['get', 'dashboard'],
+      ['get', 'analytics/downloads'],
       ['get', 'records'],
       ['get', 'metrics/catalog'],
       ['get', 'metrics'],
@@ -158,6 +160,35 @@ describe('Store admin HTTP contracts, existing authentication and roles', () => 
     Object.values(service).forEach((call) =>
       expect(call).not.toHaveBeenCalled(),
     );
+  });
+  it('requires analytics permission for download summaries and validates query DTOs on both aliases', async () => {
+    for (const prefix of ['stores', 'store-management']) {
+      await request(app.getHttpServer())
+        .get(
+          `/api/v1/admin/${prefix}/analytics/downloads?platform=apple&from=2026-01-01&to=2026-01-03`,
+        )
+        .set('x-test-role', 'admin')
+        .expect(200);
+    }
+    expect(service.downloads).toHaveBeenCalledWith(
+      expect.objectContaining({
+        platform: 'apple',
+        from: '2026-01-01',
+        to: '2026-01-03',
+      }),
+    );
+    for (const query of ['platform=invalid', 'from=bad', 'appId=other-app']) {
+      await request(app.getHttpServer())
+        .get(`/api/v1/admin/stores/analytics/downloads?${query}`)
+        .set('x-test-role', 'admin')
+        .expect(400);
+    }
+    access.permissions.mockImplementation(async () => STORE_PROFILES.support);
+    await request(app.getHttpServer())
+      .get('/api/v1/admin/stores/analytics/downloads')
+      .set('x-test-role', 'admin')
+      .expect(403);
+    expect(service.downloads).toHaveBeenCalledTimes(2);
   });
   it.each(['admin', 'super_admin'])(
     'accepts %s and ties changes to JWT actor',

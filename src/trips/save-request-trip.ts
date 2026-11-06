@@ -4,6 +4,7 @@ import { assertRequestDriverProximity } from '../trip-requests/request-proximity
 import { hasRefusedRequest } from '../trip-requests/request-refusal';
 import { assertDriverRequestSchedule } from '../trip-requests/dispatch/driver-schedule-policy';
 import { ConflictException } from '@nestjs/common';
+import { lockAvailableAccounts } from '../users/account-availability';
 import { In, Repository } from 'typeorm';
 import { Trip, TripStatus } from './entities/trip.entity';
 import { TripRequest, TripRequestStatus } from '../trip-requests/entities/trip-request.entity';
@@ -24,6 +25,7 @@ export function saveRequestTrip(
   acceptanceToken?: string,
 ): Promise<Trip> {
   return repository.manager.transaction(async (manager) => {
+    await lockAvailableAccounts(manager, [trip.driverId, snapshot.passengerId]);
     const request = await manager.getRepository(TripRequest).findOne({
       where: { id: snapshot.id },
       lock: { mode: 'pessimistic_write' },

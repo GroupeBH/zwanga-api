@@ -124,8 +124,15 @@ export const STORE_ALERT_TYPES = [
   'metric_above',
   'metric_drop_percent',
   'version_changed',
+  'mobile_push_failure_percent',
+  'mobile_registration_drop_percent',
+  'mobile_required_policy_conflict',
 ] as const;
 export class StoreAlertRuleDto {
+  @ApiPropertyOptional({default:60,minimum:5,maximum:10080})
+  @ValidateIf(optional) @Transform(raw) @IsInt() @Min(5) @Max(10080) windowMinutes?: number;
+  @ApiPropertyOptional({default:5,minimum:0,maximum:1440})
+  @ValidateIf(optional) @Transform(raw) @IsInt() @Min(0) @Max(1440) confirmationMinutes?: number;
   @ApiProperty() @Transform(raw) @IsString() @MaxLength(100) name: string;
   @ApiPropertyOptional({ enum: ['google', 'apple'], nullable: true })
   @ValidateIf((_, v) => v !== undefined && v !== null)

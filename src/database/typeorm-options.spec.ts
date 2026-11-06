@@ -31,6 +31,7 @@ describe('PostgreSQL runtime budgets', () => {
       connectionTimeoutMillis: 5000,
     });
     expect(options.extra).not.toHaveProperty('statement_timeout');
+    expect(options.migrationsTransactionMode).toBe('each');
     expect(
       runtime({ MIGRATION_DATABASE_URL: 'not-used-by-api' }),
     ).not.toHaveProperty('url');

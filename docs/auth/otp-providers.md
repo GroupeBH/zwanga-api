@@ -1,6 +1,6 @@
 # OTP : Mobishastra pour le téléphone et les opérations PIN
 
-## Politique actuelle — 3 novembre 2026
+## Politique actuelle — 5 novembre 2026
 
 Le backend peut maintenant générer lui-même les codes téléphoniques et utiliser
 Mobishastra uniquement pour leur envoi SMS. Le module reste dans NestJS : aucun
@@ -20,6 +20,38 @@ microservice, aucune migration SQL, aucune modification Terraform/CI-CD.
   anciennes applications peuvent encore s'inscrire sans OTP et restent
   `isPhoneVerified=false`. Aucun compte n'est marqué vérifié par simple saisie
   d'un numéro ou d'un booléen fourni par le mobile.
+
+### Activation progressive et comptes existants — 5 novembre 2026
+
+Sur demande de l’utilisateur, le fournisseur téléphone local est de nouveau
+Mobishastra. Les parcours mot de passe restent inchangés et l’obligation globale
+d’OTP à l’inscription reste désactivée pour préserver les clients déjà distribués.
+Redémarrer le backend local pour charger cette configuration. Aucun secret,
+paramètre AWS, schéma ou paiement de production modifié pour cette activation.
+
+Le dépôt mobile prépare les prochains profils EAS avec l’OTP d’inscription et un
+contrôle obligatoire des comptes existants dont le téléphone n’a jamais été
+validé. Le mobile lit `isPhoneVerified` depuis le profil authentifié, distinct de
+la vérification e-mail ou KYC. Pour un compte existant, il réutilise
+`/users/phone/send-otp` avec le contexte `update`, puis `/users/phone/verify`.
+Le backend marque uniquement le numéro prouvé d’un compte encore admissible ;
+le mobile relit ensuite `/users/me` avant de libérer l’accès. Un GET commencé
+avant la validation n’est pas utilisé comme confirmation finale.
+
+Les anciens clients restent compatibles : aucune nouvelle garde serveur globale
+ni exigence de version HTTP ajoutée. Le contrôle obligatoire après mise à jour
+concerne le nouveau client officiel, pas les appels directs d’un ancien client.
+Les comptes déjà vérifiés ne reçoivent pas de SMS automatique. Un compte sans
+accès à son numéro dispose d’une aide pour contacter le support, sans changement
+de numéro non vérifié dans ce parcours.
+
+Validation : 227 tests backend ciblés réussis, puis 20 tests des routes OTP
+utilisateurs réussis (dont deux nouveaux cas pour comptes existants), et 167
+tests JavaScript mobile réussis sous Node 24.22.1. Tests simulés, sans SMS réel,
+recette native, build cloud ni déploiement. L’activation AWS du fournisseur
+d’inscription, la vérification de son accès réseau/liste blanche et une réception
+SMS de test explicitement autorisée restent nécessaires avant publication.
+Voir aussi le journal `zwanga/docs/CHANGEMENTS_TECHNIQUES.md` du même jour.
 
 ### Historique : pause locale — 29 octobre 2026
 

@@ -1,4 +1,5 @@
 import { rideCardContent } from './ride-card-content';
+import { availableAccountSql } from '../users/account-availability';
 import { issueRideRingPermit, readRideRingPermit, needsRideRingPermit } from './ride-ring-permit';
 import { DRIVER_PAYMENT_NOTIFICATION_TYPE } from './driver-payment-notification';
 import { sequentialInvitationSql, REQUEST_RESPONSE_MS } from '../trip-requests/dispatch/sequential-policy';
@@ -13,6 +14,7 @@ import { retryPushBatch } from './retry-push-batch';
 import { PUSH_RETRY_ELIGIBLE_SQL, recordPushFailure, urgentPushWorkers } from './push-retry-policy';
 import { isAppUpdateDeliverable } from '../app-updates/app-update-dispatch.service';
 import { installationUpdateToken } from '../app-updates/installation-update.policy';
+import { drainMobileCampaigns, mobileCampaignToken } from '../mobile-operations/mobile-campaign-delivery';
 import { isRideResponseDeliverable } from './ride-response-delivery';
 import { androidDriverBackup, androidDriverBackupTtl } from './android-driver-backup';
 import { isNearbyRingingRequest, prepareNearbyRequestRinging, reconcileNearbyRequestCooldowns } from './nearby-request-cooldown';
@@ -61,7 +63,7 @@ const PUSH_DELIVERY_TIMEOUT_MS = 10_000;
 const CRITICAL_RETRY_DELAY_MS = 5 * 60 * 1000;
 const CRITICAL_RETRY_WINDOW_MS = 72 * 60 * 60 * 1000;
 const CRITICAL_RETRY_BATCH_SIZE = 25;
-const URGENT_NOTIFICATION_TYPES = ['new_booking', 'driver_dispatch_offer', 'trip_request_nearby', 'booking_response', 'trip_request_accepted'];
+const URGENT_NOTIFICATION_TYPES = ['new_booking', 'driver_dispatch_offer', 'trip_request_nearby', 'booking_response', 'trip_request_accepted', 'driver_offer'];
 const EXPO_RECEIPT_DELAY_MS = 15 * 60 * 1000;
 const EXPO_RECEIPT_WINDOW_MS = 24 * 60 * 60 * 1000;
 const EXPO_RECEIPT_BATCH_SIZE = 100;
@@ -353,6 +355,12 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
     savedNotification: Notification,
   ): Promise<boolean> {
     const preparationStartedAt = Date.now();
+    if (savedNotification.data?.type === 'mobile_campaign') {
+      const token = !savedNotification.userId && this.configService.get('MOBILE_OPERATIONS_ENABLED') === 'true' && this.configService.get('MOBILE_CAMPAIGNS_ENABLED') === 'true'
+        ? await mobileCampaignToken(this.notificationRepository.manager, savedNotification.data) : null;
+      if (!token) { await this.suppressCriticalNotification(savedNotification, 'MOBILE_CAMPAIGN_NO_LONGER_ELIGIBLE'); return false; }
+      savedNotification.fcmToken = token;
+    }
     if (savedNotification.data?.type === 'app_update' && savedNotification.data?.installationId) {
       // Resolve the fresh token again at the last boundary, including retries.
       const token = this.configService.get<string>('APP_UPDATES_ENABLED') === 'true'
@@ -444,6 +452,8 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
       return completed;
     } catch (error) {
       const message = this.getErrorMessage(error);
+      if (savedNotification.data?.type === 'mobile_campaign' && this.isInvalidPushTokenError(error))
+        savedNotification.data = { ...savedNotification.data, deliveryFailureCode: 'INVALID_PUSH_TOKEN' };
       await this.markNotificationFailed(savedNotification, message, error);
       if (this.isInvalidPushTokenError(error)) {
         await this.clearInvalidPushToken(savedNotification.userId, pushToken);
@@ -483,6 +493,13 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
           ['driver_dispatch_offer', 'trip_request_nearby'].includes(notification.data?.type)
             ? Date.parse(this.driverRingUntil(notification)) : undefined)
         : getMessaging(this.firebaseApp).send(message);
+    if (notification.data?.type === 'mobile_campaign') {
+      const ttl = Math.max(0, Math.min(3600, Math.floor((Date.parse(notification.data.expiresAt) - Date.now()) / 1000)));
+      return send({ token: pushToken, notification: { title: notification.title, body: notification.body },
+        data: this.stringifyNotificationData(notification.data),
+        android: { priority: 'normal', ttl: ttl * 1000, notification: { channelId: 'zwanga_default', tag: notification.id } },
+        apns: { headers: { 'apns-priority': '5', 'apns-expiration': String(Math.floor(Date.now()/1000)+ttl), 'apns-collapse-id': notification.id } } });
+    }
     if (notification.data?.type === 'app_update') {
       return send({ token: pushToken,
         notification: { title: notification.title, body: notification.body },
@@ -623,13 +640,14 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
 
   private isPassengerRideResponse(notification: Notification): boolean {
     return notification.data?.type === 'trip_request_accepted' ||
+      (notification.data?.type === 'driver_offer' && notification.data.ringAlert === 'counter-offer-v1') ||
       (notification.data?.type === 'booking_response' &&
         (!notification.data.status || ['accepted', 'rejected'].includes(notification.data.status)));
   }
 
   private passengerRingData(notification: Notification): Record<string, unknown> {
     return { ...notification.data, passengerId: notification.userId, role: 'passenger',
-      ringAlert: notification.data?.type === 'booking_response' ? 'booking-response-v1' : 'request-accepted-v1',
+      ringAlert: notification.data?.type === 'driver_offer' ? 'counter-offer-v1' : notification.data?.type === 'booking_response' ? 'booking-response-v1' : 'request-accepted-v1',
       ringUntil: this.driverRingUntil(notification) };
   }
 
@@ -637,9 +655,14 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
   private driverRingUntil(notification: Notification): string {
     const expiry = Date.parse(String(notification.data?.alertExpiresAt ?? notification.data?.expiresAt ?? ''));
     const createdAt = new Date(notification.createdAt).getTime();
-    const window = ['driver_dispatch_offer', 'trip_request_nearby'].includes(notification.data?.type) ? REQUEST_RESPONSE_MS : 60_000;
+    const invitation = ['driver_dispatch_offer', 'trip_request_nearby'].includes(notification.data?.type);
+    const window = invitation ? REQUEST_RESPONSE_MS : 60_000;
     const deadline = (Number.isFinite(createdAt) ? createdAt : Date.now()) + window;
-    return new Date(Number.isFinite(expiry) ? Math.min(expiry, deadline) : deadline).toISOString();
+    // The post-OAuth guard, ring permit and Android TTL must share the earliest
+    // invitation deadline. A later alertExpiresAt cannot extend a business lease.
+    const businessExpiry = invitation ? Date.parse(String(notification.data?.expiresAt ?? '')) : NaN;
+    return new Date(Math.min(deadline, Number.isFinite(expiry) ? expiry : Infinity,
+      Number.isFinite(businessExpiry) ? businessExpiry : Infinity)).toISOString();
   }
 
   private withRideRingPermit(notification: Notification): Notification {
@@ -748,7 +771,7 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
   }
 
   private async clearInvalidInstallationToken(notification: Notification, token: string): Promise<void> {
-    if (notification.data?.type !== 'app_update' || !notification.data?.installationId) return;
+    if (!['app_update','mobile_campaign'].includes(notification.data?.type) || !notification.data?.installationId) return;
     // A delayed provider error for an old token must not disable its replacement.
     await this.notificationRepository.manager.query(`UPDATE app_update_installations SET enabled=false, "pushToken"=NULL
       WHERE id=$1 AND "pushToken"=$2`, [notification.data.installationId, token]);
@@ -807,6 +830,12 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
   private async publishRealtimeInvitation(notification: Notification): Promise<void> {
     if (!notification.userId || !notification.isActive ||
         !(await this.isCriticalNotificationStillDeliverable(notification))) return;
+    if (notification.data?.type === 'driver_offer' && notification.data.ringAlert === 'counter-offer-v1') {
+      if (Date.parse(this.driverRingUntil(notification)) <= Date.now()) return;
+      if (!this.rideAlerts?.publish(notification.userId, { kind: 'incoming', eventId: notification.id,
+        data: this.passengerRingData(notification) })) throw new Error('Realtime transport unavailable');
+      return;
+    }
     if (notification.data?.role === 'driver' &&
         [DRIVER_PAYMENT_NOTIFICATION_TYPE, 'cash_payment_confirmed'].includes(notification.data?.type)) {
       // A receipt is informational: never use the incoming-ride ringtone or require
@@ -835,6 +864,15 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
   }
 
   private reconcilingNearbyRequests = false;
+
+  @Cron('*/5 * * * * *', { waitForCompletion: true })
+  async dispatchMobileCampaignNotifications(): Promise<void> {
+    if (this.stopping || this.configService.get('MOBILE_OPERATIONS_ENABLED') !== 'true' || this.configService.get('MOBILE_CAMPAIGNS_ENABLED') !== 'true') return;
+    try {
+      await drainMobileCampaigns(this.notificationRepository, n => this.deliverSavedNotification(n),
+        () => this.logger.warn('Mobile campaign push deferred.'));
+    } catch { this.logger.warn('Mobile campaign lane unavailable; ride lanes unaffected.'); }
+  }
 
   @Cron(CronExpression.EVERY_MINUTE)
   async reconcileNearbyRequestRinging(): Promise<void> {
@@ -916,6 +954,7 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
             const rows = await repository
               .createQueryBuilder('notification')
               .where('notification.eventKey IS NOT NULL')
+              .andWhere("COALESCE(notification.data ->> 'type', '') <> 'mobile_campaign'")
               .andWhere(urgent
                 ? "notification.data ->> 'type' IN (:...urgentTypes)"
                 : "COALESCE(notification.data ->> 'type', '') NOT IN (:...urgentTypes)",
@@ -1060,6 +1099,7 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
         .where('notification.status IN (:...statuses)', {
           statuses: [NotificationStatus.FAILED, NotificationStatus.PENDING],
         })
+        .andWhere("COALESCE(notification.data ->> 'type', '') <> 'mobile_campaign'")
         .andWhere(
           "(notification.eventKey IS NOT NULL OR notification.data ->> 'type' IN (:...types))",
           {
@@ -1093,7 +1133,7 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
     notification: Notification,
   ): Promise<boolean> {
     const type = notification.data?.type;
-    if (type === 'booking_response' || type === 'trip_request_accepted') {
+    if (type === 'booking_response' || type === 'trip_request_accepted' || type === 'driver_offer') {
       return isRideResponseDeliverable(this.notificationRepository.manager, notification);
     }
     if (type === 'driver_location_stale') {
@@ -1123,6 +1163,7 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
       const rows: unknown[] = await this.notificationRepository.manager.query(`SELECT 1 FROM bookings b
         JOIN trips t ON t.id = b."tripId" WHERE b.id = $1 AND t."driverId" = $2
         AND b.status = 'pending' AND t.status IN ('upcoming', 'ongoing')
+        AND ${availableAccountSql('b."passengerId"')} AND ${availableAccountSql('t."driverId"')}
         AND t."tripRequestId" IS NULL`, [notification.data?.bookingId, notification.userId]);
       return rows.length > 0;
     }

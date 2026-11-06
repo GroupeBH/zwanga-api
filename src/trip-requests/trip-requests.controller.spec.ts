@@ -1,4 +1,4 @@
-import { INestApplication } from '@nestjs/common';
+import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { APP_GUARD } from '@nestjs/core';
 import { JwtService } from '@nestjs/jwt';
 import { Test } from '@nestjs/testing';
@@ -22,6 +22,9 @@ describe('Trip requests HTTP access', () => {
     createDriverOffer: jest.fn(),
     acceptTripRequest: jest.fn(),
     startTripFromRequest: jest.fn(),
+    proposeCounterOffer: jest.fn().mockResolvedValue({ status: 'pending' }),
+    mapDriver: jest.fn().mockResolvedValue({ driverId: 'resolved-driver' }),
+    rejectOffer: jest.fn().mockResolvedValue({ status: 'pending' }),
     getPassengerContact: jest.fn().mockResolvedValue({ passenger: { id: 'passenger', phone: null } }),
   };
 
@@ -48,6 +51,7 @@ describe('Trip requests HTTP access', () => {
     }).compile();
     app = module.createNestApplication();
     app.use(passport.initialize());
+    app.useGlobalPipes(new ValidationPipe({ transform: true, whitelist: true, forbidNonWhitelisted: true }));
     await app.init();
     server = app.getHttpServer() as Server;
   });
@@ -58,6 +62,33 @@ describe('Trip requests HTTP access', () => {
   });
 
   beforeEach(() => jest.clearAllMocks());
+
+  it('protects counteroffers with JWT, role, price and vehicle validation; ignores no forged identity', async () => {
+    const id = '11111111-1111-4111-8111-111111111111', vehicleId = '22222222-2222-4222-8222-222222222222';
+    const path = `/trip-requests/${id}/counter-offer`, dto = { vehicleId, pricePerSeat: 1500 };
+    const auth = `Bearer ${jwt.sign({ userId: 'driver', role: UserRole.DRIVER })}`;
+    await request(server).post(path).send(dto).expect(401);
+    await request(server).post(path).set('Authorization', `Bearer ${jwt.sign({ userId: 'passenger', role: UserRole.PASSENGER })}`).send(dto).expect(403);
+    for (const pricePerSeat of [-1, 0, 1.5, 1000001, '1500', null])
+      await request(server).post(path).set('Authorization', auth).send({ ...dto, pricePerSeat }).expect(400);
+    await request(server).post(path).set('Authorization', auth).send({ ...dto, vehicleId: 'bad' }).expect(400);
+    await request(server).post(path).set('Authorization', auth).send({ ...dto, driverId: 'other' }).expect(400);
+    expect(service.proposeCounterOffer).not.toHaveBeenCalled();
+    await request(server).post(path).set('Authorization', auth).send(dto).expect(201);
+    expect(service.proposeCounterOffer).toHaveBeenCalledWith('driver', id, dto);
+  });
+
+  it('map lookup requires authenticated ownership downstream and an opaque marker, not a driver UUID', async () => {
+    const id = '11111111-1111-4111-8111-111111111111', path = `/trip-requests/${id}/map-driver`;
+    const auth = `Bearer ${jwt.sign({ userId: 'passenger', role: UserRole.PASSENGER })}`;
+    await request(server).get(path).expect(401);
+    for (const markerId of ['', id, 'g'.repeat(64)])
+      await request(server).get(path).query({ markerId }).set('Authorization', auth).expect(400);
+    expect(service.mapDriver).not.toHaveBeenCalled();
+    await request(server).get(path).query({ markerId: 'a'.repeat(64) }).set('Authorization', auth)
+      .expect('Cache-Control', 'private, no-store').expect(200);
+    expect(service.mapDriver).toHaveBeenCalledWith('passenger', id, 'a'.repeat(64));
+  });
 
   it('returns 401 for anonymous listing', async () => {
     await request(server).get('/trip-requests').expect(401);

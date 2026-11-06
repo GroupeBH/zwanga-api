@@ -1,3 +1,7 @@
+import { MobileOperations1780000111000 } from './1780000111000-MobileOperations';
+import { BookingPriceProposal1780000113000 } from './1780000113000-BookingPriceProposal';
+import { AdminAnalyticsIndexes1780000114000 } from './1780000114000-AdminAnalyticsIndexes';
+import { AutomaticStoreUpdateAnnouncements1780000112000 } from './1780000112000-AutomaticStoreUpdateAnnouncements';
 import { IndexRealtimePaymentReceipts1780000100000 } from './1780000100000-IndexRealtimePaymentReceipts';
 import { PassengerDriverChangeReason1780000102000 } from './1780000102000-PassengerDriverChangeReason';
 import { MapDriverPriority1780000103000 } from './1780000103000-MapDriverPriority';
@@ -226,4 +230,8 @@ export const databaseMigrations = [
   DriverResponse40Seconds1780000108000,
   AdminDirectPayouts1780000109000,
   ReceiptResponseWindow1780000110000,
+  MobileOperations1780000111000,
+  AutomaticStoreUpdateAnnouncements1780000112000,
+  BookingPriceProposal1780000113000,
+  AdminAnalyticsIndexes1780000114000,
 ];

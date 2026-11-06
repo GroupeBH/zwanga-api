@@ -45,6 +45,16 @@ export async function requestSearchMap(manager: EntityManager, passengerId: stri
 
 export const requestMapMarkerId = (requestId: string, vehicleId: string) => createHash('sha256').update(`${requestId}:${vehicleId}`).digest('hex');
 
+/** Resolve only a deliberately selected marker with the map's owner/eligibility filters. */
+export async function requestMapDriver(manager: EntityManager, passengerId: string, requestId: string, markerId: string) {
+  const request = await manager.getRepository(TripRequest).findOne({ where: { id: requestId, passengerId } });
+  if (!request || !/^[a-f0-9]{64}$/.test(markerId)) throw new NotFoundException('Conducteur introuvable.');
+  const rows = await requestMapCandidates(manager, passengerId, requestId);
+  const row = rows.slice(0, 500).find(candidate => requestMapMarkerId(requestId, candidate.markerSeed) === markerId);
+  if (!row) throw new NotFoundException('Ce conducteur n’est plus disponible pour cette demande. Actualisez la carte.');
+  return { driverId: row.driverId, vehicleType: row.vehicleType, positionUpdatedAt: new Date(row.positionUpdatedAt).toISOString() };
+}
+
 /** Internal rows only. Never return driver IDs in the public map response. */
 export function requestMapCandidates(manager: EntityManager, passengerId: string, requestId: string) {
   return manager.query<{ latitude: number; longitude: number; markerSeed: string; vehicleType: string;

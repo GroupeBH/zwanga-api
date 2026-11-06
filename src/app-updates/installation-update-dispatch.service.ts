@@ -31,7 +31,7 @@ export class InstallationUpdateDispatchService {
         await this.db
           .query(`INSERT INTO notifications ("eventKey","userId","fcmToken",title,body,data,"isAutomatic",status,"isActive")
           SELECT ${event}, NULL, '', ${manual ? 'm.title' : "'Une mise à jour de Zwanga est disponible'"},
-            ${manual ? 'm.body' : "'Installez la version ' || r.version || ' pour profiter des dernières améliorations.'"},
+            ${manual ? 'm.body' : "CASE WHEN to_jsonb(r)->>'comparison'='native_build' THEN 'Mettez Zwanga à jour pour profiter des dernières améliorations.' ELSE 'Installez la version ' || r.version || ' pour profiter des dernières améliorations.' END"},
             jsonb_build_object('type','app_update','installationId',c.id::text,'releaseId',r.id::text,'platform',r.platform,
               'version',r.version,'build',r.build,'navigateTo','/app-update') ${manual ? "|| jsonb_build_object('campaignId',m.id::text)" : ''},
             false,'pending',true

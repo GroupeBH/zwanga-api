@@ -11,7 +11,7 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { BookingsService } from './bookings.service';
-import { BookingInvitationResponseDto } from './dto/booking.dto';
+import { AcceptBookingDto, BookingInvitationResponseDto } from './dto/booking.dto';
 import { PassengerInterruptionPreviewDto } from './dto/interruption-preview.dto';
 import { HistoryPageQuery } from '../common/history-page';
 import { randomUUID } from 'crypto';
@@ -150,9 +150,9 @@ export class BookingsController {
   @Get(':id')
   @Auth()
   @SensitiveThrottle(30, 60000)
-  @ApiOperation({ summary: 'Get a booking by ID' })
-  async findOne(@Param('id') id: string) {
-    return this.bookingsService.findOne(id);
+  @ApiOperation({ summary: 'Get a booking by ID (passenger or trip driver only)' })
+  async findOne(@Request() req, @Param('id', ParseUUIDPipe) id: string) {
+    return this.bookingsService.findOneForViewer(id, req.user.userId);
   }
 
   @Put(':id/status')
@@ -173,8 +173,8 @@ export class BookingsController {
   // @Roles(UserRole.DRIVER)
   @SensitiveThrottle(20, 60000)
   @ApiOperation({ summary: 'Accept a booking (driver only)' })
-  async accept(@Request() req, @Param('id') id: string) {
-    return this.bookingsService.acceptBooking(id, req.user.userId);
+  async accept(@Request() req, @Param('id') id: string, @Body() body: AcceptBookingDto) {
+    return this.bookingsService.acceptBooking(id, req.user.userId, body?.acceptedPricePerSeat);
   }
 
   @Put(':id/respond-invitation')

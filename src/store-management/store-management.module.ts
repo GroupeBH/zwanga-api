@@ -15,15 +15,18 @@ import { StoreOperationsController } from './store-operations.controller';
 import { StoreOperationsService } from './store-operations.service';
 import { StoreAlertsService } from './store-alerts.service';
 import { StoreExportsService } from './store-exports.service';
+import { StoreReleaseAnnouncementsService } from './store-release-announcements.service';
 
 @Module({
   imports: [TypeOrmModule.forFeature(STORE_ENTITIES)],
   controllers: [StoreController, StoreOperationsController],
+  exports: [StoreConfig, StoreAccess, StorePermissionsGuard, StoreService, StoreAlertsService, StoreOperationsService],
   providers: [
     StoreConfig,
     StoreAuth,
     StoreHttp,
     StoreRepository,
+    StoreReleaseAnnouncementsService,
     StoreWorker,
     StoreService,
     GooglePlayProvider,

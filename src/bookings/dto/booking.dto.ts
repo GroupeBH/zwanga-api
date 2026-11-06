@@ -2,6 +2,7 @@ import {
   IsString,
   IsNotEmpty,
   IsNumber,
+  IsInt,
   IsOptional,
   IsEnum,
   Min,
@@ -18,6 +19,15 @@ import { TripPaymentMode } from '../../payments/enums/trip-payment-mode.enum';
 
 export class BookingInvitationResponseDto {
   @IsBoolean() accept: boolean;
+}
+
+export class AcceptBookingDto {
+  @ApiProperty({ required: false, description: 'Prix proposé par place explicitement accepté, en FC' })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(99999999)
+  acceptedPricePerSeat?: number;
 }
 
 class PassengerDestinationCoordinatesDto {
@@ -65,6 +75,13 @@ class PassengerOriginCoordinatesDto {
 }
 
 export class CreateBookingDto {
+  @ApiProperty({ required: false, description: 'Proposition du passager par place en FC, soumise au conducteur' })
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(99999999)
+  proposedPricePerSeat?: number;
+
   @ApiProperty({ description: 'ID du trajet' })
   @IsString()
   @IsNotEmpty()
@@ -157,7 +174,7 @@ export class CreateBookingDto {
   paymentMode?: TripPaymentMode;
 }
 
-export class UpdateBookingStatusDto {
+export class UpdateBookingStatusDto extends AcceptBookingDto {
   @ApiProperty({ enum: BookingStatus })
   @IsEnum(BookingStatus)
   @IsNotEmpty()

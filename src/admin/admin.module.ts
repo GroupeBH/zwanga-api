@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AdminService } from './admin.service';
+import { AccountLifecycleModule } from '../users/account-lifecycle.module';
 import { KycEvidenceModule } from '../users/kyc-evidence/kyc-evidence.module';
 import { AdminController } from './admin.controller';
 import { User } from '../users/entities/user.entity';
@@ -34,9 +35,15 @@ import { AdminPaymentsController } from './admin-payments.controller';
 import { AdminPaymentReconciliationService } from './admin-payment-reconciliation.service';
 import { AdminDirectPayoutService } from './admin-direct-payout.service';
 import { AdminDirectPayoutController } from './admin-direct-payout.controller';
+import { AdminAnalyticsController } from './admin-analytics.controller';
+import { AdminAnalyticsService } from './admin-analytics.service';
+import { AdminFinanceOtpController } from './admin-finance-otp.controller';
+import { FinanceOtpModule } from '../otp/finance-otp.module';
 
 @Module({
   imports: [
+    FinanceOtpModule,
+    AccountLifecycleModule,
     StoreManagementModule,
     KycEvidenceModule,
     TypeOrmModule.forFeature([
@@ -64,9 +71,10 @@ import { AdminDirectPayoutController } from './admin-direct-payout.controller';
     VehiclesModule,
     PaymentsModule,
   ],
-  controllers: [AdminController, AdminVehiclesController, AdminPaymentsController, AdminDirectPayoutController],
+  controllers: [AdminController, AdminAnalyticsController, AdminVehiclesController, AdminPaymentsController, AdminDirectPayoutController, AdminFinanceOtpController],
   providers: [
     AdminService,
+    AdminAnalyticsService,
     AdminReferralsService,
     TripStatementService,
     AdminVehiclesService,

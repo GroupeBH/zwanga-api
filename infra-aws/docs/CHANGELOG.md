@@ -1,5 +1,93 @@
 # Journal détaillé des changements d'infrastructure AWS
 
+## INFRA-2026-11-05-001 — Préparation Store Management sans activation ECS
+
+- **Date / auteur / statut :** 5 novembre 2026, vérification finale vers 15 h 20
+  Africa/Kinshasa ; Codex à la demande du mainteneur. Paramètres SSM créés après
+  autorisation explicite ; configuration locale préparée, aucun déploiement.
+- **Contexte et état avant :** l'administration doit afficher les statistiques
+  officielles des stores, distinctes des installations déclarées par le mobile.
+  Aucun paramètre `STORE_*` ni `MOBILE_*` n'était présent sous le préfixe runtime
+  inspecté ; aucune variable de ces deux groupes n'était injectée dans la tâche
+  active `zwanga-api-production-api:38`. ECS était à 1 tâche active sur 1 attendue.
+- **Ressources AWS réellement modifiées :** création de **17 paramètres Standard
+  `SecureString`, version 1**, sous `/zwanga-api/production/env/`, région
+  `eu-central-1`, compte `046374119247`. Chiffrement avec l'alias existant
+  `alias/zwanga-api-production-application`. Vérification préalable de l'identité
+  AWS et de l'état `Enabled` de la clé ; refus d'écraser un nom déjà existant.
+  Les valeurs ont été transmises en mémoire et comparées après lecture sans
+  affichage, ni fichier temporaire de secrets, ni argument de processus contenant
+  une clé. Aucun paramètre hors liste Store n'a été modifié.
+- **Variables créées (valeurs sensibles non documentées) :**
+  - activation : `STORE_MANAGEMENT_ENABLED`, `STORE_SYNC_ENABLED` ; toutes deux
+    désactivées ;
+  - garde-fous : `STORE_REVIEW_REPLIES_ENABLED`,
+    `STORE_GOOGLE_TEMPORARY_EDITS_ENABLED`, `STORE_APPLE_SALES_REPORTS_ENABLED`,
+    `STORE_SMTP_ENABLED` ; tous désactivés ;
+  - conservation : `STORE_RETENTION_MONTHS` ;
+  - Google : `STORE_GOOGLE_AUTH_MODE`, `STORE_GOOGLE_PACKAGE_NAME`,
+    `STORE_GOOGLE_CLIENT_EMAIL`, `STORE_GOOGLE_WIF_AUDIENCE`,
+    `STORE_GOOGLE_REPORTS_BUCKET`, `STORE_GOOGLE_INSTALL_DIMENSIONS` ;
+  - Apple : `STORE_APPLE_APP_ID`, `STORE_APPLE_ISSUER_ID`, `STORE_APPLE_KEY_ID`,
+    `STORE_APPLE_PRIVATE_KEY`.
+- **Code et fichiers :** ajout du modèle public `infra-aws/store-management.env.example`
+  et mise à jour de `docs/store-management.md`. Le `.env` local reçoit seulement
+  le nom du bucket Google communiqué par l'opérateur. `store.auth.ts` conserve
+  deux diagnostics WIF prédéfinis sans exposer l'erreur SDK originale ; tests de
+  non-divulgation ajoutés dans `store-aws-wif.spec.ts`. Les autres changements
+  préexistants du dépôt sont conservés. Aucun fichier Terraform ou CI/CD changé.
+- **Opération Apple distincte autorisée :** demande Analytics `ONGOING` confirmée,
+  puis imports vers PostgreSQL **local uniquement**, avec audit opérateur sans
+  usurpation d'identité administrateur. Accès application/avis/builds/rapports
+  réussis, 4 avis, 15 versions et 124 builds importés. Les rapports et vitals
+  restent `REPORTS_NOT_YET_AVAILABLE` ; aucune statistique fictive ajoutée.
+  Aucune publication de version, réponse à un avis, campagne ou envoi mobile.
+- **Disponibilité / sécurité / IAM :** aucune modification de rôle, règle réseau,
+  trust policy, groupe de sécurité ou ressource de calcul. Aucune tâche lancée,
+  renouvelée ou arrêtée. Les identifiants Google WIF sont publics ; aucune clé
+  privée Google ou clé AWS statique copiée. La clé Apple est limitée au mécanisme
+  SSM/KMS existant. Le rôle de tâche ECS reste distinct du rôle d'exécution.
+- **Données / migrations :** aucun accès à la base de production ni migration RDS.
+  Les imports locaux ne seront pas automatiquement copiés en production. Les
+  tâches Store conservent les contraintes d'unicité et baux existants ; le guide
+  PostgreSQL a orienté les contrôles d'import, de déduplication et les transactions
+  courtes. Aucun effacement de données existantes.
+- **Coûts :** aucune nouvelle instance ni service de calcul. Ajout de paramètres
+  Standard et d'appels SSM/KMS ; frais KMS/API selon la tarification du compte.
+  L'activation ultérieure des imports utilisera CPU, mémoire, stockage PostgreSQL
+  et quotas fournisseurs ; leur charge réelle reste à mesurer.
+- **Validation obtenue :** 17 noms/type/version/clé de chiffrement contrôlés,
+  valeurs comparées sans divulgation. ECS après opération : même définition
+  `:38`, même déploiement `ecs-svc/4939221603130718987`, `PRIMARY / COMPLETED`,
+  1 tâche active sur 1 attendue. TypeScript de production sans émission réussi ;
+  **13 suites / 127 tests ciblés réussis, aucun ignoré**, fixtures PostgreSQL
+  temporaires activées, aucun appel de test vers les fournisseurs de paiement ou
+  push. Dashboard Apple et pagination des ressources vérifiés en lecture locale.
+  La fédération Google réelle n'est pas validée : le PC ne fournit pas les
+  identifiants temporaires d'un rôle autorisé ; l'accès au bucket reste à tester.
+- **Déploiement restant :** vérifier le pool/provider/binding Google et les droits
+  Play/GCS. Planifier puis approuver l'injection des nouveaux noms SSM dans ECS
+  via le mécanisme de découverte existant ; ne pas appliquer d'autres changements
+  d'infrastructure implicitement. Livrer le code et les migrations par le circuit
+  habituel, module désactivé. Après recette de démarrage, activer le module seul,
+  tester les connexions et imports manuels avec le rôle de tâche, puis autoriser
+  séparément la planification. Les tâches déjà démarrées ne relisent pas SSM.
+  Procédure détaillée dans [le guide Store](../../docs/store-management.md#activation-ultérieure-en-production).
+- **Surveillance :** erreurs de chargement SSM/KMS au démarrage, résultat des jobs,
+  permissions WIF et APIs, fraîcheur des rapports, CPU/mémoire ECS et charge SQL.
+  Des rapports Apple absents immédiatement après une demande ne démontrent pas
+  une erreur de clé ; conserver leur indisponibilité explicite.
+- **Retour arrière :** aucun retour d'image nécessaire pour cette seule préparation.
+  Conserver les deux drapeaux désactivés ; ne pas supprimer les paramètres pour
+  tenter de désactiver une tâche qui les a déjà chargés. Après activation future,
+  désactiver l'intégration ou le module, puis renouveler les tâches par la procédure
+  approuvée. Conserver imports/audits. Une suppression de ces paramètres nécessitera
+  une vérification des définitions encore actives et une autorisation distincte.
+  La demande Analytics Apple n'a pas été supprimée ; aucune publication à annuler.
+- **Résultat :** préparation SSM terminée, production inchangée fonctionnellement.
+  Ce résultat n'est ni une activation du module, ni une validation de Google,
+  ni une validation complète de la prochaine livraison backend/admin.
+
 ## INFRA-2026-11-03-001 — Documentation du transport OTP unitaire Mobishastra
 
 - **Date / statut / périmètre :** 3 novembre 2026, Africa/Kinshasa ; correction

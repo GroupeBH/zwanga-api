@@ -72,6 +72,16 @@ export class StoreController {
   dashboard(@Query() query: StoreRangeDto) {
     return this.stores.dashboard(query);
   }
+  @Get('analytics/downloads')
+  @StorePermission('store.analytics.read')
+  @SensitiveThrottle(20, 60000)
+  @ApiOperation({
+    summary:
+      'Latest imported download/install day per source and daily detail for the selected period; no provider calls or cross-store total',
+  })
+  downloads(@Query() query: StoreRangeDto) {
+    return this.stores.downloads(query);
+  }
   @Get('analytics/google')
   @StorePermission('store.analytics.read')
   google(@Query() query: StoreRangeDto) {

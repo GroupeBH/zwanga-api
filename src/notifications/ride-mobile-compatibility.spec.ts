@@ -48,11 +48,18 @@ describe('backend-first ride notification compatibility', () => {
     await service(4).sendFirebaseNotification(n, 'synthetic-token');
     expect(sendBoundedFirebase).toHaveBeenCalledWith(expect.anything(), expect.anything(), undefined, undefined);
   });
-  it.each(['trip_request_nearby', 'driver_dispatch_offer'])('rechecks %s expiry after OAuth', async type => {
+  it.each([
+    ['trip_request_nearby', 'expiresAt'], ['trip_request_nearby', 'alertExpiresAt'],
+    ['driver_dispatch_offer', 'expiresAt'], ['driver_dispatch_offer', 'alertExpiresAt'],
+  ])('rechecks %s expiry after OAuth using the earlier %s', async (type, earlier) => {
     (getMessaging as jest.Mock).mockReturnValue({ send: jest.fn().mockResolvedValue('accepted') });
     const n = item(type);
+    const now = Date.now();
+    n.data!.expiresAt = new Date(now + 40_000).toISOString();
+    n.data!.alertExpiresAt = new Date(now + 40_000).toISOString();
+    n.data![earlier] = new Date(now + 15_000).toISOString();
     await service(6).sendFirebaseNotification(n, 'synthetic-token');
-    expect(sendBoundedFirebase).toHaveBeenCalledWith(expect.anything(), expect.anything(), undefined, Date.parse(n.data!.alertExpiresAt));
+    expect(sendBoundedFirebase).toHaveBeenCalledWith(expect.anything(), expect.anything(), undefined, now + 15_000);
   });
   it.each([0, 1, 2, 3, 4, 5, 6])('preserves the declared capability v%s for scheduled requests', async version => {
     const send = jest.fn().mockResolvedValue('provider-accepted');

@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConfigModule } from '@nestjs/config';
 import { UsersService } from './users.service';
+import { AccountLifecycleModule } from './account-lifecycle.module';
 import { UsersController } from './users.controller';
 import { User } from './entities/user.entity';
 import { KycDocument } from './entities/kyc-document.entity';
@@ -19,6 +20,7 @@ import { AwsKycModule } from './aws-kyc/aws-kyc.module';
 
 @Module({
   imports: [
+    AccountLifecycleModule,
     TypeOrmModule.forFeature([
       User,
       KycDocument,

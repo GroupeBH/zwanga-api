@@ -207,3 +207,65 @@ aux remboursements, aux retraits ou au parrainage est documentée dans
 ## 📄 Licence
 
 UNLICENSED
+
+## Admin : filtres et statistiques serveur
+
+Ces routes utilisent le préfixe API existant (`/api/v1`) et nécessitent le rôle
+admin ou super-admin. Elles ne chargent pas d'échantillon de 500/1000 lignes :
+les agrégations sont faites dans PostgreSQL.
+
+- `GET /admin/trips?search=&status=&from=&to=&sort=departureDate:asc&page=1&limit=25`
+  renvoie toujours `{ trips, total, page, limit }`. Recherche sur l'identifiant,
+  le départ, l'arrivée, le nom et le téléphone du conducteur, avant pagination.
+- `from`, `to` et `sort=champ:asc|desc` sont aussi pris en charge sur
+  `/admin/payments`, `/admin/bookings`, `/admin/trip-requests`, `/admin/kyc`,
+  `/safety/admin/reports` et `/support/admin/tickets`. Les champs de tri sont
+  limités aux colonnes métier autorisées ; un tri invalide retourne 400.
+- `GET /admin/analytics/overview?from=2026-10-01&to=2026-10-31&compare=previous`
+  retourne `total`, `byStatus`, `daily`, `completionRate`, `cancellationRate`,
+  `popularRoutes`, `drivers`, `previous` et les définitions. `previous` contient
+  les mêmes indicateurs sur la période immédiatement précédente, de même durée.
+- `GET /safety/admin/reports/stats?from=&to=` retourne `total`, `byReason`,
+  `byStatus`. Les listes KYC et signalements gardent leur `total` même si la page
+  demandée ne contient aucun élément.
+- `GET /admin/payments/stats?from=&to=&groupBy=day|provider|operator` retourne
+  les comptes, `successRate`, les `volumes` par devise, `groups`,
+  `failuresByOperator` et `pendingPayouts` (âge depuis la création, pas depuis
+  la dernière vérification). Opérateur non enregistré : `unknown`.
+- `GET /admin/ratings/stats` (alias `/admin/evaluations/stats`) retourne la
+  moyenne réelle, la distribution 1–5 et les statistiques/classements des trajets.
+  Une absence de note donne `null`, jamais une estimation.
+- `GET /admin/promotions/stats` retourne les conducteurs, l'activité et les
+  récompenses de parrainage/fidélité enregistrées. Les codes promotionnels de
+  démonstration présents dans l'interface ne constituent pas un programme réel.
+- `GET /admin/search?q=` retourne `users`, `trips`, `payments`, `tickets`, chacun
+  avec `{ items, total }` (maximum 10 résultats par type). Requête de 2 à 160
+  caractères ; recherche téléphonique à partir de 3 chiffres. Aucun secret ou
+  payload brut de prestataire n'est exposé.
+- `POST /admin/bookings/bulk-status` : `{ "ids": ["uuid"], "status": "cancelled" }`.
+  Statuts autorisés : `accepted`, `rejected`, `cancelled` ; `reason` facultatif.
+- `POST /safety/admin/reports/bulk-status` : `{ "ids": ["uuid"], "status": "resolved" }`.
+  Statuts : `under_review`, `resolved`, `dismissed` ; `adminNotes` facultatif.
+  Ces deux opérations acceptent 1 à 50 UUID uniques, appliquent les règles métier
+  existantes et retournent `{ results, total, succeeded, failed }`. Chaque ligne
+  est indépendante : ne pas réexécuter tout le lot en cas de réussite partielle.
+- `GET /admin/stores/syncs?limit=100` reste accepté ; 101 est refusé.
+
+Dates : `from` est inclusif. `to=YYYY-MM-DD` inclut toute cette journée UTC ;
+un `to` ISO avec fuseau est exclusif. Les listes sans dates gardent tout
+l'historique. Les statistiques portent par défaut sur les 30 derniers jours
+UTC, jour courant inclus, avec un maximum de 366 jours. La série des trajets
+regroupe leur **date de création** et leur **statut actuel** ; ce n'est pas un
+journal des événements d'annulation. Les ratios sans population sont `null`.
+Les montants de devises différentes ne sont jamais additionnés.
+
+Migration additive et réversible : `AdminAnalyticsIndexes1780000114000`.
+Elle ajoute des index de lecture, sans changer les données. Sur de très grosses
+tables, préparer les mêmes index avec `CREATE INDEX CONCURRENTLY` hors transaction
+avant la migration ; les délais de verrouillage sont bornés. Aucune migration
+de production n'est exécutée par les tests.
+
+Les nouvelles routes sont documentées dans Swagger. Leur branchement dans les
+pages du dépôt `zwanga-admin` est distinct : les anciennes réponses restent
+compatibles, mais le frontend doit appeler ces routes pour abandonner ses calculs
+sur échantillon. Les styles de l'admin ne sont pas modifiés.

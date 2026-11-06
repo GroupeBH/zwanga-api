@@ -7,6 +7,11 @@ describe('request creation alert routing', () => {
       departureDateMin: new Date(Date.now() + (immediateDispatch ? 60_000 : 86_400_000)).toISOString(),
       departureDateMax: new Date(Date.now() + (immediateDispatch ? 600_000 : 90_000_000)).toISOString() };
     const repository = { create: jest.fn(value => ({ id: 'created', ...value })), save: jest.fn(async value => value) };
+    const manager = {
+      findOne: jest.fn(async (_entity, options) => ({ id: options.where.id, isActive: true, status: 'active' })),
+      getRepository: () => repository,
+    };
+    Object.assign(repository, { manager: { transaction: async work => work(manager) } });
     const driverDispatch = { enabled, tick: jest.fn(), notifyScheduledRequest: jest.fn<Promise<boolean>, [string]>().mockResolvedValue(true) };
     const service = Object.assign(Object.create(TripRequestsService.prototype), {
       tripRequestRepository: repository, userRepository: { findOne: async () => ({ id: 'passenger' }) },

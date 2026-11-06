@@ -24,6 +24,10 @@ import {
 } from './dto/user-report.dto';
 import { Roles } from '../common/decorators/roles.decorator';
 import { UserRole } from '../users/entities/user.entity';
+import { AdminDateRangeDto } from '../common/pagination/admin-query';
+import { runAdminBulk } from '../common/pagination/admin-bulk';
+import { BulkReportStatusDto } from './dto/user-report.dto';
+import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
 
 @ApiTags('Safety')
 @Controller('safety')
@@ -148,6 +152,22 @@ export class SafetyController {
   @ApiResponse({ status: 200, description: 'Liste paginée des signalements' })
   async listAdminUserReports(@Query() query: ListAdminUserReportsQueryDto) {
     return this.safetyService.listAdminUserReports(query);
+  }
+
+  @Get('admin/reports/stats')
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(20, 60000)
+  @ApiOperation({ summary: 'Report counts by reason and current status for the creation period (UTC)' })
+  reportStats(@Query() query: AdminDateRangeDto) {
+    return this.safetyService.adminReportStats(query);
+  }
+
+  @Post('admin/reports/bulk-status')
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(5, 60000)
+  @ApiOperation({ summary: 'Change up to 50 reports; independent per-item outcomes' })
+  bulkReports(@Request() req, @Body() dto: BulkReportStatusDto) {
+    return runAdminBulk(dto.ids, id => this.safetyService.updateReportStatus(id, req.user.userId, dto));
   }
 
   @Get('reports/:id')

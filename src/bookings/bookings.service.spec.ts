@@ -7,6 +7,7 @@ import {
 import { BookingsService } from './bookings.service';
 import { Trip, TripStatus } from '../trips/entities/trip.entity';
 import { KycStatus } from '../users/entities/kyc-document.entity';
+import { User } from '../users/entities/user.entity';
 import {
   PaymentMethod,
   PaymentPurpose,
@@ -208,6 +209,7 @@ describe('BookingsService trip payments', () => {
       query: jest.fn().mockResolvedValue([]),
       transaction: jest.fn(work => work(financialManager)),
       findOne: jest.fn(async (entity: unknown, options: unknown) => {
+        if (entity === User) return { isActive: true, status: 'active' };
         if (entity === Booking) {
           lockedBooking = await bookingRepository.findOne(options);
           return lockedBooking;
@@ -542,7 +544,7 @@ describe('BookingsService trip payments', () => {
     expect(result.payment.amount).toBe(5000);
   });
 
-  it('applies a 40 percent first-trip subsidy to an eligible passenger booking', async () => {
+  it.each([undefined, 7000])('reserves the existing first-trip subsidy without applying a proposed price before consent (%s)', async proposedPricePerSeat => {
     configService.get.mockImplementation((key: string) => {
       if (key === 'FLEXPAY_CALLBACK_BASE_URL') {
         return 'https://api.zwanga.cd/api/v1';
@@ -583,6 +585,7 @@ describe('BookingsService trip payments', () => {
     const result = await service.create('new-passenger', {
       tripId: 'trip-first',
       numberOfSeats: 1,
+      proposedPricePerSeat,
       paymentMode: TripPaymentMode.ELECTRONIC,
     });
 
@@ -590,6 +593,7 @@ describe('BookingsService trip payments', () => {
       expect.objectContaining({
         paymentAmount: 4000,
         grossPaymentAmount: 10000,
+        proposedPricePerSeat: proposedPricePerSeat ?? null,
         firstTripSubsidyApplied: true,
         passengerPaymentRate: 0.4,
         zwangaSubsidyAmount: 6000,

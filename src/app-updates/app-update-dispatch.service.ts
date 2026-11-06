@@ -28,7 +28,8 @@ export class AppUpdateDispatchService {
       // The existing outbox sends only after commit, outside this database statement.
       await this.db.query(`INSERT INTO notifications ("eventKey", "userId", "fcmToken", title, body, data, "isAutomatic", status, "isActive")
         SELECT 'app-update:' || r.id || ':' || c."userId", c."userId", '', 'Une mise à jour de Zwanga est disponible',
-          'Installez la version ' || r.version || ' pour profiter des dernières améliorations.',
+          CASE WHEN to_jsonb(r)->>'comparison'='native_build' THEN 'Mettez Zwanga à jour pour profiter des dernières améliorations.'
+            ELSE 'Installez la version ' || r.version || ' pour profiter des dernières améliorations.' END,
           jsonb_build_object('type','app_update','releaseId',r.id::text,'platform',r.platform,'version',r.version,'build',r.build,'navigateTo','/app-update'),
           false, 'pending', true
         FROM app_store_releases r JOIN app_update_clients c ON c.platform = r.platform JOIN users u ON u.id = c."userId"

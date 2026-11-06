@@ -1,8 +1,11 @@
+import type { Readable } from 'node:stream';
+
 export type SpreadsheetFile = {
   buffer: Buffer;
   filename: string;
   contentType: string;
 };
+export type SpreadsheetDownload = SpreadsheetFile | (Omit<SpreadsheetFile, 'buffer'> & { stream: Readable });
 
 const XLS_CONTENT_TYPE = 'application/vnd.ms-excel; charset=utf-8';
 
@@ -71,7 +74,7 @@ export const spreadsheetAttachment = (
 export const datedFilename = (prefix: string, now = new Date()) =>
   `${prefix}-${now.toISOString().slice(0, 10)}.xls`;
 
-export const spreadsheetHeaders = (file: SpreadsheetFile): Record<string, string> => ({
+export const spreadsheetHeaders = (file: SpreadsheetDownload): Record<string, string> => ({
   'Content-Type': file.contentType,
   'Content-Disposition': `attachment; filename="${file.filename}"`,
   'Cache-Control': 'no-store',

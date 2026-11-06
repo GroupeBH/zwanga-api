@@ -54,6 +54,9 @@ zwanga-c791b-firebase-adminsdk-fbsvc-43707dcb4e
 *.tfstate
 *.tfstate.*
 *.tfplan
+# Terraform's extensionless default plan name also embeds credentials/state.
+tfplan
+tfplan.*
 infra-aws/backend.hcl
 infra-aws/terraform.tfvars
 infra-aws/*.auto.tfvars

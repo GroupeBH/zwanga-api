@@ -129,6 +129,9 @@ function buildBaseOptions(params: {
       params.typeormSynchronize,
     ),
     migrationsRun: false,
+    // Keep each schema change atomic; online index builds can opt out.
+    // A failure resumes from the last committed migration.
+    migrationsTransactionMode: 'each' as const,
     logging: false,
   };
 

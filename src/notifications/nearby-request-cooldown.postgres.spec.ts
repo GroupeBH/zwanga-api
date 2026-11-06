@@ -79,7 +79,8 @@ const pgBin = process.env.NEARBY_RING_TEST_POSTGRES_BIN;
         synchronize: false,
       });
       await db.initialize();
-      await db.query(`CREATE TABLE users (id uuid PRIMARY KEY);
+      await db.query(`CREATE TABLE users (id uuid PRIMARY KEY, "isActive" boolean NOT NULL DEFAULT true,
+        status text NOT NULL DEFAULT 'active');
       CREATE TABLE trip_requests (id uuid PRIMARY KEY, "passengerId" uuid, status text,
         "selectedDriverId" uuid, "tripId" varchar, "departureDateMax" timestamptz,
         "updatedAt" timestamp NOT NULL DEFAULT now());

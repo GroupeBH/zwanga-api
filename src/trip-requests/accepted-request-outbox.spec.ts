@@ -14,7 +14,9 @@ describe('scheduled request acceptance durable passenger response', () => {
     const locked: any = { ...request };
     const save = jest.fn(async value => value); const update = jest.fn();
     const query = jest.fn(async (sql: string) => sql.includes('ST_DWithin') ? [{ allowed: 1 }] : []);
-    const manager = { query, getRepository: (entity: unknown) => entity === TripRequest
+    const manager = { query,
+      findOne: jest.fn(async (_entity, options) => ({ id: options.where.id, isActive: true, status: 'active' })),
+      getRepository: (entity: unknown) => entity === TripRequest
       ? { findOne: jest.fn(async () => locked), save } : { update } };
     const transaction = jest.fn(async work => work(manager));
     const sendNotification = jest.fn();

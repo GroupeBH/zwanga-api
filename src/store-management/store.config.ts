@@ -1,6 +1,7 @@
 import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { StorePlatform } from './store.types';
+import { storeAwsWifSettings } from './store-aws-wif';
 
 @Injectable()
 export class StoreConfig {
@@ -24,6 +25,24 @@ export class StoreConfig {
     );
   }
   missing(platform: StorePlatform) {
+    if (
+      platform === 'google' &&
+      this.value('STORE_GOOGLE_AUTH_MODE') === 'aws_wif'
+    ) {
+      const missing = [
+        'STORE_GOOGLE_PACKAGE_NAME',
+        'STORE_GOOGLE_CLIENT_EMAIL',
+        'STORE_GOOGLE_WIF_AUDIENCE',
+      ].filter((key) => !this.value(key));
+      if (!this.value('AWS_REGION') && !this.value('AWS_DEFAULT_REGION'))
+        missing.push('AWS_REGION');
+      return missing;
+    }
+    if (platform === 'google' && this.value('STORE_GOOGLE_AUTH_MODE') === 'adc')
+      return [
+        'STORE_GOOGLE_PACKAGE_NAME',
+        'GOOGLE_APPLICATION_CREDENTIALS',
+      ].filter((key) => !this.value(key));
     const keys =
       platform === 'google'
         ? [
@@ -54,6 +73,16 @@ export class StoreConfig {
         message:
           'Configurer les accès de cette plateforme avant la synchronisation.',
       });
+    if (platform === 'google') {
+      const mode = this.value('STORE_GOOGLE_AUTH_MODE') || 'service_account';
+      if (!['service_account', 'adc', 'aws_wif'].includes(mode)) {
+        throw new ServiceUnavailableException({
+          code: 'STORE_INVALID_AUTH_MODE',
+          message: 'Mode d’authentification Google invalide.',
+        });
+      }
+      if (mode === 'aws_wif') storeAwsWifSettings((key) => this.value(key));
+    }
     const id = this.appId(platform);
     if (
       !(platform === 'google' ? /^[a-zA-Z][\w]*(?:\.[\w]+)+$/ : /^\d+$/).test(

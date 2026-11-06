@@ -5,6 +5,7 @@ import { IsolatedPostgres } from '../../test/isolated-postgres';
 import { typeOrmEntities } from '../database/entities';
 import { MixedTokensCash1780000089000 } from '../database/migrations/1780000089000-MixedTokensCash';
 import { TokenCashFallback1780000091000 } from '../database/migrations/1780000091000-TokenCashFallback';
+import { BookingPriceProposal1780000113000 } from '../database/migrations/1780000113000-BookingPriceProposal';
 import {
   Booking,
   BookingPaymentStatus,
@@ -67,6 +68,10 @@ const bin = process.env.PAYOUT_TEST_POSTGRES_BIN;
       ).buildMetadatas();
       await db.query('CREATE EXTENSION postgis; CREATE EXTENSION "uuid-ossp"');
       await db.synchronize();
+      await db.query('ALTER TABLE bookings DROP COLUMN "proposedPricePerSeat"');
+      await db.transaction(async manager => {
+        await new BookingPriceProposal1780000113000().up(manager.queryRunner!);
+      });
       // Exercise the existing cash/token guards too, not only the TypeORM schema.
       await db.query(
         'ALTER TABLE bookings DROP COLUMN "mixedTokenAmount", DROP COLUMN "mixedTokenQuantity", DROP COLUMN "mixedPaymentAt", DROP COLUMN "tokenCashFallbackAt"',
@@ -204,6 +209,52 @@ const bin = process.env.PAYOUT_TEST_POSTGRES_BIN;
         apply,
       };
     }
+
+    async function priceProposalFixture() {
+      const f = await fixture();
+      await db.query(`UPDATE bookings SET status='pending', "droppedOff"=false,
+        "numberOfSeats"=2, "proposedPricePerSeat"=2000 WHERE id=$1`, [f.booking.id]);
+      f.service.applyFirstTripSubsidyPolicy = (BookingsService.prototype as any).applyFirstTripSubsidyPolicy;
+      f.service.canReserveFirstTripSubsidy = async () => false;
+      f.service.ensurePassengerKycApprovedForTrip = noop;
+      return f;
+    }
+
+    it('concurrent proposal acceptances commit one fare, two seats and one durable response', async () => {
+      const f = await priceProposalFixture();
+      await Promise.all([1, 2, 3].map(() => f.service.acceptBooking(f.booking.id, f.driver.id, 2000)));
+      const saved = await f.load();
+      expect(saved.status).toBe(BookingStatus.ACCEPTED);
+      expect(Number(saved.grossPaymentAmount)).toBe(4000);
+      expect(Number(saved.paymentAmount)).toBe(4000);
+      const trip = await repo(Trip).findOneByOrFail({ id: f.trip.id });
+      expect(Number(trip.pricePerSeat)).toBe(5000);
+      expect(trip.availableSeats).toBe(2);
+      const rows = await db.query('SELECT count(*)::int AS count FROM notifications WHERE "eventKey"=$1',
+        [`booking-response:${saved.id}:accepted`]);
+      expect(rows[0].count).toBe(1);
+    });
+
+    it('missing consent and capacity failure roll back price, seats and outbox', async () => {
+      const f = await priceProposalFixture();
+      await expect(f.service.acceptBooking(f.booking.id, f.driver.id)).rejects.toThrow('Ce passager propose');
+      await repo(Trip).update(f.trip.id, { totalSeats: 1, availableSeats: 1 });
+      await expect(f.service.acceptBooking(f.booking.id, f.driver.id, 2000)).rejects.toThrow('Pas assez');
+      const saved = await f.load();
+      expect(saved.status).toBe(BookingStatus.PENDING);
+      expect(Number(saved.grossPaymentAmount)).toBe(5000);
+      expect((await db.query('SELECT count(*)::int AS count FROM notifications WHERE "eventKey"=$1',
+        [`booking-response:${saved.id}:accepted`]))[0].count).toBe(0);
+    });
+
+    it('migration rejects invalid proposals and refuses rollback while offers are pending', async () => {
+      const f = await priceProposalFixture();
+      await expect(db.query('UPDATE bookings SET "proposedPricePerSeat"=0 WHERE id=$1', [f.booking.id])).rejects.toThrow();
+      const runner = db.createQueryRunner();
+      try { await expect(new BookingPriceProposal1780000113000().down(runner)).rejects.toThrow('Resolve pending'); }
+      finally { await runner.release(); }
+      expect((await f.load()).proposedPricePerSeat).toBe(2000);
+    });
 
     it('concurrent initiation sends once, persists one attempt, and releases DB locks before HTTP', async () => {
       const f = await fixture();

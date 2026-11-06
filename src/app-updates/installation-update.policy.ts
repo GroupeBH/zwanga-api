@@ -5,6 +5,7 @@ const UUID =
   /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export const INSTALLATION_AUDIENCE_SQL = `r.available = true AND c.platform = r.platform
+  AND COALESCE(to_jsonb(c)->'mobileMetadata'->'preferences'->>'updates','true')='true'
   AND c.enabled = true AND c."pushToken" IS NOT NULL AND c."updatedAt" > now() - interval '90 days'
   AND ${UPDATE_REQUIRED_SQL}`;
 export const CAMPAIGN_AUDIENCE_SQL = `m.active = true AND m."createdAt" > now() - interval '7 days'

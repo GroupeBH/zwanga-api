@@ -1,7 +1,9 @@
 import {
   Injectable,
+  Inject,
   NotFoundException,
   BadRequestException,
+  ForbiddenException,
   ConflictException,
   Logger,
   UnauthorizedException,
@@ -12,6 +14,7 @@ import type { Point } from 'typeorm';
 import { ConfigService } from '@nestjs/config';
 import * as bcrypt from 'bcrypt';
 import { User, UserStatus } from './entities/user.entity';
+import { AccountLifecycleService } from './account-lifecycle.service';
 import { KycDocument, KycProvider, KycStatus } from './entities/kyc-document.entity';
 import {
   FavoriteLocation,
@@ -53,6 +56,8 @@ import {
 
 @Injectable()
 export class UsersService {
+  @Inject(AccountLifecycleService)
+  private readonly accountLifecycle: AccountLifecycleService;
   private readonly logger = new Logger(UsersService.name);
 
   constructor(
@@ -256,107 +261,16 @@ export class UsersService {
       !user.googleId &&
       !user.appleId;
 
-    if (alreadyDeleted) {
-      return { message: 'Compte déjà supprimé' };
-    }
+    // Retrying also retires resources left by older versions of account deletion.
 
     const kycDocuments = (await this.kycDocumentRepository.find({
       where: { userId },
     })) as KycDocument[];
     const filesToDelete = this.collectAccountFiles(user, kycDocuments);
-    const now = new Date();
-    const cancellableBookingStatuses = [
-      BookingStatus.PENDING,
-      BookingStatus.ACCEPTED,
-    ];
-
-    const activeDriverTrips = await this.tripRepository.find({
-      select: ['id'],
-      where: {
-        driverId: userId,
-        status: In([TripStatus.PENDING, TripStatus.ACTIVE]),
-      },
-    });
-    const activeDriverTripIds = activeDriverTrips.map((trip) => trip.id);
-    const activeDriverTripIdSet = new Set(activeDriverTripIds);
-
-    const passengerBookingsToCancel = await this.bookingRepository.find({
-      where: {
-        passengerId: userId,
-        status: In(cancellableBookingStatuses),
-      },
-      relations: ['trip'],
-    });
-    const passengerBookingIds = passengerBookingsToCancel.map(
-      (booking) => booking.id,
-    );
-    const seatsToRestoreByTrip = new Map<
-      string,
-      { availableSeats: number; totalSeats: number | null; seats: number }
-    >();
-
-    for (const booking of passengerBookingsToCancel) {
-      if (
-        activeDriverTripIdSet.has(booking.tripId) ||
-        !booking.trip ||
-        ![TripStatus.PENDING, TripStatus.ACTIVE].includes(booking.trip.status)
-      ) {
-        continue;
-      }
-
-      const current = seatsToRestoreByTrip.get(booking.tripId) ?? {
-        availableSeats: booking.trip.availableSeats,
-        totalSeats: booking.trip.totalSeats,
-        seats: 0,
-      };
-      current.seats += booking.numberOfSeats;
-      seatsToRestoreByTrip.set(booking.tripId, current);
-    }
-
-    await this.dataSource.transaction(async (manager) => {
+    await this.accountLifecycle.deactivate(userId, UserStatus.INACTIVE, async (manager) => {
       const userRepository = manager.getRepository(User);
-      const vehicleRepository = manager.getRepository(Vehicle);
-      const kycDocumentRepository = manager.getRepository(KycDocument);
-      const favoriteLocationRepository =
-        manager.getRepository(FavoriteLocation);
-      const tripRepository = manager.getRepository(Trip);
-      const bookingRepository = manager.getRepository(Booking);
-
-      if (passengerBookingIds.length > 0) {
-        await bookingRepository.update(
-          { id: In(passengerBookingIds) },
-          { status: BookingStatus.CANCELLED, cancelledAt: now },
-        );
-
-        for (const [tripId, restore] of seatsToRestoreByTrip.entries()) {
-          const maxSeats =
-            restore.totalSeats ?? restore.availableSeats + restore.seats;
-          await tripRepository.update(tripId, {
-            availableSeats: Math.min(
-              maxSeats,
-              restore.availableSeats + restore.seats,
-            ),
-          });
-        }
-      }
-
-      if (activeDriverTripIds.length > 0) {
-        await bookingRepository.update(
-          {
-            tripId: In(activeDriverTripIds),
-            status: In(cancellableBookingStatuses),
-          },
-          { status: BookingStatus.CANCELLED, cancelledAt: now },
-        );
-        await tripRepository.update(
-          { id: In(activeDriverTripIds) },
-          { status: TripStatus.CANCELLED },
-        );
-      }
-
-      await favoriteLocationRepository.delete({ userId });
-      await kycDocumentRepository.delete({ userId });
-      await vehicleRepository.update({ ownerId: userId }, { isActive: false });
+      await manager.getRepository(FavoriteLocation).delete({ userId });
+      await manager.getRepository(KycDocument).delete({ userId });
       await userRepository.update(userId, {
         email: () => 'NULL',
         googleId: () => 'NULL',
@@ -384,7 +298,7 @@ export class UsersService {
 
     this.logger.warn(`Account deleted for user: ${userId}`);
 
-    return { message: 'Compte supprimé avec succès' };
+    return { message: alreadyDeleted ? 'Compte déjà supprimé' : 'Compte supprimé avec succès' };
   }
 
   async findByEmail(email: string): Promise<User | null> {
@@ -419,6 +333,12 @@ export class UsersService {
     const phoneChanged =
       Boolean(updateProfileDto.phone) && updateProfileDto.phone !== user.phone;
     if (phoneChanged) {
+      // The registered number is the financial second factor. A stolen session
+      // must not be able to redirect that factor through ordinary profile edit.
+      if (isAdminRole(user.role)) throw new ForbiddenException({
+        code: 'ADMIN_PHONE_CHANGE_REQUIRES_SUPPORT',
+        message: 'Le numéro de sécurité administrateur ne peut pas être modifié depuis le profil. Contactez le responsable de sécurité.',
+      });
       const existingUser = await this.userRepository.findOne({
         where: { phone: updateProfileDto.phone },
       });

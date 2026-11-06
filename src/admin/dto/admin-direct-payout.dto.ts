@@ -2,6 +2,7 @@ import { Transform } from 'class-transformer';
 import {
   Equals,
   IsNumber,
+  IsOptional,
   IsString,
   IsUUID,
   Length,
@@ -12,6 +13,11 @@ import {
 import { ApiProperty } from '@nestjs/swagger';
 
 export class AdminDirectPayoutDto {
+  @ApiProperty({ required: false, description: 'OTP du super admin, requis pour exécuter le virement, pas pour demander le code.' })
+  @IsOptional()
+  @IsString()
+  @Matches(/^\d{6}$/)
+  otpCode?: string;
   @ApiProperty({
     format: 'uuid',
     description: 'UUID v4 conservé pour toutes les tentatives du même ordre.',

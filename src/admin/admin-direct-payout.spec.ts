@@ -16,6 +16,7 @@ import { UserRole, UserStatus } from '../users/entities/user.entity';
 import { PaymentPurpose } from '../payments/entities/payment-transaction.entity';
 import { PaymentSettlementRegistry } from '../payments/payment-settlement.registry';
 import { PaymentsService } from '../payments/payments.service';
+import { FinanceOtpGuard } from '../otp/finance-otp.guard';
 
 const key = '00000000-0000-4000-8000-000000000001';
 const input = {
@@ -39,6 +40,8 @@ describe('Direct treasury payout HTTP contract (mocked provider)', () => {
         { provide: AdminDirectPayoutService, useValue: { create, get } },
       ],
     })
+      .overrideGuard(FinanceOtpGuard)
+      .useValue({ canActivate: () => true }) // OTP rejection/replay have dedicated HTTP tests.
       .overrideGuard(JwtAuthGuard)
       .useValue({
         canActivate(context: ExecutionContext) {

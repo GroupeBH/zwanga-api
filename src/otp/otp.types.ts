@@ -1,5 +1,5 @@
 export type OtpPurpose =
-  'phone_verification' | 'pin_reset' | 'pin_change' | 'admin_bootstrap';
+  'phone_verification' | 'pin_reset' | 'pin_change' | 'admin_bootstrap' | 'admin_finance';
 export type MobishastraOtpPurpose = Exclude<OtpPurpose, 'admin_bootstrap'>;
 
 export type OtpProvider = 'keccel' | 'didit' | 'mobishastra';
@@ -13,6 +13,7 @@ export interface MobishastraChallenge {
   codeHash?: string;
   proofHash?: string;
   attemptsRemaining: number;
+  context?: string;
 }
 
 export type OtpChallenge =

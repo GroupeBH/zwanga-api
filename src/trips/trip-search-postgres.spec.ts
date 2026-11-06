@@ -166,7 +166,14 @@ const bin = process.env.TRIP_SEARCH_TEST_POSTGRES_BIN;
     const sql = jest.spyOn(db.logger, 'logQuery');
     try {
       expect((await service.findAll()).map(t => t.id)).toEqual(after.map(t => t.id));
-      expect(sql).not.toHaveBeenCalled();
+      // Cached payloads still need one bounded ownership/state check. A
+      // disabled owner must disappear even if cache invalidation was missed.
+      expect(sql).toHaveBeenCalledTimes(1);
+      expect(sql.mock.calls[0][0]).toContain('account_owner."isActive" = true');
+      await db.getRepository(User).update(premium.driverId, { isActive: false });
+      sql.mockClear();
+      expect((await service.findAll()).map(t => t.id)).toEqual(after.filter(t => t.id !== premium.id).map(t => t.id));
+      expect(sql).toHaveBeenCalledTimes(1);
     } finally { sql.mockRestore(); }
   });
 });

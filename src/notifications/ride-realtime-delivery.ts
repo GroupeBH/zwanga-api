@@ -12,6 +12,7 @@ export async function claimRideRealtimeNotifications(manager: EntityManager): Pr
       AND (n.data ->> 'type' NOT IN ('driver_dispatch_offer','trip_request_nearby')
         OR n."createdAt" > now() - interval '${REQUEST_RESPONSE_MS / 1000} seconds')
       AND (n.data ->> 'type' IN ('driver_dispatch_offer','trip_request_nearby','new_booking','driver_booking_payment_confirmed')
+        OR (n.data ->> 'type' = 'driver_offer' AND n.data ->> 'ringAlert' = 'counter-offer-v1')
         OR (n.data ->> 'type' = 'cash_payment_confirmed' AND n.data ->> 'role' = 'driver'))
       AND (d."notificationId" IS NULL OR (d."completedAt" IS NULL AND d."attemptedAt" < now() - interval '5 seconds'))
     ORDER BY n."createdAt", n.id LIMIT 100

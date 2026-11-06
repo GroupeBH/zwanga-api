@@ -40,7 +40,7 @@ export const MOBISHASTRA_CHALLENGE_SCRIPT = `
     item.state = 'sent'
   elseif ARGV[1] == 'verify' or ARGV[1] == 'verify-once' then
     if ARGV[1] == 'verify' and purpose ~= 'phone_verification' then return 0 end
-    if ARGV[1] == 'verify-once' and purpose ~= 'pin_reset' and purpose ~= 'pin_change' then return 0 end
+    if ARGV[1] == 'verify-once' and purpose ~= 'pin_reset' and purpose ~= 'pin_change' and purpose ~= 'admin_finance' then return 0 end
     if item.state ~= 'sent' or item.attemptsRemaining <= 0 then return 0 end
     if item.codeHash ~= ARGV[3] then
       item.attemptsRemaining = item.attemptsRemaining - 1
@@ -88,9 +88,10 @@ export class MobishastraOtpService {
     requestId: string,
     code: string,
     purpose: MobishastraOtpPurpose,
+    context?: string,
   ): string {
     return createHmac('sha256', this.secret())
-      .update(JSON.stringify([purpose, phone, requestId, code]))
+      .update(JSON.stringify(context ? [purpose, phone, requestId, code, context] : [purpose, phone, requestId, code]))
       .digest('hex');
   }
 
@@ -105,6 +106,7 @@ export class MobishastraOtpService {
     phone: string,
     key: string,
     purpose: MobishastraOtpPurpose = 'phone_verification',
+    context?: string,
   ): Promise<SendOtpResponse> {
     // Retain six digits on existing PIN screens, five for phone verification.
     const codeLength = purpose === 'phone_verification' ? 5 : 6;
@@ -116,8 +118,9 @@ export class MobishastraOtpService {
       state: 'pending',
       codeHash: '',
       attemptsRemaining: 5,
+      ...(context ? { context } : {}),
     };
-    challenge.codeHash = this.digest(phone, challenge.requestId, code, purpose);
+    challenge.codeHash = this.digest(phone, challenge.requestId, code, purpose, context);
     try {
       // If Redis fails, do not incur a paid SMS. Pending codes cannot verify.
       await this.redis.set(key, challenge, MOBISHASTRA_OTP_TTL_SECONDS);
@@ -155,8 +158,9 @@ export class MobishastraOtpService {
     key: string,
     challenge: MobishastraChallenge,
     purpose: MobishastraOtpPurpose = 'phone_verification',
+    context?: string,
   ): Promise<VerifyOtpResponse> {
-    if ((challenge.purpose ?? 'phone_verification') !== purpose) {
+    if ((challenge.purpose ?? 'phone_verification') !== purpose || challenge.context !== context) {
       return { valid: false, status: 'INVALID' };
     }
     const verificationToken = randomBytes(32).toString('base64url');
@@ -167,7 +171,7 @@ export class MobishastraOtpService {
           arguments: [
             purpose === 'phone_verification' ? 'verify' : 'verify-once',
             challenge.requestId,
-            this.digest(phone, challenge.requestId, code, purpose),
+            this.digest(phone, challenge.requestId, code, purpose, context),
             purpose === 'phone_verification'
               ? this.proofHash(phone, verificationToken)
               : '',

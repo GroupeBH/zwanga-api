@@ -1,4 +1,6 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, IntersectionType } from '@nestjs/swagger';
+import { AdminDateRangeDto } from '../../common/pagination/admin-query';
+import { AdminBulkIdsDto } from '../../common/pagination/admin-bulk';
 import { Type } from 'class-transformer';
 import {
   IsEnum,
@@ -37,7 +39,9 @@ export class CreateUserReportDto {
   bookingId?: string;
 }
 
-export class ListAdminUserReportsQueryDto {
+export class ListAdminUserReportsQueryDto extends AdminDateRangeDto {
+  @ApiProperty({ required: false, example: 'createdAt:desc' })
+  @IsOptional() @IsString() sort?: string;
   @ApiProperty({ required: false, default: 1 })
   @Type(() => Number)
   @IsNumber()
@@ -81,4 +85,6 @@ export class UpdateReportStatusDto {
   @IsOptional()
   adminNotes?: string;
 }
+
+export class BulkReportStatusDto extends IntersectionType(AdminBulkIdsDto, UpdateReportStatusDto) {}
 

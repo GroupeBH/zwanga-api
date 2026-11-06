@@ -11,6 +11,7 @@ import {
 } from './store.entities';
 import { StoreRepository } from './store.repository';
 import { StoreConfig } from './store.config';
+import type { CacheService } from '../common/services/cache.service';
 import { StoreService } from './store.service';
 import { StoreProviderError } from './store.types';
 import { AddStoreAdministration1780000078000 } from '../database/migrations/1780000078000-AddStoreAdministration';
@@ -267,6 +268,209 @@ const bin = process.env.AUDIT_TEST_POSTGRES_BIN;
       ]);
       expect(result.attribution).toBe('aggregate_only');
     });
+    const downloadService = (
+      cache: unknown = {
+        get: jest.fn().mockResolvedValue(undefined),
+        set: jest.fn().mockResolvedValue(undefined),
+      },
+    ) =>
+      new StoreService(
+        new StoreConfig(
+          new ConfigService({
+            STORE_MANAGEMENT_ENABLED: 'true',
+            STORE_GOOGLE_PACKAGE_NAME: 'com.test',
+            STORE_APPLE_APP_ID: '123',
+          }),
+        ),
+        repository,
+        cache as CacheService,
+      );
+    const downloadPoint = (overrides: Partial<StoreMetric> = {}) => ({
+      platform: 'google' as const,
+      appId: 'com.test',
+      dataset: 'installs',
+      metric: 'google.device_installs',
+      date: '2026-01-01',
+      dimension: JSON.stringify({ country: 'CD' }),
+      value: '5',
+      ...overrides,
+    });
+    it('reads the latest report date independently of the requested period, without duplicate breakdowns or other applications', async () => {
+      await db.getRepository(StoreMetric).insert([
+        downloadPoint({ importedAt: new Date('2026-01-10') }),
+        downloadPoint({
+          dimension: JSON.stringify({ country: 'FR' }),
+          value: '2',
+        }),
+        downloadPoint({ date: '2026-01-03', value: '0' }),
+        downloadPoint({
+          date: '2026-01-04',
+          value: '11',
+          importedAt: new Date('2026-01-05'),
+        }),
+        downloadPoint({ dataset: 'installs_device', value: '100' }),
+        downloadPoint({
+          appId: 'com.other',
+          date: '2026-01-05',
+          value: '999',
+        }),
+        downloadPoint({ date: '2999-01-01', value: '999' }),
+        downloadPoint({
+          platform: 'apple',
+          appId: '123',
+          dataset: 'App Store Downloads',
+          metric: 'apple.first_time_downloads',
+          value: '3',
+        }),
+        downloadPoint({
+          platform: 'apple',
+          appId: '123',
+          dataset: 'App Store Downloads',
+          metric: 'apple.redownloads',
+          value: '1',
+        }),
+        downloadPoint({
+          platform: 'apple',
+          appId: '123',
+          dataset: 'App Store Downloads',
+          metric: 'apple.updates',
+          value: '100',
+        }),
+      ]);
+      const result = await downloadService().downloads({
+        from: '2026-01-01',
+        to: '2026-01-03',
+      });
+      expect(result.metrics).toHaveLength(3);
+      const android = result.metrics[0];
+      expect(android.latest).toMatchObject({
+        date: '2026-01-04',
+        value: '11.000000',
+      });
+      expect(android.period).toEqual({
+        value: '7.000000',
+        observedDays: 2,
+        expectedDays: 3,
+        availability: 'partial',
+      });
+      expect(android.daily.map((d) => d.value)).toEqual([
+        '7.000000',
+        null,
+        '0.000000',
+      ]);
+      expect(result.metrics[1].period.value).toBe('3.000000');
+      expect(result.metrics[2].period.value).toBe('1.000000');
+      expect(result.comparableAcrossStores).toBe(false);
+      expect(result).not.toHaveProperty('total');
+    });
+    it('applies platform, country and version filters to both the latest point and period, and leaves unsupported intersections unavailable', async () => {
+      await db.getRepository(StoreMetric).insert([
+        downloadPoint(),
+        downloadPoint({
+          date: '2026-01-02',
+          dimension: JSON.stringify({ country: 'FR' }),
+          value: '7',
+        }),
+        downloadPoint({
+          dataset: 'installs_app_version',
+          dimension: JSON.stringify({ country: 'unknown', version: '175' }),
+          value: '9',
+        }),
+      ]);
+      const range = {
+        from: '2026-01-01',
+        to: '2026-01-03',
+        platform: 'google' as const,
+      };
+      const country = await downloadService().downloads({
+        ...range,
+        country: 'CD',
+      });
+      expect(country.metrics).toHaveLength(1);
+      expect(country.metrics[0].latest?.date).toBe('2026-01-01');
+      expect(country.metrics[0].period.value).toBe('5.000000');
+      const version = await downloadService().downloads({
+        ...range,
+        version: '175',
+      });
+      expect(version.metrics[0].period.value).toBe('9.000000');
+      const unavailable = await downloadService().downloads({
+        ...range,
+        country: 'CD',
+        version: '175',
+      });
+      expect(unavailable.metrics[0].latest).toBeNull();
+      expect(unavailable.metrics[0].period.value).toBeNull();
+    });
+    it('keeps latest known figures visible for an empty selected period without inventing its total', async () => {
+      await db.getRepository(StoreMetric).insert(downloadPoint({ value: '0' }));
+      const result = await downloadService().downloads({
+        platform: 'google',
+        from: '2026-02-01',
+        to: '2026-02-02',
+      });
+      expect(result.metrics[0].latest).toMatchObject({
+        date: '2026-01-01',
+        value: '0.000000',
+      });
+      expect(result.metrics[0].period).toMatchObject({
+        value: null,
+        availability: 'unavailable',
+      });
+      expect(result.metrics[0].daily.every((d) => d.value === null)).toBe(true);
+    });
+    it('invalidates cached counts after an import, including a correction removing every point', async () => {
+      const values = new Map<string, unknown>();
+      const cache = {
+        get: jest.fn((key: string) => Promise.resolve(values.get(key))),
+        set: jest.fn((key: string, value: unknown) => {
+          values.set(key, value);
+          return Promise.resolve();
+        }),
+      };
+      const service = downloadService(cache);
+      const range = {
+        platform: 'google' as const,
+        from: '2026-01-01',
+        to: '2026-01-02',
+      };
+      await db.query(
+        `UPDATE store_integrations SET "updatedAt"='2000-01-01' WHERE platform='google'`,
+      );
+      const empty = await service.downloads(range);
+      expect(await service.downloads(range)).toBe(empty);
+      expect(cache.set).toHaveBeenCalledTimes(1);
+      await repository.enqueue(job());
+      const claimed = (await repository.claim('google', 'com.test'))!;
+      const partition = {
+        dataset: 'installs',
+        date: range.from,
+        revision: '2026-01-03',
+        points: [
+          {
+            date: range.from,
+            metric: 'google.device_installs',
+            dimension: '{}',
+            value: 4,
+          },
+        ],
+      };
+      await repository.apply(claimed, { partitions: [partition] });
+      expect((await service.downloads(range)).metrics[0].period.value).toBe(
+        '4.000000',
+      );
+      // Make the previous generation deterministic, even on sub-ms fast machines.
+      await db.query(
+        `UPDATE store_integrations SET "updatedAt"='2001-01-01' WHERE platform='google'`,
+      );
+      await service.downloads(range);
+      await repository.apply(claimed, {
+        partitions: [{ ...partition, revision: '2026-01-04', points: [] }],
+      });
+      const corrected = await service.downloads(range);
+      expect(corrected.metrics[0].latest).toBeNull();
+      expect(corrected.metrics[0].period.value).toBeNull();
+    });
     it('migration up/down/up leaves existing business data untouched', async () => {
       const runner = db.createQueryRunner();
       try {
@@ -289,6 +493,7 @@ const bin = process.env.AUDIT_TEST_POSTGRES_BIN;
           STORE_GOOGLE_PACKAGE_NAME: 'com.test',
           STORE_GOOGLE_CLIENT_EMAIL: 'svc@test.iam.gserviceaccount.com',
           STORE_GOOGLE_PRIVATE_KEY: 'configured',
+          STORE_REVIEW_REPLIES_ENABLED: 'true',
         }),
       );
       const access = new StoreAccess(db, config),
@@ -412,14 +617,18 @@ const bin = process.env.AUDIT_TEST_POSTGRES_BIN;
       await db.getRepository(StoreRecord).update(record.id, {
         syncedAt: new Date(completed.getTime() + 1000),
         // TypeORM's deep-partial conditional does not model this jsonb dictionary.
-        content: { response: 'Un autre texte.' } as unknown as QueryDeepPartialEntity<StoreRecord>['content'],
+        content: {
+          response: 'Un autre texte.',
+        } as unknown as QueryDeepPartialEntity<StoreRecord>['content'],
       });
       await expect(operations.reconcileReply(actor, record.id)).rejects.toThrow(
         'Relancez',
       );
-      await db
-        .getRepository(StoreRecord)
-        .update(record.id, { content: { response: reply } as unknown as QueryDeepPartialEntity<StoreRecord>['content'] });
+      await db.getRepository(StoreRecord).update(record.id, {
+        content: {
+          response: reply,
+        } as unknown as QueryDeepPartialEntity<StoreRecord>['content'],
+      });
       expect((await operations.reconcileReply(actor, record.id)).status).toBe(
         'responded',
       );

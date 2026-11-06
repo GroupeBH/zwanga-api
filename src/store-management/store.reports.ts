@@ -10,6 +10,7 @@ import {
 export function parseReport(
   text: string,
   delimiter: ',' | '\t',
+  requiredHeader = 'date',
 ): Record<string, string>[] {
   const rows: string[][] = [];
   let row: string[] = [],
@@ -58,7 +59,7 @@ export function parseReport(
   if (cell || row.length || closed) pushRow();
   const headers =
     rows.shift()?.map((h) => h.trim().replace(/\s+/g, ' ').toLowerCase()) ?? [];
-  if (!headers.includes('date') || new Set(headers).size !== headers.length)
+  if (!headers.includes(requiredHeader) || new Set(headers).size !== headers.length)
     throw new StoreProviderError('REPORT_SCHEMA_UNSUPPORTED');
   return rows.map((values) => {
     if (values.length !== headers.length)
@@ -79,6 +80,8 @@ function count(value: string | undefined): number | null {
   return n;
 }
 const METRICS = [
+  {id:'apple.sales_units',unit:'commercial_units',aggregation:'sum',description:'Unités Sales and Trends positives, par type de produit ; ni installations ni utilisateurs.'},
+  {id:'apple.sales_return_units',unit:'commercial_units',aggregation:'sum',description:'Valeur absolue des unités négatives (remboursements/crédits), séparée des unités positives.'},
   {
     id: 'google.device_installs',
     unit: 'count',
@@ -245,7 +248,7 @@ export const METRIC_CATALOG = METRICS.map((m) => ({
   ...m,
   officialName: OFFICIAL_NAMES[m.id] ?? m.id.split('.')[1],
   granularity: 'daily',
-  source: m.id.startsWith('apple.')
+  source: m.id.startsWith('apple.sales_') ? 'App Store Connect Sales and Trends / SALES SUMMARY' : m.id.startsWith('apple.')
     ? 'App Store Connect Analytics Reports API'
     : m.aggregation === 'none'
       ? 'Google Play Developer Reporting API'

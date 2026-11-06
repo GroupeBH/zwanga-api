@@ -134,6 +134,8 @@
   },
   "overrides": {
     "systeminformation": "5.33.16",
+    "glob@>=9 <14.0.2": "14.0.2",
+    "minimatch@>=7 <11.0.1": "11.0.1",
     "multer": "$multer",
     "engine.io": "6.6.11",
     "proxy-addr": "2.0.8",

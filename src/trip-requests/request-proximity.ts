@@ -1,4 +1,5 @@
 import { NotFoundException } from '@nestjs/common';
+import { availableAccountSql } from '../users/account-availability';
 import type { EntityManager } from 'typeorm';
 import { NEARBY_DRIVER_RADIUS_METERS } from './dispatch/nearby-driver-policy';
 import { USABLE_DRIVER_LOCATION_SQL } from './dispatch/driver-location-policy';
@@ -31,8 +32,12 @@ export const requestDriverProximitySql = (requestId: string, driverId: string, f
     ST_DWithin(nearby_request."departurePoint", ${latestDriverPositionSql(driverId, forAlert)}, ${NEARBY_DRIVER_RADIUS_METERS})
 )`;
 
+// Delimit Raw property aliases before line breaks so TypeORM quotes them correctly.
 export const nearbyRequestDriverVisibilitySql = (requestId: string, driverId: string, forAlert = false) =>
   `${requestDriverVisibilitySql(requestId, driverId)} AND ${requestDriverProximitySql(requestId, driverId, forAlert)}
+    AND EXISTS (SELECT 1 FROM trip_requests account_request WHERE account_request.id = (${requestId})
+      AND ${availableAccountSql('account_request."passengerId"')})
+    AND ${availableAccountSql(driverId)}
     AND EXISTS (SELECT 1 FROM trip_requests vehicle_request JOIN vehicles v
       ON v."ownerId" = (${driverId})::uuid AND v."isActive" = true
       AND v.type::text = ANY(${requestVehicleTypesSql('vehicle_request')})

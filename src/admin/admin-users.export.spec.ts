@@ -32,6 +32,7 @@ function createUsersQueryMock() {
     getQuery: jest.fn().mockReturnValue('(active-vehicle-subquery)'),
   };
   const query = {
+    clone: jest.fn().mockReturnThis(),
     subQuery: jest.fn().mockReturnValue(vehicleQuery),
     andWhere: jest.fn(),
     orderBy: jest.fn(),
@@ -356,7 +357,8 @@ describe('AdminService user listing and export', () => {
         'activeVehicle.type = :adminVehicleType',
         { adminVehicleType: type },
       );
-      expect(usersQuery.andWhere).toHaveBeenCalledTimes(2);
+      expect(usersQuery.andWhere).toHaveBeenCalledTimes(3);
+      expect(usersQuery.andWhere).toHaveBeenCalledWith('user.createdAt <= :exportCutoff', { exportCutoff: expect.any(Date) });
       expect(usersQuery.andWhere).toHaveBeenCalledWith(
         'EXISTS (active-vehicle-subquery)',
       );
@@ -495,6 +497,7 @@ describe('AdminService user listing and export', () => {
     );
     expect(file.filename).toContain('passagers');
     expect(file.contentType).toContain('application/vnd.ms-excel');
+    if (!('buffer' in file)) throw new Error('Small export should remain buffered');
     expect(file.buffer.toString('utf8')).toContain('Paul');
     expect(file.buffer.toString('utf8')).not.toContain('must-not-leak');
   });

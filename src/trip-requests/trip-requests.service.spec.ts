@@ -10,6 +10,13 @@ import { UserRole, UserStatus } from '../users/entities/user.entity';
 import { enqueueTransactionalNotification } from '../notifications/transactional-notification';
 jest.mock('../notifications/transactional-notification', () => ({ enqueueTransactionalNotification: jest.fn() }));
 
+const attachCreateTransaction = (repository: any) => {
+  repository.manager.transaction = (work: any) => work({
+    findOne: jest.fn().mockResolvedValue({ isActive: true, status: UserStatus.ACTIVE }),
+    getRepository: () => repository,
+  });
+};
+
 const attachEditTransaction = (repository: any, request: any) => {
   request.updatedAt = new Date();
   const update = jest.fn().mockResolvedValue({ affected: 1 });
@@ -223,6 +230,7 @@ describe('TripRequestsService optional seat count', () => {
         id: 'request-1',
       })),
     };
+    attachCreateTransaction(tripRequestRepository);
     const service = new TripRequestsService(
       tripRequestRepository as any,
       {} as any,
@@ -286,6 +294,7 @@ describe('TripRequestsService KYC seat limit', () => {
         id: 'request-extra-seats',
       })),
     };
+    attachCreateTransaction(tripRequestRepository);
     const userRepository = {
       findOne: jest.fn().mockResolvedValue({
         id: 'passenger-1',

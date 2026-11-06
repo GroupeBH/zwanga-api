@@ -12,6 +12,7 @@ import { ConfiguredIoAdapter } from './common/configured-io.adapter';
 import { HealthController } from './health/health.controller';
 import { createCorsOptions } from './common/cors-policy';
 import { configureHttpSecurity } from './common/http-security';
+import { trustedProxyCidrs } from './common/trusted-proxy';
 import { WINSTON_MODULE_NEST_PROVIDER } from 'nest-winston';
 import { join } from 'path';
 import { AppModule } from './app.module';
@@ -162,8 +163,10 @@ async function bootstrap() {
   });
 
   const configService = app.get(ConfigService);
-  const trustedProxies = configService.get<string>('TRUSTED_PROXY_CIDRS')?.split(',').map(value => value.trim()).filter(Boolean);
-  app.set('trust proxy', trustedProxies?.length ? trustedProxies : false);
+  const trustedProxies = trustedProxyCidrs(configService.get<string>('TRUSTED_PROXY_CIDRS'));
+  app.set('trust proxy', trustedProxies);
+  if (!trustedProxies && configService.get('NODE_ENV') === 'production')
+    app.get(WINSTON_MODULE_NEST_PROVIDER).warn('TRUSTED_PROXY_CIDRS absent: configure the load-balancer subnet CIDRs before enabling pre-auth IP limits.', 'Bootstrap');
   const apiPrefix = configService.get<string>('API_PREFIX') || 'api/v1';
   configureHttpSecurity(app.getHttpAdapter().getInstance(), apiPrefix);
   const redisIoAdapter = new RedisSocketIoAdapter(app, configService);
