@@ -1,5 +1,12 @@
 # Journal des changements techniques
 
+## 2026-11-08 — Motifs bornés de validation des alertes dans les diagnostics
+
+- **Problème / périmètre :** le mobile natif distingue un contrôle serveur indisponible d'une commande qui n'est plus disponible, mais le DTO des accusés de notification refusait ces deux motifs. Préparation autorisée uniquement, sans déploiement.
+- **Solution appliquée :** `src/trip-requests/dispatch/dispatch.dto.ts` accepte `REQUEST_CHECK_UNAVAILABLE` et `REQUEST_NO_LONGER_AVAILABLE` en plus des trois codes existants. `notification-receipt.dto.spec.ts` couvre ces cinq codes, les accusés historiques, les métadonnées audio et le refus de valeurs inconnues.
+- **Conservé / précautions :** aucune modification du ciblage, du transport push/socket, des délais, du son, des droits du destinataire ou de la file de conducteurs. Aucun accès ou changement de base, aucune migration. Le mobile garde son repli sans métadonnées face à l'ancien DTO durant un déploiement progressif. Les changements déjà présents dans le module partenaires ne sont pas modifiés.
+- **Vérifications / limites :** neuf tests Jest réussis avec `class-validator` réel et connexions externes bloquées par le garde-fou local. Pas d'envoi de notification, pas de serveur de production utilisé ; cette passe ne constitue pas un essai de livraison FCM/APNs ni un test sur appareil. Le journal mobile `zwanga/docs/CHANGEMENTS_TECHNIQUES.md` détaille les correctifs associés de reprise et leurs limites.
+
 ## 2026-10-30 — Choix sur la carte : priorité de trois minutes et reprise de la file
 
 - **Périmètre/problème :** prolongement du changement de conducteur ci-dessous : sélectionner un conducteur représenté sur la carte doit suspendre les autres invitations, sans bloquer définitivement la recherche. L'utilisateur a choisi 180 secondes sans réponse, avec reprise immédiate après refus. Préparation locale uniquement, sans déploiement, accès aux comptes réels ou migration de production.

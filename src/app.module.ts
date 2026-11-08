@@ -49,6 +49,7 @@ import { ActivityModule } from './activity/activity.module';
 import { ProServicesModule } from './pro-services/pro-services.module';
 import { AppUpdatesModule } from './app-updates/app-updates.module';
 import { DriverFinanceModule } from './driver-finance/driver-finance.module';
+import { PartnersModule } from './partners/partners.module';
 
 @Module({
   imports: [
@@ -123,6 +124,7 @@ import { DriverFinanceModule } from './driver-finance/driver-finance.module';
     AppUpdatesModule,
     MobileOperationsModule,
     DriverFinanceModule,
+    PartnersModule,
   ],
   controllers: [AppController],
   providers: [

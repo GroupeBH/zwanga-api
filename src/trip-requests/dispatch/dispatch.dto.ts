@@ -36,5 +36,6 @@ export class NotificationReceiptDto {
   @IsOptional() @IsIn(['received', 'displayed']) stage?: 'received' | 'displayed';
   @IsOptional() @IsISO8601() observedAt?: string;
   @IsOptional() @IsIn(['native', 'javascript']) source?: 'native' | 'javascript';
-  @IsOptional() @IsIn(['NATIVE_CARD_FAILED', 'NATIVE_CARD_PENDING', 'NATIVE_FALLBACK_FAILED']) failureCode?: string;
+  @IsOptional() @IsIn(['NATIVE_CARD_FAILED', 'NATIVE_CARD_PENDING', 'NATIVE_FALLBACK_FAILED',
+    'REQUEST_CHECK_UNAVAILABLE', 'REQUEST_NO_LONGER_AVAILABLE']) failureCode?: string;
 }
