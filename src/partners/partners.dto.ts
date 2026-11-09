@@ -1,4 +1,5 @@
-import { ArrayMaxSize, ArrayMinSize, IsArray, IsIn, IsInt, IsOptional, IsString, IsUUID, Matches, Max, MaxLength, Min, MinLength } from 'class-validator';
+import { ArrayMaxSize, ArrayMinSize, IsArray, IsIn, IsInt, IsOptional, IsString, IsUUID, Matches, Max, MaxLength, Min, MinLength, ValidateIf } from 'class-validator';
+import { ApiPropertyOptional } from '@nestjs/swagger';
 
 export class CreatePartnerOrganizationDto {
   @IsString() @MinLength(2) @MaxLength(160) displayName: string;
@@ -22,10 +23,19 @@ export class CreateFieldTicketDto {
 }
 
 export class CreateFieldAgentDto {
-  @Matches(/^\+?[0-9]{9,15}$/) phone: string;
-  @IsString() @MinLength(2) @MaxLength(100) firstName: string;
-  @IsString() @MinLength(2) @MaxLength(100) lastName: string;
-  @IsOptional() @Matches(/^[0-9]{4}$/) initialPin?: string;
+  @ApiPropertyOptional({ enum: ['existing', 'new'], description: 'Choix explicite du compte ; omission conservée pour les anciens clients.' })
+  @IsOptional() @IsIn(['existing', 'new']) accountMode?: 'existing' | 'new';
+  @ApiPropertyOptional({ description: 'Utilisateur sélectionné, sans modification de son profil ni de son PIN.' })
+  @ValidateIf(o => o.accountMode === 'existing' || o.userId !== undefined)
+  @IsUUID() userId?: string;
+  @ValidateIf(o => (o.accountMode !== 'existing' && o.userId === undefined) || o.phone !== undefined)
+  @Matches(/^\+?[0-9]{9,15}$/) phone?: string;
+  @ValidateIf(o => (o.accountMode !== 'existing' && o.userId === undefined) || o.firstName !== undefined)
+  @IsString() @MinLength(2) @MaxLength(100) firstName?: string;
+  @ValidateIf(o => (o.accountMode !== 'existing' && o.userId === undefined) || o.lastName !== undefined)
+  @IsString() @MinLength(2) @MaxLength(100) lastName?: string;
+  @ValidateIf(o => o.accountMode === 'new' || o.initialPin !== undefined)
+  @Matches(/^[0-9]{4}$/) initialPin?: string;
   @IsOptional() @IsIn(['FIELD_AGENT', 'FIELD_SUPERVISOR']) role?: string;
 }
 

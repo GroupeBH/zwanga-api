@@ -24,7 +24,7 @@ describe('independent ride realtime delivery', () => {
     return { service, notice, query, publish, send };
   };
   afterEach(() => jest.restoreAllMocks());
-  it.each(['driver_booking_payment_confirmed', 'cash_payment_confirmed'])('sends a %s receipt hint independently of ride availability or push health', async type => {
+  it.each(['driver_booking_payment_confirmed', 'cash_payment_confirmed', 'cash_payment_declared'])('sends a %s receipt hint independently of ride availability or push health', async type => {
     const f = fixture(); f.service['urgentWorkers'] = 5;
     Object.assign(f.notice.data, { type, role: 'driver', bookingId: 'booking' });
     jest.mocked(prepareNearbyRequestRinging).mockResolvedValue(false);

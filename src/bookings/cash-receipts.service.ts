@@ -7,7 +7,13 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { Booking, BookingStatus } from './entities/booking.entity';
+import {
+  Booking,
+  BookingStatus,
+  BookingPaymentStatus,
+} from './entities/booking.entity';
+import { Trip } from '../trips/entities/trip.entity';
+import { User } from '../users/entities/user.entity';
 import { BookingsService } from './bookings.service';
 import { TripPaymentMode } from '../payments/enums/trip-payment-mode.enum';
 import {
@@ -21,6 +27,79 @@ export class CashReceiptsService {
     @InjectRepository(Booking) private readonly repository: Repository<Booking>,
     private readonly bookings: BookingsService,
   ) {}
+
+  /** Passenger intent is durable, but never writes a receipt or moves money. */
+  async declare(
+    id: string,
+    passengerId: string,
+    amount: number,
+    currency: string,
+  ): Promise<Booking> {
+    await this.repository.manager.transaction(async (manager) => {
+      const booking = await manager.findOne(Booking, {
+        where: { id },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!booking) throw new NotFoundException('Réservation non trouvée.');
+      if (booking.passengerId !== passengerId)
+        throw new ForbiddenException(
+          'Seul le passager peut déclarer son paiement cash.',
+        );
+      if (
+        booking.status !== BookingStatus.COMPLETED ||
+        !booking.droppedOff ||
+        booking.paymentMode !== TripPaymentMode.CASH ||
+        booking.paymentStatus !== BookingPaymentStatus.NOT_REQUIRED
+      ) {
+        throw new BadRequestException(
+          'Le paiement cash peut être déclaré après l’arrivée, pour une réservation à régler en cash.',
+        );
+      }
+      if (
+        !Number.isFinite(amount) ||
+        amount <= 0 ||
+        !['CDF', 'USD'].includes(currency) ||
+        Number(booking.paymentAmount) !== amount ||
+        booking.paymentCurrency !== currency
+      ) {
+        throw new ConflictException(
+          'Le montant a changé. Actualisez le paiement avant de confirmer.',
+        );
+      }
+      if (booking.cashReceivedAt) return;
+      const trip = await manager.findOneBy(Trip, { id: booking.tripId });
+      if (!trip || trip.driverId === passengerId)
+        throw new BadRequestException('Trajet invalide.');
+      const passenger = await manager.findOne(User, {
+        where: { id: passengerId },
+        select: ['id', 'firstName', 'lastName'],
+      });
+      const passengerName =
+        [passenger?.firstName, passenger?.lastName]
+          .filter(Boolean)
+          .join(' ')
+          .trim()
+          .slice(0, 100) || 'Le passager';
+      await enqueueTransactionalNotification(manager, {
+        eventKey: `cash-declaration:${id}:${amount}:${currency}`,
+        userId: trip.driverId,
+        title: 'Cash à confirmer',
+        body: `${passengerName} indique avoir payé ${displayAmount(amount, currency)} en cash. Confirmez uniquement après avoir reçu l’argent.`,
+        data: {
+          type: 'cash_payment_declared',
+          role: 'driver',
+          driverId: trip.driverId,
+          bookingId: id,
+          tripId: booking.tripId,
+          paymentMode: 'cash',
+          amount,
+          currency,
+          passengerName,
+        },
+      });
+    });
+    return this.bookings.findOne(id);
+  }
 
   async confirm(
     id: string,
@@ -58,7 +137,9 @@ export class CashReceiptsService {
     // A single conditional statement rechecks ownership, fare and mode under PostgreSQL's row lock.
     // COALESCE preserves the original receipt on retries/double taps, including concurrent retries.
     await this.repository.manager.transaction(async (manager) => {
-      const rows = await manager.query(
+      const rows = await manager.query<
+        [{ id: string; passengerId: string }[], number]
+      >(
         `UPDATE bookings AS b SET
       "cashReceivedAt" = COALESCE(b."cashReceivedAt", CURRENT_TIMESTAMP),
       "cashReceivedByDriverId" = COALESCE(b."cashReceivedByDriverId", $2::uuid),
@@ -75,19 +156,19 @@ export class CashReceiptsService {
         throw new ConflictException(
           'La réservation a changé. Actualisez le trajet puis réessayez.',
         );
-      const passengerId = rows[0][0].passengerId as string;
+      const passengerId = rows[0][0].passengerId;
       for (const recipient of [
         {
           userId: passengerId,
           role: 'passenger',
-          title: 'Paiement en espèces confirmé',
+          title: 'Paiement cash confirmé',
           body: `Le conducteur a confirmé la réception de votre paiement de ${displayAmount(amount, currency)}.`,
         },
         {
           userId: driverId,
           role: 'driver',
-          title: 'Encaissement en espèces enregistré',
-          body: `Votre encaissement de ${displayAmount(amount, currency)} a été enregistré. Aucun versement électronique supplémentaire n’est prévu pour ce paiement en espèces.`,
+          title: 'Cash reçu enregistré',
+          body: `Votre encaissement de ${displayAmount(amount, currency)} a été enregistré. Aucun versement électronique supplémentaire n’est prévu pour ce paiement cash.`,
         },
       ]) {
         await enqueueTransactionalNotification(manager, {

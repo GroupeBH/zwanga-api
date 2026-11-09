@@ -2,6 +2,7 @@ import { MobileOperations1780000111000 } from './1780000111000-MobileOperations'
 import { BookingPriceProposal1780000113000 } from './1780000113000-BookingPriceProposal';
 import { AdminAnalyticsIndexes1780000114000 } from './1780000114000-AdminAnalyticsIndexes';
 import { PartnerFieldOperations1780000115000 } from './1780000115000-PartnerFieldOperations';
+import { CashDeclarationRealtimeIndex1780000116000 } from './1780000116000-CashDeclarationRealtimeIndex';
 import { AutomaticStoreUpdateAnnouncements1780000112000 } from './1780000112000-AutomaticStoreUpdateAnnouncements';
 import { IndexRealtimePaymentReceipts1780000100000 } from './1780000100000-IndexRealtimePaymentReceipts';
 import { PassengerDriverChangeReason1780000102000 } from './1780000102000-PassengerDriverChangeReason';
@@ -236,4 +237,5 @@ export const databaseMigrations = [
   BookingPriceProposal1780000113000,
   AdminAnalyticsIndexes1780000114000,
   PartnerFieldOperations1780000115000,
+  CashDeclarationRealtimeIndex1780000116000,
 ];

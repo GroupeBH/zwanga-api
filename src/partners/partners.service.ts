@@ -113,38 +113,61 @@ export class PartnersService {
   }
 
   async createFieldAgent(organizationId: string, dto: CreateFieldAgentDto) {
-    if (dto.firstName.trim().length < 2 || dto.lastName.trim().length < 2) throw new BadRequestException('Nom d’agent invalide');
+    const existing = dto.accountMode === 'existing' || dto.userId !== undefined;
+    if (existing) {
+      if (!dto.userId || dto.accountMode === 'new' || [dto.phone, dto.firstName, dto.lastName, dto.initialPin].some(value => value !== undefined)) {
+        throw new BadRequestException('Sélectionnez un utilisateur existant sans renseigner de nouveau compte');
+      }
+    } else if (!dto.firstName || !dto.lastName || dto.firstName.trim().length < 2 || dto.lastName.trim().length < 2) {
+      throw new BadRequestException('Nom d’agent invalide');
+    }
+    if (!existing && !dto.phone) throw new BadRequestException('Le téléphone est requis pour un nouveau compte');
+    if (dto.accountMode === 'new' && !dto.initialPin) throw new BadRequestException('Le code PIN initial est requis pour un nouveau compte');
     const organization = await this.organizations.findOneBy({ id: organizationId });
     if (!organization || organization.status !== 'ACTIVE' || !organization.partnerTypes.some((type) => type.type === 'FIELD_MARKETING' && type.status === 'ACTIVE')) throw new NotFoundException('Équipe terrain inconnue');
-    const canonical = canonicalFieldPhone(dto.phone);
-    return this.organizations.manager.transaction(async (manager) => {
-      const userRepo = manager.getRepository(User);
-      const memberRepo = manager.getRepository(PartnerMember);
-      let user = await userRepo.findOne({
-        where: { phone: In(fieldPhoneVariants(canonical)) },
-        select: ['id', 'phone', 'firstName', 'lastName', 'role', 'status', 'isActive', 'password'],
-        lock: { mode: 'pessimistic_write' },
+    const canonical = existing ? null : canonicalFieldPhone(dto.phone!);
+    // Hash before acquiring database locks; an existing account never changes PIN.
+    const password = !existing && dto.initialPin ? await bcrypt.hash(dto.initialPin, 10) : undefined;
+    try {
+      return await this.organizations.manager.transaction(async (manager) => {
+        const userRepo = manager.getRepository(User);
+        const memberRepo = manager.getRepository(PartnerMember);
+        let user = await userRepo.findOne({
+          where: existing ? { id: dto.userId } : { phone: In(fieldPhoneVariants(canonical!)) },
+          select: ['id', 'phone', 'firstName', 'lastName', 'role', 'status', 'isActive', 'password'],
+          lock: { mode: 'pessimistic_write' },
+        });
+        if (existing && !user) throw new NotFoundException('Utilisateur sélectionné introuvable');
+        if (dto.accountMode === 'new' && user) throw new ConflictException('Ce numéro appartient déjà à un compte. Choisissez « Utilisateur existant ».');
+        if (!user) {
+          if (!dto.initialPin) throw new BadRequestException('Le code PIN initial est requis pour un nouveau compte');
+          user = await userRepo.save(userRepo.create({
+            phone: canonical!, firstName: dto.firstName!.trim(), lastName: dto.lastName!.trim(),
+            password, role: UserRole.PASSENGER,
+            status: UserStatus.ACTIVE, isActive: true, isDriver: false, isPhoneVerified: false,
+          }));
+        } else if (!user.isActive || [UserStatus.SUSPENDED, UserStatus.INACTIVE].includes(user.status) || [UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.MARKETER].includes(user.role)) {
+          throw new ForbiddenException('Ce compte ne peut pas être agent terrain');
+        } else if (!user.password) {
+          throw new BadRequestException('Ce compte doit définir un PIN avant son affectation');
+        } else if (!user.phone) {
+          throw new BadRequestException('Ce compte doit renseigner un téléphone avant son affectation');
+        }
+        let member = await memberRepo.findOneBy({ organizationId, userId: user.id });
+        if (member?.status === 'ACTIVE') throw new ConflictException('Agent déjà présent dans cette équipe');
+        member ??= memberRepo.create({ organizationId, userId: user.id });
+        member.role = dto.role ?? 'FIELD_AGENT';
+        member.status = 'ACTIVE';
+        await memberRepo.save(member);
+        return { userId: user.id, name: [user.firstName, user.lastName].join(' '), phone: user.phone, role: member.role, status: member.status };
       });
-      if (!user) {
-        if (!dto.initialPin) throw new BadRequestException('Le code PIN initial est requis pour un nouveau compte');
-        user = await userRepo.save(userRepo.create({
-          phone: canonical, firstName: dto.firstName.trim(), lastName: dto.lastName.trim(),
-          password: await bcrypt.hash(dto.initialPin, 10), role: UserRole.PASSENGER,
-          status: UserStatus.ACTIVE, isActive: true, isDriver: false, isPhoneVerified: false,
-        }));
-      } else if (!user.isActive || [UserStatus.SUSPENDED, UserStatus.INACTIVE].includes(user.status) || [UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.MARKETER].includes(user.role)) {
-        throw new ForbiddenException('Ce compte ne peut pas être agent terrain');
-      } else if (!user.password) {
-        throw new BadRequestException('Ce compte doit définir un PIN avant son affectation');
+    } catch (error) {
+      // A concurrent creation is a conflict, never a partially created membership.
+      if (error?.code === '23505' || error?.driverError?.code === '23505') {
+        throw new ConflictException('Ce compte ou cette affectation existe déjà. Actualisez la liste des utilisateurs.');
       }
-      let member = await memberRepo.findOneBy({ organizationId, userId: user.id });
-      if (member?.status === 'ACTIVE') throw new ConflictException('Agent déjà présent dans cette équipe');
-      member ??= memberRepo.create({ organizationId, userId: user.id });
-      member.role = dto.role ?? 'FIELD_AGENT';
-      member.status = 'ACTIVE';
-      await memberRepo.save(member);
-      return { userId: user.id, name: [user.firstName, user.lastName].join(' '), phone: user.phone, role: member.role, status: member.status };
-    });
+      throw error;
+    }
   }
 
   async listFieldMembers(userId: string, organizationId: string) {
