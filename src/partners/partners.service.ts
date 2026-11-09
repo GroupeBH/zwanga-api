@@ -187,7 +187,21 @@ export class PartnersService {
 
   private async leadProgress(leads: PartnerFieldLead[]) {
     const phones = [...new Set(leads.flatMap((lead) => fieldPhoneVariants(lead.phone)))];
-    const users = phones.length ? await this.users.find({ where: { phone: In(phones) }, relations: { kycDocuments: true, vehicles: true } }) : [];
+    // Avoid the KYC history x vehicles Cartesian join and never hydrate identity
+    // documents, evidence URLs or payment details for this progress projection.
+    const users: User[] = [];
+    for (let offset = 0; offset < phones.length; offset += 200) {
+      const rows = await this.users.query(`SELECT u.id,u.phone,u.role,u.status,u."isActive",u."driverOnboardingRequestedAt",
+        k.id AS "kycId", k."createdAt" AS "kycCreatedAt", k.provider AS "kycProvider", k.status AS "kycStatus",
+        k."diditSessionStatus", EXISTS (SELECT 1 FROM vehicles v WHERE v."ownerId"=u.id AND v."isActive"=true) AS "hasVehicle"
+        FROM users u LEFT JOIN LATERAL (SELECT id,"createdAt",provider,status,"diditSessionStatus"
+          FROM kyc_documents WHERE "userId"=u.id ORDER BY "createdAt" DESC,id DESC LIMIT 1) k ON true
+        WHERE u.phone=ANY($1::varchar[])`, [phones.slice(offset, offset + 200)]);
+      for (const row of rows) users.push({ ...row,
+        kycDocuments: row.kycId ? [{ id: row.kycId, createdAt: row.kycCreatedAt, provider: row.kycProvider, status: row.kycStatus, diditSessionStatus: row.diditSessionStatus }] : [],
+        vehicles: row.hasVehicle ? [{ ownerId: row.id, isActive: true }] : [],
+      } as User);
+    }
     const byPhone = new Map(users.map((user) => [canonicalFieldPhone(user.phone), user]));
     const ids = users.map((user) => user.id);
     const firstTrips = ids.length ? await this.trips.createQueryBuilder('trip')
@@ -260,9 +274,12 @@ export class PartnersService {
       if (!lead || (member.role === 'FIELD_AGENT' && lead.agentId !== userId)) throw new ForbiddenException('Conducteur inaccessible');
     }
     const subject = `[Terrain] ${dto.subject.trim()}`.slice(0, 120);
-    const supportTicket = await this.support.createTicket(userId, { subject, message: dto.message.trim(), category: SupportTicketCategory.OTHER, priority: SupportTicketPriority.MEDIUM });
-    const ticket = await this.tickets.save(this.tickets.create({ organizationId, authorId: userId, supportTicketId: supportTicket.id, leadId: dto.leadId ?? null, category: dto.category, message: dto.message.trim() }));
-    const saved = await this.tickets.findOneOrFail({ where: { id: ticket.id }, relations: { supportTicket: true } });
-    return this.ticketView(saved);
+    return this.tickets.manager.transaction(async manager => {
+      const tickets = manager.getRepository(PartnerFieldTicket);
+      const supportTicket = await this.support.createTicketInTransaction(manager, userId, { subject, message: dto.message.trim(), category: SupportTicketCategory.OTHER, priority: SupportTicketPriority.MEDIUM });
+      const ticket = await tickets.save(tickets.create({ organizationId, authorId: userId, supportTicketId: supportTicket.id, leadId: dto.leadId ?? null, category: dto.category, message: dto.message.trim() }));
+      ticket.supportTicket = supportTicket;
+      return this.ticketView(ticket);
+    });
   }
 }

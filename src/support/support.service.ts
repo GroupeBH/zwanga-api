@@ -7,7 +7,7 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { SelectQueryBuilder, Repository } from 'typeorm';
+import { EntityManager, SelectQueryBuilder, Repository } from 'typeorm';
 import { ChatService } from '../chat/chat.service';
 import { LegacyPageQuery } from '../common/legacy-page';
 import {
@@ -229,9 +229,18 @@ export class SupportService {
     userId: string,
     dto: CreateSupportTicketDto,
   ): Promise<SanitizedSupportTicketDetails> {
+    const savedTicket = await this.ticketRepository.manager.transaction(manager =>
+      this.createTicketInTransaction(manager, userId, dto));
+    return this.getUserTicket(userId, savedTicket.id);
+  }
+
+  /** Reuse the caller's transaction so linked domain records cannot be orphaned. */
+  async createTicketInTransaction(manager: EntityManager, userId: string, dto: CreateSupportTicketDto): Promise<SupportTicket> {
+    const tickets = manager.getRepository(SupportTicket);
+    const messages = manager.getRepository(SupportTicketMessage);
     const now = new Date();
 
-    const ticket = this.ticketRepository.create({
+    const ticket = tickets.create({
       userId,
       subject: dto.subject.trim(),
       category: dto.category,
@@ -240,18 +249,18 @@ export class SupportService {
       lastMessageAt: now,
     });
 
-    const savedTicket = await this.ticketRepository.save(ticket);
+    const savedTicket = await tickets.save(ticket);
 
-    const initialMessage = this.messageRepository.create({
+    const initialMessage = messages.create({
       ticketId: savedTicket.id,
       senderId: userId,
       content: dto.message.trim(),
       isInternal: false,
     });
 
-    await this.messageRepository.save(initialMessage);
+    await messages.save(initialMessage);
 
-    return this.getUserTicket(userId, savedTicket.id);
+    return savedTicket;
   }
 
   async listUserTickets(

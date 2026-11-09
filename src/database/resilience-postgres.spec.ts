@@ -105,6 +105,8 @@ const bin = process.env.RESILIENCE_TEST_POSTGRES_BIN;
               id: { type: 'uuid', primary: true },
               profilePicture: { type: String },
               hasPublishedTrip: { type: Boolean },
+              isActive: { type: Boolean, default: true },
+              status: { type: String, default: 'active' },
             },
           }),
           new EntitySchema<Notification>({
@@ -289,9 +291,9 @@ const bin = process.env.RESILIENCE_TEST_POSTGRES_BIN;
         ),
       ).toEqual([]);
     });
-    it.each(['selected', 'preparing'] as const)(
-      'does not publish over an overlapping %s request reservation',
-      async (phase) => {
+    it.each(['selected', 'preparing'].flatMap(phase => [false, true].map(recurring => ({ phase, recurring }))))(
+      'does not publish over an overlapping $phase request reservation (recurring=$recurring)',
+      async ({ phase, recurring }) => {
         const trip = await setup();
         const requestId = randomUUID();
         await db.getRepository(TripRequest).save({
@@ -308,11 +310,14 @@ const bin = process.env.RESILIENCE_TEST_POSTGRES_BIN;
         const candidate = db.getRepository(Trip).create({
           driverId: trip.driverId, isPrivate: false, status: TripStatus.PENDING,
           departureDate: now, totalSeats: 4, availableSeats: 4,
-          recurringTemplateId: randomUUID(), recurringOccurrenceDate: '2026-10-14',
+          ...(recurring ? { recurringTemplateId: randomUUID(), recurringOccurrenceDate: '2026-10-14' } : {}),
         });
-        await expect(savePublicationsWithPhotoPolicy(db.getRepository(Trip), trip.driverId, [candidate]))
-          .rejects.toMatchObject({ response: { code: 'DRIVER_SCHEDULE_CONFLICT' } });
-        expect(await db.getRepository(Trip).countBy({ recurringTemplateId: candidate.recurringTemplateId! })).toBe(0);
+        const publication = savePublicationsWithPhotoPolicy(db.getRepository(Trip), trip.driverId, [candidate]);
+        // Recurring workers skip a conflicting occurrence; a manual publication
+        // must still fail explicitly. Neither is allowed to insert a trip.
+        if (recurring) await expect(publication).resolves.toEqual([]);
+        else await expect(publication).rejects.toMatchObject({ response: { code: 'DRIVER_SCHEDULE_CONFLICT' } });
+        expect(await db.getRepository(Trip).countBy({ driverId: trip.driverId, departureDate: now })).toBe(0);
       },
     );
     it('rejects a stale booking request after expiry commits', async () => {

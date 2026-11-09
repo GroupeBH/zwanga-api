@@ -21,19 +21,23 @@ async function main() {
     });
   });
   const password = randomBytes(24).toString('hex');
-  const args = ['--bind', '127.0.0.1', '--port', String(port), '--save', '', '--appendonly', 'no',
-    '--protected-mode', 'yes', '--requirepass', password, '--maxmemory', '32mb', '--maxmemory-policy', 'noeviction'];
+  // Read configuration on stdin: WSL must not reinterpret the empty --save
+  // argument, and the ephemeral password must not appear in process arguments.
+  const config = `bind 127.0.0.1\nport ${port}\nsave ""\nappendonly no\nprotected-mode yes\nrequirepass ${password}\nmaxmemory 32mb\nmaxmemory-policy noeviction\n`;
   server = process.platform === 'win32'
-    ? spawn('wsl.exe', ['-d', 'Ubuntu', '--', 'redis-server', ...args], { env: minimalEnvironment(), windowsHide: true, stdio: 'ignore' })
-    : spawn('redis-server', args, { env: minimalEnvironment(), stdio: 'ignore' });
+    ? spawn('wsl.exe', ['-d', 'Ubuntu', '--exec', 'redis-server', '-'], { env: minimalEnvironment(), windowsHide: true, stdio: ['pipe', 'ignore', 'ignore'] })
+    : spawn('redis-server', ['-'], { env: minimalEnvironment(), stdio: ['pipe', 'ignore', 'ignore'] });
   let launchError;
   server.once('error', error => { launchError = error; });
+  server.stdin.on('error', error => { launchError = error; });
+  server.stdin.end(config);
   client = createClient({ socket: { host: '127.0.0.1', port, connectTimeout: 1000, reconnectStrategy: false }, password });
   client.on('error', () => {});
-  for (let attempt = 0; attempt < 20; attempt++) {
+  for (let attempt = 0; attempt < 60; attempt++) {
     if (launchError) throw launchError;
+    if (server.exitCode !== null) throw new Error('Isolated Redis exited before readiness.');
     try { await client.connect(); break; }
-    catch (error) { if (attempt === 19) throw error; await new Promise(resolve => setTimeout(resolve, 250)); }
+    catch (error) { if (attempt === 59) throw error; await new Promise(resolve => setTimeout(resolve, 500)); }
   }
   if (await client.ping() !== 'PONG') throw new Error('Isolated Redis failed to start.');
   const child = spawn(process.execPath, [join(root, 'node_modules/jest/bin/jest.js'), '--runInBand', '--runTestsByPath',

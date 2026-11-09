@@ -1,5 +1,19 @@
 # Journal détaillé des changements d'infrastructure AWS
 
+## INFRA-2026-11-09-001 — Contrôles de non-régression avant déploiement
+
+- Date / opérateur : 9 novembre 2026, Africa/Kinshasa ; Codex, à la demande du mainteneur.
+- Statut : préparé dans le code local, non déployé. Environnements visés : CI staging et production.
+- Cause : des suites PostgreSQL étaient ignorées faute de variables d'activation ; le test OTP Redis protégé n'était pas exécuté et aucun contrôle npm des vulnérabilités runtime ne bloquait la livraison.
+- Fichiers : `.github/workflows/deploy.yml`, `.github/workflows/deploy-staging.yml`, `test/ci-integration-policy.test.cjs`.
+- Changements : activation des suites PostgreSQL, dont installations, résilience, recherche géographique, sonneries et subventions ; Redis jetable pour le dispatch également en staging ; exécution séparée du test OTP avec son propre Redis protégé ; `npm audit --omit=dev --audit-level=high` avant publication. Le contrôle YAML vérifie que ces étapes restent présentes.
+- Ressources AWS, IAM, SSM et secrets : aucune modification. Aucun Terraform exécuté. Aucune migration métier ni perte de données. Coût AWS ajouté : aucun ; durée CI accrue par les tests.
+- Validation locale : les deux tests de structure des workflows passent. La validation applicative et ses limites sont détaillées dans `docs/operations/correctifs-audit-2026-11-09.md`.
+- Mise en service : après revue, soumettre les changements aux workflows habituels. Un audit npm indisponible ou une intégration en échec bloque la livraison ; ne pas contourner cette protection pour déployer.
+- Surveillance : vérifier les résultats des suites et l'absence de tests critiques ignorés sur le runner Linux ; suivre la durée CI avant d'ajuster ses ressources.
+- Retour arrière : restaurer uniquement ces changements de contrôles CI via une revue ; aucun changement d'état AWS à annuler. Ne pas neutraliser durablement les contrôles pour masquer une régression.
+- Restant : séparation des rôles PostgreSQL runtime/migration et redondance AWS à planifier séparément après vérification de l'état déployé.
+
 ## INFRA-2026-11-06-001 — Activation Stores et Supervision mobile en production
 
 - **Date / opérateur / autorisation :** 6 novembre 2026, Africa/Kinshasa ;

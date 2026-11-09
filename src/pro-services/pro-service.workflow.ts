@@ -199,6 +199,7 @@ export class ProServiceWorkflow {
         throw new ConflictException('Ce dossier est déjà rattaché.');
       if (!user.isPhoneVerified)
         throw new ConflictException('Le compte doit avoir un numéro vérifié.');
+      if (item.serviceCode === 'documents') await this.store.assertNoDocumentCase(manager, user.id);
       item.ownerId = user.id;
       await manager.save(item);
       await this.store.audit(manager, id, actorId, 'owner_linked', {

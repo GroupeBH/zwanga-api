@@ -3,6 +3,7 @@ import {
   Controller,
   Get,
   Param,
+  Patch,
   ParseUUIDPipe,
   Post,
   Put,
@@ -24,6 +25,7 @@ import {
   OfferingUpdateDto,
   QuoteServiceDto,
   ServiceLedgerDto,
+  UpdateDocumentCaseDto,
 } from './pro-service.dto';
 import { ProServiceStore } from './pro-service.store';
 import { ProServiceWorkflow } from './pro-service.workflow';
@@ -60,6 +62,17 @@ export class ProServicesController {
   @Auth()
   mine(@Request() req, @Query() query: ListServiceCasesDto) {
     return this.store.list(query, req.user.userId);
+  }
+  @Get('mine/current-documents')
+  @Auth()
+  currentDocuments(@Request() req) {
+    return this.store.currentDocumentCase(req.user.userId);
+  }
+  @Patch('mine/:id')
+  @Auth()
+  @SensitiveThrottle(5, 60000)
+  updateDocuments(@Request() req, @Param('id', ParseUUIDPipe) id: string, @Body() dto: UpdateDocumentCaseDto) {
+    return this.store.updateDocumentCase(id, req.user.userId, dto);
   }
   @Get('mine/:id')
   @Auth()

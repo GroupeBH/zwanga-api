@@ -46,6 +46,15 @@ export class ListServiceCasesDto {
   @IsOptional() @IsIn(CASE_STATES) status?: CaseState;
   @IsOptional() @IsString() @MaxLength(200) cursor?: string;
 }
+export class UpdateDocumentCaseDto {
+  @IsIn([true]) contactConsent: boolean;
+  @IsUUID('4') mutationId: string;
+  @IsISO8601({ strict: true }) expectedUpdatedAt: string;
+  @IsDefined()
+  @ValidateNested()
+  @Type(() => ApplicationDto)
+  application: ApplicationDto;
+}
 export class InstallmentDto {
   @IsISO8601({ strict: true }) dueDate: string;
   @IsInt() @Min(1) @Max(1_000_000_000) amountMinor: number;
