@@ -22,10 +22,24 @@ export function counterOfferPostgresTests(context: () => Fixture) {
     const { source, driver, request, editor } = context();
     const d = await driver(), r = await request(true, 2);
     await source.getRepository(TripRequest).update(r.id, { sequentialDispatch: true });
-    return { source, d, r, edits: editor(), dto: { vehicleId: d.vehicle.id, pricePerSeat: 1500 } };
+    // Keep the negotiated fare above the current 2,500 CDF passenger budget.
+    return { source, d, r, edits: editor(), dto: { vehicleId: d.vehicle.id, pricePerSeat: 3000 } };
   };
   const notification = (source: DataSource, id: string) => source.getRepository(Notification)
     .createQueryBuilder('n').where("n.data->>'offerId'=:id AND n.data->>'type'='driver_offer'", { id }).getOneOrFail();
+
+  it.each([1500, 2499])('counteroffer: rejects a new fare of %s before saving an offer, lease or alert', async pricePerSeat => {
+    const { source, d, r, edits, dto } = await prepare();
+    await expect(edits.proposeCounterOffer(d.user.id, r.id, { ...dto, pricePerSeat }))
+      .rejects.toMatchObject({ status: 400, response: {
+        code: 'TRIP_PRICE_BELOW_MINIMUM', minimumPricePerSeat: 2500,
+      } });
+    expect(await source.getRepository(DriverOffer).countBy({ tripRequestId: r.id })).toBe(0);
+    expect(await source.query('SELECT 1 FROM trip_request_dispatch_offers WHERE "requestId"=$1', [r.id])).toHaveLength(0);
+    expect(await source.getRepository(Notification).count()).toBe(0);
+    expect(await source.getRepository(TripRequest).findOneByOrFail({ id: r.id }))
+      .toMatchObject({ status: 'pending', selectedDriverId: null, selectedPricePerSeat: null });
+  });
 
   it('counteroffer: resolves an opaque map marker only for its owner and currently eligible request', async () => {
     const { source, d, r } = await prepare();
@@ -45,7 +59,7 @@ export function counterOfferPostgresTests(context: () => Fixture) {
   it('counteroffer: commits the negotiated price and ringing outbox together, without assigning or charging', async () => {
     const { source, d, r, edits, dto } = await prepare();
     const offer = await edits.proposeCounterOffer(d.user.id, r.id, dto);
-    expect(Number(offer.pricePerSeat)).toBe(1500);
+    expect(Number(offer.pricePerSeat)).toBe(3000);
     const current = await source.getRepository(TripRequest).findOneByOrFail({ id: r.id });
     expect(current).toMatchObject({ status: 'offers_received', selectedDriverId: null, selectedPricePerSeat: null, tripId: null });
     const [invitation] = await source.query('SELECT * FROM trip_request_dispatch_offers WHERE "requestId"=$1', [r.id]);
@@ -53,7 +67,7 @@ export function counterOfferPostgresTests(context: () => Fixture) {
     expect(new Date(invitation.expiresAt).getTime()).toBeGreaterThan(Date.now() + 90000);
     const notice = await notification(source, offer.id);
     expect(notice).toMatchObject({ userId: r.passengerId, status: 'pending', data: {
-      type: 'driver_offer', ringAlert: 'counter-offer-v1', pricePerSeat: 1500, offerId: offer.id } });
+      type: 'driver_offer', ringAlert: 'counter-offer-v1', pricePerSeat: 3000, offerId: offer.id } });
     expect(await isRideResponseDeliverable(source.manager, notice)).toBe(true);
     // The actual durable socket publisher uses the same payload as the push worker.
     const publish = jest.fn().mockReturnValue(true);
@@ -68,7 +82,9 @@ export function counterOfferPostgresTests(context: () => Fixture) {
     const { source, d, r, edits, dto } = await prepare();
     await source.query('ALTER TABLE notifications ADD CONSTRAINT counteroffer_test_outbox CHECK (false) NOT VALID');
     try {
-      await expect(edits.proposeCounterOffer(d.user.id, r.id, dto)).rejects.toThrow();
+      await expect(edits.proposeCounterOffer(d.user.id, r.id, dto)).rejects.toMatchObject({
+        driverError: { code: '23514', constraint: 'counteroffer_test_outbox' },
+      });
       expect(await source.getRepository(DriverOffer).countBy({ tripRequestId: r.id })).toBe(0);
       expect(await source.query('SELECT 1 FROM trip_request_dispatch_offers WHERE "requestId"=$1', [r.id])).toHaveLength(0);
       expect((await source.getRepository(TripRequest).findOneByOrFail({ id: r.id })).status).toBe('pending');
@@ -93,7 +109,7 @@ export function counterOfferPostgresTests(context: () => Fixture) {
     await edits.acceptDriverOffer(r.passengerId, r.id, { offerId: offer.id });
     const current = await source.getRepository(TripRequest).findOneByOrFail({ id: r.id });
     expect(current.status).toBe('driver_selected'); expect(current.selectedDriverId).toBe(d.user.id);
-    expect(Number(current.selectedPricePerSeat)).toBe(1500);
+    expect(Number(current.selectedPricePerSeat)).toBe(3000);
     const receipt = await source.getRepository(Notification).findOneByOrFail({ eventKey: `offer-accepted:${offer.id}` });
     expect(receipt).toMatchObject({ userId: d.user.id, fcmToken: '', data: { type: 'offer_accepted',
       role: 'driver', driverId: d.user.id, passengerId: r.passengerId, tripRequestId: r.id } });
@@ -115,7 +131,9 @@ export function counterOfferPostgresTests(context: () => Fixture) {
     const offer = await edits.proposeCounterOffer(d.user.id, r.id, dto);
     await source.query('ALTER TABLE notifications ADD CONSTRAINT acceptance_test_outbox CHECK (false) NOT VALID');
     try {
-      await expect(edits.acceptDriverOffer(r.passengerId, r.id, { offerId: offer.id })).rejects.toThrow();
+      await expect(edits.acceptDriverOffer(r.passengerId, r.id, { offerId: offer.id })).rejects.toMatchObject({
+        driverError: { code: '23514', constraint: 'acceptance_test_outbox' },
+      });
       expect((await source.getRepository(DriverOffer).findOneByOrFail({ id: offer.id })).status).toBe('pending');
       expect((await source.getRepository(TripRequest).findOneByOrFail({ id: r.id })).selectedDriverId).toBeNull();
     } finally { await source.query('ALTER TABLE notifications DROP CONSTRAINT acceptance_test_outbox'); }

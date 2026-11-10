@@ -181,7 +181,7 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
       departureLocation: 'Départ de test', arrivalLocation: 'Arrivée de test',
       departurePoint: { type: 'Point', coordinates: [15.31, -4.3] }, arrivalPoint: { type: 'Point', coordinates: [15.32, -4.3] },
       departureDateMin: new Date(Date.now() + 1000), departureDateMax: new Date(Date.now() + 2400000),
-      numberOfSeats: seats, maxPricePerSeat: 1000, vehicleType: VehicleType.CAR });
+      numberOfSeats: seats, maxPricePerSeat: 2500, vehicleType: VehicleType.CAR });
   };
   const offers = (requestId: string) => source.query('SELECT * FROM trip_request_dispatch_offers WHERE "requestId" = $1 ORDER BY "createdAt"', [requestId]);
   driverSchedulePostgresTests(() => ({ source, driver, request }));
@@ -589,7 +589,7 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     const created = await edits.create(owner.id, { targetDriverId: chosen.user.id, immediateDispatch: true,
       departureLocation: 'Départ test', arrivalLocation: 'Arrivée test', departureCoordinates: [15.31, -4.3],
       arrivalCoordinates: [15.32, -4.3], departureDateMin: new Date(Date.now() + 60_000).toISOString(),
-      departureDateMax: new Date(Date.now() + 600_000).toISOString(), vehicleType: VehicleType.CAR, maxPricePerSeat: 1500 });
+      departureDateMax: new Date(Date.now() + 600_000).toISOString(), vehicleType: VehicleType.CAR, maxPricePerSeat: 2500 });
     expect(created.targetDriverId).toBe(chosen.user.id); await waitForDispatchCycles();
     const [invitation] = await offers(created.id); expect(invitation.driverId).toBe(chosen.user.id);
     await edits.openToNearbyDrivers(owner.id, created.id); await waitForDispatchCycles(); await service.tick();
@@ -632,7 +632,7 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
   it('publishes a terminal hint after a classical offer acceptance using a partial TypeORM update', async () => {
     const d = await driver(), r = await request(false), edits = editor();
     const offer = await edits.createDriverOffer(d.user.id, r.id, { vehicleId: d.vehicle.id,
-      proposedDepartureDate: new Date(Date.now() + 60000).toISOString(), pricePerSeat: 1000, availableSeats: 1 });
+      proposedDepartureDate: new Date(Date.now() + 60000).toISOString(), pricePerSeat: 2500, availableSeats: 1 });
     const publish = jest.fn(), changes = new RideAlertChanges(source, { publish } as any);
     try {
       await edits.acceptDriverOffer(r.passengerId, r.id, { offerId: offer.id });
@@ -742,12 +742,12 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
   it('editing a classical request retires persisted offers; those old terms cannot be accepted', async () => {
     const d = await driver(); const r = await request(false); const edits = editor();
     const offer = await edits.createDriverOffer(d.user.id, r.id, { vehicleId: d.vehicle.id,
-      proposedDepartureDate: new Date(Date.now() + 60000).toISOString(), pricePerSeat: 1000, availableSeats: 1 });
+      proposedDepartureDate: new Date(Date.now() + 60000).toISOString(), pricePerSeat: 2500, availableSeats: 1 });
     await edits.update(r.passengerId, r.id, { description: 'Nouveau point de rencontre' });
     expect((await source.getRepository(DriverOffer).findOneByOrFail({ id: offer.id })).status).toBe('rejected');
     await expect(edits.acceptDriverOffer(r.passengerId, r.id, { offerId: offer.id })).rejects.toThrow('disponible');
     const replacement = await edits.createDriverOffer(d.user.id, r.id, { vehicleId: d.vehicle.id,
-      proposedDepartureDate: new Date(Date.now() + 60000).toISOString(), pricePerSeat: 1000, availableSeats: 1 });
+      proposedDepartureDate: new Date(Date.now() + 60000).toISOString(), pricePerSeat: 2500, availableSeats: 1 });
     await expect(edits.acceptDriverOffer(r.passengerId, r.id, { offerId: replacement.id })).resolves.toMatchObject({ status: 'driver_selected', selectedDriverId: d.user.id });
     expect((await source.getRepository(DriverOffer).findOneByOrFail({ id: offer.id })).status).toBe('rejected');
   });
