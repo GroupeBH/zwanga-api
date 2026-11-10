@@ -25,7 +25,26 @@ export class PartnerMember {
   @ManyToOne(() => User, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'userId' }) user: User;
   @Column({ length: 30 }) role: string;
   @Column({ length: 20, default: 'ACTIVE' }) status: string;
+  @Column({ type: 'jsonb', default: () => "'[]'::jsonb" }) zones: string[];
   @CreateDateColumn() createdAt: Date;
+}
+
+@Entity('partner_field_daily_reports')
+@Index('UQ_partner_field_report_day', ['organizationId', 'agentId', 'reportDate'], { unique: true })
+@Index('IDX_partner_field_report_team_date', ['organizationId', 'reportDate'])
+export class PartnerFieldDailyReport {
+  @PrimaryGeneratedColumn('uuid') id: string;
+  @Column({ type: 'uuid' }) organizationId: string;
+  @ManyToOne(() => PartnerOrganization, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'organizationId' }) organization: PartnerOrganization;
+  @Column({ type: 'uuid' }) agentId: string;
+  @ManyToOne(() => User, { onDelete: 'CASCADE' }) @JoinColumn({ name: 'agentId' }) agent: User;
+  @Column({ type: 'date' }) reportDate: string;
+  @Column({ type: 'integer', default: 0 }) contactsCount: number;
+  @Column({ type: 'varchar', length: 100, nullable: true }) zone: string | null;
+  @Column({ type: 'text' }) summary: string;
+  @Column({ type: 'text', nullable: true }) obstacles: string | null;
+  @CreateDateColumn() createdAt: Date;
+  @UpdateDateColumn() updatedAt: Date;
 }
 
 @Entity('partner_field_leads')

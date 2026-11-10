@@ -4,7 +4,7 @@ import { Auth } from '../auth/decorators/auth.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
 import { UserRole } from '../users/entities/user.entity';
-import { CreateFieldAgentDto, CreateFieldLeadDto, CreateFieldOrganizationDto, CreateFieldTicketDto, CreatePartnerOrganizationDto, SetFieldTargetDto } from './partners.dto';
+import { CreateFieldAgentDto, CreateFieldLeadDto, CreateFieldOrganizationDto, CreateFieldTicketDto, CreatePartnerOrganizationDto, SaveFieldDailyReportDto, SetFieldTargetDto, SetFieldZonesDto } from './partners.dto';
 import { PartnersService } from './partners.service';
 
 @ApiTags('Partners')
@@ -26,6 +26,19 @@ export class PartnersController {
   @Get('organizations/:id/field/overview')
   overview(@Request() req, @Param('id', ParseUUIDPipe) id: string) { return this.partners.overview(req.user.userId, id); }
 
+  @Get('organizations/:id/field/team')
+  fieldTeam(@Request() req, @Param('id', ParseUUIDPipe) id: string) { return this.partners.fieldTeam(req.user.userId, id); }
+
+  @Get('organizations/:id/field/earnings')
+  earnings(@Request() req, @Param('id', ParseUUIDPipe) id: string) { return this.partners.fieldEarnings(req.user.userId, id); }
+
+  @Get('organizations/:id/field/reports')
+  fieldReports(@Request() req, @Param('id', ParseUUIDPipe) id: string) { return this.partners.listFieldReports(req.user.userId, id); }
+
+  @Post('organizations/:id/field/reports')
+  @SensitiveThrottle(10, 60000)
+  saveFieldReport(@Request() req, @Param('id', ParseUUIDPipe) id: string, @Body() dto: SaveFieldDailyReportDto) { return this.partners.saveFieldReport(req.user.userId, id, dto); }
+
   @Post('organizations/:id/field/leads')
   @SensitiveThrottle(20, 60000)
   createLead(@Request() req, @Param('id', ParseUUIDPipe) id: string, @Body() dto: CreateFieldLeadDto) { return this.partners.createLead(req.user.userId, id, dto); }
@@ -46,11 +59,19 @@ export class PartnersController {
 
   @Get('admin/organizations')
   @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
-  listAdminOrganizations() { return this.partners.listAdminOrganizations(); }
+  listAdminOrganizations(@Query('scope') scope?: string) { return this.partners.listAdminOrganizations(scope); }
 
   @Get('admin/organizations/:id/members')
   @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
   listAdminMembers(@Param('id', ParseUUIDPipe) id: string, @Query('period') period?: string) { return this.partners.listAdminMembers(id, period); }
+
+  @Get('admin/organizations/:id/field/reports')
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+  adminFieldReports(@Param('id', ParseUUIDPipe) id: string) { return this.partners.listAdminFieldReports(id); }
+
+  @Get('admin/organizations/:id/field/team')
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+  adminFieldTeam(@Param('id', ParseUUIDPipe) id: string) { return this.partners.adminFieldTeam(id); }
 
   @Post('admin/field/organizations')
   @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
@@ -70,4 +91,8 @@ export class PartnersController {
   @Put('admin/organizations/:id/field/targets/:agentId')
   @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
   setTarget(@Param('id', ParseUUIDPipe) id: string, @Param('agentId', ParseUUIDPipe) agentId: string, @Body() dto: SetFieldTargetDto) { return this.partners.setTarget(id, agentId, dto); }
+
+  @Put('admin/organizations/:id/field/agents/:agentId/zones')
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+  setZones(@Param('id', ParseUUIDPipe) id: string, @Param('agentId', ParseUUIDPipe) agentId: string, @Body() dto: SetFieldZonesDto) { return this.partners.setFieldZones(id, agentId, dto); }
 }

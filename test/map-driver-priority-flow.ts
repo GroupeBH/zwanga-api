@@ -13,7 +13,7 @@ import { TripRequestsController } from '../src/trip-requests/trip-requests.contr
 import { TripRequestsService } from '../src/trip-requests/trip-requests.service';
 import { JwtAuthGuard } from '../src/common/guards/jwt-auth.guard';
 import { Test } from '@nestjs/testing';
-import { ExecutionContext, ValidationPipe } from '@nestjs/common';
+import { ExecutionContext, INestApplication, ValidationPipe } from '@nestjs/common';
 import supertest from 'supertest';
 import type { Server } from 'node:http';
 
@@ -169,61 +169,50 @@ export function mapDriverPriorityFlow(get: () => Fixture) {
       (await offers(r.id)).filter((o) => o.status === 'pending'),
     ).toHaveLength(1);
   });
-  it('HTTP controller validates opaque markers and owner identity before the real SQL mutation', async () => {
-    const { db, driver, request } = get();
-    await driver();
-    const r = await request();
-    const map = await requestSearchMap(db.manager, r.passengerId, r.id);
-    expect(map.vehicles[0]).not.toHaveProperty('driverId');
-    const dto = {
-      markerId: map.vehicles[0].id,
-      expectedUpdatedAt: r.updatedAt.toISOString(),
-    };
+  describe('map targeting HTTP contract', () => {
+    let app: INestApplication | undefined;
     let actor = '00000000-0000-4000-8000-000000000001';
-    const module = await Test.createTestingModule({
-      controllers: [TripRequestsController],
-      providers: [
-        {
-          provide: TripRequestsService,
-          useValue: {
-            targetDriverFromMap: async (
-              owner: string,
-              id: string,
-              body: typeof dto,
-            ) => {
+    // Nest's cold HTTP initialization is setup, not request latency. Keep the
+    // scenario's default 5s budget and all ownership/DTO/idempotence assertions.
+    beforeAll(async () => {
+      const module = await Test.createTestingModule({
+        controllers: [TripRequestsController],
+        providers: [{
+          provide: TripRequestsService, useValue: {
+            targetDriverFromMap: async (owner: string, id: string,
+              body: { markerId: string; expectedUpdatedAt: string }) => {
+              const { db } = get();
               await targetMapDriver(db.manager, owner, id, body);
               return db.getRepository(TripRequest).findOneByOrFail({ id });
             },
           },
-        },
-      ],
-    })
-      .overrideGuard(JwtAuthGuard)
-      .useValue({
-        canActivate: (context: ExecutionContext) => {
-          context
-            .switchToHttp()
-            .getRequest<{ user: { userId: string } }>().user = {
-            userId: actor,
-          };
-          return true;
-        },
+        }],
       })
-      .compile();
-    const app = module.createNestApplication();
-    app.useGlobalPipes(
-      new ValidationPipe({
-        whitelist: true,
-        forbidNonWhitelisted: true,
-        transform: true,
-      }),
-    );
-    await app.init();
-    try {
+        .overrideGuard(JwtAuthGuard).useValue({
+          canActivate: (context: ExecutionContext) => {
+            context.switchToHttp().getRequest<{ user: { userId: string } }>().user = { userId: actor };
+            return true;
+          },
+        }).compile();
+      app = module.createNestApplication();
+      app.useGlobalPipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }));
+      try { await app.init(); }
+      catch (error) { await app.close(); app = undefined; throw error; }
+    }, 30000);
+    afterAll(async () => { await app?.close(); }, 10000);
+
+    it('HTTP controller validates opaque markers and owner identity before the real SQL mutation', async () => {
+      const { db, driver, request } = get();
+      await driver();
+      const r = await request();
+      const map = await requestSearchMap(db.manager, r.passengerId, r.id);
+      expect(map.vehicles[0]).not.toHaveProperty('driverId');
+      const dto = { markerId: map.vehicles[0].id, expectedUpdatedAt: r.updatedAt.toISOString() };
+      actor = '00000000-0000-4000-8000-000000000001';
       const call = () =>
-        supertest(app.getHttpServer() as Server).post(
+        supertest(app!.getHttpServer() as Server).post(
           `/trip-requests/${r.id}/target-map-driver`,
-        );
+        ).timeout({ response: 2000, deadline: 3000 });
       await call().send(dto).expect(404);
       actor = r.passengerId;
       await call()
@@ -237,8 +226,6 @@ export function mapDriverPriorityFlow(get: () => Fixture) {
         .expect(409);
       await call().send(dto).expect(201);
       await call().send(dto).expect(201);
-    } finally {
-      await app.close();
-    }
+    });
   });
 }

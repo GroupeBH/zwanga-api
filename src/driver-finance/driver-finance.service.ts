@@ -9,7 +9,11 @@ import { WalletService } from '../wallet/wallet.service';
 import { TOKEN_VALUE_CDF } from '../wallet/token-value.policy';
 import { SubscriptionsService } from '../subscriptions/subscriptions.service';
 import { Trip } from '../trips/entities/trip.entity';
-import { Booking, BookingStatus } from '../bookings/entities/booking.entity';
+import {
+  Booking,
+  BookingStatus,
+  BookingPaymentStatus,
+} from '../bookings/entities/booking.entity';
 import {
   WalletAccount,
   WalletAccountType,
@@ -18,6 +22,7 @@ import { TripPaymentMode } from '../payments/enums/trip-payment-mode.enum';
 import {
   cashCommissionTokens,
   DRIVER_FINANCE,
+  DRIVER_CASH_CREDIT_TRIP_LIMIT,
   normalizeAcceptedPaymentModes,
 } from './driver-finance.policy';
 
@@ -29,13 +34,26 @@ export class DriverFinanceService {
     private readonly subscriptions: SubscriptionsService,
   ) {}
 
-  private async reserveState(userId: string) {
+  private async reserveState(userId: string, journeyId: string | null = null) {
     const account = await this.db
       .getRepository(WalletAccount)
       .findOneBy({ userId, type: WalletAccountType.POINTS });
-    const [row] = await this.db.query<{ debt: string; enabled: boolean }[]>(
-      'SELECT COALESCE(SUM("debtTokens"),0) AS debt, zwanga_cash_policy_enabled() AS enabled FROM cash_commissions WHERE "driverId" = $1 AND "debtTokens" > 0',
-      [userId],
+    const [row] = await this.db.query<
+      {
+        debt: string;
+        enabled: boolean;
+        creditAvailable: boolean;
+        creditUsed: number;
+        creditPaid: number;
+        debtAmount: string;
+      }[]
+    >(
+      `SELECT COALESCE(SUM("debtTokens"),0) AS debt, zwanga_cash_policy_enabled() AS enabled,
+        zwanga_cash_credit_available($1, $2::uuid) AS "creditAvailable",
+        zwanga_cash_credit_used($1) AS "creditUsed", zwanga_cash_credit_paid($1) AS "creditPaid",
+        COALESCE(SUM("debtTokens" * "moneyPerToken"),0) AS "debtAmount"
+        FROM cash_commissions WHERE "driverId" = $1 AND "debtTokens" > 0`,
+      [userId, journeyId],
     );
     const reservedTokens = Number(account?.reservedCashCommissionBalance ?? 0);
     const debtTokens = Number(row?.debt ?? 0);
@@ -48,6 +66,7 @@ export class DriverFinanceService {
       ),
       reservedTokens,
       debtTokens,
+      debtAmount: Number(row?.debtAmount ?? 0),
       remainingCreditTokens: Math.max(
         0,
         Math.round((DRIVER_FINANCE.cashDebtLimitTokens - debtTokens) * 100) /
@@ -56,6 +75,20 @@ export class DriverFinanceService {
       blocked: Boolean(account?.withdrawalsBlocked),
       moneyPerToken: TOKEN_VALUE_CDF,
       debtLimitTokens: DRIVER_FINANCE.cashDebtLimitTokens,
+      creditAllowance: {
+        eligible: row?.creditAvailable === true && !account?.withdrawalsBlocked,
+        remainingTrips: Math.max(
+          0,
+          DRIVER_CASH_CREDIT_TRIP_LIMIT - Number(row?.creditUsed ?? 0),
+        ),
+        completedTrips: Number(row?.creditPaid ?? 0),
+        reservedTrips: Math.max(
+          0,
+          Number(row?.creditUsed ?? 0) - Number(row?.creditPaid ?? 0),
+        ),
+        tripLimit: DRIVER_CASH_CREDIT_TRIP_LIMIT,
+        oneTime: true,
+      },
     };
   }
 
@@ -80,11 +113,9 @@ export class DriverFinanceService {
         ...cash,
         enabled:
           !cash.blocked &&
-          cash.debtTokens <= cash.debtLimitTokens &&
-          cash.availableTokens + cash.remainingCreditTokens > 0,
+          (cash.creditAllowance.eligible ||
+            (cash.debtTokens === 0 && cash.availableTokens > 0)),
         availableCreditTokens: !cash.blocked ? cash.remainingCreditTokens : 0,
-        debtAmount:
-          Math.round(cash.debtTokens * cash.moneyPerToken * 100) / 100,
         coverageAmount: Math.floor(
           (cash.availableTokens * cash.moneyPerToken) /
             DRIVER_FINANCE.commissionRate,
@@ -97,26 +128,26 @@ export class DriverFinanceService {
 
   private async options(trip: Trip, amount: number, booking?: Booking) {
     const accepted = normalizeAcceptedPaymentModes(trip.acceptedPaymentModes);
-    const state = await this.reserveState(trip.driverId);
+    const state = await this.reserveState(
+      trip.driverId,
+      trip.tripRequestId ?? trip.id,
+    );
     const tokens = cashCommissionTokens(
       amount,
       Number(booking?.cashCommissionTokenValue) > 0
         ? Number(booking!.cashCommissionTokenValue)
         : state.moneyPerToken,
     );
-    const credit =
-      booking && booking.cashCommissionPolicyVersion < 2
-        ? 0
-        : state.remainingCreditTokens;
     const alreadyAcceptedCash =
       booking?.paymentMode === TripPaymentMode.CASH &&
       ['accepted', 'completed'].includes(booking.status);
     const cashAvailable =
       amount <= 0 ||
       alreadyAcceptedCash ||
+      state.creditAllowance.eligible ||
       (!state.blocked &&
-        state.debtTokens <= state.debtLimitTokens &&
-        state.availableTokens + credit >= tokens);
+        state.debtTokens === 0 &&
+        state.availableTokens >= tokens);
     return {
       acceptedPaymentModes: accepted,
       availablePaymentModes: accepted.filter(
@@ -125,7 +156,7 @@ export class DriverFinanceService {
       cashUnavailableReason:
         cashAvailable || !accepted.includes(TripPaymentMode.CASH)
           ? null
-          : 'La commission dépasserait la réserve disponible ou le plafond cumulé de 25 jetons de dette du conducteur. Choisissez un autre mode ou réessayez après sa recharge.',
+          : 'Après les six premiers trajets cash, le conducteur doit régulariser ses commissions et disposer des jetons nécessaires. Choisissez un autre mode ou réessayez après sa recharge.',
       commissionRate: DRIVER_FINANCE.commissionRate,
     };
   }
@@ -168,9 +199,15 @@ export class DriverFinanceService {
     }
     return {
       ...result,
-        mixedCashSupported: !booking.tokenCashFallbackAt && booking.status === BookingStatus.COMPLETED && booking.droppedOff &&
-        !booking.mixedPaymentAt && !booking.cashReceivedAt && booking.paymentStatus !== 'succeeded' &&
-        booking.paymentCurrency === 'CDF' && Number(booking.cashCommissionTokenValue) > 0 &&
+      mixedCashSupported:
+        !booking.tokenCashFallbackAt &&
+        booking.status === BookingStatus.COMPLETED &&
+        booking.droppedOff &&
+        !booking.mixedPaymentAt &&
+        !booking.cashReceivedAt &&
+        booking.paymentStatus !== BookingPaymentStatus.SUCCEEDED &&
+        booking.paymentCurrency === 'CDF' &&
+        Number(booking.cashCommissionTokenValue) > 0 &&
         result.acceptedPaymentModes.includes(TripPaymentMode.POINTS) &&
         result.acceptedPaymentModes.includes(TripPaymentMode.CASH) &&
         result.availablePaymentModes.includes(TripPaymentMode.CASH),

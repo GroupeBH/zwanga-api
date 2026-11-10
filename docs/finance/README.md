@@ -60,6 +60,8 @@ Toute évolution financière doit respecter les règles suivantes :
 
 ## Registre des documents
 
+- [Tarification actuelle des trajets : minimum, kilomètres, trafic et pluie](./trip-pricing-2026-11-10.md)
+
 - [Crédit fiable des subventions cash et reprise autorisée](./cash-subsidy-credit-reliability.md)
 - [Fidélité des trajets terminés](./trip-loyalty.md)
 - [Configuration FlexPaie payout, variable par variable](./flexpaie-payout-configuration.md)

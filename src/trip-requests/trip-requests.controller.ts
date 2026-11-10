@@ -146,7 +146,7 @@ export class TripRequestsController {
   @ApiOperation({
     summary: 'Recommend a trip request price',
     description:
-      'Calcule le prix recommandé pour une demande de trajet : voiture = 500 FC par kilomètre et par passager, moto = 1000 FC par kilomètre et par passager. Une forte pluie dans une zone du parcours applique un coefficient de 1.3.',
+      'Estimation par place : minimum 2 500 FC, 1 500 FC/km normalement, 2 000 FC/km si forte pluie ou trafic lourd. En trafic lourd (au moins +25 % et 5 min), ajout de 120 FC par minute de retard seulement. Le détail est retourné dans pricing ; aucun recalcul du prix déjà accepté.',
   })
   async recommendPrice(@Body() payload: RecommendTripRequestPriceDto) {
     return this.tripRequestsService.recommendPrice(payload);
@@ -158,7 +158,7 @@ export class TripRequestsController {
   @ApiOperation({
     summary: 'List vehicle choices and their recommended prices',
     description:
-      'Retourne, pour un même itinéraire, chaque type de véhicule disponible avec son tarif par kilomètre, son prix par place et son prix total. Ce endpoint doit être appelé avant la création de la demande.',
+      'Retourne les estimations voiture, moto 2 roues et moto 3 roues selon la même grille : minimum 2 500 FC par place, 1 500 FC/km normalement, 2 000 FC/km si forte pluie ou trafic lourd, plus 120 FC/min de retard en trafic lourd. recommendedTotalPrice inclut déjà les places et les majorations ; ne pas les appliquer à nouveau côté mobile. availableForRequestedSeats précise la capacité. À appeler avant la création de la demande.',
   })
   async getVehicleOptions(@Body() payload: TripRequestVehicleOptionsDto) {
     return this.tripRequestsService.getVehicleOptions(payload);

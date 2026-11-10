@@ -17,6 +17,7 @@ import { publicationRequestUuidCases } from '../../test/publication-request-uuid
 import { cumulativeCashDebtCases } from '../../test/cumulative-cash-debt-postgres';
 import { mixedCashCommissionCases } from '../../test/mixed-cash-commission-postgres';
 import { tokenCashCommissionCases } from '../../test/token-cash-commission-postgres';
+import { driverCashCreditCases } from '../../test/driver-cash-credit-postgres';
 import { WalletLedgerEntry } from '../wallet/entities/wallet-ledger-entry.entity';
 import { ModuleKind, ScriptTarget, transpileModule } from 'typescript';
 
@@ -45,7 +46,8 @@ const pgBin = process.env.DRIVER_FINANCE_TEST_POSTGRES_BIN;
           '-E',
           'UTF8',
         ],
-        { windowsHide: true, stdio: 'pipe', timeout: 30_000 },
+        // Match the shared isolated-cluster helper on Windows/loaded CI hosts.
+        { windowsHide: true, stdio: 'pipe', timeout: 60_000 },
       );
       const port = await new Promise<number>((done, reject) => {
         const server = createServer();
@@ -106,10 +108,12 @@ const pgBin = process.env.DRIVER_FINANCE_TEST_POSTGRES_BIN;
       } finally {
         await runner.release();
       }
-    }, 60_000);
+    }, 90_000);
     beforeEach(async () => {
+      const [credit] = await db.query("SELECT to_regclass('driver_cash_credit_trips') AS present");
       await db.query(
-        'TRUNCATE notifications,wallet_ledger_entries,cash_commissions,driver_pro_trial_claims,welcome_bonus_grants,kyc_documents,subscriptions,bookings,trip_requests,trips,wallet_accounts,users',
+        'TRUNCATE notifications,wallet_ledger_entries,cash_commissions,driver_pro_trial_claims,welcome_bonus_grants,kyc_documents,subscriptions,bookings,trip_requests,trips,wallet_accounts,users' +
+          (credit.present ? ',driver_cash_credit_trips' : ''),
       );
       await db.query('INSERT INTO users (id,phone) VALUES ($1,$2)', [
         driver,
@@ -1132,5 +1136,6 @@ const pgBin = process.env.DRIVER_FINANCE_TEST_POSTGRES_BIN;
     cumulativeCashDebtCases(() => db, driver, trip);
     mixedCashCommissionCases(() => db, driver, trip);
     tokenCashCommissionCases(() => db, driver, trip);
+    driverCashCreditCases(() => db, driver, trip);
   },
 );

@@ -63,7 +63,9 @@ describe('Payment integration tests are enabled before deployment', () => {
       "if: inputs.action == 'deploy' || inputs.action == 'bootstrap'",
     );
     expect(setup).toContain('postgresql-16 postgresql-16-postgis-3');
-    expect(setup).toContain(`${binVariable}=/usr/lib/postgresql/16/bin`);
+    const suites = setup.match(/for suite in ([A-Z_ ]+); do/)?.[1].split(/\s+/);
+    expect(suites).toContain('MIXED_CASH');
+    expect(setup).toContain('${suite}_TEST_POSTGRES_BIN=/usr/lib/postgresql/16/bin');
     expect(setup).toContain('>> "${GITHUB_ENV}"');
     expect(workflow.slice(testsIndex, awsIndex)).toContain(
       'npm run test -- --runInBand',

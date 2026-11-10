@@ -13,7 +13,7 @@ describe('driver finance policy', () => {
       durationDays: 30,
       commissionRate: 0.05,
       cashCommissionRate: 0.05,
-      cashDebtLimitTokens: 25,
+      cashDebtLimitTokens: 0,
     });
     expect(cashCommissionTokens(100000, 100)).toBe(50);
     expect(cashCommissionTokens(200000, 100)).toBe(100);

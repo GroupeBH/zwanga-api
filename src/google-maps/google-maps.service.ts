@@ -677,6 +677,9 @@ export class GoogleMapsService {
         const legs = route.legs.map((leg: any) => ({
           distance: leg.distance.value,
           duration: leg.duration.value,
+          durationInTraffic: typeof leg.duration_in_traffic?.value === 'number' &&
+            Number.isFinite(leg.duration_in_traffic.value) && leg.duration_in_traffic.value > 0
+            ? leg.duration_in_traffic.value : undefined,
           startAddress: leg.start_address,
           endAddress: leg.end_address,
           startLocation: {
@@ -727,8 +730,8 @@ export class GoogleMapsService {
         status: response.data.status,
       };
 
-      // Cache the result for one week (604800 seconds)
-      await this.cacheService.set(cacheKey, result, 604800);
+      // Live traffic must not inherit the one-week static geometry cache.
+      await this.cacheService.set(cacheKey, result, dto.departureTime ? 60 : 604800);
       await rememberRoutePreview(this.cacheService, dto, result);
 
       return result;
@@ -778,11 +781,11 @@ export class GoogleMapsService {
       alternatives: false,
       language: dto.language,
       region: dto.region,
-      departureTime: dto.departureTime,
+      departureTime: dto.departureTime ? Math.floor(dto.departureTime / 60) * 60 : undefined,
       arrivalTime: dto.arrivalTime,
     });
 
     const hash = crypto.createHash('md5').update(data).digest('hex');
-    return `google_maps:directions:${hash}`;
+    return `google_maps:directions:${dto.departureTime ? 'traffic-v1:' : ''}${hash}`;
   }
 }

@@ -63,6 +63,8 @@ import {
   saveRegistrationWithPhone,
 } from '../users/registration-phone.policy';
 
+import { accountPhoneWhere, canonicalAccountPhone } from '../users/phone-identity';
+
 const APPLE_ISSUER = 'https://appleid.apple.com';
 const APPLE_PUBLIC_KEYS_URL = 'https://appleid.apple.com/auth/keys';
 const APPLE_KEYS_CACHE_MS = 6 * 60 * 60 * 1000;
@@ -178,7 +180,7 @@ export class AuthService {
       referralReferringLink,
       referralCapturedAt,
     } = registerDto;
-    const phone = requestedPhone.trim();
+    const phone = canonicalAccountPhone(requestedPhone);
     assertSelfServiceUserRole(role);
     const legalFirstName = normalizeLegalName(firstName);
     const legalLastName = normalizeLegalName(lastName);
@@ -198,7 +200,7 @@ export class AuthService {
 
     // Check if user already exists
     const existingUser = await this.userRepository.findOne({
-      where: [{ phone }],
+      where: [{ phone: accountPhoneWhere(phone, false) }],
     });
 
     if (accountReservesPhone(existingUser)) {
@@ -313,7 +315,7 @@ export class AuthService {
   }
 
   async validateUser(phone: string, pin: string): Promise<User | null> {
-    const user = await this.userRepository.findOne({ where: { phone },
+    const user = await this.userRepository.findOne({ where: { phone: accountPhoneWhere(phone) },
       select: ['id', 'password'] });
 
     if (!user) {
@@ -350,7 +352,7 @@ export class AuthService {
   async login(loginDto: LoginDto) {
     // Find user by phone
     const user = await this.userRepository.findOne({
-      where: { phone: loginDto.phone },
+      where: { phone: accountPhoneWhere(loginDto.phone) },
     });
 
     if (!user) {
@@ -366,7 +368,7 @@ export class AuthService {
 
     const validatedUser = await this.validateUser(loginDto.phone, loginDto.pin);
 
-    if (!validatedUser) {
+    if (!validatedUser || validatedUser.id !== user.id) {
       this.logger.warn(`Login failed: Invalid PIN for user ${user.id}`);
       throw new UnauthorizedException(
         'Numéro de téléphone ou code PIN invalide',
@@ -398,7 +400,7 @@ export class AuthService {
     dto: PinResetRequestDto,
   ): Promise<{ message: string }> {
     const user = await this.userRepository.findOne({
-      where: { phone: dto.phone },
+      where: { phone: accountPhoneWhere(dto.phone) },
     });
 
     // Return the same response for unknown or ineligible accounts to avoid
@@ -407,7 +409,7 @@ export class AuthService {
       return { message: PIN_RESET_GENERIC_MESSAGE };
     }
 
-    const delivery = await this.otpService.sendOtp(dto.phone, 'pin_reset');
+    const delivery = await this.otpService.sendOtp(canonicalAccountPhone(user.phone), 'pin_reset');
     await this.redisService.set(
       this.getPinResetOtpKey(user.id),
       PIN_RESET_OTP_PENDING_VALUE,
@@ -422,7 +424,7 @@ export class AuthService {
     expiresInSeconds: number;
   }> {
     const user = await this.userRepository.findOne({
-      where: { phone: dto.phone },
+      where: { phone: accountPhoneWhere(dto.phone) },
     });
 
     if (!this.canUseSelfServicePinReset(user)) {
@@ -437,7 +439,7 @@ export class AuthService {
     }
 
     const verification = await this.otpService.verifyOtp(
-      dto.phone,
+      canonicalAccountPhone(user.phone),
       dto.otp,
       'pin_reset',
     );
@@ -605,7 +607,7 @@ export class AuthService {
 
   async adminLogin(loginDto: AdminLoginDto): Promise<AuthResponseDto> {
     const user = await this.userRepository.findOne({
-      where: { phone: loginDto.phone },
+      where: { phone: accountPhoneWhere(loginDto.phone) },
     });
 
     if (!user) {
@@ -632,7 +634,7 @@ export class AuthService {
     }
 
     const validatedUser = await this.validateUser(loginDto.phone, password);
-    if (!validatedUser) {
+    if (!validatedUser || validatedUser.id !== user.id) {
       this.logger.warn(
         `Admin login failed: Invalid password for user ${user.id}`,
       );
@@ -989,24 +991,7 @@ export class AuthService {
   }
 
   private normalizePhoneForIdentity(phone: string): string {
-    const defaultCountryCode = (
-      this.configService.get<string>('DEFAULT_COUNTRY_CODE') || '+243'
-    ).replace(/\D/g, '');
-    let normalized = phone.trim().replace(/[\s().-]/g, '');
-
-    if (normalized.startsWith('00')) {
-      normalized = `+${normalized.slice(2)}`;
-    }
-
-    if (normalized.startsWith('0')) {
-      normalized = `+${defaultCountryCode}${normalized.slice(1)}`;
-    }
-
-    if (!normalized.startsWith('+')) {
-      normalized = `+${normalized}`;
-    }
-
-    return normalized;
+    return canonicalAccountPhone(phone);
   }
 
   private getGoogleAudiences(): string[] {
@@ -1113,6 +1098,7 @@ export class AuthService {
   ): Promise<AuthResponseDto> {
     const { googleId, email, firstName, lastName, profilePicture } =
       googleProfile;
+    if (phone) phone = canonicalAccountPhone(phone);
 
     // Check if user exists with this Google ID
     let user = await this.userRepository.findOne({
@@ -1152,7 +1138,7 @@ export class AuthService {
         let verifiedPhone: boolean | undefined;
         if (phone && !user.phone) {
           const phoneOwner = await this.userRepository.findOne({
-            where: { phone },
+            where: { phone: accountPhoneWhere(phone, false) },
           });
           if (phoneOwner && phoneOwner.id !== user.id) {
             throw new UnauthorizedException(
@@ -1186,7 +1172,7 @@ export class AuthService {
 
         // Ensure phone is not already used
         const phoneOwner = await this.userRepository.findOne({
-          where: { phone },
+          where: { phone: accountPhoneWhere(phone, false) },
         });
         if (accountReservesPhone(phoneOwner)) {
           throw new UnauthorizedException(
@@ -1515,6 +1501,7 @@ export class AuthService {
     >,
   ): Promise<AuthResponseDto> {
     const { appleId, email, firstName, lastName, emailVerified } = appleProfile;
+    if (phone) phone = canonicalAccountPhone(phone);
 
     let user = await this.userRepository.findOne({
       where: { appleId },
@@ -1550,7 +1537,7 @@ export class AuthService {
       let verifiedPhone: boolean | undefined;
       if (phone && !user.phone) {
         const phoneOwner = await this.userRepository.findOne({
-          where: { phone },
+          where: { phone: accountPhoneWhere(phone, false) },
         });
         if (phoneOwner && phoneOwner.id !== user.id) {
           throw new UnauthorizedException(
@@ -1588,7 +1575,7 @@ export class AuthService {
       }
 
       const phoneOwner = await this.userRepository.findOne({
-        where: { phone },
+        where: { phone: accountPhoneWhere(phone, false) },
       });
       if (accountReservesPhone(phoneOwner)) {
         throw new UnauthorizedException(

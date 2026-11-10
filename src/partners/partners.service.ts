@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
 import { InjectRepository } from '@nestjs/typeorm';
 import { In, Repository } from 'typeorm';
@@ -7,8 +7,10 @@ import { buildProfileState } from '../users/profile-state';
 import { Trip, TripStatus } from '../trips/entities/trip.entity';
 import { SupportService } from '../support/support.service';
 import { SupportTicketCategory, SupportTicketPriority } from '../support/entities/support-ticket.entity';
-import { CreateFieldAgentDto, CreateFieldLeadDto, CreateFieldOrganizationDto, CreateFieldTicketDto, CreatePartnerOrganizationDto, SetFieldTargetDto } from './partners.dto';
-import { PartnerFieldLead, PartnerFieldTarget, PartnerFieldTicket, PartnerMember, PartnerOrganization } from './partner.entities';
+import { Notification, NotificationStatus } from '../notifications/entities/notification.entity';
+import { ReferralsService } from '../referrals/referrals.service';
+import { CreateFieldAgentDto, CreateFieldLeadDto, CreateFieldOrganizationDto, CreateFieldTicketDto, CreatePartnerOrganizationDto, SaveFieldDailyReportDto, SetFieldTargetDto, SetFieldZonesDto } from './partners.dto';
+import { PartnerFieldDailyReport, PartnerFieldLead, PartnerFieldTarget, PartnerFieldTicket, PartnerMember, PartnerOrganization } from './partner.entities';
 import { canonicalFieldPhone, fieldPhoneVariants } from './field-phone';
 
 const FIELD_PERMISSIONS = ['organization.read', 'support.tickets', 'support.tickets.read', 'leads.create', 'recruits.read_own', 'targets.read_own', 'issues.create'];
@@ -26,6 +28,8 @@ export class PartnersService {
     @InjectRepository(User) private readonly users: Repository<User>,
     @InjectRepository(Trip) private readonly trips: Repository<Trip>,
     private readonly support: SupportService,
+    @Optional() @InjectRepository(PartnerFieldDailyReport) private readonly reports?: Repository<PartnerFieldDailyReport>,
+    @Optional() private readonly referrals?: ReferralsService,
   ) {}
 
   private async member(userId: string, organizationId: string): Promise<PartnerMember> {
@@ -61,6 +65,19 @@ export class PartnersService {
         status: 'PROSPECT', partnerTypes: dto.partnerTypes.map((type) => ({ type, status: 'REQUESTED' })),
       }));
       const member = await manager.save(manager.create(PartnerMember, { organizationId: organization.id, userId, role: 'ORG_ADMIN', status: 'ACTIVE' }));
+      const admins = await manager.getRepository(User).find({
+        select: { id: true },
+        where: { role: In([UserRole.ADMIN, UserRole.SUPER_ADMIN]), status: UserStatus.ACTIVE, isActive: true },
+      });
+      if (admins.length) {
+        const notifications = manager.getRepository(Notification);
+        await notifications.save(admins.map((admin) => notifications.create({
+          userId: admin.id, fcmToken: '', title: 'Nouvel espace partenaire',
+          body: `${organization.displayName} attend une validation.`,
+          data: { type: 'partner_space_created', organizationId: organization.id },
+          status: NotificationStatus.SENT, isRead: false, isActive: true,
+        })));
+      }
       member.organization = organization;
       return this.toMine(member);
     });
@@ -80,17 +97,30 @@ export class PartnersService {
   }
 
   async activateOrganization(organizationId: string) {
-    const organization = await this.organizations.findOneBy({ id: organizationId });
-    if (!organization) throw new NotFoundException('Espace inconnu');
-    organization.status = 'ACTIVE';
-    organization.partnerTypes = organization.partnerTypes.map((type) => ({ ...type, status: 'ACTIVE' }));
-    await this.organizations.save(organization);
-    return { id: organization.id, status: organization.status, partnerTypes: organization.partnerTypes };
+    return this.organizations.manager.transaction(async (manager) => {
+      const organization = await manager.getRepository(PartnerOrganization).findOne({
+        where: { id: organizationId }, lock: { mode: 'pessimistic_write' },
+      });
+      if (!organization) throw new NotFoundException('Espace inconnu');
+      if (organization.status !== 'PROSPECT' || organization.partnerTypes.some((type) => type.type === 'FIELD_MARKETING')) {
+        throw new ConflictException('Seules les demandes partenaires en attente peuvent être validées');
+      }
+      organization.status = 'ACTIVE';
+      organization.partnerTypes = organization.partnerTypes.map((type) => ({ ...type, status: 'ACTIVE' }));
+      await manager.save(organization);
+      return { id: organization.id, status: organization.status, partnerTypes: organization.partnerTypes };
+    });
   }
 
-  async listAdminOrganizations() {
-    const organizations = await this.organizations.find({ order: { createdAt: 'DESC' }, take: 200 });
-    return { items: organizations.map((organization) => ({ id: organization.id, displayName: organization.displayName, legalType: organization.legalType, status: organization.status, partnerTypes: organization.partnerTypes, createdAt: organization.createdAt })) };
+  async listAdminOrganizations(scope?: string) {
+    if (scope && !['PARTNER', 'FIELD', 'COMPANY'].includes(scope)) throw new BadRequestException('Périmètre invalide');
+    const query = this.organizations.createQueryBuilder('organization');
+    const fieldCategory = JSON.stringify([{ type: 'FIELD_MARKETING' }]);
+    if (scope === 'FIELD') query.andWhere('organization.partnerTypes @> CAST(:fieldCategory AS jsonb)', { fieldCategory });
+    if (scope === 'PARTNER' || scope === 'COMPANY') query.andWhere('NOT (organization.partnerTypes @> CAST(:fieldCategory AS jsonb))', { fieldCategory });
+    if (scope === 'COMPANY') query.andWhere('organization.legalType = :legalType', { legalType: 'COMPANY' });
+    const [organizations, total] = await query.orderBy('organization.createdAt', 'DESC').take(200).getManyAndCount();
+    return { items: organizations.map((organization) => ({ id: organization.id, displayName: organization.displayName, legalName: organization.legalName, legalType: organization.legalType, status: organization.status, partnerTypes: organization.partnerTypes, createdAt: organization.createdAt })), total };
   }
 
   async listAdminMembers(organizationId: string, requestedPeriod?: string) {
@@ -100,7 +130,7 @@ export class PartnersService {
     const members = await this.members.find({ where: { organizationId, status: 'ACTIVE' }, relations: { user: true }, order: { createdAt: 'ASC' } });
     const targets = members.length ? await this.targets.findBy({ organizationId, period, agentId: In(members.map((member) => member.userId)) }) : [];
     const targetByAgent = new Map(targets.map((target) => [target.agentId, target.goal]));
-    return { items: members.map((member) => ({ userId: member.userId, name: [member.user?.firstName, member.user?.lastName].filter(Boolean).join(' '), phone: member.user?.phone ?? null, role: member.role, target: targetByAgent.get(member.userId) ?? null })) };
+    return { items: members.map((member) => ({ userId: member.userId, name: [member.user?.firstName, member.user?.lastName].filter(Boolean).join(' '), phone: member.user?.phone ?? null, role: member.role, target: targetByAgent.get(member.userId) ?? null, zones: member.zones ?? [] })) };
   }
 
   async createFieldOrganization(dto: CreateFieldOrganizationDto) {
@@ -237,7 +267,96 @@ export class PartnersService {
     const period = new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Kinshasa', year: 'numeric', month: '2-digit' }).format(new Date()).slice(0, 7);
     const target = await this.targets.findOneBy({ organizationId, agentId: userId, period });
     const achieved = progress.filter((lead) => lead.agentId === userId && lead.firstTripAt && new Date(lead.firstTripAt).getTime() >= new Date(lead.createdAt).getTime() && new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Kinshasa', year: 'numeric', month: '2-digit' }).format(new Date(lead.firstTripAt)).startsWith(period)).length;
-    return { target: target ? { period, goal: target.goal, achieved } : null, leads: progress.map(({ firstTripAt: _firstTripAt, ...lead }) => lead) };
+    return { target: target ? { period, goal: target.goal, achieved } : null, zones: member.zones ?? [], leads: progress.map(({ firstTripAt: _firstTripAt, ...lead }) => lead) };
+  }
+
+  async fieldTeam(userId: string, organizationId: string) {
+    const actor = await this.fieldMember(userId, organizationId);
+    return this.buildFieldTeam(organizationId, actor.organization, actor.role);
+  }
+
+  async adminFieldTeam(organizationId: string) {
+    const organization = await this.organizations.findOneBy({ id: organizationId });
+    if (!organization?.partnerTypes.some((type) => type.type === 'FIELD_MARKETING')) throw new NotFoundException('Équipe terrain inconnue');
+    return this.buildFieldTeam(organizationId, organization, 'ZWANGA_ADMIN');
+  }
+
+  private async buildFieldTeam(organizationId: string, organization: PartnerOrganization, myRole: string) {
+    const members = await this.members.find({
+      where: { organizationId, status: 'ACTIVE' }, relations: { user: true },
+      select: { id: true, userId: true, role: true, zones: true, user: { firstName: true, lastName: true } },
+      order: { createdAt: 'ASC' },
+    });
+    const agentIds = members.filter((member) => ['FIELD_AGENT', 'FIELD_SUPERVISOR'].includes(member.role)).map((member) => member.userId);
+    const period = new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Kinshasa', year: 'numeric', month: '2-digit' }).format(new Date()).slice(0, 7);
+    const [leads, targets] = await Promise.all([
+      this.leads.find({ where: { organizationId }, order: { createdAt: 'DESC' } }),
+      agentIds.length ? this.targets.findBy({ organizationId, period, agentId: In(agentIds) }) : Promise.resolve([]),
+    ]);
+    const progress = await this.leadProgress(leads);
+    const firstTrips = progress.filter((lead) => lead.firstTripAt &&
+      new Date(lead.firstTripAt).getTime() >= new Date(lead.createdAt).getTime() &&
+      new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Kinshasa', year: 'numeric', month: '2-digit' }).format(new Date(lead.firstTripAt)).startsWith(period)).length;
+    return {
+      organization: { id: organizationId, displayName: organization.displayName, status: organization.status },
+      myRole,
+      members: members.map((member) => ({ userId: member.userId, name: [member.user?.firstName, member.user?.lastName].filter(Boolean).join(' ') || 'Agent', role: member.role, zones: member.zones ?? [] })),
+      performance: {
+        period, agents: agentIds.length, contacted: progress.length,
+        registered: progress.filter((lead) => lead.status !== 'CONTACTED').length,
+        kycApproved: progress.filter((lead) => ['KYC_APPROVED', 'READY_TO_DRIVE', 'FIRST_TRIP'].includes(lead.status)).length,
+        readyToDrive: progress.filter((lead) => ['READY_TO_DRIVE', 'FIRST_TRIP'].includes(lead.status)).length,
+        firstTrips, targetGoal: targets.length ? targets.reduce((total, target) => total + target.goal, 0) : null,
+        targetsDefined: targets.length,
+      },
+    };
+  }
+
+  async fieldEarnings(userId: string, organizationId: string) {
+    await this.fieldMember(userId, organizationId);
+    const summary = await this.referrals!.getSummary(userId);
+    return { balances: summary.balances, referralCount: summary.referralCount, rewardCount: summary.rewardCount };
+  }
+
+  private reportView(report: PartnerFieldDailyReport) {
+    return { id: report.id, organizationId: report.organizationId, agentId: report.agentId, reportDate: report.reportDate, contactsCount: report.contactsCount, zone: report.zone, summary: report.summary, obstacles: report.obstacles, updatedAt: report.updatedAt };
+  }
+
+  async listFieldReports(userId: string, organizationId: string) {
+    const member = await this.fieldMember(userId, organizationId);
+    const where = member.role === 'FIELD_AGENT' ? { organizationId, agentId: userId } : { organizationId };
+    const items = await this.reports!.find({ where, order: { reportDate: 'DESC' }, take: 60 });
+    return { items: items.map((report) => this.reportView(report)) };
+  }
+
+  async listAdminFieldReports(organizationId: string) {
+    const organization = await this.organizations.findOneBy({ id: organizationId });
+    if (!organization?.partnerTypes.some((type) => type.type === 'FIELD_MARKETING')) throw new NotFoundException('Équipe terrain inconnue');
+    const items = await this.reports!.find({ where: { organizationId }, order: { reportDate: 'DESC' }, take: 100 });
+    return { items: items.map((report) => this.reportView(report)) };
+  }
+
+  async saveFieldReport(userId: string, organizationId: string, dto: SaveFieldDailyReportDto) {
+    await this.fieldMember(userId, organizationId, true);
+    const date = new Date(`${dto.reportDate}T00:00:00.000Z`);
+    const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Kinshasa', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+    if (!Number.isFinite(date.getTime()) || date.toISOString().slice(0, 10) !== dto.reportDate || dto.reportDate > today) throw new BadRequestException('Date de rapport invalide');
+    const zone = dto.zone?.trim() || null;
+    const summary = dto.summary.trim();
+    if (summary.length < 10) throw new BadRequestException('Résumé trop court');
+    await this.reports!.upsert({ organizationId, agentId: userId, reportDate: dto.reportDate, contactsCount: dto.contactsCount, zone, summary, obstacles: dto.obstacles?.trim() || null }, ['organizationId', 'agentId', 'reportDate']);
+    const report = await this.reports!.findOneByOrFail({ organizationId, agentId: userId, reportDate: dto.reportDate });
+    return this.reportView(report);
+  }
+
+  async setFieldZones(organizationId: string, agentId: string, dto: SetFieldZonesDto) {
+    const member = await this.members.findOne({ where: { organizationId, userId: agentId, status: 'ACTIVE' }, relations: { organization: true } });
+    if (!member || !['FIELD_AGENT', 'FIELD_SUPERVISOR'].includes(member.role) || member.organization.status !== 'ACTIVE' || !member.organization.partnerTypes.some((type) => type.type === 'FIELD_MARKETING' && type.status === 'ACTIVE')) throw new NotFoundException('Agent terrain inconnu');
+    const zones = dto.zones.map((zone) => zone.trim()).filter(Boolean);
+    if (zones.length !== dto.zones.length || new Set(zones.map((zone) => zone.toLocaleLowerCase('fr-FR'))).size !== zones.length) throw new BadRequestException('Zones invalides ou en double');
+    member.zones = zones;
+    await this.members.save(member);
+    return { agentId, zones };
   }
 
   async createLead(userId: string, organizationId: string, dto: CreateFieldLeadDto) {

@@ -30,7 +30,7 @@ describe('UsersService OTP routes', () => {
       await expect(UsersService.prototype.verifyPhoneOtp.call(service, { phone, otp: '12345' }))
         .resolves.toMatchObject({ valid: true });
       expect(update).toHaveBeenCalledTimes(1);
-      expect(update).toHaveBeenCalledWith({ phone, isPhoneVerified: false, isActive: true,
+      expect(update).toHaveBeenCalledWith({ phone: expect.objectContaining({ type: 'raw', objectLiteralParameters: { accountPhone: phone } }), isPhoneVerified: false, isActive: true,
         status: Not(In([UserStatus.INACTIVE, UserStatus.SUSPENDED])),
       }, { isPhoneVerified: true });
     },
@@ -191,7 +191,7 @@ describe('UsersService OTP routes', () => {
     );
     expect(update).toHaveBeenCalledWith(
       {
-        phone: '+243891234567',
+        phone: expect.objectContaining({ type: 'raw', objectLiteralParameters: { accountPhone: '+243891234567' } }),
         isPhoneVerified: false,
         isActive: true,
         status: Not(In([UserStatus.INACTIVE, UserStatus.SUSPENDED])),

@@ -47,3 +47,15 @@ export class SetFieldTargetDto {
   @Matches(/^\d{4}-(0[1-9]|1[0-2])$/) period: string;
   @IsInt() @Min(1) @Max(100000) goal: number;
 }
+
+export class SetFieldZonesDto {
+  @IsArray() @ArrayMaxSize(20) @IsString({ each: true }) @MinLength(2, { each: true }) @MaxLength(100, { each: true }) zones: string[];
+}
+
+export class SaveFieldDailyReportDto {
+  @Matches(/^\d{4}-\d{2}-\d{2}$/) reportDate: string;
+  @IsInt() @Min(0) @Max(100000) contactsCount: number;
+  @IsOptional() @IsString() @MaxLength(100) zone?: string;
+  @IsString() @MinLength(10) @MaxLength(5000) summary: string;
+  @IsOptional() @IsString() @MaxLength(5000) obstacles?: string;
+}

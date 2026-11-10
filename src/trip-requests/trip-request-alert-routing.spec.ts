@@ -3,7 +3,7 @@ import { TripRequestsService } from './trip-requests.service';
 describe('request creation alert routing', () => {
   const fixture = (enabled: boolean, immediateDispatch: boolean) => {
     const dto = { immediateDispatch, departureLocation: 'Départ', arrivalLocation: 'Arrivée', vehicleType: 'car',
-      maxPricePerSeat: 1000, numberOfSeats: 1,
+      maxPricePerSeat: 2500, numberOfSeats: 1,
       departureDateMin: new Date(Date.now() + (immediateDispatch ? 60_000 : 86_400_000)).toISOString(),
       departureDateMax: new Date(Date.now() + (immediateDispatch ? 600_000 : 90_000_000)).toISOString() };
     const repository = { create: jest.fn(value => ({ id: 'created', ...value })), save: jest.fn(async value => value) };

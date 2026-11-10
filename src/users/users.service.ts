@@ -48,6 +48,7 @@ import { SubscriptionsService } from '../subscriptions/subscriptions.service';
 import { assertSelfServiceUserRole, isAdminRole } from './user-role.policy';
 import { activateRequestedDriver } from './driver-activation';
 import { accountReservesPhone } from './registration-phone.policy';
+import { accountPhoneWhere, canonicalAccountPhone } from './phone-identity';
 import { buildProfileState, LATEST_IDENTITY_ORDER } from './profile-state';
 import {
   areLegalNamesEquivalent,
@@ -330,6 +331,15 @@ export class UsersService {
         );
     }
 
+    if (updateProfileDto.phone) {
+      updateProfileDto.phone = canonicalAccountPhone(updateProfileDto.phone);
+      // Formatting alone must not clear verification or rewrite a legacy
+      // identifier, especially while a historical collision awaits review.
+      let previousIdentity: string | null = null;
+      try { if (user.phone) previousIdentity = canonicalAccountPhone(user.phone); }
+      catch { /* A malformed legacy phone can still be replaced by a valid one. */ }
+      if (previousIdentity === updateProfileDto.phone) updateProfileDto.phone = user.phone;
+    }
     const phoneChanged =
       Boolean(updateProfileDto.phone) && updateProfileDto.phone !== user.phone;
     if (phoneChanged) {
@@ -340,12 +350,12 @@ export class UsersService {
         message: 'Le numéro de sécurité administrateur ne peut pas être modifié depuis le profil. Contactez le responsable de sécurité.',
       });
       const existingUser = await this.userRepository.findOne({
-        where: { phone: updateProfileDto.phone },
+        where: { phone: accountPhoneWhere(updateProfileDto.phone!, false) },
       });
 
-      if (existingUser) {
+      if (existingUser && existingUser.id !== user.id) {
         this.logger.warn(
-          `Profile update failed: Phone ${updateProfileDto.phone} already exists`,
+          'Profile update failed: phone identity already exists',
         );
         throw new BadRequestException('Ce numéro de téléphone existe déjà');
       }
@@ -861,9 +871,9 @@ export class UsersService {
   async sendPhoneVerificationOtp(
     sendOtpDto: SendPhoneVerificationOtpDto,
   ): Promise<{ message: string; codeLength?: number; expiresInSeconds?: number }> {
-    const phone = sendOtpDto.phone.trim();
+    const phone = canonicalAccountPhone(sendOtpDto.phone);
     const existingUser = await this.userRepository.findOne({
-      where: { phone },
+      where: { phone: accountPhoneWhere(phone, sendOtpDto.context !== PhoneVerificationContext.REGISTRATION) },
       select: ['id', 'isActive', 'status'],
     });
     if (sendOtpDto.context === PhoneVerificationContext.REGISTRATION) {
@@ -891,7 +901,7 @@ export class UsersService {
   async verifyPhoneOtp(
     verifyOtpDto: VerifyPhoneOtpDto,
   ): Promise<{ message: string; valid: boolean; verificationToken?: string; expiresInSeconds?: number }> {
-    const phone = verifyOtpDto.phone.trim();
+    const phone = canonicalAccountPhone(verifyOtpDto.phone);
     const verification = await this.otpService.verifyOtp(
       phone,
       verifyOtpDto.otp,
@@ -907,7 +917,7 @@ export class UsersService {
     // one-use proof for registration; it is not a login or PIN reset token.
     await this.userRepository.update(
       {
-        phone,
+        phone: accountPhoneWhere(phone),
         isPhoneVerified: false,
         isActive: true,
         status: Not(In([UserStatus.INACTIVE, UserStatus.SUSPENDED])),

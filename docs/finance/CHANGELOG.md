@@ -1,5 +1,12 @@
 # Journal des modifications financières
 
+## 2026-11-10 — Minimum et tarification selon le trafic et la pluie
+
+- Grille commune : minimum 2 500 FC/place, 1 500 FC/km normalement, 2 000 FC/km en forte pluie ou trafic lourd. Retard facturé à 120 FC/min uniquement si trafic lourd (au moins +25 % et 5 minutes). Aucun cumul de multiplicateurs ni supplément de temps normal.
+- Données de trafic conservées dans la réponse Google, cache court de 60 secondes, absence de données explicitée sans retard inventé. Prix confirmés et trajets gratuits préservés ; aucune réécriture comptable.
+- Mobile : plancher aligné, recommandation exacte non arrondie au palier de 500, détails de la grille affichés avec les styles existants.
+- Règles, exemples, limites et activation : [Tarification des trajets](./trip-pricing-2026-11-10.md). Changements locaux, sans déploiement AWS.
+
 ## 2026-11-02 — Cohérence du journal et du paiement mixte mobile
 
 - Le contrôle périodique compare le solde au total signé des crédits/débits dans un même instantané SQL, plutôt qu'à une écriture choisie par date puis UUID aléatoire. Des écritures simultanées ne sont plus arbitrairement ordonnées. Aucun solde ni historique réécrit ; une divergence véritable reste une alerte à investiguer en lecture seule, notamment celle observée en production.

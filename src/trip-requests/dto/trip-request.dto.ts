@@ -122,7 +122,7 @@ export class CreateTripRequestDto {
   @ApiProperty({
     required: false,
     minimum: 0,
-    description: 'Prix maximum par place accepté (optionnel)',
+    description: 'Prix maximum par place accepté (optionnel, minimum 2 500 FC pour une nouvelle demande)',
     example: 5000,
   })
   @IsNumber()
@@ -250,7 +250,7 @@ export class RecommendTripRequestPriceDto {
     enumName: 'VehicleType',
     default: VehicleType.CAR,
     description:
-      'Type de véhicule utilisé pour la grille tarifaire : voiture = 500 FC/km, moto = 1000 FC/km',
+      'Type de véhicule. Tarif commun : minimum 2 500 FC/place, 1 500 FC/km normalement, 2 000 FC/km si pluie forte ou trafic lourd, plus 120 FC/min de retard si trafic lourd.',
     example: VehicleType.MOTORCYCLE_TWO_WHEELS,
   })
   @IsEnum(VehicleType, {

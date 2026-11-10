@@ -66,6 +66,10 @@ import { TravelMode } from '../google-maps/dto/google-maps.dto';
 import { SubscriptionsService, PremiumSubscriptionFeatures } from '../subscriptions/subscriptions.service';
 import { WeatherAwarenessService } from '../weather/weather-awareness.service';
 import { WeatherRouteImpact } from '../weather/weather.types';
+import {
+  assertMinimumTripPrice, calculateTripRequestPricing, PricingRoute, TripRequestPricing,
+  DIFFICULT_PRICE_PER_KM_CDF, NORMAL_PRICE_PER_KM_CDF,
+} from './trip-request-pricing';
 import { TripPaymentMode } from '../payments/enums/trip-payment-mode.enum';
 import { TripRequestRecoveryService } from './trip-request-recovery.service';
 import { KycStatus } from '../users/entities/kyc-document.entity';
@@ -192,6 +196,7 @@ export interface TripRequestPriceRecommendation {
   recommendedPricePerSeat: number | null;
   recommendedTotalPrice: number | null;
   weatherImpact: WeatherRouteImpact;
+  pricing: TripRequestPricing;
 }
 
 export interface TripRequestVehiclePriceOption {
@@ -210,6 +215,7 @@ export interface TripRequestVehicleOptionsResponse {
   distanceMeters: number | null;
   numberOfSeats: number;
   weatherImpact: WeatherRouteImpact;
+  pricing: TripRequestPricing;
   options: TripRequestVehiclePriceOption[];
 }
 
@@ -220,14 +226,6 @@ export class TripRequestsService {
   private readonly UNACCEPTED_REQUEST_EXPIRATION_MS = UNACCEPTED_REQUEST_EXPIRATION_MS;
   private readonly ACCEPTED_REQUEST_EXPIRATION_MS = ACCEPTED_REQUEST_EXPIRATION_MS;
   private readonly EXPIRATION_WARNING_MS = 30 * 60 * 1000;
-  private readonly RECOMMENDED_PRICE_PER_KM_PER_PASSENGER_BY_VEHICLE_TYPE: Record<
-    VehicleType,
-    number
-  > = {
-    [VehicleType.CAR]: 500,
-    [VehicleType.MOTORCYCLE_TWO_WHEELS]: 1000,
-    [VehicleType.MOTORCYCLE_THREE_WHEELS]: 1000,
-  };
   private readonly VEHICLE_TYPE_DISPLAY_NAMES: Record<VehicleType, string> = {
     [VehicleType.CAR]: 'Voiture',
     [VehicleType.MOTORCYCLE_TWO_WHEELS]: 'Moto à 2 roues',
@@ -325,6 +323,12 @@ export class TripRequestsService {
         vehicleType,
         'trip request creation',
       ));
+
+    if (recommendedPrice === null) {
+      throw new BadRequestException({ code: 'TRIP_PRICE_UNAVAILABLE',
+        message: 'Le tarif est indisponible. Indiquez un budget d’au moins 2 500 FC par place.' });
+    }
+    assertMinimumTripPrice(recommendedPrice);
 
     if (createTripRequestDto.targetDriverId) {
       if (!departurePoint) throw new BadRequestException('Choisissez le point de départ avant le conducteur.');
@@ -437,22 +441,10 @@ export class TripRequestsService {
       payload.arrivalReference,
       'trip request price arrival',
     );
-    const distanceMeters = await this.calculateRouteDistanceMeters(
-      departurePoint,
-      arrivalPoint,
-      'trip request price recommendation',
+    const { pricing, weatherImpact } = await this.calculatePricing(
+      departurePoint, arrivalPoint, 'trip request price recommendation',
     );
-    const weatherImpact = await this.weatherAwarenessService.getRouteImpact(
-      this.pointToCoordinates(departurePoint),
-      this.pointToCoordinates(arrivalPoint),
-    );
-    const recommendedPricePerSeat = this.buildRecommendedPricePerSeat(
-      distanceMeters,
-      vehicleType,
-      weatherImpact.priceMultiplier,
-    );
-    const pricePerKmPerPassenger =
-      this.getRecommendedPricePerKmPerPassenger(vehicleType);
+    const { distanceMeters, recommendedPricePerSeat, pricePerKmPerPassenger } = pricing;
 
     return {
       currency: 'CDF',
@@ -469,6 +461,7 @@ export class TripRequestsService {
           ? null
           : recommendedPricePerSeat * numberOfSeats,
       weatherImpact,
+      pricing,
     };
   }
 
@@ -492,23 +485,13 @@ export class TripRequestsService {
       payload.arrivalReference,
       'trip request vehicle options arrival',
     );
-    const distanceMeters = await this.calculateRouteDistanceMeters(
-      departurePoint,
-      arrivalPoint,
-      'trip request vehicle options',
+    const { pricing, weatherImpact } = await this.calculatePricing(
+      departurePoint, arrivalPoint, 'trip request vehicle options',
     );
-    const weatherImpact = await this.weatherAwarenessService.getRouteImpact(
-      this.pointToCoordinates(departurePoint),
-      this.pointToCoordinates(arrivalPoint),
-    );
+    const { distanceMeters, recommendedPricePerSeat } = pricing;
 
     const options = Object.values(VehicleType).map((vehicleType) => {
       const maximumSeats = getVehicleMaxSeats(vehicleType);
-      const recommendedPricePerSeat = this.buildRecommendedPricePerSeat(
-        distanceMeters,
-        vehicleType,
-        weatherImpact.priceMultiplier,
-      );
 
       return {
         vehicleType,
@@ -516,8 +499,7 @@ export class TripRequestsService {
         maximumSeats,
         availableForRequestedSeats:
           maximumSeats === null || numberOfSeats <= maximumSeats,
-        pricePerKmPerPassenger:
-          this.getRecommendedPricePerKmPerPassenger(vehicleType),
+        pricePerKmPerPassenger: pricing.pricePerKmPerPassenger,
         recommendedPricePerSeat,
         recommendedTotalPrice:
           recommendedPricePerSeat === null
@@ -532,6 +514,7 @@ export class TripRequestsService {
       distanceMeters,
       numberOfSeats,
       weatherImpact,
+      pricing,
       options,
     };
   }
@@ -716,6 +699,9 @@ export class TripRequestsService {
     // A saved budget is the passenger's confirmed price, not a live estimate.
     // Route, reference and vehicle changes must never silently replace it.
     if (updateTripRequestDto.maxPricePerSeat != null) {
+      if (Number(updateTripRequestDto.maxPricePerSeat) !== Number(tripRequest.maxPricePerSeat)) {
+        assertMinimumTripPrice(updateTripRequestDto.maxPricePerSeat);
+      }
       tripRequest.maxPricePerSeat = updateTripRequestDto.maxPricePerSeat;
     }
 
@@ -1221,6 +1207,7 @@ export class TripRequestsService {
     }
 
     // Validate price if maxPricePerSeat is set
+    assertMinimumTripPrice(createDriverOfferDto.pricePerSeat);
     if (
       !counterProposal && tripRequest.maxPricePerSeat !== null &&
       createDriverOfferDto.pricePerSeat > tripRequest.maxPricePerSeat
@@ -2236,71 +2223,37 @@ export class TripRequestsService {
   private async calculateRecommendedPricePerSeat(
     departurePoint: Point | null,
     arrivalPoint: Point | null,
-    vehicleType: VehicleType | undefined | null,
+    _vehicleType: VehicleType | undefined | null,
     context: string,
   ): Promise<number | null> {
-    const [distanceMeters, weatherImpact] = await Promise.all([
-      this.calculateRouteDistanceMeters(departurePoint, arrivalPoint, context),
+    return (await this.calculatePricing(departurePoint, arrivalPoint, context)).pricing.recommendedPricePerSeat;
+  }
+
+  private async calculatePricing(departurePoint: Point | null, arrivalPoint: Point | null, context: string) {
+    const [route, weatherImpact] = await Promise.all([
+      this.calculatePricingRoute(departurePoint, arrivalPoint, context),
       this.weatherAwarenessService.getRouteImpact(
         this.pointToCoordinates(departurePoint), this.pointToCoordinates(arrivalPoint),
       ),
     ]);
 
-    return this.buildRecommendedPricePerSeat(
-      distanceMeters,
-      vehicleType,
-      weatherImpact.priceMultiplier,
-    );
+    const pricing = calculateTripRequestPricing(route, weatherImpact.heavyRain === true);
+    return { pricing, weatherImpact: { ...weatherImpact,
+      // Compatibility metadata only; already included in the returned price.
+      priceMultiplier: pricing.heavyRain ? DIFFICULT_PRICE_PER_KM_CDF / NORMAL_PRICE_PER_KM_CDF : 1,
+    } };
   }
 
-  private buildRecommendedPricePerSeat(
-    distanceMeters: number | null,
-    vehicleType: VehicleType | undefined | null,
-    priceMultiplier = 1,
-  ): number | null {
-    if (
-      typeof distanceMeters !== 'number' ||
-      !Number.isFinite(distanceMeters) ||
-      distanceMeters <= 0
-    ) {
-      return null;
-    }
-
-    const distanceKm = distanceMeters / 1000;
-    const pricePerKmPerPassenger =
-      this.getRecommendedPricePerKmPerPassenger(vehicleType);
-
-    const safeMultiplier =
-      Number.isFinite(priceMultiplier) && priceMultiplier >= 1
-        ? priceMultiplier
-        : 1;
-
-    return Math.round(distanceKm * pricePerKmPerPassenger * safeMultiplier);
-  }
-
-  private getRecommendedPricePerKmPerPassenger(
-    vehicleType: VehicleType | undefined | null,
-  ): number {
-    return (
-      this.RECOMMENDED_PRICE_PER_KM_PER_PASSENGER_BY_VEHICLE_TYPE[
-        vehicleType ?? VehicleType.CAR
-      ] ??
-      this.RECOMMENDED_PRICE_PER_KM_PER_PASSENGER_BY_VEHICLE_TYPE[
-        VehicleType.CAR
-      ]
-    );
-  }
-
-  private async calculateRouteDistanceMeters(
+  private async calculatePricingRoute(
     departurePoint: Point | null,
     arrivalPoint: Point | null,
     context: string,
-  ): Promise<number | null> {
+  ): Promise<PricingRoute> {
     const departureCoordinates = this.pointToCoordinates(departurePoint);
     const arrivalCoordinates = this.pointToCoordinates(arrivalPoint);
 
     if (!departureCoordinates || !arrivalCoordinates) {
-      return null;
+      return { distanceMeters: null, durationSeconds: null, durationInTrafficSeconds: null, distanceSource: 'unavailable' };
     }
 
     const [departureLongitude, departureLatitude] = departureCoordinates;
@@ -2312,14 +2265,20 @@ export class TripRequestsService {
         destination: { lat: arrivalLatitude, lng: arrivalLongitude },
         mode: TravelMode.DRIVING,
         region: 'CD',
+        departureTime: Math.ceil(Date.now() / 1000),
       });
-      const distanceMeters = directions.routes?.[0]?.legs?.reduce(
-        (sum, leg) => sum + (Number(leg.distance) || 0),
-        0,
-      );
+      const routeLegs = directions.routes?.[0]?.legs;
+      const distanceMeters = routeLegs?.length && routeLegs.every(leg =>
+        typeof leg.distance === 'number' && Number.isFinite(leg.distance) && leg.distance >= 0)
+        ? routeLegs.reduce((sum, leg) => sum + leg.distance, 0) : null;
 
       if (distanceMeters && distanceMeters > 0) {
-        return Math.round(distanceMeters);
+        const legs = directions.routes[0].legs;
+        const duration = (field: 'duration' | 'durationInTraffic') => legs.every(leg =>
+          typeof leg[field] === 'number' && Number.isFinite(leg[field]) && leg[field]! > 0)
+          ? legs.reduce((sum, leg) => sum + leg[field]!, 0) : null;
+        return { distanceMeters: Math.round(distanceMeters), durationSeconds: duration('duration'),
+          durationInTrafficSeconds: duration('durationInTraffic'), distanceSource: 'google_directions' };
       }
 
       this.logger.warn(
@@ -2332,10 +2291,12 @@ export class TripRequestsService {
       );
     }
 
-    return this.calculateStraightLineDistanceMeters(
+    const distanceMeters = this.calculateStraightLineDistanceMeters(
       { latitude: departureLatitude, longitude: departureLongitude },
       { latitude: arrivalLatitude, longitude: arrivalLongitude },
     );
+    return { distanceMeters, durationSeconds: null, durationInTrafficSeconds: null,
+      distanceSource: distanceMeters === null ? 'unavailable' : 'straight_line' };
   }
 
   private calculateStraightLineDistanceMeters(

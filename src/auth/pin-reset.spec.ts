@@ -193,6 +193,21 @@ describe('PIN reset security', () => {
     );
   });
 
+  it('resolves a local spelling but sends to the canonical destination of the selected account', async () => {
+    user.phone = '0831919710';
+    await service.requestPinResetOtp({ phone: ' +243 831919710 ' });
+    expect(userRepository.findOne).toHaveBeenCalledWith({ where: {
+      phone: expect.objectContaining({ type: 'raw', objectLiteralParameters: { accountPhone: '+243831919710' } }),
+    } });
+    expect(otpService.sendOtp).toHaveBeenCalledWith('+243831919710', 'pin_reset');
+  });
+
+  it('does not authenticate another owner if phone ownership changes between identity and PIN checks', async () => {
+    jest.spyOn(service, 'validateUser').mockResolvedValue({ ...user, id: 'different-owner' });
+    await expect(service.login({ phone: user.phone, pin: '1234' })).rejects.toMatchObject({ status: 401 });
+    expect(userRepository.update).not.toHaveBeenCalled();
+  });
+
   it('aligns the pending window with Mobishastra without exposing provider metadata or the OTP', async () => {
     otpService.sendOtp.mockResolvedValue({ success: true, codeLength: 6, expiresInSeconds: 895, otp: '123456' });
     const sent = await service.requestPinResetOtp({ phone: user.phone });

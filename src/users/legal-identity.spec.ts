@@ -42,6 +42,15 @@ const createService = (user: User) => {
 };
 
 describe('UsersService legal identity', () => {
+  it('does not clear verification or rewrite an old identifier for a formatting-only edit', async () => {
+    const user = createUser();
+    user.phone = '0900000000';
+    user.isPhoneVerified = true;
+    const { service, userRepository } = createService(user);
+    await service.updateProfile(user.id, { phone: '+243900000000' });
+    expect(userRepository.update).toHaveBeenCalledWith(user.id, expect.objectContaining({ phone: '0900000000' }));
+    expect(userRepository.update.mock.calls[0][1]).not.toHaveProperty('isPhoneVerified');
+  });
   it('does not allow a stolen admin session to redirect the financial OTP through profile editing', async () => {
     const user = createUser(); user.role = UserRole.SUPER_ADMIN;
     const { service, userRepository } = createService(user);

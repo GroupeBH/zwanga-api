@@ -541,6 +541,9 @@ export class RouteLeg {
   @ApiProperty()
   duration: number; // seconds
 
+  @ApiPropertyOptional({ description: 'Duration including traffic in seconds; absent if unavailable' })
+  durationInTraffic?: number;
+
   @ApiProperty()
   startAddress: string;
 

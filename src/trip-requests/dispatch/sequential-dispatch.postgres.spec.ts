@@ -53,7 +53,7 @@ import { NotificationService } from '../../notifications/notifications.service';
 import { RideNotificationReceipts1780000093000 } from '../../database/migrations/1780000093000-RideNotificationReceipts';
 import { RideDeliveryRecovery1780000094000 } from '../../database/migrations/1780000094000-RideDeliveryRecovery';
 import { AlertDeliveryReliability1780000106000 } from '../../database/migrations/1780000106000-AlertDeliveryReliability';
-import { RequestDriverQueue, REQUEST_DEADLINES_KEY } from './request-driver-queue';
+import { RequestDriverQueue, REQUEST_DEADLINES_KEY, REQUEST_CANDIDATE_CACHE_SECONDS } from './request-driver-queue';
 import { SequentialDispatchService } from './sequential-dispatch.service';
 import { DriverDispatchService } from './dispatch.service';
 import { assertSequentialInvitation, sequentialInvitationSql } from './sequential-policy';
@@ -76,7 +76,7 @@ const redisPort = Number(process.env.DISPATCH_TEST_REDIS_PORT);
   beforeAll(async () => {
     directory = mkdtempSync(join(tmpdir(), 'zwanga-sequential-test-'));
     execFileSync(executable('initdb'), ['-D', directory, '-U', 'dispatch_test', '-A', 'trust', '--no-locale', '-E', 'UTF8'],
-      { windowsHide: true, stdio: 'pipe', timeout: 30000 });
+      { windowsHide: true, stdio: 'pipe', timeout: 60000 });
     const port = await new Promise<number>(done => {
       const server = createServer(); server.listen(0, '127.0.0.1', () => {
         const port = (server.address() as { port: number }).port; server.close(() => done(port));
@@ -546,12 +546,16 @@ const redisPort = Number(process.env.DISPATCH_TEST_REDIS_PORT);
       [randomUUID(),r.id,second.id,vehicle.id])).rejects.toMatchObject({ code: '23505' });
     expect(await offers(r.id)).toHaveLength(1);
   });
-  it('candidate ranking cache expires before the next 40-second relay', async () => {
+  it('candidate ranking cache covers delivery and response but remains bounded', async () => {
     const r = await request(), claim = await queue.claim(r.id, 'test-freshness');
     expect(claim).not.toBeNull();
     expect(await queue.seed(r.id, claim!.token, 'test-freshness', [randomUUID()])).toBe(true);
     const ttl = await redis.ttl('ride-requests:{' + r.id + '}:waiting');
-    expect(ttl).toBeGreaterThan(0); expect(ttl).toBeLessThanOrEqual(30);
+    expect(REQUEST_CANDIDATE_CACHE_SECONDS).toBe(110);
+    expect(ttl).toBeGreaterThan(100);
+    expect(ttl).toBeLessThanOrEqual(REQUEST_CANDIDATE_CACHE_SECONDS);
+    const versionTtl = await redis.ttl('ride-requests:{' + r.id + '}:version');
+    expect(Math.abs(versionTtl - ttl)).toBeLessThanOrEqual(1);
     await queue.release(r.id, claim!.token);
   });
   it('a stale Redis lease cannot delete or consume the new worker queue', async () => {

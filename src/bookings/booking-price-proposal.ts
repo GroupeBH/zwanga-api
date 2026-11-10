@@ -1,6 +1,7 @@
 import { BadRequestException, ConflictException } from '@nestjs/common';
 import { Booking, BookingPaymentStatus } from './entities/booking.entity';
 import { Trip } from '../trips/entities/trip.entity';
+import { assertMinimumTripPrice } from '../trip-requests/trip-request-pricing';
 
 /** A proposal is not a payment nor a change to the public trip price. CDF integers. */
 export function validateBookingPriceProposal(value: unknown, trip: Trip, seats: number): number | null {
@@ -11,6 +12,7 @@ export function validateBookingPriceProposal(value: unknown, trip: Trip, seats: 
       !Number.isFinite(Number(trip.pricePerSeat)) || value >= Number(trip.pricePerSeat)) {
     throw new BadRequestException('Proposez un montant entier en FC, supérieur à zéro et inférieur au prix par place affiché.');
   }
+  assertMinimumTripPrice(value);
   return value;
 }
 

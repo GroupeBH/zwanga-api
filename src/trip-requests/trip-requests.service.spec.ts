@@ -52,7 +52,7 @@ const eligibleDriverRepository = () => ({
 });
 
 describe('TripRequestsService recommended price', () => {
-  it('recommends 500 FC per kilometer for cars and applies the heavy-rain coefficient', async () => {
+  it('recommends 2000 FC per kilometer in heavy rain without the former multiplier', async () => {
     const weatherAwarenessService = {
       getRouteImpact: jest.fn().mockResolvedValue({
         heavyRain: true,
@@ -88,8 +88,8 @@ describe('TripRequestsService recommended price', () => {
         coordinates: [15.403, -4.4075],
       });
     jest
-      .spyOn(service as any, 'calculateRouteDistanceMeters')
-      .mockResolvedValue(5000);
+      .spyOn(service as any, 'calculatePricingRoute')
+      .mockResolvedValue({ distanceMeters: 5000, durationSeconds: null, durationInTrafficSeconds: null, distanceSource: 'google_directions' });
 
     const recommendation = await service.recommendPrice({
       departureLocation: 'Gombe',
@@ -99,13 +99,13 @@ describe('TripRequestsService recommended price', () => {
     });
 
     expect(recommendation.vehicleType).toBe(VehicleType.CAR);
-    expect(recommendation.pricePerKmPerPassenger).toBe(500);
-    expect(recommendation.recommendedPricePerSeat).toBe(3250);
-    expect(recommendation.recommendedTotalPrice).toBe(6500);
-    expect(recommendation.weatherImpact.priceMultiplier).toBe(1.3);
+    expect(recommendation.pricePerKmPerPassenger).toBe(2000);
+    expect(recommendation.recommendedPricePerSeat).toBe(10000);
+    expect(recommendation.recommendedTotalPrice).toBe(20000);
+    expect(recommendation.weatherImpact.priceMultiplier).toBe(2000 / 1500);
   });
 
-  it('recommends 1000 FC per kilometer for motorcycles', async () => {
+  it('recommends the same 1500 FC per kilometer for motorcycles in normal conditions', async () => {
     const weatherAwarenessService = {
       getRouteImpact: jest.fn().mockResolvedValue({
         heavyRain: false,
@@ -141,8 +141,8 @@ describe('TripRequestsService recommended price', () => {
         coordinates: [15.403, -4.4075],
       });
     jest
-      .spyOn(service as any, 'calculateRouteDistanceMeters')
-      .mockResolvedValue(5000);
+      .spyOn(service as any, 'calculatePricingRoute')
+      .mockResolvedValue({ distanceMeters: 5000, durationSeconds: null, durationInTrafficSeconds: null, distanceSource: 'google_directions' });
 
     const recommendation = await service.recommendPrice({
       departureLocation: 'Gombe',
@@ -152,9 +152,9 @@ describe('TripRequestsService recommended price', () => {
     });
 
     expect(recommendation.vehicleType).toBe(VehicleType.MOTORCYCLE_TWO_WHEELS);
-    expect(recommendation.pricePerKmPerPassenger).toBe(1000);
-    expect(recommendation.recommendedPricePerSeat).toBe(5000);
-    expect(recommendation.recommendedTotalPrice).toBe(5000);
+    expect(recommendation.pricePerKmPerPassenger).toBe(1500);
+    expect(recommendation.recommendedPricePerSeat).toBe(7500);
+    expect(recommendation.recommendedTotalPrice).toBe(7500);
   });
 
   it('returns every vehicle choice with its respective price', async () => {
@@ -189,8 +189,8 @@ describe('TripRequestsService recommended price', () => {
         coordinates: [15.3136, -4.3073],
       });
     jest
-      .spyOn(service as any, 'calculateRouteDistanceMeters')
-      .mockResolvedValue(5000);
+      .spyOn(service as any, 'calculatePricingRoute')
+      .mockResolvedValue({ distanceMeters: 5000, durationSeconds: null, durationInTrafficSeconds: null, distanceSource: 'google_directions' });
 
     const result = await service.getVehicleOptions({
       departureLocation: 'Gombe',
@@ -201,25 +201,25 @@ describe('TripRequestsService recommended price', () => {
     expect(result.options).toEqual([
       expect.objectContaining({
         vehicleType: VehicleType.CAR,
-        recommendedPricePerSeat: 2500,
-        recommendedTotalPrice: 5000,
+        recommendedPricePerSeat: 7500,
+        recommendedTotalPrice: 15000,
       }),
       expect.objectContaining({
         vehicleType: VehicleType.MOTORCYCLE_TWO_WHEELS,
-        recommendedPricePerSeat: 5000,
-        recommendedTotalPrice: 10000,
+        recommendedPricePerSeat: 7500,
+        recommendedTotalPrice: 15000,
       }),
       expect.objectContaining({
         vehicleType: VehicleType.MOTORCYCLE_THREE_WHEELS,
-        recommendedPricePerSeat: 5000,
-        recommendedTotalPrice: 10000,
+        recommendedPricePerSeat: 7500,
+        recommendedTotalPrice: 15000,
       }),
     ]);
   });
 });
 
 describe('TripRequestsService optional seat count', () => {
-  it.each([undefined, 0, 1945, 2000, 6000].flatMap(price => [
+  it.each([undefined, 2500, 3000, 6000].flatMap(price => [
     [price, undefined], [price, [VehicleType.CAR, VehicleType.MOTORCYCLE_TWO_WHEELS]],
   ] as const))('stores one seat and preserves the confirmed price %s with types %j', async (confirmedPrice, vehicleTypes) => {
     const tripRequestRepository = {
@@ -564,7 +564,7 @@ describe('TripRequestsService motorcycle capacity', () => {
     await expect(
       service.createDriverOffer('driver-1', 'request-1', {
         proposedDepartureDate: new Date(now + 60 * 60 * 1000).toISOString(),
-        pricePerSeat: 1000,
+        pricePerSeat: 2500,
         availableSeats,
         vehicleId: 'vehicle-1',
       }),
@@ -622,7 +622,7 @@ describe('TripRequestsService motorcycle capacity', () => {
     await expect(
       service.createDriverOffer('driver-1', 'request-1', {
         proposedDepartureDate: new Date(now + 60 * 60 * 1000).toISOString(),
-        pricePerSeat: 1000,
+        pricePerSeat: 2500,
         availableSeats: 1,
         vehicleId: 'vehicle-1',
       }),

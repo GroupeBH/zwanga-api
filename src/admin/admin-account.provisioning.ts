@@ -1,6 +1,7 @@
 import * as bcrypt from 'bcrypt';
 import { type FindOneOptions, Repository } from 'typeorm';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
+import { accountPhoneWhere, canonicalAccountPhone } from '../users/phone-identity';
 import {
   isBackOfficeRole,
   isSelfServiceUserRole,
@@ -34,7 +35,6 @@ interface NormalizedAdminProvisioningInput {
 
 const ADMIN_PASSWORD_MIN_LENGTH = 8;
 const ADMIN_PASSWORD_MAX_LENGTH = 128;
-const PHONE_PATTERN = /^\+?\d{8,15}$/;
 
 function requireName(value: string, label: string): string {
   const normalized = value.trim();
@@ -48,12 +48,7 @@ function requireName(value: string, label: string): string {
 export function normalizeAdminProvisioningInput(
   input: AdminProvisioningInput,
 ): NormalizedAdminProvisioningInput {
-  const phone = input.phone.replace(/[\s().-]/g, '');
-  if (!PHONE_PATTERN.test(phone)) {
-    throw new Error(
-      'Le numéro de téléphone doit contenir entre 8 et 15 chiffres, avec un + optionnel',
-    );
-  }
+  const phone = canonicalAccountPhone(input.phone);
 
   const password = input.password ?? input.pin;
   if (
@@ -89,7 +84,7 @@ export async function provisionAdminAccount(
   const normalized = normalizeAdminProvisioningInput(input);
   const password = await bcrypt.hash(normalized.password, 12);
   const findOptions: FindOneOptions<User> = {
-    where: { phone: normalized.phone },
+    where: { phone: accountPhoneWhere(normalized.phone) },
   };
 
   if (input.lockExistingAccount) {

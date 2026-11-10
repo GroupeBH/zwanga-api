@@ -92,6 +92,12 @@ export class ApiExceptionFilter implements ExceptionFilter {
     const technicalError = this.asTransportError(exception);
     // Only translate known business exceptions from the atomic booking guard.
     const database = (exception as { driverError?: { code?: string; message?: string; constraint?: string } })?.driverError;
+    if (database?.code === '23505' && database.constraint === 'UQ_users_phone_identity') {
+      return { statusCode: HttpStatus.CONFLICT, error: 'Conflit de compte', code: 'PHONE_ALREADY_REGISTERED', message: 'Ce numéro correspond déjà à un compte. Connectez-vous ou contactez le support pour récupérer votre compte.' };
+    }
+    if (database?.code === '23514' && database.constraint === 'CHK_users_phone_identity') {
+      return { statusCode: HttpStatus.BAD_REQUEST, error: 'Numéro invalide', code: 'INVALID_PHONE_NUMBER', message: 'Saisissez un numéro de téléphone valide avec son indicatif.' };
+    }
     if (database?.code === '23514' && database.constraint === 'CHK_wallet_cash_reserve') {
       return { statusCode: HttpStatus.CONFLICT, error: 'Solde réservé', code: 'WALLET_FUNDS_RESERVED', message: 'Une partie de vos jetons couvre des courses cash confirmées. Actualisez votre portefeuille et utilisez le solde disponible.' };
     }
@@ -99,8 +105,8 @@ export class ApiExceptionFilter implements ExceptionFilter {
       return { statusCode: HttpStatus.SERVICE_UNAVAILABLE, error: 'Service temporairement occupé', code: 'DATABASE_TEMPORARILY_UNAVAILABLE', message: 'Le service est momentanément occupé. Vérifiez le statut de votre opération avant de réessayer.' };
     }
     const financeMessages: Record<string, string> = {
-      CASH_COMMISSION_INSUFFICIENT: 'Jetons insuffisants pour couvrir la commission cash de 5 % dans la limite autorisée de 25 jetons de dette. Rechargez ou choisissez un autre paiement.',
-      CASH_DEBT_OUTSTANDING: 'Le plafond cumulé de 25 jetons de dette cash est dépassé ou le serait avec cette commission. Rechargez vos jetons ou choisissez un autre paiement. Les courses confirmées peuvent se terminer.',
+      CASH_COMMISSION_INSUFFICIENT: 'Jetons insuffisants pour la commission cash de 5 %. Après les six premiers trajets cash, régularisez le dû et rechargez avant un nouveau trajet cash.',
+      CASH_DEBT_OUTSTANDING: 'Commissions cash à régulariser. Après les six premiers trajets cash, réglez le dû et provisionnez vos jetons. Les courses confirmées peuvent se terminer.',
       TRIP_PAYMENT_MODE_UNAVAILABLE: 'Ce mode de paiement n’est pas accepté sur ce trajet. Choisissez un mode proposé.',
       CASH_CURRENCY_UNSUPPORTED: 'Le paiement cash est disponible uniquement en francs congolais.',
       CASH_STATE_CONFLICT: 'La réservation a déjà été finalisée. Actualisez son état.',
