@@ -1,6 +1,7 @@
 import { BadRequestException } from '@nestjs/common';
 import { EntityManager, Repository } from 'typeorm';
 import { User, UserStatus } from './entities/user.entity';
+import { accountPhoneWhere, canonicalAccountPhone } from './phone-identity';
 
 /** Pending KYC is still a usable account, not an available phone number. */
 export function accountReservesPhone(
@@ -25,14 +26,14 @@ export async function saveRegistrationWithPhone(
   afterSave?: (user: User, manager: EntityManager) => Promise<void>,
 ): Promise<User> {
   return users.manager.transaction(async (manager) => {
-    const phone = newUser.phone.trim();
+    const phone = canonicalAccountPhone(newUser.phone);
     await manager.query(
       'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
       [`zwanga:registration-phone:${phone}`],
     );
     const repository = manager.getRepository(User);
     const previous = await repository.findOne({
-      where: { phone },
+      where: { phone: accountPhoneWhere(phone, false) },
       lock: { mode: 'pessimistic_write' },
     });
     if (accountReservesPhone(previous)) {

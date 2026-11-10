@@ -33,7 +33,7 @@ const bin = process.env.TRIP_SEARCH_TEST_POSTGRES_BIN;
     });
   }, 120000);
   afterAll(() => cluster.stop(), 40000);
-  beforeEach(async () => { await db.query('TRUNCATE users CASCADE'); });
+  beforeEach(async () => { await db.query('TRUNCATE users CASCADE'); }, 30000);
 
   async function trip(overrides: Partial<Trip> = {}) {
     const user = await db.getRepository(User).save({ firstName: 'Synthetic', lastName: 'Driver' });

@@ -22,6 +22,11 @@ import {
 
 // Explicit opt-in, disposable loopback cluster. Never read DATABASE_URL or .env.
 const pgBin = process.env.NEARBY_RING_TEST_POSTGRES_BIN;
+// Drain every concurrent transaction even on failure before the next TRUNCATE.
+async function settledBatch(tasks: Promise<unknown>[]) {
+  const results = await Promise.allSettled(tasks);
+  for (const result of results) if (result.status === 'rejected') throw result.reason;
+}
 (pgBin ? describe : describe.skip)(
   'nearby ringtone eligibility without a global penalty on isolated PostgreSQL',
   () => {
@@ -37,7 +42,8 @@ const pgBin = process.env.NEARBY_RING_TEST_POSTGRES_BIN;
       execFileSync(executable(name), args, {
         windowsHide: true,
         stdio: name === 'pg_ctl' ? 'ignore' : 'pipe',
-        timeout: 30_000,
+        // Cluster initialization is disk-heavy on Windows; match IsolatedPostgres.
+        timeout: name === 'initdb' ? 60_000 : 30_000,
       });
     beforeAll(async () => {
       directory = mkdtempSync(join(tmpdir(), 'zwanga-nearby-ring-'));
@@ -85,7 +91,7 @@ const pgBin = process.env.NEARBY_RING_TEST_POSTGRES_BIN;
         "selectedDriverId" uuid, "tripId" varchar, "departureDateMax" timestamptz,
         "updatedAt" timestamp NOT NULL DEFAULT now());
       CREATE TABLE notifications (id uuid PRIMARY KEY, status text, "userId" uuid, "isActive" boolean DEFAULT true, data jsonb);
-      CREATE TABLE driver_offers ("tripRequestId" uuid, "driverId" uuid,
+      CREATE TABLE driver_offers (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), "tripRequestId" uuid, "driverId" uuid,
         status text NOT NULL DEFAULT 'pending', "updatedAt" timestamp NOT NULL DEFAULT now());
       CREATE TABLE trip_request_dispatch_offers ("requestId" uuid, "driverId" uuid, status text, id uuid)`);
       const runner = db.createQueryRunner();
@@ -106,7 +112,7 @@ const pgBin = process.env.NEARBY_RING_TEST_POSTGRES_BIN;
         passenger,
         otherDriver,
       ]);
-    }, 60_000);
+    }, 120_000);
     afterAll(async () => {
       if (db?.isInitialized) await db.destroy();
       if (started) {
@@ -128,13 +134,13 @@ const pgBin = process.env.NEARBY_RING_TEST_POSTGRES_BIN;
           resolve(tmpdir()) + sep + 'zwanga-nearby-ring-',
         )
       )
-        rmSync(directory, { recursive: true, force: true });
-    });
+        rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }, 40000);
     beforeEach(async () => {
       await db.query(
         'TRUNCATE nearby_driver_ring_events, nearby_driver_ring_state, notifications, trip_requests, driver_offers, trip_request_dispatch_offers CASCADE',
       );
-    });
+    }, 30000);
     async function create(type = 'trip_request_nearby', owner = driver) {
       const id = randomUUID(),
         requestId = randomUUID();
@@ -181,7 +187,7 @@ const pgBin = process.env.NEARBY_RING_TEST_POSTGRES_BIN;
     it('hides a list refusal persistently for that driver only, without requiring a push', async () => {
       const n = await create();
       await db.query('UPDATE notifications SET "userId" = $2, data = $3 WHERE id = $1', [n.id, driver, n.data]);
-      await Promise.all(Array.from({ length: 4 }, () => refuse(n)));
+      await settledBatch(Array.from({ length: 4 }, () => refuse(n)));
       expect(await hasRefusedRequest(db.manager, driver, n.data.tripRequestId)).toBe(true);
       expect(await hasRefusedRequest(db.manager, otherDriver, n.data.tripRequestId)).toBe(false);
       const visible = (viewer: string) => db.query(`SELECT r.id FROM trip_requests r
@@ -196,17 +202,18 @@ const pgBin = process.env.NEARBY_RING_TEST_POSTGRES_BIN;
       await expect(refuse(n, passenger)).rejects.toThrow();
     });
 
-    it.each([true, false])('refusal releases temporary priority but preserves a private target (priority=%s)', async priority => {
+    it.each([true, false].flatMap(priority => [true, false].map(counteroffer => ({ priority, counteroffer }))))(
+      'refusal releases priority or a withdrawn counteroffer (priority=$priority, counteroffer=$counteroffer)', async ({ priority, counteroffer }) => {
       const n = await create();
       await db.query(`UPDATE trip_requests SET "targetDriverId"=$2,
         "targetDriverPriorityUntil"=CASE WHEN $3 THEN now()+interval '5 minutes' ELSE NULL END
         WHERE id=$1`, [n.data.tripRequestId, driver, priority]);
-      await db.query('INSERT INTO driver_offers ("tripRequestId", "driverId") VALUES ($1,$2)',
+      if (counteroffer) await db.query('INSERT INTO driver_offers ("tripRequestId", "driverId") VALUES ($1,$2)',
         [n.data.tripRequestId, driver]);
       await refuse(n);
       const [request] = await db.query('SELECT "targetDriverId", "targetDriverPriorityUntil", status FROM trip_requests WHERE id=$1', [n.data.tripRequestId]);
-      expect(request).toMatchObject({ targetDriverId: priority ? null : driver, targetDriverPriorityUntil: null, status: 'pending' });
-      expect((await db.query('SELECT status FROM driver_offers'))[0].status).toBe('cancelled');
+      expect(request).toMatchObject({ targetDriverId: priority || counteroffer ? null : driver, targetDriverPriorityUntil: null, status: 'pending' });
+      expect(await db.query('SELECT status FROM driver_offers')).toEqual(counteroffer ? [{ status: 'cancelled' }] : []);
       expect(await hasRefusedRequest(db.manager, driver, n.data.tripRequestId)).toBe(true);
       expect(await hasRefusedRequest(db.manager, otherDriver, n.data.tripRequestId)).toBe(false);
     });
@@ -341,7 +348,7 @@ const pgBin = process.env.NEARBY_RING_TEST_POSTGRES_BIN;
       const n = await create();
       await prepare(n);
       await sent(n);
-      await Promise.all(Array.from({ length: 8 }, () => refuse(n)));
+      await settledBatch(Array.from({ length: 8 }, () => refuse(n)));
       expect((await status()).missedCount).toBe(0);
       expect(await prepare(n)).toBe(false);
       const otherId = randomUUID();
@@ -426,7 +433,7 @@ const pgBin = process.env.NEARBY_RING_TEST_POSTGRES_BIN;
         );
       }
       await expire();
-      await Promise.all([
+      await settledBatch([
         reconcileNearbyRequestCooldowns(db.manager),
         reconcileNearbyRequestCooldowns(db.manager),
       ]);

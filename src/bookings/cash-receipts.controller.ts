@@ -1,4 +1,11 @@
-import { Body, Controller, Param, ParseUUIDPipe, Put, Request } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Param,
+  ParseUUIDPipe,
+  Put,
+  Request,
+} from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import { IsIn, IsNumber, Max, Min } from 'class-validator';
 import { Auth } from '../auth/decorators/auth.decorator';
@@ -20,11 +27,33 @@ class ConfirmCashReceiptDto {
 export class CashReceiptsController {
   constructor(private readonly receipts: CashReceiptsService) {}
 
+  @Put(':id/cash-declaration')
+  @Auth()
+  @SensitiveThrottle(20, 60000)
+  @ApiOperation({
+    summary:
+      'Déclarer avoir remis le cash après l’arrivée (passager uniquement, sans confirmer l’encaissement)',
+  })
+  declare(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Request() req: { user: { userId: string } },
+    @Body() dto: ConfirmCashReceiptDto,
+  ) {
+    return this.receipts.declare(id, req.user.userId, dto.amount, dto.currency);
+  }
+
   @Put(':id/cash-receipt')
   @Auth()
   @SensitiveThrottle(20, 60000)
-  @ApiOperation({ summary: 'Confirmer explicitement le cash reçu après la dépose (conducteur du trajet uniquement)' })
-  confirm(@Param('id', ParseUUIDPipe) id: string, @Request() req, @Body() dto: ConfirmCashReceiptDto) {
+  @ApiOperation({
+    summary:
+      'Confirmer explicitement le cash reçu après la dépose (conducteur du trajet uniquement)',
+  })
+  confirm(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Request() req: { user: { userId: string } },
+    @Body() dto: ConfirmCashReceiptDto,
+  ) {
     return this.receipts.confirm(id, req.user.userId, dto.amount, dto.currency);
   }
 }

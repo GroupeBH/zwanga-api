@@ -2,6 +2,7 @@ import { rideCardContent } from './ride-card-content';
 import { availableAccountSql } from '../users/account-availability';
 import { issueRideRingPermit, readRideRingPermit, needsRideRingPermit } from './ride-ring-permit';
 import { DRIVER_PAYMENT_NOTIFICATION_TYPE } from './driver-payment-notification';
+import { cashDeclarationRelevantSql } from './cash-declaration-policy';
 import { sequentialInvitationSql, REQUEST_RESPONSE_MS } from '../trip-requests/dispatch/sequential-policy';
 import { nearbyRequestDriverVisibilitySql } from '../trip-requests/request-proximity';
 import { sendBoundedFirebase, prewarmFirebaseAccessToken } from './bounded-firebase-send';
@@ -842,7 +843,7 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
       return;
     }
     if (notification.data?.role === 'driver' &&
-        [DRIVER_PAYMENT_NOTIFICATION_TYPE, 'cash_payment_confirmed'].includes(notification.data?.type)) {
+        [DRIVER_PAYMENT_NOTIFICATION_TYPE, 'cash_payment_confirmed', 'cash_payment_declared'].includes(notification.data?.type)) {
       // A receipt is informational: never use the incoming-ride ringtone or require
       // availability/KYC/subscription just to inform a driver of their own payment.
       if (!this.rideAlerts?.publish(notification.userId, {
@@ -1138,6 +1139,11 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
     notification: Notification,
   ): Promise<boolean> {
     const type = notification.data?.type;
+    if (type === 'cash_payment_declared') {
+      const rows = await this.notificationRepository.manager.query<unknown[]>(
+        `SELECT 1 FROM notifications n WHERE n.id = $1 AND ${cashDeclarationRelevantSql('n')}`, [notification.id]);
+      return rows.length > 0;
+    }
     if (type === 'booking_response' || type === 'trip_request_accepted' || type === 'driver_offer' || type === 'offer_accepted') {
       return isRideResponseDeliverable(this.notificationRepository.manager, notification);
     }
@@ -1564,7 +1570,8 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
       .andWhere('n."isRead" = false AND n."isActive" = true')
       .andWhere("n.data ->> 'role' = 'driver'")
       .andWhere("n.data ->> 'driverId' = CAST(:userId AS text) AND n.data ? 'tripId'", { userId })
-      .andWhere("n.data ->> 'type' IN (:...types)", { types: [DRIVER_PAYMENT_NOTIFICATION_TYPE, 'cash_payment_confirmed'] })
+      .andWhere("n.data ->> 'type' IN (:...types)", { types: [DRIVER_PAYMENT_NOTIFICATION_TYPE, 'cash_payment_confirmed', 'cash_payment_declared'] })
+      .andWhere(`(n.data ->> 'type' <> 'cash_payment_declared' OR ${cashDeclarationRelevantSql('n')})`)
       .orderBy('n.createdAt', 'ASC').addOrderBy('n.id', 'ASC').take(20).getMany();
     return { userId, notices: rows.map(row => ({ ...row.data, notificationId: row.id, createdAt: row.createdAt })) };
   }
@@ -1611,6 +1618,7 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
       .createQueryBuilder('notification')
       .where('notification.userId = :userId', { userId })
       .andWhere('notification.isActive = true')
+      .andWhere(`(COALESCE(notification.data ->> 'type', '') <> 'cash_payment_declared' OR ${cashDeclarationRelevantSql('notification')})`)
       .andWhere(
         `(COALESCE(notification.data ->> 'type', '') NOT IN (:...driverRequestTypes)
           OR EXISTS (SELECT 1 FROM users viewer WHERE viewer.id = :userId

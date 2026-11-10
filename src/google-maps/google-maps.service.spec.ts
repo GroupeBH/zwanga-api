@@ -33,6 +33,23 @@ describe('GoogleMapsService directions', () => {
     warnings: [],
   });
 
+  it.each([900, undefined, NaN, -20])('preserves only valid traffic durations (%s) and caches them for one minute', async trafficSeconds => {
+    const route = buildProviderRoute('Traffic route');
+    Object.assign(route.legs[0], { duration_in_traffic: { value: trafficSeconds } });
+    const get = jest.fn().mockReturnValue(of({ data: { status: 'OK', routes: [route] } }));
+    const cache = { get: jest.fn().mockResolvedValue(undefined), set: jest.fn().mockResolvedValue(undefined) };
+    const service = new GoogleMapsService({ get } as any, { get: () => 'test-key' } as any, cache as any);
+    const dto = { origin: { lat: -4.3, lng: 15.3 }, destination: { lat: -4.31, lng: 15.31 }, departureTime: 1893456010 };
+    const result = await service.getDirections(dto);
+    expect(result.routes[0].legs[0].durationInTraffic).toBe(trafficSeconds === 900 ? 900 : undefined);
+    expect(get).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ params: expect.objectContaining({ departure_time: '1893456010' }) }));
+    expect(cache.set).toHaveBeenCalledWith(expect.stringContaining('traffic-v1:'), result, 60);
+    const key = (service as any).getDirectionsCacheKey(dto);
+    expect((service as any).getDirectionsCacheKey({ ...dto, departureTime: dto.departureTime + 10 })).toBe(key);
+    expect((service as any).getDirectionsCacheKey({ ...dto, departureTime: dto.departureTime + 60 })).not.toBe(key);
+    expect((service as any).getDirectionsCacheKey({ ...dto, departureTime: undefined })).not.toBe(key);
+  });
+
   it('requests and returns only one route even when alternatives are requested', async () => {
     const httpService = {
       get: jest.fn().mockReturnValue(

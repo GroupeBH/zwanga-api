@@ -19,7 +19,7 @@ describe('parallel request preparation before dispatch (no external calls)', () 
       getRepository: () => repository,
     };
     Object.assign(repository, { manager: { transaction: async work => work(manager) } });
-    const weather = { getRouteImpact: jest.fn().mockResolvedValue({ priceMultiplier: 1.3 }) };
+    const weather = { getRouteImpact: jest.fn().mockResolvedValue({ heavyRain: true, priceMultiplier: 1.3 }) };
     const dispatch = { enabled: true, notifyScheduledRequest: jest.fn().mockResolvedValue(undefined) };
     const service = new TripRequestsService(
       repository as any, {} as any, { findOne: async () => ({ id: 'passenger' }) } as any,
@@ -28,7 +28,9 @@ describe('parallel request preparation before dispatch (no external calls)', () 
     );
     jest.spyOn(service, 'findOne').mockResolvedValue({ id: 'request' } as any);
     const points = jest.spyOn(service as any, 'resolvePointFromCoordinatesOrAddress');
-    const route = jest.spyOn(service as any, 'calculateRouteDistanceMeters').mockResolvedValue(5000);
+    const route = jest.spyOn(service as any, 'calculatePricingRoute').mockResolvedValue({
+      distanceMeters: 5000, durationSeconds: null, durationInTrafficSeconds: null, distanceSource: 'google_directions',
+    });
     const dto = {
       departureLocation: 'Gombe', arrivalLocation: 'Limete', vehicleType: VehicleType.CAR,
       departureDateMin: new Date(Date.now() + 60_000).toISOString(),
@@ -40,10 +42,28 @@ describe('parallel request preparation before dispatch (no external calls)', () 
   const arrival = { type: 'Point', coordinates: [15.4, -4.4] };
   afterEach(() => jest.restoreAllMocks());
 
+  it.each([0, 1000, 2499])('rejects a new budget %s below the minimum before storing or alerting', async price => {
+    const f = fixture(); f.points.mockResolvedValueOnce(departure).mockResolvedValueOnce(arrival);
+    await expect(f.service.create('passenger', { ...f.dto, maxPricePerSeat: price })).rejects.toMatchObject({
+      response: expect.objectContaining({ code: 'TRIP_PRICE_BELOW_MINIMUM' }),
+    });
+    expect(f.repository.save).not.toHaveBeenCalled();
+    expect(f.dispatch.notifyScheduledRequest).not.toHaveBeenCalled();
+  });
+
+  it('rejects a missing budget and unavailable distance instead of creating an unpriced request', async () => {
+    const f = fixture(); f.points.mockResolvedValueOnce(departure).mockResolvedValueOnce(arrival);
+    f.route.mockResolvedValue({ distanceMeters: null, durationSeconds: null, durationInTrafficSeconds: null, distanceSource: 'unavailable' });
+    await expect(f.service.create('passenger', f.dto)).rejects.toMatchObject({
+      response: expect.objectContaining({ code: 'TRIP_PRICE_UNAVAILABLE' }),
+    });
+    expect(f.repository.save).not.toHaveBeenCalled();
+  });
+
   it('starts both geocodings together and only publishes after both points and persistence', async () => {
     const f = fixture(); const a = deferred<any>(), b = deferred<any>();
     f.points.mockReturnValueOnce(a.promise).mockReturnValueOnce(b.promise);
-    const creating = f.service.create('passenger', { ...f.dto, maxPricePerSeat: 2000 });
+    const creating = f.service.create('passenger', { ...f.dto, maxPricePerSeat: 2500 });
     // Yield the user lookup, without resolving either geocoding operation.
     await Promise.resolve(); await Promise.resolve();
     expect(f.points).toHaveBeenCalledTimes(2);
@@ -53,7 +73,7 @@ describe('parallel request preparation before dispatch (no external calls)', () 
     expect(f.repository.save).not.toHaveBeenCalled();
     b.resolve(arrival); await creating;
     expect(f.repository.create).toHaveBeenCalledWith(expect.objectContaining({
-      departurePoint: departure, arrivalPoint: arrival, maxPricePerSeat: 2000,
+      departurePoint: departure, arrivalPoint: arrival, maxPricePerSeat: 2500,
     }));
     expect(f.dispatch.notifyScheduledRequest).toHaveBeenCalledWith('request', true);
     expect(f.repository.save.mock.invocationCallOrder[0]).toBeLessThan(f.dispatch.notifyScheduledRequest.mock.invocationCallOrder[0]);
@@ -62,13 +82,14 @@ describe('parallel request preparation before dispatch (no external calls)', () 
   });
 
   it('starts route and weather together while preserving the recommended amount', async () => {
-    const f = fixture(); const route = deferred<number>(), weather = deferred<any>();
+    const f = fixture(); const route = deferred<any>(), weather = deferred<any>();
     f.route.mockReturnValue(route.promise); f.weather.getRouteImpact.mockReturnValue(weather.promise);
     const price = (f.service as any).calculateRecommendedPricePerSeat(departure, arrival, VehicleType.CAR, 'test');
     expect(f.route).toHaveBeenCalledTimes(1);
     expect(f.weather.getRouteImpact).toHaveBeenCalledWith(departure.coordinates, arrival.coordinates);
-    route.resolve(5000); weather.resolve({ priceMultiplier: 1.3 });
-    await expect(price).resolves.toBe(3250);
+    route.resolve({ distanceMeters: 5000, durationSeconds: null, durationInTrafficSeconds: null, distanceSource: 'google_directions' });
+    weather.resolve({ heavyRain: true, priceMultiplier: 1.3 });
+    await expect(price).resolves.toBe(10000);
   });
 
   it('does not create or alert on a geocoding failure, even if the other operation completes later', async () => {

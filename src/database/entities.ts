@@ -45,6 +45,7 @@ import { ReferralReward } from '../referrals/entities/referral-reward.entity';
 import { ReferralLedgerEntry } from '../referrals/entities/referral-ledger-entry.entity';
 import { ReferralWithdrawal } from '../referrals/entities/referral-withdrawal.entity';
 import { ReferralWithdrawalResolution } from '../referrals/entities/referral-withdrawal-resolution.entity';
+import { PartnerFieldDailyReport, PartnerFieldLead, PartnerFieldTarget, PartnerFieldTicket, PartnerMember, PartnerOrganization } from '../partners/partner.entities';
 
 export const typeOrmEntities = [
   ...STORE_ENTITIES,
@@ -92,4 +93,10 @@ export const typeOrmEntities = [
   ReferralLedgerEntry,
   ReferralWithdrawal,
   ReferralWithdrawalResolution,
+  PartnerOrganization,
+  PartnerMember,
+  PartnerFieldLead,
+  PartnerFieldTarget,
+  PartnerFieldDailyReport,
+  PartnerFieldTicket,
 ];

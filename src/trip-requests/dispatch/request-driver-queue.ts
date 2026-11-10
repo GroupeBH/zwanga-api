@@ -1,9 +1,12 @@
 import { Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { RedisService } from '../../common/services/redis.service';
+import { REQUEST_RESPONSE_MS } from './sequential-policy';
 
 export const REQUEST_DEADLINES_KEY = 'ride-requests:deadlines';
-export const REQUEST_CANDIDATE_CACHE_SECONDS = 30;
+// Keep discovery through delivery + a complete response window + relay jitter.
+// This is not an invitation lifetime: SQL still rechecks eligibility/expiry.
+export const REQUEST_CANDIDATE_CACHE_SECONDS = Math.ceil(REQUEST_RESPONSE_MS / 1000) * 2 + 30;
 const key = (id: string) => 'ride-requests:{' + id + '}';
 
 /** Redis owns the ordered candidate queue and scheduling. SQL fences/reserves

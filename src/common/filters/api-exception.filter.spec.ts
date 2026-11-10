@@ -46,6 +46,17 @@ describe('ApiExceptionFilter', () => {
     jest.restoreAllMocks();
   });
 
+  it.each([
+    ['23505', 'UQ_users_phone_identity', 409, 'PHONE_ALREADY_REGISTERED'],
+    ['23514', 'CHK_users_phone_identity', 400, 'INVALID_PHONE_NUMBER'],
+  ])('maps the phone constraint %s without exposing account information', (code, constraint, status, businessCode) => {
+    const { host, response } = createHttpHost();
+    filter.catch({ driverError: { code, constraint, message: 'private phone and SQL' } }, host);
+    expect(response.status).toHaveBeenCalledWith(status);
+    expect(response.json).toHaveBeenCalledWith(expect.objectContaining({ code: businessCode }));
+    expect(JSON.stringify(response.json.mock.calls)).not.toContain('private phone');
+  });
+
   it('returns only the authenticated driver’s conflicting course summary, not the whole entity', () => {
     const row = { kind: 'trip' as const, id: 'trip', driverId: 'driver', departure: 'Test A', arrival: 'Test B',
       departureDate: new Date('2099-01-01T12:00:00Z'), status: 'upcoming', passengerPhone: 'must not escape' };

@@ -13,9 +13,10 @@ import {
   ProServiceLedger,
   ProServiceOffering,
 } from './pro-service.entities';
-import { CreateServiceCaseDto, ListServiceCasesDto } from './pro-service.dto';
+import { CreateServiceCaseDto, ListServiceCasesDto, UpdateDocumentCaseDto } from './pro-service.dto';
 import { DOCUMENT_OPTIONS } from './pro-service.types';
 import { financialSummary } from './pro-service.policy';
+import { canEditDocumentCase, documentCaseEditMode, normalizeServiceApplication, sameApplication } from './document-case.policy';
 
 @Injectable()
 export class ProServiceStore {
@@ -38,35 +39,8 @@ export class ProServiceStore {
     }));
   }
   async create(dto: CreateServiceCaseDto, ownerId: string | null) {
-    if (dto.contactConsent !== true) throw new BadRequestException('Votre accord pour être contacté est nécessaire.');
     const repo = this.db.getRepository(ProServiceCase);
-    const app = dto.application;
-    const application = {
-      fullName: app.fullName.trim(),
-      phone: app.phone.trim(),
-      vehicleDescription: app.vehicleDescription.trim(),
-      plate: app.plate?.trim().toUpperCase() || '',
-      documents: [...app.documents].sort(),
-      description: app.description.trim(),
-    };
-    if (
-      application.fullName.length < 3 ||
-      application.phone.replace(/\D/g, '').length < 8
-    ) {
-      throw new BadRequestException(
-        'Renseignez votre nom et un numéro de contact valide.',
-      );
-    }
-    if (
-      dto.serviceCode === 'documents' &&
-      (!application.documents.length ||
-        application.documents.some(
-          (code) => !DOCUMENT_OPTIONS.some(([known]) => known === code),
-        ))
-    )
-      throw new BadRequestException('Choisissez au moins un document proposé.');
-    if (dto.serviceCode !== 'documents' && application.description.length < 10)
-      throw new BadRequestException('Précisez votre besoin.');
+    const application = normalizeServiceApplication(dto.serviceCode, dto.application, dto.contactConsent);
     const same = (item: ProServiceCase) => {
       if (
         item.ownerId !== ownerId ||
@@ -94,6 +68,14 @@ export class ProServiceStore {
     if (previous) return same(previous);
     try {
       return await this.db.transaction(async (manager) => {
+        // Same lock order as acceptance/linking: account, then dossier. This
+        // serializes different submission keys across API tasks, not just double taps.
+        if (ownerId) {
+          await this.activeUser(manager, ownerId, true);
+          const replay = await manager.findOneBy(ProServiceCase, { submissionKey: dto.submissionKey });
+          if (replay) return same(replay);
+          if (dto.serviceCode === 'documents') await this.assertNoDocumentCase(manager, ownerId);
+        }
         const offering = await manager.findOne(ProServiceOffering, {
           where: { code: dto.serviceCode },
           lock: { mode: 'pessimistic_read' },
@@ -102,7 +84,6 @@ export class ProServiceStore {
           throw new ConflictException(
             'Ce service n’accepte pas de nouvelles demandes.',
           );
-        if (ownerId) await this.activeUser(manager, ownerId);
         const item = await manager.save(
           ProServiceCase,
           manager.create(ProServiceCase, {
@@ -129,6 +110,69 @@ export class ProServiceStore {
       if (!existing) throw error;
       return same(existing);
     }
+  }
+  async findDocumentCase(manager: EntityManager, ownerId: string) {
+    return manager.findOne(ProServiceCase, {
+      where: { ownerId, serviceCode: 'documents' },
+      order: { createdAt: 'DESC', id: 'DESC' },
+    });
+  }
+  async currentDocumentCase(ownerId: string) {
+    const item = await this.findDocumentCase(this.db.manager, ownerId);
+    return { request: item ? { id: item.id, status: item.status, canEdit: canEditDocumentCase(item) } : null };
+  }
+  async assertNoDocumentCase(manager: EntityManager, ownerId: string) {
+    const item = await this.findDocumentCase(manager, ownerId);
+    if (item) throw new ConflictException({
+      code: 'DOCUMENT_REQUEST_ALREADY_EXISTS',
+      message: 'Vous avez déjà une demande de documents. Modifiez votre demande existante.',
+    });
+  }
+  async updateDocumentCase(id: string, ownerId: string, dto: UpdateDocumentCaseDto) {
+    const application = normalizeServiceApplication('documents', dto.application, dto.contactConsent);
+    return this.db.transaction(async manager => {
+      await this.activeUser(manager, ownerId, true);
+      const item = await this.requireCase(manager, id, ownerId, true);
+      // Durable receipts make a lost response retry safe even after the team has
+      // processed the dossier. Never overwrite newer data on a retry.
+      const replay = await manager.getRepository(ProServiceEvent)
+        .createQueryBuilder('event')
+        .where('event."caseId" = :id AND event."actorId" = :ownerId AND event.action = :action', { id, ownerId, action: 'application_updated' })
+        .andWhere("event.detail ->> 'mutationId' = :mutationId", { mutationId: dto.mutationId })
+        .getOne();
+      if (replay) {
+        if (!sameApplication(replay.detail.application as any, application))
+          throw new ConflictException('Cette référence de modification a déjà été utilisée.');
+        return { id };
+      }
+      if (!canEditDocumentCase(item)) throw new ConflictException({
+        code: 'DOCUMENT_REQUEST_NOT_EDITABLE',
+        message: 'Cette demande ne peut plus être modifiée. Contactez l’assistance.',
+      });
+      if (item.updatedAt.getTime() !== Date.parse(dto.expectedUpdatedAt))
+        throw new ConflictException({ code: 'DOCUMENT_REQUEST_CHANGED', message: 'La demande a changé. Actualisez le dossier avant de le modifier.' });
+      const previousStatus = item.status;
+      const editMode = documentCaseEditMode(item);
+      const addedDocuments = application.documents.filter(code => !item.application.documents.includes(code));
+      if (editMode === 'add_documents') {
+        const original = normalizeServiceApplication('documents', item.application, true);
+        if (!sameApplication({ ...application, documents: original.documents }, original) ||
+            original.documents.some(code => !application.documents.includes(code)) || !addedDocuments.length)
+          throw new ConflictException('Pour ce dossier engagé ou terminé, ajoutez un document sans modifier les informations déjà validées.');
+      }
+      item.application = application;
+      if (editMode === 'full') item.status = 'submitted';
+      // Keep the last quote for audit/version monotonicity, but it cannot be
+      // accepted until a new quote is issued against this revised application.
+      item.updatedAt = new Date(Math.max(Date.now(), item.updatedAt.getTime() + 1));
+      await manager.save(item);
+      await this.audit(manager, id, ownerId, 'application_updated', {
+        mutationId: dto.mutationId, application, previousStatus,
+        editMode, addedDocuments,
+        invalidatedQuoteVersion: editMode === 'full' ? item.quote?.version ?? null : null, contactConsent: true,
+      });
+      return { id };
+    });
   }
   async activeUser(manager: EntityManager, id: string, lock = false) {
     const user = await manager.findOne(User, {
@@ -239,6 +283,8 @@ export class ProServiceStore {
     };
     return {
       ...item,
+      canEdit: canEditDocumentCase(item),
+      editMode: documentCaseEditMode(item),
       quote: ownerId ? quote : item.quote,
       canAccept:
         item.status === 'quoted' &&

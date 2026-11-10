@@ -57,16 +57,40 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y postgresql-16 postgresql-16-postgis-3
-          echo "MIXED_CASH_TEST_POSTGRES_BIN=/usr/lib/postgresql/16/bin" >> "${GITHUB_ENV}"
+          sudo apt-get install -y postgresql-16 postgresql-16-postgis-3 redis-server
+          for suite in APP_UPDATES INSTALLATION_UPDATES DISPATCH KYC_EVIDENCE DRIVER_FINANCE WALLET PAYOUT NOTIFICATIONS PIN_RESET PHONE_REGISTRATION PAWAPAY AUDIT MIXED_CASH ACCOUNT_LIFECYCLE RESILIENCE TRIP_SEARCH NEARBY_RING PAID_SUBSIDY; do
+            echo "${suite}_TEST_POSTGRES_BIN=/usr/lib/postgresql/16/bin" >> "${GITHUB_ENV}"
+          done
+
+      - name: Enable isolated Redis for sequential relay tests
+        if: inputs.action == 'deploy' || inputs.action == 'bootstrap'
+        shell: bash
+        run: |
+          set -euo pipefail
+          redis-server --bind 127.0.0.1 --port 16379 --save "" --appendonly no \
+            --daemonize yes --pidfile "$RUNNER_TEMP/zwanga-dispatch-redis.pid" \
+            --logfile "$RUNNER_TEMP/zwanga-dispatch-redis.log"
+          redis-cli -h 127.0.0.1 -p 16379 ping | grep -qx PONG
+          echo "DISPATCH_TEST_REDIS_PORT=16379" >> "$GITHUB_ENV"
 
       - name: Test and compile backend before starting the paid server
         if: inputs.action == 'deploy' || inputs.action == 'bootstrap'
         run: |
           npm ci --legacy-peer-deps
           npm run test:dependencies
+          node --test test/ci-integration-policy.test.cjs
+          npm audit --omit=dev --audit-level=high
+          node test/run-otp-redis.cjs
           npm run test -- --runInBand
           npm run build
+
+      - name: Stop isolated test Redis
+        if: always() && (inputs.action == 'deploy' || inputs.action == 'bootstrap')
+        shell: bash
+        run: |
+          if [[ -f "$RUNNER_TEMP/zwanga-dispatch-redis.pid" ]]; then
+            redis-cli -h 127.0.0.1 -p 16379 shutdown nosave
+          fi
 
       - uses: aws-actions/configure-aws-credentials@v6.2.3
         with:

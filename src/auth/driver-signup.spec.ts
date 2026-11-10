@@ -149,7 +149,7 @@ for (const provider of ['phone', 'google', 'apple'])
         f.users.findOne.mockImplementation(async ({ where }) => {
           const conditions = Array.isArray(where) ? where : [where];
           return conditions.some(
-            (condition) => condition.phone === '+243900000000',
+            (condition) => condition.phone?.objectLiteralParameters?.accountPhone === '+243900000000',
           )
             ? {
                 id: 'old-account',
@@ -196,7 +196,7 @@ for (const provider of ['phone', 'google', 'apple'])
         f.users.findOne.mockImplementation(async ({ where }) => {
           const conditions = Array.isArray(where) ? where : [where];
           return conditions.some(
-            (condition) => condition.phone === '+243900000000',
+            (condition) => condition.phone?.objectLiteralParameters?.accountPhone === '+243900000000',
           )
             ? { id: 'existing-account', isActive: true, status }
             : null;

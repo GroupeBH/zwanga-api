@@ -71,6 +71,7 @@ import {
 import { BookingsService } from '../bookings/bookings.service';
 import { DriverInterruptionWorkflow } from './driver-interruption.workflow';
 import { DriverInterruptionDecisionDto, DriverInterruptionFareQueryDto } from './dto/trip-interruption.dto';
+import { assertMinimumTripPrice } from '../trip-requests/trip-request-pricing';
 import { CacheService } from '../common/services/cache.service';
 import {
   LocationHistoryService,
@@ -277,6 +278,9 @@ export class TripsService {
   ): Promise<SanitizedTrip> {
     const isFree = createTripDto.isFree ?? createTripDto.pricePerSeat === 0;
     const pricePerSeat = isFree ? 0 : createTripDto.pricePerSeat;
+    // A request-linked trip uses the price already accepted by its passenger,
+    // including historic prices from before the current grid.
+    if (!isFree && !options?.tripRequestId) assertMinimumTripPrice(pricePerSeat);
 
     const tripType = isFree ? 'gratuit' : 'payant';
     this.logger.log(
@@ -750,6 +754,7 @@ export class TripsService {
       createRecurringTripDto.isFree ??
       createRecurringTripDto.pricePerSeat === 0;
     const pricePerSeat = isFree ? 0 : createRecurringTripDto.pricePerSeat;
+    if (!isFree) assertMinimumTripPrice(pricePerSeat);
     const departurePoint = await this.resolvePointFromCoordinatesOrAddress(
       createRecurringTripDto.departureCoordinates,
       createRecurringTripDto.departureLocation,
@@ -1174,6 +1179,9 @@ export class TripsService {
           ? pricePerSeat
           : trip.pricePerSeat;
 
+      if (!newIsFree && (Number(newPricePerSeat) !== Number(trip.pricePerSeat) || trip.isFree)) {
+        assertMinimumTripPrice(Number(newPricePerSeat));
+      }
       trip.isFree = newIsFree;
       trip.pricePerSeat = newPricePerSeat;
     }

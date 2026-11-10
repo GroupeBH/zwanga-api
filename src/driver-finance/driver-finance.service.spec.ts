@@ -10,7 +10,8 @@ describe('driver finance API projections', () => {
     booking: any,
     account: any,
     debt: number,
-    policyActive: boolean;
+    policyActive: boolean,
+    creditAvailable: boolean;
   beforeEach(() => {
     trip = {
       id: 'trip',
@@ -36,6 +37,7 @@ describe('driver finance API projections', () => {
     };
     debt = 0;
     policyActive = true;
+    creditAvailable = false;
     const db = {
       getRepository: (entity: any) => ({
         findOneBy: async () =>
@@ -44,7 +46,18 @@ describe('driver finance API projections', () => {
         existsBy: async () => false,
       }),
       query: async (sql: string) =>
-        sql.includes('COALESCE(SUM') ? [{ debt, enabled: policyActive }] : [],
+        sql.includes('COALESCE(SUM')
+          ? [
+              {
+                debt,
+                enabled: policyActive,
+                creditAvailable,
+                creditUsed: creditAvailable ? 1 : 6,
+                creditPaid: creditAvailable ? 0 : 6,
+                debtAmount: debt * 10,
+              },
+            ]
+          : [],
     };
     service = new DriverFinanceService(
       db as any,
@@ -64,82 +77,47 @@ describe('driver finance API projections', () => {
 
   it('prices a new 10000 CDF cash trip commission at 50 tokens, not 20', async () => {
     trip.pricePerSeat = 10000;
-    account.balance = 30;
+    account.balance = 49;
     account.reservedCashCommissionBalance = 0;
-    debt = 5;
-    expect((await service.tripOptions('passenger', 'trip')).availablePaymentModes).toContain('cash');
-    debt = 5.01;
-    expect((await service.tripOptions('passenger', 'trip')).availablePaymentModes).not.toContain('cash');
-    expect((await service.summary('driver')).cash).toMatchObject({ moneyPerToken: 10, debtLimitTokens: 25, debtAmount: 50.1 });
+    expect(
+      (await service.tripOptions('passenger', 'trip')).availablePaymentModes,
+    ).not.toContain('cash');
+    account.balance = 50;
+    expect(
+      (await service.tripOptions('passenger', 'trip')).availablePaymentModes,
+    ).toContain('cash');
+    debt = 0.01;
+    expect(
+      (await service.tripOptions('passenger', 'trip')).availablePaymentModes,
+    ).not.toContain('cash');
+    expect((await service.summary('driver')).cash).toMatchObject({
+      moneyPerToken: 10,
+      debtLimitTokens: 0,
+      debtAmount: 0.1,
+    });
   });
-  it('uses all seats and all free tokens, blocking cash above the aggregate debt limit', async () => {
+  it('requires tokens for all seats, not only one passenger', async () => {
     account.reservedCashCommissionBalance = 0;
     expect(
       (await service.tripOptions('passenger', 'trip', 2)).availablePaymentModes,
     ).toContain('cash');
     expect(
-      (await service.tripOptions('passenger', 'trip', 8)).availablePaymentModes,
-    ).not.toContain('cash');
-    debt = 25.01;
-    expect(
-      (await service.tripOptions('passenger', 'trip')).availablePaymentModes,
+      (await service.tripOptions('passenger', 'trip', 3)).availablePaymentModes,
     ).not.toContain('cash');
     await expect(service.tripOptions('passenger', 'trip', 0)).rejects.toThrow();
   });
-  it('deducts existing debt from the remaining 25-token allowance', async () => {
-    account.balance = 0;
-    account.withdrawableBalance = 0;
-    account.reservedCashCommissionBalance = 0;
-    expect(
-      (await service.tripOptions('passenger', 'trip', 5)).availablePaymentModes,
-    ).toContain('cash');
-    expect(
-      (await service.tripOptions('passenger', 'trip', 6)).availablePaymentModes,
-    ).not.toContain('cash');
-    debt = 0.01;
-    expect(
-      (await service.tripOptions('passenger', 'trip')).availablePaymentModes,
-    ).toContain('cash');
-    expect(
-      (await service.tripOptions('passenger', 'trip', 5)).availablePaymentModes,
-    ).not.toContain('cash');
-  });
-  it.each([
-    [20, 0, true],
-    [20.01, 0, false],
-    [25, 0, false],
-    [25, 5, true],
-    [25.01, 5, false],
-  ])(
-    'projects the cumulative ceiling with debt=%s and funds=%s',
-    async (owed, funds, allowed) => {
-      debt = owed as number;
-      account.balance = funds;
-      account.reservedCashCommissionBalance = 0;
-      expect(
-        (
-          await service.tripOptions('passenger', 'trip')
-        ).availablePaymentModes.includes(TripPaymentMode.CASH),
-      ).toBe(allowed);
-    },
-  );
-  it('reports remaining credit rather than granting another 25 for every trip', async () => {
+  it('never renews the credit after repayment; any remaining debt blocks a new cash trip', async () => {
     debt = 20;
-    account.balance = 0;
+    account.balance = 1000;
     account.reservedCashCommissionBalance = 0;
-    expect((await service.summary('driver')).cash).toMatchObject({
-      enabled: true,
-      debtTokens: 20,
-      availableCreditTokens: 5,
-    });
-    debt = 25;
     expect((await service.summary('driver')).cash).toMatchObject({
       enabled: false,
       availableCreditTokens: 0,
+      creditAllowance: { eligible: false, remainingTrips: 0 },
     });
-    account.balance = 5;
+    debt = 0;
     expect((await service.summary('driver')).cash.enabled).toBe(true);
-    debt = 25.01;
+    account.balance = 0;
     expect((await service.summary('driver')).cash.enabled).toBe(false);
   });
   it('does not bypass payment eligibility when deferred collection is inactive', async () => {
@@ -163,8 +141,7 @@ describe('driver finance API projections', () => {
     account.withdrawableBalance = 0;
     account.reservedCashCommissionBalance = 5;
     expect(
-      (await service.tripOptions('passenger', 'trip', 10))
-        .availablePaymentModes,
+      (await service.tripOptions('passenger', 'trip', 9)).availablePaymentModes,
     ).toContain('cash');
     account.reservedCashCommissionBalance = 30;
     expect(
@@ -179,5 +156,37 @@ describe('driver finance API projections', () => {
     trip.isPrivate = true;
     await expect(service.tripOptions('stranger', 'trip')).rejects.toThrow();
     await expect(service.tripOptions('driver', 'trip')).resolves.toBeDefined();
+  });
+  it('exposes the server offer and permits cash without funds, without erasing existing debt', async () => {
+    creditAvailable = true;
+    account.balance = 0;
+    account.reservedCashCommissionBalance = 0;
+    debt = 30;
+    const summary = await service.summary('driver');
+    expect(summary.cashCommissionRate).toBe(0.05);
+    expect(summary.commissionRate).toBe(0.05);
+    expect(summary.cash).toMatchObject({
+      enabled: true,
+      debtTokens: 30,
+      creditAllowance: {
+        eligible: true,
+        remainingTrips: 5,
+        completedTrips: 0,
+        reservedTrips: 1,
+        tripLimit: 6,
+        oneTime: true,
+      },
+    });
+    expect(
+      (await service.tripOptions('passenger', 'trip', 100))
+        .availablePaymentModes,
+    ).toContain('cash');
+    account.withdrawalsBlocked = true;
+    expect(
+      (await service.summary('driver')).cash.creditAllowance.eligible,
+    ).toBe(false);
+    expect(
+      (await service.tripOptions('passenger', 'trip')).availablePaymentModes,
+    ).not.toContain('cash');
   });
 });

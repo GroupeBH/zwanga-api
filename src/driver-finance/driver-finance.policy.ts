@@ -4,12 +4,14 @@ import { TripPaymentMode } from '../payments/enums/trip-payment-mode.enum';
 export const DRIVER_FINANCE = Object.freeze({
   commissionRate: 0.05,
   cashCommissionRate: 0.05,
-  cashDebtLimitTokens: 25,
+  cashDebtLimitTokens: 0,
   proPrice: 5000,
   currency: 'CDF',
   durationDays: 30,
 });
 export const ALL_TRIP_PAYMENT_MODES = Object.values(TripPaymentMode);
+
+export const DRIVER_CASH_CREDIT_TRIP_LIMIT = 6;
 
 export function normalizeAcceptedPaymentModes(
   modes?: TripPaymentMode[],
@@ -49,11 +51,7 @@ export function cashCommissionTokens(
     );
   }
   return (
-    Math.round(
-      (Math.round(amount * rate * 100) /
-        100 /
-        moneyPerToken) *
-        100,
-    ) / 100
+    Math.round((Math.round(amount * rate * 100) / 100 / moneyPerToken) * 100) /
+    100
   );
 }

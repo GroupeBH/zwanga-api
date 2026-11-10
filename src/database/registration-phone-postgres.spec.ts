@@ -9,6 +9,9 @@ import { BadRequestException } from '@nestjs/common';
 import { DataSource, EntitySchema, Repository } from 'typeorm';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { saveRegistrationWithPhone } from '../users/registration-phone.policy';
+import { CanonicalPhoneIdentity1780000119000 } from './migrations/1780000119000-CanonicalPhoneIdentity';
+import { accountPhoneWhere, canonicalAccountPhone } from '../users/phone-identity';
+import { AuthService } from '../auth/auth.service';
 
 // Explicit opt-in; this never reads application credentials or connects to its DB.
 const pgBin = process.env.PHONE_REGISTRATION_TEST_POSTGRES_BIN;
@@ -19,6 +22,12 @@ const pgBin = process.env.PHONE_REGISTRATION_TEST_POSTGRES_BIN;
     let source: DataSource;
     let users: Repository<User>;
     const phone = '+243890000001';
+    const identityMigration = new CanonicalPhoneIdentity1780000119000();
+    async function migrate(direction: 'up' | 'down') {
+      const runner = source.createQueryRunner();
+      try { await identityMigration[direction](runner); }
+      finally { await runner.release(); }
+    }
     const executable = (name: string) =>
       join(pgBin!, process.platform === 'win32' ? `${name}.exe` : name);
 
@@ -38,8 +47,9 @@ const pgBin = process.env.PHONE_REGISTRATION_TEST_POSTGRES_BIN;
           '--no-locale',
           '-E',
           'UTF8',
+          '--no-sync', // Disposable cluster only; avoid slow Windows disk sync.
         ],
-        { windowsHide: true, stdio: 'pipe', timeout: 30_000 },
+        { windowsHide: true, stdio: 'pipe', timeout: process.platform === 'win32' ? 120_000 : 30_000 },
       );
       const port = await new Promise<number>((done, reject) => {
         const server = createServer();
@@ -94,14 +104,15 @@ const pgBin = process.env.PHONE_REGISTRATION_TEST_POSTGRES_BIN;
         extra: { max: 4 },
       });
       await source.initialize();
+      await migrate('up');
       users = source.getRepository(User);
       await source.query(
         'CREATE TABLE registration_test_history (id uuid PRIMARY KEY, "userId" uuid REFERENCES users(id), amount integer NOT NULL)',
       );
-    }, 60_000);
+    }, process.platform === 'win32' ? 180_000 : 60_000);
 
     beforeEach(async () => {
-      await source.query('TRUNCATE registration_test_history, users');
+      await source.query('TRUNCATE registration_test_history, users, user_phone_identities');
     });
 
     afterAll(async () => {
@@ -139,6 +150,115 @@ const pgBin = process.env.PHONE_REGISTRATION_TEST_POSTGRES_BIN;
         isPhoneVerified: false,
       });
     }
+
+    it.each(['0890000001', '890000001', '243890000001', '00243890000001', '+243 890-000-001'])('stores %s canonically and finds it through every login spelling', async input => {
+      const account = await users.save({ ...fresh(), phone: input });
+      expect((await users.findOneByOrFail({ id: account.id })).phone).toBe(phone);
+      for (const spelling of [input, phone, '0890000001']) {
+        expect((await users.findOneByOrFail({ phone: accountPhoneWhere(spelling) })).id).toBe(account.id);
+      }
+    });
+
+    it.each(['+32 2 000 00 00', '00352 26 00 00', '+2250100000000', '+390600000000', '0900000000'])('keeps SQL and OTP normalization aligned for %s', async input => {
+      const [row] = await source.query('SELECT public.zwanga_canonical_phone($1) AS phone', [input]);
+      expect(row.phone).toBe(canonicalAccountPhone(input));
+    });
+
+    it('prevents concurrent alias signups even outside the registration service', async () => {
+      const results = await Promise.allSettled([
+        users.save({ ...fresh(), phone: '0890000001' }),
+        users.save({ ...fresh(), phone }),
+      ]);
+      expect(results.filter(r => r.status === 'fulfilled')).toHaveLength(1);
+      expect(results.filter(r => r.status === 'rejected')).toHaveLength(1);
+      expect(await users.count()).toBe(1);
+    });
+
+    it('uses the same Unicode whitespace rules in PostgreSQL and OTP', async () => {
+      for (const code of [9, 10, 11, 12, 13, 32, 160, 5760, 8192, 8202, 8232, 8233, 8239, 8287, 12288, 65279]) {
+        const input = `+243${String.fromCharCode(code)}890000001`;
+        const [row] = await source.query('SELECT public.zwanga_canonical_phone($1) AS phone', [input]);
+        expect(row.phone).toBe(canonicalAccountPhone(input));
+      }
+    });
+
+    it('rejects malformed writes and releases a deleted account reservation', async () => {
+      await expect(users.save({ ...fresh(), phone: 'not a phone' })).rejects
+        .toMatchObject({ driverError: { code: '23514', constraint: 'CHK_users_phone_identity' } });
+      const first = await users.save(fresh());
+      await users.delete(first.id);
+      expect(await source.query('SELECT * FROM user_phone_identities')).toEqual([]);
+      const second = await users.save({ ...fresh(), phone: '0890000001' });
+      expect((await users.findOneByOrFail({ phone: accountPhoneWhere(phone) })).id).toBe(second.id);
+    });
+
+    it('serializes alias registrations and preserves the canonical error contract', async () => {
+      const results = await Promise.allSettled([
+        saveRegistrationWithPhone(users, users.create({ ...fresh(), phone: '0890000001' })),
+        saveRegistrationWithPhone(users, fresh()),
+      ]);
+      expect(results.filter(r => r.status === 'fulfilled')).toHaveLength(1);
+      expect((results.find(r => r.status === 'rejected') as PromiseRejectedResult).reason)
+        .toMatchObject({ response: { code: 'PHONE_ALREADY_REGISTERED' } });
+    });
+
+    it('rejects a phone change to an occupied alias and rolls its old reservation back', async () => {
+      const first = await users.save(fresh());
+      const second = await users.save({ ...fresh(), phone: '+243890000002' });
+      await expect(users.update(second.id, { phone: '0890000001' })).rejects
+        .toMatchObject({ driverError: { code: '23505', constraint: 'UQ_users_phone_identity' } });
+      expect((await users.findOneByOrFail({ id: second.id })).phone).toBe('+243890000002');
+      expect(await source.query('SELECT "userId" FROM user_phone_identities ORDER BY phone'))
+        .toEqual([{ userId: first.id }, { userId: second.id }]);
+    });
+
+    it('preserves and quarantines historical collisions, including an inactive owner', async () => {
+      await migrate('down');
+      const first = await users.save({ ...fresh(), phone: '0890000001', status: UserStatus.INACTIVE });
+      const second = await users.save(fresh());
+      const historyId = randomUUID();
+      await source.query('INSERT INTO registration_test_history VALUES ($1,$2,50)', [historyId, first.id]);
+      await migrate('up');
+      expect((await users.findOneByOrFail({ id: first.id })).phone).toBe('0890000001');
+      expect((await users.findOneByOrFail({ id: second.id })).phone).toBe(phone);
+      expect(await users.findOneBy({ phone: accountPhoneWhere(phone) })).toBeNull();
+      expect(await users.findOneBy({ phone: accountPhoneWhere('0890000001') })).toBeNull();
+      const sendOtp = jest.fn();
+      const auth = Object.assign(Object.create(AuthService.prototype), { userRepository: users, otpService: { sendOtp } });
+      expect(await auth.requestPinResetOtp({ phone })).toEqual({ message: expect.stringContaining('Si ce compte') });
+      expect(sendOtp).not.toHaveBeenCalled();
+      await expect(saveRegistrationWithPhone(users, fresh())).rejects.toBeDefined();
+      expect(await users.count()).toBe(2);
+      expect((await users.findOneByOrFail({ id: first.id })).phone).toBe('0890000001');
+      await users.update(first.id, { firstName: 'Updated' });
+      await users.update(first.id, { phone: '0890000001' });
+      expect(await source.query('SELECT * FROM registration_test_history'))
+        .toEqual([{ id: historyId, userId: first.id, amount: 50 }]);
+    });
+
+    it('reads an unambiguous legacy account without rewriting its phone', async () => {
+      await migrate('down');
+      const old = await users.save({ ...fresh(), phone: ' 089 000 0001 ' });
+      await migrate('up');
+      expect((await users.findOneByOrFail({ phone: accountPhoneWhere(phone) })).id).toBe(old.id);
+      expect((await users.findOneByOrFail({ id: old.id })).phone).toBe(' 089 000 0001 ');
+      const sendOtp = jest.fn().mockResolvedValue({ expiresInSeconds: 900 });
+      const set = jest.fn();
+      const auth = Object.assign(Object.create(AuthService.prototype), {
+        userRepository: users, otpService: { sendOtp }, redisService: { set },
+      });
+      await auth.requestPinResetOtp({ phone });
+      expect(sendOtp).toHaveBeenCalledWith(phone, 'pin_reset');
+      expect(set).toHaveBeenCalledWith(`auth:pin-reset-otp:${old.id}`, 'pending', 900);
+    });
+
+    it('rolls back the migration without deleting accounts, then reinstalls it', async () => {
+      const user = await users.save(fresh());
+      await migrate('down');
+      expect(await users.findOneByOrFail({ id: user.id })).toEqual(user);
+      await migrate('up');
+      expect((await users.findOneByOrFail({ phone: accountPhoneWhere(phone) })).id).toBe(user.id);
+    });
 
     async function previous(state: { status: UserStatus; isActive: boolean }) {
       return users.save(

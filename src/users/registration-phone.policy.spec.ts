@@ -54,7 +54,7 @@ describe('Phone ownership during registration', () => {
         [`zwanga:registration-phone:${phone}`],
       );
       expect(f.users.findOne).toHaveBeenCalledWith({
-        where: { phone },
+        where: { phone: expect.objectContaining({ type: 'raw', objectLiteralParameters: { accountPhone: phone } }) },
         lock: { mode: 'pessimistic_write' },
       });
       expect(f.users.update).toHaveBeenCalledWith(

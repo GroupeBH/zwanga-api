@@ -58,7 +58,7 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y postgresql-16 postgresql-16-postgis-3 redis-server
-          for suite in APP_UPDATES DISPATCH KYC_EVIDENCE DRIVER_FINANCE WALLET PAYOUT NOTIFICATIONS PIN_RESET PHONE_REGISTRATION PAWAPAY AUDIT MIXED_CASH ACCOUNT_LIFECYCLE; do
+          for suite in APP_UPDATES INSTALLATION_UPDATES DISPATCH KYC_EVIDENCE DRIVER_FINANCE WALLET PAYOUT NOTIFICATIONS PIN_RESET PHONE_REGISTRATION PAWAPAY AUDIT MIXED_CASH ACCOUNT_LIFECYCLE RESILIENCE TRIP_SEARCH NEARBY_RING PAID_SUBSIDY; do
             echo "${suite}_TEST_POSTGRES_BIN=/usr/lib/postgresql/16/bin" >> "${GITHUB_ENV}"
           done
 
@@ -73,7 +73,15 @@ jobs:
           echo "DISPATCH_TEST_REDIS_PORT=16379" >> "$GITHUB_ENV"
 
       - name: Check dependency integrations
-        run: npm run test:dependencies
+        run: |
+          npm run test:dependencies
+          node --test test/ci-integration-policy.test.cjs
+
+      - name: Check known runtime vulnerabilities
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Test OTP against disposable password-protected Redis
+        run: node test/run-otp-redis.cjs
 
       - name: Run tests
         run: npm run test -- --runInBand

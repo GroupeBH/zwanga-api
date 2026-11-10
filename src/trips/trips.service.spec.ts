@@ -30,7 +30,7 @@ describe('TripsService daily trip publication quota', () => {
     arrivalCoordinates: [15.3222, -4.4419] as [number, number],
     departureDate: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
     totalSeats: 3,
-    pricePerSeat: 1000,
+    pricePerSeat: 2500,
   };
 
   beforeEach(() => {

@@ -23,7 +23,7 @@ export function driverPaymentNotification(booking: Booking, driverId: string, pr
   return {
     eventKey: `driver-payment:${booking.id}:${split ? 'tokens' : 'paid'}`,
     userId: driverId, title: split ? 'Paiement partiel reçu' : 'Paiement reçu',
-    body: `${displayAmount(amount, currency)} reçus ${mode === TripPaymentMode.POINTS ? 'en jetons Zwanga' : 'par paiement électronique'}.${split ? ` Il reste ${displayAmount(cashRemainder, currency)} à recevoir en espèces.` : ''}`,
+    body: `${displayAmount(amount, currency)} reçus ${mode === TripPaymentMode.POINTS ? 'en jetons Zwanga' : 'par paiement électronique'}.${split ? ` Il reste ${displayAmount(cashRemainder, currency)} à recevoir en cash.` : ''}`,
     data: { type: DRIVER_PAYMENT_NOTIFICATION_TYPE, role: 'driver', driverId,
       bookingId: booking.id, tripId: booking.tripId, amount, currency, paymentMode: mode,
       receiptKey: split ? `booking-payment:${booking.id}:tokens` : `booking-payment:${booking.id}`,

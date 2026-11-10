@@ -15,7 +15,7 @@ describe('booking price proposals', () => {
     expect(validateBookingPriceProposal(2500, trip, 2)).toBe(2500);
     expect(trip.pricePerSeat).toBe(3500);
   });
-  it.each([0, -1, 1.5, NaN, Infinity, '2000', 3500, 999999999])('rejects invalid price %s', value => {
+  it.each([0, -1, 1.5, 1000, 2499, NaN, Infinity, '2000', 3500, 999999999])('rejects invalid price %s', value => {
     expect(() => validateBookingPriceProposal(value, trip, 2)).toThrow();
   });
   it('rejects free/private/shared trips and monetary overflow', () => {

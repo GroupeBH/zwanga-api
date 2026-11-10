@@ -1,5 +1,75 @@
 # Journal détaillé des changements d'infrastructure AWS
 
+## INFRA-2026-11-09-001 — Contrôles de non-régression avant déploiement
+
+- Date / opérateur : 9 novembre 2026, Africa/Kinshasa ; Codex, à la demande du mainteneur.
+- Statut : préparé dans le code local, non déployé. Environnements visés : CI staging et production.
+- Cause : des suites PostgreSQL étaient ignorées faute de variables d'activation ; le test OTP Redis protégé n'était pas exécuté et aucun contrôle npm des vulnérabilités runtime ne bloquait la livraison.
+- Fichiers : `.github/workflows/deploy.yml`, `.github/workflows/deploy-staging.yml`, `test/ci-integration-policy.test.cjs`.
+- Changements : activation des suites PostgreSQL, dont installations, résilience, recherche géographique, sonneries et subventions ; Redis jetable pour le dispatch également en staging ; exécution séparée du test OTP avec son propre Redis protégé ; `npm audit --omit=dev --audit-level=high` avant publication. Le contrôle YAML vérifie que ces étapes restent présentes.
+- Ressources AWS, IAM, SSM et secrets : aucune modification. Aucun Terraform exécuté. Aucune migration métier ni perte de données. Coût AWS ajouté : aucun ; durée CI accrue par les tests.
+- Validation locale : les deux tests de structure des workflows passent. La validation applicative et ses limites sont détaillées dans `docs/operations/correctifs-audit-2026-11-09.md`.
+- Mise en service : après revue, soumettre les changements aux workflows habituels. Un audit npm indisponible ou une intégration en échec bloque la livraison ; ne pas contourner cette protection pour déployer.
+- Surveillance : vérifier les résultats des suites et l'absence de tests critiques ignorés sur le runner Linux ; suivre la durée CI avant d'ajuster ses ressources.
+- Retour arrière : restaurer uniquement ces changements de contrôles CI via une revue ; aucun changement d'état AWS à annuler. Ne pas neutraliser durablement les contrôles pour masquer une régression.
+- Restant : séparation des rôles PostgreSQL runtime/migration et redondance AWS à planifier séparément après vérification de l'état déployé.
+
+## INFRA-2026-11-06-001 — Activation Stores et Supervision mobile en production
+
+- **Date / opérateur / autorisation :** 6 novembre 2026, Africa/Kinshasa ;
+  Codex à la demande explicite du mainteneur depuis les écrans admin désactivés.
+  Opération de configuration AWS, sans modification du code applicatif ni push Git.
+- **Cause vérifiée :** les 17 paramètres `STORE_*` préparés le 5 novembre
+  existaient dans SSM, mais la définition ECS `zwanga-api-production-api:39`
+  n'injectait aucun paramètre `STORE_*` ou `MOBILE_*`.
+- **Prérequis vérifiés :** tâche de migration
+  `799749f6c4b84d60b1528414b971eef6`, même définition `:39`, terminée avec le
+  code 0. Ses logs confirment notamment la réussite de
+  `MobileOperations1780000111000` et
+  `AutomaticStoreUpdateAnnouncements1780000112000`. Aucune migration relancée.
+  Le rôle d'exécution dispose déjà de la lecture du préfixe SSM de production
+  et du déchiffrement KMS ; aucune permission IAM ajoutée.
+- **SSM réellement modifié**, sous `/zwanga-api/production/env/`, `eu-central-1` :
+  `STORE_MANAGEMENT_ENABLED=true` (version 2),
+  `MOBILE_OPERATIONS_ENABLED=true` (création, version 1),
+  `MOBILE_CAMPAIGNS_ENABLED=false` (création, version 1).
+  Paramètres Standard `SecureString`, clé existante
+  `alias/zwanga-api-production-application`. Aucune clé privée lue ou recopiée.
+- **ECS :** nouvelle définition `zwanga-api-production-api:40`, conservant
+  intégralement les conteneurs, rôles, ressources et secrets existants ; ajout
+  des références aux 17 paramètres Store et aux 2 paramètres Mobile.
+  Image inchangée et épinglée au digest
+  `sha256:7a91314ea8034dd4e1f5860491a1599663e94eb598a3f63fd1b78cf2df31546f`.
+  Déploiement `ecs-svc/4178400494333346156`, tâche attendue : 1,
+  minimum sain 100 %, maximum 200 %, circuit breaker avec rollback conservé.
+- **Limites d'activation :** `STORE_SYNC_ENABLED`, les réponses aux avis,
+  les éditions Google, les rapports Apple Sales et SMTP restent désactivés.
+  Les campagnes mobiles restent désactivées ; aucune notification de mise à
+  jour automatique n'est activée. Aucun test ne publie de version ou d'avis.
+  L'accès aux écrans ne constitue pas une validation des connexions Google/Apple
+  ni un import de statistiques ; ces vérifications restent à effectuer dans
+  Configuration, puis par synchronisation manuelle.
+- **Impacts / coûts :** renouvellement progressif de la tâche, avec chevauchement
+  temporaire des deux tâches Fargate, appels SSM/KMS et 2 paramètres Standard
+  supplémentaires. Pas de changement Terraform, CI/CD, réseau ou capacité cible.
+  Les traitements de supervision et de conservation bornée existants deviennent
+  actifs ; les imports historiques locaux ne sont pas copiés en production.
+- **Validation obtenue**, vers 16 h 10 Africa/Kinshasa : déploiement attendu
+  `ecs-svc/4178400494333346156` en `PRIMARY / COMPLETED`, définition `:40`,
+  1 tâche active sur 1 attendue, aucune en attente et aucun échec de tâche.
+  Nouvelle tâche `e61f051c3341404980fcfd4d45b8a47d` saine, cible ALB `healthy`,
+  `/health` répond `status=ok`, `db=ok`, `redis=ok` après basculement.
+  Les quatre drapeaux d'activation/garde-fous ont été relus dans SSM.
+  La navigation admin authentifiée et les imports fournisseurs restent à valider
+  depuis la session de l'opérateur ; aucun jeton administrateur créé pour ce test.
+- **Retour arrière :** remettre les deux paramètres d'activation à `false`,
+  puis renouveler les tâches ECS ; un changement SSM seul ne modifie pas les
+  tâches déjà lancées. En cas d'échec du démarrage, la définition `:39` reste
+  la référence précédente. Ne supprimer ni tables ni paramètres. Conserver
+  les données/audits. Les prochains déploiements doivent conserver les nouvelles
+  références SSM ; Terraform découvre déjà ce préfixe runtime et ignore les
+  changements de révision applicative du service ECS.
+
 ## INFRA-2026-11-05-001 — Préparation Store Management sans activation ECS
 
 - **Date / auteur / statut :** 5 novembre 2026, vérification finale vers 15 h 20
