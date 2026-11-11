@@ -63,7 +63,11 @@ import {
   saveRegistrationWithPhone,
 } from '../users/registration-phone.policy';
 
-import { accountPhoneWhere, canonicalAccountPhone } from '../users/phone-identity';
+import {
+  accountPhoneWhere,
+  authAccountPhoneWhere,
+  canonicalAccountPhone,
+} from '../users/phone-identity';
 
 const APPLE_ISSUER = 'https://appleid.apple.com';
 const APPLE_PUBLIC_KEYS_URL = 'https://appleid.apple.com/auth/keys';
@@ -315,7 +319,7 @@ export class AuthService {
   }
 
   async validateUser(phone: string, pin: string): Promise<User | null> {
-    const user = await this.userRepository.findOne({ where: { phone: accountPhoneWhere(phone) },
+    const user = await this.userRepository.findOne({ where: { phone: authAccountPhoneWhere(phone) },
       select: ['id', 'password'] });
 
     if (!user) {
@@ -352,7 +356,7 @@ export class AuthService {
   async login(loginDto: LoginDto) {
     // Find user by phone
     const user = await this.userRepository.findOne({
-      where: { phone: accountPhoneWhere(loginDto.phone) },
+      where: { phone: authAccountPhoneWhere(loginDto.phone) },
     });
 
     if (!user) {
@@ -400,7 +404,7 @@ export class AuthService {
     dto: PinResetRequestDto,
   ): Promise<{ message: string }> {
     const user = await this.userRepository.findOne({
-      where: { phone: accountPhoneWhere(dto.phone) },
+      where: { phone: authAccountPhoneWhere(dto.phone) },
     });
 
     // Return the same response for unknown or ineligible accounts to avoid
@@ -424,7 +428,7 @@ export class AuthService {
     expiresInSeconds: number;
   }> {
     const user = await this.userRepository.findOne({
-      where: { phone: accountPhoneWhere(dto.phone) },
+      where: { phone: authAccountPhoneWhere(dto.phone) },
     });
 
     if (!this.canUseSelfServicePinReset(user)) {
@@ -607,7 +611,7 @@ export class AuthService {
 
   async adminLogin(loginDto: AdminLoginDto): Promise<AuthResponseDto> {
     const user = await this.userRepository.findOne({
-      where: { phone: accountPhoneWhere(loginDto.phone) },
+      where: { phone: authAccountPhoneWhere(loginDto.phone) },
     });
 
     if (!user) {
