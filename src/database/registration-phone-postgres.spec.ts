@@ -5,13 +5,15 @@ import { existsSync, mkdtempSync, rmSync } from 'fs';
 import { createServer } from 'net';
 import { tmpdir } from 'os';
 import { join, resolve, sep } from 'path';
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, UnauthorizedException } from '@nestjs/common';
+import * as bcrypt from 'bcrypt';
 import { DataSource, EntitySchema, Repository } from 'typeorm';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { saveRegistrationWithPhone } from '../users/registration-phone.policy';
 import { CanonicalPhoneIdentity1780000119000 } from './migrations/1780000119000-CanonicalPhoneIdentity';
-import { accountPhoneWhere, canonicalAccountPhone } from '../users/phone-identity';
+import { accountPhoneWhere, authAccountPhoneWhere, canonicalAccountPhone } from '../users/phone-identity';
 import { AuthService } from '../auth/auth.service';
+import { UsersService } from '../users/users.service';
 
 // Explicit opt-in; this never reads application credentials or connects to its DB.
 const pgBin = process.env.PHONE_REGISTRATION_TEST_POSTGRES_BIN;
@@ -91,6 +93,8 @@ const pgBin = process.env.PHONE_REGISTRATION_TEST_POSTGRES_BIN;
           accessToken: { type: String, nullable: true },
           refreshToken: { type: String, nullable: true },
           fcmToken: { type: String, nullable: true },
+          password: { type: String, nullable: true, select: false },
+          lastLoginAt: { type: Date, nullable: true },
         },
       });
       source = new DataSource({
@@ -212,9 +216,9 @@ const pgBin = process.env.PHONE_REGISTRATION_TEST_POSTGRES_BIN;
         .toEqual([{ userId: first.id }, { userId: second.id }]);
     });
 
-    it('preserves and quarantines historical collisions, including an inactive owner', async () => {
+    it('preserves and quarantines historical collisions between enabled owners', async () => {
       await migrate('down');
-      const first = await users.save({ ...fresh(), phone: '0890000001', status: UserStatus.INACTIVE });
+      const first = await users.save({ ...fresh(), phone: '0890000001', status: UserStatus.ACTIVE });
       const second = await users.save(fresh());
       const historyId = randomUUID();
       await source.query('INSERT INTO registration_test_history VALUES ($1,$2,50)', [historyId, first.id]);
@@ -236,6 +240,174 @@ const pgBin = process.env.PHONE_REGISTRATION_TEST_POSTGRES_BIN;
         .toEqual([{ id: historyId, userId: first.id, amount: 50 }]);
     });
 
+    function authFixture() {
+      const sendOtp = jest.fn().mockResolvedValue({ expiresInSeconds: 900 });
+      const verifyOtp = jest.fn().mockResolvedValue({ valid: true });
+      const values = new Map<string, string>();
+      const set = jest.fn(async (key: string, value: string) => { values.set(key, value); });
+      const generateTokens = jest.fn().mockResolvedValue({ accessToken: 'test-access', refreshToken: 'test-refresh' });
+      const auth = Object.assign(Object.create(AuthService.prototype), {
+        userRepository: users, otpService: { sendOtp, verifyOtp },
+        redisService: {
+          set, get: jest.fn(async (key: string) => values.get(key)),
+          consumeIfValueMatches: jest.fn(async (key: string, expected: string) => {
+            if (values.get(key) !== expected) return false;
+            values.delete(key);
+            return true;
+          }),
+        },
+        logger: { log: jest.fn(), warn: jest.fn() }, generateTokens,
+      }) as AuthService;
+      return { auth, sendOtp, verifyOtp, set, generateTokens };
+    }
+
+    async function legacyOwners(overrides: Partial<User>[]) {
+      await migrate('down');
+      const owners: User[] = [];
+      try {
+        for (const override of overrides) owners.push(await users.save({ ...fresh(), ...override }));
+      } finally { await migrate('up'); }
+      return owners;
+    }
+
+    it.each([
+      { status: UserStatus.INACTIVE, isActive: true },
+      { status: UserStatus.INACTIVE, isActive: false },
+      { status: UserStatus.ACTIVE, isActive: false },
+      { status: UserStatus.PENDING_KYC, isActive: false },
+    ])('logs in the only enabled owner despite a deactivated alias %j', async state => {
+      const [inactive, enabled] = await legacyOwners([
+        { phone: '0890000001', ...state, password: await bcrypt.hash('1111', 4) },
+        { phone, password: await bcrypt.hash('2222', 4) },
+      ]);
+      const historyId = randomUUID();
+      await source.query('INSERT INTO registration_test_history VALUES ($1,$2,50)', [historyId, inactive.id]);
+      const f = authFixture();
+      for (const input of ['0890000001', phone, '243890000001']) {
+        expect((await users.findOneByOrFail({ phone: authAccountPhoneWhere(input) })).id).toBe(enabled.id);
+        await expect(f.auth.login({ phone: input, pin: '2222' })).resolves.toMatchObject({ accessToken: 'test-access' });
+        await expect(f.auth.login({ phone: input, pin: '1111' })).rejects.toBeInstanceOf(UnauthorizedException);
+      }
+      expect(f.generateTokens).toHaveBeenCalledTimes(3);
+      expect(f.generateTokens.mock.calls.every(([owner]) => owner.id === enabled.id)).toBe(true);
+      expect((await users.findOneByOrFail({ id: inactive.id })).lastLoginAt).toBeNull();
+      expect(await source.query('SELECT * FROM registration_test_history'))
+        .toEqual([{ id: historyId, userId: inactive.id, amount: 50 }]);
+      // Login never transfers the database reservation or enables a new signup.
+      expect(await source.query('SELECT "userId" FROM user_phone_identities')).toEqual([{ userId: null }]);
+      expect(await users.findOneBy({ phone: accountPhoneWhere(phone) })).toBeNull();
+      await expect(saveRegistrationWithPhone(users, fresh())).rejects.toBeDefined();
+      expect(await users.count()).toBe(2);
+    });
+
+    it('uses the same enabled owner for PIN-reset send/verify and phone verification', async () => {
+      const [inactive, enabled] = await legacyOwners([
+        { phone: '0890000001', isActive: false }, { phone },
+      ]);
+      const f = authFixture();
+      await f.auth.requestPinResetOtp({ phone: '0890000001' });
+      expect(f.sendOtp).toHaveBeenCalledWith(phone, 'pin_reset');
+      expect(f.set).toHaveBeenCalledWith(`auth:pin-reset-otp:${enabled.id}`, 'pending', 900);
+      const result = await f.auth.verifyPinResetOtp({ phone, otp: '123456' });
+      expect(result.resetToken.startsWith(`${enabled.id}.`)).toBe(true);
+      expect(f.verifyOtp).toHaveBeenCalledWith(phone, '123456', 'pin_reset');
+      const service = Object.assign(Object.create(UsersService.prototype), {
+        userRepository: users, otpService: { verifyOtp: f.verifyOtp },
+      }) as UsersService;
+      await service.verifyPhoneOtp({ phone: '0890000001', otp: '123456' });
+      expect((await users.findOneByOrFail({ id: enabled.id })).isPhoneVerified).toBe(true);
+      expect((await users.findOneByOrFail({ id: inactive.id })).isPhoneVerified).toBe(false);
+    });
+
+    it('selects the enabled local spelling, not a disabled canonical spelling', async () => {
+      const [enabled] = await legacyOwners([
+        { phone: '0890000001', password: await bcrypt.hash('2222', 4) },
+        { phone, isActive: false },
+        { phone: '243890000001', status: UserStatus.INACTIVE },
+      ]);
+      const f = authFixture();
+      await f.auth.login({ phone, pin: '2222' });
+      expect(f.generateTokens).toHaveBeenCalledWith(expect.objectContaining({ id: enabled.id, phone: '0890000001' }));
+      expect((await users.findOneByOrFail({ id: enabled.id })).phone).toBe('0890000001');
+    });
+
+    it('allows the enabled admin without selecting the inactive alias', async () => {
+      const [, enabled] = await legacyOwners([
+        { phone: '0890000001', status: UserStatus.INACTIVE, role: UserRole.SUPER_ADMIN },
+        { phone, role: UserRole.ADMIN, password: await bcrypt.hash('test-admin-password', 4) },
+      ]);
+      const f = authFixture();
+      await expect(f.auth.adminLogin({ phone: '0890000001', password: 'test-admin-password' }))
+        .resolves.toMatchObject({ accessToken: 'test-access' });
+      expect(f.generateTokens).toHaveBeenCalledWith(expect.objectContaining({ id: enabled.id, role: UserRole.ADMIN }));
+      // Self-service reset still cannot reset an administrator's password.
+      await f.auth.requestPinResetOtp({ phone });
+      expect(f.sendOtp).not.toHaveBeenCalled();
+    });
+
+    it('never grants an inactive admin role to the remaining passenger', async () => {
+      await legacyOwners([
+        { phone: '0890000001', isActive: false, role: UserRole.ADMIN },
+        { phone, password: await bcrypt.hash('2222', 4) },
+      ]);
+      const f = authFixture();
+      await expect(f.auth.adminLogin({ phone, pin: '2222' })).rejects.toBeInstanceOf(UnauthorizedException);
+      expect(f.generateTokens).not.toHaveBeenCalled();
+    });
+
+    it('still blocks two enabled owners even when a third alias is deactivated', async () => {
+      await legacyOwners([
+        { phone: '0890000001', isActive: false },
+        { phone, password: await bcrypt.hash('2222', 4) },
+        { phone: '243890000001', role: UserRole.ADMIN, password: await bcrypt.hash('2222', 4) },
+      ]);
+      const f = authFixture();
+      expect(await users.findOneBy({ phone: authAccountPhoneWhere(phone) })).toBeNull();
+      await expect(f.auth.login({ phone, pin: '2222' })).rejects.toBeInstanceOf(UnauthorizedException);
+      await expect(f.auth.adminLogin({ phone, pin: '2222' })).rejects.toBeInstanceOf(UnauthorizedException);
+      await f.auth.requestPinResetOtp({ phone });
+      expect(f.sendOtp).not.toHaveBeenCalled();
+      expect(f.generateTokens).not.toHaveBeenCalled();
+    });
+
+    it('never authenticates or sends reset SMS when every owner is deactivated', async () => {
+      await legacyOwners([
+        { phone: '0890000001', isActive: false }, { phone, status: UserStatus.INACTIVE },
+      ]);
+      const f = authFixture();
+      expect(await users.findOneBy({ phone: authAccountPhoneWhere(phone) })).toBeNull();
+      await expect(f.auth.login({ phone, pin: '2222' })).rejects.toBeInstanceOf(UnauthorizedException);
+      await f.auth.requestPinResetOtp({ phone });
+      expect(f.sendOtp).not.toHaveBeenCalled();
+      expect(f.generateTokens).not.toHaveBeenCalled();
+    });
+
+    it('does not silently ignore a suspended owner or bypass its login restriction', async () => {
+      const [suspended, enabled] = await legacyOwners([
+        { phone: '0890000001', status: UserStatus.SUSPENDED }, { phone },
+      ]);
+      expect(await users.findOneBy({ phone: authAccountPhoneWhere(phone) })).toBeNull();
+      await users.update(enabled.id, { isActive: false });
+      expect((await users.findOneByOrFail({ phone: authAccountPhoneWhere(phone) })).id).toBe(suspended.id);
+      const f = authFixture();
+      await expect(f.auth.login({ phone, pin: '2222' })).rejects.toThrow('Compte suspendu');
+      await f.auth.requestPinResetOtp({ phone });
+      expect(f.sendOtp).not.toHaveBeenCalled();
+      expect(f.generateTokens).not.toHaveBeenCalled();
+    });
+
+    it('fails closed again when a historical duplicate is reactivated', async () => {
+      const [inactive, enabled] = await legacyOwners([
+        { phone: '0890000001', isActive: false }, { phone },
+      ]);
+      expect((await users.findOneByOrFail({ phone: authAccountPhoneWhere(phone) })).id).toBe(enabled.id);
+      await users.update(inactive.id, { isActive: true });
+      expect(await users.findOneBy({ phone: authAccountPhoneWhere(phone) })).toBeNull();
+      const f = authFixture();
+      await expect(f.auth.login({ phone, pin: '2222' })).rejects.toBeInstanceOf(UnauthorizedException);
+      expect(f.generateTokens).not.toHaveBeenCalled();
+    });
+
     it('reads an unambiguous legacy account without rewriting its phone', async () => {
       await migrate('down');
       const old = await users.save({ ...fresh(), phone: ' 089 000 0001 ' });
@@ -254,14 +426,15 @@ const pgBin = process.env.PHONE_REGISTRATION_TEST_POSTGRES_BIN;
 
     it('rolls back the migration without deleting accounts, then reinstalls it', async () => {
       const user = await users.save(fresh());
+      const before = await users.findOneByOrFail({ id: user.id });
       await migrate('down');
-      expect(await users.findOneByOrFail({ id: user.id })).toEqual(user);
-      await migrate('up');
+      try { expect(await users.findOneByOrFail({ id: user.id })).toEqual(before); }
+      finally { await migrate('up'); }
       expect((await users.findOneByOrFail({ phone: accountPhoneWhere(phone) })).id).toBe(user.id);
     });
 
     async function previous(state: { status: UserStatus; isActive: boolean }) {
-      return users.save(
+      const saved = await users.save(
         users.create({
           ...fresh(),
           ...state,
@@ -273,6 +446,7 @@ const pgBin = process.env.PHONE_REGISTRATION_TEST_POSTGRES_BIN;
           fcmToken: 'old-device',
         }),
       );
+      return users.findOneByOrFail({ id: saved.id });
     }
 
     it.each([

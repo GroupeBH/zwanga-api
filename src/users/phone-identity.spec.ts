@@ -1,4 +1,4 @@
-import { accountPhoneWhere, canonicalAccountPhone } from './phone-identity';
+import { accountPhoneWhere, authAccountPhoneWhere, canonicalAccountPhone } from './phone-identity';
 
 describe('account phone identity', () => {
   it.each([
@@ -23,15 +23,29 @@ describe('account phone identity', () => {
       expect(() => accountPhoneWhere(phone)).toThrow();
     },
   );
-  it('uses bound parameters and a bounded ambiguity check on login/reset', () => {
+  it('keeps the ownership lookup independent of account eligibility', () => {
     const condition = accountPhoneWhere('0891234567');
     expect(condition.objectLiteralParameters).toEqual({
       accountPhone: '+243891234567',
     });
     expect(condition.getSql!('u.phone')).toContain('LIMIT 2');
     expect(condition.getSql!('u.phone')).not.toContain('+243891234567');
+    expect(condition.getSql!('u.phone')).not.toContain('isActive');
     expect(
       accountPhoneWhere('0891234567', false).getSql!('u.phone'),
     ).not.toContain('LIMIT 2');
+  });
+
+  it('selects only the single non-deactivated phone for authentication', () => {
+    const condition = authAccountPhoneWhere('0891234567');
+    const sql = condition.getSql!('u.phone');
+    expect(condition.objectLiteralParameters).toEqual({ accountPhone: '+243891234567' });
+    expect(sql).toContain('u.phone = (');
+    expect(sql).toContain('CASE WHEN count(*) = 1 THEN min(phone_matches.phone) END');
+    expect(sql).toContain('phone_owner."isActive" = true');
+    expect(sql).toContain("phone_owner.status <> 'inactive'");
+    expect(sql).toContain('LIMIT 2');
+    expect(sql).not.toContain('+243891234567');
+    expect(sql).not.toContain('suspended');
   });
 });

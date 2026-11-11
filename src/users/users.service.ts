@@ -48,7 +48,11 @@ import { SubscriptionsService } from '../subscriptions/subscriptions.service';
 import { assertSelfServiceUserRole, isAdminRole } from './user-role.policy';
 import { activateRequestedDriver } from './driver-activation';
 import { accountReservesPhone } from './registration-phone.policy';
-import { accountPhoneWhere, canonicalAccountPhone } from './phone-identity';
+import {
+  accountPhoneWhere,
+  authAccountPhoneWhere,
+  canonicalAccountPhone,
+} from './phone-identity';
 import { buildProfileState, LATEST_IDENTITY_ORDER } from './profile-state';
 import {
   areLegalNamesEquivalent,
@@ -873,7 +877,11 @@ export class UsersService {
   ): Promise<{ message: string; codeLength?: number; expiresInSeconds?: number }> {
     const phone = canonicalAccountPhone(sendOtpDto.phone);
     const existingUser = await this.userRepository.findOne({
-      where: { phone: accountPhoneWhere(phone, sendOtpDto.context !== PhoneVerificationContext.REGISTRATION) },
+      where: {
+        phone: sendOtpDto.context === PhoneVerificationContext.REGISTRATION
+          ? accountPhoneWhere(phone, false)
+          : authAccountPhoneWhere(phone),
+      },
       select: ['id', 'isActive', 'status'],
     });
     if (sendOtpDto.context === PhoneVerificationContext.REGISTRATION) {
@@ -917,7 +925,7 @@ export class UsersService {
     // one-use proof for registration; it is not a login or PIN reset token.
     await this.userRepository.update(
       {
-        phone: accountPhoneWhere(phone),
+        phone: authAccountPhoneWhere(phone),
         isPhoneVerified: false,
         isActive: true,
         status: Not(In([UserStatus.INACTIVE, UserStatus.SUSPENDED])),
