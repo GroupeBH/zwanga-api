@@ -25,6 +25,13 @@ export enum DriverOfferStatus {
 @Entity('driver_offers')
 @Index(['tripRequestId', 'driverId'])
 export class DriverOffer {
+  /** Immutable price revisions; legacy offers remain outside the new bargaining flow. */
+  @Column({ type: 'varchar', length: 24, nullable: true })
+  negotiationStage: 'driver_initial' | 'passenger_counter' | 'driver_final' | null;
+
+  @Column({ type: 'uuid', nullable: true })
+  previousOfferId: string | null;
+
   @Index('IDX_driver_offers_existing_trip')
   @Column({ type: 'uuid', nullable: true })
   existingTripId: string | null;

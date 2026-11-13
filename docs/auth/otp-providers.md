@@ -91,6 +91,15 @@ Mobishastra (au plus 900 secondes), tandis que son jeton final reste à 300 seco
 Le stockage du nouveau PIN et l'invalidation des sessions restent les mécanismes
 existants. Le PIN lui-même reste un secret à quatre chiffres, distinct de l'OTP.
 
+Depuis le correctif local du 11 novembre 2026, un OTP valide pour le PIN enregistre
+aussi durablement `isPhoneVerified=true` pour le numéro du compte : à la validation
+du code de réinitialisation, ou avec l'écriture du nouveau PIN pour la modification
+authentifiée. Une modification concurrente du compte/numéro empêche cette écriture.
+La déconnexion et l'expiration des challenges Redis ne retirent pas cette validation.
+Cela ne permet pas de réutiliser l'OTP dans un autre parcours, ni de supprimer l'OTP
+obligatoire d'une future opération sensible. Aucun compte historique n'est marqué
+vérifié en masse. Voir le [diagnostic de reconnexion](phone-verification-relogin-2026-11-11.md).
+
 La clé Redis **et le HMAC** distinguent `phone_verification`, `pin_reset` et
 `pin_change`. Les OTP PIN sont supprimés atomiquement après validation et ne
 produisent jamais de preuve d'inscription. Cinq essais maximum, TTL non prolongé,

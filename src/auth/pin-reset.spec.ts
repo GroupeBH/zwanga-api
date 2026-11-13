@@ -59,6 +59,7 @@ describe('PIN reset security', () => {
       role: UserRole.PASSENGER,
       status: UserStatus.ACTIVE,
       isActive: true,
+      isPhoneVerified: false,
       password: 'previous-hash',
       accessToken: 'access-token',
       refreshToken: 'refresh-token',
@@ -76,7 +77,10 @@ describe('PIN reset security', () => {
     userRepository = {
       findOne: jest.fn().mockResolvedValue(user),
       save: jest.fn().mockImplementation((value) => Promise.resolve(value)),
-      update: jest.fn(async (_id, patch) => Object.assign(user, patch)),
+      update: jest.fn(async (_id, patch) => {
+        Object.assign(user, patch);
+        return { affected: 1 };
+      }),
       manager: {
         transaction: jest.fn(async (work) => {
           const previous = { ...user };
@@ -331,6 +335,35 @@ describe('PIN reset security', () => {
       expect.stringMatching(/^[a-f0-9]{64}$/),
       300,
     );
+    expect(user.isPhoneVerified).toBe(true);
+    expect(userRepository.update).toHaveBeenCalledWith({
+      id: user.id, phone: user.phone, role: user.role,
+      status: user.status, isActive: true,
+    }, { isPhoneVerified: true });
+  });
+
+  it('does not persist phone verification or issue reset proof for an invalid SMS code', async () => {
+    otpService.verifyOtp.mockResolvedValue({ valid: false });
+    await expect(service.verifyPinResetOtp({ phone: user.phone, otp: '000000' }))
+      .rejects.toBeInstanceOf(BadRequestException);
+    expect(user.isPhoneVerified).toBe(false);
+    expect(userRepository.update).not.toHaveBeenCalled();
+    expect(redisService.set).not.toHaveBeenCalled();
+  });
+
+  it('does not issue reset proof when the account changed during SMS verification', async () => {
+    userRepository.update.mockResolvedValueOnce({ affected: 0 });
+    await expect(service.verifyPinResetOtp({ phone: user.phone, otp: '123456' }))
+      .rejects.toBeInstanceOf(BadRequestException);
+    expect(user.isPhoneVerified).toBe(false);
+    expect(redisService.set).not.toHaveBeenCalled();
+  });
+
+  it('does not announce successful verification when persistence fails', async () => {
+    userRepository.update.mockRejectedValueOnce(new Error('database unavailable'));
+    await expect(service.verifyPinResetOtp({ phone: user.phone, otp: '123456' }))
+      .rejects.toThrow('database unavailable');
+    expect(redisService.set).not.toHaveBeenCalled();
   });
 
   it('does not accept an OTP outside a pending PIN reset request', async () => {

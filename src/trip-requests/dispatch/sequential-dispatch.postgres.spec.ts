@@ -1,4 +1,5 @@
 import { sequentialMobileFlow } from '../../../test/sequential-mobile-flow';
+import { profileSequentialDiscovery } from '../../../test/sequential-query-profile';
 import { DriverResponse75Seconds1780000107000 } from '../../database/migrations/1780000107000-DriverResponse75Seconds';
 import { DriverResponse40Seconds1780000108000 } from '../../database/migrations/1780000108000-DriverResponse40Seconds';
 import { ReceiptResponseWindow1780000110000 } from '../../database/migrations/1780000110000-ReceiptResponseWindow';
@@ -53,7 +54,7 @@ import { NotificationService } from '../../notifications/notifications.service';
 import { RideNotificationReceipts1780000093000 } from '../../database/migrations/1780000093000-RideNotificationReceipts';
 import { RideDeliveryRecovery1780000094000 } from '../../database/migrations/1780000094000-RideDeliveryRecovery';
 import { AlertDeliveryReliability1780000106000 } from '../../database/migrations/1780000106000-AlertDeliveryReliability';
-import { RequestDriverQueue, REQUEST_DEADLINES_KEY, REQUEST_CANDIDATE_CACHE_SECONDS } from './request-driver-queue';
+import { RequestDriverQueue, REQUEST_DEADLINES_KEY, REQUEST_DEADLINE_CLAIM_MS, REQUEST_CANDIDATE_CACHE_SECONDS } from './request-driver-queue';
 import { SequentialDispatchService } from './sequential-dispatch.service';
 import { DriverDispatchService } from './dispatch.service';
 import { assertSequentialInvitation, sequentialInvitationSql } from './sequential-policy';
@@ -174,6 +175,31 @@ const redisPort = Number(process.env.DISPATCH_TEST_REDIS_PORT);
   const privateTrip = (r: TripRequest, driverId: string) => db.getRepository(Trip).create({ driverId, tripRequestId: r.id,
     isPrivate: true, departureLocation: r.departureLocation, arrivalLocation: r.arrivalLocation,
     departureDate: r.departureDateMin, totalSeats: 4, availableSeats: 4, pricePerSeat: 1000 });
+  it('claims disjoint Redis deadline batches and recovers a crashed worker without losing reschedules', async () => {
+    const now = Date.now();
+    const scheduled = Array.from({ length: 120 }, () => randomUUID());
+    ids.push(...scheduled);
+    await Promise.all(scheduled.map((id, index) => queue.schedule(id, now - 1000 + index)));
+    const other = new RequestDriverQueue({ getClient: () => redis } as never);
+    const batches = await Promise.all([queue.claimDue(now), other.claimDue(now)]);
+    expect(batches.map(batch => batch.length)).toEqual([50, 50]);
+    expect(new Set(batches.flat()).size).toBe(100);
+    expect(await queue.claimDue(now)).toHaveLength(20);
+    expect(await other.claimDue(now)).toEqual([]);
+    // A later producer schedule or cancellation must survive the old batch.
+    const cancelled = scheduled[0], postponed = scheduled[1], immediate = scheduled[2];
+    await queue.close(cancelled);
+    await queue.schedule(postponed, now + REQUEST_DEADLINE_CLAIM_MS * 2);
+    await queue.schedule(immediate, now - 1);
+    expect(await other.claimDue(now)).toEqual([immediate]);
+    // No destructive pop/ack: all other work returns when the scheduler lease ends.
+    const recovered = [] as string[];
+    for (let i = 0; i < 3; i++) recovered.push(...await other.claimDue(now + REQUEST_DEADLINE_CLAIM_MS));
+    expect(new Set(recovered).size).toBe(118);
+    expect(recovered).not.toContain(cancelled);
+    expect(recovered).not.toContain(postponed);
+    expect(recovered).toContain(immediate);
+  });
   availableRequestFlow(() => ({ db, relay, dispatch, driver, request, offers }));
   multiVehicleRequestFlow(() => ({ db, relay, dispatch, driver, request, offers }));
   mapDriverPriorityFlow(() => ({ db, relay, queue, driver, request, offers }));
@@ -389,7 +415,7 @@ const redisPort = Number(process.env.DISPATCH_TEST_REDIS_PORT);
   it('a post-commit Redis outage does not lose push; SQL relays expiry before Redis resumes', async () => {
     await driver(); await driver(15.311); const r = await request();
     jest.spyOn(queue, 'schedule').mockRejectedValue(new Error('offline'));
-    jest.spyOn(queue, 'due').mockRejectedValue(new Error('offline'));
+    jest.spyOn(queue, 'claimDue').mockRejectedValue(new Error('offline'));
     expect(await relay.advance(r.id)).toBe(true);
     expect(await relay.advance(r.id)).toBe(false);
     expect(await offers(r.id)).toHaveLength(1); expect(await notices(r.id)).toHaveLength(1);
@@ -627,7 +653,7 @@ const redisPort = Number(process.env.DISPATCH_TEST_REDIS_PORT);
   it('SQL deadline recovery still runs when the Redis deadline read fails', async () => {
     await driver(); const second = await driver(15.311), r = await request(); await relay.advance(r.id);
     await db.query(`UPDATE trip_request_dispatch_offers SET "expiresAt"=now()-interval '1 second' WHERE "requestId"=$1`, [r.id]);
-    jest.spyOn(queue, 'due').mockRejectedValue(new Error('Operation deadline exceeded'));
+    jest.spyOn(queue, 'claimDue').mockRejectedValue(new Error('Operation deadline exceeded'));
     await relay.deadlines(); expect((await offers(r.id))[1].driverId).toBe(second.id);
     await relay.deadlines(); expect(await offers(r.id)).toHaveLength(2);
   });
@@ -881,42 +907,85 @@ const redisPort = Number(process.env.DISPATCH_TEST_REDIS_PORT);
     for (const milliseconds of Object.values(measurements)) expect(milliseconds).toBeLessThan(5000);
   }, 120_000);
 
-  (process.env.DISPATCH_TEST_LOAD === '1' ? it : it.skip)('bounded local benchmark of SQL reservations + real Redis with three dispatcher replicas', async () => {
+  (process.env.DISPATCH_TEST_LOAD === '1' ? it : it.skip)('bounded local benchmark of SQL reservations + real Redis with dispatcher service instances', async () => {
+    const settings = require('../../../test/load/dispatch-benchmark.cjs').benchmarkSettings();
     const historyOwner = await driver();
-    for (let n = 1; n < 120; n++) await driver(15.31 + n * 0.00001);
+    for (let n = 1; n < settings.drivers; n++) await driver(15.31 + n * 0.00001);
     await seedDispatchNotificationHistory(db, historyOwner.id);
     const quantile = (samples: number[], percentile: number) => {
       const sorted = [...samples].sort((a, b) => a - b);
       return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * percentile))];
     };
-    for (const stage of [{ name: 'serial', concurrency: 1 }, { name: 'concurrent', concurrency: 8 }]) {
+    for (const stage of settings.stages) {
       const stageRequests: TripRequest[] = [];
-      for (let n = 0; n < 60; n++) stageRequests.push(await request());
-      const replicas = Array.from({ length: 3 }, () => new SequentialDispatchService(db, config,
+      for (let n = 0; n < settings.requests; n++) stageRequests.push(await request());
+      if (process.env.DISPATCH_TEST_LOAD_PROFILE === '1') {
+        await profileSequentialDiscovery(db, stageRequests[0], 'before-existing-kyc-index');
+      }
+      // Already deployed by AddVerifiedWelcomeBonus1780000052000, but absent
+      // from this fixture's dispatch-only migration subset. Do not benchmark
+      // a full KYC scan as though production had no latest-document index.
+      await db.query(`CREATE INDEX IF NOT EXISTS "IDX_kyc_welcome_latest"
+        ON kyc_documents ("userId", "createdAt" DESC, id DESC)`);
+      if (process.env.DISPATCH_TEST_LOAD_PROFILE === '1') {
+        await profileSequentialDiscovery(db, stageRequests[0], 'with-existing-kyc-index');
+      }
+      const replicas = Array.from({ length: settings.replicas }, () => new SequentialDispatchService(db, config,
         queue, notifications as never, changes as never));
-      const durations: number[] = [], outcomes: boolean[] = [];
+      const durations: number[] = [], completionDelays: number[] = [], outcomes: boolean[] = [];
+      const observedInvitations = new Map<string, number>();
       let cursor = 0;
       const started = Date.now();
       const settled = await Promise.allSettled(Array.from({ length: stage.concurrency }, async (_, worker) => {
         while (cursor < stageRequests.length) {
           const r = stageRequests[cursor++], at = Date.now();
-          outcomes.push(await replicas[worker % replicas.length].advance(r.id));
+          const offered = await replicas[worker % replicas.length].advance(r.id);
+          outcomes.push(offered);
+          if (offered) observedInvitations.set(r.id, Date.now() - started);
           durations.push(Date.now() - at);
+          completionDelays.push(Date.now() - started);
         }
       }));
       for (const result of settled) if (result.status === 'rejected') throw result.reason;
+      const firstPassMs = Date.now() - started;
+      const stageIds = stageRequests.map(r => r.id);
+      const firstInvitations = async () => {
+        const found = await db.query(`SELECT DISTINCT "requestId" FROM trip_request_dispatch_offers
+          WHERE "requestId" = ANY($1::uuid[])`, [stageIds]);
+        for (const row of found) if (!observedInvitations.has(row.requestId)) {
+          observedInvitations.set(row.requestId, Date.now() - started);
+        }
+        return found;
+      };
+      let invitations = await firstInvitations();
+      // advance(false) may be bounded discovery backpressure, not lost work.
+      // Exercise the actual Redis/SQL deadline recovery, without changing leases.
+      const recoveryDeadline = Date.now() + 60_000;
+      while (invitations.length < settings.requests && Date.now() < recoveryDeadline) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        await Promise.all(replicas.map(replica => replica.deadlines()));
+        invitations = await firstInvitations();
+      }
       const elapsedMs = Date.now() - started;
       const rows = await db.query(`SELECT "driverId","requestId" FROM trip_request_dispatch_offers WHERE status='pending'`);
+      const firstInvitationDelays = [...observedInvitations.values()];
       console.log('[sequential-load] ' + JSON.stringify({ stage: stage.name, count: outcomes.length,
-        concurrency: stage.concurrency, successful: outcomes.filter(Boolean).length, elapsedMs,
+        concurrency: stage.concurrency, successfulFirstPass: outcomes.filter(Boolean).length, firstPassMs, elapsedMs,
         p50Ms: quantile(durations, .5), p95Ms: quantile(durations, .95), maxMs: Math.max(...durations),
-        historyNotifications: 211_000, scope: 'Redis queue to durable SQL invitation/outbox; no real push or phone' }));
-      expect(outcomes).toHaveLength(60); expect(outcomes.every(Boolean)).toBe(true);
-      expect(rows).toHaveLength(60); expect(new Set(rows.map(r => r.driverId)).size).toBe(60);
-      expect(new Set(rows.map(r => r.requestId)).size).toBe(60);
+        firstPassCompletionP95Ms: quantile(completionDelays, .95),
+        requestsWithInvitation: invitations.length,
+        firstInvitationObservedP95Ms: quantile(firstInvitationDelays, .95),
+        invitationsPerSecond: invitations.length * 1000 / elapsedMs,
+        drivers: settings.drivers, serviceInstances: settings.replicas, nodeProcesses: 1, sqlPools: 1,
+        historyNotifications: 211_000, scope: 'Pre-created request burst to durable SQL invitation/outbox; no HTTP, GPS, push or phone' }));
+      expect(outcomes).toHaveLength(settings.requests);
+      expect(invitations).toHaveLength(settings.requests);
+      expect(rows.length).toBeGreaterThan(0);
+      expect(new Set(rows.map(r => r.driverId)).size).toBe(rows.length);
+      expect(new Set(rows.map(r => r.requestId)).size).toBe(rows.length);
       await db.query(`UPDATE trip_request_dispatch_offers SET status='cancelled' WHERE status='pending'`);
       await db.getRepository(TripRequest).update(stageRequests.map(r => r.id), { status: TripRequestStatus.CANCELLED });
     }
-  }, 120_000);
+  }, 300_000);
   sequentialMobileFlow(() => ({ db, relay, dispatch, notifications, driver, ids, offers }));
 });

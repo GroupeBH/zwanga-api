@@ -7,6 +7,7 @@ import { ELIGIBLE_DRIVER_ACCOUNT_SQL, NEARBY_DRIVER_RADIUS_METERS } from './disp
 import { driverRequestConflictSql } from './dispatch/driver-schedule-policy';
 import { USABLE_DRIVER_LOCATION_SQL } from './dispatch/driver-location-policy';
 import { requestNotRefusedSql } from './request-refusal';
+import { PRESENCE_ALERT_LOCATION_SQL } from './dispatch/driver-alert-location-policy';
 
 type SearchMapResult = {
   requestId: string; radiusKm: number; generatedAt: string; searching: boolean; total: number; truncated: boolean;
@@ -56,7 +57,7 @@ export async function requestMapDriver(manager: EntityManager, passengerId: stri
 }
 
 /** Internal rows only. Never return driver IDs in the public map response. */
-export function requestMapCandidates(manager: EntityManager, passengerId: string, requestId: string) {
+export function requestMapCandidates(manager: EntityManager, passengerId: string, requestId: string, ignoreTarget = false) {
   return manager.query<{ latitude: number; longitude: number; markerSeed: string; vehicleType: string;
     positionUpdatedAt: Date; driverId: string; seats: number }[]>(`
     SELECT ST_Y(p.position::geometry)::float8 AS latitude, ST_X(p.position::geometry)::float8 AS longitude,
@@ -74,12 +75,26 @@ export function requestMapCandidates(manager: EntityManager, passengerId: string
       AND p."driverId" <> r."passengerId" AND ${USABLE_DRIVER_LOCATION_SQL} AND ${ELIGIBLE_DRIVER_ACCOUNT_SQL}
       AND NOT ${driverRequestConflictSql('p."driverId"', 'r.id')}
       AND p."updatedAt" <= now() + interval '1 minute'
-      AND (r."targetDriverId" IS NULL OR p."driverId" = r."targetDriverId")
+      AND ($4::boolean OR r."targetDriverId" IS NULL OR p."driverId" = r."targetDriverId")
+      AND (NOT $4::boolean OR (${PRESENCE_ALERT_LOCATION_SQL}))
       AND ${requestNotRefusedSql('r.id', 'p."driverId"')}
       AND (CASE WHEN v.id = p."vehicleId" THEN p.seats WHEN v.type = 'motorcycle_2_wheels' THEN 2
         WHEN v.type = 'motorcycle_3_wheels' THEN 3 ELSE 4 END) >= r."numberOfSeats"
       AND NOT EXISTS (SELECT 1 FROM trip_request_dispatch_offers o WHERE o."driverId" = p."driverId"
         AND o."requestId" <> r.id AND o.status = 'pending' AND o."expiresAt" > now())
       AND ST_DWithin(p.position, r."departurePoint", $3)
-    ORDER BY ST_Distance(p.position, r."departurePoint"), p."driverId" LIMIT 501`, [requestId, passengerId, NEARBY_DRIVER_RADIUS_METERS]);
+    ORDER BY ST_Distance(p.position, r."departurePoint"), p."driverId" LIMIT 501`, [requestId, passengerId, NEARBY_DRIVER_RADIUS_METERS, ignoreTarget]);
+}
+
+/** Owner-only aggregate, never reveals the identities or positions of alternatives. */
+export async function requestPriceAlternatives(manager: EntityManager, passengerId: string, requestId: string, offerId: string) {
+  const rows = await manager.query(`SELECT o."driverId" FROM driver_offers o JOIN trip_requests r ON r.id=o."tripRequestId"
+    WHERE r.id=$1 AND r."passengerId"=$2 AND o.id=$3 AND o.status='pending'`, [requestId, passengerId, offerId]);
+  if (!rows.length) throw new NotFoundException('Proposition introuvable.');
+  const candidates = await requestMapCandidates(manager, passengerId, requestId, true);
+  const others = candidates.filter(row => row.driverId !== rows[0].driverId);
+  const now = Date.now();
+  const recent = others.filter(row => now - new Date(row.positionUpdatedAt).getTime() <= 600000).length;
+  return { requestId, offerId, generatedAt: new Date(now).toISOString(), radiusKm: NEARBY_DRIVER_RADIUS_METERS / 1000,
+    recent, older: others.length - recent, truncated: candidates.length > 500 };
 }

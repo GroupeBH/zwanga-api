@@ -311,12 +311,60 @@ const pgBin = process.env.PHONE_REGISTRATION_TEST_POSTGRES_BIN;
       const result = await f.auth.verifyPinResetOtp({ phone, otp: '123456' });
       expect(result.resetToken.startsWith(`${enabled.id}.`)).toBe(true);
       expect(f.verifyOtp).toHaveBeenCalledWith(phone, '123456', 'pin_reset');
+      expect((await users.findOneByOrFail({ id: enabled.id })).isPhoneVerified).toBe(true);
+      expect((await users.findOneByOrFail({ id: inactive.id })).isPhoneVerified).toBe(false);
       const service = Object.assign(Object.create(UsersService.prototype), {
         userRepository: users, otpService: { verifyOtp: f.verifyOtp },
       }) as UsersService;
       await service.verifyPhoneOtp({ phone: '0890000001', otp: '123456' });
       expect((await users.findOneByOrFail({ id: enabled.id })).isPhoneVerified).toBe(true);
       expect((await users.findOneByOrFail({ id: inactive.id })).isPhoneVerified).toBe(false);
+    });
+
+    it('persists phone verification through logout and logins using every phone spelling', async () => {
+      const account = await users.save({ ...fresh(), password: await bcrypt.hash('2222', 4) });
+      const f = authFixture();
+      const profile = Object.assign(Object.create(UsersService.prototype), {
+        userRepository: users, otpService: { verifyOtp: f.verifyOtp },
+        findOne: (id: string) => users.findOneByOrFail({ id }),
+        enrichUserWithPresignedUrls: async (user: User) => user,
+        tripRepository: { count: async () => 0 },
+        bookingRepository: {
+          count: async () => 0,
+          createQueryBuilder: () => ({ innerJoin() { return this; }, where() { return this; }, getCount: async () => 0 }),
+        },
+        messageRepository: { count: async () => 0 },
+        subscriptionsService: { getPremiumOverview: async () => ({ isPremium: false, premiumBadgeEnabled: false }) },
+      }) as UsersService;
+      await profile.verifyPhoneOtp({ phone: '0890000001', otp: '12345' });
+      for (const input of [phone, '0890000001', '243890000001']) {
+        await f.auth.logout(account.id);
+        await f.auth.login({ phone: input, pin: '2222' });
+        const result = await profile.getProfileSummary(account.id);
+        expect(result.user.id).toBe(account.id);
+        expect(result.user.isPhoneVerified).toBe(true);
+      }
+      expect(f.verifyOtp).toHaveBeenCalledTimes(1);
+      expect(f.sendOtp).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      { phone: '+243890000002' },
+      { isActive: false },
+      { status: UserStatus.SUSPENDED },
+      { role: UserRole.ADMIN },
+    ])('does not validate or issue a reset proof after a concurrent account change %j', async patch => {
+      const account = await users.save(fresh());
+      const f = authFixture();
+      await f.auth.requestPinResetOtp({ phone });
+      f.verifyOtp.mockImplementationOnce(async () => {
+        await users.update(account.id, patch);
+        return { valid: true };
+      });
+      f.set.mockClear();
+      await expect(f.auth.verifyPinResetOtp({ phone, otp: '123456' })).rejects.toBeInstanceOf(BadRequestException);
+      expect((await users.findOneByOrFail({ id: account.id })).isPhoneVerified).toBe(false);
+      expect(f.set).not.toHaveBeenCalled();
     });
 
     it('selects the enabled local spelling, not a disabled canonical spelling', async () => {

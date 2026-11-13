@@ -1,3 +1,5 @@
+import { negotiateRequestPrice } from './negotiate-request-price';
+import { requestPriceAlternatives } from './request-search-map';
 import { claimRequestAcceptance, completeRequestAcceptance, releaseRequestAcceptance, startPassengerDecision } from './dispatch/request-acceptance';
 import { changeRequestDriver, withdrawRequestDriver } from './change-request-driver';
 import { WithdrawRequestDriverDto } from './dto/withdraw-request-driver.dto';
@@ -68,7 +70,6 @@ import { WeatherAwarenessService } from '../weather/weather-awareness.service';
 import { WeatherRouteImpact } from '../weather/weather.types';
 import {
   assertMinimumTripPrice, calculateTripRequestPricing, PricingRoute, TripRequestPricing,
-  DIFFICULT_PRICE_PER_KM_CDF, NORMAL_PRICE_PER_KM_CDF,
 } from './trip-request-pricing';
 import { TripPaymentMode } from '../payments/enums/trip-payment-mode.enum';
 import { TripRequestRecoveryService } from './trip-request-recovery.service';
@@ -110,6 +111,8 @@ export interface SanitizedVehicle {
 }
 
 export interface SanitizedDriverOffer {
+  negotiationStage?: DriverOffer['negotiationStage'];
+  previousOfferId?: string | null;
   existingTripId?: string | null;
   sharedTripConsentRequired?: boolean;
   id: string;
@@ -200,6 +203,7 @@ export interface TripRequestPriceRecommendation {
 }
 
 export interface TripRequestVehiclePriceOption {
+  pricing: TripRequestPricing;
   vehicleType: VehicleType;
   displayName: string;
   maximumSeats: number | null;
@@ -442,7 +446,7 @@ export class TripRequestsService {
       'trip request price arrival',
     );
     const { pricing, weatherImpact } = await this.calculatePricing(
-      departurePoint, arrivalPoint, 'trip request price recommendation',
+      departurePoint, arrivalPoint, 'trip request price recommendation', vehicleType,
     );
     const { distanceMeters, recommendedPricePerSeat, pricePerKmPerPassenger } = pricing;
 
@@ -488,10 +492,13 @@ export class TripRequestsService {
     const { pricing, weatherImpact } = await this.calculatePricing(
       departurePoint, arrivalPoint, 'trip request vehicle options',
     );
-    const { distanceMeters, recommendedPricePerSeat } = pricing;
+    const { distanceMeters } = pricing;
 
     const options = Object.values(VehicleType).map((vehicleType) => {
       const maximumSeats = getVehicleMaxSeats(vehicleType);
+      // Reuse the route/weather snapshot: no extra provider requests per type.
+      const vehiclePricing = calculateTripRequestPricing(pricing, pricing.heavyRain, vehicleType);
+      const { recommendedPricePerSeat } = vehiclePricing;
 
       return {
         vehicleType,
@@ -499,7 +506,8 @@ export class TripRequestsService {
         maximumSeats,
         availableForRequestedSeats:
           maximumSeats === null || numberOfSeats <= maximumSeats,
-        pricePerKmPerPassenger: pricing.pricePerKmPerPassenger,
+        pricePerKmPerPassenger: vehiclePricing.pricePerKmPerPassenger,
+        pricing: vehiclePricing,
         recommendedPricePerSeat,
         recommendedTotalPrice:
           recommendedPricePerSeat === null
@@ -1088,7 +1096,7 @@ export class TripRequestsService {
     if (!request) throw new NotFoundException('Commande introuvable.');
     const proposed = Math.max(Date.now(), new Date(request.departureDateMin).getTime());
     return this.createDriverOffer(driverId, requestId, { vehicleId: dto.vehicleId, pricePerSeat: dto.pricePerSeat,
-      availableSeats: request.numberOfSeats, proposedDepartureDate: new Date(proposed).toISOString() }, true);
+      availableSeats: request.numberOfSeats, proposedDepartureDate: new Date(proposed).toISOString() }, true, dto.negotiationVersion);
   }
 
   async rejectOffer(passengerId: string, requestId: string, offerId: string) {
@@ -1097,11 +1105,39 @@ export class TripRequestsService {
     return this.findOne(requestId, passengerId);
   }
 
+  async negotiatePrice(actorId: string, requestId: string, offerId: string, price: number,
+    stage: 'passenger_counter' | 'driver_final') {
+    if (stage === 'driver_final') {
+      const driver = await this.userRepository.findOneBy({ id: actorId });
+      if (!driver) throw new NotFoundException('Conducteur introuvable.');
+      await assertDriverCanOperate(this.userRepository.manager, driver);
+    }
+    await negotiateRequestPrice(this.tripRequestRepository.manager, actorId, requestId, offerId, price, stage);
+    await this.driverDispatch?.notifyScheduledRequest(requestId);
+    return this.findOne(requestId, actorId);
+  }
+
+  async acceptPassengerPrice(driverId: string, requestId: string, offerId: string) {
+    const driver = await this.userRepository.findOneBy({ id: driverId });
+    if (!driver) throw new NotFoundException('Conducteur introuvable.');
+    await assertDriverCanOperate(this.userRepository.manager, driver);
+    const offer = await this.driverOfferRepository.findOneBy({ id: offerId, tripRequestId: requestId, driverId });
+    const request = offer && await this.tripRequestRepository.findOneBy({ id: requestId });
+    if (!offer || !request || offer.negotiationStage !== 'passenger_counter') throw new NotFoundException('Proposition introuvable.');
+    await this.acceptDriverOffer(request.passengerId, requestId, { offerId }, driverId);
+    return this.findOne(requestId, driverId);
+  }
+
+  priceAlternatives(passengerId: string, requestId: string, offerId: string) {
+    return requestPriceAlternatives(this.tripRequestRepository.manager, passengerId, requestId, offerId);
+  }
+
   async createDriverOffer(
     driverId: string,
     tripRequestId: string,
     createDriverOfferDto: CreateDriverOfferDto,
     counterProposal = false,
+    negotiationVersion?: 1,
   ): Promise<SanitizedDriverOffer> {
     this.logger.log(
       `Creating driver offer for trip request: ${tripRequestId} by driver: ${driverId}`,
@@ -1314,16 +1350,17 @@ export class TripRequestsService {
       await assertDriverRequestSchedule(manager, driverId, current!.id);
       if (counterProposal && current!.sequentialDispatch) await claimInAppRequest(manager, current!, driverId,
         randomUUID(), PASSENGER_DECISION_MS, { vehicleId: vehicle!.id, seats: createDriverOfferDto.availableSeats });
+      if (counterProposal && negotiationVersion === 1) offer.negotiationStage = 'driver_initial';
       const result = await offers.save(offer);
       await startPassengerDecision(manager, current!, driverId, counterProposal ? ['accepting'] : ['driver']);
       await requests.update(tripRequestId, { id: tripRequestId, status: TripRequestStatus.OFFERS_RECEIVED });
       if (counterProposal) await enqueueTransactionalNotification(manager, { eventKey: `counter-offer:${result.id}`,
         userId: current!.passengerId, title: 'Un conducteur propose un autre prix',
-        body: `${createDriverOfferDto.pricePerSeat} FC par place. Ouvrez Zwanga pour accepter ou refuser.`,
+        body: `${createDriverOfferDto.pricePerSeat * tripRequest.numberOfSeats} FC pour le trajet. Ouvrez Zwanga pour répondre.`,
         data: { type: 'driver_offer', counterProposal: true, ringAlert: 'counter-offer-v1', role: 'passenger',
           ringUntil: new Date(Math.min(Date.now() + 60000, current!.departureDateMax.getTime())).toISOString(),
           tripRequestId, offerId: result.id, driverId,
-          passengerId: current!.passengerId, pricePerSeat: createDriverOfferDto.pricePerSeat,
+          passengerId: current!.passengerId, pricePerSeat: createDriverOfferDto.pricePerSeat, numberOfSeats: current!.numberOfSeats,
           alertExpiresAt: new Date(Math.min(Date.now() + PASSENGER_DECISION_MS, current!.departureDateMax.getTime())).toISOString() } });
       return result;
     });
@@ -1400,6 +1437,7 @@ export class TripRequestsService {
     passengerId: string,
     tripRequestId: string,
     acceptDto: AcceptDriverOfferDto,
+    acceptingDriverId?: string,
   ): Promise<SanitizedTripRequest> {
     this.logger.log(
       `Accepting driver offer ${acceptDto.offerId} for trip request ${tripRequestId} by passenger ${passengerId}`,
@@ -1455,6 +1493,9 @@ export class TripRequestsService {
     if (offer.status !== DriverOfferStatus.PENDING) {
       throw new BadRequestException("Cette offre n'est plus disponible");
     }
+    if (offer.negotiationStage && tripRequest.departureDateMax.getTime() <= Date.now()) throw new ConflictException('Le délai de réponse est terminé.');
+    if (acceptingDriverId ? offer.driverId !== acceptingDriverId || offer.negotiationStage !== 'passenger_counter'
+      : offer.negotiationStage === 'passenger_counter') throw new ConflictException('Cette proposition attend la réponse du conducteur.');
 
     if (!offer.vehicle) {
       throw new BadRequestException(
@@ -1480,6 +1521,7 @@ export class TripRequestsService {
       assertRequestSnapshot(current, tripRequest);
       assertUnassignedRequest(current!);
       assertRequestTarget(current!, offer.driverId);
+      if (offer.negotiationStage && current!.departureDateMax.getTime() <= Date.now()) throw new ConflictException('Le délai de réponse est terminé.');
       await assertSequentialInvitation(manager, current!, offer.driverId, ['passenger']);
       await assertRequestDriverProximity(manager, current!.id, offer.driverId);
       if (await manager.getRepository(Trip).exists({ where: { driverId: offer.driverId, status: TripStatus.ACTIVE } }))
@@ -1508,7 +1550,7 @@ export class TripRequestsService {
         WHERE "requestId"=$1 AND status='pending'`, [tripRequestId, offer.driverId]);
       await manager.query(RETIRE_COUNTEROFFER_NOTIFICATIONS_SQL, [tripRequestId, [offer.id]]);
       // The receipt survives a missing push token or a process exit after COMMIT.
-      await enqueueTransactionalNotification(manager, {
+      if (!acceptingDriverId) await enqueueTransactionalNotification(manager, {
         eventKey: `offer-accepted:${offer.id}`, userId: offer.driverId,
         title: 'Le passager a accepté votre prix',
         body: 'Ouvrez cette commande dans Zwanga pour préparer la prise en charge.',
@@ -1517,6 +1559,13 @@ export class TripRequestsService {
           pricePerSeat: Number(offer.pricePerSeat), acceptedAt: acceptedAt.toISOString(),
           ringUntil: new Date(acceptedAt.getTime() + 60_000).toISOString(),
           alertExpiresAt: new Date(acceptedAt.getTime() + 180_000).toISOString() },
+      });
+      if (acceptingDriverId) await enqueueTransactionalNotification(manager, {
+        eventKey: `passenger-price-accepted:${offer.id}`, userId: passengerId,
+        title: 'Le conducteur a accepté votre prix', body: 'Votre conducteur est choisi. Retrouvez votre commande dans Zwanga.',
+        data: { type: 'trip_request_accepted', ringAlert: 'request-accepted-v1', role: 'passenger',
+          tripRequestId, offerId: offer.id, driverId: offer.driverId, passengerId, selectedAt: acceptedAt.toISOString(),
+          ringUntil: new Date(acceptedAt.getTime() + 60000).toISOString() },
       });
     });
 
@@ -2223,13 +2272,13 @@ export class TripRequestsService {
   private async calculateRecommendedPricePerSeat(
     departurePoint: Point | null,
     arrivalPoint: Point | null,
-    _vehicleType: VehicleType | undefined | null,
+    vehicleType: VehicleType | undefined | null,
     context: string,
   ): Promise<number | null> {
-    return (await this.calculatePricing(departurePoint, arrivalPoint, context)).pricing.recommendedPricePerSeat;
+    return (await this.calculatePricing(departurePoint, arrivalPoint, context, vehicleType ?? VehicleType.CAR)).pricing.recommendedPricePerSeat;
   }
 
-  private async calculatePricing(departurePoint: Point | null, arrivalPoint: Point | null, context: string) {
+  private async calculatePricing(departurePoint: Point | null, arrivalPoint: Point | null, context: string, vehicleType: VehicleType = VehicleType.CAR) {
     const [route, weatherImpact] = await Promise.all([
       this.calculatePricingRoute(departurePoint, arrivalPoint, context),
       this.weatherAwarenessService.getRouteImpact(
@@ -2237,10 +2286,10 @@ export class TripRequestsService {
       ),
     ]);
 
-    const pricing = calculateTripRequestPricing(route, weatherImpact.heavyRain === true);
+    const pricing = calculateTripRequestPricing(route, weatherImpact.heavyRain === true, vehicleType);
     return { pricing, weatherImpact: { ...weatherImpact,
       // Compatibility metadata only; already included in the returned price.
-      priceMultiplier: pricing.heavyRain ? DIFFICULT_PRICE_PER_KM_CDF / NORMAL_PRICE_PER_KM_CDF : 1,
+      priceMultiplier: pricing.heavyRain ? pricing.difficultPricePerKmPerPassenger / pricing.normalPricePerKmPerPassenger : 1,
     } };
   }
 
@@ -2692,6 +2741,8 @@ export class TripRequestsService {
     return {
       id: offer.id,
       existingTripId: offer.existingTripId ?? null,
+      negotiationStage: offer.negotiationStage ?? null,
+      previousOfferId: offer.previousOfferId ?? null,
       sharedTripConsentRequired: Boolean(offer.existingTripId),
       driver,
       vehicle: await this.sanitizeVehicle(offer.vehicle || undefined),

@@ -15,6 +15,7 @@ import { UserGender, UserRole } from '../entities/user.entity';
 import { SELF_SERVICE_USER_ROLES } from '../user-role.policy';
 import { VehicleType } from '../../vehicles/entities/vehicle.entity';
 import { normalizeLegalName } from '../legal-identity.util';
+import { DriverCategory } from '../driver-category';
 
 const toNormalizedLegalName = ({ value }: { value: unknown }): unknown => {
   if (value === undefined || value === null) {
@@ -31,6 +32,11 @@ export enum PhoneVerificationContext {
 }
 
 export class UpdateProfileDto {
+  @ApiProperty({ required: false, enum: DriverCategory, nullable: true })
+  @IsOptional()
+  @IsEnum(DriverCategory)
+  driverCategory?: DriverCategory | null;
+
   @ApiProperty({ required: false })
   @Transform(toNormalizedLegalName)
   @IsString()
@@ -186,6 +192,9 @@ export class SendPhoneVerificationOtpDto {
 }
 
 export class PublicUserInfoDto {
+  @ApiProperty({ required: false, enum: DriverCategory, nullable: true, description: 'Activité déclarée, sans certification professionnelle' })
+  driverCategory?: DriverCategory | null;
+
   @ApiProperty({ description: "ID de l'utilisateur" })
   id: string;
 

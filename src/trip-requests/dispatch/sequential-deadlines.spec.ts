@@ -3,7 +3,7 @@ import { SequentialDispatchService } from './sequential-dispatch.service';
 describe('sequential deadline recovery lanes', () => {
   const setup = () => {
     const db = { query: jest.fn().mockResolvedValue([]) };
-    const queue = { due: jest.fn().mockResolvedValue([]) };
+    const queue = { claimDue: jest.fn().mockResolvedValue([]) };
     const service = new SequentialDispatchService(db as never, { get: () => 'true' } as never,
       queue as never, {} as never, {} as never);
     const advance = jest.spyOn(service, 'advance').mockResolvedValue(true);
@@ -13,7 +13,7 @@ describe('sequential deadline recovery lanes', () => {
   it('does not lose Redis deadlines when the SQL recovery scan fails', async () => {
     const { db, queue, service, advance } = setup();
     db.query.mockRejectedValueOnce(new Error('scan timeout'));
-    queue.due.mockResolvedValue(['request']);
+    queue.claimDue.mockResolvedValue(['request']);
     await service.deadlines();
     expect(advance).toHaveBeenCalledWith('request');
     expect(service['ticking']).toBe(false);
@@ -22,7 +22,7 @@ describe('sequential deadline recovery lanes', () => {
   it('recovers expired SQL invitations when the Redis read fails', async () => {
     const { db, queue, service, advance } = setup();
     db.query.mockResolvedValue([{ requestId: 'request' }]);
-    queue.due.mockRejectedValueOnce(new Error('Redis read timeout'));
+    queue.claimDue.mockRejectedValueOnce(new Error('Redis read timeout'));
     await service.deadlines();
     expect(advance).toHaveBeenCalledWith('request');
     expect(service['ticking']).toBe(false);
@@ -31,7 +31,7 @@ describe('sequential deadline recovery lanes', () => {
   it('processes an invitation once when both sources identify its expiration', async () => {
     const { db, queue, service, advance } = setup();
     db.query.mockResolvedValue([{ requestId: 'request' }]);
-    queue.due.mockResolvedValue(['request', 'retry-after-failure']);
+    queue.claimDue.mockResolvedValue(['request', 'retry-after-failure']);
     await service.deadlines();
     expect(advance.mock.calls).toEqual([['request'], ['retry-after-failure']]);
   });

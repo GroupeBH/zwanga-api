@@ -1,3 +1,4 @@
+import { NegotiatePriceDto } from './dto/negotiate-price.dto';
 import { DriverChoiceQuery } from './dto/driver-choice.dto';
 import { MapDriverQuery, TargetMapDriverDto } from './dto/target-map-driver.dto';
 import { CounterOfferDto } from './dto/counter-offer.dto';
@@ -146,7 +147,7 @@ export class TripRequestsController {
   @ApiOperation({
     summary: 'Recommend a trip request price',
     description:
-      'Estimation par place : minimum 2 500 FC, 1 500 FC/km normalement, 2 000 FC/km si forte pluie ou trafic lourd. En trafic lourd (au moins +25 % et 5 min), ajout de 120 FC par minute de retard seulement. Le détail est retourné dans pricing ; aucun recalcul du prix déjà accepté.',
+      'Estimation par place : minimum 2 500 FC ; en conditions normales, voiture 1 500 FC/km, moto 2 roues 1 200 FC/km, moto 3 roues 1 000 FC/km. Tarif commun de 2 000 FC/km si forte pluie ou trafic lourd. En trafic lourd (au moins +25 % et 5 min), ajout de 120 FC par minute de retard seulement. Détail dans pricing ; aucun recalcul du prix déjà accepté.',
   })
   async recommendPrice(@Body() payload: RecommendTripRequestPriceDto) {
     return this.tripRequestsService.recommendPrice(payload);
@@ -158,7 +159,7 @@ export class TripRequestsController {
   @ApiOperation({
     summary: 'List vehicle choices and their recommended prices',
     description:
-      'Retourne les estimations voiture, moto 2 roues et moto 3 roues selon la même grille : minimum 2 500 FC par place, 1 500 FC/km normalement, 2 000 FC/km si forte pluie ou trafic lourd, plus 120 FC/min de retard en trafic lourd. recommendedTotalPrice inclut déjà les places et les majorations ; ne pas les appliquer à nouveau côté mobile. availableForRequestedSeats précise la capacité. À appeler avant la création de la demande.',
+      'Retourne les estimations par type : voiture 1 500 FC/km, moto 2 roues 1 200 FC/km, moto 3 roues 1 000 FC/km en conditions normales. Minimum commun 2 500 FC par place ; 2 000 FC/km si forte pluie ou trafic lourd, plus 120 FC/min de retard en trafic lourd. Chaque option contient son pricing ; le pricing global reste la référence voiture pour compatibilité. recommendedTotalPrice inclut déjà les places et les majorations ; ne pas les appliquer à nouveau côté mobile. availableForRequestedSeats précise la capacité.',
   })
   async getVehicleOptions(@Body() payload: TripRequestVehicleOptionsDto) {
     return this.tripRequestsService.getVehicleOptions(payload);
@@ -282,6 +283,41 @@ export class TripRequestsController {
   async counterOffer(@Request() req: { user: { userId: string } }, @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: CounterOfferDto) {
     return this.tripRequestsService.proposeCounterOffer(req.user.userId, id, dto);
+  }
+
+  @Post(':id/offers/:offerId/passenger-price')
+  @Auth()
+  @SensitiveThrottle(10, 60000)
+  passengerPrice(@Request() req: { user: { userId: string } }, @Param('id', ParseUUIDPipe) id: string,
+    @Param('offerId', ParseUUIDPipe) offerId: string, @Body() dto: NegotiatePriceDto) {
+    return this.tripRequestsService.negotiatePrice(req.user.userId, id, offerId, dto.pricePerSeat, 'passenger_counter');
+  }
+
+  @Get(':id/offers/:offerId/alternatives')
+  @Header('Cache-Control', 'private, no-store')
+  @Auth()
+  @SensitiveThrottle(30, 60000)
+  alternatives(@Request() req: { user: { userId: string } }, @Param('id', ParseUUIDPipe) id: string,
+    @Param('offerId', ParseUUIDPipe) offerId: string) {
+    return this.tripRequestsService.priceAlternatives(req.user.userId, id, offerId);
+  }
+
+  @Post(':id/offers/:offerId/final-price')
+  @Auth()
+  @Roles(UserRole.DRIVER)
+  @SensitiveThrottle(10, 60000)
+  finalPrice(@Request() req: { user: { userId: string } }, @Param('id', ParseUUIDPipe) id: string,
+    @Param('offerId', ParseUUIDPipe) offerId: string, @Body() dto: NegotiatePriceDto) {
+    return this.tripRequestsService.negotiatePrice(req.user.userId, id, offerId, dto.pricePerSeat, 'driver_final');
+  }
+
+  @Post(':id/offers/:offerId/accept-passenger-price')
+  @Auth()
+  @Roles(UserRole.DRIVER)
+  @SensitiveThrottle(10, 60000)
+  acceptPassengerPrice(@Request() req: { user: { userId: string } }, @Param('id', ParseUUIDPipe) id: string,
+    @Param('offerId', ParseUUIDPipe) offerId: string) {
+    return this.tripRequestsService.acceptPassengerPrice(req.user.userId, id, offerId);
   }
 
   @Post(':id/offers/:offerId/reject')

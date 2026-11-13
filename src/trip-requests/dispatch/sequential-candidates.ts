@@ -77,7 +77,7 @@ async function candidates(manager: EntityManager, request: TripRequest, driverId
     ${driverIds ? `SELECT q.id AS "driverId", e."vehicleId", e.seats, e."existingTripId"
     FROM queued_driver q LEFT JOIN eligible e ON e."driverId" = q.id
     ORDER BY e."existingTripId" LIMIT 1` : `SELECT e."driverId", e."vehicleId", e.seats, e."existingTripId"
-    FROM eligible e JOIN users driver ON driver.id = e."driverId"
+    FROM eligible e
     WHERE NOT EXISTS (SELECT 1 FROM trip_request_dispatch_offers o WHERE o."requestId" = $7 AND o."driverId" = e."driverId")
       AND NOT EXISTS (SELECT 1 FROM trip_request_dispatch_offers o WHERE o."driverId" = e."driverId" AND o.status = 'pending')
     ORDER BY e."stalePosition", ST_Distance(e.position, ST_SetSRID(ST_MakePoint($4,$5),4326)::geography), e."driverId", e."existingTripId"

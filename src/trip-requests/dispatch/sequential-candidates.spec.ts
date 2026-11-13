@@ -41,6 +41,19 @@ describe('sequential discovery versus queued validation', () => {
     expect(sql).toContain(ONGOING_ALERT_LOCATION_SQL);
   });
 
+  it('does not rejoin every user after both eligibility branches already checked the account', async () => {
+    const manager = { query: jest.fn().mockResolvedValue([]) };
+    await sequentialCandidates(manager as never, request);
+    const [sql] = manager.query.mock.calls[0];
+    expect(sql).not.toContain('FROM eligible e JOIN users');
+    expect(sql.match(/EXISTS \(SELECT 1 FROM users u WHERE u.id/g)).toHaveLength(2);
+    expect(sql.match(/u\."isActive" = true/g)).toHaveLength(2);
+    expect(sql.match(/kyc_documents k/g)).toHaveLength(2);
+    // The actual driver reservation still locks users in the queued path.
+    await lockNextQueuedCandidate(manager as never, request, ['driver']);
+    expect(manager.query.mock.calls[1][0]).toContain('FOR NO KEY UPDATE OF driver SKIP LOCKED');
+  });
+
   it('checks only one Redis ID without re-ranking; mutable restrictions and the driver lock remain', async () => {
     const candidate = { driverId: 'driver', vehicleId: 'vehicle', seats: 4, existingTripId: null };
     const manager = { query: jest.fn().mockResolvedValue([candidate]) };

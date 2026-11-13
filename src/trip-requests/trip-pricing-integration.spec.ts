@@ -14,13 +14,13 @@ describe('pricing integration with route and weather providers mocked', () => {
       .mockResolvedValueOnce({ type: 'Point', coordinates: [15.4, -4.4] });
     return { service, maps };
   }
-  it('returns the same grid for all types, with explicit delay and the correct seat total', async () => {
+  it('retains the common difficult rate, with explicit delay and the correct seat total', async () => {
     const { service, maps } = fixture([{ distance: 5000, duration: 1200, durationInTraffic: 1800 }], true);
     const result = await service.getVehicleOptions({ numberOfSeats: 2 });
     expect(maps.getDirections).toHaveBeenCalledTimes(1);
     expect(maps.getDirections).toHaveBeenCalledWith(expect.objectContaining({ departureTime: expect.any(Number) }));
     expect(result.pricing).toMatchObject({ heavyTraffic: true, heavyRain: true, billableDelaySeconds: 600,
-      trafficDelaySurchargePerSeat: 1200, recommendedPricePerSeat: 11200, pricingVersion: '2026-11-10' });
+      trafficDelaySurchargePerSeat: 1200, recommendedPricePerSeat: 11200, pricingVersion: '2026-11-13' });
     for (const option of result.options) expect(option).toMatchObject({
       pricePerKmPerPassenger: 2000, recommendedPricePerSeat: 11200, recommendedTotalPrice: 22400,
     });
@@ -42,12 +42,17 @@ describe('pricing integration with route and weather providers mocked', () => {
       expect(result.options.map(option => option.vehicleType)).toEqual(Object.values(VehicleType));
       expect(maps.getDirections).toHaveBeenCalledTimes(1);
       for (const option of result.options) {
+        const normalRates = { [VehicleType.CAR]: 1500,
+          [VehicleType.MOTORCYCLE_TWO_WHEELS]: 1200, [VehicleType.MOTORCYCLE_THREE_WHEELS]: 1000 };
+        const rate = scenario.rate === 2000 ? 2000 : normalRates[option.vehicleType];
+        const price = scenario.rate === 2000 ? scenario.price : Math.max(2500, scenario.distance / 1000 * rate);
         const single = await fixture(legs, scenario.rain).service.recommendPrice({
           vehicleType: option.vehicleType, numberOfSeats,
         });
         expect(option).toMatchObject({ availableForRequestedSeats: true,
-          pricePerKmPerPassenger: scenario.rate, recommendedPricePerSeat: scenario.price,
-          recommendedTotalPrice: scenario.price * numberOfSeats });
+          pricePerKmPerPassenger: rate, recommendedPricePerSeat: price,
+          recommendedTotalPrice: price * numberOfSeats });
+        expect(option.pricing).toEqual(single.pricing);
         expect(option.recommendedPricePerSeat).toBe(single.recommendedPricePerSeat);
         expect(option.recommendedTotalPrice).toBe(single.recommendedTotalPrice);
       }
@@ -58,9 +63,19 @@ describe('pricing integration with route and weather providers mocked', () => {
     const result = await service.getVehicleOptions({ numberOfSeats: 3 });
     expect(result.options).toEqual([
       expect.objectContaining({ vehicleType: VehicleType.CAR, availableForRequestedSeats: true, recommendedTotalPrice: 22500 }),
-      expect.objectContaining({ vehicleType: VehicleType.MOTORCYCLE_TWO_WHEELS, availableForRequestedSeats: false, recommendedTotalPrice: 22500 }),
-      expect.objectContaining({ vehicleType: VehicleType.MOTORCYCLE_THREE_WHEELS, availableForRequestedSeats: true, recommendedTotalPrice: 22500 }),
+      expect.objectContaining({ vehicleType: VehicleType.MOTORCYCLE_TWO_WHEELS, availableForRequestedSeats: false, recommendedTotalPrice: 18000 }),
+      expect.objectContaining({ vehicleType: VehicleType.MOTORCYCLE_THREE_WHEELS, availableForRequestedSeats: true, recommendedTotalPrice: 15000 }),
     ]);
+  });
+  it.each([
+    [VehicleType.CAR, 7500],
+    [VehicleType.MOTORCYCLE_TWO_WHEELS, 6000],
+    [VehicleType.MOTORCYCLE_THREE_WHEELS, 5000],
+  ])('uses the same vehicle rate for the creation default: %s', async (type, expected) => {
+    const { service } = fixture([{ distance: 5000, duration: 1200, durationInTraffic: 1200 }]);
+    const point = { type: 'Point', coordinates: [15.3, -4.3] };
+    expect(await (service as any).calculateRecommendedPricePerSeat(point, point, type, 'test'))
+      .toBe(expected);
   });
   it('does not bill an incomplete traffic route as if all legs were known', async () => {
     const { service } = fixture([{ distance: 2000, duration: 500, durationInTraffic: 900 }, { distance: 3000, duration: 700 }]);

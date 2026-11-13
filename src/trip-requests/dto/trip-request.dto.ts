@@ -250,7 +250,7 @@ export class RecommendTripRequestPriceDto {
     enumName: 'VehicleType',
     default: VehicleType.CAR,
     description:
-      'Type de véhicule. Tarif commun : minimum 2 500 FC/place, 1 500 FC/km normalement, 2 000 FC/km si pluie forte ou trafic lourd, plus 120 FC/min de retard si trafic lourd.',
+      'Type de véhicule. Normal : voiture 1 500 FC/km, moto 2 roues 1 200 FC/km, moto 3 roues 1 000 FC/km. Minimum commun 2 500 FC/place ; 2 000 FC/km si pluie forte ou trafic lourd, plus 120 FC/min de retard si trafic lourd.',
     example: VehicleType.MOTORCYCLE_TWO_WHEELS,
   })
   @IsEnum(VehicleType, {

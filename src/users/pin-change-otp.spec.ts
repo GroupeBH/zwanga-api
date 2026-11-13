@@ -24,6 +24,7 @@ describe('Authenticated PIN change requires old PIN and its own OTP', () => {
       role: UserRole.PASSENGER,
       status: UserStatus.ACTIVE,
       isActive: true,
+      isPhoneVerified: false,
       ...patch,
     };
     const userRepository = {
@@ -132,7 +133,7 @@ describe('Authenticated PIN change requires old PIN and its own OTP', () => {
     );
     const [where, updated] = f.userRepository.update.mock.calls[0] as [
       Record<string, unknown>,
-      { password: string; refreshToken: null; accessToken: null },
+      { password: string; isPhoneVerified: boolean; refreshToken: null; accessToken: null },
     ];
     expect(where).toMatchObject({
       id: 'user-a',
@@ -142,6 +143,7 @@ describe('Authenticated PIN change requires old PIN and its own OTP', () => {
       isActive: true,
     });
     expect(await bcrypt.compare(dto.newPin, updated.password)).toBe(true);
+    expect(updated.isPhoneVerified).toBe(true);
     expect(updated.refreshToken).toBeNull();
     expect(updated.accessToken).toBeNull();
   });

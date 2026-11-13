@@ -6,6 +6,7 @@ import {
   UpdateDateColumn,
   OneToMany,
   Index,
+  Check,
 } from 'typeorm';
 import { Vehicle } from '../../vehicles/entities/vehicle.entity';
 import { Trip } from '../../trips/entities/trip.entity';
@@ -16,6 +17,7 @@ import { Subscription } from '../../subscriptions/entities/subscription.entity';
 import { KycDocument } from '../entities/kyc-document.entity';
 import { ConversationParticipant } from '../../chat/entities/conversation-participant.entity';
 import { FavoriteLocation } from './favorite-location.entity';
+import { DriverCategory } from '../driver-category';
 
 export enum UserRole {
   DRIVER = 'driver',
@@ -40,6 +42,7 @@ export enum UserStatus {
 }
 
 @Entity('users')
+@Check('CHK_users_driver_category', `"driverCategory" IS NULL OR "driverCategory" IN ('private', 'transport')`)
 @Index(['email'], { unique: true })
 @Index(['phone'], { unique: true })
 export class User {
@@ -93,6 +96,9 @@ export class User {
     default: UserRole.PASSENGER,
   })
   role: UserRole;
+
+  @Column({ type: 'text', nullable: true })
+  driverCategory: DriverCategory | null;
 
   @Column({
     type: 'enum',

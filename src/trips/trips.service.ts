@@ -93,6 +93,7 @@ import { WeatherAwarenessService } from '../weather/weather-awareness.service';
 import { DriverSettlementsService } from '../driver-settlements/driver-settlements.service';
 import { WalletService } from '../wallet/wallet.service';
 import { assertDriverCanOperate } from '../users/driver-activation';
+import { assertDriverPublicationIdentity } from './trip-publication-identity';
 import { assertDriverPublicationPhoto, savePublicationsWithPhotoPolicy } from './trip-publication-photo';
 import { pauseUnavailableRecurring } from './pause-unavailable-recurring';
 import {
@@ -970,20 +971,7 @@ export class TripsService {
       });
     }
 
-    // Vérifier que le KYC est approuvé
-    const kycDocument = await this.kycDocumentRepository.findOne({
-      where: { userId: trip.driverId },
-      select: ['id', 'status'],
-    });
-
-    if (!kycDocument || kycDocument.status !== KycStatus.APPROVED) {
-      throw new BadRequestException({
-        error: "Vérification d’identité du conducteur requise",
-        code: 'DRIVER_KYC_NOT_APPROVED',
-        message:
-          "L’identité du conducteur n’a pas encore été vérifiée. La publication sera possible après vérification.",
-      });
-    }
+    await assertDriverPublicationIdentity(this.kycDocumentRepository, trip.driverId);
 
     // Vérifier que le conducteur a au moins un véhicule actif
     const activeVehicles = driver.vehicles?.filter((v) => v.isActive) || [];

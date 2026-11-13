@@ -1,5 +1,5 @@
 import { ArrayMaxSize, ArrayMinSize, IsArray, IsIn, IsInt, IsOptional, IsString, IsUUID, Matches, Max, MaxLength, Min, MinLength, ValidateIf } from 'class-validator';
-import { ApiPropertyOptional } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional, OmitType } from '@nestjs/swagger';
 
 export class CreatePartnerOrganizationDto {
   @IsString() @MinLength(2) @MaxLength(160) displayName: string;
@@ -37,6 +37,21 @@ export class CreateFieldAgentDto {
   @ValidateIf(o => o.accountMode === 'new' || o.initialPin !== undefined)
   @Matches(/^[0-9]{4}$/) initialPin?: string;
   @IsOptional() @IsIn(['FIELD_AGENT', 'FIELD_SUPERVISOR']) role?: string;
+}
+
+/** Entreprise créée par Zwanga : les équipes terrain passent par CreateFieldOrganizationDto. */
+export class CreateCompanyOrganizationDto {
+  @IsString() @MinLength(2) @MaxLength(160) displayName: string;
+  @IsOptional() @IsString() @MinLength(2) @MaxLength(200) legalName?: string;
+  @IsArray() @ArrayMinSize(1) @ArrayMaxSize(2) @IsIn(['FLEET_OWNER', 'AFFILIATE'], { each: true }) partnerTypes: string[];
+}
+
+/** Même choix de compte que pour un agent terrain, avec un mode explicite et un rôle d'entreprise. */
+export class AddCompanyManagerDto extends OmitType(CreateFieldAgentDto, ['accountMode', 'role'] as const) {
+  @ApiProperty({ enum: ['existing', 'new'] })
+  @IsIn(['existing', 'new']) accountMode: 'existing' | 'new';
+  @ApiProperty({ enum: ['ORG_ADMIN', 'ORG_MANAGER'], description: 'Responsable ou gestionnaire de l’entreprise.' })
+  @IsIn(['ORG_ADMIN', 'ORG_MANAGER']) role: 'ORG_ADMIN' | 'ORG_MANAGER';
 }
 
 export class CreateFieldOrganizationDto {

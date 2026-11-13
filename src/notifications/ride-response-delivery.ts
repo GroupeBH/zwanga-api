@@ -23,7 +23,9 @@ export async function isRideResponseDeliverable(manager: EntityManager, notifica
   }
   if (data.type === 'driver_offer') {
     const rows = await manager.query(`SELECT 1 FROM driver_offers o JOIN trip_requests r ON r.id=o."tripRequestId"
-      WHERE o.id=$1 AND r.id=$2 AND r."passengerId"=$3 AND o.status='pending'
+      WHERE o.id=$1 AND r.id=$2 AND o.status='pending'
+        AND ((o."negotiationStage"='passenger_counter' AND o."driverId"=$3)
+          OR (o."negotiationStage" IS DISTINCT FROM 'passenger_counter' AND r."passengerId"=$3))
         AND ${availableAccountSql('r."passengerId"')} AND ${availableAccountSql('o."driverId"')}
         AND r.status IN ('pending','offers_received') AND r."selectedDriverId" IS NULL AND r."tripId" IS NULL
         AND r."departureDateMax">now() AND (r."targetDriverId" IS NULL OR r."targetDriverId"=o."driverId")

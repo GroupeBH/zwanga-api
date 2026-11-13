@@ -9,13 +9,15 @@ import { SupportService } from '../support/support.service';
 import { SupportTicketCategory, SupportTicketPriority } from '../support/entities/support-ticket.entity';
 import { Notification, NotificationStatus } from '../notifications/entities/notification.entity';
 import { ReferralsService } from '../referrals/referrals.service';
-import { CreateFieldAgentDto, CreateFieldLeadDto, CreateFieldOrganizationDto, CreateFieldTicketDto, CreatePartnerOrganizationDto, SaveFieldDailyReportDto, SetFieldTargetDto, SetFieldZonesDto } from './partners.dto';
+import { AddCompanyManagerDto, CreateCompanyOrganizationDto, CreateFieldAgentDto, CreateFieldLeadDto, CreateFieldOrganizationDto, CreateFieldTicketDto, CreatePartnerOrganizationDto, SaveFieldDailyReportDto, SetFieldTargetDto, SetFieldZonesDto } from './partners.dto';
 import { PartnerFieldDailyReport, PartnerFieldLead, PartnerFieldTarget, PartnerFieldTicket, PartnerMember, PartnerOrganization } from './partner.entities';
 import { canonicalFieldPhone, fieldPhoneVariants } from './field-phone';
 
 const FIELD_PERMISSIONS = ['organization.read', 'support.tickets', 'support.tickets.read', 'leads.create', 'recruits.read_own', 'targets.read_own', 'issues.create'];
 const SUPERVISOR_PERMISSIONS = [...FIELD_PERMISSIONS, 'recruits.read_team', 'organization.members.read'];
 const ADMIN_PERMISSIONS = SUPERVISOR_PERMISSIONS;
+const COMPANY_PARTNER_TYPES = ['FLEET_OWNER', 'AFFILIATE'];
+const COMPANY_MANAGER_ROLES = ['ORG_ADMIN', 'ORG_MANAGER'];
 
 @Injectable()
 export class PartnersService {
@@ -213,6 +215,96 @@ export class PartnersService {
     target.status = 'REMOVED';
     await this.members.save(target);
     return { ok: true };
+  }
+
+  /** Entreprise créée par Zwanga : active d'emblée, sans membre ; ses responsables sont rattachés ensuite. */
+  async createCompanyOrganization(dto: CreateCompanyOrganizationDto) {
+    const displayName = dto.displayName.trim();
+    if (displayName.length < 2) throw new BadRequestException('Nom d’entreprise trop court');
+    if (!dto.partnerTypes.length || dto.partnerTypes.some((type) => !COMPANY_PARTNER_TYPES.includes(type))) throw new BadRequestException('Activité invalide : les équipes terrain sont créées séparément');
+    if (new Set(dto.partnerTypes).size !== dto.partnerTypes.length) throw new BadRequestException('Catégories en double');
+    const organization = await this.organizations.save(this.organizations.create({
+      displayName, legalName: dto.legalName?.trim() || null, legalType: 'COMPANY', status: 'ACTIVE',
+      partnerTypes: dto.partnerTypes.map((type) => ({ type, status: 'ACTIVE' })),
+    }));
+    return { id: organization.id, displayName: organization.displayName, legalName: organization.legalName, legalType: organization.legalType, status: organization.status, partnerTypes: organization.partnerTypes, createdAt: organization.createdAt };
+  }
+
+  /** Rattache un responsable (ORG_ADMIN) ou un gestionnaire (ORG_MANAGER) : compte existant inchangé, ou nouveau compte avec PIN initial. */
+  async addCompanyManager(organizationId: string, dto: AddCompanyManagerDto) {
+    if (!COMPANY_MANAGER_ROLES.includes(dto.role)) throw new BadRequestException('Rôle d’entreprise invalide');
+    const existing = dto.accountMode === 'existing';
+    if (existing) {
+      if (!dto.userId || [dto.phone, dto.firstName, dto.lastName, dto.initialPin].some((value) => value !== undefined)) {
+        throw new BadRequestException('Sélectionnez un utilisateur existant sans renseigner de nouveau compte');
+      }
+    } else if (dto.accountMode !== 'new' || dto.userId !== undefined || !dto.phone || !dto.initialPin || !dto.firstName?.trim() || !dto.lastName?.trim() || dto.firstName.trim().length < 2 || dto.lastName.trim().length < 2) {
+      throw new BadRequestException('Nouveau compte incomplet : prénom, nom, téléphone et PIN initial sont requis');
+    }
+    const organization = await this.organizations.findOneBy({ id: organizationId });
+    if (!organization || organization.partnerTypes.some((type) => type.type === 'FIELD_MARKETING')) throw new NotFoundException('Entreprise inconnue');
+    if (organization.status === 'CLOSED') throw new ConflictException('Cette entreprise est fermée');
+    const canonical = existing ? null : canonicalFieldPhone(dto.phone!);
+    // Hash before acquiring database locks; an existing account never changes PIN.
+    const password = existing ? undefined : await bcrypt.hash(dto.initialPin!, 10);
+    try {
+      return await this.organizations.manager.transaction(async (manager) => {
+        const userRepo = manager.getRepository(User);
+        const memberRepo = manager.getRepository(PartnerMember);
+        let user = await userRepo.findOne({
+          where: existing ? { id: dto.userId } : { phone: In(fieldPhoneVariants(canonical!)) },
+          select: ['id', 'phone', 'firstName', 'lastName', 'role', 'status', 'isActive', 'password'],
+          lock: { mode: 'pessimistic_write' },
+        });
+        if (existing && !user) throw new NotFoundException('Utilisateur sélectionné introuvable');
+        if (!existing && user) throw new ConflictException('Ce numéro appartient déjà à un compte. Choisissez « Utilisateur existant ».');
+        if (!user) {
+          user = await userRepo.save(userRepo.create({
+            phone: canonical!, firstName: dto.firstName!.trim(), lastName: dto.lastName!.trim(),
+            password, role: UserRole.PASSENGER,
+            status: UserStatus.ACTIVE, isActive: true, isDriver: false, isPhoneVerified: false,
+          }));
+        } else if (!user.isActive || [UserStatus.SUSPENDED, UserStatus.INACTIVE].includes(user.status) || [UserRole.ADMIN, UserRole.SUPER_ADMIN, UserRole.MARKETER].includes(user.role)) {
+          throw new ForbiddenException('Ce compte ne peut pas gérer un espace partenaire');
+        } else if (!user.password) {
+          throw new BadRequestException('Ce compte doit définir un PIN avant son rattachement');
+        } else if (!user.phone) {
+          throw new BadRequestException('Ce compte doit renseigner un téléphone avant son rattachement');
+        }
+        let member = await memberRepo.findOneBy({ organizationId, userId: user.id });
+        if (member?.status === 'ACTIVE') throw new ConflictException('Cette personne est déjà rattachée à l’entreprise');
+        member ??= memberRepo.create({ organizationId, userId: user.id });
+        member.role = dto.role;
+        member.status = 'ACTIVE';
+        await memberRepo.save(member);
+        return { userId: user.id, name: [user.firstName, user.lastName].join(' '), phone: user.phone, role: member.role, status: member.status };
+      });
+    } catch (error) {
+      const failure = error as { code?: string; driverError?: { code?: string } } | undefined;
+      // A concurrent creation is a conflict, never a partially created membership.
+      if (failure?.code === '23505' || failure?.driverError?.code === '23505') {
+        throw new ConflictException('Ce compte ou ce rattachement existe déjà. Actualisez la liste des utilisateurs.');
+      }
+      throw error;
+    }
+  }
+
+  /** Retire un responsable ou un gestionnaire ; son compte Zwanga reste intact. */
+  async removeCompanyManager(organizationId: string, targetUserId: string) {
+    return this.organizations.manager.transaction(async (manager) => {
+      // Lock the company so two concurrent removals cannot drop its last two responsables together.
+      const organization = await manager.getRepository(PartnerOrganization).findOne({ where: { id: organizationId }, lock: { mode: 'pessimistic_write' } });
+      if (!organization || organization.partnerTypes.some((type) => type.type === 'FIELD_MARKETING')) throw new NotFoundException('Entreprise inconnue');
+      const memberRepo = manager.getRepository(PartnerMember);
+      const target = await memberRepo.findOneBy({ organizationId, userId: targetUserId, status: 'ACTIVE' });
+      if (!target || !COMPANY_MANAGER_ROLES.includes(target.role)) throw new NotFoundException('Responsable ou gestionnaire inconnu');
+      if (target.role === 'ORG_ADMIN' && await memberRepo.countBy({ organizationId, role: 'ORG_ADMIN', status: 'ACTIVE' }) <= 1) {
+        throw new ConflictException('Rattachez d’abord un autre responsable : une entreprise garde toujours au moins un responsable.');
+      }
+      target.status = 'REMOVED';
+      await memberRepo.save(target);
+      return { ok: true };
+    });
   }
 
   private async leadProgress(leads: PartnerFieldLead[]) {

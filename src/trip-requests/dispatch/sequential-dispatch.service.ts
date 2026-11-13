@@ -248,7 +248,7 @@ export class SequentialDispatchService {
     try {
       // Start Redis independently, but process SQL expirations without waiting for its response.
       const dueRead = Date.now() < this.cacheUnavailableUntil ? Promise.resolve([] as string[])
-        : this.queue.due(Date.now()).catch(() => {
+        : this.queue.claimDue(Date.now()).catch(() => {
           this.logger.warn('Redis request deadlines unavailable; checking SQL expirations.');
           return [] as string[];
         });

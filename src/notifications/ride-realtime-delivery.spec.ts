@@ -24,6 +24,21 @@ describe('independent ride realtime delivery', () => {
     return { service, notice, query, publish, send };
   };
   afterEach(() => jest.restoreAllMocks());
+  it.each(['passenger_counter', 'driver_final'])('routes %s to the actual respondent without rewriting the passenger identity', async stage => {
+    const f = fixture();
+    f.notice.userId = stage === 'passenger_counter' ? 'driver' : 'passenger';
+    Object.assign(f.notice.data, { type: 'driver_offer', ringAlert: 'counter-offer-v1', negotiationStage: stage, driverId: 'driver', passengerId: 'passenger', offerId: 'offer' });
+    await f.service.dispatchRealtimeNotifications();
+    expect(f.publish).toHaveBeenCalledWith(f.notice.userId, expect.objectContaining({ kind: 'incoming',
+      data: expect.objectContaining({ driverId: 'driver', passengerId: 'passenger', negotiationStage: stage, role: stage === 'passenger_counter' ? 'driver' : 'passenger' }) }));
+    expect(f.send).not.toHaveBeenCalled();
+  });
+  it('driver acceptance of passenger price publishes the passenger confirmation without driver-availability filtering', async () => {
+    const f = fixture(); f.notice.userId = 'passenger';
+    Object.assign(f.notice.data, { type: 'trip_request_accepted', ringAlert: 'request-accepted-v1', driverId: 'driver', passengerId: 'passenger' });
+    await f.service.dispatchRealtimeNotifications();
+    expect(f.publish).toHaveBeenCalledWith('passenger', expect.objectContaining({ kind: 'incoming', data: expect.objectContaining({ role: 'passenger', passengerId: 'passenger' }) }));
+  });
   it.each(['driver_booking_payment_confirmed', 'cash_payment_confirmed', 'cash_payment_declared'])('sends a %s receipt hint independently of ride availability or push health', async type => {
     const f = fixture(); f.service['urgentWorkers'] = 5;
     Object.assign(f.notice.data, { type, role: 'driver', bookingId: 'booking' });

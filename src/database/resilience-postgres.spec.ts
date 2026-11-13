@@ -4,6 +4,7 @@ import { IsolatedPostgres } from '../../test/isolated-postgres';
 import { Trip, TripStatus } from '../trips/entities/trip.entity';
 import { Booking, BookingStatus } from '../bookings/entities/booking.entity';
 import { User } from '../users/entities/user.entity';
+import { KycDocument, KycStatus } from '../users/entities/kyc-document.entity';
 import { expirePendingTrip } from '../trips/expire-pending-trip';
 import { savePublicationsWithPhotoPolicy } from '../trips/trip-publication-photo';
 import { withBookableTrip } from '../bookings/bookable-trip-transaction';
@@ -97,6 +98,15 @@ const bin = process.env.RESILIENCE_TEST_POSTGRES_BIN;
               zwangaSubsidyAmount: { type: Number, nullable: true },
             },
           }),
+          new EntitySchema<KycDocument>({
+            name: 'KycDocument', target: KycDocument, tableName: 'kyc_documents',
+            columns: {
+              id: { type: 'uuid', primary: true },
+              userId: { type: 'uuid' },
+              status: { type: String },
+              createdAt: { type: 'timestamptz' },
+            },
+          }),
           new EntitySchema<User>({
             name: 'User',
             target: User,
@@ -146,7 +156,7 @@ const bin = process.env.RESILIENCE_TEST_POSTGRES_BIN;
       await cluster.stop();
     }, 40000);
     beforeEach(async () => {
-      await db.query('TRUNCATE bookings, trips, users, notifications, safety_alerts, emergency_contacts, trip_request_dispatch_offers, trip_requests');
+      await db.query('TRUNCATE bookings, trips, users, kyc_documents, notifications, safety_alerts, emergency_contacts, trip_request_dispatch_offers, trip_requests');
     });
     async function setup() {
       const driverId = randomUUID();
@@ -157,6 +167,8 @@ const bin = process.env.RESILIENCE_TEST_POSTGRES_BIN;
           profilePicture: 'test.jpg',
           hasPublishedTrip: true,
         });
+      await db.getRepository(KycDocument).save({ id: randomUUID(), userId: driverId,
+        status: KycStatus.APPROVED, createdAt: new Date('2026-10-01T00:00:00Z') });
       const trip = await db
         .getRepository(Trip)
         .save({
@@ -184,6 +196,54 @@ const bin = process.env.RESILIENCE_TEST_POSTGRES_BIN;
       ]);
       return trip;
     }
+    it.each([null, KycStatus.PENDING, KycStatus.REJECTED].flatMap(status =>
+      ['manual', 'recurring', 'private-to-public'].map(kind => ({ status, kind }))))(
+      'latest KYC $status blocks $kind without changing persisted trips', async ({ status, kind }) => {
+        const original = await setup();
+        const identities = db.getRepository(KycDocument);
+        if (status === null) await identities.delete({ userId: original.driverId });
+        else await identities.save({ id: randomUUID(), userId: original.driverId, status,
+          createdAt: new Date('2026-10-14T00:00:00Z') }); // old approval deliberately remains
+        const repository = db.getRepository(Trip);
+        await repository.update(original.id, { isPrivate: true });
+        const candidate = repository.create({
+          driverId: original.driverId, isPrivate: false, status: TripStatus.PENDING,
+          departureDate: now, totalSeats: 4, availableSeats: 4,
+          ...(kind === 'private-to-public' ? { id: original.id } : {}),
+          ...(kind === 'recurring' ? { recurringTemplateId: randomUUID(), recurringOccurrenceDate: '2026-10-14' } : {}),
+        });
+        await expect(savePublicationsWithPhotoPolicy(repository, original.driverId, [candidate]))
+          .rejects.toMatchObject({ response: { code: 'DRIVER_KYC_NOT_APPROVED' } });
+        expect(await repository.count()).toBe(1);
+        expect((await repository.findOneByOrFail({ id: original.id })).isPrivate).toBe(true);
+      },
+    );
+    it('a KYC rejection committed while publication waits for the owner lock prevents insertion', async () => {
+      const original = await setup();
+      const runner = db.createQueryRunner();
+      await runner.connect();
+      await runner.startTransaction();
+      let publication: Promise<Trip[]> | undefined;
+      try {
+        await runner.manager.getRepository(User).findOneOrFail({
+          where: { id: original.driverId }, lock: { mode: 'pessimistic_write' },
+        });
+        await runner.manager.getRepository(KycDocument).save({ id: randomUUID(), userId: original.driverId,
+          status: KycStatus.REJECTED, createdAt: new Date('2026-10-14T00:00:00Z') });
+        publication = savePublicationsWithPhotoPolicy(db.getRepository(Trip), original.driverId, [
+          db.getRepository(Trip).create({ driverId: original.driverId, isPrivate: false,
+            status: TripStatus.PENDING, departureDate: now, totalSeats: 4, availableSeats: 4 }),
+        ]);
+        const result = expect(publication).rejects.toMatchObject({ response: { code: 'DRIVER_KYC_NOT_APPROVED' } });
+        await runner.commitTransaction();
+        await result;
+        expect(await db.getRepository(Trip).count()).toBe(1);
+      } finally {
+        if (runner.isTransactionActive) await runner.rollbackTransaction();
+        await publication?.catch(() => undefined);
+        await runner.release();
+      }
+    });
     it('two cron workers expire once, restore only consumed seats and cannot exceed capacity', async () => {
       const trip = await setup();
       const results = await Promise.all(

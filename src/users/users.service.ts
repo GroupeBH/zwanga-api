@@ -47,6 +47,7 @@ import { UserRole } from './entities/user.entity';
 import { SubscriptionsService } from '../subscriptions/subscriptions.service';
 import { assertSelfServiceUserRole, isAdminRole } from './user-role.policy';
 import { activateRequestedDriver } from './driver-activation';
+import { resolveDriverCategory } from './driver-category';
 import { accountReservesPhone } from './registration-phone.policy';
 import {
   accountPhoneWhere,
@@ -319,6 +320,12 @@ export class UsersService {
 
     const user = await this.findOne(userId);
 
+    const categoryChanges = updateProfileDto.driverCategory === undefined ? {} : {
+      driverCategory: resolveDriverCategory(updateProfileDto.driverCategory,
+        !isAdminRole(user.role) && (user.role === UserRole.DRIVER || user.isDriver ||
+          Boolean(user.driverOnboardingRequestedAt) || updateProfileDto.role === UserRole.DRIVER)),
+    };
+
     if (updateProfileDto.role) {
       assertSelfServiceUserRole(updateProfileDto.role);
       if (
@@ -419,6 +426,7 @@ export class UsersService {
 
     // A profile write must not restore a stale role after concurrent activation.
     const profileChanges = {
+      ...categoryChanges,
       firstName: user.firstName,
       lastName: user.lastName,
       gender: user.gender,
@@ -1055,6 +1063,8 @@ export class UsersService {
       },
       {
         password: hashedNewPin,
+        // The dedicated SMS OTP proved this unchanged phone's ownership too.
+        isPhoneVerified: true,
         refreshToken: null,
         accessToken: null,
       },
@@ -1347,6 +1357,7 @@ export class UsersService {
       lastName: user.lastName,
       profilePicture: enrichedUser.profilePicture,
       role: user.role,
+      driverCategory: user.driverCategory ?? null,
       isDriver: user.isDriver,
       isPremium: premium.isPremium,
       premiumBadge: premium.premiumBadgeEnabled,

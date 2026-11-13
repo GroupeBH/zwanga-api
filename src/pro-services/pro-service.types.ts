@@ -26,6 +26,7 @@ export const DOCUMENT_OPTIONS = [
   ['mutation', 'Mutation'],
   ['attestation-perte', 'Attestation de perte'],
   ['vignette-annuelle', 'Vignette annuelle'],
+  ['autocollant-hvk', 'Autocollant HVK (Hôtel de Ville de Kinshasa)'],
   ['controle-technique', 'Contrôle technique'],
   ['autorisation-transport', 'Autorisation de transport'],
   ['assurance-auto', 'Assurance automobile'],

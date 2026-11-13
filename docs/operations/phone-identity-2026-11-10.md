@@ -11,8 +11,14 @@ conservé : les numéros étrangers ne deviennent pas des numéros RDC.
   au format international avec `+`. La création d'administrateurs suit ces règles.
 - La connexion mobile et admin, le PIN oublié et la vérification téléphonique
   retrouvent également les anciens comptes enregistrés au format local ou avec espaces.
-- S'il existe plusieurs comptes pour la même identité, la connexion par téléphone
-  et le PIN oublié ne sélectionnent aucun compte. La réponse du PIN oublié reste
+- Depuis le correctif local du 11 novembre, la connexion mobile/admin, le PIN
+  oublié et la vérification téléphonique ignorent les comptes désactivés
+  (`isActive=false` **ou** `status=inactive`). Un seul compte non désactivé doit
+  rester pour cette identité ; sinon aucun compte n'est sélectionné. Le compte
+  désactivé ne peut pas être choisi, même si son numéro possède déjà `+243`.
+- Un compte `pending_kyc` actif compte toujours. Un compte suspendu mais non
+  désactivé compte aussi et reste interdit de connexion : la suspension n'est
+  pas une libération automatique d'identité. La réponse du PIN oublié reste
   neutre pour ne pas révéler les comptes inscrits. Elle ne prouve pas un envoi SMS.
 - Les sessions existantes ne sont pas révoquées par la migration. Les UUID,
   téléphones historiques, trajets, soldes, bonus et parrainages restent inchangés.
@@ -79,6 +85,19 @@ normaliser son téléphone. La réservation NULL reste volontairement bloquante 
 que cette intervention n'a pas été réalisée. Aucun script de fusion ou de choix
 automatique de titulaire n'est fourni.
 
+Le correctif de connexion du 11 novembre ne modifie ni ces réservations ni les
+contrôles d'inscription, de changement de numéro ou de provisionnement admin.
+Une désactivation validée par le support peut désormais laisser un seul compte
+authentifiable, sans fusion ni réattribution du numéro dans les données. Si un
+doublon est réactivé, la connexion redevient ambiguë et est bloquée. Les rôles,
+UUID, soldes et historiques ne passent jamais d'un compte à l'autre.
+
+Ce correctif est applicatif : aucune nouvelle migration n'est nécessaire si
+`CanonicalPhoneIdentity1780000119000` est déjà appliquée. Il faut déployer le
+backend corrigé pour changer le comportement de production. Les groupes `710`
+et `654` diagnostiqués le 11 novembre avaient encore trois comptes non désactivés
+chacun : ce changement seul ne les départage pas.
+
 ## Retour arrière
 
 Revenir d'abord au code précédent, puis exécuter le `down` de cette migration
@@ -110,3 +129,15 @@ Validation locale du 10 novembre 2026 :
 
 Les appels aux fournisseurs SMS sont simulés dans ces tests. La migration n'a été
 appliquée qu'aux bases temporaires des tests, ni à la base de travail ni à AWS.
+
+Validation du correctif du 11 novembre 2026 :
+
+- 41 tests PostgreSQL isolés réussis, dont connexion mobile/admin avec doublon
+  désactivé, PIN erroné, sélection du compte au format local, OTP de réinitialisation,
+  vérification du téléphone, plusieurs comptes actifs, tous désactivés, suspension,
+  réactivation et conservation des historiques/réservations.
+- 76 tests unitaires ciblés réussis (identité téléphonique, inscriptions et PIN).
+- Passe élargie terminée avant le correctif OTP de reconnexion : 316 suites
+  réussies, 45 ignorées ; 3 837 tests réussis, 940 ignorés. TypeScript sans émission
+  et contrôle des espaces du diff réussis. Les tests ignorés ne sont pas validés.
+- Aucun SMS réel, aucune désactivation automatique et aucune écriture AWS.

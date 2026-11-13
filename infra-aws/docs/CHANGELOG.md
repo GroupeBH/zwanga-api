@@ -1,5 +1,47 @@
 # Journal détaillé des changements d'infrastructure AWS
 
+## INFRA-2026-11-12-002 — Profilage SQL et partage des échéances de dispatch
+
+- Statut : modifications locales du backend et du banc d'essai uniquement ; aucun apply, déploiement, accès aux données applicatives ou changement de capacité AWS.
+- Cause mesurée : index KYC existant omis par la fixture de charge ; jointure finale redondante vers `users` dans la découverte ; lecture simultanée des mêmes lots Redis par plusieurs workers.
+- Changements : recréation de l'index existant dans la fixture, profilage EXPLAIN optionnel sans paramètres, suppression de la seule jointure redondante, prise atomique des échéances Redis par lots de 50 avec récupération après 30 s en cas d'arrêt du worker.
+- Invariants : mêmes contrôles d'éligibilité et verrous SQL, même file de candidats par demande, même délai de réponse conducteur. Ni suppression destructive des échéances ni nouvelle migration de production.
+- Mesure de référence corrigée : 1 000 demandes / concurrence 6 / deux objets dans un processus, 133,110 s et p95 depuis rafale 127,173 s. La différence avec 209,443 s corrige la fixture, pas le code de production. Résultats après correctifs et limites dans `docs/capacity-175-validation-2026-11-12.md`.
+- Coûts : aucun coût AWS engagé, profil et prix archivés inchangés. Ces mesures locales ne certifient pas la cible mixte de 1 000 trajets + 1 000 demandes dans 175 USD/mois.
+- Retour arrière : rétablir ensemble la méthode de lecture Redis et son appel, puis la requête de découverte, avec tests de non-régression. Aucun changement de format de données persistées.
+- Validation complémentaire du 13 novembre : 79 tests PostgreSQL/Redis jetables réussis, 3 ignorés, après correction des deux mocks restants ; 13 tests de dimensionnement et compilation de production réussis. TypeScript global conserve seulement deux erreurs préexistantes de fixtures dans `driver-category.spec.ts`. Aucun nouvel essai de charge mixte ou changement AWS.
+
+## INFRA-2026-11-12-001 — Charge cible, coût du trafic et benchmark du palier 175 USD
+
+- Date / opérateur : 12 novembre 2026, Africa/Kinshasa ; Codex à la demande du mainteneur.
+- Statut / environnement : préparation locale uniquement ; aucun plan connecté, apply, déploiement, changement IAM, SSM ou base applicative.
+- Contexte : poursuivre la cible 1 000 trajets + 1 000 demandes dans un budget de 175 USD/mois, sans transformer une estimation financière en promesse de capacité.
+- Modifications : calculateur hors ligne `scripts/capacity-workload.cjs`, tests `test/capacity-workload.test.cjs`, benchmark borné configurable et tests de ses paramètres ; documentation `docs/capacity-175-validation-2026-11-12.md`. Profil Terraform et comportement de production inchangés.
+- Justification : compter les conducteurs disponibles séparément des conducteurs occupés, intégrer trafic GPS/connexions ALB, budget SQL pendant rolling deployment et attente/reprise des demandes différées.
+- Coût : aucun coût AWS engagé. Prix régionaux archivés au 10 novembre conservés ; modèles indicatifs 163,76 à 178,12 USD selon durée de pointe/taille des messages, provision de transfert non garantie, taxes exclues. Pas de plafond automatique d'arrêt.
+- Données : bases PostgreSQL/PostGIS et Redis jetables pour le benchmark ; aucune migration métier, aucune notification réelle. Pas de secret ajouté aux outils de calcul ou au compte rendu.
+- Validation : 13 tests hors ligne réussis ; `terraform validate` et `terraform fmt -check budget.tf` réussis ; compilation de production sans émission réussie. Le contrôle TypeScript global reste bloqué par deux fixtures GoogleAuthProfile incomplètes dans le fichier préexistant `src/users/driver-category.spec.ts`, non modifié ici.
+- Mesures : 100 demandes récupérées en 3,229 s, dont 7 différées ; à 1 000 demandes / concurrence 8, seulement 196 invitations après 68,7 s. À concurrence 6, les 1 000 invitations aboutissent sans doublon en attente en 209,443 s (p95 depuis la rafale : 198,646 s) : exhaustivité validée, latence cible non atteinte. Objectif 1 000 + 1 000 non qualifié. Les autres suites ne sont pas déclarées validées.
+- Surveillance / suite : recette mixte sur infrastructure représentative, latence création → réception mobile, reprises/équité de file, pool et crédits CPU, coûts de transfert. Examiner et faire approuver le plan du profil après qualification, pas avant.
+- Retour arrière : retirer les outils/documentation ajoutés n'affecte pas AWS. Aucun changement de runtime, délai ou garde-fou n'est nécessaire pour revenir à l'état précédent.
+
+## INFRA-2026-11-10-001 — Préparation du palier de capacité à 175 USD
+
+- Date / opérateur : 10 novembre 2026, Africa/Kinshasa ; Codex à la demande du mainteneur.
+- Statut : préparé localement, non appliqué. Cible : production ; aucun redéploiement, aucune écriture AWS, aucune migration applicative.
+- Contexte : objectif de 1 000 trajets et 1 000 demandes simultanés, budget annoncé de 175 USD/mois. Lecture AWS : 1 tâche ARM64 512/1024, révision `:41` stable ; base/Redis initialement mono-nœud. Les crédits promotionnels masquent le coût réel net.
+- Justification : préparer un palier mesurable, sans promettre un débit non testé ni modifier les files ou les invariants financiers. Les connexions PostgreSQL doivent être budgétées par processus et pendant le rolling deployment.
+- Fichiers : `profiles/capacity-175.tfvars.json`, `profiles/prices-eu-central-1-2026-11-10.json`, `scripts/capacity-cost.cjs`, `budget.tf`, `docs/capacity-175-usd.md`, `test/capacity-budget.test.cjs` à la racine du dépôt.
+- Configuration : profil explicite (pas auto-chargé), 2 tâches 0,5 vCPU/1 Gio, RDS small Single-AZ, 2 Valkey micro, autoscaling désactivé, traces à 1 %. Le runtime, les secrets, IAM, le réseau et les règles métier restent inchangés. Le proxy existant est inclus dans le coût, pas modifié.
+- Budget optionnel : `monthly_cost_budget_usd` vaut `null` par défaut. Le profil propose 175 USD ; alertes réelles à 80/100 %, prévisionnelle à 100 %, exclusion des crédits/remboursements, taxes incluses, destinataires opérateur obligatoires. Aucune action automatique d'arrêt.
+- Coût : estimation publique Francfort 163,59 USD sur 744 h, hors taxes, avec 1 LCU moyen, 20 heures-tâches temporaires et 25 USD de provision annexes ; marge 11,41 USD, non garantie. Le modèle échoue explicitement si le scénario dépasse le plafond. Aucun coût de capacité supplémentaire engagé.
+- Disponibilité : RDS small nécessite une fenêtre de redimensionnement Single-AZ ; Redis gagne une réplique, pas deux primaires. PostgreSQL/proxy restent des points de panne. Répartition AZ des tâches et reconnexion des clients à vérifier après un éventuel déploiement.
+- Validation locale : six tests du calculateur/profil réussis ; `terraform validate` et format de `budget.tf` valides. Benchmark séquentiel existant réussi sur des bases jetables (60 demandes par scénario, 3 instances dans un processus, pas de push réel). Ce n'est pas le test cible 1 000 + 1 000.
+- Déploiement : confirmer le périmètre taxes/services, fournir les vraies adresses d'alerte, vérifier sauvegarde/restauration et migrations, préparer et relire le plan explicite avec les variables existantes. Aucun `plan` connecté à la production ni `apply` effectué ici ; voir la procédure et les critères de recette dans `docs/capacity-175-usd.md`.
+- Surveillance : latence de dispatch et de réception, files, pool SQL, CPU/mémoire/crédits T4g, erreurs, réplique Redis, coûts hors crédits ; confirmer SNS et les actions des alarmes proxy avant activation.
+- Retour arrière : retirer le profil avant application n'a aucun effet AWS. Après application, examiner un plan de retour contrôlé ; ne pas réduire à chaud RDS ou supprimer une réplique pour couper la facture. Conserver les sauvegardes et les traitements en cours.
+- Restant : validation de charge mixte représentative 1 000 + 1 000 avec GPS, alertes et pannes ; test de restauration/basculement ; accord sur le plan et le coût avant toute mutation AWS.
+
 ## INFRA-2026-11-09-001 — Contrôles de non-régression avant déploiement
 
 - Date / opérateur : 9 novembre 2026, Africa/Kinshasa ; Codex, à la demande du mainteneur.

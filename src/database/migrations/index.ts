@@ -1,3 +1,4 @@
+import { RequestPriceNegotiation1780000122000 } from './1780000122000-RequestPriceNegotiation';
 import { MobileOperations1780000111000 } from './1780000111000-MobileOperations';
 import { BookingPriceProposal1780000113000 } from './1780000113000-BookingPriceProposal';
 import { AdminAnalyticsIndexes1780000114000 } from './1780000114000-AdminAnalyticsIndexes';
@@ -124,6 +125,8 @@ import { DispatchDeliveryResilience1780000088000 } from './1780000088000-Dispatc
 import { SequentialRequestQueue1780000097000 } from './1780000097000-SequentialRequestQueue';
 
 import { CanonicalPhoneIdentity1780000119000 } from './1780000119000-CanonicalPhoneIdentity';
+import { DriverCategory1780000120000 } from './1780000120000-DriverCategory';
+import { PartnerCompanyManagers1780000121000 } from './1780000121000-PartnerCompanyManagers';
 
 export const databaseMigrations = [
   FillTotalSeats1780000000000,
@@ -245,4 +248,7 @@ export const databaseMigrations = [
   PartnerFieldWorkspace1780000117000,
   DriverCashSixTripCredit1780000118000,
   CanonicalPhoneIdentity1780000119000,
+  DriverCategory1780000120000,
+  PartnerCompanyManagers1780000121000,
+  RequestPriceNegotiation1780000122000,
 ];

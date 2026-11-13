@@ -4,6 +4,8 @@ import { User } from '../users/entities/user.entity';
 import { assertAccountAvailable } from '../users/account-availability';
 import { Trip } from './entities/trip.entity';
 import { assertPublicationRequestSchedule } from '../trip-requests/dispatch/driver-schedule-policy';
+import { KycDocument } from '../users/entities/kyc-document.entity';
+import { assertDriverPublicationIdentity } from './trip-publication-identity';
 
 export function assertDriverPublicationPhoto(
   driver: Pick<User, 'profilePicture'>,
@@ -58,6 +60,9 @@ export async function savePublicationsWithPhotoPolicy(
       });
       if (!trips.length) return [];
     }
+    // All public writers, including recurring generation, recheck the latest
+    // identity using this transaction's manager after taking the owner lock.
+    await assertDriverPublicationIdentity(manager.getRepository(KycDocument), driverId);
     const alreadyPublished = driver.hasPublishedTrip || (
       !driver.profilePicture?.trim() && await publications.existsBy({ driverId, isPrivate: false })
     );

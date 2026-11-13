@@ -1,0 +1,26 @@
+{
+  "checkedAt": "2026-11-10",
+  "region": "eu-central-1",
+  "currency": "USD",
+  "basis": "On-demand public AWS Price List API, excluding discounts, credits, tax and CPU surplus credits",
+  "sources": [
+    "https://aws.amazon.com/fargate/pricing/",
+    "https://aws.amazon.com/rds/postgresql/pricing/",
+    "https://aws.amazon.com/elasticache/pricing/",
+    "https://aws.amazon.com/elasticloadbalancing/pricing/",
+    "https://aws.amazon.com/vpc/pricing/",
+    "https://aws.amazon.com/ec2/pricing/on-demand/",
+    "https://aws.amazon.com/ebs/pricing/"
+  ],
+  "hourly": {
+    "fargateArmVcpu": 0.03725,
+    "fargateArmGib": 0.00409,
+    "rds": { "db.t4g.small": 0.037, "db.t4g.medium": 0.074 },
+    "valkey": { "cache.t4g.micro": 0.0144 },
+    "alb": 0.027,
+    "albLcu": 0.008,
+    "publicIpv4": 0.005,
+    "proxyT4gMicro": 0.0096
+  },
+  "gibMonth": { "rdsGp3": 0.137, "ebsGp3": 0.0952 }
+}
