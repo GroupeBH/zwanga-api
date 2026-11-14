@@ -123,7 +123,7 @@ export function sequentialMobileFlow(context: () => Context) {
           departureCoordinates: [15.31, -4.3], arrivalCoordinates: [15.32, -4.3],
           departureDateMin: new Date(Date.now() + 120000).toISOString(),
           departureDateMax: new Date(Date.now() + 2400000).toISOString(),
-          numberOfSeats: 1, maxPricePerSeat: 1000, vehicleType: VehicleType.CAR, immediateDispatch: timeout,
+          numberOfSeats: 1, maxPricePerSeat: 2500, vehicleType: VehicleType.CAR, immediateDispatch: timeout,
         } }, passenger.id);
         ids.push(created.id);
         const messages = () => wire.filter(x => x.data?.tripRequestId === created.id &&

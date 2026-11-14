@@ -116,7 +116,8 @@ const pgBin = process.env.PAYOUT_TEST_POSTGRES_BIN;
         amount numeric(12,2), currency varchar(8), phone varchar(30), status varchar(40),
         "paymentTransactionId" uuid REFERENCES payment_transactions(id), "requestedAt" timestamp,
         "processedAt" timestamp, "failureReason" varchar(500), "createdAt" timestamp DEFAULT now(), "updatedAt" timestamp DEFAULT now());
-      CREATE TABLE driver_earnings (id uuid PRIMARY KEY, "driverId" uuid, "netAmount" numeric(12,2), status varchar(20));`);
+      CREATE TABLE driver_earnings (id uuid PRIMARY KEY, "driverId" uuid, "netAmount" numeric(12,2),
+        "assetRepaymentAmount" numeric(12,2) NOT NULL DEFAULT 0, status varchar(20));`);
       const runner = source.createQueryRunner();
       await migration.up(runner);
       await runner.release();
@@ -157,7 +158,7 @@ const pgBin = process.env.PAYOUT_TEST_POSTGRES_BIN;
       await source.query('DELETE FROM payment_transactions');
       await source.query('DELETE FROM driver_earnings');
       await source.query(
-        `INSERT INTO driver_earnings VALUES ($1,$2,10000,'available')`,
+        `INSERT INTO driver_earnings (id,"driverId","netAmount",status) VALUES ($1,$2,10000,'available')`,
         [randomUUID(), driver],
       );
       await source.query(
@@ -211,6 +212,15 @@ const pgBin = process.env.PAYOUT_TEST_POSTGRES_BIN;
           driver,
         ),
       ).toBe(10000);
+    });
+
+    it('keeps material-credit repayments deducted when support releases an unpaid payout', async () => {
+      await source.query('UPDATE driver_earnings SET "assetRepaymentAmount"=$1 WHERE "driverId"=$2', [125.50, driver]);
+      expect(await (settlements as any).getAvailableBalanceWithManager(source.manager, driver)).toBe(374.50);
+      await recovery.resolveNotPaid(admin, payoutId, dto);
+      expect(await (settlements as any).getAvailableBalanceWithManager(source.manager, driver)).toBe(9874.50);
+      const [earning] = await source.query('SELECT "assetRepaymentAmount" FROM driver_earnings WHERE "driverId"=$1', [driver]);
+      expect(Number(earning.assetRepaymentAmount)).toBe(125.50);
     });
 
     it('late verified success is retained, debits available gains and blocks withdrawals until reviewed', async () => {
