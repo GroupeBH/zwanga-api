@@ -18,6 +18,7 @@ import { cumulativeCashDebtCases } from '../../test/cumulative-cash-debt-postgre
 import { mixedCashCommissionCases } from '../../test/mixed-cash-commission-postgres';
 import { tokenCashCommissionCases } from '../../test/token-cash-commission-postgres';
 import { driverCashCreditCases } from '../../test/driver-cash-credit-postgres';
+import { assetCashCompatibility } from '../../test/asset-cash-compatibility';
 import { WalletLedgerEntry } from '../wallet/entities/wallet-ledger-entry.entity';
 import { ModuleKind, ScriptTarget, transpileModule } from 'typescript';
 
@@ -111,9 +112,10 @@ const pgBin = process.env.DRIVER_FINANCE_TEST_POSTGRES_BIN;
     }, 90_000);
     beforeEach(async () => {
       const [credit] = await db.query("SELECT to_regclass('driver_cash_credit_trips') AS present");
+      const [asset] = await db.query("SELECT to_regclass('asset_credits') AS present");
       await db.query(
         'TRUNCATE notifications,wallet_ledger_entries,cash_commissions,driver_pro_trial_claims,welcome_bonus_grants,kyc_documents,subscriptions,bookings,trip_requests,trips,wallet_accounts,users' +
-          (credit.present ? ',driver_cash_credit_trips' : ''),
+          (credit.present ? ',driver_cash_credit_trips' : '') + (asset.present ? ',asset_credit_wallet_mutations,asset_credit_sources,asset_credit_entries,asset_credit_events,asset_credits,asset_credit_requests,driver_earnings' : ''),
       );
       await db.query('INSERT INTO users (id,phone) VALUES ($1,$2)', [
         driver,
@@ -1137,5 +1139,6 @@ const pgBin = process.env.DRIVER_FINANCE_TEST_POSTGRES_BIN;
     mixedCashCommissionCases(() => db, driver, trip);
     tokenCashCommissionCases(() => db, driver, trip);
     driverCashCreditCases(() => db, driver, trip);
+    assetCashCompatibility(() => db, driver, trip);
   },
 );

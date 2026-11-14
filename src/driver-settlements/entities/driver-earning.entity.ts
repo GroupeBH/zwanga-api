@@ -68,6 +68,10 @@ export class DriverEarning {
   @Column({ type: 'decimal', precision: 12, scale: 2 })
   netAmount: number;
 
+  /** Separate from commission; netAmount remains the historical pre-credit ledger amount. */
+  @Column({ type: 'decimal', precision: 12, scale: 2, default: 0 })
+  assetRepaymentAmount?: number;
+
   @Column({ type: 'varchar', length: 8, default: 'CDF' })
   currency: string;
 

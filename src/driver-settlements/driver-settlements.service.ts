@@ -48,6 +48,7 @@ import { DriverPayoutEvent } from './entities/driver-payout-event.entity';
 import { payoutRecoveryState, payoutReviewDelay } from './driver-payout-recovery.policy';
 import { DRIVER_FINANCE } from '../driver-finance/driver-finance.policy';
 import { hasCurrentApprovedIdentity } from '../users/current-identity';
+import { earningForClient, spendableEarning } from '../asset-credit/earning-credit';
 
 export interface DriverSettlementSummary {
   availableBalance: number;
@@ -164,15 +165,17 @@ export class DriverSettlementsService implements OnModuleInit {
   }
 
   async findDriverEarnings(driverId: string): Promise<DriverEarning[]> {
-    return this.earningRepository.find({
+    const earnings = await this.earningRepository.find({
       where: { driverId },
       order: { createdAt: 'DESC' },
     });
+    return earnings.map(earningForClient);
   }
 
-  findDriverEarningsPage(driverId: string, options: HistoryPageDto) {
-    return loadHistoryPage(this.earningRepository.createQueryBuilder('entry')
+  async findDriverEarningsPage(driverId: string, options: HistoryPageDto) {
+    const page = await loadHistoryPage(this.earningRepository.createQueryBuilder('entry')
       .where('entry.driverId = :driverId', { driverId }), options, 'COALESCE(entry.availableAt, entry.createdAt)');
+    return { ...page, data: page.data.map(earningForClient) };
   }
 
   async findDriverPayoutsPage(driverId: string, options: HistoryPageDto) {
@@ -306,7 +309,7 @@ export class DriverSettlementsService implements OnModuleInit {
       zwangaSubsidyAmount += this.resolveBookingSubsidyAmount(booking);
       const earning = earningsByBooking.get(booking.id);
       if (earning && [DriverEarningStatus.AVAILABLE, DriverEarningStatus.PAID].includes(earning.status)) {
-        confirmedAmount += this.roundMoney(Number(earning.netAmount));
+        confirmedAmount += spendableEarning(earning);
       }
       if (booking.paymentMode === TripPaymentMode.CASH) {
         const cashAmount = this.resolveTripBookingPassengerAmount(booking, trip);
@@ -610,7 +613,8 @@ export class DriverSettlementsService implements OnModuleInit {
     earning: DriverEarning,
   ): Promise<void> {
     try {
-      const netAmount = this.roundMoney(Number(earning.netAmount));
+      const persisted = await this.earningRepository.findOne({ where: { id: earning.id } });
+      const netAmount = spendableEarning(persisted ?? earning);
       await this.notificationService.sendNotificationToUser(
         earning.driverId,
         'Gain du trajet disponible',
@@ -1285,7 +1289,7 @@ export class DriverSettlementsService implements OnModuleInit {
   ): Promise<number> {
     const earningResult = await manager
       .createQueryBuilder(DriverEarning, 'earning')
-      .select('COALESCE(SUM(earning.netAmount), 0)', 'sum')
+      .select('COALESCE(SUM(earning.netAmount - earning.assetRepaymentAmount), 0)', 'sum')
       .where('earning.driverId = :driverId', { driverId })
       .andWhere('earning.status = :status', {
         status: DriverEarningStatus.AVAILABLE,
@@ -1315,7 +1319,7 @@ export class DriverSettlementsService implements OnModuleInit {
   ): Promise<number> {
     const result = await this.earningRepository
       .createQueryBuilder('earning')
-      .select('COALESCE(SUM(earning.netAmount), 0)', 'sum')
+      .select('COALESCE(SUM(earning.netAmount - earning.assetRepaymentAmount), 0)', 'sum')
       .where('earning.driverId = :driverId', { driverId })
       .andWhere('earning.status IN (:...statuses)', { statuses })
       .getRawOne<{ sum: string }>();

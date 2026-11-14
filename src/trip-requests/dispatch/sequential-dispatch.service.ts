@@ -28,6 +28,10 @@ export class SequentialDispatchService {
     private readonly queue: RequestDriverQueue, private readonly notifications: NotificationService,
     private readonly changes: RideAlertChanges, private readonly bookings?: BookingsService) {}
   private get enabled() { return this.config.get('DRIVER_DISPATCH_ENABLED') === 'true'; }
+  private get waveSize() {
+    // Explicit 1 supports a controlled operational fallback; never allow unbounded fan-out.
+    return String(this.config.get('DRIVER_DISPATCH_WAVE_SIZE') ?? '4') === '1' ? 1 : 4;
+  }
   private open(r: TripRequest | null): r is TripRequest {
     return !!r && ['pending', 'offers_received'].includes(r.status) && !r.selectedDriverId && !r.tripId &&
       !!r.departurePoint && r.departureDateMax.getTime() > Date.now();
@@ -60,7 +64,7 @@ export class SequentialDispatchService {
     if (!this.enabled) return false;
     return await this.cache(() => this.queue.isDue(id), true) ? this.advance(id) : false;
   }
-  /** Redis caches ordering; SQL remains the authority for exclusive invitation + outbox. */
+  /** Redis caches ordering; SQL bounds the wave and commits every invitation with its outbox. */
   async advance(id: string): Promise<boolean> {
     if (!this.enabled) return false;
     const startedAt = Date.now();
@@ -90,7 +94,7 @@ export class SequentialDispatchService {
         if (request.targetDriverPriorityUntil && request.targetDriverPriorityUntil.getTime() > Date.now())
           return { wait: request.targetDriverPriorityUntil.getTime(), changed };
         const [pending] = await manager.query(`SELECT "expiresAt" FROM trip_request_dispatch_offers
-          WHERE "requestId" = $1 AND status = 'pending' AND "expiresAt" > now() LIMIT 1`, [id]);
+          WHERE "requestId" = $1 AND status = 'pending' AND "expiresAt" > now() ORDER BY "expiresAt" LIMIT 1`, [id]);
         return pending ? { wait: new Date(pending.expiresAt).getTime(), changed } : { request, changed };
       });
       if (!state || ('changed' in state && state.changed)) this.changes.enqueue({ kind: 'request', id, terminal: !state });
@@ -168,7 +172,7 @@ export class SequentialDispatchService {
         const recovery = await recoverRequestAcceptance(manager, request);
         if (recovery) return { wait: Date.now() + 1000, reset: false };
         const [pending] = await manager.query(`SELECT "expiresAt" FROM trip_request_dispatch_offers
-          WHERE "requestId"=$1 AND status='pending' LIMIT 1`, [id]);
+          WHERE "requestId"=$1 AND status='pending' ORDER BY "expiresAt" LIMIT 1`, [id]);
         if (pending) return { wait: new Date(pending.expiresAt).getTime(), reset: false };
         const claimed = await (async () => {
           // A different request can commit between the candidate query's snapshot
@@ -178,43 +182,47 @@ export class SequentialDispatchService {
           // other 49 candidates. Bound work when many cached drivers became busy;
           // an exhausted window is refreshed on the next Redis deadline.
           let remaining = drivers;
-          for (let attempt = 0; attempt < 8; attempt++) {
+          const invitations: { candidate: Awaited<ReturnType<typeof sequentialCandidates>>[number]; offerId: string; expiresAt: Date }[] = [];
+          const size = request.targetDriverId ? 1 : this.waveSize;
+          for (let attempt = 0; attempt < 8 * size && invitations.length < size; attempt++) {
             const checked = await lockNextQueuedCandidate(manager, request, remaining);
-            if (!checked) return null;
+            if (!checked) break;
             remaining = remaining.filter(driverId => driverId !== checked.driverId);
             const candidate = checked.candidate;
             if (!candidate) continue;
             const offerId = randomUUID();
             const [offer] = await manager.query(`INSERT INTO trip_request_dispatch_offers
-              (id,"requestId","driverId","vehicleId",seats,"expiresAt",sequential)
-              VALUES ($1,$2,$3,$4,$5,LEAST(clock_timestamp() + $6 * interval '1 millisecond', $7),true)
+              (id,"requestId","driverId","vehicleId",seats,"expiresAt",sequential,"waveSlot")
+              VALUES ($1,$2,$3,$4,$5,LEAST(clock_timestamp() + $6 * interval '1 millisecond', $7),true,$8)
               ON CONFLICT DO NOTHING RETURNING "expiresAt"`,
-              [offerId,id,candidate.driverId,candidate.vehicleId,candidate.seats,REQUEST_RESPONSE_MS,request.departureDateMax]);
+              [offerId,id,candidate.driverId,candidate.vehicleId,candidate.seats,REQUEST_RESPONSE_MS,request.departureDateMax,invitations.length + 1]);
             if (offer) {
               // INSERT trigger may cap the deadline during a rolling deployment.
               // Freeze the actual delivery deadline; receipts can add 40s only once.
               await manager.query('UPDATE trip_request_dispatch_offers SET "deliveryDeadlineAt"="expiresAt" WHERE id=$1', [offerId]);
-              return { candidate, offerId, expiresAt: new Date(offer.expiresAt) };
+              invitations.push({ candidate, offerId, expiresAt: new Date(offer.expiresAt) });
             }
           }
-          return null;
+          return invitations;
         })();
-        if (!claimed) return { wait: Date.now() + 1000, reset: true };
-        const { candidate, offerId, expiresAt: deadline } = claimed;
-        const driverId = candidate.driverId;
-        if (request.immediateDispatch && !candidate.existingTripId) await manager.query(`UPDATE driver_dispatch_presence SET "vehicleId" = $2, seats = $3 WHERE "driverId" = $1`,
-          [driverId, candidate.vehicleId, candidate.seats]);
-        const expiresAt = deadline.toISOString();
-        await enqueueTransactionalNotification(manager, { eventKey: 'sequential-offer:' + offerId, userId: driverId,
-          title: 'Nouvelle commande de trajet', body: request.departureLocation + ' → ' + request.arrivalLocation + '. Accepter ou refuser ?',
-          data: { type: request.immediateDispatch && !candidate.existingTripId ? 'driver_dispatch_offer' : 'trip_request_nearby',
-            ...(candidate.existingTripId ? { sharedTrip: true, existingTripId: candidate.existingTripId } : {}),
-            ringAlert: 'nearby-request-v1', tripRequestId: id, offerId, driverId, passengerId: request.passengerId,
-            role: 'driver', vehicleType: request.vehicleType, vehicleTypes: JSON.stringify(requestVehicleTypes(request)), expiresAt, alertExpiresAt: expiresAt,
-            ...rideSpeechData({ departure: request.departureLocation, arrival: request.arrivalLocation,
-              seats: request.numberOfSeats, departureAt: request.departureDateMin,
-              pricePerSeat: request.maxPricePerSeat, priceKind: 'budget' }) } });
-        return { offeredUntil: deadline.getTime(), driverId, reset: false };
+        if (!claimed.length) return { wait: Date.now() + 1000, reset: true };
+        for (const { candidate, offerId, expiresAt: deadline } of claimed) {
+          const driverId = candidate.driverId;
+          if (request.immediateDispatch && !candidate.existingTripId) await manager.query(`UPDATE driver_dispatch_presence SET "vehicleId" = $2, seats = $3 WHERE "driverId" = $1`,
+            [driverId, candidate.vehicleId, candidate.seats]);
+          const expiresAt = deadline.toISOString();
+          await enqueueTransactionalNotification(manager, { eventKey: 'sequential-offer:' + offerId, userId: driverId,
+            title: 'Nouvelle commande de trajet', body: request.departureLocation + ' → ' + request.arrivalLocation + '. Accepter ou refuser ?',
+            data: { type: request.immediateDispatch && !candidate.existingTripId ? 'driver_dispatch_offer' : 'trip_request_nearby',
+              ...(candidate.existingTripId ? { sharedTrip: true, existingTripId: candidate.existingTripId } : {}),
+              ringAlert: 'nearby-request-v1', tripRequestId: id, offerId, driverId, passengerId: request.passengerId,
+              role: 'driver', vehicleType: request.vehicleType, vehicleTypes: JSON.stringify(requestVehicleTypes(request)), expiresAt, alertExpiresAt: expiresAt,
+              ...rideSpeechData({ departure: request.departureLocation, arrival: request.arrivalLocation,
+                seats: request.numberOfSeats, departureAt: request.departureDateMin,
+                pricePerSeat: request.maxPricePerSeat, priceKind: 'budget' }) } });
+        }
+        return { offeredUntil: Math.min(...claimed.map(invitation => invitation.expiresAt.getTime())),
+          driverId: claimed[claimed.length - 1].candidate.driverId, reset: false };
       });
       // Start fresh push/realtime immediately after commit, before even one Redis round trip.
       if ('offeredUntil' in result) {
@@ -228,7 +236,7 @@ export class SequentialDispatchService {
       return 'offeredUntil' in result;
     } catch (error) {
       // SQL + its indexed recovery scan survive Redis eviction, timeout or a process restart.
-      // Never bypass durable single-recipient constraints with a broad broadcast.
+      // Never bypass bounded invitations and durable single-driver constraints.
       const code = (error as { code?: string })?.code ?? (error instanceof Error ? error.name : 'unknown');
       this.logger.warn('Request relay deferred id=' + id + ' code=' + code);
       // Retirement may already have committed. Keep a wake-up even when there

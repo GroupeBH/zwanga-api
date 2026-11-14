@@ -82,6 +82,15 @@ export class TripRequestsController {
     return this.tripRequestsService.driverChoices(req.user.userId, query);
   }
 
+  @Get(':id/pickup-summary')
+  @Auth()
+  @Header('Cache-Control', 'private, no-store')
+  @SensitiveThrottle(12, 60000)
+  @ApiOperation({ summary: 'Participant-only pickup position and road estimate after driver acceptance' })
+  pickupSummary(@Request() req: { user: { userId: string } }, @Param('id', ParseUUIDPipe) id: string) {
+    return this.tripRequestsService.pickupSummary(req.user.userId, id);
+  }
+
   @Get(':id/search-map')
   @Auth()
   @Header('Cache-Control', 'private, no-store')

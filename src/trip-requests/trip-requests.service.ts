@@ -1,4 +1,5 @@
 import { negotiateRequestPrice } from './negotiate-request-price';
+import { requestPickupSummary } from './request-pickup-summary';
 import { requestPriceAlternatives } from './request-search-map';
 import { claimRequestAcceptance, completeRequestAcceptance, releaseRequestAcceptance, startPassengerDecision } from './dispatch/request-acceptance';
 import { changeRequestDriver, withdrawRequestDriver } from './change-request-driver';
@@ -374,6 +375,10 @@ export class TripRequestsService {
 
   async searchMap(passengerId: string, requestId: string) {
     return requestSearchMap(this.tripRequestRepository.manager, passengerId, requestId);
+  }
+
+  pickupSummary(userId: string, requestId: string) {
+    return requestPickupSummary(this.tripRequestRepository.manager, this.googleMapsService, requestId, userId);
   }
 
   async mapDriver(passengerId: string, requestId: string, markerId: string) {
@@ -1909,6 +1914,7 @@ export class TripRequestsService {
     // The trip is created with the number of seats requested by the passenger (or more if driver specified)
     const acceptanceToken = await claimRequestAcceptance(this.tripRequestRepository.manager, tripRequest, driverId,
       { vehicleId: vehicle.id, seats: tripRequest.numberOfSeats });
+    if (acceptanceToken) this.driverDispatch?.notifyRequestClaimed?.(tripRequestId);
     const trip = await this.tripsService.create(
       driverId,
       {

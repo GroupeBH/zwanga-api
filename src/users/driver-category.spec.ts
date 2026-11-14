@@ -121,7 +121,7 @@ describe.each(['phone', 'google', 'apple'])('%s registration category', method =
     const options = { ...common, driverCategory };
     if (method === 'phone') await service.register({ ...options, pin: '1234' });
     else if (method === 'google') await service.validateGoogleUser(
-      { googleId: 'test-google', email: 'test@example.invalid', firstName: 'Test', lastName: 'Example' },
+      { googleId: 'test-google', email: 'test@example.invalid', firstName: 'Test', lastName: 'Example', profilePicture: null },
       common.phone, undefined, options,
     );
     else await (service as any).validateAppleUser(
@@ -141,7 +141,7 @@ describe.each(['google', 'apple'])('%s existing-account login', method => {
       role: UserRole.DRIVER, isDriver: true, driverCategory: DriverCategory.PRIVATE });
     const options = { ...common, driverCategory: DriverCategory.TRANSPORT };
     if (method === 'google') await service.validateGoogleUser(
-      { googleId: 'test-google', email: 'test@example.invalid', firstName: 'Test', lastName: 'Example' },
+      { googleId: 'test-google', email: 'test@example.invalid', firstName: 'Test', lastName: 'Example', profilePicture: null },
       common.phone, undefined, options,
     );
     else await (service as any).validateAppleUser({ appleId: 'test-apple' }, common.phone, options);

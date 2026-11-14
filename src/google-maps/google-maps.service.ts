@@ -571,7 +571,7 @@ export class GoogleMapsService {
   /**
    * Get directions between origin and destination
    */
-  async getDirections(dto: DirectionsDto): Promise<DirectionsResponse> {
+  async getDirections(dto: DirectionsDto, options: { timeoutMs?: number } = {}): Promise<DirectionsResponse> {
     // console.log('getDirections', dto);
     const singleRouteDto: DirectionsDto = { ...dto, alternatives: false };
     const cacheKey = this.getDirectionsCacheKey(singleRouteDto);
@@ -648,7 +648,8 @@ export class GoogleMapsService {
       }
       // console.log('params', params);
       const response = await firstValueFrom(
-        this.httpService.get(`${this.baseUrl}/directions/json`, { params }),
+        this.httpService.get(`${this.baseUrl}/directions/json`, { params,
+          ...(options.timeoutMs ? { timeout: Math.max(1000, Math.min(30000, options.timeoutMs)) } : {}) }),
       );
 
       if (response.data.status === 'ZERO_RESULTS') {

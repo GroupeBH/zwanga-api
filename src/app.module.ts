@@ -50,9 +50,11 @@ import { ProServicesModule } from './pro-services/pro-services.module';
 import { AppUpdatesModule } from './app-updates/app-updates.module';
 import { DriverFinanceModule } from './driver-finance/driver-finance.module';
 import { PartnersModule } from './partners/partners.module';
+import { AssetCreditModule } from './asset-credit/asset-credit.module';
 
 @Module({
   imports: [
+    AssetCreditModule,
     AppConfigModule,
     LoggerModule,
     TypeOrmModule.forRootAsync({

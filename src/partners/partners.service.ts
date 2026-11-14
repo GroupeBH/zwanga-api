@@ -90,11 +90,13 @@ export class PartnersService {
     const organization = member.organization;
     const activePartnerTypes = organization.partnerTypes.filter((type) => type.status === 'ACTIVE').map((type) => type.type);
     const fieldAvailable = activePartnerTypes.includes('FIELD_MARKETING');
+    const fleetAvailable = activePartnerTypes.includes('FLEET_OWNER') && ['ACTIVE','SUSPENDED'].includes(organization.status) && ['ORG_ADMIN','ORG_MANAGER','FLEET_MANAGER','VIEWER','FINANCE_VIEWER'].includes(member.role);
+    const fleetPermissions = !fleetAvailable ? [] : organization.status === 'ACTIVE' && ['ORG_ADMIN','ORG_MANAGER','FLEET_MANAGER'].includes(member.role) ? ['vehicles.read','vehicles.request','vehicles.assign_driver'] : ['vehicles.read'];
     const rolePermissions = member.role === 'ORG_ADMIN' ? ADMIN_PERMISSIONS : member.role === 'FIELD_SUPERVISOR' ? SUPERVISOR_PERMISSIONS : member.role === 'FIELD_AGENT' ? FIELD_PERMISSIONS : ['organization.read'];
     const permissions = !fieldAvailable ? ['organization.read'] : organization.status === 'ACTIVE' ? rolePermissions : ['SUSPENDED', 'CLOSED'].includes(organization.status) ? rolePermissions.filter((permission) => ['organization.read', 'support.tickets.read', 'recruits.read_own', 'recruits.read_team', 'targets.read_own', 'organization.members.read'].includes(permission)) : ['organization.read'];
     return {
       organizationId, organizationStatus: organization.status, roles: [member.role], activePartnerTypes,
-      features: fieldAvailable ? ['marketing.campaigns'] : [], permissions,
+      features: [...(fieldAvailable ? ['marketing.campaigns'] : []),...(fleetAvailable ? ['fleet.registry'] : [])], permissions: [...new Set([...permissions,...fleetPermissions,...(fleetAvailable && ['ORG_ADMIN','ORG_MANAGER','FLEET_MANAGER'].includes(member.role) ? ['fleet.payments.confirm'] : [])])],
     };
   }
 

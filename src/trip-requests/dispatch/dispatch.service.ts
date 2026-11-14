@@ -47,6 +47,10 @@ export class DriverDispatchService {
     private readonly sequential?: SequentialDispatchService) {}
 
   get enabled() { return this.config.get<string>('DRIVER_DISPATCH_ENABLED') === 'true'; }
+  /** Called only after the acceptance claim commits, before slow trip preparation. */
+  notifyRequestClaimed(requestId: string) {
+    this.rideChanges?.enqueue({ kind: 'request', id: requestId, terminal: false });
+  }
   async declineNearbyRequest(driverId: string, requestId: string) {
     const result = await declineNearbyRequest(this.db.manager, driverId, requestId);
     this.rideChanges?.enqueue({ kind: 'request', id: requestId, terminal: false });

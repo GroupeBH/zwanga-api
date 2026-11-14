@@ -1,5 +1,38 @@
 # Journal des changements techniques
 
+## 2026-11-14 — Informations de récupération dès l'acceptation
+
+- Périmètre : nouveau `GET /trip-requests/:id/pickup-summary` dans `trip-requests.controller.ts`, délégué par le service à `request-pickup-summary.ts`. Accessible au passager et au conducteur sélectionné dès l'acceptation, même avant la création du trajet ; aucune modification du dispatch, des paiements ou des règles d'acceptation.
+- Réponse : identité des participants, véhicule attribué, point de rendez-vous et repère, positions déjà partagées de moins de deux minutes, distance routière et durée d'approche avec trafic si disponible. La position réelle du passager reste distincte du rendez-vous. Aucune estimation fictive si GPS/itinéraire indisponible ; une durée d'approche n'affirme pas que le conducteur est parti et n'intègre pas ses autres arrêts.
+- Protections : lecture par identifiant et participant, comptes disponibles, trajet/réservation actifs avant récupération, nouvelle vérification après l'appel cartographique pour les annulations/réaffectations. Réponse privée `no-store`, limitation à 12 lectures/minute, durée de validité maximale de 30 secondes. Le guide PostgreSQL a orienté la lecture bornée et l'absence de verrou pendant l'appel externe. Aucune migration supplémentaire.
+- Dépendance : `GoogleMapsService.getDirections` accepte un délai HTTP optionnel borné, fixé ici à cinq secondes ; les autres appels conservent leur comportement et le cache existant. Les lectures et l'estimation sont indépendantes de la transaction d'acceptation.
+- Validation locale : quatre suites unitaires (35 tests réussis), dont `request-pickup-summary.spec.ts`, `google-maps.service.spec.ts`, les prix confirmés et l'outbox d'acceptation ; deux scénarios PostgreSQL/PostGIS et Redis isolés via `test/request-pickup-summary-flow.ts` (accès immédiat, tiers refusé, annulation, position périmée, récupération). TypeScript global backend/mobile réussi ; 64 tests mobiles ciblés réussis. Ces tests utilisent un fournisseur d'itinéraire simulé, pas des téléphones ni Google Maps réel.
+- Livraison : mettre à jour le backend puis l'application mobile ; aucune modification AWS, migration de base existante, notification réelle ou mise en production effectuée. Intégration mobile et bilan du contrôle complet dans `../zwanga/docs/CHANGEMENTS_TECHNIQUES.md`.
+- Contrôle mobile complet terminé : `node scripts/check-release.cjs` code 0, 3 828 tests réussis et un ignoré ; TypeScript, ESLint, parité native des sources, frontières réseau et taille des sources validés. Cela ne remplace pas la recette GPS/notifications sur deux appareils.
+
+## 2026-11-14 — Versements externes des conducteurs aux propriétaires de flotte
+
+- Problème : les affectations ne portaient pas de montant périodique et aucun rapprochement des versements propriétaire n'était possible. Choix confirmé : forfait par jour/semaine/mois, versements déclarés puis confirmés, sans prélèvement automatique du portefeuille.
+- Solution : migration enregistrée `1780000126000-FleetExternalPayments`, conditions périodiques et consentement dans `partners/fleet-registry.*`, API `partners/fleet-payments.*` et module/capacité `fleet.payments.confirm`. Historiques de 30 éléments par curseur ; totaux cohérents avec la page via une transaction de lecture `REPEATABLE READ`.
+- Protection : accès lié au conducteur/à l'organisation, responsable autre que le conducteur pour confirmer, refus motivé, décisions immuables et rejeu idempotent par UUID. Versement partiel possible après clôture du contrat ; organisation suspendue autorisée à rapprocher l'historique sans nouvelle affectation. Montants entiers FC, date future refusée, verrous courts et contraintes en base. Les anciens contrats sans montant restent sans dette inventée.
+- Conservé : aucun débit propriétaire, aucun calcul automatique d'impayé/prorata/pénalité ; crédit matériel, commission, alertes et autorisations existantes de conduite inchangés. Le registre n'autorise pas encore à conduire un véhicule tiers.
+- Validation : 97 tests réussis dans cinq suites (`asset-credit.postgres`, `fleet-registry.postgres`, `partners.service.spec`, `driver-category`, `accepted-request-outbox`), dont 27 sur PostgreSQL isolé. Parcours HTTP Nest/DTO/base réelle avec identité injectée, pas un test JWT/appareil. Les anciennes fixtures UUID et photo nullable ont été corrigées ; TypeScript global incluant les tests passe désormais. Les résultats du 13 novembre ci-dessous restent des mesures historiques.
+- Migration testée uniquement dans les bases isolées ; aucun déploiement, fournisseur externe ou base existante modifiée. Retour arrière refusé si conditions périodiques ou versements enregistrés. Détails, fichiers mobile/portail, mesures et travail restant : [versements propriétaires](../../zwanga/docs/flottes-versements-proprietaires-2026-11-14.md).
+
+## 2026-11-13 — Crédit matériel et registre de flotte
+
+- Problème : absence de crédit matériel traçable et de registre réel de véhicules/affectations dans le parcours partenaire. Préparation autorisée, sans déploiement.
+- Ajouts : module `src/asset-credit`, migrations `1780000124000-AssetCredits` et `1780000125000-FleetRegistry`, collectes SQL transactionnelles, registre `partners/fleet-registry.*`, capacités `fleet.registry`, intégration de la retenue matériel dans les gains disponibles et réponses client. Les types futurs véhicule/équipement restent fermés.
+- Comportements préservés : commission habituelle, contraintes de portefeuille, réserve cash, non-consommation des récompenses, contrôles KYC et droits sur les véhicules, aucun transfert de propriété ni modification des alertes. Cash insuffisant : seul le débit réel est remboursé, le reste demeure dû ; recharge sans remboursement automatique. Consentement et preuve de remise avant prélèvement, idempotence, protection contre le double financement du même matériel.
+- Résultats : 17 tests sur PostgreSQL isolé crédit/flotte réussis ; 125 tests de coexistence finance réussis, 3 ignorés ; 35 tests de service réussis. Un scénario HTTP Nest/DTO/rôles/PostgreSQL utilise une identité injectée de test, pas une authentification réelle. Compilation TypeScript de production réussie ; le typecheck incluant tous les anciens tests reste bloqué par trois erreurs préexistantes (`accepted-request-outbox.spec.ts`, `driver-category.spec.ts`). Aucune base existante migrée, aucun fournisseur externe appelé.
+- Documentation inter-dépôts, fichiers et limites : [flottes et crédit matériel](../../zwanga/docs/flottes-credit-materiel-2026-11-13.md). Le registre ne constitue pas une gestion financière de flotte complète ; les règles propriétaire restent à définir. Une correction cash à la baisse requiert une réconciliation opérateur. Pas d'assurance de disponibilité en charge ou de conformité juridique déduite des tests.
+
+## 2026-11-13 — Dispatch par vagues de quatre conducteurs
+
+- Quatre invitations maximum par demande, sans compléter une vague encore ouverte ; première acceptation validée exclusive, négociation exclusive, priorité du conducteur ciblé préservée. Une seule invitation en attente par conducteur entre les demandes.
+- Migration `FourDriverDispatchWaves1780000123000`, mode de repli `DRIVER_DISPATCH_WAVE_SIZE=1`, notifications persistées avec les invitations et signal temps réel dès la réservation préalable du trajet.
+- Fonctionnement, précautions de livraison, tests et limites : [dispatch par vagues](operations/dispatch-waves-2026-11-13.md). Aucun changement AWS ni migration sur base existante.
+
 ## 2026-11-13 — Marchandage borné avant prise en charge
 
 - **Problème :** impossibilité pour le passager de contre-proposer, puis pour le conducteur d'accepter ou d'envoyer un prix ferme.

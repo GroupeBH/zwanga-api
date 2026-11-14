@@ -1,5 +1,8 @@
 import { sequentialMobileFlow } from '../../../test/sequential-mobile-flow';
 import { profileSequentialDiscovery } from '../../../test/sequential-query-profile';
+import { fourDriverWaveFlow } from '../../../test/four-driver-wave-flow';
+import { requestPickupSummaryFlow } from '../../../test/request-pickup-summary-flow';
+import { FourDriverDispatchWaves1780000123000 } from '../../database/migrations/1780000123000-FourDriverDispatchWaves';
 import { DriverResponse75Seconds1780000107000 } from '../../database/migrations/1780000107000-DriverResponse75Seconds';
 import { DriverResponse40Seconds1780000108000 } from '../../database/migrations/1780000108000-DriverResponse40Seconds';
 import { ReceiptResponseWindow1780000110000 } from '../../database/migrations/1780000110000-ReceiptResponseWindow';
@@ -68,7 +71,7 @@ const redisPort = Number(process.env.DISPATCH_TEST_REDIS_PORT);
 (pgBin && redisPort > 1024 && redisPort !== 6379 ? describe : describe.skip)('sequential relay with real PostgreSQL + Redis', () => {
   let directory: string, started = false, db: DataSource, redis: ReturnType<typeof createClient>;
   let queue: RequestDriverQueue, relay: SequentialDispatchService, dispatch: DriverDispatchService;
-  const config = new ConfigService({ DRIVER_DISPATCH_ENABLED: 'true' });
+  const config = new ConfigService({ DRIVER_DISPATCH_ENABLED: 'true', DRIVER_DISPATCH_WAVE_SIZE: '1' });
   const notifications = { dispatchUrgentNotifications: jest.fn().mockResolvedValue(undefined),
     dispatchTransactionalNotifications: jest.fn().mockResolvedValue(undefined) };
   const changes = { enqueue: jest.fn() };
@@ -115,6 +118,7 @@ const redisPort = Number(process.env.DISPATCH_TEST_REDIS_PORT);
     await db.transaction(manager => new DriverResponse75Seconds1780000107000().up(manager.queryRunner!));
     await db.transaction(manager => new DriverResponse40Seconds1780000108000().up(manager.queryRunner!));
     await db.transaction(manager => new ReceiptResponseWindow1780000110000().up(manager.queryRunner!));
+    await db.transaction(manager => new FourDriverDispatchWaves1780000123000().up(manager.queryRunner!));
     redis = createClient({ socket: { host: '127.0.0.1', port: redisPort, connectTimeout: 3000, reconnectStrategy: false },
       password: process.env.DISPATCH_TEST_REDIS_PASSWORD });
     redis.on('error', () => undefined); await redis.connect();
@@ -123,6 +127,7 @@ const redisPort = Number(process.env.DISPATCH_TEST_REDIS_PORT);
     dispatch = new DriverDispatchService(db, config, notifications as never, changes as never, relay);
   }, 90000);
   beforeEach(async () => {
+    config.set('DRIVER_DISPATCH_WAVE_SIZE', '1');
     await db.query('TRUNCATE users CASCADE'); jest.clearAllMocks();
     relay = new SequentialDispatchService(db, config, queue, notifications as never, changes as never);
     dispatch = new DriverDispatchService(db, config, notifications as never, changes as never, relay);
@@ -201,6 +206,8 @@ const redisPort = Number(process.env.DISPATCH_TEST_REDIS_PORT);
     expect(recovered).toContain(immediate);
   });
   availableRequestFlow(() => ({ db, relay, dispatch, driver, request, offers }));
+  fourDriverWaveFlow(() => ({ db, config, relay, dispatch, queue, notifications, changes, driver, request, offers, notices }));
+  requestPickupSummaryFlow(() => ({ db, relay, dispatch, driver, request, offers }));
   multiVehicleRequestFlow(() => ({ db, relay, dispatch, driver, request, offers }));
   mapDriverPriorityFlow(() => ({ db, relay, queue, driver, request, offers }));
   it.each([false, true])('rings a 47-hour-old location through the Redis relay but excludes a 48-hour-old one (%s)', async immediate => {
