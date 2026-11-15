@@ -4,21 +4,43 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { DataSource } from 'typeorm';
+import { DataSource, EntityManager } from 'typeorm';
 import {
   ActivateAssetCreditDto,
+  AssetConsentDto,
   OfferAssetCreditDto,
   RepayAssetCreditDto,
 } from './asset-credit.dto';
 import { TOKEN_VALUE_CDF } from '../wallet/token-value.policy';
+import { ASSET_PRODUCTS, type AssetKind } from './asset-credit-products';
+import { creditSchedule, validateCreditCost } from './credit-cost';
 
-export const ASSET_TERMS_VERSION = 'asset-credit-v1';
+export const ASSET_TERMS_VERSION = 'asset-credit-v2';
 export const ASSET_POLICY_TEXT =
-  '5 % du revenu du trajet remboursent votre matériel, en plus des 5 % de commission Zwanga. Pour un trajet cash, le remboursement est prélevé sur votre solde rechargé ; un montant non prélevé reste dû. Vous pouvez aussi rembourser librement avec votre solde. Les remboursements cessent au solde du crédit ; la commission reste à 5 %.';
+  'Chaque offre précise son pourcentage de remboursement. Les pourcentages acceptés s’additionnent aux 5 % de commission Zwanga, sans dépasser le revenu disponible. Pour un trajet cash, le remboursement vient du solde rechargé ; le reliquat reste dû. Vous pouvez aussi choisir un remboursement depuis votre solde. Les anciens contrats conservent leur part commune de 5 %.';
+const LEGACY_POLICY_TEXT = 'Vos anciens crédits partagent 5 % du revenu du trajet, en plus des 5 % de commission Zwanga. Les nouveaux crédits éventuellement acceptés s’ajoutent avec leurs propres pourcentages. Pour un trajet cash, le remboursement vient du solde rechargé ; le reliquat reste dû.';
 
 @Injectable()
 export class AssetCreditService {
   constructor(private readonly db: DataSource) {}
+  private async repaymentTotal(m: EntityManager | DataSource, driverId: string, offeredId?: string) {
+    const [row] = await m.query(`SELECT COALESCE(SUM(CASE WHEN "policyVersion"='asset-credit-v2' THEN "repaymentBps" ELSE 0 END),0)
+      + CASE WHEN COUNT(*) FILTER (WHERE "policyVersion"='asset-credit-v1')>0 THEN 500 ELSE 0 END AS total
+      FROM asset_credits WHERE "driverId"=$1 AND (status IN ('accepted','active') OR (id=$2 AND status='offered'))`, [driverId, offeredId ?? null]);
+    return Number(row.total);
+  }
+  async products(driverId: string) {
+    const rows = await this.db.query('SELECT kind,enabled FROM asset_credit_products');
+    const [driver] = await this.db.query(
+      'SELECT id FROM users WHERE id=$1 AND "isDriver"=true AND "isActive"=true', [driverId],
+    );
+    return {
+      items: ASSET_PRODUCTS.map((product) => ({ ...product,
+        enabled: rows.some((row) => row.kind === product.kind && row.enabled === true),
+      })),
+      canRequest: Boolean(driver), policyText: ASSET_POLICY_TEXT,
+    };
+  }
   async requests(driverId?: string) {
     return {
       items: await this.db.query(
@@ -27,7 +49,11 @@ export class AssetCreditService {
       ),
     };
   }
-  async request(driverId: string, notes: string) {
+  async request(driverId: string, notes: string, assetKind: AssetKind = 'phone') {
+    if (!ASSET_PRODUCTS.some((product) => product.kind === assetKind))
+      throw new BadRequestException('Matériel inconnu.');
+    if (assetKind === 'equipment' && notes.trim().length < 3)
+      throw new BadRequestException('Précisez le matériel souhaité.');
     return this.db.transaction(async (m) => {
       await m.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [
         `asset-request:${driverId}`,
@@ -41,33 +67,34 @@ export class AssetCreditService {
           'Ce service est réservé aux conducteurs actifs.',
         );
       const [product] = await m.query(
-        "SELECT enabled FROM asset_credit_products WHERE kind='phone' FOR SHARE",
+        'SELECT enabled FROM asset_credit_products WHERE kind=$1 FOR SHARE', [assetKind],
       );
       if (!product?.enabled)
         throw new ConflictException('Ce service est en pause.');
       const [existing] = await m.query(
-        `SELECT id FROM asset_credit_requests WHERE "driverId"=$1 AND "assetKind"='phone' AND status='submitted'`,
-        [driverId],
+        `SELECT id FROM asset_credit_requests WHERE "driverId"=$1 AND "assetKind"=$2 AND status='submitted'`,
+        [driverId, assetKind],
       );
       if (existing) return existing;
       return (
         await m.query(
-          `INSERT INTO asset_credit_requests("driverId","assetKind",notes) VALUES($1,'phone',$2) RETURNING id`,
-          [driverId, notes.trim()],
+          `INSERT INTO asset_credit_requests("driverId","assetKind",notes) VALUES($1,$2,$3) RETURNING id`,
+          [driverId, assetKind, notes.trim()],
         )
       )[0];
     });
   }
   async list(driverId?: string) {
     const rows = await this.db.query(
-      `SELECT id,"driverId","assetKind",label,"principalMinor","paidMinor","dueMinor",status,terms,"policyVersion","acceptedAt","activatedAt","createdAt"
+      `SELECT id,"driverId","assetKind",label,"principalMinor","paidMinor","dueMinor",status,terms,"policyVersion","repaymentBps","acceptedAt","activatedAt","createdAt",
+        "cashPriceMinor","creditFeeMinor","installmentCount","installmentPeriod","costDisclosureVersion"
       FROM asset_credits ${driverId ? 'WHERE "driverId" = $1' : ''} ORDER BY "createdAt" DESC, id DESC LIMIT 100`,
       driverId ? [driverId] : [],
     );
     return {
       items: rows,
       commissionBps: 500,
-      repaymentBps: 500,
+      ...(driverId ? { totalRepaymentBps: await this.repaymentTotal(this.db, driverId) } : {}),
       policyText: ASSET_POLICY_TEXT,
       policyVersion: ASSET_TERMS_VERSION,
       currency: 'CDF',
@@ -91,14 +118,21 @@ export class AssetCreditService {
     }
     return {
       ...credit,
+      ...creditSchedule(credit),
       entries,
       currency: 'CDF',
       commissionBps: 500,
-      repaymentBps: 500,
-      policyText: ASSET_POLICY_TEXT,
+      totalRepaymentBps: await this.repaymentTotal(this.db, credit.driverId, credit.id),
+      policyText: credit.policyVersion === 'asset-credit-v1' ? LEGACY_POLICY_TEXT : ASSET_POLICY_TEXT,
     };
   }
   async offer(actorId: string, dto: OfferAssetCreditDto) {
+    const costVersion = validateCreditCost(dto.principalMinor, {
+      cashPriceMinor: dto.cashPriceMinor, creditFeeMinor: dto.creditFeeMinor,
+      installmentCount: dto.installmentCount, installmentPeriod: dto.installmentPeriod,
+    });
+    if (!Number.isInteger(dto.repaymentBps) || dto.repaymentBps < 1 || dto.repaymentBps > 9500)
+      throw new BadRequestException('Indiquez un pourcentage de remboursement entre 0,01 % et 95 %.');
     if (
       dto.label.trim().length < 3 ||
       dto.terms.trim().length < 50 ||
@@ -126,7 +160,7 @@ export class AssetCreditService {
           JSON.stringify(prior.requestPayload) !==
           JSON.stringify(JSON.parse(payload))
         ) {
-          const same = Object.keys(dto).every(
+          const same = Object.keys(dto).length === Object.keys(prior.requestPayload).length && Object.keys(dto).every(
             (k) => prior.requestPayload[k] === dto[k],
           );
           if (!same)
@@ -149,8 +183,9 @@ export class AssetCreditService {
       if (!driver)
         throw new BadRequestException('Conducteur actif introuvable.');
       const [credit] = await m.query(
-        `INSERT INTO asset_credits ("driverId","assetKind",label,"principalMinor",terms,"validationReference","createdBy","mutationId","requestPayload")
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
+        `INSERT INTO asset_credits ("driverId","assetKind",label,"principalMinor",terms,"validationReference","createdBy","mutationId","requestPayload","repaymentBps","policyVersion",
+          "cashPriceMinor","creditFeeMinor","installmentCount","installmentPeriod","costDisclosureVersion")
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id`,
         [
           dto.driverId,
           dto.assetKind,
@@ -161,6 +196,10 @@ export class AssetCreditService {
           actorId,
           dto.mutationId,
           payload,
+          dto.repaymentBps,
+          ASSET_TERMS_VERSION,
+          dto.cashPriceMinor ?? null, dto.creditFeeMinor ?? null,
+          dto.installmentCount ?? null, dto.installmentPeriod ?? null, costVersion,
         ],
       );
       await m.query(
@@ -174,17 +213,27 @@ export class AssetCreditService {
       return credit;
     });
   }
-  async decide(id: string, driverId: string, accept: boolean) {
+  async decide(id: string, driverId: string, accept: boolean, consent?: AssetConsentDto) {
     return this.db.transaction(async (m) => {
+      await m.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [`asset-driver:${driverId}`]);
       const [credit] = await m.query(
         'SELECT * FROM asset_credits WHERE id=$1 AND "driverId"=$2 FOR UPDATE',
         [id, driverId],
       );
       if (!credit) throw new NotFoundException('Crédit introuvable.');
+      if (accept && credit.costDisclosureVersion && consent?.costDisclosureVersion !== credit.costDisclosureVersion)
+        throw new ConflictException('Mettez à jour l’application pour consulter et accepter le prix, les frais et les échéances de cette offre.');
+      if (accept && ((consent && consent.policyVersion !== credit.policyVersion)
+        || (credit.policyVersion === 'asset-credit-v2' && (!consent || consent.consent !== true))))
+        throw new ConflictException('Actualisez le contrat et confirmez les conditions affichées.');
       if (credit.status === (accept ? 'accepted' : 'declined')) return { id };
       if (credit.status !== 'offered')
         throw new ConflictException('Ce contrat a déjà changé.');
       if (accept) {
+        const total = await this.repaymentTotal(m, driverId, id);
+        if (total > 9500) throw new ConflictException('Le total des remboursements et de la commission dépasse 100 % du revenu.');
+        if (credit.policyVersion === 'asset-credit-v2' && consent?.expectedTotalRepaymentBps !== total)
+          throw new ConflictException('Vos crédits ont changé. Actualisez pour vérifier le nouveau total avant de confirmer.');
         const [identity] = await m.query(
           'SELECT status FROM kyc_documents WHERE "userId"=$1 ORDER BY "createdAt" DESC,id DESC LIMIT 1',
           [driverId],
@@ -212,6 +261,9 @@ export class AssetCreditService {
     )
       throw new BadRequestException('Les références de remise sont requises.');
     return this.db.transaction(async (m) => {
+      const [owner] = await m.query('SELECT "driverId" FROM asset_credits WHERE id=$1', [id]);
+      if (!owner) throw new NotFoundException('Crédit introuvable.');
+      await m.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [`asset-driver:${owner.driverId}`]);
       const [credit] = await m.query(
         'SELECT * FROM asset_credits WHERE id=$1 FOR UPDATE',
         [id],
@@ -227,6 +279,8 @@ export class AssetCreditService {
         throw new ConflictException(
           'Le conducteur doit accepter le contrat avant la remise.',
         );
+      if (await this.repaymentTotal(m, credit.driverId) > 9500)
+        throw new ConflictException('Le cumul des crédits doit être régularisé avant la remise.');
       await m.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [
         `asset-serial:${credit.assetKind}:${dto.assetReference.trim().toUpperCase()}`,
       ]);

@@ -4,6 +4,7 @@ import { BadRequestException } from '@nestjs/common';
 export enum DriverCategory {
   PRIVATE = 'private',
   TRANSPORT = 'transport',
+  INTERCITY = 'intercity',
 }
 
 export function resolveDriverCategory(value: unknown, hasDriverIntent: boolean): DriverCategory | null {

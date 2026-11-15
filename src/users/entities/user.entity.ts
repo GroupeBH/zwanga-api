@@ -42,7 +42,7 @@ export enum UserStatus {
 }
 
 @Entity('users')
-@Check('CHK_users_driver_category', `"driverCategory" IS NULL OR "driverCategory" IN ('private', 'transport')`)
+@Check('CHK_users_driver_category', `"driverCategory" IS NULL OR "driverCategory" IN ('private', 'transport', 'intercity')`)
 @Index(['email'], { unique: true })
 @Index(['phone'], { unique: true })
 export class User {

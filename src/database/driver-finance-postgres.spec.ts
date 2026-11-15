@@ -113,9 +113,11 @@ const pgBin = process.env.DRIVER_FINANCE_TEST_POSTGRES_BIN;
     beforeEach(async () => {
       const [credit] = await db.query("SELECT to_regclass('driver_cash_credit_trips') AS present");
       const [asset] = await db.query("SELECT to_regclass('asset_credits') AS present");
+      const [rates] = await db.query("SELECT to_regclass('asset_credit_rate_sources') AS present");
       await db.query(
         'TRUNCATE notifications,wallet_ledger_entries,cash_commissions,driver_pro_trial_claims,welcome_bonus_grants,kyc_documents,subscriptions,bookings,trip_requests,trips,wallet_accounts,users' +
-          (credit.present ? ',driver_cash_credit_trips' : '') + (asset.present ? ',asset_credit_wallet_mutations,asset_credit_sources,asset_credit_entries,asset_credit_events,asset_credits,asset_credit_requests,driver_earnings' : ''),
+          (credit.present ? ',driver_cash_credit_trips' : '') + (asset.present ? ',asset_credit_wallet_mutations,asset_credit_sources,asset_credit_entries,asset_credit_events,asset_credits,asset_credit_requests,driver_earnings' : '')
+          + (rates.present ? ',asset_credit_rate_allocations,asset_credit_rate_sources' : ''),
       );
       await db.query('INSERT INTO users (id,phone) VALUES ($1,$2)', [
         driver,

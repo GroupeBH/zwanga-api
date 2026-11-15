@@ -1,6 +1,8 @@
 import { randomUUID } from 'crypto';
 import { DataSource } from 'typeorm';
 import { AssetCredits1780000124000 } from '../src/database/migrations/1780000124000-AssetCredits';
+import { ContractAssetCreditRates1780000129000 } from '../src/database/migrations/1780000129000-ContractAssetCreditRates';
+import { AssetCreditCostDisclosure1780000130000 } from '../src/database/migrations/1780000130000-AssetCreditCostDisclosure';
 import { AssetCreditService } from '../src/asset-credit/asset-credit.service';
 /** Runs after all existing cash migrations, inside the disposable finance fixture. */
 export function assetCashCompatibility(
@@ -17,6 +19,8 @@ export function assetCashCompatibility(
       await db.transaction((m) =>
         new AssetCredits1780000124000().up(m.queryRunner!),
       );
+      await db.transaction(m => new ContractAssetCreditRates1780000129000().up(m.queryRunner!));
+      await db.transaction(m => new AssetCreditCostDisclosure1780000130000().up(m.queryRunner!));
     });
     const active = async () => {
       const db = getDb(),
@@ -31,11 +35,12 @@ export function assetCashCompatibility(
         assetKind: 'phone',
         label: 'Test phone',
         principalMinor: 100000,
+        repaymentBps: 500,
         terms:
           'Test de cohabitation des commissions et crédits dans une base temporaire.',
         validationReference: 'test',
       });
-      await s.decide(id, driver, true);
+      await s.decide(id, driver, true, { consent: true, policyVersion: 'asset-credit-v2', expectedTotalRepaymentBps: 500 });
       await s.activate(id, driver, {
         deliveryReference: 'test',
         assetReference: 'test',

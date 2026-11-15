@@ -25,6 +25,9 @@ import { AssetCreditService } from './asset-credit.service';
 @SensitiveThrottle(30, 60000)
 export class AssetCreditController {
   constructor(private readonly credits: AssetCreditService) {}
+  @Get('products') products(@Request() req) {
+    return this.credits.products(req.user.userId);
+  }
   @Get('access') access(@Request() req) {
     return {
       canRead: [UserRole.ADMIN, UserRole.SUPER_ADMIN].includes(req.user.role),
@@ -37,7 +40,7 @@ export class AssetCreditController {
   @Post('requests')
   @SensitiveThrottle(5, 60000)
   request(@Request() req, @Body() dto: RequestAssetCreditDto) {
-    return this.credits.request(req.user.userId, dto.notes);
+    return this.credits.request(req.user.userId, dto.notes, dto.assetKind);
   }
   @Get('admin-requests') @Roles(UserRole.ADMIN) allRequests() {
     return this.credits.requests();
@@ -54,9 +57,9 @@ export class AssetCreditController {
   @Post('mine/:id/accept') accept(
     @Request() req,
     @Param('id', ParseUUIDPipe) id: string,
-    @Body() _dto: AssetConsentDto,
+    @Body() dto: AssetConsentDto,
   ) {
-    return this.credits.decide(id, req.user.userId, true);
+    return this.credits.decide(id, req.user.userId, true, dto);
   }
   @Post('mine/:id/decline') decline(
     @Request() req,

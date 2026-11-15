@@ -17,7 +17,7 @@ const scenarios = [
 ];
 
 describe.each(scenarios)('$dto.name driver category contract', ({ dto, body }) => {
-  it.each([undefined, null, DriverCategory.PRIVATE, DriverCategory.TRANSPORT])('accepts %s without making legacy clients mandatory', async driverCategory => {
+  it.each([undefined, null, DriverCategory.PRIVATE, DriverCategory.TRANSPORT, DriverCategory.INTERCITY])('accepts %s without making legacy clients mandatory', async driverCategory => {
     const result = await pipe.transform({ ...body, driverCategory }, { type: 'body', metatype: dto });
     expect(result.driverCategory).toBe(driverCategory);
   });
@@ -41,7 +41,7 @@ function profileFixture(extra: object = {}) {
 describe('driver category persistence and role isolation', () => {
   it('changes a legacy driver profile without changing its rights, status or vehicle', async () => {
     const f = profileFixture();
-    for (const driverCategory of [DriverCategory.PRIVATE, DriverCategory.TRANSPORT]) {
+    for (const driverCategory of [DriverCategory.PRIVATE, DriverCategory.TRANSPORT, DriverCategory.INTERCITY]) {
       const result = await f.service.updateProfile(f.user.id, { driverCategory });
       expect(result.driverCategory).toBe(driverCategory);
       expect(result.role).toBe(UserRole.DRIVER);
@@ -49,7 +49,7 @@ describe('driver category persistence and role isolation', () => {
       expect(result.status).toBe(UserStatus.ACTIVE);
     }
     await f.service.updateProfile(f.user.id, {});
-    expect(f.user.driverCategory).toBe(DriverCategory.TRANSPORT);
+    expect(f.user.driverCategory).toBe(DriverCategory.INTERCITY);
     expect(f.update.mock.calls.at(-1)![1]).not.toHaveProperty('driverCategory');
     for (const [, changes] of f.update.mock.calls) {
       for (const key of ['role', 'isDriver', 'driverActivatedAt', 'status']) expect(changes).not.toHaveProperty(key);
@@ -116,7 +116,7 @@ function registrationFixture() {
 }
 
 describe.each(['phone', 'google', 'apple'])('%s registration category', method => {
-  it.each([undefined, DriverCategory.PRIVATE, DriverCategory.TRANSPORT])('stores %s without activating driving rights', async driverCategory => {
+  it.each([undefined, DriverCategory.PRIVATE, DriverCategory.TRANSPORT, DriverCategory.INTERCITY])('stores %s without activating driving rights', async driverCategory => {
     const { service, repo } = registrationFixture();
     const options = { ...common, driverCategory };
     if (method === 'phone') await service.register({ ...options, pin: '1234' });
