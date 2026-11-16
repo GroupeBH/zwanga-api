@@ -269,3 +269,71 @@ Les nouvelles routes sont documentées dans Swagger. Leur branchement dans les
 pages du dépôt `zwanga-admin` est distinct : les anciennes réponses restent
 compatibles, mais le frontend doit appeler ces routes pour abandonner ses calculs
 sur échantillon. Les styles de l'admin ne sont pas modifiés.
+
+## Zones opérationnelles et géofencing (observation)
+
+Appliquer `OperationalZones1780000131000` et `ZoneRuntimeSettings1780000132000`
+via le processus habituel, puis activer la surveillance dans la page Zones
+avec un compte super admin. Aucune variable d'environnement ni redémarrage
+n'est nécessaire pour changer ce réglage. Désactivé par défaut, le worker lit
+uniquement l'état du module sans traiter de trajet. Les tests ne touchent
+ni AWS ni la base applicative. Les nouveaux index sur `trips` et `trip_requests`
+sont créés sous transaction avec délai limité : prévoir une fenêtre adaptée
+sur les grosses bases. Cette fonctionnalité ne bloque jamais les demandes.
+
+Routes (authentification obligatoire) :
+
+- `GET /admin/zones/status` : activation et présence du schéma.
+- `PUT /admin/zones/settings` : `{enabled,version}` (super admin). Réglage partagé
+  entre les instances, changement audité et conflit 409 si la version a changé.
+  Effet au prochain cycle (5 s environ), sans cache local. Les zones et leur
+  historique restent accessibles pendant la pause. Un traitement déjà commencé
+  termine avant la désactivation ; aucune nouvelle observation après sa validation.
+  L'ancienne variable `GEOFENCING_ENABLED` est ignorée et peut être supprimée.
+- `GET /admin/zones`, `/admin/zones/assignments`, `/admin/zones/events` :
+  `{items,total,page,limit}`, 20 par défaut, maximum 100.
+- `POST /admin/zones` : `name`, `description`, `active`, `priority`, `geometry`.
+- `PUT /admin/zones/:id` : mêmes champs et `version` lue, sinon conflit 409.
+- `GET /admin/zones/:id/audit` : auteur, version et date ; les snapshots complets
+  des contours sont conservés en base. Désactivation plutôt que suppression.
+
+Lecture administrateur, écriture super administrateur. GeoJSON `Polygon` ou
+`MultiPolygon` WGS84 `[longitude,latitude]`, au plus 5 000 points et 100 anneaux.
+Contours fermés, non vides et valides ; intersections incorrectes refusées.
+Zones polaires et traversée de l'antiméridien non prises en charge. Dans
+`zwanga-admin`, `/zones` utilise ces données réelles et non des communes fictives
+ou un échantillon de 500 trajets. Import GeoJSON (Feature unique acceptée) et
+aperçu des contours sans fond cartographique. Importer des limites vérifiées.
+
+Observateur asynchrone toutes les 5 secondes, verrou PostgreSQL entre instances,
+lots de 200 trajets et 200 demandes maximum, rotation par dernier contrôle.
+Objets actifs ou modifiés dans les dernières 24 h seulement : aucun import
+rétroactif de tout l'historique. Consulter `checkedAt` pour la fraîcheur.
+Départ et arrivée attribués séparément, frontières incluses. Chevauchements :
+priorité décroissante, surface croissante puis UUID. Hors couverture : zone
+nulle et trajet toujours autorisé. Les attributions des objets encore suivis
+sont recalculées après modification des zones ; les archives restent inchangées.
+
+Les alertes concernent la sortie de **toutes les zones actives**, pas le passage
+entre deux zones couvertes. Pour un trajet en cours, elles exigent trois GPS
+conducteur distincts sur au moins 20 s, avec précision <= 35 m, âge <= 45 s et
+intervalle <= 30 s. Tolérance de frontière : 50 m + précision GPS. Le retour
+demande la même confirmation. Aucun GPS antérieur à une modification de zone
+n'est reclassé sous les nouvelles limites. État persistant et événements
+dédupliqués après redémarrage. Sans GPS fiable, sans zone active ou en panne
+Redis, aucune sortie n'est déduite : absence d'alerte ne signifie pas couverture.
+
+Alertes affichées dans l'admin, actualisées toutes les 15 s ; aucun push
+automatique. Dispatch, paiement, embarquement et dépose automatiques inchangés.
+Le module ne remplace pas la localisation mobile en veille. La capacité pour
+1 000 trajets reste à mesurer en staging (retard d'observation, CPU et SQL).
+
+Tests PostGIS sur un cluster temporaire loopback, sans chargement du `.env` :
+
+```powershell
+$env:ZONES_TEST_POSTGRES_BIN='C:\Program Files\PostgreSQL\18\bin'
+node node_modules/jest/bin/jest.js --runInBand src/zones
+```
+
+Sans cette variable, les tests PostGIS sont explicitement ignorés, contrairement
+aux tests unitaires. Le cluster temporaire est supprimé après la suite.

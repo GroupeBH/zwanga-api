@@ -167,7 +167,7 @@ describe('Mobishastra CONNECT integration (loopback only, no real SMS)', () => {
     });
     expect(bodies[0]).toHaveProperty(
       'msgtext',
-      'Zwanga : votre code de verification est 12345. Valable 15 minutes. Ne le partagez avec personne.',
+      'Votre code de verification est 12345. Valable 15 minutes. Ne le partagez avec personne.',
     );
     expect(proxyHeaders.join('')).not.toMatch(
       /private-password|12345|243900000000/,

@@ -211,6 +211,7 @@ resource "aws_ecs_service" "backend" {
   deployment_minimum_healthy_percent = var.ecs_deployment_minimum_healthy_percent
   deployment_maximum_percent         = var.ecs_deployment_maximum_percent
   wait_for_steady_state              = var.ecs_wait_for_steady_state
+  availability_zone_rebalancing      = var.ecs_enable_availability_zone_rebalancing ? "ENABLED" : null
 
   deployment_circuit_breaker {
     enable   = true
@@ -220,7 +221,27 @@ resource "aws_ecs_service" "backend" {
   # Terraform publishes configuration revisions; CI pins their image and deploys
   # them after migrations. Applying Terraform must not roll back the deployed SHA.
   lifecycle {
-    ignore_changes = [task_definition]
+    # Counts belong to Service Auto Scaling (or an explicit operator update when
+    # disabled). Never reduce a scaled-out service during an unrelated apply.
+    ignore_changes = [task_definition, desired_count]
+
+    precondition {
+      condition = !var.ecs_enable_autoscaling || (
+        var.ecs_min_capacity <= var.ecs_max_capacity &&
+        var.ecs_desired_count >= var.ecs_min_capacity &&
+        var.ecs_desired_count <= var.ecs_max_capacity
+      )
+      error_message = "Autoscaling requires min <= initial desired_count <= max."
+    }
+
+    precondition {
+      condition = !var.ecs_enable_availability_zone_rebalancing || (
+        length(distinct(aws_subnet.public[*].availability_zone)) >= 2 &&
+        var.ecs_deployment_maximum_percent > 100 &&
+        (var.ecs_enable_autoscaling ? var.ecs_min_capacity : var.ecs_desired_count) >= 2
+      )
+      error_message = "AZ rebalancing requires two distinct public AZs, at least two tasks and deployment_maximum_percent > 100."
+    }
   }
 
   network_configuration {
@@ -253,6 +274,26 @@ resource "aws_appautoscaling_target" "ecs" {
   resource_id        = "service/${aws_ecs_cluster.main.name}/${aws_ecs_service.backend.name}"
   scalable_dimension = "ecs:service:DesiredCount"
   service_namespace  = "ecs"
+}
+
+resource "aws_appautoscaling_policy" "ecs_cpu" {
+  count = var.ecs_enable_autoscaling ? 1 : 0
+
+  name               = "${local.name_prefix}-ecs-cpu"
+  policy_type        = "TargetTrackingScaling"
+  resource_id        = aws_appautoscaling_target.ecs[0].resource_id
+  scalable_dimension = aws_appautoscaling_target.ecs[0].scalable_dimension
+  service_namespace  = aws_appautoscaling_target.ecs[0].service_namespace
+
+  target_tracking_scaling_policy_configuration {
+    target_value       = var.ecs_cpu_target_utilization
+    scale_in_cooldown  = var.ecs_scale_in_cooldown_seconds
+    scale_out_cooldown = var.ecs_scale_out_cooldown_seconds
+
+    predefined_metric_specification {
+      predefined_metric_type = "ECSServiceAverageCPUUtilization"
+    }
+  }
 }
 
 resource "aws_appautoscaling_policy" "ecs_memory" {

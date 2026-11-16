@@ -12,6 +12,29 @@ import {
 } from './boarding-detection.config';
 
 describe('boarding detection', () => {
+  it.each([[0, 0, true], [4, 0, true], [4, 100, false]] as const)(
+    'checks 50 km/h histories with phase=%ss, separation=%sm, confirmation=%s', (phase, separation, expected) => {
+    const base = Date.parse('2026-11-15T12:40:00Z');
+    const driver: BoardingLocationSample[] = [], passenger: BoardingLocationSample[] = [];
+    let candidate: BoardingCandidateSnapshot | null = null;
+    let confirmed = false;
+    for (let second = 0; second < 180; second += 4) {
+      const sample: BoardingLocationSample = {
+        latitude: -4.3, longitude: 15.3 + Math.max(0, second - 16) * 13.89 / (111195 * Math.cos(-4.3 * Math.PI / 180)),
+        recordedAt: new Date(base + second * 1000).toISOString(), accuracyMeters: 5,
+        speedMetersPerSecond: second < 16 ? 0 : 13.89, headingDegrees: 90,
+      };
+      if (second % 8 === 0) driver.push(sample);
+      if (second % 8 === phase) passenger.push({ ...sample, latitude: sample.latitude + separation / 111195 });
+      const result = evaluateBoardingDetection({ now: new Date(base + second * 1000),
+        stateCompatible: true, pickupLocation: { latitude: -4.3, longitude: 15.3 },
+        driverLocations: driver.slice(-10), passengerLocations: passenger.slice(-10), candidate,
+        allowCandidateAwayFromPickup: true, config: DEFAULT_BOARDING_DETECTION_CONFIG });
+      candidate = result.candidate;
+      if (result.decision === 'CONFIRM') { confirmed = true; break; }
+    }
+    expect(confirmed).toBe(expected);
+  });
   const now = new Date('2026-08-06T12:00:00.000Z');
   const origin = { latitude: -4.3, longitude: 15.3 };
 
@@ -454,14 +477,14 @@ describe('boarding detection', () => {
     expectRejected(evaluate({ driverLocations }), BoardingRejectionReason.GPS_ACCURACY_TOO_LOW);
   });
 
-  it('rejects strongly desynchronized positions', () => {
+  it('rejects future positions instead of treating them as fresh', () => {
     const passengerLocations = makePath({
       lateralMeters: 2,
       startDelaySeconds: 6,
     });
     expectRejected(
       evaluate({ passengerLocations }),
-      BoardingRejectionReason.TIMESTAMPS_TOO_FAR_APART,
+      BoardingRejectionReason.LOCATION_STALE,
     );
   });
 

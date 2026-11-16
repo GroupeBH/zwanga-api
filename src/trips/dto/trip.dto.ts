@@ -1,4 +1,6 @@
+import { LocationHistorySampleDto } from '../../common/dto/location-history-sample.dto';
 import {
+  ValidateNested,
   IsString,
   IsNotEmpty,
   IsNumber,
@@ -431,6 +433,10 @@ export class DriverEmergencyContactsDto {
 }
 
 export class UpdateDriverLocationDto {
+  @ApiProperty({ required: false, type: [LocationHistorySampleDto], maxItems: 10 })
+  @IsOptional() @IsArray() @ArrayMaxSize(10) @ValidateNested({ each: true })
+  @Type(() => LocationHistorySampleDto)
+  samples?: LocationHistorySampleDto[];
   @ApiProperty({
     description: 'Coordonnées actuelles du conducteur [longitude, latitude]',
     example: [15.3136, -4.3276],

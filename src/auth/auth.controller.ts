@@ -221,7 +221,7 @@ export class AuthController {
   })
   @ApiResponse({
     status: 200,
-    description: 'Generic response whether or not the account exists',
+    description: 'Generic response whether or not the account exists: message and expiresInSeconds (public OTP validity policy in seconds).',
   })
   async requestPinResetOtp(@Body() dto: PinResetRequestDto) {
     return this.authService.requestPinResetOtp(dto);

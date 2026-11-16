@@ -19,6 +19,11 @@ function estimate(options = {}, selected = profile) {
     throw new Error('Multi-AZ RDS / x86 must be priced separately; no silent extrapolation');
   }
   const tasks = finite('tasks', selected.ecs_desired_count, 1);
+  const minTasks = selected.ecs_enable_autoscaling ? finite('minTasks', selected.ecs_min_capacity, 1) : tasks;
+  const maxTasks = selected.ecs_enable_autoscaling ? finite('maxTasks', selected.ecs_max_capacity, 1) : tasks;
+  if (![tasks, minTasks, maxTasks].every(Number.isInteger) || minTasks > tasks || tasks > maxTasks) {
+    throw new Error('Task counts must be integers with min <= desired <= max');
+  }
   const redisNodes = finite('redisNodes', selected.redis_num_cache_clusters, 1);
   const cpu = finite('cpu', Number(selected.ecs_task_cpu), 1) / 1024;
   const memory = finite('memory', Number(selected.ecs_task_memory), 1) / 1024;
@@ -40,6 +45,10 @@ function estimate(options = {}, selected = profile) {
     otherServicesAllowance: overhead,
   };
   const total = Object.values(lines).reduce((sum, value) => sum + value, 0);
+  // Scenario replaces the extra-task provision with a full month at the ceiling,
+  // plus 20 deployment/migration task-hours. It is not a maximum AWS bill.
+  const maxScenario = total - lines.temporaryTasks +
+    ((maxTasks - tasks) * hours + 20) * (taskRate + h.publicIpv4);
   return {
     region: prices.region, priceDate: prices.checkedAt,
     assumptions: { hours, averageLcu: lcu, extraTaskHours, otherServicesAllowance: overhead,
@@ -49,6 +58,13 @@ function estimate(options = {}, selected = profile) {
     headroomUsd: round(selected.monthly_cost_budget_usd - total),
     withinIllustrativeBudget: total <= selected.monthly_cost_budget_usd,
     capacityValidated: false,
+    scaling: {
+      enabled: Boolean(selected.ecs_enable_autoscaling), minTasks, maxTasks,
+      extraTaskHourlyUsd: Number((taskRate + h.publicIpv4).toFixed(6)),
+      fullMonthAtMaxWith20DeploymentHoursUsd: round(maxScenario),
+      fullMonthAtMaxWithinBudget: maxScenario <= selected.monthly_cost_budget_usd,
+      maxRollingTasks: Math.floor(maxTasks * selected.ecs_deployment_maximum_percent / 100),
+    },
     warning: 'Not a quote or a spending cap. Allowance must cover other AWS resources, logs, traces, storage, transfer and CPU credits; tax is extra. No throughput guarantee.',
   };
 }

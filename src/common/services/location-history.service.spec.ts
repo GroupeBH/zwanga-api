@@ -6,6 +6,21 @@ import {
 } from '../../bookings/boarding-detection';
 
 describe('LocationHistoryService', () => {
+  it('merges a bounded native batch without making old or future fixes fresh', async () => {
+    const { service } = createService();
+    const now = new Date();
+    const samples = Array.from({ length: 10 }, (_, i) => ({ latitude: -4.3,
+      longitude: 15.3 + i * 0.0001, accuracy: 5,
+      recordedAt: new Date(now.getTime() - (10-i)*8000).toISOString() }));
+    await service.recordDriverLocation('batch-trip', -4.3, 15.301, now, { accuracyMeters: 5, samples });
+    const history = await service.getDriverLocationHistory('batch-trip');
+    expect(history?.samples).toHaveLength(10);
+    expect(history?.current?.recordedAt).toBe(now.toISOString());
+    await service.recordDriverLocation('batch-trip', -4.3, 15.301, now, { accuracyMeters: 5,
+      samples: [ { ...samples[0], recordedAt: new Date(now.getTime()+60000).toISOString() },
+        { ...samples[0], recordedAt: new Date(now.getTime()-100000).toISOString() } ] });
+    expect((await service.getDriverLocationHistory('batch-trip'))?.samples).toEqual(history?.samples);
+  });
   const createService = () => {
     const store = new Map<string, unknown>();
     const redisService = {

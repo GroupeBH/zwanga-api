@@ -5,6 +5,15 @@ const express = require('express');
 const multer = require('multer');
 const grpc = require('@grpc/grpc-js');
 
+test('all HTTP instrumentation copies include the incoming query redaction fix', () => {
+  const semver = require('semver');
+  const copies = Object.entries(require('../package-lock.json').packages)
+    .filter(([name]) => name.endsWith('/@opentelemetry/instrumentation-http'));
+  assert.ok(copies.length > 0);
+  for (const [name, pkg] of copies)
+    assert.ok(semver.gte(pkg.version, '0.222.0'), `${name}: ${pkg.version}`);
+});
+
 test('patched glob preserves TypeORM file discovery and cancellation', async () => {
   const { createRequire } = require('node:module');
   const path = require('node:path');

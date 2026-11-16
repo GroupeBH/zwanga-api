@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { ZonesModule } from './zones/zones.module';
 import { MobileOperationsModule } from './mobile-operations/mobile-operations.module';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConfigModule, ConfigService } from '@nestjs/config';
@@ -125,6 +126,7 @@ import { AssetCreditModule } from './asset-credit/asset-credit.module';
     ProServicesModule,
     AppUpdatesModule,
     MobileOperationsModule,
+    ZonesModule,
     DriverFinanceModule,
     PartnersModule,
   ],

@@ -52,7 +52,7 @@ describe('Mobishastra single-message SMS transport (no real SMS)', () => {
       senderid: 'ZWANGA',
       mobileno: phone,
       msgtext:
-        'Zwanga : votre code de verification est 12345. Valable 15 minutes. Ne le partagez avec personne.',
+        'Votre code de verification est 12345. Valable 15 minutes. Ne le partagez avec personne.',
       priority: 'High',
       CountryCode: 'ALL',
       ShowError: 'C',

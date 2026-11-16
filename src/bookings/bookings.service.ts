@@ -8,6 +8,7 @@ import { lockAvailableAccounts } from '../users/account-availability';
 import { canApplyBookingPayment } from './booking-payment-transition';
 import { finishEmptyPrivateTrip } from './private-trip-cancellation';
 import { WALLET_BALANCE_MISMATCH_SQL } from '../wallet/wallet-integrity';
+import { hasRecentDestinationPassage } from './destination-passage';
 import {
   Injectable,
   NotFoundException,
@@ -4422,8 +4423,11 @@ export class BookingsService implements OnModuleInit {
       return [];
     }
 
+    const observedPassage = driverDistanceToDestination > this.AUTO_TRIP_DESTINATION_REACHED_THRESHOLD_METERS &&
+      hasRecentDestinationPassage(await this.locationHistoryService.getDriverLocationHistory(trip.id),
+        trip.arrivalPoint, now, trip.startedAt);
     if (
-      driverDistanceToDestination >
+      !observedPassage && driverDistanceToDestination >
       this.AUTO_TRIP_DESTINATION_NOTICE_THRESHOLD_METERS
     ) {
       const reachedAt = trip.destinationReachedAt
@@ -4496,7 +4500,7 @@ export class BookingsService implements OnModuleInit {
       !trip.destinationApproachNotifiedAt &&
       driverDistanceToDestination <=
         this.AUTO_TRIP_DESTINATION_NOTICE_THRESHOLD_METERS;
-    const hasReachedDestination =
+    const hasReachedDestination = observedPassage ||
       driverDistanceToDestination <=
       this.AUTO_TRIP_DESTINATION_REACHED_THRESHOLD_METERS;
 
@@ -5254,15 +5258,19 @@ export class BookingsService implements OnModuleInit {
       driverLocation,
       dropoffPoint,
     );
+    const passage = hasRecentDestinationPassage(
+      await this.locationHistoryService.getDriverLocationHistory(booking.tripId),
+      dropoffPoint, now, booking.pickedUpAt ?? booking.pickedUpConfirmedAt ?? booking.trip.startedAt,
+    );
     if (
-      driverDistanceToDestination !== null &&
+      passage || (driverDistanceToDestination !== null &&
       driverDistanceToDestination <=
-        this.AUTO_DROPOFF_DIRECT_CONFIRM_THRESHOLD_METERS
+        this.AUTO_DROPOFF_DIRECT_CONFIRM_THRESHOLD_METERS)
     ) {
       return this.completeAutomaticDropoff(
         booking,
         now,
-        'automatic_driver_destination',
+        passage ? 'automatic_driver_destination_passage' : 'automatic_driver_destination',
       );
     }
 
@@ -6464,6 +6472,7 @@ export class BookingsService implements OnModuleInit {
         accuracyMeters: updateLocationDto.accuracy,
         speedMetersPerSecond: updateLocationDto.speed,
         headingDegrees: updateLocationDto.heading,
+        samples: updateLocationDto.samples?.filter(s => normalizeCoordinateForTrip(s.latitude, s.longitude, booking.trip)),
       },
     );
     await this.touchTripInteraction(booking.tripId);

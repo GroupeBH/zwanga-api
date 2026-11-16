@@ -2,7 +2,33 @@
 
 Identifiant : `FIN-BOOKING-001`
 
+## Complément du 16 novembre 2026 : GPS en arrière-plan
+
+- Récupération : les observations conducteur/passager décalées sont comparées au même instant, par interpolation entre deux observations réelles distantes de 16 secondes au maximum. Pas d'extrapolation du téléphone silencieux, pas d'élargissement du rayon, contrôle des sauts GPS conservé sur les données brutes. Les derniers GPS doivent toujours dater de moins de 10 secondes ; un réseau durablement plus lent peut encore empêcher la confirmation automatique.
+- Les endpoints de position acceptent un champ optionnel `samples` (maximum dix éléments : `latitude`, `longitude`, `accuracy`, `recordedAt`). Les anciens clients restent compatibles. Les lots natifs récents sont fusionnés dans la fenêtre Redis existante, avec contrôle de concurrence, limites géographiques et horodatages d'origine ; les points futurs, trop anciens (90 secondes) ou imprécis sont exclus. Aucun nouveau stockage permanent de localisation.
+- Dépose/arrivée : un segment observé de 3 à 250 mètres, parcouru en 30 secondes au maximum, précis à 35 mètres ou mieux aux deux extrémités, peut prouver un passage à moins de 25 mètres de la destination. Vitesse maximale 55 m/s ; preuve datant de moins de 90 secondes, postérieure à la prise en charge pour la dépose. Un simple éloignement de plusieurs kilomètres ne constitue pas une preuve.
+- Mobile : l'intention de clôture est conservée avant l'appel HTTP. En cas d'échec, elle peut être retentée avec un nouveau GPS frais pendant 90 secondes ; backoff existant de 45 secondes conservé. Le backend garde la décision finale. Le dernier point durable est daté, et les positions immobiles ne provoquent pas d'écritures répétées.
+- Les contrôles de réservation, les transactions de paiement et la gestion du non-embarquement restent en place. Aucune migration ni modification AWS pour ces correctifs. Déployer d'abord le backend puis distribuer la mise à jour mobile pour les nouveaux lots GPS.
+- Validation locale : six suites backend ciblées, 131 tests réussis ; 45 tests mobiles ciblés réussis ; TypeScript des deux projets contrôlé. Les tests utilisent des données synthétiques et des dépendances simulées, pas les appareils en veille ni les prestataires réels. Une recette sur Android/iPhone avec les deux écrans verrouillés reste nécessaire ; aucune clôture ne doit être inventée si le système ne fournit plus de GPS.
+
 Statut : implémenté dans le code, migration non encore appliquée en production.
+
+### Simulation locale continue du 16 novembre 2026
+
+Commande reproductible : `npm test -- --runInBand src/bookings/bookings.service.spec.ts -t "simulates a continuous local ride"`.
+
+Les vrais `BookingsService` et `LocationHistoryService` traitent un scénario GPS synthétique de quatre minutes en temps accéléré. Le conducteur approche le point de récupération pendant 16 secondes ; le déplacement commun commence à la seconde 24, à 36 km/h, vers une destination distante de 1,8 km. Aucun point conducteur ne tombe dans le rayon direct d'arrivée : les deux derniers points encadrent la destination à 40 mètres avant/après. Aucune confirmation manuelle de récupération/dépose n'est appelée.
+
+| Scénario | Récupération (depuis le début du scénario) | Dépose / clôture | Résultat |
+| --- | --- | --- | --- |
+| GPS synchronisés toutes les 8 secondes | 64 s | 208 s | Réservation et trajet terminés |
+| GPS décalés de 4 secondes | 100 s | 208 s | Réservation et trajet terminés |
+| Lots de deux observations toutes les 16 secondes | 100 s | 208 s | Réservation et trajet terminés |
+| GPS passager perdu avant embarquement | Jamais | Pas de dépose passager | Réservation `boarding_uncertain`, trajet conducteur clôturé à destination |
+
+Les trois parcours positifs produisent une seule récupération, une seule dépose et une seule clôture, même avec les positions supplémentaires après l'arrivée. Aucun appel d'initiation de paiement ni débit de jetons ; le paiement cash n'est pas déclaré reçu par cette simulation. Les 40 à 76 secondes nécessaires après le début du déplacement commun sont un délai de constitution de preuve, pas une garantie de latence en production.
+
+Limites : dépôts PostgreSQL, Redis et effets externes remplacés par des doublures en mémoire ; aucun appel HTTP au serveur local, aucune connexion AWS, aucun SMS/push réel. Ce test valide l'enchaînement métier et les historiques, pas la persistance réelle, les permissions natives ni la veille Android/iOS. Les onze tests mobiles de `backgroundLocationReliability.test.js` ont également été rejoués avec succès, avec les dépendances natives/réseau simulées.
 
 Dernière mise à jour : 14 octobre 2026.
 

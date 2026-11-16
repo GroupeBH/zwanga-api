@@ -3828,7 +3828,8 @@ export class TripsService {
       currentCoordinate.latitude,
       currentCoordinate.longitude,
       trip.lastLocationUpdateAt,
-      metadata,
+      { ...metadata, samples: metadata.samples?.filter(s =>
+        isCoordinateAllowedForTrip({latitude: s.latitude, longitude: s.longitude}, trip)) },
     );
 
     const responseCoordinates: [number, number] = [

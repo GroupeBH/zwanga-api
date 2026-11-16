@@ -3,6 +3,8 @@ import { EquipmentAssetCredits1780000127000 } from './1780000127000-EquipmentAss
 import { IntercityDriverCategory1780000128000 } from './1780000128000-IntercityDriverCategory';
 import { ContractAssetCreditRates1780000129000 } from './1780000129000-ContractAssetCreditRates';
 import { AssetCreditCostDisclosure1780000130000 } from './1780000130000-AssetCreditCostDisclosure';
+import { OperationalZones1780000131000 } from './1780000131000-OperationalZones';
+import { ZoneRuntimeSettings1780000132000 } from './1780000132000-ZoneRuntimeSettings';
 import { FleetRegistry1780000125000 } from './1780000125000-FleetRegistry';
 import { FleetExternalPayments1780000126000 } from './1780000126000-FleetExternalPayments';
 import { RequestPriceNegotiation1780000122000 } from './1780000122000-RequestPriceNegotiation';
@@ -267,4 +269,6 @@ export const databaseMigrations = [
   IntercityDriverCategory1780000128000,
   ContractAssetCreditRates1780000129000,
   AssetCreditCostDisclosure1780000130000,
+  OperationalZones1780000131000,
+  ZoneRuntimeSettings1780000132000,
 ];

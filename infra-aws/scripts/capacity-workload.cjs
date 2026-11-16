@@ -40,11 +40,14 @@ function workload(options = {}) {
   const activeConnectionLcu = sockets / 3000;
   const peakLcuLowerBound = Math.max(activeConnectionLcu, albGbPerHour);
   const averageLcu = (Math.max(baseLcu, peakLcuLowerBound) * peakHoursPerDay + baseLcu * (24 - peakHoursPerDay)) / 24;
-  const rollingTasks = Math.floor(profile.ecs_desired_count * profile.ecs_deployment_maximum_percent / 100);
+  const maxTasks = profile.ecs_enable_autoscaling ? profile.ecs_max_capacity : profile.ecs_desired_count;
+  const rollingTasks = Math.floor(maxTasks * profile.ecs_deployment_maximum_percent / 100);
+  // Scenario: capacity reaches its ceiling at each peak; cooldowns can extend it.
+  const scaledTaskHours = (maxTasks - profile.ecs_desired_count) * peakHoursPerDay * 31;
   return {
     assumptions: { activeTrips, availableDrivers, pendingRequests, passengersPerTrip,
       gpsIntervalSeconds, presenceIntervalSeconds, payloadBytes, burstSeconds, peakHoursPerDay,
-      poolPerTask, migrationPool, operationalConnections },
+      poolPerTask, migrationPool, operationalConnections, scaledTaskHours },
     sockets, gpsPerSecond, presencePerSecond, outboundPerSecond,
     requestArrivalsPerSecond: pendingRequests / burstSeconds,
     reconnectsPerSecondDuringIncident: sockets / reconnectSeconds,
@@ -53,9 +56,10 @@ function workload(options = {}) {
       peakLcuLowerBound, monthlyAverageLcuAssumption: averageLcu },
     peakOnlyMonthlyOutboundGb: outboundGbPerHour * peakHoursPerDay * 31,
     connections: { steady: profile.ecs_desired_count * poolPerTask,
+      scaled: maxTasks * poolPerTask,
       rolling: rollingTasks * poolPerTask,
       requiredWithMigrationAndOperations: rollingTasks * poolPerTask + migrationPool + operationalConnections },
-    illustrativeCost: estimate({ lcu: averageLcu }),
+    illustrativeCost: estimate({ lcu: averageLcu, extraTaskHours: 20 + scaledTaskHours }),
     capacityValidated: false,
     warning: 'Assumptions only. GPS traffic excludes other API traffic, retries, media and heartbeat overhead. Outbound transfer is not separately priced: verify the cost allowance. SQL connection budget is not a database capacity measurement. No AWS deployment.',
   };

@@ -1,9 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
+import type { LocationHistorySampleDto } from '../dto/location-history-sample.dto';
 import { RedisService } from './redis.service';
 import { normalizeLatLngCoordinate } from '../utils/tracking-coordinates';
 import type { BoardingCandidateSnapshot } from '../../bookings/boarding-detection';
 
 export interface LocationObservationMetadata {
+  samples?: LocationHistorySampleDto[];
   accuracyMeters?: number | null;
   speedMetersPerSecond?: number | null;
   headingDegrees?: number | null;
@@ -111,6 +113,28 @@ export class LocationHistoryService {
           return;
         }
 
+        if (metadata.samples?.length) {
+          const merged = new Map<string, TrackedLocationPoint>();
+          const now = Date.now();
+          for (const sample of metadata.samples.slice(-10)) {
+            const at = Date.parse(sample.recordedAt);
+            if (!Number.isFinite(at) || at > now || now - at > 90_000 ||
+              at > currentTimestamp || !Number.isFinite(sample.accuracy) ||
+              sample.accuracy < 0 || sample.accuracy > 70) continue;
+            const point = this.normalizePoint(sample.latitude, sample.longitude, new Date(at),
+              { accuracyMeters: sample.accuracy });
+            if (point) merged.set(point.recordedAt, point);
+          }
+          // Already accepted samples win conflicting duplicates.
+          for (const point of existingSamples) merged.set(point.recordedAt, point);
+          merged.set(current.recordedAt, current);
+          const samples = [...merged.values()].sort((a,b) =>
+            Date.parse(a.recordedAt) - Date.parse(b.recordedAt)).slice(-this.LOCATION_WINDOW_SIZE);
+          if (await this.redisService.compareAndSet(key, existing, {
+            previous: samples.at(-2) ?? null, current: samples.at(-1)!, samples,
+          }, this.LOCATION_HISTORY_TTL_SECONDS)) return;
+          continue;
+        }
         if (this.isDuplicateCurrentLocation(existing?.current, current)) {
           const samples = [...existingSamples.slice(0, -1), current].slice(
             -this.LOCATION_WINDOW_SIZE,

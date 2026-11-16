@@ -2,6 +2,69 @@
 
 État initial au 10 novembre 2026 : **préparé localement, non appliqué à AWS**.
 
+## Point de situation du 16 novembre 2026
+
+La lecture AWS effectuée pendant l'audit de préparation confirme encore : une
+tâche API `:42` de 0,5 vCPU / 1 Gio, RDS `db.t4g.micro` Single-AZ, un seul
+Valkey `cache.t4g.micro` sans basculement automatique, et le proxy Mobishastra
+EC2 `t4g.micro` démarré. Ce relevé est daté ; ce document ne remplace pas une
+nouvelle lecture AWS avant intervention.
+
+Sur les 24 heures consultées, PostgreSQL disposait au minimum de 110 Mio de
+mémoire disponible et l'alarme `rds-low-memory` était active. Le CPU restait
+inférieur à 9 % et les connexions au plus à 10 : ce n'est pas la preuve d'une
+panne, mais la marge mémoire mérite un traitement avant montée en charge.
+Les métriques Valkey consultées sur sept jours ne montraient aucune éviction.
+
+**Cible révisée le 16 novembre :** utiliser explicitement
+`profiles/capacity-175.tfvars.json` : deux tâches API minimum, trois maximum
+avec autoscaling CPU/mémoire/HTTP et rééquilibrage AZ, RDS small, deux nœuds
+Valkey avec réplication et bascule automatique. Les valeurs par défaut et la
+configuration de production ne sont pas modifiées implicitement. Le profil
+reste non appliqué et sa capacité mixte de 1 000 trajets + 1 000 demandes
+reste non certifiée. Un réplica Valkey ne double pas la mémoire utilisable
+du primaire. RDS Single-AZ et le proxy unique restent des points de panne.
+
+### Conditions de passage en production
+
+1. Inclure tous les nouveaux fichiers applicatifs dans le commit, notamment
+   `src/zones/`, les migrations `1780000131000` / `1780000132000`, les DTO et
+   helpers GPS. Une compilation locale ne garantit pas le contenu du commit.
+2. Exiger les tests CI verts, dont `ZONES_TEST_POSTGRES_BIN` dans les deux
+   pipelines. Les tests SMS doivent conserver les assertions TLS, délai et
+   non-exposition de l'OTP. Vérifier aussi la confidentialité des traces après
+   la correction de l'instrumentation HTTP OpenTelemetry.
+3. Rejouer les migrations sur une base de préproduction représentative ; les
+   index de `OperationalZones` utilisent `CREATE INDEX` transactionnel, pas
+   `CONCURRENTLY`. Ils peuvent attendre un verrou ou bloquer temporairement
+   des écritures. Les limites de temps font échouer la migration plutôt que
+   garantir sa durée sur la production. Prévoir un créneau peu chargé et
+   vérifier les sauvegardes. Ne pas lancer de DDL manuellement en parallèle.
+4. Conserver le géofencing désactivé à la première livraison (défaut en base),
+   puis l'activer depuis l'administration après les contrôles fonctionnels.
+5. Pour la capacité, produire et relire un plan Terraform connecté avec le
+   profil explicite ; vérifier les écarts existants, les références SSM,
+   l'absence de remplacement destructif et la fenêtre de maintenance RDS.
+   Aucun `apply` ni changement payant n'est autorisé par cette documentation.
+6. Après autorisation de mise en service, contrôler le dimensionnement réel,
+   la répartition ECS, la bascule Valkey et le budget SQL, puis tester la
+   charge mixte GPS / HTTP / dispatch / notifications. La disponibilité
+   d'ECS ne prouve ni la réception FCM/APNs ni la sonnerie sur téléphone.
+
+Les prix ci-dessous restent ceux archivés au 10 novembre, pas un nouveau
+devis. Recalculer les coûts et le trafic avant application : 175 USD est un
+objectif budgétaire, pas une limite technique de facturation.
+
+### Vérifications locales après les correctifs
+
+Le 16 novembre : compilation NestJS réussie, 127 tests OTP/proxy/confidentialité
+et PIN réussis, 36 tests géofencing réussis (dont 12 PostGIS réels sur une base
+jetable), 23 contrôles CI/dépendances/dimensionnement réussis, garde de
+documentation infrastructure réussie. L'audit npm ne remonte plus d'alerte
+modérée, haute ou critique après correction de l'instrumentation HTTP ; huit
+alertes faibles subsistent. Ces tests ciblés ne remplacent pas le workflow
+complet sur Node 24.22.1 (Node local : 24.11.0), ni une recette en charge.
+
 Suite du 12 novembre : [modèle de charge, sensibilité du coût et validation locale](capacity-175-validation-2026-11-12.md).
 Les observations AWS et prix ci-dessous restent datés du 10 novembre.
 
@@ -21,13 +84,13 @@ automatique de l'API, de Redis ou de PostgreSQL n'est prévu.
 
 | Composant | État AWS observé le 10 novembre | Premier palier proposé |
 | --- | --- | --- |
-| API ECS ARM64 | 1 tâche, 0,5 vCPU / 1 Gio | 2 tâches, chacune 0,5 vCPU / 1 Gio |
+| API ECS ARM64 | 1 tâche, 0,5 vCPU / 1 Gio | 2 à 3 tâches, chacune 0,5 vCPU / 1 Gio |
 | PostgreSQL RDS | `db.t4g.micro`, Single-AZ, 20 Gio gp3 | `db.t4g.small` (2 Gio), Single-AZ, stockage conservé |
 | Valkey | 1 `cache.t4g.micro` | 2 nœuds, réplication et basculement automatique |
 | Load balancer | ALB existant | Conservé, affinité Socket.IO conservée |
 | Proxy Mobishastra | EC2 `t4g.micro`, EIP, disque 8 Gio | Inchangé, inclus dans le chiffrage |
 | Traces X-Ray | Échantillonnage configuré à 5 % | 1 %, à surveiller avec le réservoir existant |
-| Autoscaling API | Désactivé | Désactivé ; 2 tâches fixes pour borner le coût du calcul |
+| Autoscaling API | Désactivé | Activé dans le profil explicite ; minimum 2, maximum 3 hors chevauchement de déploiement |
 
 La dernière lecture ECS de cette préparation voit la révision `:41`, un
 déploiement terminé et 1 tâche en cours. Aucun changement de cette révision.
@@ -41,6 +104,44 @@ n'est donc pas une architecture entièrement hautement disponible.
 Le passage RDS micro → small améliore la marge mémoire, mais ne garantit pas le
 débit SQL ; T4g reste une famille à crédits CPU. Ne pas désactiver les sauvegardes,
 la protection contre la suppression ou TLS pour financer cette montée en charge.
+
+### Autoscaling borné : fonctionnement et garde-fous
+
+- Cibles initiales : CPU moyen **60 %**, mémoire moyenne **70 %**, **1 000
+  requêtes HTTP par cible et par minute**. Ce sont des réglages de départ,
+  pas des seuils de performance validés par un test de charge.
+- Une politique peut demander une augmentation ; la réduction exige l'accord
+  de toutes les politiques autorisant la réduction. Cooldown de montée :
+  **60 s** ; cooldown de réduction : **600 s**. Ces délais ne sont ni une
+  promesse de démarrage en 60 s, ni une durée maximale passée à trois tâches.
+  Le retour à deux peut prendre plus longtemps ou ne pas se produire si la
+  mémoire reste haute. Observer la mémoire au repos et calibrer après mesure.
+- Le rééquilibrage AZ ECS est explicitement activé dans ce profil. Une
+  précondition exige deux sous-réseaux publics dans des AZ distinctes, au moins
+  deux tâches et une marge de déploiement supérieure à 100 %. Contrôler la
+  répartition et la reconnexion des clients après mise en service ; l'affinité
+  ALB ne répartit pas à nouveau les WebSockets déjà ouverts.
+- Terraform ignore désormais `desired_count` sur le service existant, comme
+  `task_definition`, pour ne pas annuler une montée à trois lors d'un autre
+  apply. La variable `ecs_desired_count` initialise seulement un service neuf.
+  Sur le service existant, l'enregistrement de la cible autoscaling ramène le
+  nombre dans les bornes 2–3 ; vérifier le résultat et attendre la stabilité.
+- Si l'autoscaling est désactivé ultérieurement, le compte courant est conservé.
+  Modifier seulement `ecs_desired_count` ne le change plus : un opérateur doit
+  effectuer un `aws ecs update-service --desired-count 2` ciblé et autorisé,
+  puis attendre la stabilité. Pour rester à deux avec Terraform, conserver
+  l'autoscaling et fixer **min=max=2** dans un plan revu.
+- La limite de trois s'applique au nombre désiré, pas au chevauchement : avec
+  `deployment_maximum_percent=200`, jusqu'à **six tâches** peuvent coexister
+  lors d'un rolling deployment à trois. Réserver aussi les ressources des
+  migrations, des tâches en arrêt et des interventions opérateur.
+- Aucune métrique personnalisée de retard des files n'est ajoutée ici. CPU et
+  HTTP seuls ne prouvent pas que les alertes arrivent ; surveiller les délais
+  de dispatch, les reçus mobiles, PostgreSQL et les erreurs FCM/APNs.
+
+Le minimum de deux tâches est maintenu même en heures creuses. Il n'y a pas
+de scale-to-zero ni d'arrêt automatique pour respecter le budget. Le RDS
+Multi-AZ reste une étape ultérieure, chiffrée et autorisée séparément.
 
 ## Coût reproductible
 
@@ -81,6 +182,8 @@ partielles en promesse de facture mensuelle.
 ```sh
 node infra-aws/scripts/capacity-cost.cjs
 node infra-aws/scripts/capacity-cost.cjs --hours=730
+# Troisième tâche 4 h/jour sur 31 jours + 20 h de déploiement/migration.
+node infra-aws/scripts/capacity-cost.cjs --extra-task-hours=144
 # Scénarios de dépassement : code de sortie 2, aucun appel AWS.
 node infra-aws/scripts/capacity-cost.cjs --extra-task-hours=764
 node infra-aws/scripts/capacity-cost.cjs --lcu=5
@@ -88,6 +191,12 @@ node infra-aws/scripts/capacity-cost.cjs --overhead=50
 ```
 
 Une troisième tâche permanente ou RDS medium dépassent le budget dans ce modèle.
+Avec la troisième tâche 4 h/jour, l'estimation passe à **167,03 USD/mois**.
+Si elle reste tout le mois, elle passe à **184,21 USD/mois**, provision de
+20 heures-tâches conservée. Le calculateur affiche aussi ce scénario au
+maximum : le total de base de 163,59 USD n'est pas une facture garantie.
+Les alarmes automatiques de target tracking doivent également tenir dans la
+provision CloudWatch/autres services, qui n'est pas une tarification détaillée.
 Une hausse du trafic, le stockage autoscalé jusqu'à 100 Gio, des CPU saturés ou
 des taxes peuvent aussi consommer la marge. Si 175 USD est un plafond taxes
 comprises, **le profil doit être recalculé avant application**.
@@ -117,17 +226,23 @@ pas seulement du nombre de requêtes.
   l'exclusivité, les états et l'outbox. Ne pas supprimer la revalidation SQL ni
   les protections anti-doublons pour accélérer les envois.
 - Les messages Socket.IO ne sont pas représentés individuellement dans le
-  compteur de requêtes HTTP ALB. Un futur autoscaling doit prendre aussi en
-  compte CPU, retard des files, connexions et latence, pas uniquement HTTP.
+  compteur de requêtes HTTP ALB. L'autoscaling préparé prend aussi en compte
+  CPU et mémoire ; retard des files, connexions et latence restent à surveiller
+  séparément et ne déclenchent pas encore directement le scaling.
 - Les tâches stores, analytics, KYC et paiements partagent actuellement les
   ressources avec les trajets. Inclure leur exécution dans le test mixte.
 
 ### Connexions PostgreSQL
 
 Vérifier la valeur effective `DATABASE_POOL_MAX` dans la tâche déployée. Le code
-a un défaut de 10 par processus ; avec 2 tâches cela donne un plafond de 20
-connexions applicatives et jusqu'à **40 pendant le rolling deployment**, plus 2 pour une migration,
-les outils d'administration et les autres clients. Ce calcul suppose un seul
+a un défaut de 10 par processus ; avec 2 tâches cela donne un plafond de 20,
+avec 3 tâches un plafond de 30 connexions applicatives et jusqu'à **60 pendant
+le rolling deployment**, plus 2 pour une migration et une réserve proposée
+de 10 pour l'administration/autres clients : **72 connexions à prévoir**, sans
+compter un éventuel chevauchement de connexions de tâches en arrêt. Vérifier
+le `max_connections` effectif, les autres pools et la mémoire disponible avant
+application ; ce calcul ne valide pas la capacité mémoire de RDS small.
+Ce calcul suppose un seul
 processus applicatif par tâche. Ne pas porter le pool à 1 000 parce qu'il y a
 1 000 trajets. Mesurer attente du pool, transactions, mémoire et verrous.
 
@@ -232,8 +347,8 @@ ne prouve pas que le plan sera sans remplacement.
 
 Après application autorisée : vérifier réellement les deux cibles saines et leur
 répartition AZ, le primaire et la réplique Redis, les paramètres de tâche, les
-alertes reçues, puis réaliser la recette de charge. Le fichier ECS actuel ignore
-les changements de `task_definition` : une nouvelle révision de configuration
+alertes reçues, l'autoscaling 2–3, puis réaliser la recette de charge. Le fichier
+ECS ignore les changements de `desired_count` et de `task_definition` : une nouvelle révision de configuration
 nécessite le déploiement contrôlé prévu par la CI pour être consommée.
 
 Retour arrière : l'ancien profil doit être connu et sauvegardé. Ne pas réduire

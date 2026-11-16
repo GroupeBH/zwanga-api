@@ -405,7 +405,11 @@ export class AuthService {
 
   async requestPinResetOtp(
     dto: PinResetRequestDto,
-  ): Promise<{ message: string }> {
+  ): Promise<{ message: string; expiresInSeconds: number }> {
+    const response = {
+      message: PIN_RESET_GENERIC_MESSAGE,
+      expiresInSeconds: this.otpService.validitySeconds('pin_reset'),
+    };
     const user = await this.userRepository.findOne({
       where: { phone: authAccountPhoneWhere(dto.phone) },
     });
@@ -413,7 +417,7 @@ export class AuthService {
     // Return the same response for unknown or ineligible accounts to avoid
     // exposing which phone numbers are registered.
     if (!this.canUseSelfServicePinReset(user)) {
-      return { message: PIN_RESET_GENERIC_MESSAGE };
+      return response;
     }
 
     const delivery = await this.otpService.sendOtp(canonicalAccountPhone(user.phone), 'pin_reset');
@@ -423,7 +427,7 @@ export class AuthService {
       delivery.expiresInSeconds ?? PIN_RESET_TOKEN_TTL_SECONDS,
     );
 
-    return { message: PIN_RESET_GENERIC_MESSAGE };
+    return response;
   }
 
   async verifyPinResetOtp(dto: PinResetVerifyOtpDto): Promise<{

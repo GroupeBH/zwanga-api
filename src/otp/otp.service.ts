@@ -12,7 +12,10 @@ import { KeccelOtpService } from '../keccel-otp/keccel-otp.service';
 import { OTP_SMS_MESSAGES } from '../keccel-otp/otp-messages';
 import { normalizeOtpPhone } from './otp-phone.util';
 import { reserveOtpSend } from './otp-send-budget';
-import { MobishastraOtpService } from './mobishastra-otp.service';
+import {
+  MobishastraOtpService,
+  MOBISHASTRA_OTP_TTL_SECONDS,
+} from './mobishastra-otp.service';
 import {
   OtpChallenge,
   OtpPurpose,
@@ -100,7 +103,11 @@ export class OtpService {
         { provider: 'keccel', requestId: randomUUID() } satisfies OtpChallenge,
         DEFAULT_OTP_TTL_SECONDS,
       );
-      return response;
+      return {
+        ...response,
+        codeLength: length,
+        expiresInSeconds: DEFAULT_OTP_TTL_SECONDS,
+      };
     });
   }
 
@@ -165,6 +172,13 @@ export class OtpService {
       phone,
       this.configService.get<string>('DEFAULT_COUNTRY_CODE') || '+243',
     );
+  }
+
+  // Public policy, independent of account existence (forgotten PIN must not enumerate accounts).
+  validitySeconds(purpose: OtpPurpose): number {
+    return this.usesMobishastra(purpose)
+      ? MOBISHASTRA_OTP_TTL_SECONDS
+      : DEFAULT_OTP_TTL_SECONDS;
   }
 
   private usesMobishastra(purpose: OtpPurpose): boolean {

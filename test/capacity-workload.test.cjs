@@ -13,14 +13,19 @@ test('1000 occupied and 1000 available drivers are distinct capacity needs', () 
   assert.equal(r.alb.activeConnectionLcu, 4 / 3);
 });
 test('rolling SQL budget accounts for duplicate tasks and migration process', () => {
-  assert.deepEqual(workload().connections, { steady: 20, rolling: 40, requiredWithMigrationAndOperations: 52 });
+  assert.deepEqual(workload().connections, { steady: 20, scaled: 30, rolling: 60, requiredWithMigrationAndOperations: 72 });
+  assert.deepEqual(workload({ poolPerTask: 5 }).connections,
+    { steady: 10, scaled: 15, rolling: 30, requiredWithMigrationAndOperations: 42 });
 });
-test('duration and payload can consume the budget without any extra task', () => {
+test('peak duration accounts for scaled tasks and traffic without claiming a cost cap', () => {
   const short = workload();
   const steady = workload({ peakHoursPerDay: 24 });
   const large = workload({ peakHoursPerDay: 24, payloadBytes: 2048 });
   assert.ok(steady.peakOnlyMonthlyOutboundGb > short.peakOnlyMonthlyOutboundGb);
   assert.ok(steady.illustrativeCost.estimatedUsd > short.illustrativeCost.estimatedUsd);
+  assert.equal(short.assumptions.scaledTaskHours, 62);
+  assert.equal(steady.illustrativeCost.assumptions.extraTaskHours, 764);
+  assert.equal(steady.illustrativeCost.withinIllustrativeBudget, false);
   assert.equal(large.illustrativeCost.withinIllustrativeBudget, false);
   assert.equal(large.capacityValidated, false);
 });

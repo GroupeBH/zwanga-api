@@ -14,6 +14,7 @@ import {
   PaymentStatus,
 } from '../payments/entities/payment-transaction.entity';
 import { TripPaymentMode } from '../payments/enums/trip-payment-mode.enum';
+import { LocationHistoryService } from '../common/services/location-history.service';
 
 describe('BookingsService trip payments', () => {
   let bookingRepository: {
@@ -259,6 +260,113 @@ describe('BookingsService trip payments', () => {
       locationHistoryService as any,
       dataSource as any,
     );
+  });
+
+  it.each([
+    { name: 'synchronized GPS', phase: 0, batch: false, offline: false },
+    { name: 'GPS staggered by four seconds', phase: 4, batch: false, offline: false },
+    { name: 'background batches every sixteen seconds', phase: 4, batch: true, offline: false },
+    { name: 'passenger GPS lost before boarding', phase: 4, batch: false, offline: true },
+  ])('simulates a continuous local ride: $name', async scenario => {
+    const base = Date.parse('2026-11-16T09:00:00Z');
+    jest.useFakeTimers({ now: base, doNotFake: ['nextTick', 'setImmediate', 'clearImmediate',
+      'setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'performance', 'hrtime', 'queueMicrotask'] });
+    try {
+      // Actual business services; only persistence and external effects are isolated.
+      const memory = new Map<string, unknown>();
+      const history = new LocationHistoryService({
+        get: async (key: string) => memory.get(key) ?? null,
+        set: async (key: string, value: unknown) => { memory.set(key, value); },
+        compareAndSet: async (key: string, expected: unknown, value: unknown) => {
+          if (JSON.stringify(memory.get(key) ?? null) !== JSON.stringify(expected)) return false;
+          memory.set(key, value); return true;
+        },
+      } as any);
+      (service as any).locationHistoryService = history;
+      jest.spyOn((service as any).logger, 'log').mockImplementation(() => {});
+      jest.spyOn((service as any).logger, 'debug').mockImplementation(() => {});
+      jest.spyOn((service as any).logger, 'warn').mockImplementation(() => {});
+      for (const method of ['notifySelectedEmergencyContacts', 'notifyDriverEmergencyContactsOnPickup',
+        'notifyPassengerAboutAutomaticPickupConfirmation', 'notifyDriverAboutAutomaticPickupConfirmation',
+        'notifyPassengerAboutAutomaticDropoffConfirmation', 'notifyDriverAboutAutomaticDropoffConfirmation',
+        'touchTripInteraction']) jest.spyOn(service as any, method).mockResolvedValue(undefined);
+      const point = (meters: number) => ({ type: 'Point' as const,
+        coordinates: [15.3 + meters / (111195 * Math.cos(-4.3 * Math.PI / 180)), -4.3] });
+      const trip = { ...booking.trip, id: 'trip-1', driverId: 'driver-1', status: TripStatus.ACTIVE,
+        startedAt: new Date(base), departurePoint: point(0), arrivalPoint: point(1800),
+        currentLocation: point(-160), lastLocationUpdateAt: new Date(base),
+        destinationApproachNotifiedAt: null, destinationReachedAt: null };
+      const passenger = { ...booking, trip, paymentMode: TripPaymentMode.CASH,
+        paymentStatus: BookingPaymentStatus.NOT_REQUIRED, pickedUp: false, droppedOff: false,
+        pickedUpConfirmedByPassenger: false, droppedOffConfirmedByPassenger: false,
+        passengerOriginPoint: point(0), passengerDestinationPoint: point(1800),
+        passengerCurrentLocation: point(0), passengerLastLocationUpdateAt: new Date(base) } as unknown as Booking;
+      bookingRepository.find.mockImplementation(async () =>
+        [BookingStatus.ACCEPTED, BookingStatus.NO_SHOW, BookingStatus.BOARDING_UNCERTAIN].includes(passenger.status)
+          ? [passenger] : []);
+      bookingRepository.findOne.mockResolvedValue(passenger);
+      tripRepository.findOne.mockResolvedValue(trip);
+      bookingRepository.count.mockImplementation(async () =>
+        passenger.status === BookingStatus.ACCEPTED && !passenger.droppedOff ? 1 : 0);
+      const timeline: { second: number; type: string; method?: string }[] = [];
+      let driverBatch: {latitude: number; longitude: number; accuracy: number; recordedAt: string}[] = [];
+      let passengerBatch: typeof driverBatch = [];
+      for (let second = 0; second <= 240; second += 4) {
+        jest.setSystemTime(base + second * 1000);
+        let delivered = false;
+        if (second % 8 === 0) {
+          const meters = second <= 16 ? -160 + second * 10 : Math.max(0, second - 24) * 10;
+          const coordinate = point(meters);
+          driverBatch.push({ latitude: -4.3, longitude: coordinate.coordinates[0], accuracy: 5, recordedAt: new Date().toISOString() });
+          if (!scenario.batch || second % 16 === 0) {
+            trip.currentLocation = coordinate; trip.lastLocationUpdateAt = new Date();
+            await history.recordDriverLocation(trip.id, -4.3, coordinate.coordinates[0], new Date(),
+              { accuracyMeters: 5, samples: driverBatch });
+            driverBatch = []; delivered = true;
+          }
+        }
+        if (second % 8 === scenario.phase && (!scenario.offline || second <= 20)) {
+          const coordinate = point(Math.min(1800, Math.max(0, second - 24) * 10));
+          passengerBatch.push({ latitude: -4.3, longitude: coordinate.coordinates[0], accuracy: 5, recordedAt: new Date().toISOString() });
+          if (!scenario.batch || second % 16 === scenario.phase) {
+            passenger.passengerCurrentLocation = coordinate; passenger.passengerLastLocationUpdateAt = new Date();
+            await history.recordPassengerLocation(passenger.id, -4.3, coordinate.coordinates[0], new Date(),
+              { accuracyMeters: 5, samples: passengerBatch });
+            passengerBatch = []; delivered = true;
+          }
+        }
+        if (!delivered) continue;
+        const result = await service.evaluateAutomaticRideProgressForTrip(trip.id);
+        for (const event of result.events) {
+          if (['pickup_confirmed', 'dropoff_confirmed', 'driver_arrived_destination', 'passenger_boarding_uncertain'].includes(event.type))
+            timeline.push({ second, type: event.type, method: event.detectionMethod });
+        }
+        if (second < 24) expect(passenger.pickedUp).toBe(false);
+        expect(paymentsService.initiatePayment).not.toHaveBeenCalled();
+        expect(walletService.payForBooking).not.toHaveBeenCalled();
+      }
+      if (scenario.offline) {
+        expect(passenger.pickedUp).toBe(false);
+        expect(passenger.droppedOff).toBe(false);
+        expect(timeline.some(e => e.type === 'pickup_confirmed' || e.type === 'dropoff_confirmed')).toBe(false);
+        expect(driverSettlementsService.recordCompletedBookingEarning).not.toHaveBeenCalled();
+      } else {
+        expect(timeline.filter(e => e.type === 'pickup_confirmed')).toHaveLength(1);
+        expect(timeline.filter(e => e.type === 'dropoff_confirmed')).toHaveLength(1);
+        expect(timeline.filter(e => e.type === 'driver_arrived_destination')).toHaveLength(1);
+        expect(timeline.find(e => e.type === 'pickup_confirmed')!.second).toBeLessThan(200);
+        expect(timeline.find(e => e.type === 'dropoff_confirmed')).toEqual({
+          second: 208, type: 'dropoff_confirmed', method: 'automatic_driver_destination_passage' });
+        expect(passenger.status).toBe(BookingStatus.COMPLETED);
+        expect(trip.status).toBe(TripStatus.COMPLETED);
+        expect(passenger.paidAt).toBeNull();
+      }
+      console.info('LOCAL_RIDE_SIMULATION', JSON.stringify({ scenario: scenario.name, timeline,
+        bookingStatus: passenger.status, tripStatus: trip.status, paid: Boolean(passenger.paidAt) }));
+    } finally {
+      jest.useRealTimers();
+      jest.restoreAllMocks();
+    }
   });
 
   it('marks a pending private trip as cancelled when its passenger cancels', async () => {
@@ -2344,7 +2452,7 @@ describe('BookingsService trip payments', () => {
     expect(autoBooking.trip.status).toBe(TripStatus.ACTIVE);
   });
 
-  it('automatically completes dropoff at destination after boarding even when passenger GPS remains close', async () => {
+  it.each([false, true])('automatically completes dropoff after boarding, including a sampled crossing=%s', async crossing => {
     const now = new Date();
     const autoBooking = {
       ...booking,
@@ -2372,6 +2480,12 @@ describe('BookingsService trip payments', () => {
         destinationReachedAt: null,
       },
     };
+    if (crossing) {
+      autoBooking.trip.currentLocation.coordinates = [15.3105, -4.31];
+      const history = buildLocationHistory([15.3095, -4.31], [15.3105, -4.31], now);
+      history.previous.recordedAt = new Date(now.getTime() - 8000).toISOString();
+      locationHistoryService.getDriverLocationHistory.mockResolvedValue(history);
+    }
     bookingRepository.find.mockResolvedValue([autoBooking]);
 
     const result = await service.evaluateAutomaticRideProgressForTrip('trip-1');
@@ -2381,7 +2495,7 @@ describe('BookingsService trip payments', () => {
         expect.objectContaining({
           type: 'dropoff_confirmed',
           bookingId: 'booking-1',
-          detectionMethod: 'automatic_driver_destination',
+          detectionMethod: crossing ? 'automatic_driver_destination_passage' : 'automatic_driver_destination',
         }),
         expect.objectContaining({
           type: 'driver_arrived_destination',
@@ -2402,7 +2516,7 @@ describe('BookingsService trip payments', () => {
       expect.objectContaining({
         droppedOff: true,
         status: BookingStatus.COMPLETED,
-        dropoffDetectionMethod: 'automatic_driver_destination',
+        dropoffDetectionMethod: crossing ? 'automatic_driver_destination_passage' : 'automatic_driver_destination',
       }),
     );
   });

@@ -1,3 +1,4 @@
+import { alignBoardingSamples } from './aligned-boarding-samples';
 import {
   BoardingDetectionConfig,
   DEFAULT_BOARDING_DETECTION_CONFIG,
@@ -375,10 +376,10 @@ export function evaluateBoardingDetection(
   const config = input.config ?? DEFAULT_BOARDING_DETECTION_CONFIG;
   const now = input.now ?? new Date();
   const nowMs = now.getTime();
-  const driverLocations = sortedSamples(input.driverLocations);
-  const passengerLocations = sortedSamples(input.passengerLocations);
-  const driverCurrent = driverLocations.at(-1) ?? null;
-  const passengerCurrent = passengerLocations.at(-1) ?? null;
+  let driverLocations = sortedSamples(input.driverLocations);
+  let passengerLocations = sortedSamples(input.passengerLocations);
+  let driverCurrent = driverLocations.at(-1) ?? null;
+  let passengerCurrent = passengerLocations.at(-1) ?? null;
   let candidate = input.candidate;
   let currentState =
     candidate?.state ?? BoardingDetectionState.DRIVER_APPROACHING;
@@ -434,6 +435,7 @@ export function evaluateBoardingDetection(
   metrics.passengerAccuracy = passengerCurrent.accuracyMeters;
 
   if (
+    timestamp(driverCurrent) > nowMs || timestamp(passengerCurrent) > nowMs ||
     metrics.driverLocationAge > config.maximumLocationAgeMs ||
     metrics.passengerLocationAge > config.maximumLocationAgeMs
   ) {
@@ -441,19 +443,33 @@ export function evaluateBoardingDetection(
   }
 
   if (
-    driverCurrent.accuracyMeters === null ||
-    passengerCurrent.accuracyMeters === null ||
+    driverCurrent.accuracyMeters === null || !Number.isFinite(driverCurrent.accuracyMeters) || driverCurrent.accuracyMeters < 0 ||
+    passengerCurrent.accuracyMeters === null || !Number.isFinite(passengerCurrent.accuracyMeters) || passengerCurrent.accuracyMeters < 0 ||
     driverCurrent.accuracyMeters > config.maximumAcceptedAccuracyMeters ||
     passengerCurrent.accuracyMeters > config.maximumAcceptedAccuracyMeters
   ) {
     return finish('REJECT', BoardingRejectionReason.GPS_ACCURACY_TOO_LOW);
   }
 
+  const rawImpossibleJump = hasImpossibleJump(driverLocations, config.maximumPlausibleSpeedMetersPerSecond) ||
+    hasImpossibleJump(passengerLocations, config.maximumPlausibleSpeedMetersPerSecond);
+  const aligned = timestamp(driverCurrent) !== timestamp(passengerCurrent)
+    ? alignBoardingSamples(driverLocations, passengerLocations,
+      config.maximumAcceptedAccuracyMeters, config.maximumPlausibleSpeedMetersPerSecond) : null;
+  if (aligned && nowMs - timestamp(aligned.driver.at(-1)!) <= config.maximumLocationAgeMs) {
+    driverLocations = aligned.driver;
+    passengerLocations = aligned.passenger;
+    driverCurrent = driverLocations.at(-1)!;
+    passengerCurrent = passengerLocations.at(-1)!;
+  }
   if (
     Math.abs(timestamp(driverCurrent) - timestamp(passengerCurrent)) >
     config.maximumTimestampDifferenceMs
   ) {
     return finish('REJECT', BoardingRejectionReason.TIMESTAMPS_TOO_FAR_APART);
+  }
+  if (driverCurrent.accuracyMeters === null || passengerCurrent.accuracyMeters === null) {
+    return finish('REJECT', BoardingRejectionReason.GPS_ACCURACY_TOO_LOW);
   }
 
   pickupRadius = clamp(
@@ -553,6 +569,7 @@ export function evaluateBoardingDetection(
   metrics.validSamples = pairs.length;
 
   if (
+    rawImpossibleJump ||
     hasImpossibleJump(
       driverWindow,
       config.maximumPlausibleSpeedMetersPerSecond,

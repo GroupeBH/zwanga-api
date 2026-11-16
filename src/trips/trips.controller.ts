@@ -209,6 +209,7 @@ export class TripsController {
         speedMetersPerSecond: dto.speed,
         headingDegrees: dto.heading,
         recordedAt: dto.recordedAt,
+        samples: dto.samples,
       },
     );
     const autoProgress =

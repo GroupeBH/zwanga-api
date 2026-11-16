@@ -228,8 +228,8 @@ const pgBin = process.env.PHONE_REGISTRATION_TEST_POSTGRES_BIN;
       expect(await users.findOneBy({ phone: accountPhoneWhere(phone) })).toBeNull();
       expect(await users.findOneBy({ phone: accountPhoneWhere('0890000001') })).toBeNull();
       const sendOtp = jest.fn();
-      const auth = Object.assign(Object.create(AuthService.prototype), { userRepository: users, otpService: { sendOtp } });
-      expect(await auth.requestPinResetOtp({ phone })).toEqual({ message: expect.stringContaining('Si ce compte') });
+      const auth = Object.assign(Object.create(AuthService.prototype), { userRepository: users, otpService: { sendOtp, validitySeconds: () => 900 } });
+      expect(await auth.requestPinResetOtp({ phone })).toEqual({ message: expect.stringContaining('Si ce compte'), expiresInSeconds: 900 });
       expect(sendOtp).not.toHaveBeenCalled();
       await expect(saveRegistrationWithPhone(users, fresh())).rejects.toBeDefined();
       expect(await users.count()).toBe(2);
@@ -247,7 +247,7 @@ const pgBin = process.env.PHONE_REGISTRATION_TEST_POSTGRES_BIN;
       const set = jest.fn(async (key: string, value: string) => { values.set(key, value); });
       const generateTokens = jest.fn().mockResolvedValue({ accessToken: 'test-access', refreshToken: 'test-refresh' });
       const auth = Object.assign(Object.create(AuthService.prototype), {
-        userRepository: users, otpService: { sendOtp, verifyOtp },
+        userRepository: users, otpService: { sendOtp, verifyOtp, validitySeconds: () => 900 },
         redisService: {
           set, get: jest.fn(async (key: string) => values.get(key)),
           consumeIfValueMatches: jest.fn(async (key: string, expected: string) => {
@@ -465,7 +465,7 @@ const pgBin = process.env.PHONE_REGISTRATION_TEST_POSTGRES_BIN;
       const sendOtp = jest.fn().mockResolvedValue({ expiresInSeconds: 900 });
       const set = jest.fn();
       const auth = Object.assign(Object.create(AuthService.prototype), {
-        userRepository: users, otpService: { sendOtp }, redisService: { set },
+        userRepository: users, otpService: { sendOtp, validitySeconds: () => 900 }, redisService: { set },
       });
       await auth.requestPinResetOtp({ phone });
       expect(sendOtp).toHaveBeenCalledWith(phone, 'pin_reset');
