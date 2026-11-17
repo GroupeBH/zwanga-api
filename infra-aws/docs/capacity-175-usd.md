@@ -2,6 +2,23 @@
 
 État initial au 10 novembre 2026 : **préparé localement, non appliqué à AWS**.
 
+## Actualisation du 17 novembre 2026
+
+Après le plan appliqué par le mainteneur et son autorisation explicite pour la
+maintenance RDS, le passage à `db.t4g.small` est effectif : instance `available`,
+Single-AZ, aucun changement différé, snapshot manuel de sécurité conservé.
+L'API répond HTTP 200 avec db/redis `ok` et ECS a 2 tâches actives / 0 en attente,
+toujours sur révision `:42`. La base a été arrêtée de 02:25:56 à 02:27:55
+(Kinshasa) ; ECS a remplacé automatiquement des tâches après les échecs de santé.
+Ce contrôle ne valide pas la capacité cible ni la bascule Valkey, non modifiée
+pendant l'intervention. Détails : `CHANGELOG.md`, INFRA-2026-11-17-001.
+Lors de l'intervention distincte autorisée à partir de 02 h 37, la bascule
+automatique Valkey a ensuite été activée : groupe `available`, Multi-AZ et
+AutomaticFailover `enabled`, aucun changement différé, primaire en
+`eu-central-1b` et réplique en `eu-central-1a`. Aucun test de panne volontaire
+n'a été effectué ; voir INFRA-2026-11-17-002 dans le journal.
+Les constats du 16 novembre ci-dessous restent historiques.
+
 ## Point de situation du 16 novembre 2026
 
 La lecture AWS effectuée pendant l'audit de préparation confirme encore : une

@@ -59,6 +59,7 @@ tfplan
 tfplan.*
 infra-aws/backend.hcl
 infra-aws/terraform.tfvars
+infra-aws/operators.tfvars
 infra-aws/*.auto.tfvars
 !infra-aws/production.auto.tfvars
 infra-aws/bootstrap/terraform.tfvars

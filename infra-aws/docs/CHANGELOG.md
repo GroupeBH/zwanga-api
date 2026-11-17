@@ -1,5 +1,30 @@
 # Journal détaillé des changements d'infrastructure AWS
 
+## INFRA-2026-11-17-002 — Activation de la bascule automatique Valkey
+
+- Date / opérateur : 17 novembre 2026 à partir de 02 h 37, Africa/Kinshasa ; Codex après accord explicite du mainteneur.
+- Cible : groupe `zwanga-api-production-redis`, compte `046374119247`, région `eu-central-1`. Deux nœuds existants, primaire `-001` en `eu-central-1b`, réplique `-002` en `eu-central-1a` ; Multi-AZ déjà activé.
+- État initial : groupe disponible, `AutomaticFailover=disabled`, seul changement différé `AutomaticFailoverStatus=enabled`. API HTTP 200 avec PostgreSQL et Redis `ok`.
+- Action : `aws elasticache modify-replication-group --region eu-central-1 --replication-group-id zwanga-api-production-redis --automatic-failover-enabled --apply-immediately`. Le profil Terraform prévoit déjà cette valeur ; aucun changement de classe, nombre de nœuds, IAM, secret, donnée, RDS ou version applicative. Aucun `test-failover`, flush ou redémarrage volontaire.
+- Statut / validation : terminé. Après passage par `modifying` / `enabling`, groupe `available`, `MultiAZ=enabled`, `AutomaticFailover=enabled`, `PendingModifiedValues={}`. Primaire et réplique inchangés, disponibles dans deux AZ distinctes. Contrôles `/health` avant et pendant intervention HTTP 200 avec db/redis `ok` ; disponibilité ponctuelle vérifiée, pas de test de panne ou de charge.
+- Risque / coût : surveiller les reconnexions et la santé applicative pendant la modification ; aucun nœud supplémentaire demandé. La réplication multi-AZ et les deux nœuds étaient déjà provisionnés. Aucun engagement de capacité ou de reprise sans interruption.
+- Contrôles finaux : `/health` HTTP 200 avec db/redis `ok` après activation ; ECS 2 tâches désirées / 2 actives / 0 en attente, révision `:42` inchangée, PRIMARY/COMPLETED. Aucune interruption observée dans les contrôles ponctuels ; ceci n'est pas une mesure continue ni une recette fonctionnelle des paiements/trajets.
+- Retour arrière / suite : ne pas désactiver la protection ou supprimer la réplique automatiquement. En cas d'erreur, lire les événements et examiner les connexions avant toute nouvelle intervention ; test de panne réelle à planifier séparément avec autorisation. Ne pas réappliquer un ancien plan Terraform.
+
+## INFRA-2026-11-17-001 — Application du redimensionnement RDS autorisé
+
+- Date / opérateur : 17 novembre 2026 à partir de 02 h 18, Africa/Kinshasa ; Codex après confirmation explicite du mainteneur.
+- Périmètre : instance `zwanga-api-production-postgres`, compte `046374119247`, région `eu-central-1`. Passage `db.t4g.micro` → `db.t4g.small` déjà demandé par le plan Terraform appliqué par le mainteneur. Ni modification Redis, ni déploiement applicatif, ni migration de schéma pendant cette intervention.
+- État initial vérifié : RDS `available`, Single-AZ ; seul `DBInstanceClass=db.t4g.small` en attente. API : 2 tâches sur révision `:42`, PRIMARY/COMPLETED ; `/health` HTTP 200, db/redis `ok`.
+- Sauvegarde : snapshot manuel `zwanga-prod-before-small-20261117-0118` demandé avant toute modification ; disponibilité requise avant lancement. Sauvegardes automatiques conservées 7 jours.
+- Risque / coût : interruption temporaire de connexions pendant redimensionnement Single-AZ ; coût de la classe small et du snapshot manuel selon stockage facturable. Pas de désactivation de sauvegardes, TLS ou protections, ni élargissement IAM.
+- Procédure : attendre le snapshot, revérifier les modifications différées, appliquer exclusivement le changement de classe prévu avec `modify-db-instance --apply-immediately`, puis contrôler classe effective, statut, événements RDS, santé API et révision ECS. Ne pas relancer l'ancien plan Terraform.
+- Statut / validation : terminé. Snapshot confirmé `available` / 100 % avant commande ; dernière vérification RDS limitée au changement de classe attendu. RDS désormais `available`, `db.t4g.small`, Single-AZ, `PendingModifiedValues={}`. API finale `/health` HTTP 200 avec db/redis `ok`. ECS revenu à 2 tâches désirées / 2 actives / 0 en attente, même révision `:42`, PRIMARY/COMPLETED.
+- Chronologie AWS (Kinshasa, UTC+1) : sauvegarde terminée 02:23:07 ; application de la classe 02:24:38 ; arrêt DB 02:25:56 ; redémarrage DB 02:27:55 ; changement de classe terminé 02:28:00. Environ 2 minutes entre arrêt et redémarrage DB, pas une mesure exhaustive de l'indisponibilité utilisateur. Contrôles API 503 observés à 02:26:26 et 02:27:30, puis HTTP 200 après reprise.
+- Effet observé : ECS a automatiquement remplacé des tâches après les échecs ALB HTTP 503 pendant la coupure SQL ; aucun redémarrage manuel ou changement d'image effectué. Les événements RDS indiquent aussi à 02:29:05 « Performance Insights has been disabled » et « Monitoring Interval changed to 60 » ; la commande envoyée ne contenait que la classe et `--apply-immediately`, et aucun autre PendingModifiedValues n'était visible avant envoi.
+- Limites / suite : contrôles de disponibilité réussis, pas de test de trajet ou paiement réel ni de qualification de charge 1 000 + 1 000. Vérifier séparément la bascule Valkey précédemment différée et la nouvelle livraison applicative. Le snapshot manuel est conservé ; sa rétention/suppression sera décidée séparément.
+- Retour arrière : ne pas restaurer le snapshot ni réduire la classe automatiquement. En cas de panne persistante, examiner les événements et la connectivité ; restauration sous un autre identifiant uniquement après autorisation, avec prise en compte des écritures postérieures au snapshot. Aucun snapshot supprimé pendant cette intervention.
+
 ## INFRA-2026-11-16-002 — Autoscaling API borné et répartition AZ
 
 - Date / opérateur : 16 novembre 2026, Africa/Kinshasa ; Codex à la demande du mainteneur.
