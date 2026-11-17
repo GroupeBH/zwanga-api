@@ -2,6 +2,7 @@ import { TripRequestsService } from './trip-requests.service';
 import { TripRequest, TripRequestStatus } from './entities/trip-request.entity';
 import { VehicleType } from '../vehicles/entities/vehicle.entity';
 import { enqueueTransactionalNotification } from '../notifications/transactional-notification';
+import * as acceptance from './dispatch/request-acceptance';
 
 jest.mock('../notifications/transactional-notification', () => ({ enqueueTransactionalNotification: jest.fn() }));
 
@@ -35,6 +36,29 @@ describe('scheduled request acceptance durable passenger response', () => {
     return { service, locked, manager, transaction, save, sendNotification };
   };
   beforeEach(() => jest.clearAllMocks());
+  afterEach(() => jest.restoreAllMocks());
+  it('signals competing drivers immediately after the claim, before trip preparation', async () => {
+    const f = fixture();
+    const claim = jest.spyOn(acceptance, 'claimRequestAcceptance').mockResolvedValue('11111111-1111-4111-8111-111111111111');
+    const notifyRequestClaimed = jest.fn();
+    f.service.driverDispatch = { notifyRequestClaimed, notifyScheduledRequest: jest.fn() };
+    f.service.tripsService.create.mockImplementation(async () => {
+      expect(claim).toHaveBeenCalled();
+      expect(notifyRequestClaimed).toHaveBeenCalledWith('request-test');
+      return { id: 'trip-test' };
+    });
+    await f.service.acceptTripRequest('driver-test', 'request-test', {});
+    expect(notifyRequestClaimed).toHaveBeenCalledTimes(1);
+  });
+  it('does not silence other phones when the claim is rejected', async () => {
+    const f = fixture();
+    jest.spyOn(acceptance, 'claimRequestAcceptance').mockRejectedValue(new Error('claim rejected'));
+    const notifyRequestClaimed = jest.fn();
+    f.service.driverDispatch = { notifyRequestClaimed };
+    await expect(f.service.acceptTripRequest('driver-test', 'request-test', {})).rejects.toThrow('claim rejected');
+    expect(notifyRequestClaimed).not.toHaveBeenCalled();
+    expect(f.service.tripsService.create).not.toHaveBeenCalled();
+  });
   it('commits the selection and response in the same transaction even without a passenger push token', async () => {
     const f = fixture();
     await f.service.acceptTripRequest('driver-test', 'request-test', {});

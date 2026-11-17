@@ -126,7 +126,7 @@ export class MobishastraSmsService implements OnModuleDestroy {
               pwd: credentials.pwd,
               senderid: credentials.sender,
               mobileno: phone,
-              msgtext: `Zwanga : votre code de ${operation} est ${code}. Valable 15 minutes. Ne le partagez avec personne.`,
+              msgtext: `Votre code de ${operation} est ${code}. Valable 15 minutes. Ne le partagez avec personne.`,
               priority: 'High',
               CountryCode: 'ALL',
               ShowError: 'C',

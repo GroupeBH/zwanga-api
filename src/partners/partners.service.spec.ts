@@ -22,6 +22,15 @@ function fixture(role: string) {
 }
 
 describe('PartnersService field access', () => {
+  it.each(['ACTIVE','SUSPENDED'])('allows receipt reconciliation only to fleet managers in %s fleets', async status => {
+    for(const role of ['ORG_ADMIN','ORG_MANAGER','FLEET_MANAGER','VIEWER','FINANCE_VIEWER','FIELD_AGENT']) {
+      const {service,members} = fixture(role);
+      members.findOne.mockResolvedValue({role,organization:{...organization,status,partnerTypes:[{type:'FLEET_OWNER',status:'ACTIVE'}]}});
+      const caps = await service.capabilities('22222222-2222-4222-8222-222222222222',organization.id);
+      expect(caps.permissions.includes('fleet.payments.confirm')).toBe(['ORG_ADMIN','ORG_MANAGER','FLEET_MANAGER'].includes(role));
+      if(status==='SUSPENDED') expect(caps.permissions).not.toContain('vehicles.assign_driver');
+    }
+  });
   it('reserves team and agent administration to Zwanga admins', () => {
     for (const method of ['activate', 'listAdminOrganizations', 'listAdminMembers', 'adminFieldReports', 'adminFieldTeam', 'createFieldOrganization', 'createFieldAgent', 'removeFieldAgent', 'setTarget', 'setZones'] as const) {
       expect(Reflect.getMetadata(ROLES_KEY, PartnersController.prototype[method])).toEqual([UserRole.ADMIN, UserRole.SUPER_ADMIN]);

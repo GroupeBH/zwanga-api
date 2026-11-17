@@ -41,6 +41,17 @@ describe('OtpService Keccel-only compatibility routing', () => {
       keccel as unknown as KeccelOtpService,
     );
 
+  it('exposes the configured validity without account lookup or sending an SMS', () => {
+    expect(serviceFor('mobishastra').validitySeconds('pin_reset')).toBe(900);
+    expect(serviceFor('mobishastra', 'keccel').validitySeconds('pin_reset')).toBe(300);
+    expect(serviceFor('keccel', 'mobishastra').validitySeconds('pin_change')).toBe(900);
+    expect(serviceFor('keccel', 'mobishastra').validitySeconds('phone_verification')).toBe(300);
+  });
+
+  it('includes the Keccel lifetime for the mobile countdown', async () => {
+    expect(await serviceFor('keccel').sendOtp(phone)).toMatchObject({codeLength:5,expiresInSeconds:300});
+  });
+
   beforeEach(() => {
     values = new Map();
     redis = {

@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { ZonesModule } from './zones/zones.module';
 import { MobileOperationsModule } from './mobile-operations/mobile-operations.module';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConfigModule, ConfigService } from '@nestjs/config';
@@ -50,9 +51,11 @@ import { ProServicesModule } from './pro-services/pro-services.module';
 import { AppUpdatesModule } from './app-updates/app-updates.module';
 import { DriverFinanceModule } from './driver-finance/driver-finance.module';
 import { PartnersModule } from './partners/partners.module';
+import { AssetCreditModule } from './asset-credit/asset-credit.module';
 
 @Module({
   imports: [
+    AssetCreditModule,
     AppConfigModule,
     LoggerModule,
     TypeOrmModule.forRootAsync({
@@ -123,6 +126,7 @@ import { PartnersModule } from './partners/partners.module';
     ProServicesModule,
     AppUpdatesModule,
     MobileOperationsModule,
+    ZonesModule,
     DriverFinanceModule,
     PartnersModule,
   ],

@@ -1,5 +1,6 @@
 import { BadRequestException, ConflictException, NotFoundException } from '@nestjs/common';
 import { User } from '../users/entities/user.entity';
+import { KycDocument } from '../users/entities/kyc-document.entity';
 import { Trip } from './entities/trip.entity';
 import { assertDriverPublicationPhoto, savePublicationsWithPhotoPolicy } from './trip-publication-photo';
 
@@ -16,17 +17,46 @@ function setup(overrides: Partial<User> = {}, history = false) {
     save: jest.fn(async (items: Trip[]) => items.map((item, i) => ({ ...item, id: String(i) }))),
   };
   const query = jest.fn().mockResolvedValue([{ busy: false }]);
+  const identities = { findOne: jest.fn().mockResolvedValue({ id: 'latest', status: 'approved' }) };
   // Serial transaction mock models the owner lock; this is NOT a PostgreSQL integration test.
   let tail = Promise.resolve();
   const repository = { manager: { transaction: jest.fn((_isolation, work) => {
-    const run = tail.then(() => work({ query, getRepository: entity => entity === User ? users : trips }));
+    const run = tail.then(() => work({ query, getRepository: entity => entity === User ? users : entity === KycDocument ? identities : trips }));
     tail = run.catch(() => undefined);
     return run;
   }) } };
-  return { driver, users, trips, query, repository: repository as any };
+  return { driver, users, trips, query, identities, repository: repository as any };
 }
 
 describe('driver photo publication policy', () => {
+  it.each([null, 'pending', 'rejected'])('blocks every public writer with latest KYC %s, even with a photo', async status => {
+    for (const kind of ['manual', 'recurring', 'private-to-public']) {
+      const ctx = setup({ profilePicture: 'photo.jpg' });
+      ctx.identities.findOne.mockResolvedValue(status === null ? null : { id: 'latest', status });
+      const candidate = { ...trip(), ...(kind === 'recurring' ? { recurringTemplateId: 'template', recurringOccurrenceDate: '2030-01-01' }
+        : kind === 'private-to-public' ? { id: 'existing-private' } : {}) };
+      await expect(savePublicationsWithPhotoPolicy(ctx.repository, 'driver', [candidate]))
+        .rejects.toMatchObject({ response: { code: 'DRIVER_KYC_NOT_APPROVED' } });
+      expect(ctx.trips.save).not.toHaveBeenCalled();
+      expect(ctx.users.update).not.toHaveBeenCalled();
+      expect(ctx.query).not.toHaveBeenCalled();
+    }
+  });
+  it('reads the latest KYC deterministically under the existing owner lock', async () => {
+    const ctx = setup();
+    await savePublicationsWithPhotoPolicy(ctx.repository, 'driver', [trip()]);
+    expect(ctx.identities.findOne).toHaveBeenCalledWith({ where: { userId: 'driver' },
+      order: { createdAt: 'DESC', id: 'DESC' }, select: ['id', 'status'] });
+    expect(ctx.users.findOne.mock.invocationCallOrder[0]).toBeLessThan(ctx.identities.findOne.mock.invocationCallOrder[0]);
+    expect(ctx.identities.findOne.mock.invocationCallOrder[0]).toBeLessThan(ctx.trips.save.mock.invocationCallOrder[0]);
+  });
+  it('does not save or consume an allowance when the KYC read fails', async () => {
+    const ctx = setup();
+    ctx.identities.findOne.mockRejectedValue(new Error('identity read unavailable'));
+    await expect(savePublicationsWithPhotoPolicy(ctx.repository, 'driver', [trip()])).rejects.toThrow('identity read unavailable');
+    expect(ctx.trips.save).not.toHaveBeenCalled();
+    expect(ctx.users.update).not.toHaveBeenCalled();
+  });
   it('skips a conflicting recurring day without discarding the other dates', async () => {
     const ctx = setup({ profilePicture: 'photo.jpg' });
     ctx.query.mockResolvedValueOnce([{ busy: true }]);

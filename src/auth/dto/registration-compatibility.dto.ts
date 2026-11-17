@@ -1,10 +1,16 @@
 import { ApiHideProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
-import { IsOptional, IsString, Matches } from 'class-validator';
+import { IsEnum, IsOptional, IsString, Matches } from 'class-validator';
+import { DriverCategory } from '../../users/driver-category';
 import { ReferralAttributionDto } from '../../referrals/dto/referral.dto';
 
 /** Compatibility with shipped clients, not an email identity assertion. */
 export class RegistrationCompatibilityDto extends ReferralAttributionDto {
+  @ApiPropertyOptional({ enum: DriverCategory, nullable: true })
+  @IsOptional()
+  @IsEnum(DriverCategory)
+  driverCategory?: DriverCategory | null;
+
   @ApiPropertyOptional({
     description:
       'Preuve à usage unique renvoyée par users/phone/verify. Liée au numéro; ne remplace pas un jeton de connexion.',

@@ -12,6 +12,7 @@ import { WalletAccount, WalletAccountType } from './wallet-account.entity';
 import { PaymentTransaction } from '../../payments/entities/payment-transaction.entity';
 
 export enum WalletLedgerEntryType {
+  ASSET_CREDIT_REPAYMENT = 'asset_credit_repayment',
   TOP_UP = 'top_up',
   LOYALTY_REWARD = 'loyalty_reward',
   BOOKING_PAYMENT = 'booking_payment',

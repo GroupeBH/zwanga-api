@@ -31,7 +31,11 @@ function fixture() {
     queue = next.catch(() => undefined);
     return next;
   }) };
-  const earnings = { find: jest.fn(async () => records) };
+  const earnings = {
+    find: jest.fn(async () => records),
+    findOne: jest.fn(async ({ where }: { where: { id?: string; bookingId?: string } }) =>
+      records.find(record => Object.entries(where).every(([key, value]) => record[key] === value)) ?? null),
+  };
   const notifications = { sendNotificationToUser: jest.fn(async () => {
     expect(records.length).toBe(1);
   }) };
@@ -70,6 +74,11 @@ describe('Cash subsidy credit and authoritative trip summary', () => {
       grossAmount: 3000, netAmount: 3000, commissionRate: 0, paymentMode: 'cash', status: 'available',
     });
     expect(f.notifications.sendNotificationToUser).toHaveBeenCalledTimes(1);
+    expect(f.earnings.findOne).toHaveBeenCalledWith({ where: { id: 'earning' } });
+    expect(f.notifications.sendNotificationToUser).toHaveBeenCalledWith(
+      'driver', 'Gain du trajet disponible', expect.any(String),
+      expect.objectContaining({ type: 'driver_booking_earning_confirmed', amount: 3000, currency: 'CDF' }),
+    );
     expect(f.booking.paymentAmount).toBe(2000);
     expect(f.booking.paidAt).toBeNull();
     expect(f.booking.paymentStatus).toBe('not_required');

@@ -264,7 +264,10 @@ const enabled = Boolean(
       };
       const auth = Object.create(AuthService.prototype) as AuthService;
       Object.assign(auth, {
-        userRepository: { findOne: jest.fn().mockResolvedValue(user) },
+        userRepository: {
+          findOne: jest.fn().mockResolvedValue(user),
+          update: jest.fn().mockResolvedValue({ affected: 1 }),
+        },
         otpService: otp,
         redisService: redis,
         logger: { log: jest.fn() },

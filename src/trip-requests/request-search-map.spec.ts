@@ -50,10 +50,11 @@ describe('passenger request search map', () => {
     expect(map.vehicles[1].id).not.toBe(map.vehicles[0].id);
     expect((await requestSearchMap(manager, 'owner', 'request')).vehicles[0].id).toBe(map.vehicles[0].id);
     expect((await requestSearchMap(manager, 'owner', 'another')).vehicles[0].id).not.toBe(map.vehicles[0].id);
-    expect(query.mock.calls[0][1]).toEqual(['request', 'owner', 5000]);
+    expect(query.mock.calls[0][1]).toEqual(['request', 'owner', 5000, false]);
     const sql = query.mock.calls[0][0];
     for (const fragment of ['ST_DWithin', 'ST_Distance', 'LIMIT 501', 'trip_request_driver_refusals',
-      'o."requestId" <> r.id', 'r."targetDriverId"', 'r."passengerId" = $2::uuid']) expect(sql).toContain(fragment);
+      'o."requestId" <> r.id', 'r."targetDriverId"', 'r."passengerId" = $2::uuid',
+      '($4::boolean OR r."targetDriverId" IS NULL OR p."driverId" = r."targetDriverId")']) expect(sql).toContain(fragment);
     expect(sql).not.toContain("interval '10 minutes'");
   });
   it('keeps older last-known positions with their date but does not expose them to legacy recent-only clients', async () => {

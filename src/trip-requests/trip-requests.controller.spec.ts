@@ -25,6 +25,9 @@ describe('Trip requests HTTP access', () => {
     proposeCounterOffer: jest.fn().mockResolvedValue({ status: 'pending' }),
     mapDriver: jest.fn().mockResolvedValue({ driverId: 'resolved-driver' }),
     rejectOffer: jest.fn().mockResolvedValue({ status: 'pending' }),
+    negotiatePrice: jest.fn().mockResolvedValue({ status: 'offers_received' }),
+    acceptPassengerPrice: jest.fn().mockResolvedValue({ status: 'driver_selected' }),
+    priceAlternatives: jest.fn().mockResolvedValue({ recent: 0, older: 0 }),
     getPassengerContact: jest.fn().mockResolvedValue({ passenger: { id: 'passenger', phone: null } }),
   };
 
@@ -62,6 +65,30 @@ describe('Trip requests HTTP access', () => {
   });
 
   beforeEach(() => jest.clearAllMocks());
+
+  it('authenticates bounded bargaining routes, forbids forged actors, validates money and restricts driver decisions', async () => {
+    const id = '11111111-1111-4111-8111-111111111111', offerId = '22222222-2222-4222-8222-222222222222';
+    const path = `/trip-requests/${id}/offers/${offerId}`;
+    const passenger = `Bearer ${jwt.sign({ userId: 'passenger', role: UserRole.PASSENGER })}`;
+    const driver = `Bearer ${jwt.sign({ userId: 'driver', role: UserRole.DRIVER })}`;
+    for (const action of ['passenger-price', 'final-price', 'accept-passenger-price'])
+      await request(server).post(`${path}/${action}`).send({ pricePerSeat: 2700 }).expect(401);
+    for (const action of ['final-price', 'accept-passenger-price'])
+      await request(server).post(`${path}/${action}`).set('Authorization', passenger).send({ pricePerSeat: 2700 }).expect(403);
+    for (const pricePerSeat of [0, -1, 1.5, 1000001, '2700', null])
+      await request(server).post(`${path}/passenger-price`).set('Authorization', passenger).send({ pricePerSeat }).expect(400);
+    await request(server).post(`${path}/passenger-price`).set('Authorization', passenger).send({ pricePerSeat: 2700, passengerId: 'someone-else' }).expect(400);
+    expect(service.negotiatePrice).not.toHaveBeenCalled();
+    await request(server).post(`${path}/passenger-price`).set('Authorization', passenger).send({ pricePerSeat: 2700 }).expect(201);
+    expect(service.negotiatePrice).toHaveBeenLastCalledWith('passenger', id, offerId, 2700, 'passenger_counter');
+    await request(server).post(`${path}/final-price`).set('Authorization', driver).send({ pricePerSeat: 2800 }).expect(201);
+    expect(service.negotiatePrice).toHaveBeenLastCalledWith('driver', id, offerId, 2800, 'driver_final');
+    await request(server).post(`${path}/accept-passenger-price`).set('Authorization', driver).send({}).expect(201);
+    expect(service.acceptPassengerPrice).toHaveBeenCalledWith('driver', id, offerId);
+    await request(server).get(`${path}/alternatives`).expect(401);
+    await request(server).get(`${path}/alternatives`).set('Authorization', passenger).expect(200).expect('Cache-Control', 'private, no-store');
+    expect(service.priceAlternatives).toHaveBeenCalledWith('passenger', id, offerId);
+  });
 
   it('protects counteroffers with JWT, role, price and vehicle validation; ignores no forged identity', async () => {
     const id = '11111111-1111-4111-8111-111111111111', vehicleId = '22222222-2222-4222-8222-222222222222';

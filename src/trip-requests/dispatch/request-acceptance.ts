@@ -17,11 +17,18 @@ export const PASSENGER_DECISION_MS = 120_000;
 export async function startPassengerDecision(manager: EntityManager, request: TripRequest, driverId: string, phases = ['driver']) {
   if (!request.sequentialDispatch) return;
   await assertSequentialInvitation(manager, request, driverId, phases);
+  // The request lock serializes competing responses. A counteroffer reserves
+  // the passenger decision, not four simultaneous negotiations.
+  const competing = await manager.query(`SELECT 1 FROM trip_request_dispatch_offers
+    WHERE "requestId"=$1 AND "driverId"<>$2 AND status='pending' AND phase<>'driver'`, [request.id, driverId]);
+  if (competing.length) throw new ConflictException('Une réponse est déjà en cours pour cette commande.');
+  await manager.query(`UPDATE trip_request_dispatch_offers SET status='cancelled'
+    WHERE "requestId"=$1 AND "driverId"<>$2 AND status='pending'`, [request.id, driverId]);
   await manager.query(`UPDATE trip_request_dispatch_offers SET phase='passenger',
     "expiresAt"=LEAST(clock_timestamp()+$4*interval '1 millisecond',$3::timestamptz)
     WHERE "requestId"=$1 AND "driverId"=$2 AND status='pending'`,
     [request.id, driverId, request.departureDateMax, PASSENGER_DECISION_MS]);
-  await silenceRequestInvitation(manager, request.id, driverId);
+  await silenceRequestInvitation(manager, request.id);
 }
 
 /** A failed preparation releases only its own claim, never another worker's acceptance. */

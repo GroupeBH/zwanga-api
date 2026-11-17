@@ -4,6 +4,9 @@ import { RedisService } from '../../common/services/redis.service';
 import { REQUEST_RESPONSE_MS } from './sequential-policy';
 
 export const REQUEST_DEADLINES_KEY = 'ride-requests:deadlines';
+// Scheduling lease only, not the driver's response/delivery deadline. A worker
+// crash leaves the item in Redis for another worker to recover after this delay.
+export const REQUEST_DEADLINE_CLAIM_MS = 30_000;
 // Keep discovery through delivery + a complete response window + relay jitter.
 // This is not an invitation lifetime: SQL still rechecks eligibility/expiry.
 export const REQUEST_CANDIDATE_CACHE_SECONDS = Math.ceil(REQUEST_RESPONSE_MS / 1000) * 2 + 30;
@@ -79,7 +82,17 @@ export class RequestDriverQueue {
     return deadline === null || deadline <= Date.now();
   }
   async schedule(id: string, at: number) { await this.redis.getClient().zAdd(REQUEST_DEADLINES_KEY, { score: at, value: id }); }
-  async due(now: number) { return this.redis.getClient().zRangeByScore(REQUEST_DEADLINES_KEY, 0, now, { LIMIT: { offset: 0, count: 50 } }); }
+  async claimDue(now: number): Promise<string[]> {
+    const result = await this.redis.getClient().eval(`
+      local due = redis.call('ZRANGEBYSCORE', KEYS[1], 0, ARGV[1], 'LIMIT', 0, 50)
+      for _, id in ipairs(due) do
+        redis.call('ZADD', KEYS[1], ARGV[2], id)
+      end
+      return due`, { keys: [REQUEST_DEADLINES_KEY],
+      arguments: [String(now), String(now + REQUEST_DEADLINE_CLAIM_MS)] });
+    if (!Array.isArray(result)) throw new Error('Invalid Redis deadline claim result');
+    return result.map(String);
+  }
   async close(id: string) {
     await this.redis.getClient().del([key(id) + ':waiting', key(id) + ':version']);
     await this.redis.getClient().zRem(REQUEST_DEADLINES_KEY, id);

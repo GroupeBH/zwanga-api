@@ -2,6 +2,7 @@ import { BadRequestException, ConflictException } from '@nestjs/common';
 import * as tripDetailWrites from './save-trip-details-update';
 import { TripsService } from './trips.service';
 import { User, UserRole } from '../users/entities/user.entity';
+import { KycDocument } from '../users/entities/kyc-document.entity';
 import { TripStatus } from './entities/trip.entity';
 import { BookingStatus } from '../bookings/entities/booking.entity';
 import { VehicleType } from '../vehicles/entities/vehicle.entity';
@@ -61,7 +62,9 @@ describe('TripsService daily trip publication quota', () => {
     };
     tripRepository.manager = { transaction: jest.fn(async (_isolation, work) => work({
       query: jest.fn().mockResolvedValue([{ busy: false }]),
-      getRepository: (entity) => entity === User ? userRepository : {
+      getRepository: (entity) => entity === User ? userRepository : entity === KycDocument ? {
+        findOne: jest.fn().mockResolvedValue({ status: 'approved' }),
+      } : {
         save: async (trips) => [await tripRepository.save(trips)],
       },
     })) };

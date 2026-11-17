@@ -1,4 +1,6 @@
+import { LocationHistorySampleDto } from '../../common/dto/location-history-sample.dto';
 import {
+  IsArray, ArrayMaxSize,
   IsString,
   IsNotEmpty,
   IsNumber,
@@ -252,6 +254,10 @@ export class ReportBookingProblemDto {
 }
 
 export class UpdatePassengerLocationDto {
+  @ApiProperty({ required: false, type: [LocationHistorySampleDto], maxItems: 10 })
+  @IsOptional() @IsArray() @ArrayMaxSize(10) @ValidateNested({ each: true })
+  @Type(() => LocationHistorySampleDto)
+  samples?: LocationHistorySampleDto[];
   @ApiProperty({
     description: 'Latitude de la position actuelle du passager',
     example: -4.3276,

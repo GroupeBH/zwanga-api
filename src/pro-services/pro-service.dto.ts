@@ -18,7 +18,7 @@ import {
   MinLength,
   ValidateNested,
 } from 'class-validator';
-import { CASE_STATES, SERVICE_CODES } from './pro-service.types';
+import { CASE_STATES, DOCUMENT_OPTIONS, SERVICE_CODES } from './pro-service.types';
 import type { CaseState, ServiceCode } from './pro-service.types';
 export class ApplicationDto {
   @IsString() @MinLength(3) @MaxLength(180) fullName: string;
@@ -26,7 +26,7 @@ export class ApplicationDto {
   @IsString() @MaxLength(180) vehicleDescription: string;
   @IsOptional() @IsString() @MaxLength(40) plate?: string;
   @IsArray()
-  @ArrayMaxSize(10)
+  @ArrayMaxSize(DOCUMENT_OPTIONS.length)
   @ArrayUnique()
   @IsString({ each: true })
   @MaxLength(60, { each: true })
@@ -76,7 +76,7 @@ export class QuoteServiceDto {
   @Type(() => InstallmentDto)
   installments: InstallmentDto[];
   @IsArray()
-  @ArrayMaxSize(10)
+  @ArrayMaxSize(DOCUMENT_OPTIONS.length)
   @ValidateNested({ each: true })
   @Type(() => RetainedDocumentDto)
   retainedDocuments: RetainedDocumentDto[];

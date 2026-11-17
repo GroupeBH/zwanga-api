@@ -237,9 +237,14 @@ variable "ecs_task_cpu_architecture" {
 }
 
 variable "ecs_desired_count" {
-  description = "Number of Fargate tasks kept running. Use 1 for the economical always-on profile."
+  description = "Initial Fargate task count at creation. Subsequent counts are owned by Service Auto Scaling or an explicit operator update, not Terraform."
   type        = number
   default     = 1
+
+  validation {
+    condition     = var.ecs_desired_count >= 1 && floor(var.ecs_desired_count) == var.ecs_desired_count
+    error_message = "ecs_desired_count must be a positive integer."
+  }
 }
 
 variable "ecs_enable_autoscaling" {
@@ -252,36 +257,83 @@ variable "ecs_min_capacity" {
   description = "Minimum ECS tasks when autoscaling is enabled."
   type        = number
   default     = 1
+
+  validation {
+    condition     = var.ecs_min_capacity >= 1 && floor(var.ecs_min_capacity) == var.ecs_min_capacity
+    error_message = "ecs_min_capacity must be a positive integer."
+  }
 }
 
 variable "ecs_max_capacity" {
   description = "Maximum ECS tasks when autoscaling is enabled."
   type        = number
   default     = 6
+
+  validation {
+    condition     = var.ecs_max_capacity >= 1 && floor(var.ecs_max_capacity) == var.ecs_max_capacity
+    error_message = "ecs_max_capacity must be a positive integer."
+  }
+}
+
+variable "ecs_enable_availability_zone_rebalancing" {
+  description = "Explicitly enable ECS Availability Zone rebalancing. False leaves the existing AWS/provider setting unchanged."
+  type        = bool
+  default     = false
+}
+
+variable "ecs_cpu_target_utilization" {
+  description = "Target average CPU percentage for ECS Service Auto Scaling. Initial threshold must be calibrated with representative load."
+  type        = number
+  default     = 60
+
+  validation {
+    condition     = var.ecs_cpu_target_utilization > 0 && var.ecs_cpu_target_utilization < 100
+    error_message = "ecs_cpu_target_utilization must be between 0 and 100, exclusive."
+  }
 }
 
 variable "ecs_memory_target_utilization" {
   description = "Target memory utilization percentage for ECS Service Auto Scaling."
   type        = number
   default     = 70
+
+  validation {
+    condition     = var.ecs_memory_target_utilization > 0 && var.ecs_memory_target_utilization < 100
+    error_message = "ecs_memory_target_utilization must be between 0 and 100, exclusive."
+  }
 }
 
 variable "ecs_request_count_per_target" {
-  description = "Target ALB request count per target for ECS Service Auto Scaling."
+  description = "Target ALB requests per target per minute for ECS Service Auto Scaling; does not count individual WebSocket messages."
   type        = number
   default     = 1000
+
+  validation {
+    condition     = var.ecs_request_count_per_target > 0
+    error_message = "ecs_request_count_per_target must be positive."
+  }
 }
 
 variable "ecs_scale_in_cooldown_seconds" {
   description = "Cooldown before ECS scales in after a scale event."
   type        = number
   default     = 300
+
+  validation {
+    condition     = var.ecs_scale_in_cooldown_seconds >= 0 && floor(var.ecs_scale_in_cooldown_seconds) == var.ecs_scale_in_cooldown_seconds
+    error_message = "ecs_scale_in_cooldown_seconds must be a nonnegative integer."
+  }
 }
 
 variable "ecs_scale_out_cooldown_seconds" {
   description = "Cooldown before ECS scales out after a scale event."
   type        = number
   default     = 60
+
+  validation {
+    condition     = var.ecs_scale_out_cooldown_seconds >= 0 && floor(var.ecs_scale_out_cooldown_seconds) == var.ecs_scale_out_cooldown_seconds
+    error_message = "ecs_scale_out_cooldown_seconds must be a nonnegative integer."
+  }
 }
 
 variable "ecs_deployment_minimum_healthy_percent" {

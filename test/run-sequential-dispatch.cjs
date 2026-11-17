@@ -8,6 +8,7 @@ const { join } = require('node:path');
 const { createClient } = require('redis');
 const { randomBytes } = require('node:crypto');
 const { minimalEnvironment } = require('./load/isolation.cjs');
+const { benchmarkSettings } = require('./load/dispatch-benchmark.cjs');
 const root = join(__dirname, '..');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 let server, client;
@@ -15,6 +16,15 @@ let server, client;
 async function main() {
   const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
   if (!pgBin) throw new Error('Set DISPATCH_TEST_POSTGRES_BIN to local PostgreSQL/PostGIS binaries.');
+  const loadEnvironment = {};
+  if (process.env.DISPATCH_TEST_LOAD === '1') {
+    benchmarkSettings(); // Reject oversized/invalid workloads before starting anything.
+    for (const key of ['DISPATCH_TEST_LOAD', 'DISPATCH_TEST_LOAD_REQUESTS',
+      'DISPATCH_TEST_LOAD_CONCURRENCY', 'DISPATCH_TEST_LOAD_REPLICAS', 'DISPATCH_TEST_LOAD_STAGE',
+      'DISPATCH_TEST_LOAD_PROFILE']) {
+      if (process.env[key] !== undefined) loadEnvironment[key] = process.env[key];
+    }
+  }
   const port = await new Promise((resolve, reject) => {
     const probe = createServer(); probe.on('error', reject);
     probe.listen(0, '127.0.0.1', () => {
@@ -55,7 +65,7 @@ async function main() {
       NODE_ENV: 'test', TZ: 'UTC', AWS_EC2_METADATA_DISABLED: 'true',
       DISPATCH_TEST_POSTGRES_BIN: pgBin, DISPATCH_TEST_REDIS_PORT: String(port),
       DISPATCH_TEST_REDIS_PASSWORD: password,
-      ...(process.env.DISPATCH_TEST_LOAD === '1' ? { DISPATCH_TEST_LOAD: '1' } : {}),
+      ...loadEnvironment,
       ...(process.env.RIDE_AUDIT_MOBILE_ROOT ? { RIDE_AUDIT_MOBILE_ROOT: process.env.RIDE_AUDIT_MOBILE_ROOT } : {}),
     }),
   });

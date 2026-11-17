@@ -105,7 +105,7 @@ describe('TripRequestsService recommended price', () => {
     expect(recommendation.weatherImpact.priceMultiplier).toBe(2000 / 1500);
   });
 
-  it('recommends the same 1500 FC per kilometer for motorcycles in normal conditions', async () => {
+  it('recommends 1200 FC per kilometer for two-wheel motorcycles in normal conditions', async () => {
     const weatherAwarenessService = {
       getRouteImpact: jest.fn().mockResolvedValue({
         heavyRain: false,
@@ -152,9 +152,9 @@ describe('TripRequestsService recommended price', () => {
     });
 
     expect(recommendation.vehicleType).toBe(VehicleType.MOTORCYCLE_TWO_WHEELS);
-    expect(recommendation.pricePerKmPerPassenger).toBe(1500);
-    expect(recommendation.recommendedPricePerSeat).toBe(7500);
-    expect(recommendation.recommendedTotalPrice).toBe(7500);
+    expect(recommendation.pricePerKmPerPassenger).toBe(1200);
+    expect(recommendation.recommendedPricePerSeat).toBe(6000);
+    expect(recommendation.recommendedTotalPrice).toBe(6000);
   });
 
   it('returns every vehicle choice with its respective price', async () => {
@@ -206,13 +206,13 @@ describe('TripRequestsService recommended price', () => {
       }),
       expect.objectContaining({
         vehicleType: VehicleType.MOTORCYCLE_TWO_WHEELS,
-        recommendedPricePerSeat: 7500,
-        recommendedTotalPrice: 15000,
+        recommendedPricePerSeat: 6000,
+        recommendedTotalPrice: 12000,
       }),
       expect.objectContaining({
         vehicleType: VehicleType.MOTORCYCLE_THREE_WHEELS,
-        recommendedPricePerSeat: 7500,
-        recommendedTotalPrice: 15000,
+        recommendedPricePerSeat: 5000,
+        recommendedTotalPrice: 10000,
       }),
     ]);
   });

@@ -1,5 +1,102 @@
 # Journal détaillé des changements d'infrastructure AWS
 
+## INFRA-2026-11-17-002 — Activation de la bascule automatique Valkey
+
+- Date / opérateur : 17 novembre 2026 à partir de 02 h 37, Africa/Kinshasa ; Codex après accord explicite du mainteneur.
+- Cible : groupe `zwanga-api-production-redis`, compte `046374119247`, région `eu-central-1`. Deux nœuds existants, primaire `-001` en `eu-central-1b`, réplique `-002` en `eu-central-1a` ; Multi-AZ déjà activé.
+- État initial : groupe disponible, `AutomaticFailover=disabled`, seul changement différé `AutomaticFailoverStatus=enabled`. API HTTP 200 avec PostgreSQL et Redis `ok`.
+- Action : `aws elasticache modify-replication-group --region eu-central-1 --replication-group-id zwanga-api-production-redis --automatic-failover-enabled --apply-immediately`. Le profil Terraform prévoit déjà cette valeur ; aucun changement de classe, nombre de nœuds, IAM, secret, donnée, RDS ou version applicative. Aucun `test-failover`, flush ou redémarrage volontaire.
+- Statut / validation : terminé. Après passage par `modifying` / `enabling`, groupe `available`, `MultiAZ=enabled`, `AutomaticFailover=enabled`, `PendingModifiedValues={}`. Primaire et réplique inchangés, disponibles dans deux AZ distinctes. Contrôles `/health` avant et pendant intervention HTTP 200 avec db/redis `ok` ; disponibilité ponctuelle vérifiée, pas de test de panne ou de charge.
+- Risque / coût : surveiller les reconnexions et la santé applicative pendant la modification ; aucun nœud supplémentaire demandé. La réplication multi-AZ et les deux nœuds étaient déjà provisionnés. Aucun engagement de capacité ou de reprise sans interruption.
+- Contrôles finaux : `/health` HTTP 200 avec db/redis `ok` après activation ; ECS 2 tâches désirées / 2 actives / 0 en attente, révision `:42` inchangée, PRIMARY/COMPLETED. Aucune interruption observée dans les contrôles ponctuels ; ceci n'est pas une mesure continue ni une recette fonctionnelle des paiements/trajets.
+- Retour arrière / suite : ne pas désactiver la protection ou supprimer la réplique automatiquement. En cas d'erreur, lire les événements et examiner les connexions avant toute nouvelle intervention ; test de panne réelle à planifier séparément avec autorisation. Ne pas réappliquer un ancien plan Terraform.
+
+## INFRA-2026-11-17-001 — Application du redimensionnement RDS autorisé
+
+- Date / opérateur : 17 novembre 2026 à partir de 02 h 18, Africa/Kinshasa ; Codex après confirmation explicite du mainteneur.
+- Périmètre : instance `zwanga-api-production-postgres`, compte `046374119247`, région `eu-central-1`. Passage `db.t4g.micro` → `db.t4g.small` déjà demandé par le plan Terraform appliqué par le mainteneur. Ni modification Redis, ni déploiement applicatif, ni migration de schéma pendant cette intervention.
+- État initial vérifié : RDS `available`, Single-AZ ; seul `DBInstanceClass=db.t4g.small` en attente. API : 2 tâches sur révision `:42`, PRIMARY/COMPLETED ; `/health` HTTP 200, db/redis `ok`.
+- Sauvegarde : snapshot manuel `zwanga-prod-before-small-20261117-0118` demandé avant toute modification ; disponibilité requise avant lancement. Sauvegardes automatiques conservées 7 jours.
+- Risque / coût : interruption temporaire de connexions pendant redimensionnement Single-AZ ; coût de la classe small et du snapshot manuel selon stockage facturable. Pas de désactivation de sauvegardes, TLS ou protections, ni élargissement IAM.
+- Procédure : attendre le snapshot, revérifier les modifications différées, appliquer exclusivement le changement de classe prévu avec `modify-db-instance --apply-immediately`, puis contrôler classe effective, statut, événements RDS, santé API et révision ECS. Ne pas relancer l'ancien plan Terraform.
+- Statut / validation : terminé. Snapshot confirmé `available` / 100 % avant commande ; dernière vérification RDS limitée au changement de classe attendu. RDS désormais `available`, `db.t4g.small`, Single-AZ, `PendingModifiedValues={}`. API finale `/health` HTTP 200 avec db/redis `ok`. ECS revenu à 2 tâches désirées / 2 actives / 0 en attente, même révision `:42`, PRIMARY/COMPLETED.
+- Chronologie AWS (Kinshasa, UTC+1) : sauvegarde terminée 02:23:07 ; application de la classe 02:24:38 ; arrêt DB 02:25:56 ; redémarrage DB 02:27:55 ; changement de classe terminé 02:28:00. Environ 2 minutes entre arrêt et redémarrage DB, pas une mesure exhaustive de l'indisponibilité utilisateur. Contrôles API 503 observés à 02:26:26 et 02:27:30, puis HTTP 200 après reprise.
+- Effet observé : ECS a automatiquement remplacé des tâches après les échecs ALB HTTP 503 pendant la coupure SQL ; aucun redémarrage manuel ou changement d'image effectué. Les événements RDS indiquent aussi à 02:29:05 « Performance Insights has been disabled » et « Monitoring Interval changed to 60 » ; la commande envoyée ne contenait que la classe et `--apply-immediately`, et aucun autre PendingModifiedValues n'était visible avant envoi.
+- Limites / suite : contrôles de disponibilité réussis, pas de test de trajet ou paiement réel ni de qualification de charge 1 000 + 1 000. Vérifier séparément la bascule Valkey précédemment différée et la nouvelle livraison applicative. Le snapshot manuel est conservé ; sa rétention/suppression sera décidée séparément.
+- Retour arrière : ne pas restaurer le snapshot ni réduire la classe automatiquement. En cas de panne persistante, examiner les événements et la connectivité ; restauration sous un autre identifiant uniquement après autorisation, avec prise en compte des écritures postérieures au snapshot. Aucun snapshot supprimé pendant cette intervention.
+
+## INFRA-2026-11-16-002 — Autoscaling API borné et répartition AZ
+
+- Date / opérateur : 16 novembre 2026, Africa/Kinshasa ; Codex à la demande du mainteneur.
+- Statut / périmètre : préparation locale du profil de capacité ; aucune application AWS, migration ou modification SSM. Production actuelle non modifiée.
+- Contexte / justification : accepter des pics API sans ajouter une troisième tâche permanente, tout en évitant que Terraform annule une augmentation automatique. Le budget de 175 USD reste un objectif, pas un plafond technique.
+- Configuration : `profiles/capacity-175.tfvars.json` passe à 2–3 tâches ARM64 512/1024, CPU cible 60 %, mémoire 70 %, HTTP 1 000 requêtes/cible/minute, cooldowns montée 60 s / réduction 600 s et rééquilibrage AZ. RDS small reste Single-AZ ; deux Valkey micro avec bascule restent la cible.
+- Fichiers : politique CPU, ownership de `desired_count`, rééquilibrage AZ et préconditions dans `ecs.tf` ; validations et variables dans `variables.tf` ; estimateurs `capacity-cost.cjs` et `capacity-workload.cjs`, leurs tests et procédure dans `docs/capacity-175-usd.md`.
+- Ressources / IAM : après application autorisée, cible Application Auto Scaling et trois politiques target tracking, avec alarmes CloudWatch gérées par AWS. Aucun nouveau secret ou droit applicatif ; vérifier que l'opérateur dispose du droit d'enregistrer la cible et, si nécessaire, créer le service-linked role ECS Auto Scaling.
+- Disponibilité / données : minimum deux API avec rééquilibrage AZ ; jusqu'à six tâches lors du rolling deployment. Pools inchangés ; budget théorique 72 connexions SQL avec pool 10, migration 2 et réserve 10, à vérifier contre la base réelle. Aucune migration métier. RDS Single-AZ reste un point de panne ; son changement micro → small demande une fenêtre de maintenance.
+- Coût : estimation archivée du 10 novembre, 163,59 USD au socle ; 167,03 USD avec troisième tâche 4 h/jour ; 184,21 USD si troisième tâche permanente. Hors taxes, mêmes hypothèses/provisions ; ni garantie de coût ni qualification 1 000 + 1 000.
+- Déploiement : utiliser le profil explicite avec les variables opérateur existantes, examiner un plan connecté puis demander approbation avant apply. Vérifier sauvegardes, paramètres/pools réels, droits, sous-réseaux, absence de remplacement destructif et notifications SNS. Les modifications de task definition passent toujours par le workflow de déploiement existant.
+- Validation : `terraform validate` et format des deux fichiers Terraform réussis localement ; 12 tests de profil/coût/politiques et charge théorique réussis ; garde documentaire CI et `git diff --check` réussis. Aucun test de bascule ou autoscaling AWS effectué, aucune suite applicative exhaustive relancée pour ce changement d'infrastructure.
+- Surveillance : CPU/mémoire, nombre désiré/réel, événements de scaling, erreurs ALB, latence de dispatch et reçus mobiles, attente SQL, réplication/évictions Valkey et coût hors crédits. Les WebSockets existants ne se redistribuent pas automatiquement.
+- Retour arrière : après revue, garder l'autoscaling avec min=max=2 pour revenir au socle ; ne pas supprimer une réplique ni réduire RDS en urgence. Si l'autoscaling est désactivé, le compte courant reste inchangé : `ecs_desired_count` ne pilote plus un service existant, un update-service ciblé et autorisé est nécessaire. Conserver l'image en service et les sauvegardes.
+- Restant : approbation du plan/coût, mise en service, contrôle de répartition et test mixte représentatif. Pas de certification de capacité à partir des seuls tests locaux.
+
+## INFRA-2026-11-16-001 — Contrôles de livraison et état du palier de capacité
+
+- Date / opérateur : 16 novembre 2026, Africa/Kinshasa ; Codex à la demande du mainteneur.
+- Statut / environnement : correctifs locaux pour les pipelines staging et production ; aucune ressource AWS modifiée, aucun déploiement ni migration applicative de production.
+- Contexte / cause : deux assertions SMS attendaient un ancien libellé ; la suite PostGIS `ZONES` n'était pas activée dans la CI. L'audit npm signalait aussi l'instrumentation HTTP OpenTelemetry avant 0.222.0 (GHSA-3v2p-hm54-8qcq).
+- Code / configuration : ajout de `ZONES` aux exports de binaires PostgreSQL dans `deploy.yml` et `deploy-staging.yml`, renforcement du test de politique CI sur la liste effectivement exportée ; alignement des deux assertions SMS en conservant leurs contrôles de confidentialité ; mise à jour ciblée de l'instrumentation HTTP et verrou npm, avec garde de version pour toutes ses copies transitives.
+- Infrastructure souhaitée : profil explicite `profiles/capacity-175.tfvars.json` conservé (2 tâches API ARM64 de 0,5 vCPU / 1 Gio, RDS small Single-AZ, 2 Valkey micro). Ne pas confondre avec l'état AWS observé lors de l'audit : 1 tâche API, RDS micro et 1 Valkey. Synthèse et conditions dans `docs/capacity-175-usd.md`.
+- Variables / IAM / données : aucun nouveau secret, droit IAM ou paramètre runtime ; aucun changement Terraform de ressources. Les migrations géofencing restent à livrer avec l'application ; risques de verrouillage et activation séparée documentés.
+- Coûts / disponibilité : aucun coût AWS engagé ; durée CI augmentée par la suite PostGIS isolée. Aucun engagement de capacité 1 000 trajets + 1 000 demandes ni de facture plafonnée à 175 USD.
+- Déploiement : inclure les nouveaux fichiers, obtenir une CI verte, valider les migrations sur volume représentatif et garder le géofencing désactivé initialement. Un plan connecté et une autorisation distincte sont nécessaires avant toute application du profil de capacité.
+- Validation locale : 127 tests OTP/proxy/confidentialité/PIN réussis ; 36 tests géofencing réussis dont 12 sur PostgreSQL 18/PostGIS jetable ; 23 contrôles dépendances/CI/dimensionnement réussis ; compilation NestJS et garde de documentation infrastructure réussies. Audit npm après mise à jour : 8 alertes faibles, aucune modérée/haute/critique. Node local 24.11.0, différent du 24.22.1 de CI : la suite exhaustive et les intégrations du runner restent à exécuter en CI. Aucun résultat CI distante ni test de charge AWS revendiqué.
+- Surveillance : tests PostGIS réellement exécutés, erreurs de démarrage/migration, mémoire RDS, évictions Valkey, temps de première invitation et accusés de réception mobile.
+- Retour arrière : réviser le code via le workflow habituel ; ne pas réintroduire une instrumentation vulnérable ni supprimer les contrôles CI pour contourner un échec. Aucune modification AWS à annuler ; ne pas supprimer les données de géofencing.
+
+## INFRA-2026-11-12-002 — Profilage SQL et partage des échéances de dispatch
+
+- Statut : modifications locales du backend et du banc d'essai uniquement ; aucun apply, déploiement, accès aux données applicatives ou changement de capacité AWS.
+- Cause mesurée : index KYC existant omis par la fixture de charge ; jointure finale redondante vers `users` dans la découverte ; lecture simultanée des mêmes lots Redis par plusieurs workers.
+- Changements : recréation de l'index existant dans la fixture, profilage EXPLAIN optionnel sans paramètres, suppression de la seule jointure redondante, prise atomique des échéances Redis par lots de 50 avec récupération après 30 s en cas d'arrêt du worker.
+- Invariants : mêmes contrôles d'éligibilité et verrous SQL, même file de candidats par demande, même délai de réponse conducteur. Ni suppression destructive des échéances ni nouvelle migration de production.
+- Mesure de référence corrigée : 1 000 demandes / concurrence 6 / deux objets dans un processus, 133,110 s et p95 depuis rafale 127,173 s. La différence avec 209,443 s corrige la fixture, pas le code de production. Résultats après correctifs et limites dans `docs/capacity-175-validation-2026-11-12.md`.
+- Coûts : aucun coût AWS engagé, profil et prix archivés inchangés. Ces mesures locales ne certifient pas la cible mixte de 1 000 trajets + 1 000 demandes dans 175 USD/mois.
+- Retour arrière : rétablir ensemble la méthode de lecture Redis et son appel, puis la requête de découverte, avec tests de non-régression. Aucun changement de format de données persistées.
+- Validation complémentaire du 13 novembre : 79 tests PostgreSQL/Redis jetables réussis, 3 ignorés, après correction des deux mocks restants ; 13 tests de dimensionnement et compilation de production réussis. TypeScript global conserve seulement deux erreurs préexistantes de fixtures dans `driver-category.spec.ts`. Aucun nouvel essai de charge mixte ou changement AWS.
+
+## INFRA-2026-11-12-001 — Charge cible, coût du trafic et benchmark du palier 175 USD
+
+- Date / opérateur : 12 novembre 2026, Africa/Kinshasa ; Codex à la demande du mainteneur.
+- Statut / environnement : préparation locale uniquement ; aucun plan connecté, apply, déploiement, changement IAM, SSM ou base applicative.
+- Contexte : poursuivre la cible 1 000 trajets + 1 000 demandes dans un budget de 175 USD/mois, sans transformer une estimation financière en promesse de capacité.
+- Modifications : calculateur hors ligne `scripts/capacity-workload.cjs`, tests `test/capacity-workload.test.cjs`, benchmark borné configurable et tests de ses paramètres ; documentation `docs/capacity-175-validation-2026-11-12.md`. Profil Terraform et comportement de production inchangés.
+- Justification : compter les conducteurs disponibles séparément des conducteurs occupés, intégrer trafic GPS/connexions ALB, budget SQL pendant rolling deployment et attente/reprise des demandes différées.
+- Coût : aucun coût AWS engagé. Prix régionaux archivés au 10 novembre conservés ; modèles indicatifs 163,76 à 178,12 USD selon durée de pointe/taille des messages, provision de transfert non garantie, taxes exclues. Pas de plafond automatique d'arrêt.
+- Données : bases PostgreSQL/PostGIS et Redis jetables pour le benchmark ; aucune migration métier, aucune notification réelle. Pas de secret ajouté aux outils de calcul ou au compte rendu.
+- Validation : 13 tests hors ligne réussis ; `terraform validate` et `terraform fmt -check budget.tf` réussis ; compilation de production sans émission réussie. Le contrôle TypeScript global reste bloqué par deux fixtures GoogleAuthProfile incomplètes dans le fichier préexistant `src/users/driver-category.spec.ts`, non modifié ici.
+- Mesures : 100 demandes récupérées en 3,229 s, dont 7 différées ; à 1 000 demandes / concurrence 8, seulement 196 invitations après 68,7 s. À concurrence 6, les 1 000 invitations aboutissent sans doublon en attente en 209,443 s (p95 depuis la rafale : 198,646 s) : exhaustivité validée, latence cible non atteinte. Objectif 1 000 + 1 000 non qualifié. Les autres suites ne sont pas déclarées validées.
+- Surveillance / suite : recette mixte sur infrastructure représentative, latence création → réception mobile, reprises/équité de file, pool et crédits CPU, coûts de transfert. Examiner et faire approuver le plan du profil après qualification, pas avant.
+- Retour arrière : retirer les outils/documentation ajoutés n'affecte pas AWS. Aucun changement de runtime, délai ou garde-fou n'est nécessaire pour revenir à l'état précédent.
+
+## INFRA-2026-11-10-001 — Préparation du palier de capacité à 175 USD
+
+- Date / opérateur : 10 novembre 2026, Africa/Kinshasa ; Codex à la demande du mainteneur.
+- Statut : préparé localement, non appliqué. Cible : production ; aucun redéploiement, aucune écriture AWS, aucune migration applicative.
+- Contexte : objectif de 1 000 trajets et 1 000 demandes simultanés, budget annoncé de 175 USD/mois. Lecture AWS : 1 tâche ARM64 512/1024, révision `:41` stable ; base/Redis initialement mono-nœud. Les crédits promotionnels masquent le coût réel net.
+- Justification : préparer un palier mesurable, sans promettre un débit non testé ni modifier les files ou les invariants financiers. Les connexions PostgreSQL doivent être budgétées par processus et pendant le rolling deployment.
+- Fichiers : `profiles/capacity-175.tfvars.json`, `profiles/prices-eu-central-1-2026-11-10.json`, `scripts/capacity-cost.cjs`, `budget.tf`, `docs/capacity-175-usd.md`, `test/capacity-budget.test.cjs` à la racine du dépôt.
+- Configuration : profil explicite (pas auto-chargé), 2 tâches 0,5 vCPU/1 Gio, RDS small Single-AZ, 2 Valkey micro, autoscaling désactivé, traces à 1 %. Le runtime, les secrets, IAM, le réseau et les règles métier restent inchangés. Le proxy existant est inclus dans le coût, pas modifié.
+- Budget optionnel : `monthly_cost_budget_usd` vaut `null` par défaut. Le profil propose 175 USD ; alertes réelles à 80/100 %, prévisionnelle à 100 %, exclusion des crédits/remboursements, taxes incluses, destinataires opérateur obligatoires. Aucune action automatique d'arrêt.
+- Coût : estimation publique Francfort 163,59 USD sur 744 h, hors taxes, avec 1 LCU moyen, 20 heures-tâches temporaires et 25 USD de provision annexes ; marge 11,41 USD, non garantie. Le modèle échoue explicitement si le scénario dépasse le plafond. Aucun coût de capacité supplémentaire engagé.
+- Disponibilité : RDS small nécessite une fenêtre de redimensionnement Single-AZ ; Redis gagne une réplique, pas deux primaires. PostgreSQL/proxy restent des points de panne. Répartition AZ des tâches et reconnexion des clients à vérifier après un éventuel déploiement.
+- Validation locale : six tests du calculateur/profil réussis ; `terraform validate` et format de `budget.tf` valides. Benchmark séquentiel existant réussi sur des bases jetables (60 demandes par scénario, 3 instances dans un processus, pas de push réel). Ce n'est pas le test cible 1 000 + 1 000.
+- Déploiement : confirmer le périmètre taxes/services, fournir les vraies adresses d'alerte, vérifier sauvegarde/restauration et migrations, préparer et relire le plan explicite avec les variables existantes. Aucun `plan` connecté à la production ni `apply` effectué ici ; voir la procédure et les critères de recette dans `docs/capacity-175-usd.md`.
+- Surveillance : latence de dispatch et de réception, files, pool SQL, CPU/mémoire/crédits T4g, erreurs, réplique Redis, coûts hors crédits ; confirmer SNS et les actions des alarmes proxy avant activation.
+- Retour arrière : retirer le profil avant application n'a aucun effet AWS. Après application, examiner un plan de retour contrôlé ; ne pas réduire à chaud RDS ou supprimer une réplique pour couper la facture. Conserver les sauvegardes et les traitements en cours.
+- Restant : validation de charge mixte représentative 1 000 + 1 000 avec GPS, alertes et pannes ; test de restauration/basculement ; accord sur le plan et le coût avant toute mutation AWS.
+
 ## INFRA-2026-11-09-001 — Contrôles de non-régression avant déploiement
 
 - Date / opérateur : 9 novembre 2026, Africa/Kinshasa ; Codex, à la demande du mainteneur.

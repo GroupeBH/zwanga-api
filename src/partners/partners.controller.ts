@@ -4,7 +4,7 @@ import { Auth } from '../auth/decorators/auth.decorator';
 import { Roles } from '../common/decorators/roles.decorator';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
 import { UserRole } from '../users/entities/user.entity';
-import { CreateFieldAgentDto, CreateFieldLeadDto, CreateFieldOrganizationDto, CreateFieldTicketDto, CreatePartnerOrganizationDto, SaveFieldDailyReportDto, SetFieldTargetDto, SetFieldZonesDto } from './partners.dto';
+import { AddCompanyManagerDto, CreateCompanyOrganizationDto, CreateFieldAgentDto, CreateFieldLeadDto, CreateFieldOrganizationDto, CreateFieldTicketDto, CreatePartnerOrganizationDto, SaveFieldDailyReportDto, SetFieldTargetDto, SetFieldZonesDto } from './partners.dto';
 import { PartnersService } from './partners.service';
 
 @ApiTags('Partners')
@@ -72,6 +72,21 @@ export class PartnersController {
   @Get('admin/organizations/:id/field/team')
   @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
   adminFieldTeam(@Param('id', ParseUUIDPipe) id: string) { return this.partners.adminFieldTeam(id); }
+
+  @Post('admin/organizations')
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+  @SensitiveThrottle(5, 60000)
+  createCompanyOrganization(@Body() dto: CreateCompanyOrganizationDto) { return this.partners.createCompanyOrganization(dto); }
+
+  @Post('admin/organizations/:id/managers')
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+  @SensitiveThrottle(10, 60000)
+  addCompanyManager(@Param('id', ParseUUIDPipe) id: string, @Body() dto: AddCompanyManagerDto) { return this.partners.addCompanyManager(id, dto); }
+
+  @Delete('admin/organizations/:id/managers/:userId')
+  @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)
+  @SensitiveThrottle(10, 60000)
+  removeCompanyManager(@Param('id', ParseUUIDPipe) id: string, @Param('userId', ParseUUIDPipe) userId: string) { return this.partners.removeCompanyManager(id, userId); }
 
   @Post('admin/field/organizations')
   @Roles(UserRole.ADMIN, UserRole.SUPER_ADMIN)

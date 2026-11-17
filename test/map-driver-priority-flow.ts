@@ -113,7 +113,7 @@ export function mapDriverPriorityFlow(get: () => Fixture) {
     );
     await queue.close(r.id);
     jest
-      .spyOn(queue, 'due')
+      .spyOn(queue, 'claimDue')
       .mockRejectedValue(new Error('deadline read unavailable'));
     await relay.deadlines();
     expect((await offers(r.id)).filter((o) => o.status === 'pending')).toEqual([

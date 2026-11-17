@@ -1,3 +1,13 @@
+import { AssetCredits1780000124000 } from './1780000124000-AssetCredits';
+import { EquipmentAssetCredits1780000127000 } from './1780000127000-EquipmentAssetCredits';
+import { IntercityDriverCategory1780000128000 } from './1780000128000-IntercityDriverCategory';
+import { ContractAssetCreditRates1780000129000 } from './1780000129000-ContractAssetCreditRates';
+import { AssetCreditCostDisclosure1780000130000 } from './1780000130000-AssetCreditCostDisclosure';
+import { OperationalZones1780000131000 } from './1780000131000-OperationalZones';
+import { ZoneRuntimeSettings1780000132000 } from './1780000132000-ZoneRuntimeSettings';
+import { FleetRegistry1780000125000 } from './1780000125000-FleetRegistry';
+import { FleetExternalPayments1780000126000 } from './1780000126000-FleetExternalPayments';
+import { RequestPriceNegotiation1780000122000 } from './1780000122000-RequestPriceNegotiation';
 import { MobileOperations1780000111000 } from './1780000111000-MobileOperations';
 import { BookingPriceProposal1780000113000 } from './1780000113000-BookingPriceProposal';
 import { AdminAnalyticsIndexes1780000114000 } from './1780000114000-AdminAnalyticsIndexes';
@@ -16,6 +26,7 @@ import { DriverResponse75Seconds1780000107000 } from './1780000107000-DriverResp
 import { DriverResponse40Seconds1780000108000 } from './1780000108000-DriverResponse40Seconds';
 import { AdminDirectPayouts1780000109000 } from './1780000109000-AdminDirectPayouts';
 import { ReceiptResponseWindow1780000110000 } from './1780000110000-ReceiptResponseWindow';
+import { FourDriverDispatchWaves1780000123000 } from './1780000123000-FourDriverDispatchWaves';
 import { SeparateRequestAttentionLease1780000101000 } from './1780000101000-SeparateRequestAttentionLease';
 import { IndexRequestNotificationRetirement1780000099000 } from './1780000099000-IndexRequestNotificationRetirement';
 import { RequestResponsePhases1780000098000 } from './1780000098000-RequestResponsePhases';
@@ -124,6 +135,8 @@ import { DispatchDeliveryResilience1780000088000 } from './1780000088000-Dispatc
 import { SequentialRequestQueue1780000097000 } from './1780000097000-SequentialRequestQueue';
 
 import { CanonicalPhoneIdentity1780000119000 } from './1780000119000-CanonicalPhoneIdentity';
+import { DriverCategory1780000120000 } from './1780000120000-DriverCategory';
+import { PartnerCompanyManagers1780000121000 } from './1780000121000-PartnerCompanyManagers';
 
 export const databaseMigrations = [
   FillTotalSeats1780000000000,
@@ -245,4 +258,17 @@ export const databaseMigrations = [
   PartnerFieldWorkspace1780000117000,
   DriverCashSixTripCredit1780000118000,
   CanonicalPhoneIdentity1780000119000,
+  DriverCategory1780000120000,
+  PartnerCompanyManagers1780000121000,
+  RequestPriceNegotiation1780000122000,
+  FourDriverDispatchWaves1780000123000,
+  AssetCredits1780000124000,
+  FleetRegistry1780000125000,
+  FleetExternalPayments1780000126000,
+  EquipmentAssetCredits1780000127000,
+  IntercityDriverCategory1780000128000,
+  ContractAssetCreditRates1780000129000,
+  AssetCreditCostDisclosure1780000130000,
+  OperationalZones1780000131000,
+  ZoneRuntimeSettings1780000132000,
 ];

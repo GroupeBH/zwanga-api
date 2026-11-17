@@ -50,6 +50,14 @@ describe('GoogleMapsService directions', () => {
     expect((service as any).getDirectionsCacheKey({ ...dto, departureTime: undefined })).not.toBe(key);
   });
 
+  it.each([[5000, 5000], [1, 1000], [60000, 30000]])('bounds the optional approach HTTP timeout %s', async (timeoutMs, expected) => {
+    const get = jest.fn().mockReturnValue(of({ data: { status: 'OK', routes: [buildProviderRoute('Pickup')] } }));
+    const cache = { get: jest.fn().mockResolvedValue(undefined), set: jest.fn().mockResolvedValue(undefined) };
+    const service = new GoogleMapsService({ get } as any, { get: () => 'test-key' } as any, cache as any);
+    await service.getDirections({ origin: { lat: -4.3, lng: 15.3 }, destination: { lat: -4.31, lng: 15.31 } }, { timeoutMs });
+    expect(get).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ timeout: expected }));
+  });
+
   it('requests and returns only one route even when alternatives are requested', async () => {
     const httpService = {
       get: jest.fn().mockReturnValue(

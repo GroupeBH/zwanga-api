@@ -648,6 +648,10 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
   }
 
   private passengerRingData(notification: Notification): Record<string, unknown> {
+    if (notification.data?.type === 'driver_offer' && notification.data.negotiationStage === 'passenger_counter') return {
+      ...notification.data, driverId: notification.userId, role: 'driver', ringAlert: 'counter-offer-v1',
+      ringUntil: this.driverRingUntil(notification),
+    };
     if (notification.data?.type === 'offer_accepted') return { ...notification.data,
       driverId: notification.userId, role: 'driver', ringAlert: 'offer-accepted-v1',
       ringUntil: this.driverRingUntil(notification) };
@@ -836,7 +840,8 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
     if (!notification.userId || !notification.isActive ||
         !(await this.isCriticalNotificationStillDeliverable(notification))) return;
     if ((notification.data?.type === 'driver_offer' && notification.data.ringAlert === 'counter-offer-v1') ||
-        (notification.data?.type === 'offer_accepted' && notification.data.ringAlert === 'offer-accepted-v1')) {
+        (notification.data?.type === 'offer_accepted' && notification.data.ringAlert === 'offer-accepted-v1') ||
+        (notification.data?.type === 'trip_request_accepted' && notification.data.ringAlert === 'request-accepted-v1')) {
       if (Date.parse(this.driverRingUntil(notification)) <= Date.now()) return;
       if (!this.rideAlerts?.publish(notification.userId, { kind: 'incoming', eventId: notification.id,
         data: this.passengerRingData(notification) })) throw new Error('Realtime transport unavailable');

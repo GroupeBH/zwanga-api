@@ -4,6 +4,8 @@ import { ConfigModule } from '@nestjs/config';
 import { UsersService } from './users.service';
 import { AccountLifecycleModule } from './account-lifecycle.module';
 import { UsersController } from './users.controller';
+import { PublicDriverController } from './public-driver/public-driver.controller';
+import { PublicDriverService } from './public-driver/public-driver.service';
 import { User } from './entities/user.entity';
 import { KycDocument } from './entities/kyc-document.entity';
 import { Trip } from '../trips/entities/trip.entity';
@@ -37,8 +39,8 @@ import { AwsKycModule } from './aws-kyc/aws-kyc.module';
     AwsKycModule,
     SubscriptionsModule,
   ],
-  controllers: [UsersController],
-  providers: [UsersService, DiditKycService],
+  controllers: [UsersController, PublicDriverController],
+  providers: [UsersService, DiditKycService, PublicDriverService],
   exports: [UsersService, DiditKycService],
 })
 export class UsersModule {}

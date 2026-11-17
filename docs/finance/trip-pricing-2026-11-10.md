@@ -1,19 +1,21 @@
 # Tarification des trajets Zwanga
 
-Règle validée le **10 novembre 2026**. Cette grille remplace les anciennes estimations à 500 FC/km pour les voitures et 1 000 FC/km pour les motos. Elle est préparée dans le code local ; sa mise en production nécessite le déploiement du backend et de la version mobile correspondante.
+Règle initiale du **10 novembre 2026**, tarifs normaux par véhicule ajustés le **13 novembre 2026**. Version API `2026-11-13`. Préparée localement, non déployée par cette intervention.
 
 ## Grille tarifaire
 
-Les montants sont en francs congolais (FC, code monétaire CDF). Le contrat actuel de l’API est **par place**, et non par véhicule. La même grille s’applique aux voitures, motos à deux roues et motos à trois roues ; leurs limites de places ne changent pas.
+Les montants sont en francs congolais (FC, code monétaire CDF). Le contrat actuel de l’API est **par place**, et non par véhicule. Les tarifs normaux diffèrent par type ; les limites de places ne changent pas. Les montants demandés de 1 200 et 1 000 FC sont appliqués au kilomètre en conditions normales. Les autres règles existantes sont conservées, sans inventer de nouveaux tarifs majorés pour les motos.
 
 | Élément | Règle |
 | --- | --- |
 | Minimum | **2 500 FC par place** |
-| Conditions normales | **1 500 FC/km par place** |
+| Voiture, conditions normales | **1 500 FC/km par place** |
+| Moto 2 roues, conditions normales | **1 200 FC/km par place** |
+| Moto 3 roues, conditions normales | **1 000 FC/km par place** |
 | Circulation lourde ou forte pluie | **2 000 FC/km par place** |
 | Retard en circulation lourde | **120 FC/min de retard par place**, en supplément |
 
-Le tarif de 2 000 FC/km **remplace** celui de 1 500 FC/km. Il ne s’y ajoute pas. La présence simultanée de pluie et d’embouteillages ne double pas la majoration.
+Le tarif de 2 000 FC/km **remplace** le tarif normal du type choisi. Il ne s’y ajoute pas. Il reste commun aux trois types. La présence simultanée de pluie et d’embouteillages ne double pas la majoration.
 
 ## Quand la circulation est considérée comme lourde
 
@@ -32,7 +34,8 @@ Le retard est la différence positive entre la durée avec circulation et la dur
 retard = max(0, durée avec circulation − durée normale)
 
 tarif kilométrique = 2 000 FC si circulation lourde OU forte pluie
-                    1 500 FC sinon
+                    sinon : voiture 1 500 FC, moto 2 roues 1 200 FC,
+                           moto 3 roues 1 000 FC
 
 supplément de retard = 120 × retard en minutes si circulation lourde
                       0 sinon
@@ -51,7 +54,9 @@ Le serveur arrondit la part kilométrique et le supplément au franc le plus pro
 | Situation | Calcul pour une place | Montant |
 | --- | --- | --- |
 | 1 km, conditions normales | max(2 500, 1 × 1 500) | **2 500 FC** |
-| 5 km, conditions normales | 5 × 1 500 | **7 500 FC** |
+| 5 km, voiture, conditions normales | 5 × 1 500 | **7 500 FC** |
+| 5 km, moto 2 roues, conditions normales | 5 × 1 200 | **6 000 FC** |
+| 5 km, moto 3 roues, conditions normales | 5 × 1 000 | **5 000 FC** |
 | 5 km, forte pluie, sans retard | 5 × 2 000 | **10 000 FC** |
 | 5 km, durée normale 20 min, durée avec trafic 30 min | 5 × 2 000 + 10 × 120 | **11 200 FC** |
 | Même trajet, pluie et circulation lourde | même calcul, sans deuxième majoration | **11 200 FC** |
@@ -83,7 +88,9 @@ Le mobile utilise le montant du serveur et ne lui ajoute pas une seconde fois le
 
 Dans les deux parcours de création mobile (depuis l’accueil et formulaire standard), chaque choix **Voiture**, **Moto 2 roues** et **Moto 3 roues** affiche son `recommendedTotalPrice` reçu de `/trip-requests/vehicle-options`, même si ce type n’est pas sélectionné. Ce total inclut déjà le nombre de places et les éventuelles majorations. Le budget manuel du passager ne remplace pas ces estimations.
 
-La grille actuelle étant commune, les trois montants sont identiques pour un même itinéraire, les mêmes conditions et le même nombre de places. Par exemple, **3,3 km en conditions normales donnent 4 950 FC pour une place**, pour chaque type ; avec deux places, le total affiché est **9 900 FC**. Les limites de capacité restent appliquées : un type trop petit est indiqué indisponible.
+Pour **3,3 km en conditions normales et une place**, les estimations sont **4 950 FC voiture**, **3 960 FC moto 2 roues** et **3 300 FC moto 3 roues**. Avec deux places, les totaux doublent. Les montants peuvent encore être identiques sur une courte distance à cause du minimum commun de 2 500 FC, ou en conditions difficiles à cause du tarif majoré commun. Les limites de capacité restent appliquées : un type trop petit est indiqué indisponible.
+
+Chaque `options[].pricing` contient maintenant le détail du type concerné. Le `pricing` global de la réponse conserve la référence voiture pour les anciens clients : il ne doit pas remplacer la grille de l'option choisie. Le mobile utilise le détail de l'option pour son explication, avec repli global pour les anciens backends. Itinéraire et météo sont récupérés une seule fois par appel, puis réutilisés pour calculer les trois montants.
 
 Un changement d’itinéraire ou de places actualise les estimations. Pendant le chargement, le mobile affiche « Calcul… » ; en cas d’échec, « Indisponible », sans présenter l’ancien montant comme une estimation à jour. Ces prix nécessitent le backend mis à jour : une application encore reliée à l’ancienne production continue de recevoir l’ancienne grille tant que le backend n’est pas déployé.
 
@@ -104,6 +111,10 @@ Les subventions, remises et règles de règlement existantes restent distinctes 
 - Contrôler les quotas et la facturation Google associés aux requêtes avec trafic, ainsi que la couverture effective des zones météo. Aucun appel fournisseur réel ni changement AWS n’est nécessaire aux tests automatisés de cette grille.
 
 ## Validation
+
+Les campagnes ci-dessous sont historiques et correspondent à la grille initiale.
+Pour la mise à jour du 13 novembre : voir l'entrée du journal technique. Ne pas
+additionner les campagnes recouvrantes ni les présenter comme une recette native.
 
 **174 tests backend ciblés réussis, dans 9 suites**, couvrant le minimum, les tarifs normaux et majorés, les deux seuils de congestion, les fractions de minute, les données absentes, le cumul pluie/trafic, le cache Google, les totaux multi-places, les alertes de création et la conservation des anciens prix acceptés.
 

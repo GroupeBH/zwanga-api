@@ -52,6 +52,7 @@ import {
   resolveSelfServiceDriverState,
 } from '../users/user-role.policy';
 import { OtpService } from '../otp/otp.service';
+import { resolveDriverCategory } from '../users/driver-category';
 import { provisionAdminAccount } from '../admin/admin-account.provisioning';
 import { normalizeLegalName } from '../users/legal-identity.util';
 import { RedisService } from '../common/services/redis.service';
@@ -201,6 +202,7 @@ export class AuthService {
       isDriver,
       hasVehicle: Boolean(vehicle),
     });
+    const driverCategory = resolveDriverCategory(registerDto.driverCategory, role === UserRole.DRIVER);
 
     // Check if user already exists
     const existingUser = await this.userRepository.findOne({
@@ -266,6 +268,7 @@ export class AuthService {
       lastName: legalLastName,
       gender: gender ?? null,
       role: driverState.role,
+      driverCategory,
       isDriver: driverState.isDriver,
       driverOnboardingRequestedAt: role === UserRole.DRIVER ? new Date() : null,
       status: UserStatus.PENDING_KYC,
@@ -402,7 +405,11 @@ export class AuthService {
 
   async requestPinResetOtp(
     dto: PinResetRequestDto,
-  ): Promise<{ message: string }> {
+  ): Promise<{ message: string; expiresInSeconds: number }> {
+    const response = {
+      message: PIN_RESET_GENERIC_MESSAGE,
+      expiresInSeconds: this.otpService.validitySeconds('pin_reset'),
+    };
     const user = await this.userRepository.findOne({
       where: { phone: authAccountPhoneWhere(dto.phone) },
     });
@@ -410,7 +417,7 @@ export class AuthService {
     // Return the same response for unknown or ineligible accounts to avoid
     // exposing which phone numbers are registered.
     if (!this.canUseSelfServicePinReset(user)) {
-      return { message: PIN_RESET_GENERIC_MESSAGE };
+      return response;
     }
 
     const delivery = await this.otpService.sendOtp(canonicalAccountPhone(user.phone), 'pin_reset');
@@ -420,7 +427,7 @@ export class AuthService {
       delivery.expiresInSeconds ?? PIN_RESET_TOKEN_TTL_SECONDS,
     );
 
-    return { message: PIN_RESET_GENERIC_MESSAGE };
+    return response;
   }
 
   async verifyPinResetOtp(dto: PinResetVerifyOtpDto): Promise<{
@@ -458,6 +465,23 @@ export class AuthService {
     );
     if (!otpConsumed) {
       throw new BadRequestException('Code OTP invalide ou expiré');
+    }
+
+    // A successful SMS challenge also proves ownership of this account phone.
+    // Persist that fact independently of Redis expiry or the next app session.
+    // Never validate a number/account changed while the provider was responding.
+    const phoneVerified = await this.userRepository.update(
+      {
+        id: user.id,
+        phone: user.phone,
+        role: user.role,
+        status: user.status,
+        isActive: true,
+      },
+      { isPhoneVerified: true },
+    );
+    if (phoneVerified.affected !== 1) {
+      throw new BadRequestException('Le compte a changé. Demandez un nouveau code.');
     }
 
     const resetToken = `${user.id}.${randomBytes(32).toString('base64url')}`;
@@ -1053,6 +1077,7 @@ export class AuthService {
     signupOptions?: Pick<
       GoogleMobileAuthDto,
       | 'role'
+      | 'driverCategory'
       | 'phoneVerificationToken'
       | 'isDriver'
       | 'vehicle'
@@ -1088,6 +1113,7 @@ export class AuthService {
     signupOptions?: Pick<
       GoogleMobileAuthDto,
       | 'role'
+      | 'driverCategory'
       | 'phoneVerificationToken'
       | 'isDriver'
       | 'vehicle'
@@ -1232,6 +1258,7 @@ export class AuthService {
           gender: gender ?? null,
           profilePicture: profilePicture ?? undefined,
           role: driverState.role,
+          driverCategory: resolveDriverCategory(signupOptions?.driverCategory, role === UserRole.DRIVER),
           isDriver: driverState.isDriver,
           driverOnboardingRequestedAt:
             role === UserRole.DRIVER ? new Date() : null,
@@ -1493,6 +1520,7 @@ export class AuthService {
     signupOptions?: Pick<
       AppleMobileAuthDto,
       | 'gender'
+      | 'driverCategory'
       | 'phoneVerificationToken'
       | 'role'
       | 'isDriver'
@@ -1630,6 +1658,7 @@ export class AuthService {
         lastName: legalLastName,
         gender: signupOptions?.gender ?? null,
         role: driverState.role,
+        driverCategory: resolveDriverCategory(signupOptions?.driverCategory, role === UserRole.DRIVER),
         isDriver: driverState.isDriver,
         driverOnboardingRequestedAt:
           role === UserRole.DRIVER ? new Date() : null,
