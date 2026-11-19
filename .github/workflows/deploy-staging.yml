@@ -78,7 +78,7 @@ jobs:
         run: |
           npm ci --legacy-peer-deps
           npm run test:dependencies
-          node --test test/ci-integration-policy.test.cjs
+          node --test test/ci-integration-policy.test.cjs test/observability-kms.test.cjs test/capacity-budget.test.cjs
           npm audit --omit=dev --audit-level=high
           node test/run-otp-redis.cjs
           npm run test -- --runInBand

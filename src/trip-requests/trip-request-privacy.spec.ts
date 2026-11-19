@@ -88,6 +88,8 @@ function buildService() {
     {},
     {},
     {
+      getPremiumFeaturesForUsers: jest.fn(async (ids: string[]) => new Map(ids.map(id =>
+        [id, { isPremium: false, premiumBadgeEnabled: false }]))),
       getPremiumOverview: jest
         .fn()
         .mockResolvedValue({ isPremium: false, premiumBadgeEnabled: false }),

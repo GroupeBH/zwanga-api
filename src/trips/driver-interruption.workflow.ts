@@ -9,6 +9,7 @@ import { Booking, BookingStatus } from '../bookings/entities/booking.entity';
 import { BookingsService } from '../bookings/bookings.service';
 import { InterruptionFareQuote } from '../bookings/interruption-fare';
 import { Trip, TripStatus } from './entities/trip.entity';
+import { enqueueTripStartNotifications } from './trip-start-notifications';
 import {
   DriverTripInterruptionConfirmation as Confirmation,
   DriverTripInterruptionRequest as Interruption,
@@ -313,6 +314,7 @@ export class DriverInterruptionWorkflow {
       // Keep the original start, pickup flags, agreed prices and current position on resume.
       await manager.save(Interruption, request);
       await manager.save(Trip, trip);
+      await enqueueTripStartNotifications(manager, trip, request.id);
       return true;
     });
   }

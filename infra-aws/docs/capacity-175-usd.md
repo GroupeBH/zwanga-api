@@ -2,6 +2,24 @@
 
 État initial au 10 novembre 2026 : **préparé localement, non appliqué à AWS**.
 
+## Configuration locale retenue au 19 novembre 2026
+
+Le dimensionnement retenu figure désormais dans `production.auto.tfvars`, chargé
+automatiquement depuis `infra-aws`. Le fichier `profiles/capacity-175.tfvars.json`
+reste une copie contrôlée par les tests CI, et non un prérequis à chaque plan.
+Cela évite qu'un oubli du profil propose de réduire RDS, supprimer la réplication
+Redis ou retirer l'autoscaling. `operators.tfvars` reste privé et doit encore être
+fourni explicitement pour les destinataires d'alertes. Sans destinataire, la
+précondition du budget refuse le plan.
+
+Pour les correctifs KMS, générer un nouveau plan avec
+`terraform plan -var-file=operators.tfvars -out=kms-production.tfplan`.
+Vérifier son contenu avec `terraform show -no-color kms-production.tfplan` : seuls
+les deux changements IAM sont attendus, sans ajout ni suppression. Après revue
+et approbation, utiliser `terraform apply kms-production.tfplan`. Ne pas réutiliser
+les anciens plans ni publier les fichiers de plan. Aucun apply n'a été réalisé
+par cette mise à jour locale. Les relevés des sections suivantes sont historiques.
+
 ## Actualisation du 17 novembre 2026
 
 Après le plan appliqué par le mainteneur et son autorisation explicite pour la
@@ -340,9 +358,9 @@ node test/run-sequential-dispatch.cjs src/trip-requests/dispatch/sequential-disp
 3. Vérifier sauvegarde RDS, restauration, migrations, image ARM64 et compatibilité
    avec deux tâches. Le redimensionnement Single-AZ RDS peut interrompre les
    connexions ; prévoir une fenêtre et la reprise applicative.
-4. Le fichier de profil est **explicite**, pas `.auto.tfvars` : un `apply`
-   ordinaire ne l'active pas. Ne pas remplacer le fichier de configuration
-   historique ni supprimer les paramètres SSM existants.
+4. Depuis le 19 novembre, les valeurs de capacité sont chargées automatiquement
+   par `production.auto.tfvars`. Le profil explicite reste disponible et sa
+   cohérence est testée. Ne pas supprimer les paramètres SSM existants.
 5. Préparer un plan avec le même état Terraform que la production, ses variables
    existantes, puis ce profil en dernier et les vraies adresses d'alerte. Examiner
    toutes les dérives préexistantes ; refuser tout remplacement de base/VPC,
@@ -354,7 +372,7 @@ node test/run-sequential-dispatch.cjs src/trip-requests/dispatch/sequential-disp
 ```sh
 # Depuis infra-aws, après préparation des variables habituelles et d'un fichier
 # local operators.tfvars définissant alert_email_addresses (adresses réelles).
-terraform plan -var-file=profiles/capacity-175.tfvars.json -var-file=operators.tfvars -out=capacity.tfplan
+terraform plan -var-file=operators.tfvars -out=capacity-review.tfplan
 ```
 
 Cette commande n'a pas été exécutée contre l'état AWS pendant cette préparation.

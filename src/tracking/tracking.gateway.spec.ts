@@ -14,6 +14,7 @@ describe('TrackingGateway boarding detection recovery', () => {
     updateDriverLocation: jest.Mock;
   };
   let bookingsService: {
+    queueAutomaticRideProgressForTrip: jest.Mock;
     evaluateAutomaticRideProgressForTrip: jest.Mock;
     updatePassengerLocation: jest.Mock;
   };
@@ -25,6 +26,7 @@ describe('TrackingGateway boarding detection recovery', () => {
       updateDriverLocation: jest.fn(),
     };
     bookingsService = {
+      queueAutomaticRideProgressForTrip: jest.fn().mockResolvedValue(undefined),
       evaluateAutomaticRideProgressForTrip: jest.fn().mockResolvedValue({
         tripId: 'trip-1',
         events: [],

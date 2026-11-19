@@ -28,6 +28,8 @@ describe('PartnersService field access', () => {
       members.findOne.mockResolvedValue({role,organization:{...organization,status,partnerTypes:[{type:'FLEET_OWNER',status:'ACTIVE'}]}});
       const caps = await service.capabilities('22222222-2222-4222-8222-222222222222',organization.id);
       expect(caps.permissions.includes('fleet.payments.confirm')).toBe(['ORG_ADMIN','ORG_MANAGER','FLEET_MANAGER'].includes(role));
+      expect(caps.permissions.includes('fleet.applications.read')).toBe(['ORG_ADMIN','ORG_MANAGER','FLEET_MANAGER'].includes(role));
+      expect(caps.permissions.includes('fleet.applications.review')).toBe(status === 'ACTIVE' && ['ORG_ADMIN','ORG_MANAGER','FLEET_MANAGER'].includes(role));
       if(status==='SUSPENDED') expect(caps.permissions).not.toContain('vehicles.assign_driver');
     }
   });
@@ -126,10 +128,10 @@ describe('PartnersService field access', () => {
     Object.assign(service, { targets: { findBy: jest.fn().mockResolvedValue([{ goal: 10 }, { goal: 12 }]) } });
     const today = new Date();
     const yesterday = new Date(today.getTime() - 86400000);
-    jest.spyOn(service as any, 'leadProgress').mockResolvedValue([
+    jest.spyOn(service as any, 'fieldProgressPages').mockImplementation(async function* () { yield [
       { status: 'FIRST_TRIP', firstTripAt: today, createdAt: yesterday },
       { status: 'REGISTERED', firstTripAt: null, createdAt: yesterday },
-    ]);
+    ]; });
 
     const result = await service.fieldTeam('22222222-2222-4222-8222-222222222222', organization.id);
     expect(result.performance).toMatchObject({ agents: 2, contacted: 2, registered: 2, firstTrips: 1, targetGoal: 22, targetsDefined: 2 });

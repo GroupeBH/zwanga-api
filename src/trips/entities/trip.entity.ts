@@ -128,6 +128,7 @@ export class Trip {
   @Column({ type: 'timestamp', nullable: true })
   completedAt: Date;
 
+  @Index('IDX_trips_current_location', { spatial: true })
   @Column({
     type: 'geography',
     spatialFeatureType: 'Point',

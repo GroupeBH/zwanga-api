@@ -1,5 +1,6 @@
 import { negotiateRequestPrice } from './negotiate-request-price';
 import { requestPickupSummary } from './request-pickup-summary';
+import { requestProfileStats } from './request-profile-stats';
 import { requestPriceAlternatives } from './request-search-map';
 import { claimRequestAcceptance, completeRequestAcceptance, releaseRequestAcceptance, startPassengerDecision } from './dispatch/request-acceptance';
 import { changeRequestDriver, withdrawRequestDriver } from './change-request-driver';
@@ -81,9 +82,12 @@ import { ACCEPTED_REQUEST_EXPIRATION_MS, UNACCEPTED_REQUEST_EXPIRATION_MS, asser
 import { enqueueTransactionalNotification } from '../notifications/transactional-notification';
 import { lockAvailableAccounts } from '../users/account-availability';
 import { HistoryPageQuery, orderHistory } from '../common/history-page';
-import { requestPageIds, offerPageIds } from './request-pages';
+import { requestPageIds, offerPageIds, requestDiscoveryIds } from './request-pages';
+import { RequestDiscoveryQuery } from './dto/request-discovery.dto';
 import { homeRequestIds } from './home-request-ids';
+import { optionalLegacyPage, LegacyPageQuery } from '../common/legacy-page';
 import { randomUUID } from 'node:crypto';
+import { withProviderDeadline } from '../common/provider-work';
 import { CounterOfferDto } from './dto/counter-offer.dto';
 import { RETIRE_COUNTEROFFER_NOTIFICATIONS_SQL } from './dispatch/retire-request-invitations';
 import { claimInAppRequest } from './dispatch/claim-in-app-request';
@@ -189,6 +193,7 @@ export interface SanitizedTripRequest {
 }
 
 export interface TripRequestPriceRecommendation {
+  estimateQuality: 'complete' | 'degraded';
   currency: 'CDF';
   vehicleType: VehicleType;
   pricingModel: 'distance_per_vehicle_type';
@@ -215,6 +220,7 @@ export interface TripRequestVehiclePriceOption {
 }
 
 export interface TripRequestVehicleOptionsResponse {
+  estimateQuality: 'complete' | 'degraded';
   currency: 'CDF';
   pricingModel: 'distance_per_vehicle_type';
   distanceMeters: number | null;
@@ -431,6 +437,7 @@ export class TripRequestsService {
   async recommendPrice(
     payload: RecommendTripRequestPriceDto,
   ): Promise<TripRequestPriceRecommendation> {
+    const deadline = Date.now() + 12000;
     const numberOfSeats = payload.numberOfSeats ?? 1;
     const vehicleType = payload.vehicleType ?? VehicleType.CAR;
 
@@ -438,24 +445,26 @@ export class TripRequestsService {
       throw new BadRequestException('Le nombre de places doit être au moins 1');
     }
 
-    const departurePoint = await this.resolvePointFromCoordinatesOrAddress(
+    const [departurePoint, arrivalPoint] = await Promise.all([this.resolvePointFromCoordinatesOrAddress(
       payload.departureCoordinates,
       payload.departureLocation,
       payload.departureReference,
       'trip request price departure',
-    );
-    const arrivalPoint = await this.resolvePointFromCoordinatesOrAddress(
+      deadline,
+    ), this.resolvePointFromCoordinatesOrAddress(
       payload.arrivalCoordinates,
       payload.arrivalLocation,
       payload.arrivalReference,
       'trip request price arrival',
-    );
+      deadline,
+    )]);
     const { pricing, weatherImpact } = await this.calculatePricing(
-      departurePoint, arrivalPoint, 'trip request price recommendation', vehicleType,
+      departurePoint, arrivalPoint, 'trip request price recommendation', vehicleType, deadline,
     );
     const { distanceMeters, recommendedPricePerSeat, pricePerKmPerPassenger } = pricing;
 
     return {
+      estimateQuality: pricing.distanceSource === 'google_directions' && pricing.trafficDataAvailable && weatherImpact.dataAvailable ? 'complete' : 'degraded',
       currency: 'CDF',
       vehicleType,
       pricingModel: 'distance_per_vehicle_type',
@@ -477,25 +486,27 @@ export class TripRequestsService {
   async getVehicleOptions(
     payload: TripRequestVehicleOptionsDto,
   ): Promise<TripRequestVehicleOptionsResponse> {
+    const deadline = Date.now() + 12000;
     const numberOfSeats = payload.numberOfSeats ?? 1;
     if (numberOfSeats < 1) {
       throw new BadRequestException('Le nombre de places doit être au moins 1');
     }
 
-    const departurePoint = await this.resolvePointFromCoordinatesOrAddress(
+    const [departurePoint, arrivalPoint] = await Promise.all([this.resolvePointFromCoordinatesOrAddress(
       payload.departureCoordinates,
       payload.departureLocation,
       payload.departureReference,
       'trip request vehicle options departure',
-    );
-    const arrivalPoint = await this.resolvePointFromCoordinatesOrAddress(
+      deadline,
+    ), this.resolvePointFromCoordinatesOrAddress(
       payload.arrivalCoordinates,
       payload.arrivalLocation,
       payload.arrivalReference,
       'trip request vehicle options arrival',
-    );
+      deadline,
+    )]);
     const { pricing, weatherImpact } = await this.calculatePricing(
-      departurePoint, arrivalPoint, 'trip request vehicle options',
+      departurePoint, arrivalPoint, 'trip request vehicle options', VehicleType.CAR, deadline,
     );
     const { distanceMeters } = pricing;
 
@@ -529,6 +540,7 @@ export class TripRequestsService {
       weatherImpact,
       pricing,
       options,
+      estimateQuality: pricing.distanceSource === 'google_directions' && pricing.trafficDataAvailable && weatherImpact.dataAvailable ? 'complete' : 'degraded',
     };
   }
 
@@ -840,7 +852,7 @@ export class TripRequestsService {
     }
   }
 
-  async findAll(driverId: string, home = false): Promise<SanitizedTripRequest[]> {
+  async findAll(driverId: string, home = false, options: LegacyPageQuery = {}): Promise<SanitizedTripRequest[]> {
     await this.assertDriverViewer(driverId);
     const ids = home ? await homeRequestIds(this.tripRequestRepository, driverId) : undefined;
     if (ids && !ids.length) return [];
@@ -868,7 +880,8 @@ export class TripRequestsService {
         selectedDriverId: IsNull(),
         tripId: IsNull(),
       },
-      order: { createdAt: 'DESC' },
+      order: { createdAt: 'DESC', id: 'DESC' },
+      ...optionalLegacyPage(options),
     });
 
     await this.expireRequests(tripRequests);
@@ -880,16 +893,32 @@ export class TripRequestsService {
       (tr) => this.isAvailableRequest(tr, now),
     );
 
+    const premium = await this.loadRequestPremium(visibleTripRequests);
     return Promise.all(
       visibleTripRequests.map((tr) =>
-        this.sanitizeTripRequest(tr, driverId, true),
+        this.sanitizeTripRequest(tr, driverId, true, premium),
       ),
     );
+  }
+
+  profileStats(userId: string) {
+    return requestProfileStats(this.tripRequestRepository.manager, userId);
   }
 
   async findRequestPage(userId: string, own: boolean, options: HistoryPageQuery) {
     if (!own) await this.assertDriverViewer(userId);
     const page = await requestPageIds(this.tripRequestRepository, userId, own, options);
+    return this.hydrateRequestPage(userId, own, page);
+  }
+
+  async discoverRequests(userId: string, options: RequestDiscoveryQuery) {
+    await this.assertDriverViewer(userId);
+    const page = await requestDiscoveryIds(this.tripRequestRepository, userId, options);
+    const result = await this.hydrateRequestPage(userId, false, page);
+    return { ...result, page: page.page, limit: page.limit, hasMore: page.hasMore };
+  }
+
+  private async hydrateRequestPage(userId: string, own: boolean, page: { ids: string[]; total: number; nextCursor: string | null }) {
     if (!page.ids.length) return { data: [], total: page.total, nextCursor: page.nextCursor };
     const requests = await this.tripRequestRepository.find({ where: { id: own ? In(page.ids) : Raw(alias => `${alias} IN (:...requestIds) AND ${nearbyRequestDriverVisibilitySql(alias, ':refusingDriverId')}`,
         { requestIds: page.ids, refusingDriverId: userId }) },
@@ -900,7 +929,8 @@ export class TripRequestsService {
     const visible = orderHistory(page.ids, requests).filter(request => own
       ? request.passengerId === userId
       : this.isAvailableRequest(request, now));
-    return { data: await Promise.all(visible.map(request => this.sanitizeTripRequest(request, userId, !own))),
+    const premium = await this.loadRequestPremium(visible);
+    return { data: await Promise.all(visible.map(request => this.sanitizeTripRequest(request, userId, !own, premium))),
       total: page.total, nextCursor: page.nextCursor };
   }
 
@@ -910,7 +940,8 @@ export class TripRequestsService {
     const offers = page.ids.length ? await this.driverOfferRepository.find({
       where: { id: In(page.ids), driverId }, relations: ['driver', 'vehicle', 'tripRequest', 'tripRequest.passenger'],
     }) : [];
-    return { data: await Promise.all(orderHistory(page.ids, offers).map(offer => this.sanitizeDriverOfferWithTripRequest(offer, driverId))),
+    const premium = await this.loadRequestPremium(offers.map(offer => offer.tripRequest).filter(Boolean), offers);
+    return { data: await Promise.all(orderHistory(page.ids, offers).map(offer => this.sanitizeDriverOfferWithTripRequest(offer, driverId, premium))),
       total: page.total, nextCursor: page.nextCursor };
   }
 
@@ -958,7 +989,8 @@ export class TripRequestsService {
         await assertRequestDriverProximity(this.tripRequestRepository.manager, id, userId);
     }
 
-    const result = await this.sanitizeTripRequest(tripRequest, userId);
+    const premium = await this.loadRequestPremium([tripRequest]);
+    const result = await this.sanitizeTripRequest(tripRequest, userId, false, premium);
     if (tripRequest.sequentialDispatch && !tripRequest.selectedDriverId) {
       const [window] = await this.tripRequestRepository.manager.query(`SELECT phase,"expiresAt",clock_timestamp() AS "serverNow"
         FROM trip_request_dispatch_offers WHERE "requestId"=$1 AND status='pending'
@@ -1047,14 +1079,15 @@ export class TripRequestsService {
       return [];
     }
 
+    const premium = await this.loadRequestPremium([tripRequest]);
     return Promise.all(
       tripRequest.driverOffers.map((offer) =>
-        this.sanitizeDriverOffer(offer, tripRequest, userId),
+        this.sanitizeDriverOffer(offer, tripRequest, userId, premium),
       ),
     );
   }
 
-  async findByPassenger(passengerId: string, activityOnly = false): Promise<SanitizedTripRequest[]> {
+  async findByPassenger(passengerId: string, activityOnly = false, options: LegacyPageQuery = {}): Promise<SanitizedTripRequest[]> {
     this.logger.debug(`Fetching trip requests for passenger: ${passengerId}`);
 
     const tripRequests = await this.tripRequestRepository.find({
@@ -1067,18 +1100,21 @@ export class TripRequestsService {
         'driverOffers.driver',
         'driverOffers.vehicle',
       ],
-      order: { createdAt: 'DESC' },
+      order: { createdAt: 'DESC', id: 'DESC' },
+      ...optionalLegacyPage(options),
     });
 
     await this.expireRequests(tripRequests);
 
+    const premium = await this.loadRequestPremium(tripRequests);
     return Promise.all(
-      tripRequests.map((tr) => this.sanitizeTripRequest(tr, passengerId)),
+      tripRequests.map((tr) => this.sanitizeTripRequest(tr, passengerId, false, premium)),
     );
   }
 
   async findByDriver(
     driverId: string,
+    options: LegacyPageQuery = {},
   ): Promise<SanitizedDriverOfferWithTripRequest[]> {
     await this.assertDriverViewer(driverId);
     this.logger.debug(`Fetching driver offers for driver: ${driverId}`);
@@ -1086,12 +1122,14 @@ export class TripRequestsService {
     const offers = await this.driverOfferRepository.find({
       where: { driverId },
       relations: ['driver', 'vehicle', 'tripRequest', 'tripRequest.passenger'],
-      order: { createdAt: 'DESC' },
+      order: { createdAt: 'DESC', id: 'DESC' },
+      ...optionalLegacyPage(options),
     });
 
+    const premium = await this.loadRequestPremium(offers.map(offer => offer.tripRequest).filter(Boolean), offers);
     return Promise.all(
       offers.map((offer) =>
-        this.sanitizeDriverOfferWithTripRequest(offer, driverId),
+        this.sanitizeDriverOfferWithTripRequest(offer, driverId, premium),
       ),
     );
   }
@@ -2284,12 +2322,12 @@ export class TripRequestsService {
     return (await this.calculatePricing(departurePoint, arrivalPoint, context, vehicleType ?? VehicleType.CAR)).pricing.recommendedPricePerSeat;
   }
 
-  private async calculatePricing(departurePoint: Point | null, arrivalPoint: Point | null, context: string, vehicleType: VehicleType = VehicleType.CAR) {
+  private async calculatePricing(departurePoint: Point | null, arrivalPoint: Point | null, context: string, vehicleType: VehicleType = VehicleType.CAR, deadline = Date.now() + 12000) {
     const [route, weatherImpact] = await Promise.all([
-      this.calculatePricingRoute(departurePoint, arrivalPoint, context),
-      this.weatherAwarenessService.getRouteImpact(
+      this.calculatePricingRoute(departurePoint, arrivalPoint, context, deadline),
+      withProviderDeadline(Math.max(1, Math.min(1500, deadline - Date.now())), () => this.weatherAwarenessService.getRouteImpact(
         this.pointToCoordinates(departurePoint), this.pointToCoordinates(arrivalPoint),
-      ),
+      )).catch(() => ({ heavyRain: false, dataAvailable: false, priceMultiplier: 1, etaMultiplier: 1, evaluatedZoneIds: [], affectedZoneIds: [] })),
     ]);
 
     const pricing = calculateTripRequestPricing(route, weatherImpact.heavyRain === true, vehicleType);
@@ -2303,6 +2341,7 @@ export class TripRequestsService {
     departurePoint: Point | null,
     arrivalPoint: Point | null,
     context: string,
+    deadline = Date.now() + 12000,
   ): Promise<PricingRoute> {
     const departureCoordinates = this.pointToCoordinates(departurePoint);
     const arrivalCoordinates = this.pointToCoordinates(arrivalPoint);
@@ -2315,13 +2354,15 @@ export class TripRequestsService {
     const [arrivalLongitude, arrivalLatitude] = arrivalCoordinates;
 
     try {
+      const timeoutMs = Math.min(6000, deadline - Date.now());
+      if (timeoutMs < 1000) throw new Error('ESTIMATION_BUDGET_EXHAUSTED');
       const directions = await this.googleMapsService.getDirections({
         origin: { lat: departureLatitude, lng: departureLongitude },
         destination: { lat: arrivalLatitude, lng: arrivalLongitude },
         mode: TravelMode.DRIVING,
         region: 'CD',
         departureTime: Math.ceil(Date.now() / 1000),
-      });
+      }, { timeoutMs });
       const routeLegs = directions.routes?.[0]?.legs;
       const distanceMeters = routeLegs?.length && routeLegs.every(leg =>
         typeof leg.distance === 'number' && Number.isFinite(leg.distance) && leg.distance >= 0)
@@ -2389,19 +2430,21 @@ export class TripRequestsService {
     address?: string | null,
     reference?: string | null,
     context = 'address',
+    deadline?: number,
   ): Promise<Point | null> {
     const coordinatesPoint = this.buildPointFromCoordinates(coordinates);
     if (coordinatesPoint) {
       return coordinatesPoint;
     }
 
-    return this.geocodeAddressToPoint(address, reference, context);
+    return this.geocodeAddressToPoint(address, reference, context, deadline);
   }
 
   private async geocodeAddressToPoint(
     address?: string | null,
     reference?: string | null,
     context = 'address',
+    deadline = Date.now() + 8000,
   ): Promise<Point | null> {
     const addressText = address?.trim();
     if (!addressText) {
@@ -2422,11 +2465,13 @@ export class TripRequestsService {
     let bestRank = Number.POSITIVE_INFINITY;
 
     for (const query of queries) {
+      const timeoutMs = Math.min(4000, deadline - Date.now());
+      if (timeoutMs <= 0) break;
       try {
         const result = await this.googleMapsService.geocode({
           address: query,
           region: 'CD',
-        });
+        }, { timeoutMs });
         const rank = this.getGeocodePrecisionRank(result);
         if (rank < bestRank) {
           bestResult = result;
@@ -2549,6 +2594,23 @@ export class TripRequestsService {
         viewerId &&
         (viewerId === tripRequest.passengerId || viewerId === selectedDriverId),
     );
+  }
+
+  /** One bounded subscription read per unique-user batch, not per serialized relation. */
+  private async loadRequestPremium(requests: TripRequest[], offers: DriverOffer[] = []) {
+    const ids = new Set<string>();
+    for (const request of requests) {
+      if (request.passenger?.id) ids.add(request.passenger.id);
+      if (request.selectedDriver?.id) ids.add(request.selectedDriver.id);
+      for (const offer of request.driverOffers ?? []) if (offer.driver?.id) ids.add(offer.driver.id);
+    }
+    for (const offer of offers) if (offer.driver?.id) ids.add(offer.driver.id);
+    const users = [...ids], result = new Map<string, PremiumSubscriptionFeatures>();
+    for (let offset = 0; offset < users.length; offset += 100) {
+      const batch = await this.subscriptionsService.getPremiumFeaturesForUsers(users.slice(offset, offset + 100));
+      for (const [id, features] of batch) result.set(id, features);
+    }
+    return result;
   }
 
   private async sanitizeUser(
@@ -2769,6 +2831,7 @@ export class TripRequestsService {
   private async sanitizeDriverOfferWithTripRequest(
     offer: DriverOffer,
     viewerId: string,
+    premiumByUser?: Map<string, PremiumSubscriptionFeatures>,
   ): Promise<SanitizedDriverOfferWithTripRequest> {
     if (!offer.driver) {
       throw new Error(`Driver offer ${offer.id} has no driver associated`);
@@ -2792,7 +2855,7 @@ export class TripRequestsService {
       offer.status === DriverOfferStatus.ACCEPTED &&
       this.getSelectedDriverId(tripRequest) === offer.driverId &&
       this.canShareContact(tripRequest, viewerId);
-    const passenger = await this.sanitizeUser(tripRequest.passenger, accepted);
+    const passenger = await this.sanitizeUser(tripRequest.passenger, accepted, premiumByUser);
     if (!passenger) {
       throw new Error(
         `Failed to sanitize passenger for trip request ${offer.tripRequest.id}`,
@@ -2800,7 +2863,7 @@ export class TripRequestsService {
     }
 
     return {
-      ...(await this.sanitizeDriverOffer(offer, tripRequest, viewerId)),
+      ...(await this.sanitizeDriverOffer(offer, tripRequest, viewerId, premiumByUser)),
       tripRequest: {
         id: offer.tripRequest.id,
         departureLocation: offer.tripRequest.departureLocation,

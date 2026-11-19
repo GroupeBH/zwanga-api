@@ -5,6 +5,7 @@ import {
   Get,
   Param,
   ParseUUIDPipe,
+  ParseEnumPipe,
   Post,
   Put,
   Query,
@@ -36,6 +37,9 @@ import { AdminBulkBookingsDto } from './dto/admin-bulk-bookings.dto';
 import { runAdminBulk } from '../common/pagination/admin-bulk';
 import { ApiAdminListQuery } from '../common/pagination/admin-query';
 import { RequireFinanceOtp } from '../otp/finance-otp.guard';
+import { AdminPhoneVerificationDto } from './dto/admin-phone-verification.dto';
+import { AdminUserDetailsQuery, AdminUserHistoryKind } from './dto/user-history.dto';
+import { HistoryPageQuery } from '../common/history-page';
 
 interface AuthenticatedAdminRequest {
   user: { userId: string };
@@ -231,6 +235,19 @@ export class AdminController {
       sortOrder,
     );
     return this.sendSpreadsheet(res, file);
+  }
+
+  @Put('users/:userId/phone-verification')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({ summary: 'Manually verify the current phone of an existing user without OTP' })
+  verifyUserPhone(
+    @Request() req: AuthenticatedAdminRequest,
+    @Param('userId', new ParseUUIDPipe()) userId: string,
+    @Body() dto: AdminPhoneVerificationDto,
+  ) {
+    return this.adminService.verifyUserPhone(userId, req.user.userId, dto);
   }
 
   @Get('accounts')
@@ -556,8 +573,18 @@ export class AdminController {
     summary:
       'Get a full admin view of a user, including trips, bookings, trip requests and payments',
   })
-  async getUserDetails(@Param('userId') userId: string) {
-    return this.adminService.getUserDetails(userId);
+  async getUserDetails(@Param('userId', ParseUUIDPipe) userId: string, @Query() query: AdminUserDetailsQuery) {
+    return this.adminService.getUserDetails(userId, query?.view);
+  }
+
+  @Get('users/:userId/history/:kind')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(30, 60000)
+  getUserHistory(@Param('userId', ParseUUIDPipe) userId: string,
+    @Param('kind', new ParseEnumPipe(AdminUserHistoryKind)) kind: AdminUserHistoryKind,
+    @Query() query: HistoryPageQuery) {
+    return this.adminService.getUserHistory(userId, kind, query);
   }
 
   @Get('users/:userId/financial-summary')

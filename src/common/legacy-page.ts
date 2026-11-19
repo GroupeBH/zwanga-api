@@ -13,3 +13,8 @@ export function legacyPage(options: LegacyPageQuery = {}, defaultLimit = 100) {
   const page = Number.isFinite(options.page) ? Math.min(10000, Math.max(1, Math.trunc(options.page!))) : 1;
   return { take, skip: (page - 1) * take };
 }
+
+/** Opt-in only while released clients still compute totals/filter these arrays locally. */
+export function optionalLegacyPage(options: LegacyPageQuery = {}) {
+  return options.page !== undefined || options.limit !== undefined ? legacyPage(options) : {};
+}

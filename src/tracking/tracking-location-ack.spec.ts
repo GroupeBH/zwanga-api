@@ -4,7 +4,7 @@ import { normalizeLocationRecordedAt } from '../common/utils/tracking-coordinate
 describe('tracking acknowledgements', () => {
   const fixture = () => {
     const trips = { updateDriverLocation: jest.fn() };
-    const bookings = { updatePassengerLocation: jest.fn(), evaluateAutomaticRideProgressForTrip: jest.fn().mockResolvedValue({ events: [] }) };
+    const bookings = { updatePassengerLocation: jest.fn(), queueAutomaticRideProgressForTrip: jest.fn().mockResolvedValue(undefined), evaluateAutomaticRideProgressForTrip: jest.fn().mockResolvedValue({ events: [] }) };
     const gateway = new TrackingGateway(trips as any, bookings as any, {} as any, { get: () => '0' } as any, {} as any);
     const emit = jest.fn();
     gateway.server = { to: () => ({ emit }) } as any;
@@ -41,17 +41,27 @@ describe('tracking acknowledgements', () => {
     expect(env.client.emit).toHaveBeenCalled();
   });
 
-  it('waits for server acceptance and keeps automatic progress events', async () => {
+  it('waits for storage and durable enqueue, but not automatic processing; broadcasts worker events separately', async () => {
     const env = fixture();
     let accept!: (value: any) => void;
     env.trips.updateDriverLocation.mockReturnValue(new Promise(resolve => { accept = resolve; }));
-    const progress = { events: [{ type: 'pickup_confirmed', tripId: 'trip' }] };
-    env.bookings.evaluateAutomaticRideProgressForTrip.mockResolvedValue(progress);
+    const progress: any = { tripId: 'trip', events: [{ type: 'pickup_confirmed', tripId: 'trip' }] };
     let settled = false;
     const response = env.gateway.handleDriverLocationUpdate(env.client, data).then(value => { settled = true; return value; });
     await Promise.resolve(); expect(settled).toBe(false);
     accept({ ...data, updatedAt: data.recordedAt });
     expect(await response).toMatchObject({ success: true });
+    expect(env.bookings.queueAutomaticRideProgressForTrip).toHaveBeenCalledWith('trip');
+    expect(env.bookings.evaluateAutomaticRideProgressForTrip).not.toHaveBeenCalled();
+    expect(env.emit).not.toHaveBeenCalledWith('booking_auto_progress', expect.anything());
+    env.gateway.publishAutomaticProgress(progress);
     expect(env.emit).toHaveBeenCalledWith('booking_auto_progress', progress);
+  });
+  it('does not acknowledge when durable work cannot be enqueued', async () => {
+    const env = fixture();
+    env.trips.updateDriverLocation.mockResolvedValue({ ...data, updatedAt: data.recordedAt });
+    env.bookings.queueAutomaticRideProgressForTrip.mockRejectedValue(new Error('database unavailable'));
+    expect(await env.gateway.handleDriverLocationUpdate(env.client, data)).toEqual({ success: false });
+    expect(env.emit).not.toHaveBeenCalled();
   });
 });

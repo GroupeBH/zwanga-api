@@ -75,7 +75,7 @@ jobs:
       - name: Check dependency integrations
         run: |
           npm run test:dependencies
-          node --test test/ci-integration-policy.test.cjs
+          node --test test/ci-integration-policy.test.cjs test/observability-kms.test.cjs test/capacity-budget.test.cjs
 
       - name: Check known runtime vulnerabilities
         run: npm audit --omit=dev --audit-level=high

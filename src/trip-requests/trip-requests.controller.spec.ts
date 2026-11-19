@@ -149,7 +149,7 @@ describe('Trip requests HTTP access', () => {
       .set('Authorization', `Bearer ${token}`)
       .expect('Cache-Control', 'private, no-store')
       .expect(200, []);
-    expect(service.findAll).toHaveBeenCalledWith('driver');
+    expect(service.findAll).toHaveBeenCalledWith('driver', false, { page: undefined, limit: undefined });
   });
 
   it('protects explicit passenger contact with authentication, role and UUID validation', async () => {
@@ -174,7 +174,7 @@ describe('Trip requests HTTP access', () => {
     expect(service.findAll).not.toHaveBeenCalled();
     await request(server).get(path).set('Authorization', `Bearer ${jwt.sign({ userId: 'driver', role: UserRole.DRIVER })}`)
       .expect('Cache-Control', 'private, no-store').expect(200, []);
-    expect(service.findAll).toHaveBeenCalledWith('driver', true);
+    expect(service.findAll).toHaveBeenCalledWith('driver', true, { page: undefined, limit: undefined });
   });
 
   it('denies passengers access to my-offers', async () => {

@@ -12,6 +12,7 @@ import { recoverUnacknowledgedRides } from './recover-unacknowledged-ride';
 import { nativeAndroidDriverPush } from './native-android-driver-push';
 import { PUSH_CLAIM_LEASE_MS, ownPushClaim, heartbeatPushClaim, renewPushClaim, saveNotificationResult, isRetryPushClaim } from './notification-push-claim';
 import { retryPushBatch } from './retry-push-batch';
+import { enqueueTransactionalNotification } from './transactional-notification';
 import { PUSH_RETRY_ELIGIBLE_SQL, recordPushFailure, urgentPushWorkers } from './push-retry-policy';
 import { isAppUpdateDeliverable } from '../app-updates/app-update-dispatch.service';
 import { installationUpdateToken } from '../app-updates/installation-update.policy';
@@ -44,6 +45,8 @@ import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { canReceiveDriverRequests, DRIVER_REQUEST_NOTIFICATION_TYPES, isDriverRequestNotification } from './driver-request-policy';
 import { resolveDriverRequestOwner } from './driver-request-owner';
 import { sharedTripAlertIsDeliverable } from '../trip-requests/dispatch/shared-trip-alert';
+import { isTripStartDeliverable } from './trip-start-delivery';
+import { AUTOMATIC_RIDE_NOTIFICATION_TYPES, isRideProgressDeliverable } from './ride-progress-delivery';
 import { DriverPayout } from '../driver-settlements/entities/driver-payout.entity';
 import { WalletWithdrawal } from '../wallet/entities/wallet-withdrawal.entity';
 import { ReferralWithdrawal } from '../referrals/entities/referral-withdrawal.entity';
@@ -334,6 +337,15 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
     userId?: string,
     isAutomatic = false,
   ): Promise<boolean> {
+    // Ride-progress workers must not wait on provider HTTP. Stable keys also
+    // prevent duplicate pushes when the same GPS transition is retried.
+    if (userId && data?.bookingId && AUTOMATIC_RIDE_NOTIFICATION_TYPES.includes(data.type)) {
+      await this.notificationRepository.manager.transaction(manager => enqueueTransactionalNotification(manager, {
+        eventKey: `ride-progress:${data.bookingId}:${data.type}:${userId}`,
+        userId, title, body, data,
+      }));
+      return true;
+    }
     // Créer l'enregistrement de notification en base de données
     const notification = this.notificationRepository.create({
       userId: userId || null,
@@ -356,6 +368,16 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
     savedNotification: Notification,
   ): Promise<boolean> {
     const preparationStartedAt = Date.now();
+    if (AUTOMATIC_RIDE_NOTIFICATION_TYPES.includes(savedNotification.data?.type) &&
+        !await isRideProgressDeliverable(this.notificationRepository.manager, savedNotification)) {
+      await this.suppressCriticalNotification(savedNotification, 'RIDE_PROGRESS_NO_LONGER_RELEVANT');
+      return false;
+    }
+    if (savedNotification.data?.type === 'trip_started' &&
+        !await isTripStartDeliverable(this.notificationRepository.manager, savedNotification)) {
+      await this.suppressCriticalNotification(savedNotification, 'TRIP_START_PASSENGER_NO_LONGER_ELIGIBLE');
+      return false;
+    }
     if (savedNotification.data?.type === 'mobile_campaign') {
       const token = !savedNotification.userId && this.configService.get('MOBILE_OPERATIONS_ENABLED') === 'true' && this.configService.get('MOBILE_CAMPAIGNS_ENABLED') === 'true'
         ? await mobileCampaignToken(this.notificationRepository.manager, savedNotification.data) : null;
@@ -1144,6 +1166,8 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
     notification: Notification,
   ): Promise<boolean> {
     const type = notification.data?.type;
+    if (AUTOMATIC_RIDE_NOTIFICATION_TYPES.includes(type)) return isRideProgressDeliverable(this.notificationRepository.manager, notification);
+    if (type === 'trip_started') return isTripStartDeliverable(this.notificationRepository.manager, notification);
     if (type === 'cash_payment_declared') {
       const rows = await this.notificationRepository.manager.query<unknown[]>(
         `SELECT 1 FROM notifications n WHERE n.id = $1 AND ${cashDeclarationRelevantSql('n')}`, [notification.id]);

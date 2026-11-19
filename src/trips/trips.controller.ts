@@ -212,9 +212,8 @@ export class TripsController {
         samples: dto.samples,
       },
     );
-    const autoProgress =
-      await this.bookingsService.evaluateAutomaticRideProgressForTrip(id);
-    return { ...location, autoProgress };
+    await this.bookingsService.queueAutomaticRideProgressForTrip(id);
+    return { ...location, autoProgress: { tripId: id, events: [] } };
   }
 
   @Get(':id/driver-location')

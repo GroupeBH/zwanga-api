@@ -89,13 +89,19 @@ describe('nearby ringing per-request delivery boundary', () => {
     'new_booking',
     'booking_response',
     'trip_request_accepted',
-    'trip_started',
     'driver_near_pickup',
   ])('preserves %s without querying nearby request events', async (type) => {
     const f = fixture();
     jest.mocked(prepareNearbyRequestRinging).mockResolvedValue(false);
     expect(await f.deliver(type)).toBe(true);
     expect(f.fcm).toHaveBeenCalledTimes(1);
+    expect(prepareNearbyRequestRinging).not.toHaveBeenCalled();
+  });
+  it('rejects a legacy trip-start push without a valid trip and accepted passenger', async () => {
+    const f = fixture();
+    expect(await f.deliver('trip_started')).toBe(false);
+    expect(f.fcm).not.toHaveBeenCalled();
+    expect(f.apns).not.toHaveBeenCalled();
     expect(prepareNearbyRequestRinging).not.toHaveBeenCalled();
   });
   it('never interprets a policy storage failure as permission to ring or as a missed request', async () => {

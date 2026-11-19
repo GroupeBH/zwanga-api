@@ -10,6 +10,7 @@ import { firstValueFrom } from 'rxjs';
 import * as crypto from 'crypto';
 import { CacheService } from '../common/services/cache.service';
 import { rememberRoutePreview } from '../common/route-preview';
+import { ProviderSingleFlight, withProviderDeadline } from '../common/provider-work';
 import { AxiosError } from 'axios';
 import {
   GeocodeDto,
@@ -37,6 +38,7 @@ export class GoogleMapsService {
   private readonly logger = new Logger(GoogleMapsService.name);
   private readonly apiKey: string;
   private readonly baseUrl = 'https://maps.googleapis.com/maps/api';
+  private readonly providerWork = new ProviderSingleFlight();
 
   constructor(
     private readonly httpService: HttpService,
@@ -242,7 +244,13 @@ export class GoogleMapsService {
   /**
    * Geocode an address to coordinates
    */
-  async geocode(dto: GeocodeDto): Promise<GeocodeResponse> {
+  async geocode(dto: GeocodeDto, options: { timeoutMs?: number } = {}): Promise<GeocodeResponse> {
+    const timeoutMs = Math.max(1, Math.min(30000, options.timeoutMs ?? 30000));
+    return this.providerWork.run(`geocode:${timeoutMs}:${JSON.stringify(dto)}`, () =>
+      withProviderDeadline(timeoutMs, signal => this.fetchGeocode(dto, timeoutMs, signal)));
+  }
+
+  private async fetchGeocode(dto: GeocodeDto, timeoutMs: number, signal: AbortSignal): Promise<GeocodeResponse> {
     try {
       const params: Record<string, string> = {
         address: dto.address,
@@ -262,7 +270,7 @@ export class GoogleMapsService {
       }
 
       const response = await firstValueFrom(
-        this.httpService.get(`${this.baseUrl}/geocode/json`, { params }),
+        this.httpService.get(`${this.baseUrl}/geocode/json`, { params, timeout: timeoutMs, signal }),
       );
 
       if (response.data.status === 'ZERO_RESULTS') {
@@ -572,6 +580,12 @@ export class GoogleMapsService {
    * Get directions between origin and destination
    */
   async getDirections(dto: DirectionsDto, options: { timeoutMs?: number } = {}): Promise<DirectionsResponse> {
+    const timeoutMs = Math.max(1000, Math.min(30000, options.timeoutMs ?? 30000));
+    return this.providerWork.run(`${this.getDirectionsCacheKey(dto)}:${timeoutMs}`, () =>
+      withProviderDeadline(timeoutMs, signal => this.fetchDirections(dto, { timeoutMs, signal })));
+  }
+
+  private async fetchDirections(dto: DirectionsDto, options: { timeoutMs: number; signal: AbortSignal }): Promise<DirectionsResponse> {
     // console.log('getDirections', dto);
     const singleRouteDto: DirectionsDto = { ...dto, alternatives: false };
     const cacheKey = this.getDirectionsCacheKey(singleRouteDto);
@@ -579,6 +593,7 @@ export class GoogleMapsService {
     try {
       // Try to get from cache first
       const cached = await this.cacheService.get<DirectionsResponse>(cacheKey);
+      options.signal.throwIfAborted();
       if (cached) {
         await rememberRoutePreview(this.cacheService, dto, cached);
         // this.logger.debug('Returning directions from cache');
@@ -648,7 +663,7 @@ export class GoogleMapsService {
       }
       // console.log('params', params);
       const response = await firstValueFrom(
-        this.httpService.get(`${this.baseUrl}/directions/json`, { params,
+        this.httpService.get(`${this.baseUrl}/directions/json`, { params, signal: options.signal,
           ...(options.timeoutMs ? { timeout: Math.max(1000, Math.min(30000, options.timeoutMs)) } : {}) }),
       );
 
@@ -732,6 +747,7 @@ export class GoogleMapsService {
       };
 
       // Live traffic must not inherit the one-week static geometry cache.
+      options.signal.throwIfAborted();
       await this.cacheService.set(cacheKey, result, dto.departureTime ? 60 : 604800);
       await rememberRoutePreview(this.cacheService, dto, result);
 

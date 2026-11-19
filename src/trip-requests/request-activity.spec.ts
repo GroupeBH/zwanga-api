@@ -6,7 +6,7 @@ describe('request activity read without unbounded history hydration', () => {
   beforeEach(() => jest.useFakeTimers({ now: new Date('2026-10-21T12:00:00Z') }));
   afterEach(() => jest.useRealTimers());
 
-  it('uses the same scope as the activity summary, without limiting unfinished requests', async () => {
+  it('preserves the complete legacy activity snapshot until clients request a page', async () => {
     const rows = [{ id: 'a' }, { id: 'b' }];
     const repository = { find: jest.fn().mockResolvedValue(rows) };
     const dependencies = [repository, ...Array.from({ length: 11 }, () => ({}))] as unknown as ConstructorParameters<typeof TripRequestsService>;
@@ -17,11 +17,11 @@ describe('request activity read without unbounded history hydration', () => {
     expect(repository.find).toHaveBeenLastCalledWith({
       where: activeRequestWhere('owner'),
       relations: ['passenger', 'targetDriver', 'selectedDriver', 'selectedVehicle', 'driverOffers', 'driverOffers.driver', 'driverOffers.vehicle'],
-      order: { createdAt: 'DESC' },
+      order: { createdAt: 'DESC', id: 'DESC' },
     });
     expect(expire).toHaveBeenCalledWith(rows);
-    expect(sanitize).toHaveBeenCalledWith(rows[0], 'owner');
-    expect(sanitize).toHaveBeenCalledWith(rows[1], 'owner');
+    expect(sanitize).toHaveBeenCalledWith(rows[0], 'owner', false, new Map());
+    expect(sanitize).toHaveBeenCalledWith(rows[1], 'owner', false, new Map());
     await service.findByPassenger('owner');
     expect(repository.find.mock.calls.at(-1)?.[0].where).toEqual({ passengerId: 'owner' });
   });
@@ -31,10 +31,10 @@ describe('request activity read without unbounded history hydration', () => {
     const controller = new TripRequestsController({ findByPassenger } as unknown as TripRequestsService);
     const req = { user: { userId: 'owner' } };
     await controller.findMyRequests(req, 'activity');
-    expect(findByPassenger).toHaveBeenLastCalledWith('owner', true);
+    expect(findByPassenger).toHaveBeenLastCalledWith('owner', true, {});
     for (const scope of [undefined, 'other-account', 'history']) {
       await controller.findMyRequests(req, scope);
-      expect(findByPassenger).toHaveBeenLastCalledWith('owner', false);
+      expect(findByPassenger).toHaveBeenLastCalledWith('owner', false, {});
     }
   });
 });

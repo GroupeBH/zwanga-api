@@ -27,7 +27,8 @@ import {
   buildReferralRewardsSpreadsheet,
   buildReferralWithdrawalsSpreadsheet,
 } from './admin-spreadsheets';
-import type { SpreadsheetFile } from './spreadsheet';
+import type { SpreadsheetDownload } from './spreadsheet';
+import { streamExport, exportCreatedPages, exportOffsetPages } from './streaming-export';
 import { ResolvePayoutNotPaidDto } from '../payments/dto/resolve-payout-not-paid.dto';
 import { payoutRecoveryActions } from '../payments/payout-recovery-actions';
 import { ReferralWithdrawalResolution } from '../referrals/entities/referral-withdrawal-resolution.entity';
@@ -289,50 +290,32 @@ export class AdminReferralsService {
     return this.getWithdrawalDetail(replacement.id);
   }
 
-  async exportAccounts(search?: string): Promise<SpreadsheetFile> {
-    const accounts = await this.createAccountsQuery(search)
+  async exportAccounts(search?: string): Promise<SpreadsheetDownload> {
+    const query = this.createAccountsQuery(search)
       .orderBy('account.updatedAt', 'DESC')
-      .addOrderBy('account.id', 'DESC')
-      .getMany();
-    const referralCounts = await this.loadReferralCounts(
-      accounts.map((account) => account.userId),
-    );
-
-    return buildReferralAccountsSpreadsheet(
-      (accounts as AdminReferralAccount[]).map((account) => ({
-        ...this.serializeAccount(account),
-        directReferralsCount: referralCounts.get(account.userId) ?? 0,
-      })),
-    );
+      .addOrderBy('account.id', 'DESC');
+    return streamExport(exportOffsetPages(query, 'account'), async accounts => {
+      const referralCounts = await this.loadReferralCounts(accounts.map(account => account.userId));
+      return buildReferralAccountsSpreadsheet((accounts as AdminReferralAccount[]).map(account => ({
+        ...this.serializeAccount(account), directReferralsCount: referralCounts.get(account.userId) ?? 0,
+      })));
+    });
   }
 
   async exportRewards(
     search?: string,
     requestedStatus?: string,
-  ): Promise<SpreadsheetFile> {
-    const rewards = await this.createRewardsQuery(search, requestedStatus)
-      .orderBy('reward.createdAt', 'DESC')
-      .addOrderBy('reward.id', 'DESC')
-      .getMany();
-    return buildReferralRewardsSpreadsheet(
-      rewards.map((reward) => this.serializeReward(reward)),
-    );
+  ): Promise<SpreadsheetDownload> {
+    return streamExport(exportCreatedPages(this.createRewardsQuery(search, requestedStatus), 'reward'),
+      rewards => buildReferralRewardsSpreadsheet(rewards.map(reward => this.serializeReward(reward))));
   }
 
   async exportWithdrawals(
     search?: string,
     requestedStatus?: string,
-  ): Promise<SpreadsheetFile> {
-    const withdrawals = await this.createWithdrawalsQuery(
-      search,
-      requestedStatus,
-    )
-      .orderBy('withdrawal.requestedAt', 'DESC')
-      .addOrderBy('withdrawal.id', 'DESC')
-      .getMany();
-    return buildReferralWithdrawalsSpreadsheet(
-      withdrawals.map((withdrawal) => this.serializeWithdrawal(withdrawal)),
-    );
+  ): Promise<SpreadsheetDownload> {
+    return streamExport(exportCreatedPages(this.createWithdrawalsQuery(search, requestedStatus), 'withdrawal', 'requestedAt'),
+      withdrawals => buildReferralWithdrawalsSpreadsheet(withdrawals.map(withdrawal => this.serializeWithdrawal(withdrawal))));
   }
 
   private normalizePagination(page: number, limit: number) {

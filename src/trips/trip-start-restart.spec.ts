@@ -2,6 +2,8 @@ import { BadRequestException, Logger } from '@nestjs/common';
 import { TripsService } from './trips.service';
 import { TripStatus } from './entities/trip.entity';
 import { BookingStatus } from '../bookings/entities/booking.entity';
+import { enqueueTripStartNotifications } from './trip-start-notifications';
+jest.mock('./trip-start-notifications');
 
 const firstStart = new Date('2026-10-10T10:00:00.000Z');
 
@@ -22,6 +24,7 @@ function fixture(overrides: Record<string, unknown> = {}) {
     }),
   };
   service.tripRepository = repo;
+  (repo as any).manager = { transaction: jest.fn(callback => callback({ getRepository: () => repo })) };
   service.bookingRepository = { find: jest.fn(async () => saved.bookings) };
   service.ensureDriverCanStartTrip = jest.fn(async () => undefined);
   service.calculateEstimatedArrivalDate = jest.fn(async (_trip, time) => new Date(time.getTime() + 1800000));
@@ -38,7 +41,7 @@ function fixture(overrides: Record<string, unknown> = {}) {
   return { service, repo, saved, resume, start: () => service.startTrip(saved.id, saved.driverId) };
 }
 
-afterEach(() => jest.restoreAllMocks());
+afterEach(() => { jest.restoreAllMocks(); jest.clearAllMocks(); });
 
 it('starts a new pending ride once and resets only its initial tracking state', async () => {
   const f = fixture({ currentLocation: { type: 'Point', coordinates: [15.3, -4.3] } });
@@ -82,7 +85,8 @@ it('two concurrent starts produce one state transition and one notification sequ
   expect(result.every(trip => trip.status === TripStatus.ACTIVE)).toBe(true);
   expect(f.service.logTripStateChange).toHaveBeenCalledTimes(1);
   expect(f.service.notifyDriverEmergencyContacts).toHaveBeenCalledTimes(1);
-  expect(f.service.notifyBookedPassengersAboutTripStart).toHaveBeenCalledTimes(1);
+  expect(enqueueTripStartNotifications).toHaveBeenCalledTimes(1);
+  expect(f.service.notifyNearbyUsersAboutTripStart).not.toHaveBeenCalled();
 });
 
 it('does not bypass a formal interruption awaiting passenger decisions', async () => {

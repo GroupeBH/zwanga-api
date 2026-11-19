@@ -20,6 +20,7 @@ import {
   RequestWalletWithdrawalDto,
 } from './dto/wallet.dto';
 import { WalletService } from './wallet.service';
+import { LegacyPageQuery } from '../common/legacy-page';
 import { RecoverTopUpDto } from './dto/recover-topup.dto';
 import { WalletWithdrawalsService } from './wallet-withdrawals.service';
 import { HistoryPageDto } from '../common/pagination/history-page';
@@ -80,8 +81,8 @@ export class WalletController {
   @Auth()
   @SensitiveThrottle(30, 60000)
   @ApiOperation({ summary: 'Get current user Zwanga token ledger' })
-  async getMyLedger(@Request() req) {
-    return this.walletService.getLedger(req.user.userId);
+  async getMyLedger(@Request() req, @Query() options: LegacyPageQuery = {}) {
+    return this.walletService.getLedger(req.user.userId, options);
   }
 
   @Get('ledger/page')

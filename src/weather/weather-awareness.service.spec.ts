@@ -33,7 +33,7 @@ describe('WeatherAwarenessService', () => {
           data: {
             weather: [{ id: 502, description: 'heavy intensity rain' }],
             rain: { '1h': 8.2 },
-            dt: 1782720000,
+            dt: Math.floor(Date.now() / 1000),
           },
         }),
       ),
@@ -52,6 +52,7 @@ describe('WeatherAwarenessService', () => {
 
     expect(httpService.get).toHaveBeenCalledTimes(4);
     expect(cacheService.set).toHaveBeenCalledTimes(4);
+    expect(cacheService.set).toHaveBeenCalledWith(expect.any(String), expect.any(Object), 1200);
     expect(impact).toEqual(
       expect.objectContaining({
         heavyRain: true,
@@ -83,5 +84,12 @@ describe('WeatherAwarenessService', () => {
         etaMultiplier: 1,
       }),
     );
+  });
+
+  it('does not reuse old rain data left by the former millisecond TTL', async () => {
+    const service = new WeatherAwarenessService({ get: jest.fn(() => throwError(() => new Error('offline'))) } as any, configService as any, cacheService as any);
+    cacheService.get.mockResolvedValue({ available: true, heavyRain: true, zoneId: 'old', observedAt: new Date(Date.now() - 86400000).toISOString() });
+    const result = await service.getRouteImpact([15.3136, -4.3073], null);
+    expect(result).toMatchObject({ dataAvailable: false, heavyRain: false });
   });
 });

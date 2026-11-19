@@ -1,7 +1,7 @@
-import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException, Optional } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, Injectable, NotFoundException, Optional, ServiceUnavailableException } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
+import { In, Repository, EntityManager } from 'typeorm';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { buildProfileState } from '../users/profile-state';
 import { Trip, TripStatus } from '../trips/entities/trip.entity';
@@ -12,6 +12,10 @@ import { ReferralsService } from '../referrals/referrals.service';
 import { AddCompanyManagerDto, CreateCompanyOrganizationDto, CreateFieldAgentDto, CreateFieldLeadDto, CreateFieldOrganizationDto, CreateFieldTicketDto, CreatePartnerOrganizationDto, SaveFieldDailyReportDto, SetFieldTargetDto, SetFieldZonesDto } from './partners.dto';
 import { PartnerFieldDailyReport, PartnerFieldLead, PartnerFieldTarget, PartnerFieldTicket, PartnerMember, PartnerOrganization } from './partner.entities';
 import { canonicalFieldPhone, fieldPhoneVariants } from './field-phone';
+import { fieldSummaryAccumulator } from './field-summary';
+import { FieldLeadPageQuery } from './partners.dto';
+import { CacheService } from '../common/services/cache.service';
+import { ProviderSingleFlight } from '../common/provider-work';
 
 const FIELD_PERMISSIONS = ['organization.read', 'support.tickets', 'support.tickets.read', 'leads.create', 'recruits.read_own', 'targets.read_own', 'issues.create'];
 const SUPERVISOR_PERMISSIONS = [...FIELD_PERMISSIONS, 'recruits.read_team', 'organization.members.read'];
@@ -21,6 +25,7 @@ const COMPANY_MANAGER_ROLES = ['ORG_ADMIN', 'ORG_MANAGER'];
 
 @Injectable()
 export class PartnersService {
+  private readonly fieldReads = new ProviderSingleFlight();
   constructor(
     @InjectRepository(PartnerOrganization) private readonly organizations: Repository<PartnerOrganization>,
     @InjectRepository(PartnerMember) private readonly members: Repository<PartnerMember>,
@@ -32,6 +37,7 @@ export class PartnersService {
     private readonly support: SupportService,
     @Optional() @InjectRepository(PartnerFieldDailyReport) private readonly reports?: Repository<PartnerFieldDailyReport>,
     @Optional() private readonly referrals?: ReferralsService,
+    @Optional() private readonly cache?: CacheService,
   ) {}
 
   private async member(userId: string, organizationId: string): Promise<PartnerMember> {
@@ -92,11 +98,13 @@ export class PartnersService {
     const fieldAvailable = activePartnerTypes.includes('FIELD_MARKETING');
     const fleetAvailable = activePartnerTypes.includes('FLEET_OWNER') && ['ACTIVE','SUSPENDED'].includes(organization.status) && ['ORG_ADMIN','ORG_MANAGER','FLEET_MANAGER','VIEWER','FINANCE_VIEWER'].includes(member.role);
     const fleetPermissions = !fleetAvailable ? [] : organization.status === 'ACTIVE' && ['ORG_ADMIN','ORG_MANAGER','FLEET_MANAGER'].includes(member.role) ? ['vehicles.read','vehicles.request','vehicles.assign_driver'] : ['vehicles.read'];
+    const fleetApplicationsPermissions = fleetAvailable && ['ORG_ADMIN','ORG_MANAGER','FLEET_MANAGER'].includes(member.role)
+      ? ['fleet.applications.read', ...(organization.status === 'ACTIVE' ? ['fleet.applications.review'] : [])] : [];
     const rolePermissions = member.role === 'ORG_ADMIN' ? ADMIN_PERMISSIONS : member.role === 'FIELD_SUPERVISOR' ? SUPERVISOR_PERMISSIONS : member.role === 'FIELD_AGENT' ? FIELD_PERMISSIONS : ['organization.read'];
     const permissions = !fieldAvailable ? ['organization.read'] : organization.status === 'ACTIVE' ? rolePermissions : ['SUSPENDED', 'CLOSED'].includes(organization.status) ? rolePermissions.filter((permission) => ['organization.read', 'support.tickets.read', 'recruits.read_own', 'recruits.read_team', 'targets.read_own', 'organization.members.read'].includes(permission)) : ['organization.read'];
     return {
       organizationId, organizationStatus: organization.status, roles: [member.role], activePartnerTypes,
-      features: [...(fieldAvailable ? ['marketing.campaigns'] : []),...(fleetAvailable ? ['fleet.registry'] : [])], permissions: [...new Set([...permissions,...fleetPermissions,...(fleetAvailable && ['ORG_ADMIN','ORG_MANAGER','FLEET_MANAGER'].includes(member.role) ? ['fleet.payments.confirm'] : [])])],
+      features: [...(fieldAvailable ? ['marketing.campaigns'] : []),...(fleetAvailable ? ['fleet.registry'] : [])], permissions: [...new Set([...permissions,...fleetPermissions,...fleetApplicationsPermissions,...(fleetAvailable && ['ORG_ADMIN','ORG_MANAGER','FLEET_MANAGER'].includes(member.role) ? ['fleet.payments.confirm'] : [])])],
     };
   }
 
@@ -309,13 +317,13 @@ export class PartnersService {
     });
   }
 
-  private async leadProgress(leads: PartnerFieldLead[]) {
+  private async leadProgress(leads: PartnerFieldLead[], manager?: EntityManager) {
     const phones = [...new Set(leads.flatMap((lead) => fieldPhoneVariants(lead.phone)))];
     // Avoid the KYC history x vehicles Cartesian join and never hydrate identity
     // documents, evidence URLs or payment details for this progress projection.
     const users: User[] = [];
     for (let offset = 0; offset < phones.length; offset += 200) {
-      const rows = await this.users.query(`SELECT u.id,u.phone,u.role,u.status,u."isActive",u."driverOnboardingRequestedAt",
+      const rows = await (manager?.getRepository(User) ?? this.users).query(`SELECT u.id,u.phone,u.role,u.status,u."isActive",u."driverOnboardingRequestedAt",
         k.id AS "kycId", k."createdAt" AS "kycCreatedAt", k.provider AS "kycProvider", k.status AS "kycStatus",
         k."diditSessionStatus", EXISTS (SELECT 1 FROM vehicles v WHERE v."ownerId"=u.id AND v."isActive"=true) AS "hasVehicle"
         FROM users u LEFT JOIN LATERAL (SELECT id,"createdAt",provider,status,"diditSessionStatus"
@@ -328,7 +336,7 @@ export class PartnersService {
     }
     const byPhone = new Map(users.map((user) => [canonicalFieldPhone(user.phone), user]));
     const ids = users.map((user) => user.id);
-    const firstTrips = ids.length ? await this.trips.createQueryBuilder('trip')
+    const firstTrips = ids.length ? await (manager?.getRepository(Trip) ?? this.trips).createQueryBuilder('trip')
       .select('trip.driverId', 'driverId').addSelect('MIN(trip.completedAt)', 'firstTripAt')
       .where('trip.driverId IN (:...ids)', { ids }).andWhere('trip.status = :status', { status: TripStatus.COMPLETED })
       .andWhere('trip.completedAt IS NOT NULL').groupBy('trip.driverId').getRawMany<{ driverId: string; firstTripAt: Date }>() : [];
@@ -353,9 +361,75 @@ export class PartnersService {
     });
   }
 
-  async overview(userId: string, organizationId: string) {
+  private async *fieldProgressPages(userId: string, organizationId: string, team: boolean, options: FieldLeadPageQuery = {}) {
+    const deadline = Date.now() + 10000;
+    const base = this.leads.createQueryBuilder('lead').where('lead."organizationId" = :organizationId', { organizationId })
+      .andWhere('lead."createdAt" <= :cutoff', { cutoff: new Date() });
+    if (!team) base.andWhere('lead."agentId" = :userId', { userId });
+    if (options.id) base.andWhere('lead.id = :leadId', { leadId: options.id });
+    const search = (options.search ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+    search.split(/\s+/).filter(Boolean).forEach((term, index) => {
+      const digits = term.replace(/\D/g, '').replace(/^0/, '');
+      base.andWhere(`(translate(lower(concat_ws(' ', lead."firstName", lead."lastName", lead.city)),
+        'àâäáãåçéèêëìíîïñòóôöõùúûüýÿÀÂÄÁÃÅÇÉÈÊËÌÍÎÏÑÒÓÔÖÕÙÚÛÜÝŸ', 'aaaaaaceeeeiiiinooooouuuuyyaaaaaaceeeeiiiinooooouuuuyy') LIKE :term${index} ESCAPE '!'
+        OR (:digits${index} <> '' AND lead.phone LIKE :phone${index}))`, {
+        [`term${index}`]: `%${term.replace(/[!%_]/g, '!$&')}%`, [`digits${index}`]: digits, [`phone${index}`]: `%${digits}%`,
+      });
+    });
+    let cursor: { at: string; id: string } | undefined;
+    do {
+      if (Date.now() >= deadline) throw new ServiceUnavailableException('Statistiques terrain temporairement indisponibles. Réessayez.');
+      const query = base.clone();
+      if (cursor) query.andWhere('(lead."createdAt", lead.id) < (:at::timestamp, :cursorId::uuid)', { at: cursor.at, cursorId: cursor.id });
+      const { entities, raw, progress } = await this.leads.manager.transaction(async manager => {
+        await manager.query(`SELECT set_config('statement_timeout', $1, true), set_config('lock_timeout','500ms',true)`, [`${Math.max(1, Math.min(2500, deadline - Date.now()))}ms`]);
+        const rows = await query.setQueryRunner(manager.queryRunner!).addSelect(`to_char(lead."createdAt", 'YYYY-MM-DD"T"HH24:MI:SS.US')`, 'cursorAt')
+          .orderBy('lead.createdAt', 'DESC').addOrderBy('lead.id', 'DESC').take(200).getRawAndEntities();
+        return { ...rows, progress: await this.leadProgress(rows.entities, manager) };
+      });
+      if (Date.now() >= deadline) throw new ServiceUnavailableException('Statistiques terrain temporairement indisponibles. Réessayez.');
+      yield progress;
+      if (entities.length < 200) break;
+      const next = { at: raw.at(-1).cursorAt as string, id: entities.at(-1)!.id };
+      if (next.id === cursor?.id) throw new Error('Field page scan did not advance');
+      cursor = next;
+    } while (true);
+  }
+
+  async fieldLeadsPage(userId: string, organizationId: string, options: FieldLeadPageQuery = {}) {
+    const member = await this.fieldMember(userId, organizationId);
+    const page = options.page ?? 1, limit = Math.min(100, options.limit ?? 25);
+    const items: Awaited<ReturnType<PartnersService['leadProgress']>> = [];
+    let total = 0;
+    for await (const batch of this.fieldProgressPages(userId, organizationId, member.role !== 'FIELD_AGENT', options)) {
+      for (const lead of batch) {
+        if (options.status ? lead.status !== options.status : options.filter === 'done' ? lead.status !== 'FIRST_TRIP' : options.filter === 'progress' && lead.status === 'FIRST_TRIP') continue;
+        if (total >= (page - 1) * limit && items.length < limit) items.push(lead);
+        total++;
+      }
+    }
+    return { items: items.map(({ firstTripAt: _firstTripAt, ...lead }) => lead), total, page, limit };
+  }
+
+  async overview(userId: string, organizationId: string, view?: 'summary') {
     const member = await this.fieldMember(userId, organizationId);
     const team = member.role !== 'FIELD_AGENT';
+    if (view === 'summary') {
+      // Reauthorize before cache lookup. Role changes cannot reuse team-scoped data.
+      const key = `field-summary:v1:${organizationId}:${userId}:${member.role}`;
+      const summary = await this.fieldReads.run(key, async () => {
+        const cached = await this.cache?.get<ReturnType<ReturnType<typeof fieldSummaryAccumulator>['result']>>(key);
+        if (cached) return cached;
+        const accumulator = fieldSummaryAccumulator(userId);
+        for await (const batch of this.fieldProgressPages(userId, organizationId, team)) for (const lead of batch) accumulator.add(lead);
+        const result = accumulator.result();
+        await this.cache?.set(key, result, 30);
+        return result;
+      });
+      const target = await this.targets.findOneBy({ organizationId, agentId: userId, period: summary.period });
+      return { target: target ? { period: summary.period, goal: target.goal, achieved: summary.achieved } : null,
+        zones: member.zones ?? [], leads: [], summary };
+    }
     const leads = await this.leads.find({ where: team ? { organizationId } : { organizationId, agentId: userId }, order: { createdAt: 'DESC' } });
     const progress = await this.leadProgress(leads);
     const period = new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Kinshasa', year: 'numeric', month: '2-digit' }).format(new Date()).slice(0, 7);
@@ -383,24 +457,25 @@ export class PartnersService {
     });
     const agentIds = members.filter((member) => ['FIELD_AGENT', 'FIELD_SUPERVISOR'].includes(member.role)).map((member) => member.userId);
     const period = new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Kinshasa', year: 'numeric', month: '2-digit' }).format(new Date()).slice(0, 7);
-    const [leads, targets] = await Promise.all([
-      this.leads.find({ where: { organizationId }, order: { createdAt: 'DESC' } }),
-      agentIds.length ? this.targets.findBy({ organizationId, period, agentId: In(agentIds) }) : Promise.resolve([]),
-    ]);
-    const progress = await this.leadProgress(leads);
-    const firstTrips = progress.filter((lead) => lead.firstTripAt &&
-      new Date(lead.firstTripAt).getTime() >= new Date(lead.createdAt).getTime() &&
-      new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Kinshasa', year: 'numeric', month: '2-digit' }).format(new Date(lead.firstTripAt)).startsWith(period)).length;
+    const targets = agentIds.length ? await this.targets.findBy({ organizationId, period, agentId: In(agentIds) }) : [];
+    const totals = { contacted: 0, registered: 0, kycApproved: 0, readyToDrive: 0, firstTrips: 0 };
+    const month = new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Kinshasa', year: 'numeric', month: '2-digit' });
+    for await (const batch of this.fieldProgressPages('', organizationId, true)) {
+      for (const lead of batch) {
+        totals.contacted++;
+        if (lead.status !== 'CONTACTED') totals.registered++;
+        if (['KYC_APPROVED', 'READY_TO_DRIVE', 'FIRST_TRIP'].includes(lead.status)) totals.kycApproved++;
+        if (['READY_TO_DRIVE', 'FIRST_TRIP'].includes(lead.status)) totals.readyToDrive++;
+        if (lead.firstTripAt && new Date(lead.firstTripAt).getTime() >= new Date(lead.createdAt).getTime() && month.format(new Date(lead.firstTripAt)).startsWith(period)) totals.firstTrips++;
+      }
+    }
     return {
       organization: { id: organizationId, displayName: organization.displayName, status: organization.status },
       myRole,
       members: members.map((member) => ({ userId: member.userId, name: [member.user?.firstName, member.user?.lastName].filter(Boolean).join(' ') || 'Agent', role: member.role, zones: member.zones ?? [] })),
       performance: {
-        period, agents: agentIds.length, contacted: progress.length,
-        registered: progress.filter((lead) => lead.status !== 'CONTACTED').length,
-        kycApproved: progress.filter((lead) => ['KYC_APPROVED', 'READY_TO_DRIVE', 'FIRST_TRIP'].includes(lead.status)).length,
-        readyToDrive: progress.filter((lead) => ['READY_TO_DRIVE', 'FIRST_TRIP'].includes(lead.status)).length,
-        firstTrips, targetGoal: targets.length ? targets.reduce((total, target) => total + target.goal, 0) : null,
+        period, agents: agentIds.length, ...totals,
+        targetGoal: targets.length ? targets.reduce((total, target) => total + target.goal, 0) : null,
         targetsDefined: targets.length,
       },
     };

@@ -15,7 +15,7 @@ import { Namespace, Socket } from 'socket.io';
 import { JwtService } from '@nestjs/jwt';
 import { ConfigService } from '@nestjs/config';
 import { TripsService } from '../trips/trips.service';
-import { BookingsService } from '../bookings/bookings.service';
+import { BookingsService, AutomaticRideProgressResult } from '../bookings/bookings.service';
 import { normalizeLngLatCoordinates } from '../common/utils/tracking-coordinates';
 import {
   BookingSocketDto,
@@ -71,6 +71,12 @@ export class TrackingGateway
     if (autoProgress.events.length > 0) {
       client.emit('booking_auto_progress', autoProgress);
     }
+  }
+
+  /** The durable worker broadcasts committed progress; reconnecting clients also reload state. */
+  publishAutomaticProgress(progress: AutomaticRideProgressResult) {
+    if (progress.events.length && this.server)
+      this.server.to(`trip:${progress.tripId}`).emit('booking_auto_progress', progress);
   }
 
   private shouldSampleGpsPosition(): boolean {
@@ -213,21 +219,9 @@ export class TrackingGateway
           recordedAt: data.recordedAt,
         },
       );
-      const autoProgress =
-        await this.bookingsService.evaluateAutomaticRideProgressForTrip(
-          data.tripId,
-        );
+      await this.bookingsService.queueAutomaticRideProgressForTrip(data.tripId);
 
       this.server.to(`trip:${data.tripId}`).emit('driver_location', location);
-      if (autoProgress.events.length > 0) {
-        this.logAutomaticProgress(
-          'driver_location_update',
-          autoProgress.events,
-        );
-        this.server
-          .to(`trip:${data.tripId}`)
-          .emit('booking_auto_progress', autoProgress);
-      }
       this.logGpsSample('driver_location_update', {
         tripId: data.tripId,
         userId: client.data.userId,
@@ -269,6 +263,7 @@ export class TrackingGateway
           heading: data.heading,
           recordedAt: data.recordedAt,
         },
+        { deferProgress: true },
       );
 
       const payload = {

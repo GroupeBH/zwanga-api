@@ -6,6 +6,7 @@ import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decor
 import { UserRole } from '../users/entities/user.entity';
 import { AddCompanyManagerDto, CreateCompanyOrganizationDto, CreateFieldAgentDto, CreateFieldLeadDto, CreateFieldOrganizationDto, CreateFieldTicketDto, CreatePartnerOrganizationDto, SaveFieldDailyReportDto, SetFieldTargetDto, SetFieldZonesDto } from './partners.dto';
 import { PartnersService } from './partners.service';
+import { FieldLeadPageQuery, FieldOverviewQuery } from './partners.dto';
 
 @ApiTags('Partners')
 @Auth()
@@ -24,7 +25,11 @@ export class PartnersController {
   capabilities(@Request() req, @Param('id', ParseUUIDPipe) id: string) { return this.partners.capabilities(req.user.userId, id); }
 
   @Get('organizations/:id/field/overview')
-  overview(@Request() req, @Param('id', ParseUUIDPipe) id: string) { return this.partners.overview(req.user.userId, id); }
+  overview(@Request() req, @Param('id', ParseUUIDPipe) id: string, @Query() query: FieldOverviewQuery = {}) { return this.partners.overview(req.user.userId, id, query.view); }
+
+  @Get('organizations/:id/field/leads')
+  @SensitiveThrottle(30, 60000)
+  fieldLeads(@Request() req, @Param('id', ParseUUIDPipe) id: string, @Query() query: FieldLeadPageQuery) { return this.partners.fieldLeadsPage(req.user.userId, id, query); }
 
   @Get('organizations/:id/field/team')
   fieldTeam(@Request() req, @Param('id', ParseUUIDPipe) id: string) { return this.partners.fieldTeam(req.user.userId, id); }

@@ -100,7 +100,7 @@ export async function streamExport<T>(
 /** Stable keyset on immutable createdAt/id, no ever-growing OFFSET scans. */
 export function exportCreatedPages<
   T extends ObjectLiteral & { id: string; createdAt: Date },
->(query: SelectQueryBuilder<T>, alias: string) {
+>(query: SelectQueryBuilder<T>, alias: string, dateColumn: 'createdAt' | 'requestedAt' = 'createdAt') {
   // Alias is supplied by our code, never a query parameter.
   if (!/^[a-zA-Z]+$/.test(alias)) throw new Error('Invalid export alias');
   let cursor: { id: string; timestamp: string } | undefined;
@@ -108,16 +108,16 @@ export function exportCreatedPages<
   return async (_offset: number, limit: number) => {
     const page = query
       .clone()
-      .andWhere(`${alias}.createdAt <= :exportCutoff`, { exportCutoff: cutoff })
-      .orderBy(`${alias}.createdAt`, 'DESC')
+      .andWhere(`${alias}.${dateColumn} <= :exportCutoff`, { exportCutoff: cutoff })
+      .orderBy(`${alias}.${dateColumn}`, 'DESC')
       .addOrderBy(`${alias}.id`, 'DESC')
       .take(limit)
-      .addSelect(`${alias}."createdAt"::text`, '__exportCreatedAt')
+      .addSelect(`${alias}."${dateColumn}"::text`, '__exportCreatedAt')
       .addSelect(`${alias}.id::text`, '__exportId');
     // Keep microseconds in the cursor, even if the boundary row is deleted.
     if (cursor)
       page.andWhere(
-        `(${alias}."createdAt", ${alias}.id) < (:exportDate, :exportId)`,
+        `(${alias}."${dateColumn}", ${alias}.id) < (:exportDate, :exportId)`,
         { exportId: cursor.id, exportDate: cursor.timestamp },
       );
     const { entities, raw } = await page.getRawAndEntities();

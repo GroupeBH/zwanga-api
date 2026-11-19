@@ -5,6 +5,8 @@ import {
   BookingStatus,
 } from './entities/booking.entity';
 import { BookingsService } from './bookings.service';
+import { scanFinancialIntegrity } from '../wallet/financial-integrity-scan';
+jest.mock('../wallet/financial-integrity-scan');
 import { Trip, TripStatus } from '../trips/entities/trip.entity';
 import { KycStatus } from '../users/entities/kyc-document.entity';
 import { User } from '../users/entities/user.entity';
@@ -114,6 +116,7 @@ describe('BookingsService trip payments', () => {
   };
 
   beforeEach(() => {
+    jest.mocked(scanFinancialIntegrity).mockResolvedValue({ unsafeAnomalies: 0, walletBalanceMismatches: 0 });
     bookingRepository = {
       exists: jest.fn().mockResolvedValue(false),
       find: jest.fn(),
@@ -1176,6 +1179,7 @@ describe('BookingsService trip payments', () => {
       },
     };
     dataSource.query
+      .mockResolvedValueOnce([{ name: 'token-settlement-reconciliation' }])
       .mockResolvedValueOnce([{ id: 'booking-1' }])
       .mockResolvedValueOnce([{ count: 0 }])
       .mockResolvedValueOnce([{ count: 0 }]);
@@ -1200,7 +1204,9 @@ describe('BookingsService trip payments', () => {
   });
 
   it('reports a paid-without-ledger anomaly without debiting automatically', async () => {
+    jest.mocked(scanFinancialIntegrity).mockResolvedValueOnce({ unsafeAnomalies: 2, walletBalanceMismatches: 0 });
     dataSource.query
+      .mockResolvedValueOnce([{ name: 'token-settlement-reconciliation' }])
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([{ count: 2 }])
       .mockResolvedValueOnce([{ count: 0 }]);
@@ -1216,7 +1222,7 @@ describe('BookingsService trip payments', () => {
     bookingRepository.findOne.mockResolvedValue({ ...booking, status: BookingStatus.COMPLETED,
       paymentStatus: BookingPaymentStatus.SUCCEEDED, paymentMode: TripPaymentMode.POINTS,
       cashCommissionTokenValue: 10, trip: { ...booking.trip, driverId: 'driver-1' } });
-    dataSource.query.mockResolvedValueOnce([{ id: booking.id }]).mockResolvedValue([]);
+    dataSource.query.mockResolvedValueOnce([{ name: 'token-settlement-reconciliation' }]).mockResolvedValueOnce([{ id: booking.id }]).mockResolvedValue([]);
     financialManager.find.mockResolvedValue([{ type: 'booking_payment', amount: -500, currency: 'PTS', createdAt: new Date() }]);
     driverSettlementsService.recordCompletedBookingEarningWithManager.mockResolvedValue(created ? { id: 'earning' } : null);
     expect(await service.reconcileTokenTripSettlements()).toMatchObject({ repaired: created ? 1 : 0, failed: created ? 0 : 1 });
