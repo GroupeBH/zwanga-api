@@ -6,7 +6,7 @@ for (const file of ['deploy.yml', 'deploy-staging.yml']) test(`${file}: integrat
   const workflow = yaml.load(readFileSync(`.github/workflows/${file}`, 'utf8'));
   const steps = Object.values(workflow.jobs)[0].steps;
   const commands = steps.map(step => step.run || '').join('\n');
-  for (const flag of ['INSTALLATION_UPDATES', 'ACCOUNT_LIFECYCLE', 'MIXED_CASH', 'RESILIENCE', 'TRIP_SEARCH', 'NEARBY_RING', 'PAID_SUBSIDY', 'ZONES']) {
+  for (const flag of ['INSTALLATION_UPDATES', 'ACCOUNT_LIFECYCLE', 'MIXED_CASH', 'RESILIENCE', 'TRIP_SEARCH', 'NEARBY_RING', 'PAID_SUBSIDY', 'ZONES', 'ASSET', 'PRO_CREDIT']) {
     // Verify the actual exported suite list, not an incidental mention in a comment.
     const suiteLoop = commands.match(/for suite in ([^;]+); do\s+echo "\$\{suite\}_TEST_POSTGRES_BIN=\/usr\/lib\/postgresql\/16\/bin" >> "\$\{GITHUB_ENV\}"/);
     assert.ok(suiteLoop && suiteLoop[1].split(/\s+/).includes(flag), flag);

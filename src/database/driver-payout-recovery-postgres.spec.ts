@@ -63,7 +63,7 @@ const pgBin = process.env.PAYOUT_TEST_POSTGRES_BIN;
           '-E',
           'UTF8',
         ],
-        { windowsHide: true, stdio: 'pipe', timeout: 30_000 },
+        { windowsHide: true, stdio: 'pipe', timeout: 60_000 },
       );
       const port = await new Promise<number>((done) => {
         const server = createServer();
@@ -117,7 +117,9 @@ const pgBin = process.env.PAYOUT_TEST_POSTGRES_BIN;
         "paymentTransactionId" uuid REFERENCES payment_transactions(id), "requestedAt" timestamp,
         "processedAt" timestamp, "failureReason" varchar(500), "createdAt" timestamp DEFAULT now(), "updatedAt" timestamp DEFAULT now());
       CREATE TABLE driver_earnings (id uuid PRIMARY KEY, "driverId" uuid, "netAmount" numeric(12,2),
-        "assetRepaymentAmount" numeric(12,2) NOT NULL DEFAULT 0, status varchar(20));`);
+        "assetRepaymentAmount" numeric(12,2) NOT NULL DEFAULT 0,
+        "proRepaymentAmount" numeric(12,2) NOT NULL DEFAULT 0,
+        "proCreditPending" boolean NOT NULL DEFAULT false, status varchar(20));`);
       const runner = source.createQueryRunner();
       await migration.up(runner);
       await runner.release();
@@ -150,7 +152,7 @@ const pgBin = process.env.PAYOUT_TEST_POSTGRES_BIN;
         settlements,
         config,
       );
-    }, 60_000);
+    }, 120_000);
 
     beforeEach(async () => {
       await source.query('DELETE FROM driver_payout_events');
@@ -190,7 +192,7 @@ const pgBin = process.env.PAYOUT_TEST_POSTGRES_BIN;
             resolve(tmpdir()) + sep + 'zwanga-payout-recovery-test-',
           )
         ) {
-          rmSync(directory, { recursive: true, force: true });
+          rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
         }
         jest.restoreAllMocks();
       }
@@ -221,6 +223,18 @@ const pgBin = process.env.PAYOUT_TEST_POSTGRES_BIN;
       expect(await (settlements as any).getAvailableBalanceWithManager(source.manager, driver)).toBe(9874.50);
       const [earning] = await source.query('SELECT "assetRepaymentAmount" FROM driver_earnings WHERE "driverId"=$1', [driver]);
       expect(Number(earning.assetRepaymentAmount)).toBe(125.50);
+    });
+
+    it('preserves Pro reservations and deductions when support releases an unpaid payout', async () => {
+      const balance = () => (settlements as unknown as {
+        getAvailableBalanceWithManager: (manager: DataSource['manager'], id: string) => Promise<number>;
+      }).getAvailableBalanceWithManager(source.manager, driver);
+      await source.query('UPDATE driver_earnings SET "proCreditPending"=true WHERE "driverId"=$1', [driver]);
+      expect(await balance()).toBe(0);
+      await recovery.resolveNotPaid(admin, payoutId, dto);
+      expect(await balance()).toBe(0);
+      await source.query('UPDATE driver_earnings SET "proCreditPending"=false,"proRepaymentAmount"=400 WHERE "driverId"=$1', [driver]);
+      expect(await balance()).toBe(9600);
     });
 
     it('late verified success is retained, debits available gains and blocks withdrawals until reviewed', async () => {

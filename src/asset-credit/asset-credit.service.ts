@@ -51,7 +51,7 @@ export class AssetCreditService {
   async requests(driverId?: string) {
     return {
       items: await this.db.query(
-        `SELECT id,"driverId","assetKind",notes,status,"createdAt" FROM asset_credit_requests ${driverId ? 'WHERE "driverId"=$1' : ''} ORDER BY "createdAt" DESC,id DESC LIMIT 100`,
+        `SELECT id,"driverId","assetKind",notes,status,"createdAt" FROM asset_credit_requests WHERE to_jsonb(asset_credit_requests)->>'proProductId' IS NULL ${driverId ? 'AND "driverId"=$1' : ''} ORDER BY "createdAt" DESC,id DESC LIMIT 100`,
         driverId ? [driverId] : [],
       ),
     };
@@ -79,9 +79,10 @@ export class AssetCreditService {
         throw new ConflictException('Ce service est en pause.');
       if (assetKind === 'vehicle') await assertVehicleCreditEligible(m, driverId);
       const [existing] = await m.query(
-        `SELECT id FROM asset_credit_requests WHERE "driverId"=$1 AND "assetKind"=$2 AND status='submitted'`,
+        `SELECT id,to_jsonb(asset_credit_requests)->>'proProductId' AS "proProductId" FROM asset_credit_requests WHERE "driverId"=$1 AND "assetKind"=$2 AND status='submitted'`,
         [driverId, assetKind],
       );
+      if (existing?.proProductId) throw new ConflictException('Une demande Zwanga Pro est déjà en cours. Consultez ce dossier.');
       if (existing) return existing;
       return (
         await m.query(
@@ -93,7 +94,7 @@ export class AssetCreditService {
   }
   async comment(id: string, driverId: string, notes: string) {
     const [updated] = await this.db.query(`WITH updated AS (UPDATE asset_credit_requests SET notes=$3
-      WHERE id=$1 AND "driverId"=$2 AND status='submitted' RETURNING id,notes) SELECT * FROM updated`, [id, driverId, notes.trim()]);
+      WHERE id=$1 AND "driverId"=$2 AND status='submitted' AND to_jsonb(asset_credit_requests)->>'proProductId' IS NULL RETURNING id,notes) SELECT * FROM updated`, [id, driverId, notes.trim()]);
     if (!updated) throw new ConflictException('Ce dossier ne peut plus être modifié. Consultez votre offre.');
     return updated;
   }
@@ -101,7 +102,7 @@ export class AssetCreditService {
     const rows = await this.db.query(
       `SELECT id,"driverId","assetKind",label,"principalMinor","paidMinor","dueMinor",status,terms,"policyVersion","repaymentBps","acceptedAt","activatedAt","createdAt",
         "cashPriceMinor","creditFeeMinor","installmentCount","installmentPeriod","costDisclosureVersion"
-      FROM asset_credits ${driverId ? 'WHERE "driverId" = $1' : ''} ORDER BY "createdAt" DESC, id DESC LIMIT 100`,
+      FROM asset_credits WHERE "policyVersion"<>'zwanga-pro-v1' ${driverId ? 'AND "driverId" = $1' : ''} ORDER BY "createdAt" DESC, id DESC LIMIT 100`,
       driverId ? [driverId] : [],
     );
     return {
@@ -125,6 +126,7 @@ export class AssetCreditService {
       driverId ? [id, driverId] : [id],
     );
     if (!credit) throw new NotFoundException('Crédit introuvable.');
+    if (credit.policyVersion === 'zwanga-pro-v1') throw new ConflictException('Consultez ce contrat dans Zwanga Pro.');
     const entries = await this.db.query(
       'SELECT id,kind,"amountMinor","dueDeltaMinor","createdAt","bookingId" FROM asset_credit_entries WHERE "creditId"=$1 ORDER BY "createdAt" DESC,id DESC LIMIT 100',
       [id],
@@ -224,7 +226,8 @@ export class AssetCreditService {
         [credit.id, actorId],
       );
       await m.query(
-        `UPDATE asset_credit_requests SET status='offered' WHERE "driverId"=$1 AND "assetKind"=$2 AND status='submitted'`,
+        `UPDATE asset_credit_requests SET status='offered' WHERE "driverId"=$1 AND "assetKind"=$2 AND status='submitted'
+          AND to_jsonb(asset_credit_requests)->>'proProductId' IS NULL`,
         [dto.driverId, dto.assetKind],
       );
       return credit;
@@ -238,6 +241,7 @@ export class AssetCreditService {
         [id, driverId],
       );
       if (!credit) throw new NotFoundException('Crédit introuvable.');
+      if (credit.policyVersion === 'zwanga-pro-v1') throw new ConflictException('Utilisez le parcours contractuel Zwanga Pro.');
       const plan = accept ? selectRepaymentPlan(credit, consent?.selectedPlanId) : null;
       if (accept && credit.costDisclosureVersion && consent?.costDisclosureVersion !== credit.costDisclosureVersion)
         throw new ConflictException('Mettez à jour l’application pour consulter et accepter le prix, les frais et les échéances de cette offre.');
@@ -289,6 +293,7 @@ export class AssetCreditService {
         [id],
       );
       if (!credit) throw new NotFoundException('Crédit introuvable.');
+      if (credit.policyVersion === 'zwanga-pro-v1') throw new ConflictException('Utilisez la remise Zwanga Pro.');
       if (
         ['active', 'settled'].includes(credit.status) &&
         credit.deliveryReference === dto.deliveryReference.trim() &&
@@ -343,6 +348,8 @@ export class AssetCreditService {
       );
     try {
       return await this.db.transaction(async (m) => {
+        const [contract] = await m.query('SELECT "policyVersion" FROM asset_credits WHERE id=$1 AND "driverId"=$2', [id, driverId]);
+        if (contract?.policyVersion === 'zwanga-pro-v1') throw new ConflictException('Utilisez le remboursement Zwanga Pro.');
         const [result] = await m.query(
           'SELECT zwanga_asset_wallet_repay($1,$2,$3,$4) AS result',
           [id, driverId, dto.amountMinor, dto.mutationId],

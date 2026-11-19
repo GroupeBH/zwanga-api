@@ -1,5 +1,16 @@
 # Journal détaillé des changements d'infrastructure AWS
 
+## INFRA-2026-11-19-003 — Tests transactionnels Zwanga Pro dans la CI
+
+- Date / opérateur : 19 novembre 2026, Africa/Kinshasa ; Codex à la demande du mainteneur. Statut : modifications locales, aucun workflow distant ni déploiement lancé.
+- Contexte : le module de crédit Zwanga Pro étend les crédits existants, les revenus disponibles et leurs réserves. Les suites PostgreSQL opt-in doivent être réellement exécutées avant publication de l'image.
+- Configuration : `deploy.yml` et `deploy-staging.yml` exportent désormais `ASSET_TEST_POSTGRES_BIN` et `PRO_CREDIT_TEST_POSTGRES_BIN` vers les binaires PostgreSQL 16 déjà installés sur leurs runners. Le test `test/ci-integration-policy.test.cjs` exige ces deux exports. Aucun nouveau job, secret GitHub ou droit IAM.
+- Ressources / disponibilité / coût : aucune ressource AWS créée ou redimensionnée, aucun changement de capacité. Les suites ajoutent du temps de runner CI ; elles utilisent des bases jetables sur loopback, pas RDS ni des paiements réels.
+- Données : les trois nouvelles migrations métier `1780000137000`, `1780000138000`, `1780000139000` sont testées localement, pas appliquées à une base existante. Pour un futur déploiement, elles doivent précéder le backend qui lit les nouvelles colonnes de réserve des gains.
+- Validation locale : les deux tests de politique CI passent ; les résultats des suites métier et leurs limites figurent dans `docs/zwanga-pro-integration.md`. Une exécution GitHub Actions n'est pas revendiquée.
+- Déploiement / surveillance : après revue et recette, conserver les étapes existantes de tests et de migration avant ECS. Contrôler les suites activées, le résultat des migrations, la file Pro et les rapprochements. Les produits Pro restent désactivés par défaut ; leur ouverture nécessite une validation distincte.
+- Repli : ne pas désactiver les tests pour contourner une régression financière. Avant ouverture des offres seulement, un repli applicatif doit vérifier l'absence de contrats/travaux Pro. Après ouverture, ne pas déployer une version ignorant les réserves Pro ; fermer les offres, conserver le traitement et corriger en avant. Aucun rollback destructif du ledger.
+
 ## INFRA-2026-11-19-002 — Dimensionnement de production chargé automatiquement
 
 - Date / opérateur : 19 novembre 2026, Africa/Kinshasa ; Codex à la demande du mainteneur. Statut : local uniquement, aucun apply AWS.

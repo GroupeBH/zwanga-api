@@ -615,10 +615,13 @@ export class DriverSettlementsService implements OnModuleInit {
     try {
       const persisted = await this.earningRepository.findOne({ where: { id: earning.id } });
       const netAmount = spendableEarning(persisted ?? earning);
+      const creditPending = (persisted ?? earning).proCreditPending === true;
       await this.notificationService.sendNotificationToUser(
         earning.driverId,
-        'Gain du trajet disponible',
-        `${this.formatMoney(netAmount)} ${earning.currency} sont maintenant disponibles dans vos gains.`,
+        creditPending ? 'Règlement du trajet confirmé' : 'Gain du trajet disponible',
+        creditPending
+          ? 'Votre règlement est confirmé. Le montant disponible sera affiché après traitement de vos engagements Zwanga Pro.'
+          : `${this.formatMoney(netAmount)} ${earning.currency} sont maintenant disponibles dans vos gains.`,
         {
           type: 'driver_booking_earning_confirmed',
           role: 'driver',
@@ -626,6 +629,7 @@ export class DriverSettlementsService implements OnModuleInit {
           tripId: earning.tripId,
           bookingId: earning.bookingId,
           amount: netAmount,
+          creditPending,
           currency: earning.currency,
         },
       );
@@ -1289,7 +1293,7 @@ export class DriverSettlementsService implements OnModuleInit {
   ): Promise<number> {
     const earningResult = await manager
       .createQueryBuilder(DriverEarning, 'earning')
-      .select('COALESCE(SUM(earning.netAmount - earning.assetRepaymentAmount), 0)', 'sum')
+      .select('COALESCE(SUM(CASE WHEN earning.proCreditPending THEN 0 ELSE earning.netAmount - earning.assetRepaymentAmount - earning.proRepaymentAmount END), 0)', 'sum')
       .where('earning.driverId = :driverId', { driverId })
       .andWhere('earning.status = :status', {
         status: DriverEarningStatus.AVAILABLE,
@@ -1319,7 +1323,7 @@ export class DriverSettlementsService implements OnModuleInit {
   ): Promise<number> {
     const result = await this.earningRepository
       .createQueryBuilder('earning')
-      .select('COALESCE(SUM(earning.netAmount - earning.assetRepaymentAmount), 0)', 'sum')
+      .select('COALESCE(SUM(CASE WHEN earning.proCreditPending THEN 0 ELSE earning.netAmount - earning.assetRepaymentAmount - earning.proRepaymentAmount END), 0)', 'sum')
       .where('earning.driverId = :driverId', { driverId })
       .andWhere('earning.status IN (:...statuses)', { statuses })
       .getRawOne<{ sum: string }>();
