@@ -9,6 +9,13 @@ import { AppUpdatesService } from './app-updates.service';
 @Controller('app-updates')
 export class AppUpdatesController {
   constructor(private readonly updates: AppUpdatesService) {}
+  @Get('status') @Roles(UserRole.ADMIN)
+  status() { return this.updates.status(); }
+  @Post('releases/:id/dispatch') @Roles(UserRole.ADMIN) @SensitiveThrottle(5, 60000)
+  dispatch(@Param('id') id: string) {
+    if (!/^\d{1,18}$/.test(id)) throw new BadRequestException('Annonce invalide.');
+    return this.updates.dispatch(id);
+  }
   @Get('latest') @Public() @SensitiveThrottle(60, 60000)
   latest(@Query() input: AppVersionDto) { return this.updates.latest(input); }
   @Post('client') @SensitiveThrottle(20, 60000)

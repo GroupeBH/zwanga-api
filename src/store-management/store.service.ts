@@ -30,6 +30,7 @@ import {
 } from './store-downloads';
 import { storePermissions } from './store.permissions';
 import { METRIC_CATALOG } from './store.reports';
+import { STORE_DATA_TASKS, storeSourceDiagnostics } from './store-diagnostics';
 import {
   StoreIntegration,
   StoreReviewWorkflow,
@@ -79,6 +80,34 @@ export class StoreService {
               : 'invalid',
       })),
     };
+  }
+  async diagnostics() {
+    this.config.assertEnabled();
+    const settings = await this.repository.db.getRepository(StoreIntegration).find();
+    const platforms = await Promise.all(STORE_PLATFORMS.map(async (platform) => {
+      const jobs = await this.repository.db.getRepository(StoreSyncJob)
+        .createQueryBuilder('j')
+        .select(['j.id', 'j.task', 'j.state', 'j.processed', 'j.errorCode', 'j.createdAt', 'j.completedAt'])
+        .where('j.platform = :platform AND j.appId = :appId', { platform, appId: this.config.appId(platform) })
+        .andWhere('j.task IN (:...tasks)', { tasks: [...STORE_DATA_TASKS, 'connection'] })
+        .distinctOn(['j.task'])
+        .orderBy('j.task', 'ASC')
+        .addOrderBy('j.createdAt', 'DESC')
+        .addOrderBy('j.id', 'DESC')
+        .getMany();
+      const setting = settings.find((s) => s.platform === platform);
+      const check = jobs.find(j => j.task === 'connection');
+      // Integration settings are keyed by platform, while credentials may now
+      // identify another app. Only trust a completed check for THIS app.
+      const matches = check?.completedAt && setting?.checkedAt && check.completedAt >= setting.checkedAt;
+      const evidence = setting && { ...setting,
+        checkedAt: matches ? setting.checkedAt : null,
+        capabilities: matches ? setting.capabilities : null,
+        errorCode: matches ? setting.errorCode : null,
+      };
+      return storeSourceDiagnostics(this.config, platform, evidence, jobs);
+    }));
+    return { generatedAt: new Date().toISOString(), scheduled: this.config.scheduled, platforms };
   }
   private scope(alias: string, platform?: StorePlatform) {
     return new Brackets((q) => {
@@ -193,6 +222,15 @@ export class StoreService {
     input: StoreSyncJob['input'],
   ) {
     const appId = this.config.assertReady(platform);
+    const blocker = this.config.taskBlocker(platform, task);
+    if (blocker) {
+      throw new BadRequestException({
+        code: blocker.code,
+        message: blocker.code === 'GOOGLE_REPORTS_BUCKET_NOT_CONFIGURED'
+          ? 'Le bucket des rapports Google doit être configuré avant cet import.'
+          : 'La lecture des versions Google doit être autorisée sur le serveur avant cet import.',
+      });
+    }
     if (
       !(
         await this.repository.db

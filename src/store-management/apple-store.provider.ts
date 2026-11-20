@@ -96,6 +96,7 @@ export class AppleStoreProvider {
       for (const [name, path] of [
         ['application_read', `/apps/${identifier(app)}`],
         ['reviews_read', `/apps/${identifier(app)}/customerReviews?limit=1`],
+        ['versions_read', `/apps/${identifier(app)}/appStoreVersions?limit=1&filter[platform]=IOS`],
         [
           'analytics_read',
           `/apps/${identifier(app)}/analyticsReportRequests?limit=1`,
@@ -103,8 +104,15 @@ export class AppleStoreProvider {
         ['builds_read', `/builds?filter[app]=${identifier(app)}&limit=1`],
       ]) {
         try {
-          await this.http.api(`${API}${path}`, this.auth.apple(), { signal });
+          const response = await this.http.api(`${API}${path}`, this.auth.apple(), { signal });
           checks[name] = { available: true };
+          if (name === 'analytics_read') {
+            // A readable endpoint does not mean that report generation was requested.
+            const requests = list(object(response).data);
+            checks.analytics_reports_requested = requests.length
+              ? { available: true }
+              : { available: false, errorCode: 'APPLE_ANALYTICS_REQUEST_REQUIRED' };
+          }
         } catch (e) {
           checks[name] = {
             available: false,

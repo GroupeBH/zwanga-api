@@ -27,6 +27,10 @@ export class IsolatedPostgres {
           '-A',
           'trust',
           '--no-locale',
+          // Disposable cluster only: avoid fsync of the freshly generated
+          // bootstrap files on slow Windows/CI disks. Runtime fsync stays on.
+          // Never use this option to initialize an application database.
+          '--no-sync',
           '-E',
           'UTF8',
         ],

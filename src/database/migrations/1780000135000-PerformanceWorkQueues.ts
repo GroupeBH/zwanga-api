@@ -2,7 +2,10 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
 
 export class PerformanceWorkQueues1780000135000 implements MigrationInterface {
   async up(q: QueryRunner) {
-    await q.query(`CREATE TABLE ride_progress_jobs (
+    // One SQL batch keeps LOCAL budgets effective even in an isolated test
+    // without an explicit outer transaction. Do not wait indefinitely on trips.
+    await q.query(`SET LOCAL lock_timeout='3s'; SET LOCAL statement_timeout='30s';
+    CREATE TABLE ride_progress_jobs (
       "tripId" uuid PRIMARY KEY REFERENCES trips(id) ON DELETE CASCADE,
       version bigint NOT NULL DEFAULT 1,
       "availableAt" timestamptz NOT NULL DEFAULT clock_timestamp(),
@@ -17,7 +20,8 @@ export class PerformanceWorkQueues1780000135000 implements MigrationInterface {
   }
   async down(q: QueryRunner) {
     // Do not discard pending automatic pickup/dropoff work during rollback.
-    await q.query(`LOCK TABLE ride_progress_jobs, maintenance_job_leases IN ACCESS EXCLUSIVE MODE;
+    await q.query(`SET LOCAL lock_timeout='3s'; SET LOCAL statement_timeout='30s';
+    LOCK TABLE ride_progress_jobs, maintenance_job_leases IN ACCESS EXCLUSIVE MODE;
     DO $$ BEGIN
       IF EXISTS (SELECT 1 FROM ride_progress_jobs) THEN
         RAISE EXCEPTION 'Drain ride progress jobs before rollback';

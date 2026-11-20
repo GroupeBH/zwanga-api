@@ -11,11 +11,18 @@ const bin = process.env.TRIP_SEARCH_TEST_POSTGRES_BIN;
   const cluster = new IsolatedPostgres(bin!);
   let db: DataSource;
   beforeAll(async () => {
+    const setupStarted = performance.now();
+    const phase = (stage: string) => process.stdout.write(JSON.stringify({
+      event: 'synthetic_discovery_setup', stage, elapsedMs: Math.round(performance.now() - setupStarted),
+    }) + '\n');
     db = await cluster.start();
+    phase('cluster_started');
+    expect(await db.query('SHOW fsync')).toEqual([{ fsync: 'on' }]);
     db.setOptions({ entities: typeOrmEntities });
     await (db as any).buildMetadatas();
     await db.query('CREATE EXTENSION postgis; CREATE EXTENSION "uuid-ossp"');
     await db.synchronize();
+    phase('schema_created');
     await db.query(`INSERT INTO users(id,"firstName","lastName")
       SELECT md5('profile-user-'||n)::uuid,'Synthetic','Driver' FROM generate_series(1,5000) n;
       INSERT INTO trips("driverId","departureLocation","arrivalLocation","departureDate",
@@ -28,7 +35,10 @@ const bin = process.env.TRIP_SEARCH_TEST_POSTGRES_BIN;
         CASE WHEN n%3=0 THEN now() ELSE now()-interval '5 minutes' END
       FROM (SELECT id,row_number() OVER (ORDER BY id) n FROM users) u;
       ANALYZE users; ANALYZE trips; ANALYZE vehicles; ANALYZE subscriptions;`);
-  });
+    phase('5000_trips_seeded');
+  // Bootstrap/seed time is not a query latency measurement. Keep the actual
+  // EXPLAIN statement budget below at 10 seconds, independently of setup.
+  }, 300000);
   afterAll(() => cluster.stop());
 
   it('profiles the actual query with bounded synthetic data and preserves eligibility', async () => {

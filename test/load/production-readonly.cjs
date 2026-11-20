@@ -15,6 +15,8 @@ const TG = 'targetgroup/zwanga-api-production-api-tg/47218716421646ca';
 const LB = 'app/zwanga-api-production-api-alb/e595966267648f03';
 const TG_ARN = `arn:aws:elasticloadbalancing:${REGION}:${ACCOUNT}:${TG}`;
 const HOST = 'compute-api.zwanga-app.com';
+// Check both provisioned nodes: the primary may change after a failover.
+const REDIS_METRIC_PREFIXES = Object.freeze(['redis', 'redis_node2']);
 const ROUTES = Object.freeze({
   health: '/health',
   list: '/api/v1/trips',
@@ -48,7 +50,6 @@ function metricQueries() {
   }
   const ecs = { ClusterName: CLUSTER, ServiceName: SERVICE };
   const rds = { DBInstanceIdentifier: `${PREFIX}-postgres` };
-  const redis = { CacheClusterId: `${PREFIX}-redis-001`, CacheNodeId: '0001' };
   const alb = { LoadBalancer: LB, TargetGroup: TG };
   add('ecs_cpu', 'AWS/ECS', 'CPUUtilization', ecs, 'Maximum');
   add('ecs_memory', 'AWS/ECS', 'MemoryUtilization', ecs, 'Maximum');
@@ -58,9 +59,12 @@ function metricQueries() {
   add('rds_swap', 'AWS/RDS', 'SwapUsage', rds, 'Maximum');
   add('rds_free_storage', 'AWS/RDS', 'FreeStorageSpace', rds, 'Minimum');
   add('rds_cpu_credits', 'AWS/RDS', 'CPUCreditBalance', rds, 'Minimum', 300);
-  add('redis_cpu', 'AWS/ElastiCache', 'EngineCPUUtilization', redis, 'Maximum');
-  add('redis_memory', 'AWS/ElastiCache', 'DatabaseMemoryUsagePercentage', redis, 'Maximum');
-  add('redis_evictions', 'AWS/ElastiCache', 'Evictions', redis, 'Sum');
+  for (const [index, prefix] of REDIS_METRIC_PREFIXES.entries()) {
+    const redis = { CacheClusterId: `${PREFIX}-redis-00${index + 1}`, CacheNodeId: '0001' };
+    add(`${prefix}_cpu`, 'AWS/ElastiCache', 'EngineCPUUtilization', redis, 'Maximum');
+    add(`${prefix}_memory`, 'AWS/ElastiCache', 'DatabaseMemoryUsagePercentage', redis, 'Maximum');
+    add(`${prefix}_evictions`, 'AWS/ElastiCache', 'Evictions', redis, 'Sum');
+  }
   add('alb_requests', 'AWS/ApplicationELB', 'RequestCount', alb, 'Sum');
   add('alb_target_5xx', 'AWS/ApplicationELB', 'HTTPCode_Target_5XX_Count', alb, 'Sum');
   add('alb_elb_5xx', 'AWS/ApplicationELB', 'HTTPCode_ELB_5XX_Count', { LoadBalancer: LB }, 'Sum');
@@ -90,16 +94,30 @@ function unsafeState(s, expectedTask, now = Date.now()) {
       s.service.deployments.length !== 1 || s.service.deployments[0].rollout !== 'COMPLETED') return 'ECS is not stable';
   if (expectedTask && s.service.taskDefinition !== expectedTask) return 'A new deployment started';
   if (!s.targets.length || s.targets.some(t => t.state !== 'healthy')) return 'ALB target not healthy';
+  if (!Array.isArray(s.alarms) || !s.alarms.length) return 'Missing alarm monitoring';
   if (s.alarms.some(a => a.state === 'ALARM')) return 'CloudWatch alarm active';
+  if (s.alarms.some(a => a.state !== 'OK')) return 'Incomplete alarm monitoring';
   const thresholds = { ecs_cpu: 70, ecs_memory: 85, rds_cpu: 70, rds_connections: 60,
-    redis_cpu: 60, redis_memory: 75, alb_unhealthy: 0, alb_target_5xx: 0, alb_elb_5xx: 0, redis_evictions: 0,
+    alb_unhealthy: 0, alb_target_5xx: 0, alb_elb_5xx: 0,
     alb_latency_p95: 2 };
   const required = ['ecs_cpu', 'ecs_memory', 'rds_cpu', 'rds_connections', 'rds_free_memory',
-    'rds_free_storage', 'redis_cpu', 'redis_memory', 'alb_unhealthy'];
+    'rds_free_storage', 'alb_unhealthy'];
+  for (const prefix of REDIS_METRIC_PREFIXES) {
+    Object.assign(thresholds, { [`${prefix}_cpu`]: 60, [`${prefix}_memory`]: 75, [`${prefix}_evictions`]: 0 });
+    required.push(`${prefix}_cpu`, `${prefix}_memory`);
+  }
+  if (!Array.isArray(s.metrics)) return 'Missing metric monitoring';
+  // A timestamp without a value (or NaN) is not healthy telemetry.
+  for (const m of s.metrics) {
+    if (m.StatusCode !== 'Complete' || !Array.isArray(m.Values) || !Array.isArray(m.Timestamps) ||
+        m.Values.length !== m.Timestamps.length || m.Values.some(v => !Number.isFinite(v) || v < 0) ||
+        m.Timestamps.some(t => !Number.isFinite(Date.parse(t)) || Date.parse(t) > now + 60000)) {
+      return `Invalid/incomplete monitoring: ${m.Id}`;
+    }
+  }
   for (const id of required) {
     const m = s.metrics.find(m => m.Id === id);
-    if (!m || m.StatusCode !== 'Complete' || !m.Timestamps.length ||
-        now - Date.parse(m.Timestamps[0]) > 5 * 60000) return `Missing/stale monitoring: ${id}`;
+    if (!m || !m.Timestamps.some(t => now - Date.parse(t) <= 5 * 60000)) return `Missing/stale monitoring: ${id}`;
   }
   for (const m of s.metrics) {
     const recent = m.Values.filter((_, i) => now - Date.parse(m.Timestamps[i]) <= 5 * 60000);
@@ -118,6 +136,22 @@ function summarize(rows) {
   return { requests: rows.length, valid: rows.filter(r => r.valid).length, statuses,
     p50Ms: quantile(.5), p95Ms: quantile(.95), maxMs: times.at(-1) ?? null,
     resultCounts: [...new Set(rows.filter(r => r.count !== undefined).map(r => r.count))] };
+}
+
+async function recordFinalMonitoring(report, readSnapshot) {
+  let reason;
+  try {
+    const final = await readSnapshot();
+    const expectedTask = report.snapshots[0]?.service?.taskDefinition;
+    report.snapshots.push(final);
+    const unsafe = unsafeState(final, expectedTask);
+    reason = unsafe ? `Final monitoring: ${unsafe}` : null;
+  } catch (error) {
+    report.finalMonitoringError = error.message;
+    reason = error.message;
+  }
+  if (reason && report.result === 'completed') report.result = 'stopped_early';
+  return reason;
 }
 
 async function main(mode) {
@@ -245,10 +279,11 @@ async function main(mode) {
   } finally {
     clearTimeout(deadlineTimer); clearInterval(monitorTimer);
     if (monitorPromise) await monitorPromise;
-    if (stopped && report.result === 'completed') report.result = 'stopped_early';
     if (mode === '--run-confirmed-readonly') {
-      try { report.snapshots.push(await snapshot()); } catch (error) { report.finalMonitoringError = error.message; }
+      const reason = await recordFinalMonitoring(report, snapshot);
+      if (reason) stop(reason);
     }
+    if (stopped && report.result === 'completed') report.result = 'stopped_early';
     agent.destroy();
     report.stopReason = stopped || null;
     report.summary = { all: summarize(report.requests), list: summarize(report.requests.filter(r => r.route === 'list')),
@@ -259,5 +294,5 @@ async function main(mode) {
   }
 }
 
-module.exports = { metricQueries, unsafeState, summarize, ROUTES, STAGES, INTERVAL_MS, BURSTS, HARD_LIMIT_MS };
+module.exports = { metricQueries, unsafeState, summarize, recordFinalMonitoring, ROUTES, STAGES, INTERVAL_MS, BURSTS, HARD_LIMIT_MS };
 if (require.main === module) main(process.argv[2]).catch(error => { console.error(error.message); process.exitCode = 1; });

@@ -1,5 +1,5 @@
 bucket       = "tfstates-zwanga-api"
-key          = "zwanga/production/terraform.tfstate"
+key          = "zwanga/ecs-fargate/eu-central-1/terraform.tfstate"
 region       = "eu-central-1"
 encrypt      = true
 use_lockfile = true
