@@ -10,7 +10,7 @@ describe('server list route previews without provider calls', () => {
     const cache = fixture();
     await rememberRoutePreview(cache, dto, { routes: [{ legs: [{ duration: 300 }, { duration: 600 }] }] } as any);
     expect(cache.set.mock.calls[0][0]).toBe(routePreviewKey(dto.origin, dto.destination));
-    expect(cache.set.mock.calls[0][2]).toBe(86_400_000); // cache-manager v5 TTL in milliseconds
+    expect(cache.set.mock.calls[0][2]).toBe(86_400); // Redis adapter TTL is seconds.
     cache.get.mockResolvedValue(cache.set.mock.calls[0][1]);
     expect(await getTripRoutePreview(cache, trip)).toEqual({ estimatedDurationSeconds: 900,
       arrivalEstimateSource: 'route', previewArrivalDate: '2026-09-17T10:15:00.000Z' });

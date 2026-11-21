@@ -1,14 +1,25 @@
-import { BadRequestException, Injectable, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, Injectable, Optional, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { DataSource } from 'typeorm';
 import { AppUpdateClientDto, AppVersionDto, PublishAppReleaseDto } from './app-update.dto';
 import { AppRelease, normalizeAppVersion, UPDATE_REQUIRED_SQL } from './app-update.policy';
 import { createHash } from 'crypto';
+import { AppUpdateDeliveryService } from './app-update-delivery.service';
 
 @Injectable()
 export class AppUpdatesService {
-  constructor(private readonly db: DataSource, private readonly config: ConfigService) {}
+  constructor(private readonly db: DataSource, private readonly config: ConfigService, @Optional() private readonly delivery?: AppUpdateDeliveryService) {}
   enabled() { return this.config.get<string>('APP_UPDATES_ENABLED') === 'true'; }
+  status() {
+    return { enabled: this.enabled(), automaticFromStores: this.config.get<string>('APP_UPDATES_FROM_STORES_ENABLED') === 'true' };
+  }
+  async dispatch(id: string) {
+    this.requireEnabled();
+    const rows = await this.db.query('SELECT id FROM app_store_releases WHERE id=$1 AND available=true', [id]);
+    if (!rows.length) throw new BadRequestException('Cette annonce est absente ou retirée.');
+    if (!this.delivery) throw new ServiceUnavailableException('Préparation des notifications indisponible.');
+    return this.delivery.prepare(id);
+  }
   private requireEnabled() {
     if (!this.enabled()) throw new ServiceUnavailableException('Les annonces de mise à jour ne sont pas encore activées.');
   }
@@ -48,11 +59,11 @@ export class AppUpdatesService {
     this.requireEnabled();
     return this.db.query('SELECT * FROM app_store_releases ORDER BY id DESC LIMIT 50');
   }
-  async publish(adminId: string, input: PublishAppReleaseDto): Promise<AppRelease> {
+  async publish(adminId: string, input: PublishAppReleaseDto) {
     this.requireEnabled();
     if (input.storeAvailabilityConfirmed !== true) throw new BadRequestException('Confirmez la disponibilité publique sur le store.');
     const value = this.normalize(input);
-    return this.db.transaction(async manager => {
+    const release = await this.db.transaction(async manager => {
       await manager.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`app-update:${value.platform}`]);
       // Repeating the same announcement must not reactivate an old/retracted release or duplicate pushes.
       const existing: AppRelease[] = await manager.query('SELECT * FROM app_store_releases WHERE platform = $1 AND version = $2 AND build = $3',
@@ -70,6 +81,8 @@ export class AppUpdatesService {
         VALUES ($1,$2,$3,$4,$5) RETURNING *`, [value.platform, value.version, value.build, input.notes.trim(), adminId]);
       return rows[0];
     });
+    const dispatch = release.available && this.delivery ? await this.delivery.prepare(release.id) : undefined;
+    return { ...release, ...(dispatch ? { dispatch } : {}) };
   }
   async withdraw(id: string) {
     this.requireEnabled();

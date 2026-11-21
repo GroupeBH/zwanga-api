@@ -19,7 +19,8 @@ export async function rememberRoutePreview(cache: CacheService, dto: DirectionsD
   const key = routePreviewKey(dto.origin, dto.destination);
   const seconds = result.routes?.[0]?.legs?.reduce((sum, leg) => sum + Number(leg.duration || 0), 0);
   if (!key || !seconds || !Number.isFinite(seconds) || seconds <= 0) return;
-  try { await cache.set(key, { seconds, savedAt: Date.now() }, MAX_AGE_MS); }
+  // Our Redis cache store accepts seconds, independently of cache-manager defaults.
+  try { await cache.set(key, { seconds, savedAt: Date.now() }, MAX_AGE_MS / 1000); }
   catch { /* A cache failure must not fail navigation or payment estimation. */ }
 }
 

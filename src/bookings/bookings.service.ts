@@ -3,11 +3,13 @@ import { acceptedBookingProposalTotal, validateBookingPriceProposal } from './bo
 import { trustedContactMessagesEnabled } from '../safety/trusted-contact-policy';
 import { TOKEN_VALUE_CDF } from '../wallet/token-value.policy';
 import { CoalescedRideProgress } from './coalesced-ride-progress';
+import { enqueueRideProgress } from '../tracking/ride-progress-queue';
+import { runExclusiveMaintenanceJob } from '../common/exclusive-maintenance-job';
+import { scanFinancialIntegrity } from '../wallet/financial-integrity-scan';
 import { withBookableTrip } from './bookable-trip-transaction';
 import { lockAvailableAccounts } from '../users/account-availability';
 import { canApplyBookingPayment } from './booking-payment-transition';
 import { finishEmptyPrivateTrip } from './private-trip-cancellation';
-import { WALLET_BALANCE_MISMATCH_SQL } from '../wallet/wallet-integrity';
 import { hasRecentDestinationPassage } from './destination-passage';
 import {
   Injectable,
@@ -296,6 +298,7 @@ export class BookingsService implements OnModuleInit {
 
     this.financialReconciliationRunning = true;
     try {
+      return await runExclusiveMaintenanceJob(this.dataSource, 'token-settlement-reconciliation', 300_000, async assertLease => {
       const candidates = (await this.dataSource.query(
         `
           SELECT DISTINCT b.id
@@ -332,6 +335,7 @@ export class BookingsService implements OnModuleInit {
       let repaired = 0;
       let failed = 0;
       for (const candidate of candidates) {
+        assertLease();
         try {
           const booking = await this.bookingRepository.findOne({
             where: { id: candidate.id },
@@ -357,34 +361,7 @@ export class BookingsService implements OnModuleInit {
         }
       }
 
-      const anomalyRows = (await this.dataSource.query(
-        `
-          SELECT COUNT(*)::int AS count
-          FROM bookings b
-          WHERE b."paymentMode" = $1
-            AND b."paymentStatus" = $2
-            AND (b.status = $3 OR b."droppedOff" = true)
-            AND NOT EXISTS (
-              SELECT 1
-              FROM wallet_ledger_entries debit
-              WHERE debit."relatedEntityType" = $4
-                AND debit."relatedEntityId" = b.id
-                AND debit.type = $5
-            )
-        `,
-        [
-          TripPaymentMode.POINTS,
-          BookingPaymentStatus.SUCCEEDED,
-          BookingStatus.COMPLETED,
-          this.BOOKING_RELATED_ENTITY_TYPE,
-          'booking_payment',
-        ],
-      )) as Array<{ count: number | string }>;
-      const unsafeAnomalies = Number(anomalyRows[0]?.count ?? 0);
-      const walletMismatchRows = (await this.dataSource.query(
-        WALLET_BALANCE_MISMATCH_SQL,
-      )) as Array<{ count: number | string }>;
-      const walletBalanceMismatches = Number(walletMismatchRows[0]?.count ?? 0);
+      const { unsafeAnomalies, walletBalanceMismatches } = await scanFinancialIntegrity(this.dataSource, assertLease);
 
       if (unsafeAnomalies > 0) {
         this.logger.error(
@@ -409,6 +386,7 @@ export class BookingsService implements OnModuleInit {
         unsafeAnomalies,
         walletBalanceMismatches,
       };
+      }) ?? { inspected: 0, repaired: 0, failed: 0, unsafeAnomalies: 0, walletBalanceMismatches: 0 };
     } finally {
       this.financialReconciliationRunning = false;
     }
@@ -4295,16 +4273,22 @@ export class BookingsService implements OnModuleInit {
     };
   }
 
+  async queueAutomaticRideProgressForTrip(tripId: string): Promise<void> {
+    await enqueueRideProgress(this.dataSource, tripId);
+  }
+
   async evaluateAutomaticRideProgressForTrip(
     tripId: string,
+    options: { checkProximity?: boolean } = {},
   ): Promise<AutomaticRideProgressResult> {
     return this.automaticRideProgressQueues.run(tripId, () =>
-      this.evaluateAutomaticRideProgressForTripUnlocked(tripId),
+      this.evaluateAutomaticRideProgressForTripUnlocked(tripId, options),
     );
   }
 
   private async evaluateAutomaticRideProgressForTripUnlocked(
     tripId: string,
+    options: { checkProximity?: boolean } = {},
   ): Promise<AutomaticRideProgressResult> {
     const result: AutomaticRideProgressResult = { tripId, events: [] };
     const bookings = await this.bookingRepository.find({
@@ -4313,6 +4297,9 @@ export class BookingsService implements OnModuleInit {
     });
 
     for (const booking of bookings) {
+      if (options.checkProximity && booking.status === BookingStatus.ACCEPTED && this.hasFreshGpsPair(booking)) {
+        await this.checkAndNotifyDestinationProximity(booking);
+      }
       result.events.push(...this.detectPickupAwarenessEvents(booking));
 
       const pickupEvent = await this.tryConfirmAutomaticPickup(booking);
@@ -6345,6 +6332,7 @@ export class BookingsService implements OnModuleInit {
     passengerId: string,
     bookingId: string,
     updateLocationDto: UpdatePassengerLocationDto,
+    options: { deferProgress?: boolean } = {},
   ): Promise<{
     tripId: string;
     bookingId: string;
@@ -6400,9 +6388,7 @@ export class BookingsService implements OnModuleInit {
       ? new Date(booking.passengerLastLocationUpdateAt).getTime()
       : 0;
     if (previousTimestamp >= observedAt.getTime()) {
-      const autoProgress = await this.evaluateAutomaticRideProgressForTrip(
-        booking.tripId,
-      );
+      const autoProgress = await this.progressAfterPassengerLocation(booking.tripId, options.deferProgress);
       const existingCoordinates = booking.passengerCurrentLocation?.coordinates;
       return {
         tripId: booking.tripId,
@@ -6439,9 +6425,7 @@ export class BookingsService implements OnModuleInit {
         where: { id: booking.id, passengerId },
         relations: ['trip'],
       });
-      const autoProgress = await this.evaluateAutomaticRideProgressForTrip(
-        booking.tripId,
-      );
+      const autoProgress = await this.progressAfterPassengerLocation(booking.tripId, options.deferProgress);
       const existingCoordinates =
         latestBooking?.passengerCurrentLocation?.coordinates ??
         booking.passengerCurrentLocation?.coordinates;
@@ -6478,10 +6462,8 @@ export class BookingsService implements OnModuleInit {
     await this.touchTripInteraction(booking.tripId);
 
     // Vérifier la proximité de la destination et notifier si nécessaire
-    await this.checkAndNotifyDestinationProximity(booking);
-    const autoProgress = await this.evaluateAutomaticRideProgressForTrip(
-      booking.tripId,
-    );
+    if (!options.deferProgress) await this.checkAndNotifyDestinationProximity(booking);
+    const autoProgress = await this.progressAfterPassengerLocation(booking.tripId, options.deferProgress);
 
     const responseCoordinates: [number, number] = [
       currentCoordinate.longitude,
@@ -6497,9 +6479,13 @@ export class BookingsService implements OnModuleInit {
     };
   }
 
-  /**
-   * Calcule la distance en mètres entre la position actuelle du passager et sa destination
-   */
+  /** Preserve the response shape while deferring progression until after the GPS ACK. */
+  private async progressAfterPassengerLocation(tripId: string, defer = false): Promise<AutomaticRideProgressResult> {
+    if (!defer) return this.evaluateAutomaticRideProgressForTrip(tripId);
+    await this.queueAutomaticRideProgressForTrip(tripId);
+    return { tripId, events: [] };
+  }
+
   private async touchTripInteraction(tripId: string): Promise<void> {
     try {
       await this.tripRepository
@@ -6566,6 +6552,13 @@ export class BookingsService implements OnModuleInit {
   private async checkAndNotifyDestinationProximity(
     booking: Booking,
   ): Promise<void> {
+    // Do not consume the one-time proximity alert before boarding or after dropoff.
+    if (
+      booking.status !== BookingStatus.ACCEPTED ||
+      !this.hasBookingBeenPickedUpForRideProgress(booking) ||
+      this.hasBookingBeenDroppedOffForTripEnd(booking)
+    ) return;
+
     // Ne pas vérifier si la notification a déjà été envoyée
     if (booking.destinationProximityNotified) {
       return;

@@ -9,10 +9,18 @@ import {
   Length,
   Max,
   Min,
+  IsArray, ArrayMaxSize, ValidateNested, Matches,
 } from 'class-validator';
+import { Type } from 'class-transformer';
 import { ASSET_KINDS, type AssetKind } from './asset-credit-products';
 
+export class RepaymentPlanDto {
+  @IsString() @Matches(/^[a-z0-9-]{1,32}$/) id: string;
+  @IsInt() @Min(1) @Max(120) months: number;
+}
 export class OfferAssetCreditDto {
+  @IsOptional() @IsArray() @ArrayMaxSize(6) @ValidateNested({ each: true }) @Type(() => RepaymentPlanDto)
+  repaymentPlans?: RepaymentPlanDto[];
   @IsUUID() mutationId: string;
   @IsUUID() driverId: string;
   @IsIn(ASSET_KINDS) assetKind: AssetKind;
@@ -27,6 +35,7 @@ export class OfferAssetCreditDto {
   @IsString() @Length(3, 160) validationReference: string;
 }
 export class AssetConsentDto {
+  @IsOptional() @IsString() @Matches(/^[a-z0-9-]{1,32}$/) selectedPlanId?: string;
   @IsOptional() @IsIn(['asset-credit-cost-v1']) costDisclosureVersion?: string;
   @IsBoolean() @Equals(true) consent: boolean;
   @IsString() @IsIn(['asset-credit-v1','asset-credit-v2']) policyVersion: string;
@@ -42,5 +51,8 @@ export class RepayAssetCreditDto {
 }
 export class RequestAssetCreditDto {
   @IsIn(ASSET_KINDS) assetKind: AssetKind;
+  @IsString() @Length(0, 1000) notes: string;
+}
+export class CreditRequestCommentDto {
   @IsString() @Length(0, 1000) notes: string;
 }

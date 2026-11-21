@@ -1,5 +1,19 @@
 import { ArrayMaxSize, ArrayMinSize, IsArray, IsIn, IsInt, IsOptional, IsString, IsUUID, Matches, Max, MaxLength, Min, MinLength, ValidateIf } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional, OmitType } from '@nestjs/swagger';
+import { Type } from 'class-transformer';
+import { FIELD_STAGES } from './field-summary';
+
+export class FieldOverviewQuery {
+  @IsOptional() @IsIn(['summary']) view?: 'summary';
+}
+export class FieldLeadPageQuery {
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(100000) page?: number;
+  @IsOptional() @Type(() => Number) @IsInt() @Min(1) @Max(100) limit?: number;
+  @IsOptional() @IsString() @MaxLength(100) search?: string;
+  @IsOptional() @IsIn(FIELD_STAGES) status?: string;
+  @IsOptional() @IsIn(['all', 'progress', 'done']) filter?: 'all' | 'progress' | 'done';
+  @IsOptional() @IsUUID() id?: string;
+}
 
 export class CreatePartnerOrganizationDto {
   @IsString() @MinLength(2) @MaxLength(160) displayName: string;

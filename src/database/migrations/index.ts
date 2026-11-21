@@ -1,10 +1,17 @@
 import { AssetCredits1780000124000 } from './1780000124000-AssetCredits';
+import { ZwangaProFoundations1780000137000 } from './1780000137000-ZwangaProFoundations';
+import { ZwangaProSettlements1780000138000 } from './1780000138000-ZwangaProSettlements';
+import { ZwangaProOperations1780000139000 } from './1780000139000-ZwangaProOperations';
 import { EquipmentAssetCredits1780000127000 } from './1780000127000-EquipmentAssetCredits';
 import { IntercityDriverCategory1780000128000 } from './1780000128000-IntercityDriverCategory';
 import { ContractAssetCreditRates1780000129000 } from './1780000129000-ContractAssetCreditRates';
 import { AssetCreditCostDisclosure1780000130000 } from './1780000130000-AssetCreditCostDisclosure';
 import { OperationalZones1780000131000 } from './1780000131000-OperationalZones';
 import { ZoneRuntimeSettings1780000132000 } from './1780000132000-ZoneRuntimeSettings';
+import { AssetRepaymentPlans1780000133000 } from './1780000133000-AssetRepaymentPlans';
+import { FleetDriverApplications1780000134000 } from './1780000134000-FleetDriverApplications';
+import { PerformanceWorkQueues1780000135000 } from './1780000135000-PerformanceWorkQueues';
+import { DiscoveryGeographyIndex1780000136000 } from './1780000136000-DiscoveryGeographyIndex';
 import { FleetRegistry1780000125000 } from './1780000125000-FleetRegistry';
 import { FleetExternalPayments1780000126000 } from './1780000126000-FleetExternalPayments';
 import { RequestPriceNegotiation1780000122000 } from './1780000122000-RequestPriceNegotiation';
@@ -271,4 +278,11 @@ export const databaseMigrations = [
   AssetCreditCostDisclosure1780000130000,
   OperationalZones1780000131000,
   ZoneRuntimeSettings1780000132000,
+  AssetRepaymentPlans1780000133000,
+  FleetDriverApplications1780000134000,
+  PerformanceWorkQueues1780000135000,
+  DiscoveryGeographyIndex1780000136000,
+  ZwangaProFoundations1780000137000,
+  ZwangaProSettlements1780000138000,
+  ZwangaProOperations1780000139000,
 ];

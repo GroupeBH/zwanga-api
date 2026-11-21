@@ -34,6 +34,8 @@ import { Roles } from '../common/decorators/roles.decorator';
 import { UserRole } from '../users/entities/user.entity';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
 import { HistoryPageQuery } from '../common/history-page';
+import { RequestDiscoveryQuery } from './dto/request-discovery.dto';
+import { LegacyRequestPageDto } from './dto/legacy-request-page.dto';
 
 @ApiTags('Trip Requests')
 @Controller('trip-requests')
@@ -69,9 +71,9 @@ export class TripRequestsController {
     description:
       'Conducteurs authentifiés uniquement, à 5 km maximum du départ selon leur dernière position connue. Sans position utilisable, la liste est vide. Exclut les demandes expirées même avant la mise à jour du statut. Aucun téléphone dans la liste.',
   })
-  async findAll(@Request() req: { user: { userId: string } }, @Query('scope') scope?: string) {
-    return scope === 'home' ? this.tripRequestsService.findAll(req.user.userId, true)
-      : this.tripRequestsService.findAll(req.user.userId);
+  async findAll(@Request() req: { user: { userId: string } }, @Query('scope') scope?: string,
+    @Query() options: LegacyRequestPageDto = {}) {
+    return this.tripRequestsService.findAll(req.user.userId, scope === 'home', { page: options.page, limit: options.limit });
   }
 
   @Get('driver-choices')
@@ -123,6 +125,11 @@ export class TripRequestsController {
     return this.tripRequestsService.mapDriver(req.user.userId, id, query.markerId);
   }
 
+  @Get('my-stats')
+  @Header('Cache-Control', 'private, no-store')
+  @Auth()
+  profileStats(@Request() req) { return this.tripRequestsService.profileStats(req.user.userId); }
+
   @Get('my-requests')
   @Header('Cache-Control', 'private, no-store')
   @Auth()
@@ -132,8 +139,8 @@ export class TripRequestsController {
       "Récupère toutes les demandes de trajet créées par l'utilisateur connecté",
   })
   // @ApiBearerAuth()
-  async findMyRequests(@Request() req, @Query('scope') scope?: string) {
-    return this.tripRequestsService.findByPassenger(req.user.userId, scope === 'activity');
+  async findMyRequests(@Request() req, @Query('scope') scope?: string, @Query() options: LegacyRequestPageDto = {}) {
+    return this.tripRequestsService.findByPassenger(req.user.userId, scope === 'activity', options);
   }
 
   @Get('my-offers')
@@ -146,8 +153,8 @@ export class TripRequestsController {
       'Récupère toutes les offres faites par le driver connecté, avec les détails des demandes de trajet associées',
   })
   // @ApiBearerAuth()
-  async findMyOffers(@Request() req) {
-    return this.tripRequestsService.findByDriver(req.user.userId);
+  async findMyOffers(@Request() req, @Query() options: LegacyRequestPageDto = {}) {
+    return this.tripRequestsService.findByDriver(req.user.userId, options);
   }
 
   @Post('recommended-price')
@@ -173,6 +180,13 @@ export class TripRequestsController {
   async getVehicleOptions(@Body() payload: TripRequestVehicleOptionsDto) {
     return this.tripRequestsService.getVehicleOptions(payload);
   }
+
+  @Get('discovery')
+  @Header('Cache-Control', 'private, no-store')
+  @Auth()
+  @Roles(UserRole.DRIVER)
+  @SensitiveThrottle(30, 60000)
+  discoverRequests(@Request() req, @Query() options: RequestDiscoveryQuery) { return this.tripRequestsService.discoverRequests(req.user.userId, options); }
 
   @Get('pages/available')
   @Header('Cache-Control', 'private, no-store')

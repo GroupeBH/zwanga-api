@@ -36,7 +36,7 @@ export class S3Service {
    */
   async uploadFile(
     file: Buffer,
-    subfolder: 'profiles' | 'kyc' | 'vehicles',
+    subfolder: 'profiles' | 'kyc' | 'vehicles' | 'pro',
     mimetype: string,
     originalName: string,
   ): Promise<string> {
@@ -57,6 +57,7 @@ export class S3Service {
         Body: file,
         ContentType: mimetype,
         ACL: 'private', // Files are private by default
+        ...(subfolder === 'pro' ? { ServerSideEncryption: 'AES256' as const } : {}),
       });
 
       await this.s3Client.send(command);

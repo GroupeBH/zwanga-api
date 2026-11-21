@@ -56,6 +56,9 @@ export class StoreWorker implements OnModuleDestroy {
       }
       if (!integration?.enabled) continue;
       for (const task of STORE_TASKS) {
+        // Do not repeatedly queue imports whose explicit prerequisites are absent.
+        // Other sources (reviews, vitals, Apple) continue independently.
+        if (this.config.taskBlocker(platform, task)) continue;
         try {
           const appId = this.config.assertReady(platform);
           const minutes = integration.schedule[task] ?? STORE_CADENCES[task];

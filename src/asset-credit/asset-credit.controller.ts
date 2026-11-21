@@ -5,6 +5,7 @@ import {
   Param,
   ParseUUIDPipe,
   Post,
+  Patch,
   Request,
 } from '@nestjs/common';
 import { Auth } from '../auth/decorators/auth.decorator';
@@ -17,6 +18,7 @@ import {
   OfferAssetCreditDto,
   RepayAssetCreditDto,
   RequestAssetCreditDto,
+  CreditRequestCommentDto,
 } from './asset-credit.dto';
 import { AssetCreditService } from './asset-credit.service';
 
@@ -44,6 +46,10 @@ export class AssetCreditController {
   }
   @Get('admin-requests') @Roles(UserRole.ADMIN) allRequests() {
     return this.credits.requests();
+  }
+  @Patch('requests/:id/comment')
+  comment(@Request() req, @Param('id', ParseUUIDPipe) id: string, @Body() dto: CreditRequestCommentDto) {
+    return this.credits.comment(id, req.user.userId, dto.notes);
   }
   @Get('mine') mine(@Request() req) {
     return this.credits.list(req.user.userId);

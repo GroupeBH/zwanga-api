@@ -1,6 +1,6 @@
 import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { StorePlatform } from './store.types';
+import { StoreJobTask, StorePlatform } from './store.types';
 import { storeAwsWifSettings } from './store-aws-wif';
 
 @Injectable()
@@ -64,6 +64,15 @@ export class StoreConfig {
         code: 'STORE_DISABLED',
         message: 'Store Management est désactivé.',
       });
+  }
+  taskBlocker(platform: StorePlatform, task: StoreJobTask) {
+    if (platform === 'google' && task === 'catalog' &&
+        this.value('STORE_GOOGLE_TEMPORARY_EDITS_ENABLED') !== 'true')
+      return { code: 'GOOGLE_CATALOG_TEMPORARY_EDIT_NOT_ALLOWED', missingVariables: ['STORE_GOOGLE_TEMPORARY_EDITS_ENABLED'] };
+    if (platform === 'google' && task === 'reports' &&
+        !/^pubsite_prod_[a-zA-Z0-9_-]+$/.test(this.value('STORE_GOOGLE_REPORTS_BUCKET')))
+      return { code: 'GOOGLE_REPORTS_BUCKET_NOT_CONFIGURED', missingVariables: ['STORE_GOOGLE_REPORTS_BUCKET'] };
+    return null;
   }
   assertReady(platform: StorePlatform) {
     this.assertEnabled();

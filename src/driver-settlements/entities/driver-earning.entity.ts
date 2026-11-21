@@ -72,6 +72,13 @@ export class DriverEarning {
   @Column({ type: 'decimal', precision: 12, scale: 2, default: 0 })
   assetRepaymentAmount?: number;
 
+  @Column({ type: 'decimal', precision: 12, scale: 2, default: 0 })
+  proRepaymentAmount?: number;
+
+  /** Durable reservation until the independent credit worker settles or releases it. */
+  @Column({ type: 'boolean', default: false })
+  proCreditPending?: boolean;
+
   @Column({ type: 'varchar', length: 8, default: 'CDF' })
   currency: string;
 

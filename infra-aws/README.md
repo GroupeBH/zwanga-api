@@ -293,11 +293,21 @@ terraform apply
 
 ## 2. Initialiser l'infrastructure principale
 
+Pour une installation neuve uniquement :
+
 ```bash
 cd ..
 cp backend.hcl.example backend.hcl
 cp terraform.tfvars.example terraform.tfvars
 ```
+
+Pour la production existante, ne pas recopier ces fichiers sur la configuration locale
+et ne pas lancer `init -reconfigure` ou une migration de state par défaut. Le state
+de cette pile est `s3://tfstates-zwanga-api/zwanga/ecs-fargate/eu-central-1/terraform.tfstate`.
+`backend.tf` et `backend.hcl.example` désignent désormais la même clé. Vérifier le
+compte AWS et les ressources de `terraform state list` avant tout plan : un state
+vide ou une recréation massive est un motif d'arrêt, pas une nouvelle installation.
+Ne pas afficher le contenu brut du state, qui contient des secrets.
 
 Modifier au minimum :
 
@@ -324,9 +334,16 @@ Puis :
 terraform init -backend-config=backend.hcl
 terraform fmt -recursive
 terraform validate
-terraform plan -out=tfplan
+terraform plan -var-file=operators.tfvars -out=tfplan
+terraform show tfplan
+# Uniquement après revue et accord explicite sur ce plan sauvegardé :
 terraform apply tfplan
 ```
+
+`operators.tfvars` reste local et ignoré par Git. Le fournir pour préserver les
+destinataires d'alertes ; le dimensionnement non sensible est chargé automatiquement
+depuis `production.auto.tfvars`. Ne pas publier les fichiers de plan. Les changements
+applicatifs et leurs migrations passent par `deploy.yml`, pas par un apply Terraform.
 
 Le service ECS peut etre cree avant que l'image `latest` existe dans ECR, car `ecs_wait_for_steady_state = false` par defaut. La premiere execution GitHub Actions pousse l'image et force ensuite un nouveau deploiement ECS.
 

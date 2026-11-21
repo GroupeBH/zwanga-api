@@ -27,7 +27,17 @@ test('explicit budget profile keeps two API tasks and replicated Redis without u
   assert.equal(profile.database_skip_final_snapshot, false);
   assert.equal(profile.database_multi_az, false); // explicitly NOT full HA
   assert.equal(profile.runtime_environment_variables, undefined); // never overwrite the runtime map
-  assert.ok(!readFileSync('infra-aws/production.auto.tfvars', 'utf8').includes('capacity-175'));
+});
+
+test('automatically loaded production capacity matches the retained profile', () => {
+  const source = readFileSync('infra-aws/production.auto.tfvars', 'utf8');
+  const assignments = [...source.matchAll(/^([a-z][a-z0-9_]*)\s*=\s*("[^"\r\n]*"|true|false|\d+(?:\.\d+)?)\s*$/gm)];
+  const values = Object.fromEntries(assignments.map(([, name, value]) => [name, JSON.parse(value)]));
+  assert.equal(new Set(assignments.map(([, name]) => name)).size, assignments.length);
+  for (const [key, value] of Object.entries(profile)) {
+    assert.equal(values[key], value, `Production capacity drift: ${key}`);
+  }
+  assert.doesNotMatch(source, /^\s*(alert_email_addresses|runtime_environment_variables)\s*=/m);
 });
 test('31-day baseline includes hidden costs and does not claim capacity validation', () => {
   const r = estimate();
@@ -89,7 +99,7 @@ test('unknown architectures, prices and invalid inputs fail closed', () => {
   assert.throws(() => parseArgs(['--hours=']));
   assert.deepEqual(parseArgs(['--hours=730', '--lcu=2']), { hours: 730, lcu: 2 });
 });
-test('budget is opt-in, excludes credits, requires recipients and has no shutdown action', () => {
+test('generic budget default remains opt-in; enabled production budget requires recipients and never shuts down services', () => {
   const hcl = readFileSync('infra-aws/budget.tf', 'utf8');
   assert.match(hcl, /default\s*= null/);
   assert.match(hcl, /include_credit\s*= false/);

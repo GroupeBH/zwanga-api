@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   Inject,
@@ -8,6 +9,9 @@ import {
   Optional,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
+import { AdminUserHistoryKind } from './dto/user-history.dto';
+import { userHistoryStats } from './user-history-stats';
+import { HistoryPageQuery, historyContext, loadHistoryIds, orderHistory } from '../common/history-page';
 import { AccountLifecycleService } from '../users/account-lifecycle.service';
 import { AdminListOptions, applyAdminList, applyAdminRange, literalSearch } from '../common/pagination/admin-query';
 import { In, Point, Repository, SelectQueryBuilder } from 'typeorm';
@@ -90,6 +94,8 @@ import type { SpreadsheetDownload } from './spreadsheet';
 import { streamExport, exportCreatedPages, exportOffsetPages } from './streaming-export';
 import { KycEvidenceRepository } from '../users/kyc-evidence/kyc-evidence.repository';
 import { adminUserIdentity } from './admin-user-identity';
+import { AdminPhoneVerificationDto } from './dto/admin-phone-verification.dto';
+import { canonicalAccountPhone } from '../users/phone-identity';
 
 type Coordinates = [number, number] | null;
 type WalletAccountWithUser = WalletAccount & { user?: User | null };
@@ -751,12 +757,20 @@ export class AdminService {
     return this.serializeWalletAccount({ ...account, user });
   }
 
-  async getUserDetails(userId: string) {
+  async getUserDetails(userId: string, view?: 'summary') {
     this.logger.debug(`Fetching admin user details for ${userId}`);
 
     const user = await this.userRepository.findOne({ where: { id: userId } });
     if (!user) {
       throw new NotFoundException("Utilisateur introuvable.");
+    }
+
+    if (view === 'summary') {
+      const stats = await userHistoryStats(this.userRepository.manager, userId);
+      const documents = await this.kycDocumentRepository.find({ where: { userId }, order: { createdAt: 'DESC', id: 'DESC' }, take: 8 });
+      return { user: (await this.serializeUsersWithDriverQualification([user]))[0], stats,
+        trips: [], bookingsAsPassenger: [], bookingsAsDriver: [], payments: [], tripRequests: [],
+        kycDocuments: documents.map(document => this.sanitizeKycDocument(document)), historiesDeferred: true };
     }
 
     const [
@@ -826,6 +840,74 @@ export class AdminService {
           .reduce((sum, payment) => sum + Number(payment.amount || 0), 0),
       },
     };
+  }
+
+  async getUserHistory(userId: string, kind: AdminUserHistoryKind, options: HistoryPageQuery = {}) {
+    if (!await this.userRepository.existsBy({ id: userId })) throw new NotFoundException('Utilisateur introuvable.');
+    // Bind cursors to this user and section; never accept SQL identifiers from input.
+    const context = historyContext({ ...options, search: `${userId}:${kind}` }, 'admin-user-history');
+    const base = kind === AdminUserHistoryKind.TRIPS ? this.tripRepository.createQueryBuilder('entry').where('entry.driverId=:userId')
+      : kind === AdminUserHistoryKind.PAYMENTS ? this.paymentRepository.createQueryBuilder('entry').where('entry.userId=:userId')
+      : kind === AdminUserHistoryKind.REQUESTS ? this.tripRequestRepository.createQueryBuilder('entry').where('entry.passengerId=:userId')
+      : this.bookingRepository.createQueryBuilder('entry').where(kind === AdminUserHistoryKind.DRIVER_BOOKINGS
+        ? 'EXISTS (SELECT 1 FROM trips t WHERE t.id=entry."tripId" AND t."driverId"=:userId)' : 'entry.passengerId=:userId');
+    base.setParameter('userId', userId).andWhere('entry."createdAt" <= :asOf', { asOf: new Date(context.asOf) });
+    const total = await base.clone().getCount();
+    const page = await loadHistoryIds(base as any, options, context, 'entry.id', 'entry."createdAt"');
+    let data: any[] = [];
+    if (page.ids.length) {
+      if (kind === AdminUserHistoryKind.TRIPS) data = orderHistory(page.ids, await this.tripRepository.find({ where: { id: In(page.ids), driverId: userId }, relations: ['driver', 'vehicle', 'bookings', 'bookings.passenger'] })).map(trip => this.sanitizeTrip(trip, true));
+      else if (kind === AdminUserHistoryKind.PAYMENTS) data = orderHistory(page.ids, await this.paymentRepository.find({ where: { id: In(page.ids), userId } })).map(payment => this.sanitizePayment(payment));
+      else if (kind === AdminUserHistoryKind.REQUESTS) data = orderHistory(page.ids, await this.tripRequestsService.findForAdminBatch(page.ids));
+      else data = orderHistory(page.ids, await this.bookingRepository.find({ where: { id: In(page.ids) }, relations: ['passenger', 'trip', 'trip.driver', 'paymentTransaction'] })).map(booking => this.sanitizeBooking(booking));
+    }
+    return { data, total, nextCursor: page.nextCursor };
+  }
+
+  async verifyUserPhone(
+    userId: string,
+    adminId: string,
+    input: AdminPhoneVerificationDto,
+  ) {
+    const actor = await this.ensureAdmin(adminId, 'Action réservée aux administrateurs.');
+    if (!actor.isActive || actor.status === UserStatus.SUSPENDED || actor.status === UserStatus.INACTIVE) {
+      throw new ForbiddenException('Compte administrateur inactif.');
+    }
+    const reason = typeof input.reason === 'string' ? input.reason.trim() : '';
+    if (reason.length < 10 || reason.length > 300) {
+      throw new BadRequestException('Décrivez le contrôle du numéro (10 à 300 caractères).');
+    }
+    const phone = canonicalAccountPhone(input.phone);
+    const user = await this.userRepository.findOne({ where: { id: userId } });
+    if (!user) throw new NotFoundException('Utilisateur introuvable.');
+    if (isBackOfficeRole(user.role)) {
+      assertSuperAdminRole(actor.role, 'Seul un super administrateur peut valider le téléphone d’un compte back-office.');
+    }
+    if (!user.phone) throw new BadRequestException('Ce compte ne possède aucun numéro de téléphone.');
+    if (canonicalAccountPhone(user.phone) !== phone) {
+      throw new ConflictException('Le numéro du compte a changé. Rechargez la fiche avant de le valider.');
+    }
+    const result = { userId: user.id, phone: user.phone, isPhoneVerified: true as const };
+    if (user.isPhoneVerified) return result;
+
+    // Approve only the exact phone and role that were checked. Never save a stale
+    // User entity: it could restore a phone, PIN or status changed concurrently.
+    const update = await this.userRepository.update(
+      { id: user.id, phone: user.phone, role: user.role, isPhoneVerified: false },
+      { isPhoneVerified: true },
+    );
+    if (update.affected !== 1) {
+      const current = await this.userRepository.findOne({ where: { id: userId } });
+      if (current?.phone === user.phone && current.role === user.role && current.isPhoneVerified) return result;
+      throw new ConflictException('Le compte a changé. Rechargez la fiche avant de valider le numéro.');
+    }
+    this.logger.warn({
+      event: 'admin.phone.manually_verified',
+      actorUserId: adminId,
+      targetUserId: user.id,
+      reason,
+    });
+    return result;
   }
 
   async suspendUser(userId: string, adminId: string) {

@@ -7,6 +7,7 @@ describe('disposable PostgreSQL server options', () => {
       const options = postgresTestServerOptions(port).split(' ');
       expect(options).toEqual([
         '-h', '127.0.0.1', '-p', String(port), '-c', 'unix_socket_directories=',
+        ...(process.env.TZ === 'UTC' ? ['-c', 'timezone=UTC'] : []),
       ]);
     },
   );

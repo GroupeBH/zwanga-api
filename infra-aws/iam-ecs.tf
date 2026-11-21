@@ -38,6 +38,34 @@ data "aws_iam_policy_document" "ecs_task_execution_secrets" {
     actions   = ["kms:Decrypt"]
     resources = [aws_kms_key.application.arn]
   }
+
+  # CloudWatch Logs can call KMS on behalf of the execution role. Permissions
+  # on the Logs service principal alone do not authorize this caller path.
+  statement {
+    sid       = "EncryptExecutionLogsViaCloudWatch"
+    effect    = "Allow"
+    actions   = ["kms:GenerateDataKey", "kms:Decrypt"]
+    resources = [aws_kms_key.observability.arn]
+
+    condition {
+      test     = "StringEquals"
+      variable = "kms:ViaService"
+      values   = ["logs.${var.aws_region}.amazonaws.com"]
+    }
+
+    condition {
+      test     = "ArnEquals"
+      variable = "kms:EncryptionContext:aws:logs:arn"
+      # KMS uses the log GROUP ARN, without the IAM log-stream suffix :*.
+      values = concat(
+        [
+          trimsuffix(aws_cloudwatch_log_group.ecs_app.arn, ":*"),
+          trimsuffix(aws_cloudwatch_log_group.database_import.arn, ":*"),
+        ],
+        [for group in aws_cloudwatch_log_group.ecs_otel : trimsuffix(group.arn, ":*")],
+      )
+    }
+  }
 }
 
 resource "aws_iam_role_policy" "ecs_task_execution_secrets" {

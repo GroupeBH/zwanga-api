@@ -309,6 +309,25 @@ data "aws_iam_policy_document" "cloudtrail_logs" {
     ]
     resources = ["${aws_cloudwatch_log_group.cloudtrail.arn}:*"]
   }
+
+  statement {
+    sid       = "EncryptAuditLogsViaCloudWatch"
+    effect    = "Allow"
+    actions   = ["kms:GenerateDataKey", "kms:Decrypt"]
+    resources = [aws_kms_key.observability.arn]
+
+    condition {
+      test     = "StringEquals"
+      variable = "kms:ViaService"
+      values   = ["logs.${var.aws_region}.amazonaws.com"]
+    }
+
+    condition {
+      test     = "ArnEquals"
+      variable = "kms:EncryptionContext:aws:logs:arn"
+      values   = [trimsuffix(aws_cloudwatch_log_group.cloudtrail.arn, ":*")]
+    }
+  }
 }
 
 resource "aws_iam_role_policy" "cloudtrail_logs" {

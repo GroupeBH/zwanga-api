@@ -6,6 +6,7 @@ import {
   DriverTripInterruptionConfirmation as Confirmation,
 } from './entities/trip-interruption.entity';
 import { calculateInterruptionFare } from '../bookings/interruption-fare';
+jest.mock('./trip-start-notifications');
 
 function fixture() {
   const trip: any = {

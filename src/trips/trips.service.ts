@@ -1,6 +1,8 @@
 import { trustedContactMessagesEnabled } from '../safety/trusted-contact-policy';
 import { expirePendingTrip } from './expire-pending-trip';
 import { enqueueTripReminder, TripReminderKind } from './trip-reminders';
+import { enqueueTripStartNotifications } from './trip-start-notifications';
+import { discoveryDepartureWithinSql } from './discovery-geography';
 import { cancelEmptyRequestTrip } from './cancel-empty-request-trip';
 import { saveRequestTrip } from './save-request-trip';
 import { saveTripDetailsUpdate } from './save-trip-details-update';
@@ -425,9 +427,7 @@ export class TripsService {
   }
 
   async searchPage(searchTripsDto: SearchTripsDto) {
-    this.logger.log(
-      `Searching trips with filters: ${JSON.stringify(searchTripsDto)}`,
-    );
+    const searchStarted = performance.now();
 
     const now = new Date();
     const queryBuilder = this.tripRepository
@@ -526,14 +526,8 @@ export class TripsService {
       [depLng, depLat] = departureSearchCoordinates;
       const departureRadiusMeters =
         (searchTripsDto.departureRadiusKm ?? 50) * 1000;
-      const departureSearchPoint = this.getDepartureSearchPointExpression();
-
       queryBuilder.andWhere(
-        `ST_DWithin(
-          ${departureSearchPoint},
-          ST_SetSRID(ST_MakePoint(:depLng, :depLat), 4326)::geography,
-          :depRadius
-        )`,
+        discoveryDepartureWithinSql,
         {
           depLat,
           depLng,
@@ -596,7 +590,9 @@ export class TripsService {
     const nearbyOrder = hasDepartureCoords ? `ST_Distance(${this.getDepartureSearchPointExpression()}, ST_SetSRID(ST_MakePoint(:depLng, :depLat), 4326)::geography)`
       : hasArrivalCoords ? 'ST_Distance(trip.arrivalPoint, ST_SetSRID(ST_MakePoint(:arrLng, :arrLat), 4326)::geography)'
       : 'EXTRACT(EPOCH FROM trip.departureDate)::double precision';
+    const selectionStarted = performance.now();
     const page = await selectDiscoveryPage(queryBuilder, searchTripsDto, nearbyOrder);
+    const selectionMs = performance.now() - selectionStarted;
     const results = page.entities;
     const userIds = this.collectTripUserIds(results);
     const userRatingsMap = await this.buildUserRatingsMap(userIds);
@@ -610,6 +606,11 @@ export class TripsService {
       ),
     );
     this.logger.log(`Trip search returned ${sanitized.length} results`);
+    const totalMs = performance.now() - searchStarted;
+    if (totalMs >= 500) this.logger.warn({ event: 'trip_search_slow',
+      selectionMs: Math.round(selectionMs), enrichmentMs: Math.round(totalMs - selectionMs),
+      totalMs: Math.round(totalMs), count: sanitized.length,
+      geographic: hasDepartureCoords || hasArrivalCoords, sort: searchTripsDto.sort ?? 'nearby' });
     return { data: sanitized, nextCursor: page.nextCursor, previousCursor: page.previousCursor };
   }
 
@@ -1717,16 +1718,8 @@ export class TripsService {
 
     if (trip.startedAt && await this.driverInterruptionWorkflow.resume(tripId, driverId)) {
       await this.invalidateDriverInterruptionCaches(tripId);
-      const resumedBookings = await this.bookingRepository.find({ where: { tripId, status: BookingStatus.ACCEPTED }, relations: ['passenger'] });
-      await this.notifyBookedPassengersAboutTripStart(trip, resumedBookings);
       return this.findOne(tripId);
     }
-
-    const totalAcceptedSeats = acceptedBookings.reduce(
-      (sum, booking) => sum + booking.numberOfSeats,
-      0,
-    );
-    const hasAvailableSeats = trip.availableSeats > 0;
 
     // A direct pause before pickup keeps startedAt. It is not a new trip.
     // Formal interruptions are handled above and must retain their passenger choices.
@@ -1754,13 +1747,14 @@ export class TripsService {
         destinationReachedAt: null,
       } : {}),
     };
-    const started = await this.tripRepository.update(
-      {
-        id: tripId, driverId, status: TripStatus.PENDING,
-        startedAt: originalStartedAt ? Not(IsNull()) : IsNull(),
-      },
-      updates,
-    );
+    const started = await this.tripRepository.manager.transaction(async manager => {
+      const result = await manager.getRepository(Trip).update(
+        { id: tripId, driverId, status: TripStatus.PENDING,
+          startedAt: originalStartedAt ? Not(IsNull()) : IsNull() }, updates);
+      if (result.affected === 1)
+        await enqueueTripStartNotifications(manager, trip, resumedAt.toISOString());
+      return result;
+    });
     if (started.affected !== 1) {
       const current = await this.tripRepository.findOne({ where: { id: tripId, driverId } });
       if (current?.status === TripStatus.ACTIVE) {
@@ -1793,14 +1787,8 @@ export class TripsService {
     );
     await this.notifyDriverEmergencyContacts(trip, 'trip_started');
 
-    // Notify users based on seat availability
-    if (hasAvailableSeats) {
-      // Notify all active users (except driver) about available seats
-      await this.notifyNearbyUsersAboutTripStart(trip);
-    } else {
-      // Notify only passengers who have booked
-      await this.notifyBookedPassengersAboutTripStart(trip, acceptedBookings);
-    }
+    // Passenger notifications were committed with the transition. The outbox
+    // delivers them without keeping this HTTP request waiting for a provider.
 
     return this.findOne(tripId);
   }
@@ -2294,132 +2282,6 @@ export class TripsService {
     } catch (error) {
       this.logger.error(
         `Failed to notify passengers about completed interruption: ${error.message}`,
-        error.stack,
-      );
-    }
-  }
-
-  private async notifyNearbyUsersAboutTripStart(trip: Trip): Promise<void> {
-    try {
-      this.logger.log(
-        `Notifying nearby users about trip ${trip.id} start (${trip.availableSeats} seats available)`,
-      );
-
-      // Get all active users with FCM tokens (except the driver)
-      const users = await this.userRepository.find({
-        where: {
-          isActive: true,
-        },
-        select: ['id', 'fcmToken', 'firstName'],
-      });
-
-      // Filter out driver and users without FCM tokens
-      const usersToNotify = users.filter(
-        (user) => user.id !== trip.driverId && user.fcmToken,
-      );
-
-      if (usersToNotify.length === 0) {
-        this.logger.debug('No users to notify about trip start');
-        return;
-      }
-
-      const fcmTokens = usersToNotify.map((user) => user.fcmToken!);
-      const userIds = usersToNotify.map((user) => user.id);
-
-      const title = '🚗 Trajet disponible maintenant';
-      const body = `Un trajet vient de démarrer : ${trip.departureLocation} → ${trip.arrivalLocation} (${trip.availableSeats} place${trip.availableSeats > 1 ? 's' : ''} disponible${trip.availableSeats > 1 ? 's' : ''})`;
-
-      const data = {
-        type: 'trip_started',
-        tripId: trip.id,
-        departureLocation: trip.departureLocation,
-        arrivalLocation: trip.arrivalLocation,
-        availableSeats: trip.availableSeats.toString(),
-        pricePerSeat: trip.pricePerSeat.toString(),
-        departureDate: trip.departureDate.toISOString(),
-      };
-
-      await this.notificationService.sendToMultiple(
-        fcmTokens,
-        title,
-        body,
-        data,
-        userIds,
-      );
-      this.logger.log(
-        `Notified ${fcmTokens.length} users about trip ${trip.id} start`,
-      );
-    } catch (error: any) {
-      this.logger.error(
-        `Error notifying nearby users about trip start: ${error.message}`,
-        error.stack,
-      );
-    }
-  }
-
-  private async notifyBookedPassengersAboutTripStart(
-    trip: Trip,
-    acceptedBookings: Booking[],
-  ): Promise<void> {
-    try {
-      this.logger.log(
-        `Notifying ${acceptedBookings.length} booked passengers about trip ${trip.id} start`,
-      );
-
-      if (acceptedBookings.length === 0) {
-        this.logger.debug('No accepted bookings to notify');
-        return;
-      }
-
-      // Get passengers with FCM tokens
-      const passengerIds = acceptedBookings.map(
-        (booking) => booking.passengerId,
-      );
-      const passengers = await this.userRepository.find({
-        where: {
-          id: In(passengerIds),
-        },
-        select: ['id', 'fcmToken', 'firstName'],
-      });
-
-      const passengersWithTokens = passengers.filter(
-        (passenger) => passenger.fcmToken,
-      );
-
-      if (passengersWithTokens.length === 0) {
-        this.logger.debug('No passengers with FCM tokens to notify');
-        return;
-      }
-
-      const fcmTokens = passengersWithTokens.map(
-        (passenger) => passenger.fcmToken!,
-      );
-      const userIds = passengersWithTokens.map((passenger) => passenger.id);
-
-      const title = '🚗 Votre trajet a démarré';
-      const body = `Le trajet ${trip.departureLocation} → ${trip.arrivalLocation} vient de démarrer. Préparez-vous !`;
-
-      const data = {
-        type: 'trip_started',
-        tripId: trip.id,
-        departureLocation: trip.departureLocation,
-        arrivalLocation: trip.arrivalLocation,
-        departureDate: trip.departureDate.toISOString(),
-      };
-
-      await this.notificationService.sendToMultiple(
-        fcmTokens,
-        title,
-        body,
-        data,
-        userIds,
-      );
-      this.logger.log(
-        `Notified ${fcmTokens.length} passengers about trip ${trip.id} start`,
-      );
-    } catch (error: any) {
-      this.logger.error(
-        `Error notifying booked passengers about trip start: ${error.message}`,
         error.stack,
       );
     }

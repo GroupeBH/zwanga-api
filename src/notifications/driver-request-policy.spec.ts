@@ -119,7 +119,7 @@ describe('Driver-only order alerts', () => {
     expect(f.send).toHaveBeenCalledTimes(1); expect(f.ownerQuery).not.toHaveBeenCalled();
   });
 
-  it.each(['trip_request_accepted', 'trip_request_reopened', 'trip_request_expired', 'trip_request_driver_overdue', 'trip_started', 'booking_confirmed'])(
+  it.each(['trip_request_accepted', 'trip_request_reopened', 'trip_request_expired', 'trip_request_driver_overdue', 'booking_confirmed'])(
     'preserves a passenger’s own lifecycle notification: %s', async type => {
       const f = fixture();
       f.users.findOne.mockResolvedValue({ role: 'passenger', isActive: true, status: 'active', fcmToken: 'current-token' });

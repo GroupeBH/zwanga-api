@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import { Cron } from '@nestjs/schedule';
 import { DataSource, EntityManager } from 'typeorm';
 import { UPDATE_CLIENT_ELIGIBLE_SQL } from './app-update.policy';
+import type { UpdateDispatchResult } from './app-update-delivery.service';
 
 /** Shared by the initial dispatcher and the existing push retry path. */
 export async function isAppUpdateDeliverable(manager: EntityManager, releaseId: unknown, userId: string | null): Promise<boolean> {
@@ -20,24 +21,29 @@ export class AppUpdateDispatchService {
   private running = false;
   constructor(private readonly db: DataSource, private readonly config: ConfigService) {}
   @Cron('*/30 * * * * *')
-  async enqueueUpdates(): Promise<void> {
-    if (this.running || this.config.get<string>('APP_UPDATES_ENABLED') !== 'true') return;
+  async enqueueUpdates(releaseId?: string): Promise<UpdateDispatchResult> {
+    if (this.config.get<string>('APP_UPDATES_ENABLED') !== 'true') return { state: 'disabled', queued: 0 };
+    if (this.running) return { state: 'busy', queued: 0 };
     this.running = true;
     try {
       // One bounded statement; unique eventKey handles multiple server processes.
       // The existing outbox sends only after commit, outside this database statement.
-      await this.db.query(`INSERT INTO notifications ("eventKey", "userId", "fcmToken", title, body, data, "isAutomatic", status, "isActive")
+      const rows = await this.db.query(`INSERT INTO notifications ("eventKey", "userId", "fcmToken", title, body, data, "isAutomatic", status, "isActive")
         SELECT 'app-update:' || r.id || ':' || c."userId", c."userId", '', 'Une mise à jour de Zwanga est disponible',
           CASE WHEN to_jsonb(r)->>'comparison'='native_build' THEN 'Mettez Zwanga à jour pour profiter des dernières améliorations.'
             ELSE 'Installez la version ' || r.version || ' pour profiter des dernières améliorations.' END,
           jsonb_build_object('type','app_update','releaseId',r.id::text,'platform',r.platform,'version',r.version,'build',r.build,'navigateTo','/app-update'),
           false, 'pending', true
         FROM app_store_releases r JOIN app_update_clients c ON c.platform = r.platform JOIN users u ON u.id = c."userId"
-        WHERE ${UPDATE_CLIENT_ELIGIBLE_SQL}
+        WHERE ${UPDATE_CLIENT_ELIGIBLE_SQL} AND ($1::bigint IS NULL OR r.id = $1)
           AND NOT EXISTS (SELECT 1 FROM app_update_installations i WHERE i."tokenHash" = c."tokenHash")
           AND NOT EXISTS (SELECT 1 FROM notifications n WHERE n."eventKey" = 'app-update:' || r.id || ':' || c."userId")
-        ORDER BY c."userId" LIMIT 100 ON CONFLICT ("eventKey") DO NOTHING`);
-    } catch { this.logger.warn('Impossible de préparer les annonces de mise à jour ; nouvelle tentative au prochain passage.'); }
+        ORDER BY c."userId" LIMIT 100 ON CONFLICT ("eventKey") DO NOTHING RETURNING id`, [releaseId ?? null]);
+      return { state: 'prepared', queued: Array.isArray(rows) ? rows.length : 0 };
+    } catch {
+      this.logger.warn('Impossible de préparer les annonces de mise à jour ; nouvelle tentative au prochain passage.');
+      return { state: 'retry_pending', queued: 0 };
+    }
     finally { this.running = false; }
   }
 }

@@ -11,6 +11,7 @@ import { TripShareLink } from './entities/trip-share-link.entity';
 import { TrackingController } from './tracking.controller';
 import { TrackingService } from './tracking.service';
 import { TrackingShutdownService } from './tracking-shutdown.service';
+import { RideProgressWorker } from './ride-progress.worker';
 
 @Module({
   imports: [
@@ -21,7 +22,7 @@ import { TrackingShutdownService } from './tracking-shutdown.service';
     TypeOrmModule.forFeature([TripShareLink, Trip, Booking]),
   ],
   controllers: [TrackingController],
-  providers: [TrackingGateway, TrackingService, TrackingShutdownService],
+  providers: [TrackingGateway, TrackingService, TrackingShutdownService, RideProgressWorker],
 })
 export class TrackingModule {}
 

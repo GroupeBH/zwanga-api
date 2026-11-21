@@ -85,6 +85,9 @@ describe('parallel request preparation before dispatch (no external calls)', () 
     const f = fixture(); const route = deferred<any>(), weather = deferred<any>();
     f.route.mockReturnValue(route.promise); f.weather.getRouteImpact.mockReturnValue(weather.promise);
     const price = (f.service as any).calculateRecommendedPricePerSeat(departure, arrival, VehicleType.CAR, 'test');
+    // The deadline wrapper schedules provider work in the next microtask;
+    // neither route nor weather has completed yet.
+    await Promise.resolve();
     expect(f.route).toHaveBeenCalledTimes(1);
     expect(f.weather.getRouteImpact).toHaveBeenCalledWith(departure.coordinates, arrival.coordinates);
     route.resolve({ distanceMeters: 5000, durationSeconds: null, durationInTrafficSeconds: null, distanceSource: 'google_directions' });

@@ -104,14 +104,14 @@ export class WeatherAwarenessService implements OnModuleInit {
       );
       const availableObservations = observations.filter(
         (observation): observation is WeatherObservation =>
-          observation?.available === true,
+          observation?.available === true && this.isFreshObservation(observation),
       );
       const affectedZoneIds = availableObservations
         .filter((observation) => observation.heavyRain)
         .map((observation) => observation.zoneId);
       const heavyRain = affectedZoneIds.length > 0;
 
-      if (observations.some((observation) => !observation)) {
+      if (observations.some((observation) => !observation || !this.isFreshObservation(observation))) {
         void this.refreshWeatherCache();
       }
 
@@ -130,6 +130,11 @@ export class WeatherAwarenessService implements OnModuleInit {
     }
   }
 
+  private isFreshObservation(observation: WeatherObservation): boolean {
+    const age = Date.now() - Date.parse(observation.observedAt);
+    return Number.isFinite(age) && age >= -60000 && age <= 2 * WEATHER_REFRESH_INTERVAL_MS;
+  }
+
   private async refreshZones(): Promise<void> {
     const observations = await Promise.all(
       this.zones.map((zone) => this.fetchZoneObservation(zone)),
@@ -141,7 +146,7 @@ export class WeatherAwarenessService implements OnModuleInit {
           await this.cacheService.set(
             this.getCacheKey(observation.zoneId),
             observation,
-            WEATHER_REFRESH_INTERVAL_MS,
+            WEATHER_REFRESH_INTERVAL_MS / 1000,
           );
         } catch (error) {
           const message =

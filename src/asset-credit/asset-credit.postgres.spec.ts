@@ -6,6 +6,8 @@ import { EquipmentAssetCredits1780000127000 } from '../database/migrations/17800
 import { IntercityDriverCategory1780000128000 } from '../database/migrations/1780000128000-IntercityDriverCategory';
 import { ContractAssetCreditRates1780000129000 } from '../database/migrations/1780000129000-ContractAssetCreditRates';
 import { AssetCreditCostDisclosure1780000130000 } from '../database/migrations/1780000130000-AssetCreditCostDisclosure';
+import { AssetRepaymentPlans1780000133000 } from '../database/migrations/1780000133000-AssetRepaymentPlans';
+import { vehicleCreditEligibility, nineMonthsBefore } from './vehicle-credit-eligibility';
 import { type AssetKind } from './asset-credit-products';
 import { AssetCreditService } from './asset-credit.service';
 import { earningForClient } from './earning-credit';
@@ -35,8 +37,11 @@ const bin = process.env.ASSET_TEST_POSTGRES_BIN;
       await db.query(`CREATE EXTENSION "uuid-ossp";
       CREATE TABLE users(id uuid PRIMARY KEY,"isDriver" boolean DEFAULT true,"isActive" boolean DEFAULT true,"driverCategory" text CONSTRAINT "CHK_users_driver_category" CHECK("driverCategory" IS NULL OR "driverCategory" IN ('private','transport')));
       CREATE TABLE kyc_documents(id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),"userId" uuid,status text,"createdAt" timestamptz DEFAULT now());
-      CREATE TABLE trips(id uuid PRIMARY KEY,"driverId" uuid);
-      CREATE TABLE bookings(id uuid PRIMARY KEY,"tripId" uuid,"paymentMode" text DEFAULT 'cash',status text DEFAULT 'completed',"paymentCurrency" text DEFAULT 'CDF',"cashReceivedAt" timestamptz,"cashReceivedAmount" numeric(12,2),"cashReceivedByDriverId" uuid);
+      CREATE TABLE trips(id uuid PRIMARY KEY,"driverId" uuid,status text DEFAULT 'upcoming',"completedAt" timestamp);
+      CREATE INDEX fixture_trip_driver ON trips("driverId");
+      CREATE TABLE bookings(id uuid PRIMARY KEY,"tripId" uuid,"paymentMode" text DEFAULT 'cash',status text DEFAULT 'completed',"paymentCurrency" text DEFAULT 'CDF',"cashReceivedAt" timestamptz,"cashReceivedAmount" numeric(12,2),"cashReceivedByDriverId" uuid,
+        "passengerId" uuid,"pickedUp" boolean DEFAULT false,"droppedOff" boolean DEFAULT false,"pickedUpAt" timestamp,"droppedOffAt" timestamp);
+      CREATE INDEX fixture_booking_trip ON bookings("tripId");
       CREATE TABLE wallet_accounts(id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),"userId" uuid,type text DEFAULT 'points',balance numeric(12,2) DEFAULT 0,"withdrawableBalance" numeric(12,2) DEFAULT 0,"reservedCashCommissionBalance" numeric(12,2) DEFAULT 0,"withdrawalsBlocked" boolean DEFAULT false,currency text DEFAULT 'PTS',"updatedAt" timestamptz DEFAULT now(), UNIQUE("userId",type), CHECK(balance>=0 AND "withdrawableBalance">=0 AND "withdrawableBalance"<=balance));
       CREATE TABLE wallet_ledger_entries(id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),"accountId" uuid,"userId" uuid,"accountType" text,type text,amount numeric(12,2),"withdrawableAmount" numeric(12,2),"balanceAfter" numeric(12,2),currency text,"relatedEntityType" text,"relatedEntityId" uuid,description text,CONSTRAINT "CHK_wallet_ledger_type" CHECK(type IN ('top_up')));
       CREATE TABLE driver_earnings(id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),"driverId" uuid,"bookingId" uuid UNIQUE,"grossAmount" numeric(12,2),"netAmount" numeric(12,2),"commissionAmount" numeric(12,2),currency text DEFAULT 'CDF',status text DEFAULT 'available',"createdAt" timestamptz DEFAULT clock_timestamp(), CHECK("grossAmount"="netAmount"+"commissionAmount"));`);
@@ -47,6 +52,7 @@ const bin = process.env.ASSET_TEST_POSTGRES_BIN;
       await db.transaction(m => new IntercityDriverCategory1780000128000().up(m.queryRunner!));
       await db.transaction(m => new ContractAssetCreditRates1780000129000().up(m.queryRunner!));
       await db.transaction(m => new AssetCreditCostDisclosure1780000130000().up(m.queryRunner!));
+      await db.transaction(m => new AssetRepaymentPlans1780000133000().up(m.queryRunner!));
       // Test identity injection only. Actual DTO validation, role guard, HTTP and SQL are exercised.
       const module = await Test.createTestingModule({
         controllers: [AssetCreditController],
@@ -99,7 +105,12 @@ const bin = process.env.ASSET_TEST_POSTGRES_BIN;
       admin = randomUUID();
       trip = randomUUID();
       await db.query('INSERT INTO users(id) VALUES($1),($2)', [driver, admin]);
-      await db.query('INSERT INTO trips VALUES($1,$2)', [trip, driver]);
+      await db.query('INSERT INTO trips(id,"driverId") VALUES($1,$2)', [trip, driver]);
+      await db.query(`WITH history AS (
+        INSERT INTO trips(id,"driverId",status,"completedAt") SELECT uuid_generate_v4(),$1,'completed',day AT TIME ZONE 'UTC'
+        FROM generate_series(now()-interval '10 months',now()-interval '1 hour',interval '1 day') day RETURNING id,"completedAt")
+        INSERT INTO bookings(id,"tripId","passengerId","pickedUp","droppedOff","pickedUpAt","droppedOffAt")
+        SELECT uuid_generate_v4(),id,$2,true,true,"completedAt"-interval '20 minutes',"completedAt" FROM history`, [driver, admin]);
       await db.query(
         `INSERT INTO kyc_documents("userId",status) VALUES($1,'approved')`,
         [driver],
@@ -108,6 +119,79 @@ const bin = process.env.ASSET_TEST_POSTGRES_BIN;
         'INSERT INTO wallet_accounts("userId",balance,"withdrawableBalance") VALUES($1,100,100)',
         [driver],
       );
+    }, 20000);
+    it('vehicle eligibility uses nine months of completed passenger rides, not age or empty publications', async () => {
+      const now = new Date();
+      expect((await vehicleCreditEligibility(db, driver, now)).eligible).toBe(true);
+      expect((await vehicleCreditEligibility(db, admin, now)).eligible).toBe(false);
+      // A missing three-day section defeats continuity even with many total rides.
+      await db.query(`UPDATE bookings SET status='cancelled' WHERE "droppedOffAt" BETWEEN now()-interval '60 days' AND now()-interval '57 days'`);
+      expect((await vehicleCreditEligibility(db, driver, now)).eligible).toBe(false);
+      await expect(service.request(driver, '', 'vehicle')).rejects.toThrow('tous les deux jours');
+      expect((await service.products(driver)).items.find(p => p.kind === 'vehicle')?.enabled).toBe(false);
+      await db.query(`UPDATE bookings SET status='completed'`);
+      await db.query(`UPDATE bookings SET "passengerId"=$1`, [driver]);
+      expect((await vehicleCreditEligibility(db, driver, now)).eligible).toBe(false);
+      await db.query(`UPDATE bookings SET "passengerId"=$1`, [admin]);
+      await db.query(`UPDATE bookings SET "droppedOff"=false`);
+      expect((await vehicleCreditEligibility(db, driver, now)).eligible).toBe(false);
+      expect(nineMonthsBefore(new Date('2026-11-30T12:00:00Z')).toISOString()).toBe('2026-02-28T12:00:00.000Z');
+    });
+    it('exact 48-hour continuity is allowed, but a one-millisecond excess is not', async () => {
+      const now = new Date('2026-11-17T12:00:00.000Z');
+      await db.query('DELETE FROM bookings');
+      await db.query(`UPDATE trips SET status='completed' WHERE id=$1`, [trip]);
+      await db.query(`INSERT INTO bookings(id,"tripId","passengerId","pickedUp","droppedOff","pickedUpAt","droppedOffAt")
+        SELECT uuid_generate_v4(),$1,$2,true,true,at-interval '30 minutes',at
+        FROM generate_series(($3::timestamptz AT TIME ZONE 'UTC')-interval '48 hours',($3::timestamptz AT TIME ZONE 'UTC')-interval '10 months',interval '-48 hours') at`, [trip, admin, now]);
+      expect((await vehicleCreditEligibility(db, driver, now)).eligible).toBe(true);
+      expect((await vehicleCreditEligibility(db, driver, new Date(now.getTime()+1))).eligible).toBe(false);
+    });
+    it('new account with recent daily rides remains ineligible until nine months are recorded', async () => {
+      await db.query(`DELETE FROM bookings WHERE "droppedOffAt"<now()-interval '8 months'`);
+      expect((await vehicleCreditEligibility(db, driver)).eligible).toBe(false);
+      await expect(offer(100000, 'vehicle')).rejects.toThrow();
+      await service.request(driver, 'Téléphone pour travailler', 'phone');
+    });
+    it('application comment is owner-scoped, bounded and closed once an offer is issued', async () => {
+      const http = request(app.getHttpServer());
+      const { id } = await service.request(driver, 'Premier commentaire', 'phone');
+      const url = `/asset-credits/requests/${id}/comment`;
+      await http.patch(url).send({ notes: 'test' }).expect(401);
+      await http.patch(url).set('x-test-user', admin).send({ notes: 'test' }).expect(409);
+      await http.patch(url).set('x-test-user', driver).send({ notes: 'x'.repeat(1001) }).expect(400);
+      await http.patch(url).set('x-test-user', driver).send({ notes: '  Nouveau commentaire  ' }).expect(200);
+      expect((await service.requests(driver)).items[0].notes).toBe('Nouveau commentaire');
+      await offer();
+      await http.patch(url).set('x-test-user', driver).send({ notes: 'trop tard' }).expect(409);
+    });
+    it('monthly formula is mandatory, owner-scoped, idempotent and immutable after acceptance', async () => {
+      const dto = { mutationId: randomUUID(), driverId: driver, assetKind: 'phone' as const,
+        label: 'Téléphone de test', principalMinor: 120000, cashPriceMinor: 100000, creditFeeMinor: 20000,
+        repaymentBps: 500, installmentPeriod: 'month' as const, installmentCount: 3,
+        repaymentPlans: [{ id: 'three', months: 3 }, { id: 'six', months: 6 }],
+        terms: 'Conditions de test : frais fixes inclus, durée choisie parmi les formules, sans double paiement.', validationReference: 'test' };
+      const http = request(app.getHttpServer());
+      const created = await http.post('/asset-credits/admin').set('x-test-user', admin).set('x-test-role', 'super_admin').send(dto).expect(201);
+      const id = created.body.id;
+      expect(await service.offer(admin, { ...dto, repaymentPlans: [{ months: 3, id: 'three' }, { months: 6, id: 'six' }] })).toEqual({ id });
+      const c = await service.detail(id, driver);
+      expect(c.repaymentPlanPreviews[1].installments).toHaveLength(6);
+      expect(c.repaymentPlanPreviews[1].installments[0].amountMinor).toBe(20000);
+      const consent = { consent: true as const, policyVersion: 'asset-credit-v2', costDisclosureVersion: 'asset-credit-cost-v1', expectedTotalRepaymentBps: 500 };
+      await http.post(`/asset-credits/mine/${id}/accept`).set('x-test-user', driver).send(consent).expect(409);
+      await http.post(`/asset-credits/mine/${id}/accept`).set('x-test-user', driver).send({ ...consent, selectedPlanId: 'invented' }).expect(409);
+      await http.post(`/asset-credits/mine/${id}/accept`).set('x-test-user', admin).send({ ...consent, selectedPlanId: 'six' }).expect(404);
+      for (let i=0;i<2;i++) await http.post(`/asset-credits/mine/${id}/accept`).set('x-test-user', driver).send({ ...consent, selectedPlanId: 'six' }).expect(201);
+      const accepted = await service.detail(id, driver);
+      expect(accepted).toMatchObject({ selectedPlanId: 'six', installmentCount: 6, principalMinor: '120000', paidMinor: '0' });
+      await http.post(`/asset-credits/mine/${id}/accept`).set('x-test-user', driver).send({ ...consent, selectedPlanId: 'three' }).expect(409);
+      await expect(db.query('UPDATE asset_credits SET "installmentCount"=3 WHERE id=$1', [id])).rejects.toThrow('ASSET_COST_IMMUTABLE');
+      await expect(db.query(`UPDATE asset_credits SET "repaymentPlans"='[]' WHERE id=$1`, [id])).rejects.toThrow('ASSET_COST_IMMUTABLE');
+      await service.activate(id, admin, { deliveryReference: 'test delivery', assetReference: 'test asset' });
+      const delivered = await service.detail(id, driver);
+      expect(delivered.installments).toHaveLength(6);
+      expect(delivered.installments.every(p => p.dueAt !== null)).toBe(true);
     });
     it('discloses fixed fees and minimums, requires updated consent and freezes agreed cost terms', async () => {
       const dto = { mutationId: randomUUID(), driverId: driver, assetKind: 'phone' as const,
@@ -140,7 +224,7 @@ const bin = process.env.ASSET_TEST_POSTGRES_BIN;
       const result = await service.offer(admin, {
         mutationId: randomUUID(),
         driverId: driver,
-        assetKind,
+        assetKind: ['phone', 'vehicle'].includes(assetKind) ? assetKind : 'phone',
         label: 'Téléphone de test',
         principalMinor,
         repaymentBps: repaymentBps ?? 500,
@@ -149,6 +233,8 @@ const bin = process.env.ASSET_TEST_POSTGRES_BIN;
         validationReference: 'test-validation',
       });
       // Historical v1 fixtures explicitly preserve the old pooled rule; new HTTP offers are v2.
+      // Seed grandfathered equipment; new intake is intentionally closed, repayments still work.
+      if (!['phone', 'vehicle'].includes(assetKind)) await db.query('UPDATE asset_credits SET "assetKind"=$2 WHERE id=$1', [result.id, assetKind]);
       if (repaymentBps === undefined) await db.query(`UPDATE asset_credits SET "policyVersion"='asset-credit-v1' WHERE id=$1`, [result.id]);
       return result;
     };
@@ -425,7 +511,7 @@ const bin = process.env.ASSET_TEST_POSTGRES_BIN;
         ),
       ).rejects.toThrow('archived');
     });
-    it.each(['phone', 'helmet', 'gps_tracker', 'delivery_equipment', 'equipment', 'vehicle'] as const)('HTTP + database %s: application, admin offer, owner consent, delivery, income and wallet repayment', async assetKind => {
+    it.each(['phone', 'vehicle'] as const)('HTTP + database %s: application, admin offer, owner consent, delivery, income and wallet repayment', async assetKind => {
       const http = request(app.getHttpServer());
       const application = await http.post('/asset-credits/requests').set('x-test-user', driver)
         .send({ assetKind, notes: 'Matériel de test isolé' }).expect(201);
@@ -523,27 +609,30 @@ const bin = process.env.ASSET_TEST_POSTGRES_BIN;
       await db.query("UPDATE asset_credit_products SET enabled=false WHERE kind='vehicle'");
       const catalogue = await http.get('/asset-credits/products').set('x-test-user', driver).expect(200);
       expect(catalogue.body.canRequest).toBe(true);
-      expect(catalogue.body.items.filter(p => p.enabled).map(p => p.kind)).toEqual(['phone', 'helmet', 'gps_tracker', 'delivery_equipment', 'equipment']);
+      expect(catalogue.body.items.filter(p => p.enabled).map(p => p.kind)).toEqual(['phone']);
       for (const assetKind of ['vehicle', 'invalid']) {
         await http.post('/asset-credits/requests').set('x-test-user', driver).send({ assetKind, notes: '' }).expect(assetKind === 'vehicle' ? 409 : 400);
       }
-      await http.post('/asset-credits/requests').set('x-test-user', driver).send({ assetKind: 'equipment', notes: '  ' }).expect(400);
+      for (const assetKind of ['helmet', 'gps_tracker', 'delivery_equipment', 'equipment']) {
+        await http.post('/asset-credits/requests').set('x-test-user', driver).send({ assetKind, notes: 'Besoin test' }).expect(409);
+      }
       await db.query("UPDATE asset_credit_products SET enabled=false WHERE kind='helmet'");
       const paused = await http.get('/asset-credits/products').set('x-test-user', driver).expect(200);
       expect(paused.body.items.find(p => p.kind === 'helmet').enabled).toBe(false);
       await expect(service.request(driver, '', 'helmet')).rejects.toThrow();
-      await expect(offer(10000, 'helmet')).rejects.toThrow();
+      await expect(service.offer(admin, { mutationId: randomUUID(), driverId: driver, assetKind: 'helmet', label: 'Casque test', principalMinor: 10000, repaymentBps: 500, terms: 'Conditions de test isolées sans envoi externe ni données de production.', validationReference: 'test' })).rejects.toThrow();
       await db.query('UPDATE users SET "isDriver"=false WHERE id=$1', [driver]);
       expect((await service.products(driver)).canRequest).toBe(false);
       await expect(service.request(driver, '', 'phone')).rejects.toThrow();
     });
     it('concurrent applications coalesce per driver AND kind, without hiding other equipment', async () => {
-      const [a, b, other] = await Promise.all([service.request(driver, '', 'helmet'), service.request(driver, '', 'helmet'), service.request(driver, '', 'gps_tracker')]);
+      const [a, b, other] = await Promise.all([service.request(driver, '', 'phone'), service.request(driver, '', 'phone'), service.request(driver, '', 'vehicle')]);
       expect(a.id).toBe(b.id); expect(other.id).not.toBe(a.id);
-      await offer(10000, 'helmet');
+      await offer(10000, 'phone');
       const rows = (await service.requests(driver)).items;
-      expect(rows.find(r => r.assetKind === 'helmet').status).toBe('offered');
-      expect(rows.find(r => r.assetKind === 'gps_tracker').status).toBe('submitted');
+      expect(rows.find(r => r.assetKind === 'phone').status).toBe('offered');
+      expect(rows.find(r => r.assetKind === 'vehicle').status).toBe('submitted');
+      await db.query(`INSERT INTO asset_credit_requests("driverId","assetKind",notes) VALUES($1,'helmet','legacy test')`, [driver]);
       await expect(db.transaction(m => new EquipmentAssetCredits1780000127000().down(m.queryRunner!))).rejects.toThrow('preserved');
     });
     it('equipment migration can round-trip without dossiers and preserves phone and vehicle flags', async () => {
@@ -553,7 +642,7 @@ const bin = process.env.ASSET_TEST_POSTGRES_BIN;
       const products = (await service.products(driver)).items;
       expect(products.find(p => p.kind === 'phone')?.enabled).toBe(false);
       expect(products.find(p => p.kind === 'vehicle')?.enabled).toBe(true);
-      expect(products.find(p => p.kind === 'equipment')?.enabled).toBe(true);
+      expect(products.find(p => p.kind === 'equipment')?.enabled).toBe(false);
     });
     it('adds individual equipment and vehicle percentages, caps each principal and does not replay a debit', async () => {
       const phone = await active(20000, 'phone', 500);

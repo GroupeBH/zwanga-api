@@ -3,7 +3,7 @@ import * as tripDetailWrites from './save-trip-details-update';
 import { TripsService } from './trips.service';
 import { User, UserRole } from '../users/entities/user.entity';
 import { KycDocument } from '../users/entities/kyc-document.entity';
-import { TripStatus } from './entities/trip.entity';
+import { Trip, TripStatus } from './entities/trip.entity';
 import { BookingStatus } from '../bookings/entities/booking.entity';
 import { VehicleType } from '../vehicles/entities/vehicle.entity';
 
@@ -898,6 +898,11 @@ describe('TripsService started trip ETA expiration', () => {
       update: jest.fn().mockResolvedValue({ affected: 1 }),
       increment: jest.fn().mockResolvedValue(undefined),
     };
+    const acceptedBookings: any = { getMany: jest.fn().mockResolvedValue([]) };
+    for (const method of ['select', 'where', 'andWhere', 'orderBy']) acceptedBookings[method] = () => acceptedBookings;
+    (tripRepository as any).manager = { transaction: (callback: any) => callback({
+      getRepository: (entity: any) => entity === Trip ? tripRepository : { createQueryBuilder: () => acceptedBookings },
+    }) };
     bookingRepository = {
       update: jest.fn().mockResolvedValue(undefined),
     };

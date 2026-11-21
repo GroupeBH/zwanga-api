@@ -56,6 +56,13 @@ export class StoreController {
     return this.stores.status(req.user.role, req.storePermissions);
   }
 
+  @Get('diagnostics')
+  @SensitiveThrottle(20, 60000)
+  @ApiOperation({ summary: 'Read-only source availability and latest import evidence; no credentials or provider calls' })
+  diagnostics() {
+    return this.stores.diagnostics();
+  }
+
   @Get([
     'dashboard',
     'overview',

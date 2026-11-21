@@ -4,6 +4,7 @@ import {
   ForbiddenException,
   GoneException,
   Injectable,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -15,6 +16,7 @@ import {
 } from './installation-update.dto';
 import { INSTALLATION_AUDIENCE_SQL } from './installation-update.policy';
 import { normalizeAppVersion } from './app-update.policy';
+import { AppUpdateDeliveryService } from './app-update-delivery.service';
 
 export interface CampaignSummary {
   id: string;
@@ -32,6 +34,7 @@ export class InstallationUpdatesService {
   constructor(
     private readonly db: DataSource,
     private readonly config: ConfigService,
+    @Optional() private readonly delivery?: AppUpdateDeliveryService,
   ) {}
   private available() {
     if (this.config.get<string>('APP_UPDATES_ENABLED') !== 'true')
@@ -123,7 +126,7 @@ export class InstallationUpdatesService {
       body = input.body.trim();
     if (title.length < 3 || body.length < 3)
       throw new BadRequestException('Renseignez le titre et le message.');
-    return this.db.transaction(async (manager) => {
+    const campaign = await this.db.transaction(async (manager) => {
       await manager.query(
         'SELECT pg_advisory_xact_lock(hashtextextended($1,0))',
         [`update-campaign:${input.id}`],
@@ -162,6 +165,8 @@ export class InstallationUpdatesService {
       );
       return { id: input.id, queued: true };
     });
+    const dispatch = this.delivery ? await this.delivery.prepare(input.releaseId) : undefined;
+    return { ...campaign, ...(dispatch ? { dispatch } : {}) };
   }
   async list(): Promise<CampaignSummary[]> {
     this.available();

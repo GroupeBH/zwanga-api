@@ -1,7 +1,31 @@
-import { of } from 'rxjs';
+import { of, Subject, NEVER } from 'rxjs';
 import { GoogleMapsService } from './google-maps.service';
 
 describe('GoogleMapsService directions', () => {
+  it('coalesces provider requests and aborts timed-out work without caching it', async () => {
+    jest.useFakeTimers();
+    try {
+      const response = new Subject<any>();
+      const get = jest.fn().mockReturnValue(response);
+      const cache = { get: jest.fn().mockResolvedValue(undefined), set: jest.fn().mockResolvedValue(undefined) };
+      const service = new GoogleMapsService({ get } as any, { get: () => 'synthetic' } as any, cache as any);
+      const dto = { origin: { lat: -4.3, lng: 15.3 }, destination: { lat: -4.31, lng: 15.31 } };
+      const one = service.getDirections(dto, { timeoutMs: 1000 });
+      const two = service.getDirections(dto, { timeoutMs: 1000 });
+      await jest.advanceTimersByTimeAsync(0);
+      expect(get).toHaveBeenCalledTimes(1);
+      response.next({ data: { status: 'OK', routes: [buildProviderRoute('Shared')] } }); response.complete();
+      expect(await one).toEqual(await two);
+      get.mockReturnValue(NEVER); cache.set.mockClear();
+      const timeout = service.getDirections(dto, { timeoutMs: 1000 });
+      const rejected = expect(timeout).rejects.toThrow('PROVIDER_BUDGET_EXHAUSTED');
+      await jest.advanceTimersByTimeAsync(1000); await rejected;
+      expect(get.mock.calls[1][1].signal.aborted).toBe(true);
+      expect(cache.set).not.toHaveBeenCalled();
+      get.mockReturnValue(of({ data: { status: 'OK', routes: [buildProviderRoute('Recovered')] } }));
+      await expect(service.getDirections(dto)).resolves.toHaveProperty('routes');
+    } finally { jest.useRealTimers(); }
+  });
   const buildProviderRoute = (summary: string) => ({
     summary,
     legs: [

@@ -21,6 +21,8 @@ describe('destination proximity: PostgreSQL query and notification boundaries', 
       tripId: 'test-trip',
       passengerId: 'test-passenger',
       status: BookingStatus.ACCEPTED,
+      pickedUp: true,
+      droppedOff: false,
       passengerCurrentLocation: { type: 'Point', coordinates: [15.3, -4.3] },
       passengerDestinationPoint: { type: 'Point', coordinates: [15.3, -4.3] },
       destinationProximityNotified: false,
@@ -139,7 +141,7 @@ describe('destination proximity: PostgreSQL query and notification boundaries', 
     },
   );
 
-  it('notifies once at exactly zero metres without completing or boarding the ride', async () => {
+  it('notifies an onboard passenger once at exactly zero metres without completing the ride', async () => {
     const booking = makeBooking();
     raw.mockResolvedValue({ distance: 0 });
     await service.checkAndNotifyDestinationProximity(booking);
@@ -156,8 +158,8 @@ describe('destination proximity: PostgreSQL query and notification boundaries', 
     expect(notify).toHaveBeenCalledTimes(1);
     expect(notify).toHaveBeenCalledWith(booking, 0);
     expect(booking.status).toBe(BookingStatus.ACCEPTED);
-    expect(booking.pickedUp).toBeUndefined();
-    expect(booking.droppedOff).toBeUndefined();
+    expect(booking.pickedUp).toBe(true);
+    expect(booking.droppedOff).toBe(false);
   });
 
   it('retains the one-kilometre proximity threshold', async () => {

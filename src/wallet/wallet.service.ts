@@ -53,6 +53,7 @@ import { loadWalletLedgerPage } from './wallet-ledger-page';
 import type { HistoryPageDto } from '../common/pagination/history-page';
 import { TOKEN_WITHDRAWAL_DISABLED } from '../payments/token-withdrawal.policy';
 import { TOKEN_VALUE_CDF } from './token-value.policy';
+import { optionalLegacyPage, LegacyPageQuery } from '../common/legacy-page';
 
 export interface WalletSummary {
   account: WalletAccount;
@@ -162,10 +163,11 @@ export class WalletService implements OnModuleInit {
     };
   }
 
-  async getLedger(userId: string): Promise<WalletLedgerEntry[]> {
+  async getLedger(userId: string, options: LegacyPageQuery = {}): Promise<WalletLedgerEntry[]> {
     return this.ledgerRepository.find({
       where: { userId, accountType: WalletAccountType.POINTS },
-      order: { createdAt: 'DESC' },
+      order: { createdAt: 'DESC', id: 'DESC' },
+      ...optionalLegacyPage(options),
     });
   }
 

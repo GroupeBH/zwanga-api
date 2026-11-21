@@ -363,7 +363,7 @@ export class BookingsController {
     @Param('id') id: string,
     @Body() updateLocationDto: UpdatePassengerLocationDto,
   ) {
-    return this.bookingsService.updatePassengerLocation(req.user.userId, id, updateLocationDto);
+    return this.bookingsService.updatePassengerLocation(req.user.userId, id, updateLocationDto, { deferProgress: true });
   }
 
   @Get('trip/:tripId/passengers-locations')

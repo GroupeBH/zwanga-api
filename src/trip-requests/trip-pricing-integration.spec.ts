@@ -18,7 +18,7 @@ describe('pricing integration with route and weather providers mocked', () => {
     const { service, maps } = fixture([{ distance: 5000, duration: 1200, durationInTraffic: 1800 }], true);
     const result = await service.getVehicleOptions({ numberOfSeats: 2 });
     expect(maps.getDirections).toHaveBeenCalledTimes(1);
-    expect(maps.getDirections).toHaveBeenCalledWith(expect.objectContaining({ departureTime: expect.any(Number) }));
+    expect(maps.getDirections).toHaveBeenCalledWith(expect.objectContaining({ departureTime: expect.any(Number) }), { timeoutMs: 6000 });
     expect(result.pricing).toMatchObject({ heavyTraffic: true, heavyRain: true, billableDelaySeconds: 600,
       trafficDelaySurchargePerSeat: 1200, recommendedPricePerSeat: 11200, pricingVersion: '2026-11-13' });
     for (const option of result.options) expect(option).toMatchObject({

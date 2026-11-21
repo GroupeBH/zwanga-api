@@ -8,3 +8,5 @@ export const ASSET_PRODUCTS = [
 ] as const;
 export type AssetKind = (typeof ASSET_PRODUCTS)[number]['kind'];
 export const ASSET_KINDS = ASSET_PRODUCTS.map((product) => product.kind);
+/** New intake only: existing contracts keep their repayment rights. */
+export const isAssetIntakeOpen = (kind: string) => kind === 'phone' || kind === 'vehicle';

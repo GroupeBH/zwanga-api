@@ -12,8 +12,11 @@ import {
   RepayAssetCreditDto,
 } from './asset-credit.dto';
 import { TOKEN_VALUE_CDF } from '../wallet/token-value.policy';
-import { ASSET_PRODUCTS, type AssetKind } from './asset-credit-products';
+import { ASSET_PRODUCTS, isAssetIntakeOpen, type AssetKind } from './asset-credit-products';
 import { creditSchedule, validateCreditCost } from './credit-cost';
+import { assertVehicleCreditEligible, vehicleCreditEligibility } from './vehicle-credit-eligibility';
+import { repaymentPlanPreviews, selectRepaymentPlan, validateRepaymentPlans } from './repayment-plans';
+import { isDeepStrictEqual } from 'node:util';
 
 export const ASSET_TERMS_VERSION = 'asset-credit-v2';
 export const ASSET_POLICY_TEXT =
@@ -34,9 +37,13 @@ export class AssetCreditService {
     const [driver] = await this.db.query(
       'SELECT id FROM users WHERE id=$1 AND "isDriver"=true AND "isActive"=true', [driverId],
     );
+    const vehicle = driver ? await vehicleCreditEligibility(this.db, driverId) : { eligible: false };
     return {
       items: ASSET_PRODUCTS.map((product) => ({ ...product,
-        enabled: rows.some((row) => row.kind === product.kind && row.enabled === true),
+        enabled: isAssetIntakeOpen(product.kind) && rows.some((row) => row.kind === product.kind && row.enabled === true)
+          && (product.kind !== 'vehicle' || vehicle.eligible),
+        comingSoon: !isAssetIntakeOpen(product.kind),
+        ...(product.kind === 'vehicle' ? { eligibility: vehicle } : {}),
       })),
       canRequest: Boolean(driver), policyText: ASSET_POLICY_TEXT,
     };
@@ -44,16 +51,15 @@ export class AssetCreditService {
   async requests(driverId?: string) {
     return {
       items: await this.db.query(
-        `SELECT id,"driverId","assetKind",notes,status,"createdAt" FROM asset_credit_requests ${driverId ? 'WHERE "driverId"=$1' : ''} ORDER BY "createdAt" DESC,id DESC LIMIT 100`,
+        `SELECT id,"driverId","assetKind",notes,status,"createdAt" FROM asset_credit_requests WHERE to_jsonb(asset_credit_requests)->>'proProductId' IS NULL ${driverId ? 'AND "driverId"=$1' : ''} ORDER BY "createdAt" DESC,id DESC LIMIT 100`,
         driverId ? [driverId] : [],
       ),
     };
   }
   async request(driverId: string, notes: string, assetKind: AssetKind = 'phone') {
+    if (!isAssetIntakeOpen(assetKind)) throw new ConflictException('Cet équipement sera disponible prochainement.');
     if (!ASSET_PRODUCTS.some((product) => product.kind === assetKind))
       throw new BadRequestException('Matériel inconnu.');
-    if (assetKind === 'equipment' && notes.trim().length < 3)
-      throw new BadRequestException('Précisez le matériel souhaité.');
     return this.db.transaction(async (m) => {
       await m.query('SELECT pg_advisory_xact_lock(hashtextextended($1,0))', [
         `asset-request:${driverId}`,
@@ -71,10 +77,12 @@ export class AssetCreditService {
       );
       if (!product?.enabled)
         throw new ConflictException('Ce service est en pause.');
+      if (assetKind === 'vehicle') await assertVehicleCreditEligible(m, driverId);
       const [existing] = await m.query(
-        `SELECT id FROM asset_credit_requests WHERE "driverId"=$1 AND "assetKind"=$2 AND status='submitted'`,
+        `SELECT id,to_jsonb(asset_credit_requests)->>'proProductId' AS "proProductId" FROM asset_credit_requests WHERE "driverId"=$1 AND "assetKind"=$2 AND status='submitted'`,
         [driverId, assetKind],
       );
+      if (existing?.proProductId) throw new ConflictException('Une demande Zwanga Pro est déjà en cours. Consultez ce dossier.');
       if (existing) return existing;
       return (
         await m.query(
@@ -84,15 +92,27 @@ export class AssetCreditService {
       )[0];
     });
   }
+  async comment(id: string, driverId: string, notes: string) {
+    const [updated] = await this.db.query(`WITH updated AS (UPDATE asset_credit_requests SET notes=$3
+      WHERE id=$1 AND "driverId"=$2 AND status='submitted' AND to_jsonb(asset_credit_requests)->>'proProductId' IS NULL RETURNING id,notes) SELECT * FROM updated`, [id, driverId, notes.trim()]);
+    if (!updated) throw new ConflictException('Ce dossier ne peut plus être modifié. Consultez votre offre.');
+    return updated;
+  }
   async list(driverId?: string) {
     const rows = await this.db.query(
       `SELECT id,"driverId","assetKind",label,"principalMinor","paidMinor","dueMinor",status,terms,"policyVersion","repaymentBps","acceptedAt","activatedAt","createdAt",
         "cashPriceMinor","creditFeeMinor","installmentCount","installmentPeriod","costDisclosureVersion"
-      FROM asset_credits ${driverId ? 'WHERE "driverId" = $1' : ''} ORDER BY "createdAt" DESC, id DESC LIMIT 100`,
+      FROM asset_credits WHERE "policyVersion"<>'zwanga-pro-v1' ${driverId ? 'AND "driverId" = $1' : ''} ORDER BY "createdAt" DESC, id DESC LIMIT 100`,
       driverId ? [driverId] : [],
     );
     return {
-      items: rows,
+      // The mobile dashboard must compare every active contract, not fetch one
+      // arbitrarily selected credit and hide an older overdue installment.
+      items: rows.map((credit) => {
+        const { installments, minimumDueMinor } = creditSchedule(credit);
+        return { ...credit, minimumDueMinor,
+          nextInstallment: installments.find(row => row.remainingMinor > 0 && row.dueAt) ?? null };
+      }),
       commissionBps: 500,
       ...(driverId ? { totalRepaymentBps: await this.repaymentTotal(this.db, driverId) } : {}),
       policyText: ASSET_POLICY_TEXT,
@@ -106,6 +126,7 @@ export class AssetCreditService {
       driverId ? [id, driverId] : [id],
     );
     if (!credit) throw new NotFoundException('Crédit introuvable.');
+    if (credit.policyVersion === 'zwanga-pro-v1') throw new ConflictException('Consultez ce contrat dans Zwanga Pro.');
     const entries = await this.db.query(
       'SELECT id,kind,"amountMinor","dueDeltaMinor","createdAt","bookingId" FROM asset_credit_entries WHERE "creditId"=$1 ORDER BY "createdAt" DESC,id DESC LIMIT 100',
       [id],
@@ -119,6 +140,7 @@ export class AssetCreditService {
     return {
       ...credit,
       ...creditSchedule(credit),
+      repaymentPlanPreviews: repaymentPlanPreviews(credit),
       entries,
       currency: 'CDF',
       commissionBps: 500,
@@ -127,6 +149,8 @@ export class AssetCreditService {
     };
   }
   async offer(actorId: string, dto: OfferAssetCreditDto) {
+    if (!isAssetIntakeOpen(dto.assetKind)) throw new ConflictException('Cet équipement sera disponible prochainement.');
+    const plans = validateRepaymentPlans(dto.repaymentPlans, dto);
     const costVersion = validateCreditCost(dto.principalMinor, {
       cashPriceMinor: dto.cashPriceMinor, creditFeeMinor: dto.creditFeeMinor,
       installmentCount: dto.installmentCount, installmentPeriod: dto.installmentPeriod,
@@ -156,17 +180,10 @@ export class AssetCreditService {
         [dto.mutationId],
       );
       if (prior) {
-        if (
-          JSON.stringify(prior.requestPayload) !==
-          JSON.stringify(JSON.parse(payload))
-        ) {
-          const same = Object.keys(dto).length === Object.keys(prior.requestPayload).length && Object.keys(dto).every(
-            (k) => prior.requestPayload[k] === dto[k],
+        if (!isDeepStrictEqual(prior.requestPayload, JSON.parse(payload))) {
+          throw new ConflictException(
+            'Cette opération existe avec un autre contenu.',
           );
-          if (!same)
-            throw new ConflictException(
-              'Cette opération existe avec un autre contenu.',
-            );
         }
         return { id: prior.id };
       }
@@ -182,10 +199,11 @@ export class AssetCreditService {
       );
       if (!driver)
         throw new BadRequestException('Conducteur actif introuvable.');
+      if (dto.assetKind === 'vehicle') await assertVehicleCreditEligible(m, dto.driverId);
       const [credit] = await m.query(
         `INSERT INTO asset_credits ("driverId","assetKind",label,"principalMinor",terms,"validationReference","createdBy","mutationId","requestPayload","repaymentBps","policyVersion",
-          "cashPriceMinor","creditFeeMinor","installmentCount","installmentPeriod","costDisclosureVersion")
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) RETURNING id`,
+          "cashPriceMinor","creditFeeMinor","installmentCount","installmentPeriod","costDisclosureVersion","repaymentPlans")
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) RETURNING id`,
         [
           dto.driverId,
           dto.assetKind,
@@ -200,6 +218,7 @@ export class AssetCreditService {
           ASSET_TERMS_VERSION,
           dto.cashPriceMinor ?? null, dto.creditFeeMinor ?? null,
           dto.installmentCount ?? null, dto.installmentPeriod ?? null, costVersion,
+          JSON.stringify(plans),
         ],
       );
       await m.query(
@@ -207,7 +226,8 @@ export class AssetCreditService {
         [credit.id, actorId],
       );
       await m.query(
-        `UPDATE asset_credit_requests SET status='offered' WHERE "driverId"=$1 AND "assetKind"=$2 AND status='submitted'`,
+        `UPDATE asset_credit_requests SET status='offered' WHERE "driverId"=$1 AND "assetKind"=$2 AND status='submitted'
+          AND to_jsonb(asset_credit_requests)->>'proProductId' IS NULL`,
         [dto.driverId, dto.assetKind],
       );
       return credit;
@@ -221,6 +241,8 @@ export class AssetCreditService {
         [id, driverId],
       );
       if (!credit) throw new NotFoundException('Crédit introuvable.');
+      if (credit.policyVersion === 'zwanga-pro-v1') throw new ConflictException('Utilisez le parcours contractuel Zwanga Pro.');
+      const plan = accept ? selectRepaymentPlan(credit, consent?.selectedPlanId) : null;
       if (accept && credit.costDisclosureVersion && consent?.costDisclosureVersion !== credit.costDisclosureVersion)
         throw new ConflictException('Mettez à jour l’application pour consulter et accepter le prix, les frais et les échéances de cette offre.');
       if (accept && ((consent && consent.policyVersion !== credit.policyVersion)
@@ -230,6 +252,7 @@ export class AssetCreditService {
       if (credit.status !== 'offered')
         throw new ConflictException('Ce contrat a déjà changé.');
       if (accept) {
+        if (credit.assetKind === 'vehicle') await assertVehicleCreditEligible(m, driverId);
         const total = await this.repaymentTotal(m, driverId, id);
         if (total > 9500) throw new ConflictException('Le total des remboursements et de la commission dépasse 100 % du revenu.');
         if (credit.policyVersion === 'asset-credit-v2' && consent?.expectedTotalRepaymentBps !== total)
@@ -244,8 +267,9 @@ export class AssetCreditService {
           );
       }
       await m.query(
-        `UPDATE asset_credits SET status=$2,"acceptedAt"=CASE WHEN $2='accepted' THEN now() ELSE NULL END WHERE id=$1`,
-        [id, accept ? 'accepted' : 'declined'],
+        `UPDATE asset_credits SET status=$2,"acceptedAt"=CASE WHEN $2='accepted' THEN now() ELSE NULL END,
+          "selectedPlanId"=COALESCE($3,"selectedPlanId"),"installmentCount"=COALESCE($4,"installmentCount") WHERE id=$1`,
+        [id, accept ? 'accepted' : 'declined', plan?.id ?? null, plan?.months ?? null],
       );
       await m.query(
         'INSERT INTO asset_credit_events ("creditId","actorId",action) VALUES ($1,$2,$3)',
@@ -269,6 +293,7 @@ export class AssetCreditService {
         [id],
       );
       if (!credit) throw new NotFoundException('Crédit introuvable.');
+      if (credit.policyVersion === 'zwanga-pro-v1') throw new ConflictException('Utilisez la remise Zwanga Pro.');
       if (
         ['active', 'settled'].includes(credit.status) &&
         credit.deliveryReference === dto.deliveryReference.trim() &&
@@ -323,6 +348,8 @@ export class AssetCreditService {
       );
     try {
       return await this.db.transaction(async (m) => {
+        const [contract] = await m.query('SELECT "policyVersion" FROM asset_credits WHERE id=$1 AND "driverId"=$2', [id, driverId]);
+        if (contract?.policyVersion === 'zwanga-pro-v1') throw new ConflictException('Utilisez le remboursement Zwanga Pro.');
         const [result] = await m.query(
           'SELECT zwanga_asset_wallet_repay($1,$2,$3,$4) AS result',
           [id, driverId, dto.amountMinor, dto.mutationId],

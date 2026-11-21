@@ -5,6 +5,7 @@ import { AppUpdateDispatchService } from './app-update-dispatch.service';
 import { InstallationUpdatesController } from './installation-updates.controller';
 import { InstallationUpdatesService } from './installation-updates.service';
 import { InstallationUpdateDispatchService } from './installation-update-dispatch.service';
+import { AppUpdateDeliveryService } from './app-update-delivery.service';
 
-@Module({ controllers: [AppUpdatesController, InstallationUpdatesController], providers: [AppUpdatesService, AppUpdateDispatchService, InstallationUpdatesService, InstallationUpdateDispatchService], exports: [InstallationUpdatesService, AppUpdatesService] })
+@Module({ controllers: [AppUpdatesController, InstallationUpdatesController], providers: [AppUpdatesService, AppUpdateDispatchService, InstallationUpdatesService, InstallationUpdateDispatchService, AppUpdateDeliveryService], exports: [InstallationUpdatesService, AppUpdatesService] })
 export class AppUpdatesModule {}

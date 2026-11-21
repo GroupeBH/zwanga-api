@@ -8,13 +8,15 @@ import { PartnersController } from './partners.controller';
 import { PartnersService } from './partners.service';
 import { FleetRegistryController } from './fleet-registry.controller';
 import { FleetRegistryService } from './fleet-registry.service';
+import { FleetApplicationsService } from './fleet-applications.service';
+import { FleetApplicationsController } from './fleet-applications.controller';
 import { FleetPaymentsService } from './fleet-payments.service';
 import { FleetPaymentsController } from './fleet-payments.controller';
 import { PartnerFieldDailyReport, PartnerFieldLead, PartnerFieldTarget, PartnerFieldTicket, PartnerMember, PartnerOrganization } from './partner.entities';
 
 @Module({
   imports: [TypeOrmModule.forFeature([PartnerOrganization, PartnerMember, PartnerFieldLead, PartnerFieldTarget, PartnerFieldTicket, PartnerFieldDailyReport, User, Trip]), SupportModule, ReferralsModule],
-  controllers: [PartnersController,FleetRegistryController,FleetPaymentsController],
-  providers: [PartnersService,FleetRegistryService,FleetPaymentsService],
+  controllers: [PartnersController,FleetRegistryController,FleetPaymentsController,FleetApplicationsController],
+  providers: [PartnersService,FleetRegistryService,FleetPaymentsService,FleetApplicationsService],
 })
 export class PartnersModule {}
