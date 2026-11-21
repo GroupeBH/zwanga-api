@@ -19,7 +19,9 @@ import type {
 } from '../shared/credit.rows';
 import { minor } from '../shared/money';
 import { schedule } from '../schedules/installment-schedule.policy';
-import { evaluateCredit } from '../eligibility/credit-eligibility.policy';
+import { evaluatePurchase } from '../commerce/purchase-eligibility.policy';
+import { purchaseQuote } from '../commerce/commerce.policy';
+import { assertVehicleCreditEligible } from '../../asset-credit/vehicle-credit-eligibility';
 import type { CreditActor } from '../shared/credit.store';
 import { createHash } from 'node:crypto';
 import { FINANCING_CONTRACT_VERSION } from '../contracts/contract-version';
@@ -47,13 +49,47 @@ export class CreditApplicationsService {
         );
         if (!product) throw new NotFoundException('Produit introuvable.');
         await this.catalog.gate(m, product);
+        if (product.kind === 'vehicle')
+          await assertVehicleCreditEligible(m, driverId);
+        const purchase = product.commerce
+          ? purchaseQuote(
+              {
+                id: product.id,
+                commerce: product.commerce,
+                revision: product.revision!,
+              },
+              dto.mode ?? 'credit',
+              dto.planId,
+            )
+          : undefined;
+        if (
+          purchase &&
+          (dto.quoteHash !== purchase.quoteHash ||
+            dto.depositMinor !== purchase.depositMinor ||
+            dto.installments !== purchase.installments ||
+            dto.period !== purchase.period)
+        )
+          throw new ConflictException(
+            'Le prix ou la formule a changé. Consultez le nouveau récapitulatif.',
+          );
+        if (!purchase && (dto.mode || dto.planId || dto.quoteHash))
+          throw new BadRequestException(
+            'Cette offre utilise le parcours de crédit existant.',
+          );
+        if (purchase) {
+          const [category] = await m.query<IdRow[]>(
+            'SELECT id FROM pro_commerce_categories WHERE id=$1 AND enabled FOR SHARE',
+            [product.categoryId],
+          );
+          if (!category) throw new ConflictException('Catégorie indisponible.');
+        }
         const [policy] = await m.query<PolicyRow[]>(
           'SELECT * FROM pro_credit_policies WHERE id=$1',
           [product.policyId],
         );
         const deposit = minor(dto.depositMinor),
-          price = minor(product.priceMinor, false),
-          fee = minor(product.feeMinor);
+          price = minor(purchase?.totalMinor ?? product.priceMinor, false),
+          fee = purchase ? 0n : minor(product.feeMinor);
         if (
           deposit >= price ||
           price - deposit < 100n ||
@@ -65,12 +101,13 @@ export class CreditApplicationsService {
         const principal = price - deposit + fee;
         schedule(principal, dto.installments, dto.period, new Date());
         const evaluation = {
-          ...evaluateCredit(
+          ...evaluatePurchase(
             await this.eligibility.facts(m, driverId),
             policy.rules,
             principal.toString(),
             dto.depositMinor,
-            product.priceMinor,
+            price.toString(),
+            purchase?.mode,
           ),
           rulesVersion: policy.version,
         };
@@ -118,7 +155,12 @@ export class CreditApplicationsService {
           );
           if (!owned) throw new NotFoundException('Justificatif introuvable.');
         }
-        const kind = product.kind === 'phone' ? 'phone' : 'equipment';
+        const kind =
+          product.kind === 'phone'
+            ? 'phone'
+            : product.kind === 'vehicle'
+              ? 'vehicle'
+              : 'equipment';
         const [existing] = await m.query<IdRow[]>(
           'SELECT id FROM asset_credit_requests WHERE "driverId"=$1 AND "assetKind"=$2 AND status=\'submitted\'',
           [driverId, kind],
@@ -130,7 +172,13 @@ export class CreditApplicationsService {
             message: 'Une demande est déjà en cours.',
           });
         const snapshot = {
-          product,
+          product: {
+            ...product,
+            commerce: undefined,
+            priceMinor: price.toString(),
+            feeMinor: fee.toString(),
+          },
+          ...(purchase ? { purchase } : {}),
           policy: {
             version: policy.version,
             terms: policy.terms,
@@ -223,13 +271,16 @@ export class CreditApplicationsService {
           [snapshot.product.id],
         );
         await this.catalog.gate(m, current);
+        if (snapshot.product.kind === 'vehicle')
+          await assertVehicleCreditEligible(m, owner.driverId);
         const evaluation = {
-          ...evaluateCredit(
+          ...evaluatePurchase(
             await this.eligibility.facts(m, owner.driverId),
             snapshot.policy.rules,
             snapshot.principalMinor,
             snapshot.depositMinor,
             snapshot.product.priceMinor,
+            snapshot.purchase?.mode,
           ),
           rulesVersion: snapshot.policy.version,
         };

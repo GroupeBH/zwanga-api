@@ -30,6 +30,14 @@ export class CreditWalletPaymentsService {
           );
           await this.store.creditLock(m, driverId);
           const c = await this.store.contract(m, id, driverId, true);
+          const advance =
+            dto.purpose === 'repayment' &&
+            c.status === 'accepted' &&
+            !!c.snapshot.purchase;
+          if (['rejected', 'returned'].includes(c.deliveryState))
+            throw new ConflictException(
+              'Paiement suspendu : contactez le support.',
+            );
           let walletEntryId: string;
           if (dto.purpose === 'deposit') {
             const [product] = await m.query<ProductRow[]>(
@@ -51,6 +59,33 @@ export class CreditWalletPaymentsService {
             await m.query(
               'UPDATE pro_credit_contracts SET "depositPaidMinor"="depositPaidMinor"+$2 WHERE "creditId"=$1',
               [id, amount.toString()],
+            );
+          } else if (advance) {
+            if (
+              amount > BigInt(c.principalMinor) - BigInt(c.paidMinor) ||
+              c.depositMinor !== c.depositPaidMinor
+            )
+              throw new ConflictException(
+                'Vérifiez l’acompte et le solde avant ce paiement.',
+              );
+            [{ id: walletEntryId }] = await m.query<IdRow[]>(
+              'SELECT zwanga_asset_wallet_debit($1,$2,$3,$4) AS id',
+              [driverId, amount.toString(), id, dto.mutationId],
+            );
+            await m.query(
+              'UPDATE asset_credits SET "paidMinor"="paidMinor"+$2 WHERE id=$1',
+              [id, amount.toString()],
+            );
+            await m.query(
+              `INSERT INTO asset_credit_entries("creditId","driverId",kind,"amountMinor","sourceKey","walletEntryId")
+              VALUES($1,$2,'wallet',$3,$4,$5)`,
+              [
+                id,
+                driverId,
+                amount.toString(),
+                `wallet:${dto.mutationId}`,
+                walletEntryId,
+              ],
             );
           } else {
             if (
@@ -79,7 +114,9 @@ export class CreditWalletPaymentsService {
             'wallet_clearing',
             dto.purpose === 'deposit'
               ? 'deposit_liability'
-              : 'credit_receivable',
+              : advance
+                ? 'prepayment_liability'
+                : 'credit_receivable',
             amount,
             {
               purpose: dto.purpose,

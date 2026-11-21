@@ -7,7 +7,8 @@ import { CreditStore } from '../shared/credit.store';
 import { CreditCatalogService } from '../catalogue/credit-catalogue.service';
 import { CreditEligibilityService } from '../eligibility/credit-eligibility.service';
 import { AcceptCreditContractDto } from './credit-contracts.dto';
-import { evaluateCredit } from '../eligibility/credit-eligibility.policy';
+import { evaluatePurchase } from '../commerce/purchase-eligibility.policy';
+import { assertVehicleCreditEligible } from '../../asset-credit/vehicle-credit-eligibility';
 import { schedule } from '../schedules/installment-schedule.policy';
 import { minor } from '../shared/money';
 import type { CreditActor } from '../shared/credit.store';
@@ -42,19 +43,23 @@ export class CreditContractsService {
           dto.termsHash !== c.termsHash
         )
           throw new ConflictException('Contrat modifié ou déjà accepté.');
-        const evaluation = evaluateCredit(
+        const cash = c.snapshot.purchase?.mode === 'cash';
+        if (c.snapshot.product.kind === 'vehicle')
+          await assertVehicleCreditEligible(m, driverId);
+        const evaluation = evaluatePurchase(
           await this.eligibility.facts(m, driverId),
           c.snapshot.policy.rules,
           c.principalMinor,
           c.depositMinor,
           c.snapshot.product.priceMinor,
+          c.snapshot.purchase?.mode,
         );
         if (!evaluation.eligible)
           throw new ConflictException({
             code: 'PRO_INELIGIBLE',
             ...evaluation,
           });
-        const until = new Date(dto.mandateUntil),
+        const until = new Date(dto.mandateUntil ?? ''),
           now = new Date();
         const last = schedule(
           minor(c.principalMinor),
@@ -63,9 +68,10 @@ export class CreditContractsService {
           now,
         ).at(-1)!;
         if (
-          !Number.isFinite(until.getTime()) ||
-          until < new Date(last.dueAt) ||
-          until.getTime() > now.getTime() + 3660 * 86400000
+          !cash &&
+          (!Number.isFinite(until.getTime()) ||
+            until < new Date(last.dueAt) ||
+            until.getTime() > now.getTime() + 3660 * 86400000)
         )
           throw new BadRequestException(
             'Le mandat doit couvrir l’échéancier et rester limité dans le temps.',
@@ -76,7 +82,7 @@ export class CreditContractsService {
         );
         await m.query(
           'UPDATE pro_credit_contracts SET "mandateUntil"=$2,"consentMutationId"=$3 WHERE "creditId"=$1',
-          [id, until, dto.mutationId],
+          [id, cash ? null : until, dto.mutationId],
         );
         await this.store.audit(
           m,
@@ -114,12 +120,15 @@ export class CreditContractsService {
         await this.store.driverLock(m, owner.driverId);
         await this.store.creditLock(m, owner.driverId);
         const c = await this.store.contract(m, id, undefined, true);
+        const cash = c.snapshot.purchase?.mode === 'cash';
         if (
           c.status !== 'accepted' ||
           c.depositPaidMinor !== c.depositMinor ||
-          !c.mandateUntil ||
-          c.mandateRevokedAt ||
-          new Date(c.mandateUntil) <= new Date()
+          (!cash &&
+            (!c.mandateUntil ||
+              c.mandateRevokedAt ||
+              new Date(c.mandateUntil) <= new Date())) ||
+          (cash && c.paidMinor !== c.principalMinor)
         )
           throw new ConflictException(
             'Acceptation, acompte encaissé et mandat valide requis.',
@@ -129,8 +138,14 @@ export class CreditContractsService {
           [c.productId],
         );
         await this.catalog.gate(m, product);
+        if (c.snapshot.product.kind === 'vehicle')
+          await assertVehicleCreditEligible(m, c.driverId);
         const facts = await this.eligibility.facts(m, c.driverId);
-        if (!facts.activeDriver || !facts.kycApproved || facts.overdue)
+        if (
+          !facts.activeDriver ||
+          !facts.kycApproved ||
+          (!cash && facts.overdue)
+        )
           throw new ConflictException(
             'Éligibilité à vérifier avant activation.',
           );
@@ -152,12 +167,15 @@ export class CreditContractsService {
             c.snapshot.period,
             now,
           );
-        if (new Date(c.mandateUntil) < new Date(installments.at(-1)!.dueAt))
+        if (
+          !cash &&
+          new Date(c.mandateUntil!) < new Date(installments.at(-1)!.dueAt)
+        )
           throw new ConflictException(
             'Le mandat doit être renouvelé avant activation.',
           );
         await m.query(
-          `UPDATE asset_credits SET status='active',"activatedAt"=$2,"deliveryReference"=$3,"assetReference"=$4 WHERE id=$1`,
+          `UPDATE asset_credits SET status=CASE WHEN "paidMinor"="principalMinor" THEN 'settled' ELSE 'active' END,"activatedAt"=$2,"deliveryReference"=$3,"assetReference"=$4 WHERE id=$1`,
           [
             id,
             now,
@@ -189,6 +207,12 @@ export class CreditContractsService {
             'supplier_payable',
             minor(c.depositMinor),
           ],
+          [
+            'advance',
+            'prepayment_liability',
+            'credit_receivable',
+            minor(c.paidMinor),
+          ],
         ] as const;
         for (const [key, debit, credit, amount] of postings)
           if (amount > 0n) {
@@ -212,7 +236,10 @@ export class CreditContractsService {
           }
         await this.store.audit(m, actor.userId, 'financing_activated', {}, id);
         await this.store.notify(m, c.driverId, id, `activated:${id}`);
-        return { id, status: 'active' };
+        return {
+          id,
+          status: c.paidMinor === c.principalMinor ? 'settled' : 'active',
+        };
       },
     );
   }
@@ -261,6 +288,10 @@ export class CreditContractsService {
       FROM pro_credit_reschedules WHERE "creditId"=$1 ORDER BY "createdAt" DESC,id DESC LIMIT 20`,
       [id],
     );
+    const [reductions] = await this.store.db.query<{ discountMinor: string }[]>(
+      'SELECT coalesce(sum("amountMinor"),0)::text AS "discountMinor" FROM asset_credit_entries WHERE "creditId"=$1 AND kind=\'discount\'',
+      [id],
+    );
     return {
       id: c.id,
       status: c.status,
@@ -269,7 +300,11 @@ export class CreditContractsService {
       snapshot: c.snapshot,
       termsHash: c.termsHash,
       principalMinor: c.principalMinor,
-      paidMinor: c.paidMinor,
+      paidMinor: (
+        BigInt(c.paidMinor) - BigInt(reductions.discountMinor)
+      ).toString(),
+      creditedMinor: c.paidMinor,
+      discountMinor: reductions.discountMinor,
       remainingMinor: (
         BigInt(c.principalMinor) - BigInt(c.paidMinor)
       ).toString(),
@@ -303,7 +338,7 @@ export class CreditContractsService {
         'auditor',
       ]);
     const rows = await this.store.db.query<ContractRow[]>(
-      `SELECT c.id,c.label,c.status,c."principalMinor",c."paidMinor",p."deliveryState",c."createdAt"
+      `SELECT c.id,c.label,c.status,c."principalMinor",c."paidMinor",p."depositMinor",p."depositPaidMinor",p."deliveryState",c."createdAt"
       FROM asset_credits c JOIN pro_credit_contracts p ON p."creditId"=c.id WHERE ($1::uuid IS NULL OR c."driverId"=$1)
       AND ($2::uuid IS NULL OR c.id>$2) ORDER BY c.id LIMIT $3`,
       [admin ? null : actor.userId, page.after ?? null, page.limit + 1],

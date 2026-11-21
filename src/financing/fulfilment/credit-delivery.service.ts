@@ -34,6 +34,14 @@ export class CreditDeliveryService {
             'La remise doit être attestée par un agent distinct du bénéficiaire.',
           );
         const document = c.snapshot.product.kind === 'document';
+        if (
+          c.snapshot.purchase &&
+          BigInt(c.depositPaidMinor) + BigInt(c.paidMinor) <
+            BigInt(c.snapshot.purchase.beforeDeliveryMinor)
+        )
+          throw new ConflictException(
+            'Le paiement avant remise n’est pas encore confirmé.',
+          );
         await this.store.authorize(
           m,
           actor,

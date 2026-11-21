@@ -4,6 +4,7 @@ import { driverSchedulePostgresTests } from '../../../test/driver-schedule-postg
 import { driverScheduleConflictPostgresTests } from '../../../test/driver-schedule-conflict-postgres';
 import { driverAlertLocationPostgresTests } from '../../../test/driver-alert-location-postgres';
 import { homeDiscoveryPostgresTests } from '../../../test/home-discovery-postgres';
+import { nonPremiumSubscriptions } from '../../../test/non-premium-subscriptions';
 import { counterOfferPostgresTests } from '../../../test/counter-offer-postgres';
 import { tripUpdateSchedulePostgresTests } from '../../../test/trip-update-schedule-postgres';
 import { SequentialRequestQueue1780000097000 } from '../../database/migrations/1780000097000-SequentialRequestQueue';
@@ -355,7 +356,7 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
   const editor = () => {
     const edits = new TripRequestsService(source.getRepository(TripRequest), source.getRepository(DriverOffer),
       source.getRepository(User), source.getRepository(Vehicle), {} as never, {} as never, {} as never,
-      {} as never, {} as never, {} as never, {} as never, {} as never);
+      {} as never, {} as never, nonPremiumSubscriptions() as never, {} as never, {} as never);
     jest.spyOn(edits, 'findOne').mockImplementation(async id => source.getRepository(TripRequest).findOneByOrFail({ id }) as never);
     jest.spyOn(edits as any, 'notifyPassengerAboutDriverOffer').mockResolvedValue(undefined);
     jest.spyOn(edits as any, 'sanitizeDriverOffer').mockImplementation(async offer => offer);

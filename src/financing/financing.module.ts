@@ -11,6 +11,7 @@ import { CreditFulfilmentModule } from './fulfilment/credit-fulfilment.module';
 import { CreditEvidenceModule } from './evidence/credit-evidence.module';
 import { CreditSchedulesModule } from './schedules/credit-schedules.module';
 import { CreditReportingModule } from './reporting/credit-reporting.module';
+import { CommerceModule } from './commerce/commerce.module';
 
 /** Composition only: business logic belongs to the imported domain modules. */
 @Module({
@@ -27,6 +28,7 @@ import { CreditReportingModule } from './reporting/credit-reporting.module';
     CreditEvidenceModule,
     CreditSchedulesModule,
     CreditReportingModule,
+    CommerceModule,
   ],
 })
 export class FinancingModule {}

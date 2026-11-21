@@ -39,7 +39,6 @@ export function counterOfferPostgresTests(context: () => Fixture) {
     // Restore real reads/projections; only premium/media adapters and authentication identity are synthetic.
     (edits.findOne as jest.Mock).mockRestore();
     (edits as any).sanitizeDriverOffer.mockRestore();
-    (edits as any).subscriptionsService.getPremiumOverview = async () => ({ isPremium: false, premiumBadgeEnabled: false });
     (edits as any).fileUploadService.getPresignedUrlIfS3Key = async (value: string) => value;
     const module = await Test.createTestingModule({ controllers: [TripRequestsController], providers: [{ provide: TripRequestsService, useValue: edits }] })
       .overrideGuard(JwtAuthGuard).useValue({ canActivate: (context: any) => {

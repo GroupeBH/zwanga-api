@@ -7,6 +7,7 @@ import { AssetRepaymentPlans1780000133000 } from '../src/database/migrations/178
 import { ZwangaProFoundations1780000137000 } from '../src/database/migrations/1780000137000-ZwangaProFoundations';
 import { ZwangaProSettlements1780000138000 } from '../src/database/migrations/1780000138000-ZwangaProSettlements';
 import { ZwangaProOperations1780000139000 } from '../src/database/migrations/1780000139000-ZwangaProOperations';
+import { ServiceCommerce1780000140000 } from '../src/database/migrations/1780000140000-ServiceCommerce';
 
 export async function proFixture(db: DataSource) {
   await db.query(`CREATE EXTENSION "uuid-ossp";
@@ -33,6 +34,7 @@ export async function proFixture(db: DataSource) {
     ZwangaProFoundations1780000137000,
     ZwangaProSettlements1780000138000,
     ZwangaProOperations1780000139000,
+    ServiceCommerce1780000140000,
   ]) {
     await db.transaction((m) => new Migration().up(m.queryRunner!));
   }
