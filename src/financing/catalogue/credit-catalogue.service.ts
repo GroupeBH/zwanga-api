@@ -11,6 +11,7 @@ import { minor, MAX_MINOR } from '../shared/money';
 import type { IdRow, ProductRow, PolicyRow } from '../shared/credit.rows';
 import { EntityManager } from 'typeorm';
 import { CreditPageDto } from '../shared/credit.dto';
+import { publicCommerce } from '../commerce/commerce.policy';
 
 @Injectable()
 export class CreditCatalogService {
@@ -21,7 +22,7 @@ export class CreditCatalogService {
       throw new BadRequestException('Total trop élevé.');
     if (dto.kind === 'phone' && (!dto.brand?.trim() || !dto.model?.trim()))
       throw new BadRequestException('Marque et modèle requis.');
-    return this.store.db.transaction(async (m) => {
+    const run = async (m: EntityManager) => {
       await this.store.authorize(m, actor, ['manager']);
       const {
         kind,
@@ -36,6 +37,7 @@ export class CreditCatalogService {
         currency,
         priceMinor,
         feeMinor,
+        mutationId: _mutationId,
         ...details
       } = dto;
       const [row] = await m.query<IdRow[]>(
@@ -61,7 +63,16 @@ export class CreditCatalogService {
         id: row.id,
       });
       return row;
-    });
+    };
+    return dto.mutationId
+      ? this.store.mutation(
+          actor.userId,
+          dto.mutationId,
+          'create_product',
+          dto,
+          run,
+        )
+      : this.store.db.transaction(run);
   }
 
   async gate(m: EntityManager, product: ProductRow) {
@@ -137,7 +148,7 @@ export class CreditCatalogService {
     const rows = await this.store.db.query<ProductRow[]>(
       `SELECT p.id,p.code,p.kind,p.name,p.description,p.enabled,p.currency,p."priceMinor",p."feeMinor",p.details,
       p."financingModel",p."supplierId",p."sellerId",p."creditorId",s."legalName" AS "supplierName",c."legalName" AS "creditorName",
-      policy.version AS "policyVersion",policy.rules,
+      policy.version AS "policyVersion",policy.rules,p.commerce,p."categoryId",p.revision,
       (SELECT count(*)::integer FROM pro_credit_stock st WHERE st."productId"=p.id AND st.status='available') AS "availableStock"
       FROM pro_credit_products p JOIN pro_credit_policies policy ON policy.id=p."policyId"
       JOIN partner_organizations s ON s.id=p."supplierId" JOIN partner_organizations c ON c.id=p."creditorId"
@@ -145,7 +156,14 @@ export class CreditCatalogService {
       [page.after ?? null, page.limit + 1],
     );
     return {
-      items: rows.slice(0, page.limit),
+      items: rows
+        .slice(0, page.limit)
+        .map(({ commerce, ...row }) => ({
+          ...row,
+          ...(commerce
+            ? { commerce: actor ? commerce : publicCommerce(commerce) }
+            : {}),
+        })),
       nextCursor: rows.length > page.limit ? rows[page.limit - 1].id : null,
     };
   }

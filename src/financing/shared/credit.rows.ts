@@ -1,5 +1,6 @@
 import type { CreditPolicyRules } from '../policies/credit-policy.rules';
 import type { EligibilityFacts } from '../eligibility/credit-eligibility.policy';
+import type { CommerceTerms, PurchaseQuote } from '../commerce/commerce.policy';
 
 export interface IdRow {
   id: string;
@@ -21,11 +22,12 @@ export interface ProductDetails {
   model?: string;
   specifications?: string;
   warranty?: string;
+  imageUrl?: string;
 }
 
 export interface ProductRow extends IdRow {
   code: string;
-  kind: 'document' | 'phone' | 'equipment';
+  kind: 'document' | 'phone' | 'equipment' | 'vehicle';
   name: string;
   description: string;
   supplierId: string;
@@ -39,9 +41,13 @@ export interface ProductRow extends IdRow {
   financingModel: 'ZWANGA_DIRECT' | 'PARTNER_DIRECT' | 'CO_FINANCED';
   details: ProductDetails;
   availableStock?: number;
+  commerce?: CommerceTerms | null;
+  categoryId?: string | null;
+  revision?: number;
 }
 
 export interface CreditSnapshot {
+  purchase?: PurchaseQuote;
   product: ProductRow;
   policy: Omit<PolicyRow, 'id'>;
   depositMinor: string;

@@ -2,6 +2,7 @@ import { AssetCredits1780000124000 } from './1780000124000-AssetCredits';
 import { ZwangaProFoundations1780000137000 } from './1780000137000-ZwangaProFoundations';
 import { ZwangaProSettlements1780000138000 } from './1780000138000-ZwangaProSettlements';
 import { ZwangaProOperations1780000139000 } from './1780000139000-ZwangaProOperations';
+import { ServiceCommerce1780000140000 } from './1780000140000-ServiceCommerce';
 import { EquipmentAssetCredits1780000127000 } from './1780000127000-EquipmentAssetCredits';
 import { IntercityDriverCategory1780000128000 } from './1780000128000-IntercityDriverCategory';
 import { ContractAssetCreditRates1780000129000 } from './1780000129000-ContractAssetCreditRates';
@@ -285,4 +286,5 @@ export const databaseMigrations = [
   ZwangaProFoundations1780000137000,
   ZwangaProSettlements1780000138000,
   ZwangaProOperations1780000139000,
+  ServiceCommerce1780000140000,
 ];

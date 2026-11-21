@@ -45,6 +45,10 @@ import {
 import request from 'supertest';
 import { AssetCreditService } from '../../asset-credit/asset-credit.service';
 import { spendableEarning } from '../../asset-credit/earning-credit';
+import { CommerceCatalogueService } from '../commerce/commerce-catalogue.service';
+import { CommercePaymentsService } from '../commerce/commerce-payments.service';
+import { CommerceCatalogueController } from '../commerce/commerce-catalogue.controller';
+import { IS_PUBLIC_KEY } from '../../common/decorators/public.decorator';
 
 // Read shapes for this isolated schema only. Production queries declare their own projections.
 interface FixtureRow extends EarningRow {
@@ -189,9 +193,14 @@ const bin = process.env.PRO_CREDIT_TEST_POSTGRES_BIN;
         CreditEvidenceController,
         CreditSchedulesController,
         CreditReportingController,
+        CommerceCatalogueController,
       ],
       providers: [
         { provide: CreditCatalogService, useValue: catalog },
+        {
+          provide: CommerceCatalogueService,
+          useValue: new CommerceCatalogueService(store, catalog),
+        },
         { provide: CreditPartnersService, useValue: partners },
         { provide: CreditPoliciesService, useValue: policies },
         { provide: CreditApplicationsService, useValue: applications },
@@ -208,6 +217,8 @@ const bin = process.env.PRO_CREDIT_TEST_POSTGRES_BIN;
       .overrideGuard(JwtAuthGuard)
       .useValue({
         canActivate(context: ExecutionContext) {
+          if (Reflect.getMetadata(IS_PUBLIC_KEY, context.getHandler()))
+            return true;
           const req = context.switchToHttp().getRequest<{
             headers: Record<string, string>;
             user: CreditActor;
@@ -232,6 +243,13 @@ const bin = process.env.PRO_CREDIT_TEST_POSTGRES_BIN;
     try {
       const url = await app.getUrl();
       await request(url).get('/zwanga-pro/catalogue').expect(401);
+      await request(url).get('/zwanga-pro/commerce/categories').expect(200);
+      await request(url)
+        .get('/zwanga-pro/commerce/products?categoryId=invalid')
+        .expect(400);
+      await request(url)
+        .get('/zwanga-pro/commerce/products?limit=10')
+        .expect(200);
       await request(url)
         .get('/zwanga-pro/admin/contracts')
         .set('x-test-actor', driver.userId)
@@ -1089,5 +1107,230 @@ const bin = process.env.PRO_CREDIT_TEST_POSTGRES_BIN;
       [e.id],
     );
     expect(spendableEarning(updated)).toBe(17000);
+  });
+  async function commerceLoan(mode: 'cash' | 'credit' = 'credit') {
+    const commerce = new CommerceCatalogueService(store, catalog);
+    const { id: productId } = await catalog.create(admin, product());
+    const [{ id: categoryId }] = await db.query(
+      "SELECT id FROM pro_commerce_categories WHERE code='telephones'",
+    );
+    const setup = {
+      mutationId: randomUUID(),
+      revision: 1,
+      categoryId,
+      commerce: {
+        version: 'commerce-v1' as const,
+        acquisitionMinor: '60000',
+        expensesMinor: '10000',
+        marginMinor: '30000',
+        minimumMarginMinor: '10000',
+        depositMinor: '10000',
+        plans: [
+          { id: 'three-months', period: 'month' as const, count: 3 },
+          { id: 'six-weeks', period: 'week' as const, count: 6 },
+        ],
+      },
+    };
+    await expect(commerce.configure(driver, productId, setup)).rejects.toThrow(
+      'Habilitation',
+    );
+    await commerce.configure(admin, productId, setup);
+    await catalog.enable(admin, productId, true);
+    expect(JSON.stringify(await commerce.product(productId))).not.toMatch(
+      /acquisitionMinor|expensesMinor|minimumMarginMinor/,
+    );
+    const [{ id: userId }] = await db.query(
+      'INSERT INTO users DEFAULT VALUES RETURNING id',
+    );
+    const actor = { userId, role: 'driver' };
+    await db.query(
+      'INSERT INTO kyc_documents("userId",status) VALUES($1,\'approved\')',
+      [userId],
+    );
+    await db.query(
+      'INSERT INTO wallet_accounts("userId",balance,"withdrawableBalance") VALUES($1,1000,1000)',
+      [userId],
+    );
+    const quote = await commerce.quote(productId, {
+      mode,
+      planId: mode === 'credit' ? 'three-months' : undefined,
+    });
+    const body = {
+      mutationId: randomUUID(),
+      productId,
+      mode,
+      planId: quote.planId ?? undefined,
+      quoteHash: quote.quoteHash,
+      depositMinor: quote.depositMinor,
+      installments: quote.installments,
+      period: quote.period,
+      evidence: [],
+      notes: 'Test isolé',
+    };
+    await expect(
+      applications.apply(userId, { ...body, quoteHash: '0'.repeat(64) }),
+    ).rejects.toThrow('récapitulatif');
+    const applied = await applications.apply(userId, body);
+    const offered = await applications.review(admin, applied.id, {
+      mutationId: randomUUID(),
+      approve: true,
+      reason: 'Test commerce isolé',
+    });
+    const detail = await contracts.detail(actor, offered.id);
+    expect(JSON.stringify(detail.snapshot)).not.toMatch(
+      /acquisitionMinor|expensesMinor|minimumMarginMinor/,
+    );
+    const consent = {
+      mutationId: randomUUID(),
+      consent: true,
+      termsHash: detail.termsHash,
+      mandateUntil:
+        mode === 'credit'
+          ? new Date(Date.now() + 500 * 86400000).toISOString()
+          : undefined,
+    };
+    await contracts.accept(userId, offered.id, consent);
+    return {
+      id: offered.id,
+      actor,
+      productId,
+      vehicleId: undefined,
+      caseId: undefined,
+      consent,
+      quote,
+    };
+  }
+  it('cash checkout takes exactly 80 percent once, requires full payment before delivery, and reconciles', async () => {
+    const l = await commerceLoan('cash');
+    await expect(
+      deliver(l as Awaited<ReturnType<typeof loan>>),
+    ).rejects.toThrow('paiement avant remise');
+    const body = {
+      mutationId: randomUUID(),
+      purpose: 'repayment' as const,
+      amountMinor: l.quote.totalMinor,
+    };
+    const paid = await finance.wallet(l.actor.userId, l.id, body);
+    expect(await finance.wallet(l.actor.userId, l.id, body)).toEqual(paid);
+    await deliver(l as Awaited<ReturnType<typeof loan>>);
+    await contracts.activate(admin, l.id, randomUUID());
+    expect(await contracts.detail(l.actor, l.id)).toMatchObject({
+      status: 'settled',
+      paidMinor: '80000',
+      remainingMinor: '0',
+      mandateUntil: null,
+    });
+    expect((await reporting.overview(admin)).reconciliation.mismatches).toEqual(
+      [],
+    );
+  });
+  it('daily payments and early discount are distinct, replay-safe and leave old principal immutable', async () => {
+    const l = await commerceLoan();
+    await finance.wallet(l.actor.userId, l.id, {
+      mutationId: randomUUID(),
+      purpose: 'deposit',
+      amountMinor: '10000',
+    });
+    await deliver(l as Awaited<ReturnType<typeof loan>>);
+    await contracts.activate(admin, l.id, randomUUID());
+    await finance.wallet(l.actor.userId, l.id, {
+      mutationId: randomUUID(),
+      purpose: 'repayment',
+      amountMinor: '1000',
+    });
+    const payments = new CommercePaymentsService(store, ledger);
+    await expect(payments.quote(driver.userId, l.id)).rejects.toThrow(
+      'introuvable',
+    );
+    const quote = await payments.quote(l.actor.userId, l.id);
+    expect(quote).toMatchObject({
+      remainingMinor: '89000',
+      amountMinor: '80100',
+      discountMinor: '8900',
+    });
+    await expect(
+      payments.settle(l.actor.userId, l.id, {
+        mutationId: randomUUID(),
+        quoteHash: '0'.repeat(64),
+      }),
+    ).rejects.toThrow('solde a changé');
+    const body = { mutationId: randomUUID(), quoteHash: quote.quoteHash };
+    const paid = await payments.settle(l.actor.userId, l.id, body);
+    expect(await payments.settle(l.actor.userId, l.id, body)).toEqual(paid);
+    expect(await contracts.detail(l.actor, l.id)).toMatchObject({
+      status: 'settled',
+      principalMinor: '90000',
+      paidMinor: '81100',
+      discountMinor: '8900',
+      remainingMinor: '0',
+    });
+    expect((await reporting.overview(admin)).reconciliation.mismatches).toEqual(
+      [],
+    );
+    await expect(payments.quote(l.actor.userId, l.id)).rejects.toThrow();
+  });
+  it('changes future installments only after the current period is paid, keeps the old schedule and rejects stale versions', async () => {
+    const l = await commerceLoan();
+    await finance.wallet(l.actor.userId, l.id, {
+      mutationId: randomUUID(),
+      purpose: 'deposit',
+      amountMinor: '10000',
+    });
+    await deliver(l as Awaited<ReturnType<typeof loan>>);
+    await contracts.activate(admin, l.id, randomUUID());
+    const payments = new CommercePaymentsService(store, ledger);
+    await expect(payments.plans(l.actor.userId, l.id)).rejects.toThrow(
+      'fin de la période',
+    );
+    // A new test schedule simulates elapsed time without mutating immutable historical rows.
+    for (let ordinal = 1; ordinal <= 3; ordinal++)
+      await db.query(
+        'INSERT INTO pro_credit_installments("creditId",version,ordinal,"dueAt","amountMinor") VALUES($1,2,$2,$3,30000)',
+        [
+          l.id,
+          ordinal,
+          new Date(Date.now() + ((ordinal - 1) * 30 - 2) * 86400000),
+        ],
+      );
+    await db.query(
+      'UPDATE pro_credit_contracts SET "scheduleVersion"=2 WHERE "creditId"=$1',
+      [l.id],
+    );
+    await expect(payments.plans(l.actor.userId, l.id)).rejects.toThrow('Payez');
+    await finance.wallet(l.actor.userId, l.id, {
+      mutationId: randomUUID(),
+      purpose: 'repayment',
+      amountMinor: '30000',
+    });
+    const options = await payments.plans(l.actor.userId, l.id);
+    expect(options.plans.some((p) => p.id === 'six-weeks')).toBe(true);
+    const body = {
+      mutationId: randomUUID(),
+      planId: 'six-weeks',
+      expectedVersion: options.version,
+      expectedRemainingMinor: options.remainingMinor,
+    };
+    const result = await payments.changePlan(l.actor.userId, l.id, body);
+    expect(await payments.changePlan(l.actor.userId, l.id, body)).toEqual(
+      result,
+    );
+    expect(result.installments).toHaveLength(6);
+    expect(
+      result.installments.reduce((s, i) => s + BigInt(i.amountMinor), 0n),
+    ).toBe(60000n);
+    await expect(
+      payments.changePlan(l.actor.userId, l.id, {
+        ...body,
+        mutationId: randomUUID(),
+      }),
+    ).rejects.toThrow();
+    const [historical] = await db.query(
+      'SELECT count(*) FROM pro_credit_installments WHERE "creditId"=$1 AND version=1',
+      [l.id],
+    );
+    expect(historical.count).toBe('3');
+    expect((await reporting.overview(admin)).reconciliation.mismatches).toEqual(
+      [],
+    );
   });
 });

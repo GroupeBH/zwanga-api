@@ -15,6 +15,7 @@ import { declineRequestForDriver } from '../src/trip-requests/request-refusal';
 import { DriverDispatchService } from '../src/trip-requests/dispatch/dispatch.service';
 import { SequentialDispatchService } from '../src/trip-requests/dispatch/sequential-dispatch.service';
 import { SeparateRequestAttentionLease1780000101000 } from '../src/database/migrations/1780000101000-SeparateRequestAttentionLease';
+import { nonPremiumSubscriptions } from './non-premium-subscriptions';
 
 type Context = {
   db: DataSource;
@@ -87,13 +88,7 @@ function serviceFor({ db, dispatch }: Context) {
     trips as never,
     bookings,
     {} as never,
-    {
-      getPremiumOverview: () =>
-        Promise.resolve({
-          isPremium: false,
-          premiumBadgeEnabled: false,
-        }),
-    } as never,
+    nonPremiumSubscriptions() as never,
     {} as never,
     {} as never,
     dispatch,

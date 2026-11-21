@@ -61,7 +61,7 @@ describe('Financing domain boundaries', () => {
   it('keeps the composition root free of controllers and business providers', () => {
     expect(providers(FinancingModule)).toEqual([]);
     expect(controllers(FinancingModule)).toEqual([]);
-    expect(imports(FinancingModule)).toHaveLength(12);
+    expect(imports(FinancingModule)).toHaveLength(13);
   });
 
   it('contains no circular Nest module dependency or forwardRef escape hatch', () => {
@@ -90,14 +90,14 @@ describe('Financing domain boundaries', () => {
     for (const c of graph().flatMap(controllers)) {
       expect(Reflect.getMetadata(GUARDS_METADATA, c)).toContain(JwtAuthGuard);
       const prefix = Reflect.getMetadata(PATH_METADATA, c) as string;
-      expect(prefix).toBe('zwanga-pro');
+      expect(prefix.startsWith('zwanga-pro')).toBe(true);
       for (const key of Object.getOwnPropertyNames(c.prototype)) {
         const handler = (c.prototype as Record<string, object>)[key];
         const method = Reflect.getMetadata(METHOD_METADATA, handler) as
           RequestMethod | undefined;
         if (method === undefined) continue;
         routes.push(
-          `${RequestMethod[method]} ${Reflect.getMetadata(PATH_METADATA, handler) as string}`,
+          `${RequestMethod[method]} ${prefix === 'zwanga-pro' ? '' : prefix.slice('zwanga-pro/'.length) + '/'}${Reflect.getMetadata(PATH_METADATA, handler) as string}`,
         );
       }
     }
@@ -105,6 +105,17 @@ describe('Financing domain boundaries', () => {
     expect(routes.sort()).toEqual(
       [
         'GET catalogue',
+        'GET commerce/categories',
+        'GET commerce/products',
+        'GET commerce/products/:id',
+        'GET commerce/products/:id/quote',
+        'GET commerce/admin/categories',
+        'POST commerce/admin/categories',
+        'POST commerce/admin/products/:id',
+        'GET commerce/mine/:id/settlement',
+        'POST commerce/mine/:id/settlement',
+        'GET commerce/mine/:id/plans',
+        'POST commerce/mine/:id/plans',
         'GET mine',
         'GET applications',
         'GET applications/:id',

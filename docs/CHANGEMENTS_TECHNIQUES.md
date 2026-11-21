@@ -1,5 +1,12 @@
 # Journal des changements techniques
 
+## 2026-11-21 — Catalogue commercial et nouvelles modalités de paiement
+
+- Périmètre : `src/financing/commerce/`, catalogue, applications, contrats, remise, remboursements, migration `1780000140000-ServiceCommerce.ts` et tests. Produits détaillés, prix comptant à 80 %, formules semaine/mois, prépaiement avant remise, paiements libres, solde anticipé avec remise distincte et changement de formule sans réécriture de l'historique.
+- Prix et droits contrôlés côté serveur ; devis versionnés, mutations idempotentes, verrous financiers et contrats figés. Aucun changement des anciens crédits, alertes, GPS ou variables d'environnement. Les nouveaux contrats Pro ne prélèvent pas automatiquement les trajets cash ; leur remboursement volontaire reste disponible.
+- Résultats : 68 tests backend ciblés et 9 scénarios HTTP croisés avec clients mobile/admin/site réussis sur bases temporaires. La migration commerciale seule a ensuite été appliquée, avec autorisation, sur la base locale de test ; les deux routes publiques sont passées de HTTP 500 à HTTP 200 et le catalogue Android se charge. Aucun déploiement AWS ni offre réelle créée.
+- [Guide des règles, fichiers et procédures](../../zwanga/docs/catalogue-achats-remboursements-2026-11-21.md) et [recette avec limites natives](../../zwanga/docs/recette-commerce-2026-11-21.md). Les scénarios JavaScript ne certifient ni paiements fournisseurs réels, ni iOS physique, ni capacité de production.
+
 ## 2026-11-15 — Coût total et échéances minimums du crédit
 
 - DTO/service `asset-credit`, nouveau `credit-cost.ts` et migration enregistrée `1780000130000-AssetCreditCostDisclosure.ts` : ventilation prix/frais fixes, échéancier hebdomadaire/mensuel optionnel (1–120), dates à partir de la remise, imputation des paiements existants aux minimums. Consentement versionné obligatoire pour accepter une offre détaillée ; anciennes offres conservées sans frais inventés.

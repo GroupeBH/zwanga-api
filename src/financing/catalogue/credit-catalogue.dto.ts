@@ -12,11 +12,13 @@ import {
   Min,
   Max,
   IsBoolean,
+  IsUrl,
 } from 'class-validator';
 
 export class CreateCreditProductDto {
-  @IsIn(['document', 'phone', 'equipment']) kind:
-    'document' | 'phone' | 'equipment';
+  @IsOptional() @IsUUID() mutationId?: string;
+  @IsIn(['document', 'phone', 'equipment', 'vehicle']) kind:
+    'document' | 'phone' | 'equipment' | 'vehicle';
   @IsString() @Matches(/^[a-z0-9-]{3,80}$/) code: string;
   @IsString() @Length(3, 160) name: string;
   @IsString() @Length(3, 4000) description: string;
@@ -45,6 +47,10 @@ export class CreateCreditProductDto {
   @IsOptional() @IsString() @Length(1, 100) model?: string;
   @IsOptional() @IsString() @Length(0, 2000) specifications?: string;
   @IsOptional() @IsString() @Length(0, 2000) warranty?: string;
+  @IsOptional()
+  @IsUrl({ protocols: ['https'], require_protocol: true })
+  @Length(1, 2000)
+  imageUrl?: string;
 }
 
 export class SetCreditProductEnabledDto {
