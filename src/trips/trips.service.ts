@@ -3,6 +3,7 @@ import { expirePendingTrip } from './expire-pending-trip';
 import { enqueueTripReminder, TripReminderKind } from './trip-reminders';
 import { enqueueTripStartNotifications } from './trip-start-notifications';
 import { discoveryDepartureWithinSql } from './discovery-geography';
+import { discoveryAccountAvailableSql, discoveryVehicleAvailableSql } from './discovery-eligibility';
 import { cancelEmptyRequestTrip } from './cancel-empty-request-trip';
 import { saveRequestTrip } from './save-request-trip';
 import { saveTripDetailsUpdate } from './save-trip-details-update';
@@ -49,7 +50,7 @@ import {
   RecurringTripTemplateStatus,
 } from './entities/recurring-trip-template.entity';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
-import { availableAccountSql, lockAvailableAccounts } from '../users/account-availability';
+import { lockAvailableAccounts } from '../users/account-availability';
 import { Booking, BookingStatus } from '../bookings/entities/booking.entity';
 import {
   getVehicleMaxSeats,
@@ -375,10 +376,10 @@ export class TripsService {
       if (!cached.length) return [];
       const live = await this.tripRepository.createQueryBuilder('trip')
         .select('trip.id').where('trip.id IN (:...ids)', { ids: cached.map(t => t.id) })
-        .andWhere(availableAccountSql('trip."driverId"'))
+        .andWhere(discoveryAccountAvailableSql)
         .andWhere('trip.isPrivate = false')
         .andWhere("((trip.status = 'upcoming' AND trip.departureDate > :now) OR (trip.status = 'ongoing' AND trip.availableSeats > 0))", { now: new Date() })
-        .andWhere('(trip.vehicleId IS NULL OR EXISTS (SELECT 1 FROM vehicles v WHERE v.id::text=trip."vehicleId"::text AND v."isActive"=true))')
+        .andWhere(discoveryVehicleAvailableSql)
         .getMany();
       const visibleIds = new Set(live.map(t => t.id));
       const nowMs = Date.now();
@@ -433,8 +434,8 @@ export class TripsService {
     const queryBuilder = this.tripRepository
       .createQueryBuilder('trip')
       .where('trip.isPrivate = :isPrivate', { isPrivate: false })
-      .andWhere(availableAccountSql('trip."driverId"'))
-      .andWhere('(trip.vehicleId IS NULL OR EXISTS (SELECT 1 FROM vehicles v WHERE v.id::text=trip."vehicleId"::text AND v."isActive"=true))')
+      .andWhere(discoveryAccountAvailableSql)
+      .andWhere(discoveryVehicleAvailableSql)
       .andWhere(
         new Brackets((qb) => {
           qb.where(
@@ -593,6 +594,7 @@ export class TripsService {
     const selectionStarted = performance.now();
     const page = await selectDiscoveryPage(queryBuilder, searchTripsDto, nearbyOrder);
     const selectionMs = performance.now() - selectionStarted;
+    const enrichmentStarted = performance.now();
     const results = page.entities;
     const userIds = this.collectTripUserIds(results);
     const userRatingsMap = await this.buildUserRatingsMap(userIds);
@@ -609,6 +611,14 @@ export class TripsService {
     const totalMs = performance.now() - searchStarted;
     if (totalMs >= 500) this.logger.warn({ event: 'trip_search_slow',
       selectionMs: Math.round(selectionMs), enrichmentMs: Math.round(totalMs - selectionMs),
+      // Keep the legacy enrichmentMs field for dashboards; explicit new fields
+      // distinguish preparation from actual enrichment and selection internals.
+      preparationMs: Math.round(selectionStarted - searchStarted),
+      postSelectionMs: Math.round(performance.now() - enrichmentStarted),
+      poolWaitMs: Math.round(page.timings.poolWaitMs),
+      databaseRoundTripMs: page.timings.databaseRoundTripMs === undefined ? undefined : Math.round(page.timings.databaseRoundTripMs),
+      ormMs: page.timings.ormMs === undefined ? undefined : Math.round(page.timings.ormMs),
+      queryCount: page.timings.queryCount,
       totalMs: Math.round(totalMs), count: sanitized.length,
       geographic: hasDepartureCoords || hasArrivalCoords, sort: searchTripsDto.sort ?? 'nearby' });
     return { data: sanitized, nextCursor: page.nextCursor, previousCursor: page.previousCursor };

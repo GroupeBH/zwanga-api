@@ -1,12 +1,13 @@
 'use strict';
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { unsafeState, metricQueries, summarize, recordFinalMonitoring, ROUTES, STAGES, INTERVAL_MS, BURSTS, HARD_LIMIT_MS } = require('./production-readonly.cjs');
+const { unsafeState, metricQueries, summarize, summarizeAlertDelivery, recordFinalMonitoring, ROUTES, STAGES, INTERVAL_MS, BURSTS, HARD_LIMIT_MS } = require('./production-readonly.cjs');
 const now = Date.now();
 function state() {
   return { service: { running: 1, desired: 1, pending: 0, taskDefinition: 'task:20',
     deployments: [{ status: 'PRIMARY', rollout: 'COMPLETED' }] },
-  targets: [{ state: 'healthy' }], alarms: [{ name: 'test', state: 'OK' }], metrics: metricQueries().map(q => ({
+  targets: [{ state: 'healthy' }], alarms: [{ name: 'test', state: 'OK' }],
+  alertDelivery: { confirmedEmailSubscriptions: 1 }, metrics: metricQueries().map(q => ({
     Id: q.Id, StatusCode: 'Complete', Timestamps: [new Date(now - 60000).toISOString()],
     Values: [q.Id === 'rds_free_memory' ? 256 * 1024 ** 2 : q.Id === 'rds_free_storage' ? 10 * 1024 ** 3 : 0],
   })) };
@@ -80,11 +81,27 @@ test('missing alarms and unknown alarm states refuse traffic', () => {
   assert.equal(unsafeState(s, 'task:20', now), 'Incomplete alarm monitoring');
 });
 
+test('missing or pending email subscriptions refuse traffic even with healthy alarms', () => {
+  const arn = 'arn:aws:sns:eu-central-1:046374119247:zwanga-api-production-alerts:00000000-0000-4000-8000-000000000001';
+  for (const subscriptions of [[], [{ protocol: 'email', arn: 'PendingConfirmation' }],
+    [{ protocol: 'email', arn: 'Deleted' }], [{ protocol: 'sqs', arn }],
+    [{ protocol: 'email', arn: arn.replace('production-alerts', 'staging-alerts') }]]) {
+    const s = state(); s.alertDelivery = summarizeAlertDelivery(subscriptions);
+    assert.equal(unsafeState(s, 'task:20', now), 'No confirmed operational email alert subscription');
+  }
+  const s = state(); s.alertDelivery = undefined;
+  assert.equal(unsafeState(s, 'task:20', now), 'No confirmed operational email alert subscription');
+  assert.throws(() => summarizeAlertDelivery(undefined));
+  assert.throws(() => summarizeAlertDelivery([null]));
+  assert.deepEqual(summarizeAlertDelivery([{ protocol: 'email', arn }]), { confirmedEmailSubscriptions: 1 });
+});
+
 test('final monitoring failure or degradation cannot be reported as a completed test', async () => {
   for (const readSnapshot of [
     async () => { throw new Error('AWS unavailable'); },
     async () => { const s = state(); s.alarms[0].state = 'ALARM'; return s; },
     async () => { const s = state(); s.service.taskDefinition = 'task:21'; return s; },
+    async () => { const s = state(); s.alertDelivery.confirmedEmailSubscriptions = 0; return s; },
   ]) {
     const report = { result: 'completed', snapshots: [state()] };
     assert.ok(await recordFinalMonitoring(report, readSnapshot));

@@ -4,6 +4,8 @@ import { typeOrmEntities } from '../database/entities';
 import { Trip } from './entities/trip.entity';
 import { TripsService } from './trips.service';
 import { discoveryDepartureWithinSql } from './discovery-geography';
+import { discoveryAccountAvailableSql, discoveryVehicleAvailableSql } from './discovery-eligibility';
+import { availableAccountSql } from '../users/account-availability';
 
 const bin = process.env.TRIP_SEARCH_TEST_POSTGRES_BIN;
 (bin ? describe : describe.skip)('synthetic discovery plan (never production)', () => {
@@ -87,6 +89,61 @@ const bin = process.env.TRIP_SEARCH_TEST_POSTGRES_BIN;
       walk(plan.Plan);
       process.stdout.write(JSON.stringify({ event: 'synthetic_discovery_plan', variant, executionMs: plan['Execution Time'],
         planningMs: plan['Planning Time'], jit: plan.JIT, nodes })+'\n');
+      }
+      await runner.rollbackTransaction();
+    } finally { await runner.release(); }
+  });
+
+  it('profiles populated vehicle eligibility rather than an empty vehicle table', async () => {
+    await db.query(`INSERT INTO vehicles(id,"ownerId",brand,model,color,"licensePlate")
+      SELECT id,id,'Synthetic','Test','white',id::text FROM users;
+      UPDATE trips SET "vehicleId"="driverId",
+        "departurePoint"=ST_SetSRID(ST_MakePoint(15.28,-4.34),4326),
+        "currentLocation"=ST_SetSRID(ST_MakePoint(15.28,-4.34),4326);
+      INSERT INTO subscriptions("userId","startDate","endDate",amount,currency)
+        SELECT id,'2026-01-01','2099-01-01',5000,'CDF' FROM users;
+      ANALYZE users; ANALYZE trips; ANALYZE vehicles; ANALYZE subscriptions;`);
+    let statement = '', parameters: any[] = [];
+    const spy = jest.spyOn(db.logger, 'logQuery').mockImplementation((sql, args) => {
+      if (sql.startsWith('WITH "discovery_page"')) { statement = sql; parameters = args ?? []; }
+    });
+    const service = Object.assign(Object.create(TripsService.prototype), {
+      logger: { log: jest.fn(), debug: jest.fn(), warn: jest.fn() },
+      tripRepository: db.getRepository(Trip), buildUserRatingsMap: async () => new Map(),
+      subscriptionsService: { getPremiumFeaturesForUsers: async () => new Map() },
+      sanitizeTrip: async (trip: Trip) => trip, sortSanitizedTripsByPremium: (trips: Trip[]) => trips,
+    });
+    try {
+      await service.searchPage({ departureCoordinates: [15.28,-4.34], departureRadiusKm: 20, limit: 20 });
+    } finally { spy.mockRestore(); }
+    expect(statement).toContain(discoveryAccountAvailableSql);
+    expect(statement).toContain(discoveryVehicleAvailableSql);
+    const legacy = statement.replace(discoveryAccountAvailableSql, availableAccountSql('trip."driverId"'))
+      .replace(discoveryVehicleAvailableSql, '("trip"."vehicleId" IS NULL OR EXISTS (SELECT 1 FROM vehicles v WHERE v.id::text=trip."vehicleId"::text AND v."isActive"=true))');
+    const runner = db.createQueryRunner();
+    try {
+      await runner.startTransaction();
+      await runner.query("SET LOCAL statement_timeout='30s'");
+      const rows = await runner.query(legacy, parameters);
+      expect((await runner.query(statement, parameters)).map((row: any) => row.trip_id))
+        .toEqual(rows.map((row: any) => row.trip_id));
+      for (const [variant, sql] of [['legacy_eligibility', legacy], ['indexed_eligibility', statement]]) {
+        const [row] = await runner.query(`EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) ${sql}`, parameters);
+        const plan = row['QUERY PLAN'][0];
+        const nodes: any[] = [];
+        const walk = (node: any) => { nodes.push({ type: node['Node Type'], relation: node['Relation Name'],
+          index: node['Index Name'], rows: node['Actual Rows'], loops: node['Actual Loops'], removed: node['Rows Removed by Filter'] });
+          for (const child of node.Plans ?? []) walk(child); };
+        walk(plan.Plan);
+        if (variant === 'indexed_eligibility') {
+          // Assert the access path, not a hardware-dependent millisecond budget.
+          for (const relation of ['users', 'vehicles']) {
+            expect(nodes.some(node => node.relation === relation && node.type === 'Seq Scan')).toBe(false);
+            expect(nodes.some(node => node.relation === relation && /Index/.test(node.type))).toBe(true);
+          }
+        }
+        process.stdout.write(JSON.stringify({ event: 'synthetic_vehicle_plan', variant,
+          executionMs: plan['Execution Time'], planningMs: plan['Planning Time'], jit: plan.JIT, nodes })+'\n');
       }
       await runner.rollbackTransaction();
     } finally { await runner.release(); }

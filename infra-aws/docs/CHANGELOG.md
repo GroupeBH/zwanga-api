@@ -1,5 +1,19 @@
 # Journal détaillé des changements d'infrastructure AWS
 
+## INFRA-2026-11-21-001 — Destinataire obligatoire pour les alertes de production
+
+- Statut : abonnement email SNS créé en production le 21 novembre, confirmé par le destinataire et réconcilié dans Terraform. Aucun changement de capacité, migration RDS ou redémarrage ECS ; les correctifs backend restent locaux.
+- Constat : le contrôle du 21 novembre retrouve zéro abonnement au topic d'alertes, bien que les 20 alarmes soient `OK`. L'état d'une alarme ne garantit pas sa livraison.
+- Correction : le topic SNS exige désormais au moins un destinataire configuré en production, indépendamment du budget mensuel. `operators.tfvars` reste privé ; aucun destinataire ni secret ajouté aux fichiers versionnés.
+- Garde-fou : `test/load/production-readonly.cjs` lit les abonnements du topic exact et refuse le trafic si aucun abonnement email n'est confirmé. Les adresses ne sont ni récupérées ni conservées dans les rapports. Le contrôle s'applique au départ, pendant la sonde et à la fin ; aucun seuil existant n'est relâché.
+- Validation : tests Node de dimensionnement et de sécurité de la sonde réussis (21 tests), `terraform validate` réussi. Le précontrôle AWS actualisé a refusé le trafic avec `No confirmed operational email alert subscription`, zéro requête HTTP.
+- Plan autorisé : compte AWS Windows/WSL, clé de backend et 187 adresses de state vérifiés ; `alerts-production-20261121.tfplan` ne prévoyait que **1 création d'abonnement SNS, 0 modification et 0 suppression**. Ce plan est désormais obsolète après la réconciliation : ne pas le réappliquer ni le publier.
+- Application et récupération : la commande a dépassé son délai après la création effective de l'abonnement, avant l'enregistrement final du state. Après constat de l'absence de processus Terraform, seul son verrou identifié a été libéré. L'ancien abonnement était absent d'AWS mais encore référencé dans le state. Après sauvegarde locale privée vérifiée, seule cette référence obsolète a été retirée et l'abonnement confirmé existant a été importé, sans nouvelle création ni suppression de ressource AWS.
+- Vérification du state : numéro de série 49 vers 51, abonnement SNS avec `pending_confirmation=false`, autres instances de ressources gérées identiques à la sauvegarde et aucun verrou résiduel. L'import a ajouté deux entrées ECS Exec vides (zéro instance), pas de rôle ni de politique AWS. Plans, sauvegarde et variables opérateur restent ignorés par Git.
+- Précontrôle après confirmation : `preflight_passed` le 21 novembre à 17 h 29 (Kinshasa), **20 alarmes OK, 1 abonnement email confirmé, zéro requête HTTP et zéro sonde**. Rapport privé : `tmp/production-load-results/2026-11-21T16-29-25-194Z/report.json`. La réception d'une alerte opérationnelle reste à vérifier par une notification de contrôle distincte, après autorisation ; la confirmation seule ne valide pas toute la chaîne.
+- Protection à prévoir séparément : le bucket du state ne retourne pas de versioning activé. Une sauvegarde locale privée a été conservée pour cette réconciliation ; aucune modification du bucket n'a été effectuée.
+- Repli : ne pas retirer le destinataire ni désactiver le garde-fou pour lancer un test. Corriger la configuration d'alertes sans toucher aux alarmes, au chiffrement ou à la capacité.
+
 ## INFRA-2026-11-19-004 — Préparation du déploiement et garde-fous du test de charge
 
 - Résultat final : compilation NestJS réussie, 35 tests Node, 27 tests unitaires Jest et 57 tests PostgreSQL ciblés réussis après relances locales ; `terraform validate`, ESLint ciblé et contrôle documentaire réussis. Le profilage synthétique de 5 000 trajets conserve les résultats et passe de 92,262 ms à 3,243 ms SQL ; aucune certification de capacité production.
