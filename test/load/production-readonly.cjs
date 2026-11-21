@@ -14,6 +14,7 @@ const PREFIX = 'zwanga-api-production', CLUSTER = `${PREFIX}-cluster`, SERVICE =
 const TG = 'targetgroup/zwanga-api-production-api-tg/47218716421646ca';
 const LB = 'app/zwanga-api-production-api-alb/e595966267648f03';
 const TG_ARN = `arn:aws:elasticloadbalancing:${REGION}:${ACCOUNT}:${TG}`;
+const ALERT_TOPIC_ARN = `arn:aws:sns:${REGION}:${ACCOUNT}:${PREFIX}-alerts`;
 const HOST = 'compute-api.zwanga-app.com';
 // Check both provisioned nodes: the primary may change after a failover.
 const REDIS_METRIC_PREFIXES = Object.freeze(['redis', 'redis_node2']);
@@ -29,7 +30,8 @@ const wait = ms => new Promise(done => setTimeout(done, ms));
 async function aws(service, operation, ...args) {
   const allowed = new Set(['sts:get-caller-identity', 'ecs:describe-services',
     'ecs:describe-task-definition', 'elbv2:describe-target-health', 'cloudwatch:get-metric-data',
-    'cloudwatch:describe-alarms', 'rds:describe-db-instances', 'elasticache:describe-replication-groups']);
+    'cloudwatch:describe-alarms', 'rds:describe-db-instances', 'elasticache:describe-replication-groups',
+    'sns:list-subscriptions-by-topic']);
   if (!allowed.has(`${service}:${operation}`)) throw new Error('AWS operation is not read-only/allowlisted');
   try {
     const { stdout } = await execute(process.platform === 'win32' ? 'aws.exe' : 'aws',
@@ -75,7 +77,7 @@ function metricQueries() {
 
 async function snapshot() {
   const now = new Date();
-  const [metrics, service, targets, alarms] = await Promise.all([
+  const [metrics, service, targets, alarms, subscriptions] = await Promise.all([
     aws('cloudwatch', 'get-metric-data', '--start-time', new Date(now - 15 * 60000).toISOString(),
       '--end-time', now.toISOString(), '--scan-by', 'TimestampDescending',
       '--metric-data-queries', JSON.stringify(metricQueries())),
@@ -85,8 +87,21 @@ async function snapshot() {
       '--query', 'TargetHealthDescriptions[].{state:TargetHealth.State,reason:TargetHealth.Reason}'),
     aws('cloudwatch', 'describe-alarms', '--alarm-name-prefix', PREFIX,
       '--query', 'MetricAlarms[].{name:AlarmName,state:StateValue,metric:MetricName}'),
+    // Do not retrieve/persist email addresses. CLI pagination remains enabled.
+    aws('sns', 'list-subscriptions-by-topic', '--topic-arn', ALERT_TOPIC_ARN,
+      '--query', 'Subscriptions[].{protocol:Protocol,arn:SubscriptionArn}'),
   ]);
-  return { at: now.toISOString(), service, targets, alarms, metrics: metrics.MetricDataResults };
+  return { at: now.toISOString(), service, targets, alarms,
+    alertDelivery: summarizeAlertDelivery(subscriptions), metrics: metrics.MetricDataResults };
+}
+
+function summarizeAlertDelivery(subscriptions) {
+  if (!Array.isArray(subscriptions) || subscriptions.some(s => !s || typeof s.protocol !== 'string' || typeof s.arn !== 'string')) {
+    throw new Error('Invalid alert subscription monitoring');
+  }
+  return { confirmedEmailSubscriptions: subscriptions.filter(s => s.protocol === 'email' &&
+    s.arn.startsWith(`${ALERT_TOPIC_ARN}:`) &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s.arn.slice(ALERT_TOPIC_ARN.length + 1))).length };
 }
 
 function unsafeState(s, expectedTask, now = Date.now()) {
@@ -97,6 +112,8 @@ function unsafeState(s, expectedTask, now = Date.now()) {
   if (!Array.isArray(s.alarms) || !s.alarms.length) return 'Missing alarm monitoring';
   if (s.alarms.some(a => a.state === 'ALARM')) return 'CloudWatch alarm active';
   if (s.alarms.some(a => a.state !== 'OK')) return 'Incomplete alarm monitoring';
+  if (!Number.isSafeInteger(s.alertDelivery?.confirmedEmailSubscriptions) ||
+      s.alertDelivery.confirmedEmailSubscriptions < 1) return 'No confirmed operational email alert subscription';
   const thresholds = { ecs_cpu: 70, ecs_memory: 85, rds_cpu: 70, rds_connections: 60,
     alb_unhealthy: 0, alb_target_5xx: 0, alb_elb_5xx: 0,
     alb_latency_p95: 2 };
@@ -294,5 +311,5 @@ async function main(mode) {
   }
 }
 
-module.exports = { metricQueries, unsafeState, summarize, recordFinalMonitoring, ROUTES, STAGES, INTERVAL_MS, BURSTS, HARD_LIMIT_MS };
+module.exports = { metricQueries, unsafeState, summarize, summarizeAlertDelivery, recordFinalMonitoring, ROUTES, STAGES, INTERVAL_MS, BURSTS, HARD_LIMIT_MS };
 if (require.main === module) main(process.argv[2]).catch(error => { console.error(error.message); process.exitCode = 1; });

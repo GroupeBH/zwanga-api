@@ -109,3 +109,12 @@ test('generic budget default remains opt-in; enabled production budget requires 
   assert.match(hcl, /FORECASTED/);
   assert.doesNotMatch(hcl, /resource "aws_budgets_budget_action"/);
 });
+
+test('production alerts require a recipient independently of the optional budget', () => {
+  const hcl = readFileSync('infra-aws/monitoring.tf', 'utf8');
+  const topic = hcl.split('resource "aws_sns_topic" "alerts" {')[1].split('resource "aws_sns_topic_subscription"')[0];
+  assert.match(topic, /precondition\s*\{/);
+  assert.match(topic, /var\.environment != "production" \|\| length\(var\.alert_email_addresses\) > 0/);
+  assert.doesNotMatch(topic, /monthly_cost_budget_usd/);
+  assert.match(hcl, /for_each\s*= var\.alert_email_addresses/);
+});

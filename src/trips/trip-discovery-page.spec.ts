@@ -9,6 +9,8 @@ describe('Bounded discovery cursor queries', () => {
   const fixture = () => {
     const trips = [1, 2, 3].map(n => ({ id: id(n), departureDate: new Date('2026-10-02T12:00:00Z') }));
     const query: any = {}, outer: any = {};
+    outer.connection = { createQueryRunner: () => ({ connect: jest.fn(), query: jest.fn(), release: jest.fn() }) };
+    outer.setQueryRunner = jest.fn();
     for (const name of ['andWhere', 'select', 'addSelect', 'orderBy', 'addOrderBy', 'limit']) query[name] = jest.fn().mockReturnValue(query);
     for (const name of ['select', 'from', 'addCommonTableExpression', 'innerJoin', 'leftJoinAndSelect', 'addSelect', 'orderBy', 'addOrderBy']) outer[name] = jest.fn().mockReturnValue(outer);
     query.createQueryBuilder = jest.fn().mockReturnValue(outer);
@@ -60,6 +62,9 @@ describe('Bounded discovery cursor queries', () => {
     const source = new DataSource({ type: 'postgres', entities: [join(__dirname, '../**/*.entity.ts')] });
     // Metadata only: no initialize(), connection, credentials or SQL execution.
     await (source as any).buildMetadatas();
+    jest.spyOn(source, 'createQueryRunner').mockReturnValue({
+      connect: jest.fn(), query: jest.fn(), release: jest.fn(),
+    } as any);
     const query = source.getRepository(Trip).createQueryBuilder('trip')
       .where('trip.isPrivate = :private', { private: false }).setParameter('now', new Date());
     const outer = query.createQueryBuilder();

@@ -1,7 +1,7 @@
 import { DataSource } from 'typeorm';
 import { IsolatedPostgres } from '../../test/isolated-postgres';
 import { typeOrmEntities } from '../database/entities';
-import { User } from '../users/entities/user.entity';
+import { User, UserStatus } from '../users/entities/user.entity';
 import { Vehicle } from '../vehicles/entities/vehicle.entity';
 import { Trip, TripStatus } from './entities/trip.entity';
 import { Subscription } from '../subscriptions/entities/subscription.entity';
@@ -24,7 +24,7 @@ const bin = process.env.TRIP_SEARCH_TEST_POSTGRES_BIN;
     await db.query('CREATE EXTENSION IF NOT EXISTS postgis');
     await db.synchronize();
     service = Object.assign(Object.create(TripsService.prototype), {
-      logger: { log: jest.fn(), debug: jest.fn() }, tripRepository: db.getRepository(Trip),
+      logger: { log: jest.fn(), debug: jest.fn(), warn: jest.fn() }, tripRepository: db.getRepository(Trip),
       buildUserRatingsMap: async () => new Map(),
       subscriptionsService: { getPremiumFeaturesForUsers: async () => new Map() },
       // Keep actual query, hydration and cursor logic. Only skip external/presentation enrichment.
@@ -83,6 +83,29 @@ const bin = process.env.TRIP_SEARCH_TEST_POSTGRES_BIN;
     expect((await service.searchPage(arrival)).data.map(t => t.id).sort())
       .toEqual([inside.id, outsideDeparture.id].sort());
     expect((await service.searchPage({ ...arrival, ...filters })).data.map(t => t.id)).toEqual([inside.id]);
+  });
+
+  it('excludes disabled/suspended owners and disabled vehicles in searches and cached lists', async () => {
+    const withoutVehicle = await trip(), active = await trip(), disabled = await trip();
+    const vehicle = await db.getRepository(Vehicle).save({ ownerId: active.driverId,
+      brand: 'Synthetic', model: 'Test', color: 'white', licensePlate: 'ACTIVE-TEST' });
+    const inactiveVehicle = await db.getRepository(Vehicle).save({ ownerId: disabled.driverId,
+      brand: 'Synthetic', model: 'Test', color: 'white', licensePlate: 'DISABLED-TEST', isActive: false });
+    await db.getRepository(Trip).update(active.id, { vehicleId: vehicle.id });
+    await db.getRepository(Trip).update(disabled.id, { vehicleId: inactiveVehicle.id });
+    const unavailable = [await trip(), await trip(), await trip()];
+    await db.getRepository(User).update(unavailable[0].driverId, { isActive: false });
+    await db.getRepository(User).update(unavailable[1].driverId, { status: UserStatus.SUSPENDED });
+    await db.getRepository(User).update(unavailable[2].driverId, { status: UserStatus.INACTIVE });
+    const expected = [withoutVehicle.id, active.id].sort();
+    for (const query of [{}, filters, { ...filters, sort: 'price' as const }]) {
+      expect((await service.searchPage(query)).data.map(t => t.id).sort()).toEqual(expected);
+    }
+    const cache = { get: jest.fn().mockResolvedValue([withoutVehicle, active, disabled, ...unavailable]), set: jest.fn() };
+    Object.assign(service, { cacheService: cache, CACHE_TTL: 300 });
+    expect((await service.findAll()).map(t => t.id).sort()).toEqual(expected);
+    await db.getRepository(Vehicle).update(vehicle.id, { isActive: false });
+    expect((await service.findAll()).map(t => t.id)).toEqual([withoutVehicle.id]);
   });
 
   it('loads driver/vehicle relations in one bounded statement, also without coordinates', async () => {

@@ -4,6 +4,7 @@ import { isUUID } from 'class-validator';
 import { SelectQueryBuilder } from 'typeorm';
 import { Trip } from './entities/trip.entity';
 import { SearchTripsDto } from './dto/trip.dto';
+import { executeDiscoveryRead } from './discovery-query-execution';
 
 type Cursor = { rank: number; sort: number; date: string; at?: string; id: string; filter: string };
 const rankSql = `CASE WHEN COALESCE((SELECT s."featuredTripsEnabled" FROM subscriptions s
@@ -52,14 +53,15 @@ export async function selectDiscoveryPage(query: SelectQueryBuilder<Trip>, filte
     .addSelect(`to_char(trip.departureDate, 'YYYY-MM-DD"T"HH24:MI:SS.US')`, 'discovery_date')
     .orderBy('discovery_rank', order).addOrderBy('discovery_sort', order)
     .addOrderBy('trip.departureDate', order).addOrderBy('trip.id', order).limit(limit + 1);
-  const result = await query.createQueryBuilder().select('trip').from(Trip, 'trip')
+  const readQuery = query.createQueryBuilder().select('trip').from(Trip, 'trip')
     .addCommonTableExpression(candidates, 'discovery_page', { materialized: true })
     .innerJoin('discovery_page', 'page', 'page.id = trip.id')
     .leftJoinAndSelect('trip.driver', 'driver').leftJoinAndSelect('trip.vehicle', 'vehicle')
     .addSelect('page.discovery_rank', 'discovery_rank').addSelect('page.discovery_sort', 'discovery_sort')
     .addSelect('page.discovery_date', 'discovery_date')
     .orderBy('page.discovery_rank', order).addOrderBy('page.discovery_sort', order)
-    .addOrderBy('trip.departureDate', order).addOrderBy('trip.id', order).getRawAndEntities();
+    .addOrderBy('trip.departureDate', order).addOrderBy('trip.id', order);
+  const result = await executeDiscoveryRead(readQuery);
   const entities = result.entities.slice(0, limit);
   if (backwards) entities.reverse();
   const encode = (trip: Trip | undefined) => {
@@ -69,6 +71,6 @@ export async function selectDiscoveryPage(query: SelectQueryBuilder<Trip>, filte
       date: trip.departureDate.toISOString(), at: raw.discovery_date, id: trip.id, filter } satisfies Cursor)).toString('base64url') : null;
   };
   const more = result.entities.length > limit;
-  return { entities, nextCursor: (backwards ? !!filters.cursor : more) ? encode(entities.at(-1)) : null,
+  return { entities, timings: result.timings, nextCursor: (backwards ? !!filters.cursor : more) ? encode(entities.at(-1)) : null,
     previousCursor: (backwards ? more : !!filters.cursor) ? encode(entities[0]) : null };
 }

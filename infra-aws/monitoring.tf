@@ -8,6 +8,13 @@ resource "aws_sns_topic" "alerts" {
   tags = {
     Purpose = "Operational and security alerts"
   }
+
+  lifecycle {
+    precondition {
+      condition     = var.environment != "production" || length(var.alert_email_addresses) > 0
+      error_message = "Production requires an alert recipient. Supply the private operators.tfvars file, apply the reviewed SNS subscription plan, and confirm the subscription email."
+    }
+  }
 }
 
 resource "aws_sns_topic_subscription" "email" {
