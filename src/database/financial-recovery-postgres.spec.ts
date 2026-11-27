@@ -289,7 +289,7 @@ const bin = process.env.FINANCIAL_RECOVERY_TEST_POSTGRES_BIN ?? process.env.PAYO
     });
 
     it.each([PaymentStatus.FAILED, PaymentStatus.CANCELLED])('does not reopen a %s deposit on a stale pending check', async status => {
-      const p = await payment({ status });
+      const p = await payment({ status, orderNumber: 'verified-fixture-order' });
       const result = await commitFlexPayDepositState(db.getRepository(PaymentTransaction), { ...p, status: PaymentStatus.PENDING });
       expect(result.status).toBe(status);
       const success = await commitFlexPayDepositState(db.getRepository(PaymentTransaction), { ...p, status: PaymentStatus.SUCCEEDED, paidAt: new Date() });

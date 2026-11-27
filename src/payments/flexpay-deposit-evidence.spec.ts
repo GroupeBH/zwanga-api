@@ -14,7 +14,10 @@ const proof = (patch = {}) =>
   ({
     orderNumber: 'order-B',
     reference: 'booking-B',
-    amount: 5000,
+    amount: '5000',
+    amountCustomer: '5000',
+    status: '0',
+    createdAt: '2026-11-27T00:00:00Z',
     currency: 'CDF',
     ...patch,
   }) as FlexPayTransactionStatus;

@@ -5,6 +5,7 @@ export function safeRequestPath(request: RequestPath): string {
   let path = (request.originalUrl || request.url || '/').split(/[?#]/, 1)[0];
   try { path = decodeURIComponent(path); } catch { /* Still mask the raw path. */ }
   return path.replace(/(\/tracking\/public\/)[^/?#]*/gi, '$1[redacted]')
+    .replace(/(\/sms\/s\/)[^/?#]*/gi, '$1[redacted]')
     .replace(/[\r\n\x00-\x1f]/g, '').slice(0, 1000);
 }
 
@@ -20,6 +21,8 @@ export function safeRequestError(value: string | undefined, request: RequestPath
       result = result.split(variant).join(safeRequestPath({ url: variant }));
       const token = variant.match(/\/tracking\/public\/([^/?#]+)/i)?.[1];
       if (token) result = result.split(token).join('[redacted]');
+      const smsToken = variant.match(/\/sms\/s\/([^/?#]+)/i)?.[1];
+      if (smsToken) result = result.split(smsToken).join('[redacted]');
     }
   }
   return result;

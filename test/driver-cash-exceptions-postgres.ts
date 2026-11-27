@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 import { DataSource } from 'typeorm';
 import { DriverCashExceptions1780000145000 } from '../src/database/migrations/1780000145000-DriverCashExceptions';
 import { readCashExceptionPolicy } from '../src/driver-finance/cash-exception-policy';
+import { cashExceptionUpgradeCases } from './cash-exception-upgrade-postgres';
 
 export function driverCashExceptionCases(
   getDb: () => DataSource,
@@ -587,6 +588,7 @@ export function driverCashExceptionCases(
         )[0].balance,
       ).toBe('1000.00');
     });
+    cashExceptionUpgradeCases(getDb, driver, { booking, switchCash, confirm, newTrip });
     it('keeps the driver history and penalty amount private in passenger options', async () => {
       const id = await booking();
       await switchCash(id);

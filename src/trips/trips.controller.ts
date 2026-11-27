@@ -13,6 +13,7 @@ import {
 } from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { TripsService } from './trips.service';
+import { compactDriverActivity } from './compact-driver-activity';
 import { HistoryPageQuery } from '../common/history-page';
 import { BookingsService } from '../bookings/bookings.service';
 import {
@@ -129,8 +130,9 @@ export class TripsController {
   @Auth()
   @SensitiveThrottle(20, 60000)
   @ApiOperation({ summary: 'Get trips created by current user' })
-  async findMyTrips(@Request() req, @Query('scope') scope?: string) {
-    return this.tripsService.findByDriver(req.user.userId, scope === 'activity');
+  async findMyTrips(@Request() req, @Query('scope') scope?: string, @Query('view') view?: string) {
+    const trips = await this.tripsService.findByDriver(req.user.userId, scope === 'activity');
+    return scope === 'activity' && view === 'compact' ? compactDriverActivity(trips) : trips;
   }
 
   @Get('my-trips/history')

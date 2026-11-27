@@ -38,10 +38,13 @@ const bin = process.env.PIN_RESET_TEST_POSTGRES_BIN;
           '-A',
           'trust',
           '--no-locale',
+          // Disposable bootstrap only, matching test/isolated-postgres.ts.
+          // Runtime fsync remains enabled; never initialize application data this way.
+          '--no-sync',
           '-E',
           'UTF8',
         ],
-        { windowsHide: true, stdio: 'pipe', timeout: 30000 },
+        { windowsHide: true, stdio: 'pipe', timeout: 60000 },
       );
       const port = await new Promise<number>((done, reject) => {
         const server = createServer();
@@ -135,7 +138,7 @@ const bin = process.env.PIN_RESET_TEST_POSTGRES_BIN;
       await db.transaction((m) =>
         new AddPinResetReplayProtection1780000064000().up(m.queryRunner!),
       );
-    }, 60000);
+    }, 120000);
 
     beforeEach(async () => {
       await db.query(

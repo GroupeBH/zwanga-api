@@ -1,4 +1,5 @@
 import { AssetCredits1780000124000 } from './1780000124000-AssetCredits';
+import { SmsMarketing1780000149000 } from './1780000149000-SmsMarketing';
 import { ZwangaProFoundations1780000137000 } from './1780000137000-ZwangaProFoundations';
 import { ZwangaProSettlements1780000138000 } from './1780000138000-ZwangaProSettlements';
 import { ZwangaProOperations1780000139000 } from './1780000139000-ZwangaProOperations';
@@ -10,6 +11,7 @@ import { ReserveDeletedAccountPhones1780000144000 } from './1780000144000-Reserv
 import { DriverCashExceptions1780000145000 } from './1780000145000-DriverCashExceptions';
 import { DiditFullEvidence1780000146000 } from './1780000146000-DiditFullEvidence';
 import { ManualKycEvidence1780000147000 } from './1780000147000-ManualKycEvidence';
+import { UpgradeDriverCashExceptions1780000148000 } from './1780000148000-UpgradeDriverCashExceptions';
 import { EquipmentAssetCredits1780000127000 } from './1780000127000-EquipmentAssetCredits';
 import { IntercityDriverCategory1780000128000 } from './1780000128000-IntercityDriverCategory';
 import { ContractAssetCreditRates1780000129000 } from './1780000129000-ContractAssetCreditRates';
@@ -301,4 +303,6 @@ export const databaseMigrations = [
   DriverCashExceptions1780000145000,
   DiditFullEvidence1780000146000,
   ManualKycEvidence1780000147000,
+  UpgradeDriverCashExceptions1780000148000,
+  SmsMarketing1780000149000,
 ];

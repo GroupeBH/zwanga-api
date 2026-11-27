@@ -86,7 +86,10 @@ export function sequentialMobileFlow(context: () => Context) {
         });
         const requests = new TripRequestsService(db.getRepository(TripRequest), db.getRepository(DriverOffer),
           db.getRepository(User), db.getRepository(Vehicle), {} as never, delivery, {} as never, {} as never,
-          {} as never, { getPremiumOverview: async () => ({ isPremium: false, premiumBadgeEnabled: false }) } as never,
+          {} as never, {
+            getPremiumFeaturesForUsers: async (userIds: string[]) => new Map(userIds.map(id => [id, { isPremium: false, premiumBadgeEnabled: false }])),
+            getPremiumOverview: async () => ({ isPremium: false, premiumBadgeEnabled: false }),
+          } as never,
           {} as never, {} as never, dispatch);
         const builder = Test.createTestingModule({ imports: [ScheduleModule.forRoot()],
           controllers: [DriverDispatchController, TripRequestsController], providers: [
@@ -98,7 +101,7 @@ export function sequentialMobileFlow(context: () => Context) {
           const user = users.find(u => u.id === req.headers['x-local-user']);
           if (!user) return false; req.user = { userId: user.id, role: UserRole.DRIVER }; return true;
         } }).compile();
-        app = module.createNestApplication(); app.useLogger(false);
+        app = module.createNestApplication(); app.useLogger(['error']);
         // Authenticate fixtures before the real role and DTO/ownership checks.
         app.use((req: any, _res: any, next: () => void) => {
           const user = users.find(u => u.id === req.headers['x-local-user']);

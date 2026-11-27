@@ -7,7 +7,7 @@ jest.mock('firebase-admin/messaging', () => ({ getMessaging: jest.fn() }));
 
 type Dependencies = ConstructorParameters<typeof NotificationService>;
 type DeliveryInternals = {
-  deliverSavedNotification(value: unknown): Promise<boolean>;
+  deliverSavedNotification(value: unknown, queued?: boolean): Promise<boolean>;
   sendFirebaseNotification(value: unknown, token: string): Promise<string>;
   claimExpoPushReceipts(): Promise<unknown[]>;
   claimCriticalFinancialNotifications(): Promise<unknown[]>;
@@ -137,7 +137,7 @@ describe('anonymous update outbox delivery', () => {
       .mockResolvedValue(true);
     await f.service.retryCriticalFinancialNotifications();
     expect(deliver).toHaveBeenCalledTimes(1);
-    expect(deliver).toHaveBeenCalledWith(f.item);
+    expect(deliver).toHaveBeenCalledWith(f.item, true);
     expect(financial.status).toBe(NotificationStatus.FAILED);
   });
 });

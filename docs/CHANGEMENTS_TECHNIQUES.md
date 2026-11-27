@@ -1,5 +1,13 @@
 # Journal des changements techniques
 
+## 2026-11-27 — Préparation des campagnes SMS promotionnelles (désactivées)
+
+- Module dédié `src/sms-marketing`, contrat admin existant, permissions contrôlées sur les comptes actifs en base, brouillons/révisions/tests obligatoires, estimation agrégée, programmation et suivi paginé. Aucun changement des styles admin ni du transport, des messages ou des budgets OTP.
+- Migration `1780000149000-SmsMarketing` : file SQL et baux, plafonds globaux, intentions idempotentes, audit et désinscriptions conservées après suppression du compte. Le guide PostgreSQL a orienté les transactions courtes sans appel fournisseur et les index partiels ; les listes regroupent leurs statistiques pour éviter les requêtes par ligne.
+- GET public sans effet et POST de désinscription idempotent, codes aléatoires partagés avec les tests, masquage des numéros et des chemins dans les logs. Aucun rejeu automatique d'une soumission incertaine. Transport frère via le proxy privé, instrumentation sortante et SQL supprimée ; routes SMS exclues du traçage HTTP ADOT entrant, autres routes conservées. Tests réseau uniquement avec origine/proxy de boucle locale simulés.
+- PDF Mobishastra v1.3 fourni et examiné : ambiguïtés Unicode et concaténation conservées comme blocages, pas de callback de livraison ni de format de solde inventé. Domaine court, expéditeur promotionnel, qualification AWS et conformité à confirmer. Envoi désactivé, aucune opération AWS ni SMS réel. Détails, mesures locales et écarts : [guide SMS marketing](sms-marketing.md).
+- Validation locale : 102 tests SMS réussis, dont les 83 politiques/PostgreSQL rejoués après les derniers ajustements ; 166 tests OTP réussis et 17 Redis ignorés faute d'instance dédiée configurée ; build NestJS réussi. Estimation synthétique 50 000 comptes : 1 498 ms ; six soumissions via proxy local simulé à 1,75/s, sans trace sensible. Runtime local Node 24.11.0 : revalidation de release requise sous la version minimale du projet, 24.22.1. Pas de recette navigateur ni de mesure de production.
+
 ## 2026-11-26 — Identifiants publics des passagers et transfert du HTML conducteur au site
 
 - Problème : la liste des co-passagers ne permettait pas de cibler un profil ou une conversation ; le backend hébergeait la présentation HTML du QR conducteur. Le mobile utilise désormais le profil authentifié existant et la messagerie directe existante ; le site héberge la page publique.

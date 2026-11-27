@@ -156,8 +156,11 @@ const bin = process.env.MIXED_CASH_TEST_POSTGRES_BIN;
       expect(notices[0]).toMatchObject({ cashDeclared: true, cashReceived: false, amount: 2850 });
       let confirmed = false;
       const { CashPaymentRequestNotice } = loader({ react: driverHooks.react,
+        '@expo/vector-icons': { Ionicons: 'Icon' },
         'react-native': { View: 'View', Text: 'Text', ScrollView: 'Scroll', TouchableOpacity: 'Button', ActivityIndicator: 'Spinner', StyleSheet: { create: (x: any) => x } },
         '@/services/tokenSession': { getTokenSessionVersion: () => 1 },
+        '@/hooks/useDisplayReads': { useDisplayReadsEnabled: (active: boolean) => active, displayReadOptions: () => ({}) },
+        '@/store/api/driverFinanceApi': { useBookingPaymentOptionsQuery: () => ({ currentData: { cashException: null }, isError: false, isFetching: false, refetch() {} }) },
         '@/utils/errorHelpers': { getApiErrorMessage: () => 'Test error' },
         '@/store/api/bookingApi': { useConfirmCashReceiptMutation: () => [mutation(endpoints.confirmCashReceipt, f.driver.id)] },
       })('features/driver-payments/CashPaymentRequestNotice.tsx');

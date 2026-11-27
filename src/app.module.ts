@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { SmsMarketingModule } from './sms-marketing/sms-marketing.module';
 import { ZonesModule } from './zones/zones.module';
 import { MobileOperationsModule } from './mobile-operations/mobile-operations.module';
 import { TypeOrmModule } from '@nestjs/typeorm';
@@ -55,6 +56,7 @@ import { AssetCreditModule } from './asset-credit/asset-credit.module';
 
 @Module({
   imports: [
+    SmsMarketingModule,
     AssetCreditModule,
     AppConfigModule,
     LoggerModule,

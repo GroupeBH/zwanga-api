@@ -23,7 +23,7 @@ const bin = process.env.PAYMENT_ARRIVAL_TEST_POSTGRES_BIN;
         id: { type: 'uuid', primary: true }, driverId: { type: 'uuid' }, tripRequestId: { type: String, nullable: true },
         status: { type: String }, completedAt: date, currentLocation: json, arrivalPoint: json, lastLocationUpdateAt: date,
       } }),
-      new EntitySchema({ name: 'Booking', target: Booking, tableName: 'bookings', columns: {
+      new EntitySchema<Booking>({ name: 'Booking', target: Booking, tableName: 'bookings', columns: {
         id: { type: 'uuid', primary: true }, tripId: { type: 'uuid' }, passengerId: { type: 'uuid' }, status: { type: String },
         paymentMode: { type: String }, paymentStatus: { type: String }, paymentAmount: { type: 'numeric', nullable: true },
         pickedUp: { type: Boolean, default: false }, pickedUpAt: date, droppedOff: { type: Boolean, default: false },

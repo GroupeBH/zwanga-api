@@ -27,7 +27,11 @@ describe('immediate refusal handoff', () => {
     const f = fixture(); f.service['ticking'] = true;
     f.allocate.mockImplementation(async () => {
       expect(f.query).toHaveBeenCalledWith(
-        'UPDATE trip_request_dispatch_offers SET status = $2 WHERE id = $1', ['offer', 'declined']);
+        expect.stringContaining("UPDATE trip_request_dispatch_offers SET status='declined'"),
+        ['driver', 'request', 'offer']);
+      const refusalWrite = f.query.mock.calls.find(([sql]) => sql.startsWith('WITH declined AS'))?.[0];
+      expect(refusalWrite).toContain('INSERT INTO trip_request_driver_refusals');
+      expect(refusalWrite).toContain('UPDATE notifications SET "isActive" = false');
       expect(f.urgent).not.toHaveBeenCalled();
     });
     await expect(f.service.respond('driver', 'offer', 'decline')).resolves.toEqual({ status: 'declined', requestId: 'request' });

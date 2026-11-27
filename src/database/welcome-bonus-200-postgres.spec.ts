@@ -37,10 +37,13 @@ const bin = process.env.WELCOME_BONUS_TEST_POSTGRES_BIN ?? process.env.WALLET_TE
           '-A',
           'trust',
           '--no-locale',
+          // Disposable bootstrap only, matching test/isolated-postgres.ts.
+          // Runtime fsync remains enabled; never initialize application data this way.
+          '--no-sync',
           '-E',
           'UTF8',
         ],
-        { windowsHide: true, stdio: 'pipe', timeout: 30000 },
+        { windowsHide: true, stdio: 'pipe', timeout: 60000 },
       );
       const port = await new Promise<number>((done, reject) => {
         const server = createServer();
@@ -100,7 +103,7 @@ const bin = process.env.WELCOME_BONUS_TEST_POSTGRES_BIN ?? process.env.WALLET_TE
       [{ definition: oldDefinition }] = await db.query(
         "SELECT pg_get_functiondef('zwanga_grant_welcome_bonus(uuid)'::regprocedure) AS definition",
       );
-    }, 60000);
+    }, 120000);
 
     afterAll(async () => {
       try {

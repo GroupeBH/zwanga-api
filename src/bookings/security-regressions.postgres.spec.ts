@@ -28,7 +28,7 @@ const bin = process.env.SECURITY_TEST_POSTGRES_BIN;
     const boolean = { type: Boolean, default: false };
     const geo = {
       type: 'geography' as const,
-      spatialFeatureType: 'Point',
+      spatialFeatureType: 'Point' as const,
       srid: 4326,
       nullable: true,
     };
@@ -54,7 +54,7 @@ const bin = process.env.SECURITY_TEST_POSTGRES_BIN;
               lastLocationUpdateAt: nullableTime,
             },
           }),
-          new EntitySchema({
+          new EntitySchema<Booking>({
             name: 'Booking',
             target: Booking,
             tableName: 'bookings',
