@@ -2,6 +2,7 @@ import { BadRequestException } from '@nestjs/common';
 import { EntityManager, Repository } from 'typeorm';
 import { User, UserStatus } from './entities/user.entity';
 import { accountPhoneWhere, canonicalAccountPhone } from './phone-identity';
+import { assertPhoneNotDeleted } from './deleted-phone.policy';
 
 /** Pending KYC is still a usable account, not an available phone number. */
 export function accountReservesPhone(
@@ -16,9 +17,10 @@ export function accountReservesPhone(
 }
 
 /**
- * Keep the global unique phone constraint. An unavailable account relinquishes
+ * Keep the global unique phone constraint. A non-deleted unavailable account relinquishes
  * only its phone when the new account is actually persisted, never on OTP send.
  * Its UUID, financial history, KYC and restrictions are not inherited or reset.
+ * Deleted accounts reserve their number permanently, even without a remaining user row.
  */
 export async function saveRegistrationWithPhone(
   users: Repository<User>,
@@ -31,6 +33,7 @@ export async function saveRegistrationWithPhone(
       'SELECT pg_advisory_xact_lock(hashtextextended($1, 0))',
       [`zwanga:registration-phone:${phone}`],
     );
+    await assertPhoneNotDeleted(manager, phone);
     const repository = manager.getRepository(User);
     const previous = await repository.findOne({
       where: { phone: accountPhoneWhere(phone, false) },

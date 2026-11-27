@@ -1,0 +1,36 @@
+name: Scan secrets and sensitive artifacts
+description: Full-history, redacted, fail-closed scan without cloud credentials or uploaded reports
+runs:
+  using: composite
+  steps:
+    - name: Install pinned Gitleaks and scan
+      shell: bash
+      run: |
+        set -euo pipefail
+        umask 077
+        scan_dir="$(mktemp -d "${RUNNER_TEMP}/zwanga-gitleaks.XXXXXX")"
+        trap 'rm -rf -- "$scan_dir"' EXIT
+        version=8.30.1
+        case "$(uname -m)" in
+          x86_64) arch=x64; checksum=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb ;;
+          aarch64|arm64) arch=arm64; checksum=e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080 ;;
+          *) echo 'Unsupported scanner architecture'; exit 2 ;;
+        esac
+        archive="gitleaks_${version}_linux_${arch}.tar.gz"
+        curl --fail --silent --show-error --location --retry 3 --connect-timeout 10 --max-time 120 \
+          "https://github.com/gitleaks/gitleaks/releases/download/v${version}/${archive}" -o "$scan_dir/$archive"
+        printf '%s  %s\n' "$checksum" "$scan_dir/$archive" | sha256sum --check --status
+        tar -xzf "$scan_dir/$archive" -C "$scan_dir" gitleaks
+        node test/gitleaks-smoke.cjs "$scan_dir/gitleaks"
+        # Run both checks even when historical Terraform artifacts are found.
+        # No baseline/allowlist: this incident must not be silently grandfathered in.
+        artifact_status=0
+        leak_status=0
+        node scripts/security/check-sensitive-artifacts.cjs --history || artifact_status=$?
+        "$scan_dir/gitleaks" git . --redact=100 --no-banner --log-level=error \
+          --max-archive-depth=3 --max-decode-depth=3 --log-opts="--all --full-history" || leak_status=$?
+        if [[ "$artifact_status" -ne 0 || "$leak_status" -ne 0 ]]; then
+          echo 'Secret scan blocked. Review findings privately; never paste raw plans, state or tokens.'
+          exit 1
+        fi
+        echo 'Full reachable-history secret scan passed.'

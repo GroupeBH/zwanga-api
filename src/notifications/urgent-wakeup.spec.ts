@@ -10,17 +10,13 @@ describe('work-conserving urgent push wakeups (no provider or database)', () => 
   const services: NotificationService[] = [];
   const fixture = (capacity = 2) => {
     const waiting: any[] = [];
-    let limit = capacity;
-    const builder: any = {};
-    for (const name of ['where', 'andWhere', 'orderBy', 'addOrderBy', 'setLock', 'setOnLocked'])
-      builder[name] = jest.fn().mockReturnValue(builder);
-    builder.take = jest.fn((value: number) => { limit = value; return builder; });
-    builder.getMany = jest.fn(async () => waiting.splice(0, limit));
-    const repository = { createQueryBuilder: () => builder, save: async (rows: any[]) => rows };
-    const transaction = jest.fn(async (work: any) => work({ getRepository: () => repository }));
+    const query = jest.fn(async (_sql: string, parameters: any[]) =>
+      waiting.splice(0, parameters[1]).map(row => ({
+        ...row, status: 'pending', errorMessage: `${parameters[2]}:${row.id}`,
+      })));
     const service = new NotificationService(
       { get: (key: string) => key === 'URGENT_PUSH_WORKERS' ? capacity : undefined } as any,
-      { manager: { transaction }, update: jest.fn().mockResolvedValue({ affected: 1 }) } as any,
+      { query, manager: { query }, update: jest.fn().mockResolvedValue({ affected: 1 }) } as any,
       {} as any, {} as any,
     );
     services.push(service);
@@ -31,7 +27,7 @@ describe('work-conserving urgent push wakeups (no provider or database)', () => 
     const add = (...ids: string[]) => waiting.push(...ids.map(id => ({
       id, createdAt: new Date(), isActive: true, data: { type: 'driver_dispatch_offer' },
     })));
-    return { service, waiting, builder, transaction, relevant, deliver, suppress, add };
+    return { service, waiting, query, relevant, deliver, suppress, add };
   };
   const flush = () => jest.advanceTimersByTimeAsync(1);
   beforeEach(() => jest.useFakeTimers());
@@ -47,7 +43,7 @@ describe('work-conserving urgent push wakeups (no provider or database)', () => 
     const first = f.service.dispatchUrgentNotifications();
     await flush(); expect(f.deliver).toHaveBeenCalledTimes(2);
     fast.resolve(true); await flush(); await flush();
-    expect(f.deliver).toHaveBeenCalledWith(expect.objectContaining({ id: 'next' }));
+    expect(f.deliver).toHaveBeenCalledWith(expect.objectContaining({ id: 'next' }), true);
     expect((f.service as any).urgentWorkers).toBe(1);
     slow.resolve(true); await first; await flush();
     expect(f.deliver).toHaveBeenCalledTimes(3);
@@ -57,12 +53,12 @@ describe('work-conserving urgent push wakeups (no provider or database)', () => 
 
   it('retains a wakeup that arrives while an empty SQL claim is already in progress', async () => {
     const f = fixture(); const emptyClaim = deferred<any[]>();
-    f.builder.getMany.mockImplementationOnce(() => emptyClaim.promise);
+    f.query.mockImplementationOnce(() => emptyClaim.promise);
     const first = f.service.dispatchUrgentNotifications(); await flush();
     f.add('new'); await f.service.dispatchUrgentNotifications();
     emptyClaim.resolve([]); await first; await flush(); await flush();
     expect(f.deliver).toHaveBeenCalledTimes(1);
-    expect(f.deliver).toHaveBeenCalledWith(expect.objectContaining({ id: 'new' }));
+    expect(f.deliver).toHaveBeenCalledWith(expect.objectContaining({ id: 'new' }), true);
     expect(jest.getTimerCount()).toBe(0);
   });
 
@@ -97,36 +93,43 @@ describe('work-conserving urgent push wakeups (no provider or database)', () => 
     });
     const first = f.service.dispatchUrgentNotifications(); await flush();
     await Promise.all(Array.from({ length: 100 }, () => f.service.dispatchUrgentNotifications()));
-    expect(f.builder.getMany).toHaveBeenCalledTimes(1);
+    expect(f.query).toHaveBeenCalledTimes(1);
     for (const release of releases) { release.resolve(true); await flush(); await flush(); }
     await first; await flush();
     expect(peak).toBe(2);
     expect(f.deliver).toHaveBeenCalledTimes(10);
     expect(new Set(f.deliver.mock.calls.map(([n]) => (n as any).id)).size).toBe(10);
-    expect(f.builder.getMany.mock.calls.length).toBeLessThan(25);
+    expect(f.query.mock.calls.length).toBeLessThan(25);
     expect(jest.getTimerCount()).toBe(0);
   });
 
   it('stops on an empty queue and defers a failed SQL claim to the cron, without spinning', async () => {
     const f = fixture(); f.add('first');
-    f.builder.getMany.mockRejectedValueOnce(new Error('synthetic SQL outage'));
+    f.query.mockRejectedValueOnce(new Error('synthetic SQL outage'));
     await expect(f.service.dispatchUrgentNotifications()).rejects.toThrow('synthetic SQL outage');
     await jest.advanceTimersByTimeAsync(10_000);
-    expect(f.builder.getMany).toHaveBeenCalledTimes(1);
+    expect(f.query).toHaveBeenCalledTimes(1);
     await f.service.dispatchUrgentNotifications(); await flush();
     expect(f.deliver).toHaveBeenCalledTimes(1);
-    const reads = f.builder.getMany.mock.calls.length;
+    const reads = f.query.mock.calls.length;
     await jest.advanceTimersByTimeAsync(10_000);
-    expect(f.builder.getMany).toHaveBeenCalledTimes(reads);
+    expect(f.query).toHaveBeenCalledTimes(reads);
   });
 
   it('rechecks relevance for the next job and suppresses a cancelled invitation', async () => {
     const f = fixture(1); f.add('cancelled', 'valid');
+    // Exercise the real queued preparation, not a stub of the whole delivery.
+    f.deliver.mockRestore();
+    for (const row of f.waiting) { row.userId = 'passenger'; row.data = { type: 'booking_response' }; }
+    Object.assign(f.service, { userRepository: { query: jest.fn().mockResolvedValue([
+      { fcmToken: 'synthetic', hasExclusivePushToken: true },
+    ]) } });
+    const provider = jest.spyOn(f.service as any, 'sendFirebaseNotification').mockResolvedValue('synthetic');
     f.relevant.mockResolvedValueOnce(false).mockResolvedValue(true);
     await f.service.dispatchUrgentNotifications(); await flush();
     expect(f.suppress).toHaveBeenCalledTimes(1);
-    expect(f.deliver).toHaveBeenCalledTimes(1);
-    expect(f.deliver).toHaveBeenCalledWith(expect.objectContaining({ id: 'valid' }));
+    expect(provider).toHaveBeenCalledTimes(1);
+    expect(provider).toHaveBeenCalledWith(expect.objectContaining({ id: 'valid' }), 'synthetic');
   });
 
   it('does not claim new work after shutdown, including a pending release wakeup', async () => {

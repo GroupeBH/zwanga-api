@@ -4,12 +4,14 @@ import { withDeadline } from './with-deadline';
 // Lifecycle/events remain bound to the real client (node-redis has private fields).
 const COMMANDS = new Set([
   'get',
+  'mGet',
   'getDel',
   'set',
   'setEx',
   'del',
   'exists',
   'eval',
+  'evalSha',
   'keys',
   'zScore',
   'zAdd',

@@ -163,6 +163,14 @@ describe('DiditKycService', () => {
     jest.restoreAllMocks();
   });
 
+  it('enqueues the initial session in full mode without changing KYC pending semantics', async () => {
+    (evidence as any).fullDataEnabled = () => true;
+    const payload = { session_id: 'new-session', status: 'Not Started', vendor_data: user.id };
+    await (service as any).applyDiditState({ userId: user.id, source: 'session_created', sessionId: 'new-session', payload });
+    expect(evidence.enqueue).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ status: KycStatus.PENDING }), payload);
+    expect(kyc.status).toBe(KycStatus.PENDING);
+  });
+
   it.each(['In Progress', 'Declined', 'Approved'])('ignores repeated %s from a superseded Didit session', async status => {
     Object.assign(kyc, { status: KycStatus.APPROVED, diditSessionId: 'new-session' });
     user.status = UserStatus.ACTIVE;

@@ -11,6 +11,8 @@ import { AdminService } from '../admin/admin.service';
 import { AwsKycRepository } from '../users/aws-kyc/aws-kyc.repository';
 import { KycEvidenceArchive1780000061000 } from './migrations/1780000061000-KycEvidenceArchive';
 import { KycEvidenceIndefiniteRetention1780000062000 } from './migrations/1780000062000-KycEvidenceIndefiniteRetention';
+import { DiditFullEvidence1780000146000 } from './migrations/1780000146000-DiditFullEvidence';
+import { ManualKycEvidence1780000147000 } from './migrations/1780000147000-ManualKycEvidence';
 import { AwsKycSessions1780000069000 } from './migrations/1780000069000-AwsKycSessions';
 import { AwsKycSession } from '../users/aws-kyc/aws-kyc-session.entity';
 
@@ -69,6 +71,8 @@ const bin = process.env.AUDIT_TEST_POSTGRES_BIN;
           m.queryRunner!,
         );
         await new AwsKycSessions1780000069000().up(m.queryRunner!);
+        await new DiditFullEvidence1780000146000().up(m.queryRunner!);
+        await new ManualKycEvidence1780000147000().up(m.queryRunner!);
       });
       repo = new AwsKycRepository(db);
       new TransactionalNotificationsSubscriber(db);

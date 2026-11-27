@@ -16,4 +16,41 @@ describe('Live GPS room authorization', () => {
     expect(sockets[1].leave).not.toHaveBeenCalledWith('trip:active');
     expect(sockets[2].leave).toHaveBeenCalledWith('trip:active');
   });
+
+  it('does not prune rooms joined during the query, including on a previously empty socket', async () => {
+    const existing = { data: { userId: 'driver' }, rooms: new Set(['trip:active']), leave: jest.fn() };
+    const newcomer = { data: { userId: 'driver' }, rooms: new Set<string>(), leave: jest.fn() };
+    const trip = { id: 'active', driverId: 'driver', bookings: [] };
+    const find = jest.fn().mockImplementationOnce(async () => {
+      existing.rooms.add('trip:new'); newcomer.rooms.add('trip:new');
+      return [trip];
+    });
+    const source = { getRepository: () => ({ find }) } as any;
+    await pruneTrackingRooms(source, [existing, newcomer] as any);
+    expect(existing.leave).not.toHaveBeenCalled();
+    expect(newcomer.leave).not.toHaveBeenCalled();
+    // New rooms are checked next time, not permanently exempted from authorization.
+    find.mockResolvedValue([trip]);
+    await pruneTrackingRooms(source, [existing, newcomer] as any);
+    expect(existing.leave).toHaveBeenCalledWith('trip:new');
+    expect(newcomer.leave).toHaveBeenCalledWith('trip:new');
+  });
+
+  it('does not act on rooms belonging to a replaced identity during the query', async () => {
+    const socket = { data: { userId: 'before' }, rooms: new Set(['trip:active']), leave: jest.fn() };
+    const find = jest.fn().mockImplementation(async () => {
+      socket.data.userId = 'after';
+      return [];
+    });
+    await pruneTrackingRooms({ getRepository: () => ({ find }) } as any, [socket] as any);
+    expect(socket.leave).not.toHaveBeenCalled();
+    await pruneTrackingRooms({ getRepository: () => ({ find }) } as any, [socket] as any);
+    expect(socket.leave).toHaveBeenCalledWith('trip:active');
+  });
+
+  it('propagates a failed membership read to the fail-closed session checker', async () => {
+    const socket = { data: { userId: 'driver' }, rooms: new Set(['trip:active']), leave: jest.fn() };
+    await expect(pruneTrackingRooms({ getRepository: () => ({ find: jest.fn().mockRejectedValue(new Error('offline')) }) } as any,
+      [socket] as any)).rejects.toThrow('offline');
+  });
 });

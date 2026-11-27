@@ -272,6 +272,9 @@ export class TripRequestsService {
     const passenger = await this.userRepository.findOne({
       where: { id: passengerId },
       relations: ['kycDocuments'],
+      // Only existence and document status are consumed here. Do not hydrate
+      // tokens, profile data or KYC media on every new request.
+      select: { id: true, kycDocuments: { id: true, status: true } },
     });
     if (!passenger) {
       throw new NotFoundException('Utilisateur non trouvé');
@@ -2707,6 +2710,7 @@ export class TripRequestsService {
     const passenger = await this.userRepository.findOne({
       where: { id: passengerId },
       relations: ['kycDocuments'],
+      select: { id: true, kycDocuments: { id: true, status: true } },
     });
 
     return this.passengerHasApprovedKyc(passenger);

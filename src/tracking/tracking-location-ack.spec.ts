@@ -5,7 +5,7 @@ describe('tracking acknowledgements', () => {
   const fixture = () => {
     const trips = { updateDriverLocation: jest.fn() };
     const bookings = { updatePassengerLocation: jest.fn(), queueAutomaticRideProgressForTrip: jest.fn().mockResolvedValue(undefined), evaluateAutomaticRideProgressForTrip: jest.fn().mockResolvedValue({ events: [] }) };
-    const gateway = new TrackingGateway(trips as any, bookings as any, {} as any, { get: () => '0' } as any, {} as any);
+    const gateway = new TrackingGateway(trips as any, bookings as any, {} as any, { get: () => '0' } as any, {} as any, {} as any);
     const emit = jest.fn();
     gateway.server = { to: () => ({ emit }) } as any;
     return { trips, bookings, gateway, emit, client: { data: { userId: 'synthetic-user' }, emit: jest.fn() } as any };
@@ -51,7 +51,7 @@ describe('tracking acknowledgements', () => {
     await Promise.resolve(); expect(settled).toBe(false);
     accept({ ...data, updatedAt: data.recordedAt });
     expect(await response).toMatchObject({ success: true });
-    expect(env.bookings.queueAutomaticRideProgressForTrip).toHaveBeenCalledWith('trip');
+    expect(env.bookings.queueAutomaticRideProgressForTrip).not.toHaveBeenCalled(); // already atomic in the service
     expect(env.bookings.evaluateAutomaticRideProgressForTrip).not.toHaveBeenCalled();
     expect(env.emit).not.toHaveBeenCalledWith('booking_auto_progress', expect.anything());
     env.gateway.publishAutomaticProgress(progress);
@@ -59,8 +59,7 @@ describe('tracking acknowledgements', () => {
   });
   it('does not acknowledge when durable work cannot be enqueued', async () => {
     const env = fixture();
-    env.trips.updateDriverLocation.mockResolvedValue({ ...data, updatedAt: data.recordedAt });
-    env.bookings.queueAutomaticRideProgressForTrip.mockRejectedValue(new Error('database unavailable'));
+    env.trips.updateDriverLocation.mockRejectedValue(new Error('atomic GPS/queue write failed'));
     expect(await env.gateway.handleDriverLocationUpdate(env.client, data)).toEqual({ success: false });
     expect(env.emit).not.toHaveBeenCalled();
   });

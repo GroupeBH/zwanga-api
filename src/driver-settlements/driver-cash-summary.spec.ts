@@ -67,7 +67,7 @@ describe('Informational driver cash receipts', () => {
       { createQueryBuilder: () => cashQuery } as any,
       {} as any,
       { get: jest.fn() } as any,
-      {} as any, {} as any, {} as any,
+      {} as any, { manager: { query: jest.fn().mockResolvedValue([]) } } as any, {} as any,
     );
     await expect(service.getSummary('driver-A')).resolves.toMatchObject({
       availableBalance: available,

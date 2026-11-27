@@ -10,7 +10,7 @@ import { postgresTestServerOptions } from './postgres-test-options';
 export class IsolatedPostgres {
   private directory?: string;
   source?: DataSource;
-  constructor(private readonly bin: string) {}
+  constructor(private readonly bin: string, private readonly diagnostics: { ioTiming?: boolean } = {}) {}
   private executable(name: string) {
     return join(this.bin, process.platform === 'win32' ? `${name}.exe` : name);
   }
@@ -52,7 +52,7 @@ export class IsolatedPostgres {
           '-l',
           join(this.directory, 'postgres.log'),
           '-o',
-          postgresTestServerOptions(port),
+          postgresTestServerOptions(port) + (this.diagnostics.ioTiming ? ' -c track_io_timing=on -c track_wal_io_timing=on' : ''),
           '-w',
           'start',
         ],

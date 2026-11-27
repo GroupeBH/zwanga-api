@@ -18,7 +18,10 @@ import {
   ReferralWithdrawal,
   ReferralWithdrawalStatus,
 } from '../referrals/entities/referral-withdrawal.entity';
-import { User, UserStatus } from '../users/entities/user.entity';
+import { User, UserRole, UserStatus } from '../users/entities/user.entity';
+import { AdminUserReferralsQuery } from './dto/admin-user-referrals.dto';
+import { parseRegistrationRange } from './dto/admin-users.dto';
+import { buildUserReferralsSpreadsheet, type AdminUserReferralItem } from './user-referrals-spreadsheet';
 import { isSuperAdminRole } from '../users/user-role.policy';
 import { RetryPayoutDto } from '../payments/dto/retry-payout.dto';
 import { payoutRetryDetails } from '../payments/payout-retry';
@@ -98,6 +101,55 @@ export class AdminReferralsService {
       .orderBy('candidate.firstName', 'ASC').addOrderBy('candidate.id', 'ASC')
       .take(15).getMany();
     return { users: users.map((user) => this.serializeUser(user)) };
+  }
+
+  async getUserReferrals(userId: string, filters: AdminUserReferralsQuery) {
+    await this.ensureReferralUserExists(userId);
+    const { pageNumber, pageSize } = this.normalizePagination(filters.page, filters.limit);
+    const [profiles, total] = await this.createUserReferralsQuery(userId, filters)
+      .skip((pageNumber - 1) * pageSize).take(pageSize).getManyAndCount();
+    return { items: profiles.map(profile => this.serializeUserReferral(profile)), total, page: pageNumber, limit: pageSize };
+  }
+
+  async exportUserReferrals(userId: string, filters: AdminUserReferralsQuery): Promise<SpreadsheetDownload> {
+    await this.ensureReferralUserExists(userId);
+    const query = this.createUserReferralsQuery(userId, filters);
+    // The export never applies the displayed page/limit. It reads bounded batches.
+    return streamExport(exportOffsetPages(query, 'referredUser'), profiles => ({
+      buffer: buildUserReferralsSpreadsheet(profiles.map(profile => this.serializeUserReferral(profile))),
+      filename: `filleuls-zwanga-${userId}-${new Date().toISOString().slice(0, 10)}.xls`,
+      contentType: 'application/vnd.ms-excel; charset=utf-8',
+    }));
+  }
+
+  private async ensureReferralUserExists(userId: string) {
+    if (!await this.userRepository.findOne({ where: { id: userId }, select: { id: true } }))
+      throw new NotFoundException('Utilisateur introuvable.');
+  }
+
+  private createUserReferralsQuery(userId: string, filters: AdminUserReferralsQuery) {
+    if (filters.role && !Object.values(UserRole).includes(filters.role))
+      throw new BadRequestException('Rôle de compte invalide.');
+    const registered = parseRegistrationRange(filters.registeredFrom, filters.registeredTo);
+    const query = this.profileRepository.createQueryBuilder('profile')
+      .innerJoinAndSelect('profile.user', 'referredUser')
+      .select(['profile.id', 'profile.userId', 'profile.referredAt', ...this.userSelect('referredUser'), 'referredUser.createdAt'])
+      .where('profile.referredByUserId = :referrerUserId', { referrerUserId: userId });
+    if (filters.role) query.andWhere('referredUser.role = :referralRole', { referralRole: filters.role });
+    if (registered.from) query.andWhere('referredUser.createdAt >= :registeredFrom', { registeredFrom: registered.from });
+    if (registered.to) query.andWhere('referredUser.createdAt < :registeredTo', { registeredTo: registered.to });
+    return query.orderBy('referredUser.createdAt', 'DESC').addOrderBy('referredUser.id', 'DESC');
+  }
+
+  private serializeUserReferral(profile: ReferralProfile): AdminUserReferralItem {
+    const user = profile.user;
+    return {
+      id: profile.id,
+      user: { id: user.id, firstName: user.firstName, lastName: user.lastName, phone: user.phone,
+        email: user.email, role: user.role, status: user.status, isDriver: user.isDriver,
+        isActive: user.isActive, createdAt: user.createdAt },
+      referredAt: profile.referredAt ?? null,
+    };
   }
 
   attachReferrer(adminId: string, userId: string, referrerUserId: string, reason: string) {

@@ -3,6 +3,13 @@ import { ZwangaProFoundations1780000137000 } from './1780000137000-ZwangaProFoun
 import { ZwangaProSettlements1780000138000 } from './1780000138000-ZwangaProSettlements';
 import { ZwangaProOperations1780000139000 } from './1780000139000-ZwangaProOperations';
 import { ServiceCommerce1780000140000 } from './1780000140000-ServiceCommerce';
+import { ArrivalAssistance1780000141000 } from './1780000141000-ArrivalAssistance';
+import { UniqueFlexPayOrder1780000142000 } from './1780000142000-UniqueFlexPayOrder';
+import { ArrivalCashFallback1780000143000 } from './1780000143000-ArrivalCashFallback';
+import { ReserveDeletedAccountPhones1780000144000 } from './1780000144000-ReserveDeletedAccountPhones';
+import { DriverCashExceptions1780000145000 } from './1780000145000-DriverCashExceptions';
+import { DiditFullEvidence1780000146000 } from './1780000146000-DiditFullEvidence';
+import { ManualKycEvidence1780000147000 } from './1780000147000-ManualKycEvidence';
 import { EquipmentAssetCredits1780000127000 } from './1780000127000-EquipmentAssetCredits';
 import { IntercityDriverCategory1780000128000 } from './1780000128000-IntercityDriverCategory';
 import { ContractAssetCreditRates1780000129000 } from './1780000129000-ContractAssetCreditRates';
@@ -287,4 +294,11 @@ export const databaseMigrations = [
   ZwangaProSettlements1780000138000,
   ZwangaProOperations1780000139000,
   ServiceCommerce1780000140000,
+  ArrivalAssistance1780000141000,
+  UniqueFlexPayOrder1780000142000,
+  ArrivalCashFallback1780000143000,
+  ReserveDeletedAccountPhones1780000144000,
+  DriverCashExceptions1780000145000,
+  DiditFullEvidence1780000146000,
+  ManualKycEvidence1780000147000,
 ];

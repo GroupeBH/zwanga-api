@@ -37,6 +37,9 @@ export enum PaymentPurpose {
 }
 
 @Entity('payment_transactions')
+@Index('UQ_flexpay_provider_order', ['provider', 'orderNumber'], {
+  unique: true, where: `"provider" = 'flexpay' AND "orderNumber" IS NOT NULL`,
+})
 @Index(['userId', 'status'])
 @Index(['purpose', 'relatedEntityType', 'relatedEntityId'])
 @Index('IDX_payment_transactions_provider_pending', ['provider', 'updatedAt'], {

@@ -14,7 +14,11 @@ const fixture = () => {
   const ownerQuery = jest.fn().mockResolvedValue([{ passengerId: 'author' }]);
   const notifications = { create: jest.fn(v => v), save: jest.fn(async v => v), createQueryBuilder: jest.fn(() => query),
     manager: { query: ownerQuery } };
-  const users = { findOne: jest.fn(), count: jest.fn().mockResolvedValue(1) };
+  const users = { query: jest.fn(), findOne: jest.fn(), count: jest.fn().mockResolvedValue(1) };
+  users.query.mockImplementation(async (_sql, [id]) => {
+    const owner = await users.findOne({ where: { id } });
+    return owner ? [{ ...owner, hasExclusivePushToken: await users.count() === 1 }] : [];
+  });
   const service = new NotificationService({ get: jest.fn() } as never, notifications as never, users as never, {} as never);
   const send = jest.spyOn(service as any, 'sendFirebaseNotification').mockResolvedValue('synthetic-message');
   const deliver = (type: string, userId: string | null = 'recipient', data: Record<string, unknown> = {}) => (service as any).deliverSavedNotification({

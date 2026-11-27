@@ -17,8 +17,10 @@ import { publicationRequestUuidCases } from '../../test/publication-request-uuid
 import { cumulativeCashDebtCases } from '../../test/cumulative-cash-debt-postgres';
 import { mixedCashCommissionCases } from '../../test/mixed-cash-commission-postgres';
 import { tokenCashCommissionCases } from '../../test/token-cash-commission-postgres';
+import { arrivalCashCommissionCases } from '../../test/arrival-cash-commission-postgres';
 import { driverCashCreditCases } from '../../test/driver-cash-credit-postgres';
 import { assetCashCompatibility } from '../../test/asset-cash-compatibility';
+import { driverCashExceptionCases } from '../../test/driver-cash-exceptions-postgres';
 import { WalletLedgerEntry } from '../wallet/entities/wallet-ledger-entry.entity';
 import { ModuleKind, ScriptTarget, transpileModule } from 'typescript';
 
@@ -114,10 +116,12 @@ const pgBin = process.env.DRIVER_FINANCE_TEST_POSTGRES_BIN;
       const [credit] = await db.query("SELECT to_regclass('driver_cash_credit_trips') AS present");
       const [asset] = await db.query("SELECT to_regclass('asset_credits') AS present");
       const [rates] = await db.query("SELECT to_regclass('asset_credit_rate_sources') AS present");
+      const [exceptions] = await db.query("SELECT to_regclass('driver_cash_exceptions') AS present");
       await db.query(
         'TRUNCATE notifications,wallet_ledger_entries,cash_commissions,driver_pro_trial_claims,welcome_bonus_grants,kyc_documents,subscriptions,bookings,trip_requests,trips,wallet_accounts,users' +
           (credit.present ? ',driver_cash_credit_trips' : '') + (asset.present ? ',asset_credit_wallet_mutations,asset_credit_sources,asset_credit_entries,asset_credit_events,asset_credits,asset_credit_requests,driver_earnings' : '')
-          + (rates.present ? ',asset_credit_rate_allocations,asset_credit_rate_sources' : ''),
+          + (rates.present ? ',asset_credit_rate_allocations,asset_credit_rate_sources' : '')
+          + (exceptions.present ? ',driver_cash_exceptions,driver_cash_exception_trips,driver_cash_restrictions,driver_offers' : ''),
       );
       await db.query('INSERT INTO users (id,phone) VALUES ($1,$2)', [
         driver,
@@ -1140,7 +1144,9 @@ const pgBin = process.env.DRIVER_FINANCE_TEST_POSTGRES_BIN;
     cumulativeCashDebtCases(() => db, driver, trip);
     mixedCashCommissionCases(() => db, driver, trip);
     tokenCashCommissionCases(() => db, driver, trip);
+    arrivalCashCommissionCases(() => db, driver, trip);
     driverCashCreditCases(() => db, driver, trip);
     assetCashCompatibility(() => db, driver, trip);
+    driverCashExceptionCases(() => db, driver, trip);
   },
 );

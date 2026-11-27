@@ -1,0 +1,90 @@
+{
+  "status": "design-only-not-a-terraform-var-file",
+  "approvedForProvisioning": false,
+  "productionChangesAllowed": false,
+  "environment": "load-test",
+  "resourcePrefix": "zwanga-api-load-test",
+  "region": "eu-central-1",
+  "baselineFrom": "infra-aws/production.auto.tfvars",
+  "api": {
+    "architecture": "ARM64",
+    "cpuUnitsPerTask": 512,
+    "memoryMiBPerTask": 1024,
+    "initialTasks": 2,
+    "autoscalingMaximumTasks": 3,
+    "availabilityZones": 2,
+    "testFixedBaselineBeforeAutoscaling": true
+  },
+  "database": {
+    "class": "db.t4g.small",
+    "multiAZ": false,
+    "storageGiB": 20,
+    "data": "synthetic-only-no-production-snapshot"
+  },
+  "redis": {
+    "nodeType": "cache.t4g.micro",
+    "nodes": 2,
+    "multiAZ": true,
+    "automaticFailover": true,
+    "sharedWithProduction": false
+  },
+  "isolation": {
+    "separateTerraformRootAndState": true,
+    "separateVpcAndSecurityGroups": true,
+    "productionPeeringAllowed": false,
+    "productionIamAndSecretsAllowed": false,
+    "productionDnsAllowed": false,
+    "externalBusinessProviders": "test-sinks-only",
+    "publicGeneratorEndpointAllowed": false
+  },
+  "generator": {
+    "separateComputeFromApi": true,
+    "scenario": "test/load/journeys/profile.cjs",
+    "remoteRunnerImplemented": false,
+    "localLimitedApiRunner": "node test/load/journeys/run.cjs smoke --containerized-api --execute-local",
+    "localRunnerRequires": "Linux host networking, Node from .nvmrc, Docker engine and a source-matching lab image"
+  },
+  "expandedJourneyScenario": {
+    "simultaneousJourneys": 1000,
+    "additionalRequestsPerCohort": 1000,
+    "socketBudget": 6000,
+    "sessionGuardPerApi": 2000,
+    "minimumHeadroomPercent": 20,
+    "localFixedApiReplicas": 4,
+    "withinCurrentProductionAutoscalingMaximum": false,
+    "changesProductionConfiguration": false,
+    "additionalCostApprovalRequired": true
+  },
+  "comparativeValidation": {
+    "status": "prepared-not-executed",
+    "referenceScenario": "stage-500-mixed",
+    "fixtureSeed": "replica-balance-v1",
+    "replicaOffset": 0,
+    "fixedReplicas": 2,
+    "localApiSizes": {
+      "baseline": { "cpuUnits": 512, "memoryMiB": 1024 },
+      "larger": { "cpuUnits": 1024, "memoryMiB": 2048 }
+    },
+    "unchanged": ["SQL pool of 10 per API", "GPS every 5 seconds per phone", "notification receipts", "business safety and latency limits", "V8 heap and RSS guard"],
+    "sequence": ["smoke", "500 baseline", "500 larger", "500 larger", "500 baseline", "separate-host 500 validation", "750 only after review", "1000 only after review"],
+    "separateHostValidation": {
+      "required": true,
+      "implemented": false,
+      "missing": ["operator-selected isolated Linux hosts", "private authenticated control and traffic transport", "distributed cleanup and fault validation"],
+      "mustNotAcceptArbitraryProductionUrls": true
+    },
+    "workerIsolation": { "status": "design-only", "candidateCpuUnits": 512, "candidateMemoryMiB": 1024 },
+    "rdsMediumComparison": { "status": "conditional-design-only", "condition": "measured database CPU or memory saturation; SQL waits alone are insufficient" },
+    "cost": { "monthlyBudgetReferenceUsd": 175, "newMonthlyEstimateAvailable": false, "approvalRequiredBeforeProvisioning": true }
+  },
+  "gates": {
+    "explicitExtraCostApprovalRequired": true,
+    "hourlyCostEstimateRequired": true,
+    "maximumRunHours": 3,
+    "automaticTeardownRequired": true,
+    "allCloudWatchAlarmsMustBeOk": true,
+    "confirmedAlertSubscriberRequired": true,
+    "immutableImageDigestRequired": true,
+    "terraformPlanReviewRequired": true
+  }
+}

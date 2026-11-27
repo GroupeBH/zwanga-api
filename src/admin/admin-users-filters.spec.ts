@@ -68,6 +68,9 @@ describe('admin user status and sort validation', () => {
 });
 
 describe('admin identity presentation', () => {
+  it('uses the explicit deletion marker on a partial projection', () => {
+    expect(adminUserIdentity({ deletedAt: new Date(), firstName: 'Compte', lastName: 'supprimé' }).isDeleted).toBe(true);
+  });
   it.each([
     UserStatus.ACTIVE,
     UserStatus.INACTIVE,

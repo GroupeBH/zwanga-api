@@ -1,4 +1,6 @@
 import { rideCardContent } from './ride-card-content';
+import { NotificationPreparation, NotificationPreparationLane } from './notification-preparation';
+import { backgroundSql } from '../database/background-sql-budget';
 import { availableAccountSql } from '../users/account-availability';
 import { issueRideRingPermit, readRideRingPermit, needsRideRingPermit } from './ride-ring-permit';
 import { DRIVER_PAYMENT_NOTIFICATION_TYPE } from './driver-payment-notification';
@@ -10,7 +12,8 @@ import { FirebaseDeliveryError } from './firebase-delivery-error';
 import { boundedFirebaseCredential } from './firebase-credential';
 import { recoverUnacknowledgedRides } from './recover-unacknowledged-ride';
 import { nativeAndroidDriverPush } from './native-android-driver-push';
-import { PUSH_CLAIM_LEASE_MS, ownPushClaim, heartbeatPushClaim, renewPushClaim, saveNotificationResult, isRetryPushClaim } from './notification-push-claim';
+import { ownPushClaim, heartbeatPushClaim, renewPushClaim, saveNotificationResult, isRetryPushClaim } from './notification-push-claim';
+import { claimTransactionalPushNotifications, URGENT_NOTIFICATION_TYPES } from './transactional-push-queue';
 import { retryPushBatch } from './retry-push-batch';
 import { enqueueTransactionalNotification } from './transactional-notification';
 import { PUSH_RETRY_ELIGIBLE_SQL, recordPushFailure, urgentPushWorkers } from './push-retry-policy';
@@ -31,7 +34,7 @@ import { getMessaging, type MulticastMessage } from 'firebase-admin/messaging';
 import { createHash, randomUUID } from 'node:crypto';
 import { Injectable, OnModuleInit, OnApplicationBootstrap, OnModuleDestroy, Logger, Optional } from '@nestjs/common';
 import { RideAlertRealtime } from './ride-alert-realtime.service';
-import { claimRideRealtimeNotifications } from './ride-realtime-delivery';
+import { claimRideRealtimeBatch } from './ride-realtime-delivery';
 import { iosDriverPush } from './ios-driver-push';
 import { ConfigService } from '@nestjs/config';
 import { Cron, CronExpression } from '@nestjs/schedule';
@@ -44,6 +47,7 @@ import {
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { canReceiveDriverRequests, DRIVER_REQUEST_NOTIFICATION_TYPES, isDriverRequestNotification } from './driver-request-policy';
 import { resolveDriverRequestOwner } from './driver-request-owner';
+import { readPushRecipient } from './read-push-recipient';
 import { sharedTripAlertIsDeliverable } from '../trip-requests/dispatch/shared-trip-alert';
 import { isTripStartDeliverable } from './trip-start-delivery';
 import { AUTOMATIC_RIDE_NOTIFICATION_TYPES, isRideProgressDeliverable } from './ride-progress-delivery';
@@ -67,7 +71,6 @@ const PUSH_DELIVERY_TIMEOUT_MS = 10_000;
 const CRITICAL_RETRY_DELAY_MS = 5 * 60 * 1000;
 const CRITICAL_RETRY_WINDOW_MS = 72 * 60 * 60 * 1000;
 const CRITICAL_RETRY_BATCH_SIZE = 25;
-const URGENT_NOTIFICATION_TYPES = ['new_booking', 'driver_dispatch_offer', 'trip_request_nearby', 'booking_response', 'trip_request_accepted', 'driver_offer', 'offer_accepted'];
 const EXPO_RECEIPT_DELAY_MS = 15 * 60 * 1000;
 const EXPO_RECEIPT_WINDOW_MS = 24 * 60 * 60 * 1000;
 const EXPO_RECEIPT_BATCH_SIZE = 100;
@@ -109,6 +112,7 @@ const ROUTINE_TRIP_NOTIFICATION_TYPES = [
   'pickup_confirmed_by_passenger',
   'private_trip_cancelled',
   'ride_confirmation_required',
+  'arrival_confirmation_requested',
   'trip_departure_reminder',
   'trip_expired',
   'trip_expiring_soon',
@@ -155,6 +159,13 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
   private urgentWakePending = false;
   private urgentWake?: NodeJS.Immediate;
   private warmingFirebase = false;
+  private notificationPreparation?: NotificationPreparation;
+
+  private prepareInLane<T>(lane: NotificationPreparationLane, work: () => Promise<T>): Promise<T> {
+    this.notificationPreparation ??= new NotificationPreparation();
+    return this.notificationPreparation.run(lane, () => backgroundSql(this.notificationRepository.manager,
+      lane === 'standard' ? 'maintenance' : 'delivery', work));
+  }
 
   constructor(
     private configService: ConfigService,
@@ -340,10 +351,14 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
     // Ride-progress workers must not wait on provider HTTP. Stable keys also
     // prevent duplicate pushes when the same GPS transition is retried.
     if (userId && data?.bookingId && AUTOMATIC_RIDE_NOTIFICATION_TYPES.includes(data.type)) {
-      await this.notificationRepository.manager.transaction(manager => enqueueTransactionalNotification(manager, {
+      // This path only appends one outbox row: the INSERT is already atomic.
+      // Keep the stable key and await persistence, without BEGIN/COMMIT round
+      // trips. If the repository belongs to a business transaction, its manager
+      // still participates in that transaction; delivery remains deferred.
+      await enqueueTransactionalNotification(this.notificationRepository.manager, {
         eventKey: `ride-progress:${data.bookingId}:${data.type}:${userId}`,
         userId, title, body, data,
-      }));
+      });
       return true;
     }
     // Créer l'enregistrement de notification en base de données
@@ -364,24 +379,32 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
     return this.deliverSavedNotification(savedNotification);
   }
 
-  private async deliverSavedNotification(
+  /** Resolve fresh state after admission, never cache authorization across sends. */
+  private async prepareSavedNotification(
     savedNotification: Notification,
-  ): Promise<boolean> {
-    const preparationStartedAt = Date.now();
-    if (AUTOMATIC_RIDE_NOTIFICATION_TYPES.includes(savedNotification.data?.type) &&
+    revalidate = false,
+  ): Promise<string | null> {
+    if (revalidate && !await this.isCriticalNotificationStillDeliverable(savedNotification)) {
+      await this.suppressCriticalNotification(savedNotification,
+        isRetryPushClaim(savedNotification) && !savedNotification.eventKey
+          ? 'Notification critique obsolete: demande de trajet non recuperable'
+          : 'Notification transactionnelle remplacée par un état plus récent');
+      return null;
+    }
+    if (!revalidate && AUTOMATIC_RIDE_NOTIFICATION_TYPES.includes(savedNotification.data?.type) &&
         !await isRideProgressDeliverable(this.notificationRepository.manager, savedNotification)) {
       await this.suppressCriticalNotification(savedNotification, 'RIDE_PROGRESS_NO_LONGER_RELEVANT');
-      return false;
+      return null;
     }
-    if (savedNotification.data?.type === 'trip_started' &&
+    if (!revalidate && savedNotification.data?.type === 'trip_started' &&
         !await isTripStartDeliverable(this.notificationRepository.manager, savedNotification)) {
       await this.suppressCriticalNotification(savedNotification, 'TRIP_START_PASSENGER_NO_LONGER_ELIGIBLE');
-      return false;
+      return null;
     }
     if (savedNotification.data?.type === 'mobile_campaign') {
       const token = !savedNotification.userId && this.configService.get('MOBILE_OPERATIONS_ENABLED') === 'true' && this.configService.get('MOBILE_CAMPAIGNS_ENABLED') === 'true'
         ? await mobileCampaignToken(this.notificationRepository.manager, savedNotification.data) : null;
-      if (!token) { await this.suppressCriticalNotification(savedNotification, 'MOBILE_CAMPAIGN_NO_LONGER_ELIGIBLE'); return false; }
+      if (!token) { await this.suppressCriticalNotification(savedNotification, 'MOBILE_CAMPAIGN_NO_LONGER_ELIGIBLE'); return null; }
       savedNotification.fcmToken = token;
     }
     if (savedNotification.data?.type === 'app_update' && savedNotification.data?.installationId) {
@@ -390,26 +413,26 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
         ? await installationUpdateToken(this.notificationRepository.manager, savedNotification.data) : null;
       if (!token) {
         await this.suppressCriticalNotification(savedNotification, 'INSTALLATION_UPDATE_NO_LONGER_ELIGIBLE');
-        return false;
+        return null;
       }
       savedNotification.fcmToken = token;
     }
     const driverRequest = isDriverRequestNotification(savedNotification.data);
     if (driverRequest && !savedNotification.userId) {
       await this.suppressCriticalNotification(savedNotification, 'DRIVER_REQUEST_RECIPIENT_REQUIRED');
-      return false;
+      return null;
     }
     // A queued token snapshot is not proof that the device still belongs to this account.
+    let exclusivePushToken = false;
     if (savedNotification.userId) {
-      const owner = await this.userRepository.findOne({
-        where: { id: savedNotification.userId }, select: ['id', 'fcmToken', 'role', 'isActive', 'status'],
-      });
+      const owner = await readPushRecipient(this.userRepository, savedNotification.userId);
       // Recheck at delivery, including retries: eligibility may have changed since enqueueing.
       if (driverRequest && !canReceiveDriverRequests(owner)) {
         await this.suppressCriticalNotification(savedNotification, 'DRIVER_REQUEST_RECIPIENT_REQUIRED');
-        return false;
+        return null;
       }
       savedNotification.fcmToken = owner?.fcmToken?.trim() ?? '';
+      exclusivePushToken = owner?.hasExclusivePushToken === true;
     }
     if (driverRequest) {
       let passengerId: string | undefined;
@@ -417,12 +440,12 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
         passengerId = await resolveDriverRequestOwner(this.notificationRepository.manager, savedNotification.data);
       } catch {
         await this.markNotificationFailed(savedNotification, 'DRIVER_REQUEST_OWNER_CHECK_FAILED');
-        return false;
+        return null;
       }
       if (!passengerId || passengerId === savedNotification.userId) {
         await this.suppressCriticalNotification(savedNotification,
           passengerId ? 'DRIVER_REQUEST_SELF_NOTIFICATION' : 'DRIVER_REQUEST_OWNER_UNAVAILABLE');
-        return false;
+        return null;
       }
       // Preserve ownership on legacy retries and on both FCM/APNs payloads.
       savedNotification.data = { ...savedNotification.data, passengerId, notificationId: savedNotification.id };
@@ -433,26 +456,37 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
         savedNotification,
         'Aucun token push actif pour cet utilisateur',
       );
-      return false;
+      return null;
     }
+    if (savedNotification.userId && !exclusivePushToken) {
+      await this.markNotificationFailed(savedNotification, 'PUSH_TOKEN_OWNERSHIP_AMBIGUOUS');
+      return null;
+    }
+    if (isNearbyRingingRequest(savedNotification.data) &&
+        !await prepareNearbyRequestRinging(this.notificationRepository.manager, savedNotification)) {
+      await this.suppressCriticalNotification(savedNotification, 'NEARBY_REQUEST_INVALID_OR_HANDLED');
+      return null;
+    }
+    if (!await renewPushClaim(this.notificationRepository, savedNotification)) return null;
+    return pushToken;
+  }
 
+  private async deliverSavedNotification(
+    savedNotification: Notification,
+    queued = false,
+  ): Promise<boolean> {
+    const preparationStartedAt = Date.now();
+    let pushToken = '';
     try {
-      this.logger.debug(
-        `Verifying unambiguous push ownership`,
-      );
-      if (savedNotification.userId && await this.userRepository.count({ where: { fcmToken: pushToken } }) !== 1) {
-        await this.markNotificationFailed(savedNotification, 'PUSH_TOKEN_OWNERSHIP_AMBIGUOUS');
-        return false;
-      }
-      if (isNearbyRingingRequest(savedNotification.data) &&
-          !await prepareNearbyRequestRinging(this.notificationRepository.manager, savedNotification)) {
-        await this.suppressCriticalNotification(savedNotification, 'NEARBY_REQUEST_INVALID_OR_HANDLED');
-        return false;
-      }
+      const token = queued
+        ? await this.prepareInLane(URGENT_NOTIFICATION_TYPES.includes(savedNotification.data?.type) ? 'urgent' : 'standard',
+          () => this.stopping ? Promise.resolve(null) : this.prepareSavedNotification(savedNotification, true))
+        : await this.prepareSavedNotification(savedNotification);
+      if (!token) return false;
+      pushToken = token;
       this.logger.debug(
         `Sending notification through ${this.isExpoPushToken(pushToken) ? 'Expo' : 'FCM'} - Title: ${savedNotification.title}`,
       );
-      if (!await renewPushClaim(this.notificationRepository, savedNotification)) return false;
       if (URGENT_NOTIFICATION_TYPES.includes(savedNotification.data?.type))
         this.logger.log(`URGENT_PUSH_PREFLIGHT notificationId=${savedNotification.id} elapsedMs=${Date.now() - preparationStartedAt}`);
       const messageId = this.isExpoPushToken(pushToken)
@@ -837,17 +871,19 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
     this.dispatchingRealtime = true;
     const manager = this.notificationRepository.manager;
     try {
-      const ids = await claimRideRealtimeNotifications(manager);
-      if (!ids.length) return;
-      const rows = await this.notificationRepository.findBy({ id: In(ids) });
+      const rows = await backgroundSql(manager, 'delivery', () => claimRideRealtimeBatch(manager));
+      if (!rows.length) return;
       let next = 0;
       await Promise.all(Array.from({ length: Math.min(5, rows.length) }, async () => {
         while (next < rows.length) {
           const row = rows[next++];
           try {
-            await this.publishRealtimeInvitation(row);
-            await manager.query(`UPDATE ride_realtime_deliveries SET "completedAt" = clock_timestamp()
-              WHERE "notificationId" = $1`, [row.id]);
+            await this.prepareInLane('realtime', async () => {
+              if (this.stopping) return;
+              await this.publishRealtimeInvitation(row);
+              await manager.query(`UPDATE ride_realtime_deliveries SET "completedAt" = clock_timestamp()
+                WHERE "notificationId" = $1`, [row.id]);
+            });
           } catch {
             // Lease retries after 5s, never after the original invitation expires.
             this.logger.warn(`Ride realtime delivery deferred notificationId=${row.id}`);
@@ -861,6 +897,12 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
   private async publishRealtimeInvitation(notification: Notification): Promise<void> {
     if (!notification.userId || !notification.isActive ||
         !(await this.isCriticalNotificationStillDeliverable(notification))) return;
+    if (notification.data?.type === 'booking_payment_requested') {
+      // Informational refresh only: never use the new-ride ringtone or foreground launch.
+      if (!this.rideAlerts?.publish(notification.userId, { kind: 'changed',
+        bookingId: notification.data.bookingId, terminal: false })) throw new Error('Realtime transport unavailable');
+      return;
+    }
     if ((notification.data?.type === 'driver_offer' && notification.data.ringAlert === 'counter-offer-v1') ||
         (notification.data?.type === 'offer_accepted' && notification.data.ringAlert === 'offer-accepted-v1') ||
         (notification.data?.type === 'trip_request_accepted' && notification.data.ringAlert === 'request-accepted-v1')) {
@@ -959,7 +1001,8 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
     if (this.recoveringRideAcknowledgements) return;
     this.recoveringRideAcknowledgements = true;
     try {
-      await recoverUnacknowledgedRides(this.notificationRepository.manager);
+      await backgroundSql(this.notificationRepository.manager, 'maintenance', () =>
+        recoverUnacknowledgedRides(this.notificationRepository.manager));
     } catch { this.logger.warn('Native delivery acknowledgement recovery deferred.'); }
     finally { this.recoveringRideAcknowledgements = false; }
   }
@@ -980,43 +1023,10 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
     }
     let claimReleased = false;
     try {
-      const notifications =
-        await this.notificationRepository.manager.transaction(
-          async (manager) => {
-            const repository = manager.getRepository(Notification);
-            const rows = await repository
-              .createQueryBuilder('notification')
-              .where('notification.eventKey IS NOT NULL')
-              .andWhere("COALESCE(notification.data ->> 'type', '') <> 'mobile_campaign'")
-              .andWhere(urgent
-                ? "notification.data ->> 'type' IN (:...urgentTypes)"
-                : "COALESCE(notification.data ->> 'type', '') NOT IN (:...urgentTypes)",
-                { urgentTypes: URGENT_NOTIFICATION_TYPES })
-              .andWhere(urgent
-                ? '(notification.status = :pending AND notification.errorMessage IS NULL OR notification.status = :failed AND notification.updatedAt < :retryBefore OR notification.status = :pending AND notification.updatedAt < :leaseBefore)'
-                : 'notification.status = :pending AND notification.errorMessage IS NULL', {
-                pending: NotificationStatus.PENDING,
-                failed: NotificationStatus.FAILED,
-                retryBefore: new Date(Date.now() - 15_000),
-                leaseBefore: new Date(Date.now() - PUSH_CLAIM_LEASE_MS),
-              })
-              .andWhere('notification.isActive = true')
-              .andWhere(PUSH_RETRY_ELIGIBLE_SQL)
-              // Age fairness across all urgent kinds: a busy immediate lane
-              // must not starve nearby/shared requests or passenger responses.
-              .orderBy('notification.createdAt', 'ASC')
-              .addOrderBy('notification.id', 'ASC')
-              .take(urgent ? capacity - this.urgentWorkers : CRITICAL_RETRY_BATCH_SIZE)
-              .setLock('pessimistic_write')
-              .setOnLocked('skip_locked')
-              .getMany();
-            for (const row of rows) {
-              row.status = NotificationStatus.PENDING;
-              row.errorMessage = `TRANSACTIONAL_PUSH_CLAIMED:${randomUUID()}`;
-            }
-            return rows.length ? repository.save(rows) : rows;
-          },
-        );
+      const notifications = await backgroundSql(this.notificationRepository.manager, urgent ? 'delivery' : 'maintenance', () => claimTransactionalPushNotifications(
+        this.notificationRepository, urgent,
+        urgent ? capacity - this.urgentWorkers : CRITICAL_RETRY_BATCH_SIZE,
+      ));
       // Release the urgent claim gate before HTTP: the next tick can use free
       // slots while a previous provider request is slow. Never race a timeout
       // against an uncancelled send, which could duplicate delivery.
@@ -1042,18 +1052,7 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
             try {
               // Retry transport only: the original server deadline is immutable.
               // Relevance below rejects expired invitations instead of reviving them.
-              if (
-                !(await this.isCriticalNotificationStillDeliverable(
-                  notification,
-                ))
-              ) {
-                await this.suppressCriticalNotification(
-                  notification,
-                  'Notification transactionnelle remplacée par un état plus récent',
-                );
-                continue;
-              }
-              await this.deliverSavedNotification(notification);
+              await this.deliverSavedNotification(notification, true);
             } catch (error) {
               // A crashed/failed delivery is recovered by the existing stale-claim retry.
               this.logger.error(
@@ -1095,16 +1094,6 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
     }
 
     const delivered = await retryPushBatch(this.notificationRepository, notifications, async notification => {
-      if (!(await this.isCriticalNotificationStillDeliverable(notification))) {
-        await this.suppressCriticalNotification(
-          notification,
-          notification.eventKey
-            ? 'Notification transactionnelle remplacée par un état plus récent'
-            : 'Notification critique obsolete: demande de trajet non recuperable',
-        );
-        return false;
-      }
-
       if (!notification.userId && !(notification.data?.type === 'app_update' && notification.data?.installationId)) {
         await this.markNotificationFailed(
           notification,
@@ -1112,7 +1101,7 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
         );
         return false;
       }
-      return this.deliverSavedNotification(notification);
+      return this.deliverSavedNotification(notification, true);
     }, () => this.logger.warn('Critical push retry deferred; durable claim retained.'));
 
     this.logger.log(
@@ -1166,6 +1155,17 @@ export class NotificationService implements OnModuleInit, OnApplicationBootstrap
     notification: Notification,
   ): Promise<boolean> {
     const type = notification.data?.type;
+    if (type === 'booking_payment_requested') {
+      if (Date.now() - new Date(notification.createdAt).getTime() > 10 * 60_000) return false;
+      const rows = await this.notificationRepository.manager.query<unknown[]>(
+        `SELECT 1 FROM bookings b JOIN trips t ON t.id = b."tripId"
+         WHERE b.id::text = $1 AND b."passengerId"::text = $2
+           AND b."paymentMode" IN ('electronic', 'points') AND b."paymentStatus" NOT IN ('succeeded', 'initiated')
+           AND b."paymentAmount" > 0 AND
+           ((b.status = 'accepted' AND b."pickedUp" = true AND t.status = 'ongoing') OR (b.status = 'completed' AND b."droppedOff" = true))`,
+        [notification.data?.bookingId, notification.userId]);
+      return rows.length > 0;
+    }
     if (AUTOMATIC_RIDE_NOTIFICATION_TYPES.includes(type)) return isRideProgressDeliverable(this.notificationRepository.manager, notification);
     if (type === 'trip_started') return isTripStartDeliverable(this.notificationRepository.manager, notification);
     if (type === 'cash_payment_declared') {

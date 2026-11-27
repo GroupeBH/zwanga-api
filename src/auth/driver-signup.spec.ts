@@ -12,7 +12,7 @@ function fixture() {
       id: 'new-account',
     })),
     update: jest.fn(),
-    manager: { transaction: jest.fn() },
+    manager: { transaction: jest.fn(), query: jest.fn().mockResolvedValue([]) },
   };
   users.manager.transaction.mockImplementation((callback) =>
     callback({
@@ -77,6 +77,16 @@ function fixture() {
 }
 
 describe.each(['phone', 'google', 'apple'])('%s registration phone proof', provider => {
+  it('explains the permanent deleted-phone prohibition before issuing tokens or creating records', async () => {
+    const f = fixture();
+    f.users.manager.query.mockResolvedValue([{ deleted: true }]);
+    await expect(f.signup(provider, UserRole.PASSENGER, false)).rejects.toMatchObject({
+      status: 409, response: { code: 'PHONE_PREVIOUSLY_DELETED', message: expect.stringContaining('compte supprimé') },
+    });
+    expect(f.users.save).not.toHaveBeenCalled();
+    expect(f.jwt.signAsync).not.toHaveBeenCalled();
+    expect(f.otp.consumePhoneVerificationProof).not.toHaveBeenCalled();
+  });
   const token = 'x'.repeat(43);
   it('marks only an account backed by a consumed phone-bound proof as verified', async () => {
     const f = fixture();

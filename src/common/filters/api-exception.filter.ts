@@ -11,6 +11,7 @@ import type { Request, Response } from 'express';
 import { isHttpRequestAborted } from '../http-request-abort';
 import { safeRequestPath, safeRequestError } from '../safe-request-log';
 import { DriverScheduleConflictException } from '../driver-schedule-conflict';
+import { DELETED_PHONE_MESSAGE } from '../../users/deleted-phone.policy';
 
 type ApiErrorMessage = string | string[];
 
@@ -92,6 +93,9 @@ export class ApiExceptionFilter implements ExceptionFilter {
     const technicalError = this.asTransportError(exception);
     // Only translate known business exceptions from the atomic booking guard.
     const database = (exception as { driverError?: { code?: string; message?: string; constraint?: string } })?.driverError;
+    if (database?.code === '23514' && database.constraint === 'CHK_users_deleted_phone') {
+      return { statusCode: HttpStatus.CONFLICT, error: 'Numéro indisponible', code: 'PHONE_PREVIOUSLY_DELETED', message: DELETED_PHONE_MESSAGE };
+    }
     if (database?.code === '23505' && database.constraint === 'UQ_users_phone_identity') {
       return { statusCode: HttpStatus.CONFLICT, error: 'Conflit de compte', code: 'PHONE_ALREADY_REGISTERED', message: 'Ce numéro correspond déjà à un compte. Connectez-vous ou contactez le support pour récupérer votre compte.' };
     }
@@ -107,6 +111,10 @@ export class ApiExceptionFilter implements ExceptionFilter {
     const financeMessages: Record<string, string> = {
       CASH_COMMISSION_INSUFFICIENT: 'Jetons insuffisants pour la commission cash de 5 %. Après les six premiers trajets cash, régularisez le dû et rechargez avant un nouveau trajet cash.',
       CASH_DEBT_OUTSTANDING: 'Commissions cash à régulariser. Après les six premiers trajets cash, réglez le dû et provisionnez vos jetons. Les courses confirmées peuvent se terminer.',
+      CASH_EXCEPTION_ACK_REQUIRED: 'Les conditions du cash exceptionnel doivent être confirmées. Actualisez le paiement et relisez l’avertissement avant de confirmer.',
+      CASH_EXCEPTION_RECEIPT_INVALID: 'Cet encaissement exceptionnel ne peut pas être confirmé. Actualisez le trajet.',
+      CASH_EXCEPTION_ACCOUNT_UNAVAILABLE: 'Le cash exceptionnel est indisponible pour ce compte.',
+      DRIVER_CASH_RESTRICTED: 'Nouvelles courses bloquées après plusieurs récidives cash. Terminez les courses en cours et contactez l’assistance.',
       TRIP_PAYMENT_MODE_UNAVAILABLE: 'Ce mode de paiement n’est pas accepté sur ce trajet. Choisissez un mode proposé.',
       CASH_CURRENCY_UNSUPPORTED: 'Le paiement cash est disponible uniquement en francs congolais.',
       CASH_STATE_CONFLICT: 'La réservation a déjà été finalisée. Actualisez son état.',

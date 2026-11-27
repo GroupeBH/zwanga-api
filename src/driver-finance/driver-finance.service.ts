@@ -5,6 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { DataSource } from 'typeorm';
+import { readCashExceptionPolicy } from './cash-exception-policy';
 import { WalletService } from '../wallet/wallet.service';
 import { TOKEN_VALUE_CDF } from '../wallet/token-value.policy';
 import { SubscriptionsService } from '../subscriptions/subscriptions.service';
@@ -126,7 +127,7 @@ export class DriverFinanceService {
     };
   }
 
-  private async options(trip: Trip, amount: number, booking?: Booking) {
+  private async options(trip: Trip, amount: number, booking?: Booking, viewerId?: string) {
     const accepted = normalizeAcceptedPaymentModes(trip.acceptedPaymentModes);
     const state = await this.reserveState(
       trip.driverId,
@@ -148,13 +149,47 @@ export class DriverFinanceService {
       (!state.blocked &&
         state.debtTokens === 0 &&
         state.availableTokens >= tokens);
+    // Arrival-only escape hatch; do not change the driver's published modes
+    // or the eligibility of a new reservation / mixed-token settlement.
+    const cashFallbackEligible = Boolean(
+      booking &&
+      booking.status === BookingStatus.COMPLETED &&
+      booking.droppedOff &&
+      [TripPaymentMode.ELECTRONIC, TripPaymentMode.POINTS].includes(
+        booking.paymentMode,
+      ) &&
+      Number.isFinite(amount) &&
+      amount > 0 &&
+      booking.paymentStatus !== BookingPaymentStatus.SUCCEEDED &&
+      !booking.cashReceivedAt &&
+      !booking.mixedPaymentAt,
+    );
+    const couldNeedException = Boolean(booking && state.policyActive && !state.blocked && amount > 0 &&
+      booking.paymentCurrency === 'CDF' && ['accepted', 'completed'].includes(booking.status) &&
+      booking.paymentStatus !== BookingPaymentStatus.SUCCEEDED && !booking.cashReceivedAt && !booking.mixedPaymentAt &&
+      (!cashAvailable || booking.paymentMode === TripPaymentMode.CASH));
+    const exceptionPolicy = couldNeedException && booking ? await readCashExceptionPolicy(this.db, trip.driverId, booking.id, viewerId === trip.driverId) : null;
+    const exceptionalCash = Boolean(exceptionPolicy && !cashAvailable);
+    const cashException = exceptionPolicy && (exceptionalCash || exceptionPolicy.pending) ? exceptionPolicy.notice : undefined;
+    const available = accepted.filter(
+      (mode) => mode !== TripPaymentMode.CASH || cashAvailable,
+    );
+    if (
+      cashFallbackEligible &&
+      (cashAvailable || exceptionalCash) &&
+      !available.includes(TripPaymentMode.CASH)
+    ) {
+      available.push(TripPaymentMode.CASH);
+    }
     return {
       acceptedPaymentModes: accepted,
-      availablePaymentModes: accepted.filter(
-        (mode) => mode !== TripPaymentMode.CASH || cashAvailable,
-      ),
+      availablePaymentModes: available,
+      ...(booking
+        ? { cashFallbackAvailable: cashFallbackEligible && (cashAvailable || exceptionalCash), ...(cashException ? { cashException } : {}) }
+        : {}),
       cashUnavailableReason:
-        cashAvailable || !accepted.includes(TripPaymentMode.CASH)
+        cashAvailable || exceptionalCash ||
+        (!accepted.includes(TripPaymentMode.CASH) && !cashFallbackEligible)
           ? null
           : 'Après les six premiers trajets cash, le conducteur doit régulariser ses commissions et disposer des jetons nécessaires. Choisissez un autre mode ou réessayez après sa recharge.',
       commissionRate: DRIVER_FINANCE.commissionRate,
@@ -189,6 +224,7 @@ export class DriverFinanceService {
       booking.trip,
       Number(booking.paymentAmount),
       booking,
+      userId,
     );
     // Later trip edits do not invalidate a payment mode already accepted for this booking.
     if (

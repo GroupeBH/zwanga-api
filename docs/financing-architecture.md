@@ -20,6 +20,7 @@ Zwanga Pro reste une dénomination commerciale, pas un service métier unique. L
 | `ledger` | Journal comptable et historique des écritures | `CreditLedgerService` |
 | `schedules` | Échéanciers, rééchelonnement et rappels | `CreditSchedulesService`, `CreditRemindersWorker` |
 | `reporting` | Agrégats, impayés et rapprochement de dette | `CreditReportingService` |
+| `collections` | Journal de recouvrement et débiteurs en retard des deux sources, sans effet financier | `CreditCollectionsService` |
 | `shared` | Infrastructure transactionnelle, identités, montants exacts et modèles SQL partagés | `CreditStore`, utilitaires monétaires |
 
 Chaque domaine exposé dispose de son contrôleur et de ses DTO. Dans l'exécution, `EquipmentStockModule` et `VehicleDocumentsModule` sont indépendants ; `CreditFulfilmentModule` les assemble pour la remise. Les règles pures de monnaie, éligibilité, allocation des retenues et calcul d'échéancier sont séparées des services d'accès aux données.
@@ -35,6 +36,8 @@ Le worker de retenues et le worker de rappels sont enregistrés chacun dans un s
 ## Compatibilité
 
 Le découpage ne renomme ni les tables `pro_credit_*`, ni les champs HTTP, ni les événements, ni la version contractuelle `zwanga-pro-v1`. Les 35 couples méthode/route sous `/zwanga-pro` restent inchangés. Les migrations déjà écrites conservent leur identité et leur contenu. Aucune migration de données n'est nécessaire pour ce découpage seul ; les migrations fonctionnelles du module restent nécessaires avant son premier déploiement.
+
+Évolution du 25 novembre : `collections` ajoute trois routes sous `/zwanga-pro` et enrichit trois lectures admin existantes sans migration. La liste canonique des routes actuelles reste contrôlée par la spec d'architecture ; contrats, droits, exemples et limites du recouvrement figurent dans [le guide d'intégration](zwanga-pro-integration.md#recouvrement--25-novembre-2026).
 
 Le nom `PRO_CREDIT_IDENTITY_KEY` reste compatible avec la configuration existante. Aucun secret ne doit être dupliqué simplement pour refléter un changement de nom de classe. Les styles admin et partenaire ne font pas partie de cette réorganisation backend.
 

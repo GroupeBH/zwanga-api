@@ -15,7 +15,7 @@ import {
 } from './public-driver.service';
 import { PublicDriverController } from './public-driver.controller';
 import { publicDriverCredits, publicPhotoUrl } from './public-driver.model';
-import { renderDriverCard } from './public-driver.html';
+import { publicDriverWebLink } from './public-driver.web-link';
 
 const id = '11111111-1111-4111-8111-111111111111';
 const row = () => ({
@@ -190,22 +190,25 @@ describe('public driver allowlist', () => {
     ])
       expect(publicPhotoUrl(url)).toBeNull();
   });
-  it('escapes stored text and rejects script/photo URL injection in the page', async () => {
-    const f = fixture();
-    const card = await f.service.getCard(id);
-    const html = renderDriverCard({
-      ...card,
-      firstName: '<script>alert(1)</script>',
-      profilePicture: 'javascript:alert(1)',
-      vehicles: [
-        { ...card.vehicles[0], model: '<img src=x onerror=alert(1)>' },
-      ],
-    });
-    expect(html).not.toMatch(/<script|<img src=x|javascript:/);
-    expect(html).toContain('&lt;script&gt;');
-    expect(html).toContain('&lt;img src=x');
-    expect(html).toContain('En cours');
-    expect(html).not.toContain('123456');
+  it('only redirects to a configured safe site URL, never request parameters', () => {
+    expect(publicDriverWebLink(undefined, id)).toBe(
+      `https://zwanga-app.com/conducteurs/${id}`,
+    );
+    expect(publicDriverWebLink('https://web.example.test/base/', id)).toBe(
+      `https://web.example.test/base/conducteurs/${id}`,
+    );
+    expect(publicDriverWebLink('http://localhost:3000', id)).toBe(
+      `http://localhost:3000/conducteurs/${id}`,
+    );
+    for (const url of [
+      'javascript:alert(1)',
+      'http://remote.test',
+      'https://u:p@example.test',
+      'https://example.test?token=x',
+      'https://example.test#x',
+    ]) {
+      expect(() => publicDriverWebLink(url, id)).toThrow();
+    }
   });
 });
 
@@ -237,7 +240,7 @@ describe('anonymous driver QR HTTP integration (database and storage mocked)', (
   afterEach(async () => {
     await app?.close();
   });
-  it('serves JSON and a styled browser page without JWT, with no-store/noindex', async () => {
+  it('serves public JSON and redirects legacy QR to the website without rendering HTML', async () => {
     const json = await request(app.getHttpServer())
       .get(`/api/v1/public/drivers/${id}`)
       .expect(200);
@@ -247,8 +250,10 @@ describe('anonymous driver QR HTTP integration (database and storage mocked)', (
     ]);
     const page = await request(app.getHttpServer())
       .get(`/api/v1/public/drivers/${id}/card`)
-      .expect(200);
-    expect(page.headers['content-type']).toMatch(/text\/html/);
+      .expect(302);
+    expect(page.headers.location).toBe(
+      `https://zwanga-app.com/conducteurs/${id}`,
+    );
     expect(page.headers['cache-control']).toBe('no-store');
     expect(page.headers['x-robots-tag']).toContain('noindex');
     expect(page.headers['content-security-policy']).toContain(
@@ -256,8 +261,8 @@ describe('anonymous driver QR HTTP integration (database and storage mocked)', (
     );
     expect(page.headers['x-frame-options']).toBe('DENY');
     expect(page.headers['referrer-policy']).toBe('no-referrer');
-    expect(page.text).toContain('Biens à crédit chez Zwanga');
-    expect(page.text).not.toMatch(/private-|secret-|principalMinor|dueMinor/);
+    expect(page.text).toBe('');
+    expect(f.db.query).toHaveBeenCalledTimes(1); // JSON only; redirect does not read SQL.
   });
   it('invalid UUIDs are rejected before SQL', async () => {
     await request(app.getHttpServer())
@@ -265,7 +270,7 @@ describe('anonymous driver QR HTTP integration (database and storage mocked)', (
       .expect(400);
     await request(app.getHttpServer())
       .get('/api/v1/public/drivers/not-a-uuid/card')
-      .expect(404);
+      .expect(400);
     expect(f.db.query).not.toHaveBeenCalled();
   });
   it('inactive driver and backend failure never render stale information', async () => {
@@ -273,15 +278,15 @@ describe('anonymous driver QR HTTP integration (database and storage mocked)', (
     await request(app.getHttpServer())
       .get(`/api/v1/public/drivers/${id}`)
       .expect(404);
-    let page = await request(app.getHttpServer())
+    const page = await request(app.getHttpServer())
       .get(`/api/v1/public/drivers/${id}/card`)
-      .expect(404);
-    expect(page.text).toContain('Fiche indisponible');
+      .expect(302);
+    expect(page.text).toBe('');
     f.db.query.mockRejectedValue(new Error('secret database host'));
-    page = await request(app.getHttpServer())
-      .get(`/api/v1/public/drivers/${id}/card`)
-      .expect(503);
-    expect(page.text).not.toMatch(/secret database|Aucun bien à crédit/);
+    const json = await request(app.getHttpServer())
+      .get(`/api/v1/public/drivers/${id}`)
+      .expect(500);
+    expect(json.text).not.toMatch(/secret database|Aucun bien à crédit/);
     expect(page.headers['cache-control']).toBe('no-store');
   });
   it('limits anonymous repeated scans', async () => {

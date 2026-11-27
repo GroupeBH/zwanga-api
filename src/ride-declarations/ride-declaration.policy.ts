@@ -1,4 +1,5 @@
 import { ConflictException } from '@nestjs/common';
+import type { RideConfirmationMode } from './ride-confirmation-mode';
 import { dropoffDeclarationStatus, pickupDeclarationStatus, type RideActor, type RideDeclarations, type RideEvidence, type RideStage } from './ride-declaration.model';
 
 /** Bounded receipts, one immutable declaration per person and stage. */
@@ -8,18 +9,19 @@ export function recordDeclaration(
   actor: RideActor,
   evidence: RideEvidence,
   applied: boolean,
+  mode: RideConfirmationMode = 'shared',
 ): { declarations: RideDeclarations; changed: boolean; ready: boolean } {
   const declarations = current ?? {};
   const stageStatus = stage === 'dropoff' ? dropoffDeclarationStatus : pickupDeclarationStatus;
   const replayReady = !applied &&
-    stageStatus(declarations[stage], false) === 'ready';
+    stageStatus(declarations[stage], false, mode) === 'ready';
   for (const [savedStage, votes] of Object.entries(declarations)) {
     for (const [savedActor, vote] of Object.entries(votes ?? {})) {
       if (vote?.eventId !== evidence.eventId) continue;
       if (savedStage !== stage || savedActor !== actor ||
           vote.decision !== evidence.decision || vote.occurredAt !== evidence.occurredAt ||
           vote.latitude !== evidence.latitude || vote.longitude !== evidence.longitude ||
-          vote.accuracy !== evidence.accuracy) {
+          vote.accuracy !== evidence.accuracy || vote.arrivalPromptId !== evidence.arrivalPromptId) {
         throw new ConflictException({ code: 'RIDE_EVENT_CONFLICT', message: 'Cette confirmation a déjà été enregistrée avec des informations différentes. Actualisez le trajet.' });
       }
       return { declarations, changed: false, ready: replayReady };
@@ -42,7 +44,7 @@ export function recordDeclaration(
   return {
     declarations: { ...declarations, [stage]: votes },
     changed: true,
-    ready: stageStatus(votes, false) === 'ready',
+    ready: stageStatus(votes, false, mode) === 'ready',
   };
 }
 

@@ -1,4 +1,4 @@
-import { lockNextQueuedCandidate, sequentialCandidates } from './sequential-candidates';
+import { lockNextQueuedCandidate, lockQueuedCandidates, sequentialCandidates } from './sequential-candidates';
 import { TripRequest } from '../entities/trip-request.entity';
 import { PRESENCE_ALERT_LOCATION_SQL, ONGOING_ALERT_LOCATION_SQL } from './driver-alert-location-policy';
 
@@ -31,6 +31,20 @@ describe('sequential discovery versus queued validation', () => {
     expect(sql).toContain(ONGOING_ALERT_LOCATION_SQL);
   });
 
+  it('prunes occupied and already invited drivers inside both discovery branches', async () => {
+    const manager = { query: jest.fn().mockResolvedValue([]) };
+    await sequentialCandidates(manager as never, request);
+    const [sql] = manager.query.mock.calls[0];
+    const [presence, ongoing] = sql.split('UNION ALL');
+    for (const [branch, driver] of [[presence, 'p'], [ongoing, 't']]) {
+      expect(branch).toContain(`o."requestId" = $7 AND o."driverId" = ${driver}."driverId"`);
+      expect(branch).toContain(`o."driverId" = ${driver}."driverId" AND o.status = 'pending'`);
+    }
+    expect(sql).not.toContain('o."driverId" = e."driverId"');
+    expect(sql).toContain('ORDER BY e."stalePosition", ST_Distance(');
+    expect(sql).toContain('LIMIT 50');
+  });
+
   it('keeps the queued validation independent from freshness ranking', async () => {
     const manager = { query: jest.fn().mockResolvedValue([]) };
     await lockNextQueuedCandidate(manager as never, request, ['driver']);
@@ -59,17 +73,17 @@ describe('sequential discovery versus queued validation', () => {
     const manager = { query: jest.fn().mockResolvedValue([candidate]) };
     expect(await lockNextQueuedCandidate(manager as never, request, ['driver', 'next'])).toEqual({ driverId: 'driver', candidate });
     const [sql, params] = manager.query.mock.calls[0];
-    expect(params.at(-1)).toEqual(['driver', 'next']);
+    expect(params.slice(-2)).toEqual([['driver', 'next'], 1]);
     expect(sql).toContain('queued_driver AS MATERIALIZED');
-    expect(sql).toContain('p."driverId" = (SELECT id FROM queued_driver)');
-    expect(sql).toContain('t."driverId" = (SELECT id FROM queued_driver)');
+    expect(sql).toContain('p."driverId" IN (SELECT id FROM queued_driver)');
+    expect(sql).toContain('t."driverId" IN (SELECT id FROM queued_driver)');
     expect(sql).not.toContain('ST_Distance(');
     expect(sql).not.toContain('array_position(');
     expect(sql).toContain('ST_DWithin(');
     expect(sql).toContain('kyc_documents');
     expect(sql).toContain('"isActive" = true');
     expect(sql).toContain("o.status = 'pending'");
-    expect(sql).toContain('LIMIT 1 FOR NO KEY UPDATE OF driver SKIP LOCKED');
+    expect(sql).toContain('LIMIT $12 FOR NO KEY UPDATE OF driver SKIP LOCKED');
   });
 
   it('returns an ineligible checked ID so the next candidate can be tried without discovery', async () => {
@@ -77,5 +91,15 @@ describe('sequential discovery versus queued validation', () => {
     expect(await lockNextQueuedCandidate(manager as never, request, ['driver'])).toEqual({ driverId: 'driver', candidate: null });
     manager.query.mockResolvedValue([]);
     expect(await lockNextQueuedCandidate(manager as never, request, ['driver'])).toBeNull();
+  });
+
+  it('bounds and deduplicates a whole wave without re-ranking or skipping eligibility checks', async () => {
+    const manager = { query: jest.fn().mockResolvedValue([]) };
+    await lockQueuedCandidates(manager as never, request, ['a', 'b', 'a', 'c', 'd'], 4);
+    expect(manager.query.mock.calls[0][1].slice(-2)).toEqual([['a', 'b', 'c', 'd'], 4]);
+    expect(manager.query.mock.calls[0][0]).toContain('ORDER BY q.position');
+    for (const limit of [0, 5, 1.5, NaN])
+      await expect(lockQueuedCandidates(manager as never, request, ['a'], limit)).rejects.toThrow();
+    expect(manager.query).toHaveBeenCalledTimes(1);
   });
 });

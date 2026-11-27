@@ -48,6 +48,7 @@ describe('ApiExceptionFilter', () => {
 
   it.each([
     ['23505', 'UQ_users_phone_identity', 409, 'PHONE_ALREADY_REGISTERED'],
+    ['23514', 'CHK_users_deleted_phone', 409, 'PHONE_PREVIOUSLY_DELETED'],
     ['23514', 'CHK_users_phone_identity', 400, 'INVALID_PHONE_NUMBER'],
   ])('maps the phone constraint %s without exposing account information', (code, constraint, status, businessCode) => {
     const { host, response } = createHttpHost();

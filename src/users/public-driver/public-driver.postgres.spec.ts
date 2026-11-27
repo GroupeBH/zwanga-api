@@ -103,7 +103,7 @@ const bin = process.env.DRIVER_QR_TEST_POSTGRES_BIN;
         await get().expect(404);
         const page = await request(app.getHttpServer())
           .get(`/api/v1/public/drivers/${driverId}/card`)
-          .expect(404);
+          .expect(302); // Website owns unavailable-profile rendering, API still returns 404.
         expect(page.text).not.toContain('Conducteur Démo');
       },
     );
@@ -148,7 +148,7 @@ const bin = process.env.DRIVER_QR_TEST_POSTGRES_BIN;
         totalRatings: 2,
       });
     });
-    it('reflects a settled credit in the next scan with no amount in browser HTML', async () => {
+    it('reflects a settled credit in JSON and keeps legacy QR as a data-free redirect', async () => {
       await db.query(
         `UPDATE asset_credits SET status='settled' WHERE "driverId"=$1 AND status='active'`,
         [driverId],
@@ -159,9 +159,11 @@ const bin = process.env.DRIVER_QR_TEST_POSTGRES_BIN;
       ]);
       const page = await request(app.getHttpServer())
         .get(`/api/v1/public/drivers/${driverId}/card`)
-        .expect(200);
-      expect(page.text).toContain('Soldé');
-      expect(page.text).not.toContain('En cours');
+        .expect(302);
+      expect(page.headers.location).toBe(
+        `https://zwanga-app.com/conducteurs/${driverId}`,
+      );
+      expect(page.text).toBe('');
       expect(page.text).not.toMatch(
         /123456789|987654321|principalMinor|dueMinor/,
       );

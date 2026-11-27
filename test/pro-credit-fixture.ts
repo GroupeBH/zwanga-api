@@ -11,7 +11,7 @@ import { ServiceCommerce1780000140000 } from '../src/database/migrations/1780000
 
 export async function proFixture(db: DataSource) {
   await db.query(`CREATE EXTENSION "uuid-ossp";
-    CREATE TABLE users(id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),role text DEFAULT 'driver',"isDriver" boolean DEFAULT true,"isActive" boolean DEFAULT true,status text DEFAULT 'active',"createdAt" timestamptz DEFAULT now());
+    CREATE TABLE users(id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),role text DEFAULT 'driver',"isDriver" boolean DEFAULT true,"isActive" boolean DEFAULT true,status text DEFAULT 'active',"firstName" text,"lastName" text,phone text,"createdAt" timestamptz DEFAULT now());
     CREATE TABLE kyc_documents(id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),"userId" uuid,status text,"createdAt" timestamptz DEFAULT now());
     CREATE TABLE partner_organizations(id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),"legalName" text DEFAULT 'Test legal entity',status text DEFAULT 'ACTIVE');
     CREATE TABLE partner_members(id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),"userId" uuid,"organizationId" uuid,status text DEFAULT 'ACTIVE');

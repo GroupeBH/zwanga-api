@@ -183,6 +183,80 @@ async function settledBatch(tasks: Promise<unknown>[]) {
           "receivedAt" = CASE WHEN "receivedAt" IS NOT NULL THEN now() - interval '20 seconds' ELSE NULL END`,
       );
 
+    it('locks and reads driver state in one statement, preserving the original cycle and deadline on retry', async () => {
+      const notice = await create();
+      const deadline = new Date(Date.now() + 20_000).toISOString();
+      Object.assign(notice.data, { expiresAt: deadline });
+      expect(await prepare(notice)).toBe(true);
+      const [original] = await db.query('SELECT *, xmin::text AS version FROM nearby_driver_ring_state WHERE "driverId"=$1', [driver]);
+      const [originalEvent] = await db.query('SELECT xmin::text AS version FROM nearby_driver_ring_events WHERE "notificationId"=$1', [notice.id]);
+      const runner = db.createQueryRunner();
+      await runner.connect();
+      const queries = jest.spyOn(runner, 'query');
+      try {
+        expect(await prepareNearbyRequestRinging(runner.manager, notice)).toBe(true);
+        const stateQueries = queries.mock.calls.filter(([sql]) => /nearby_driver_ring_state/.test(sql));
+        expect(stateQueries).toHaveLength(1);
+        expect(stateQueries[0][0]).toContain('FOR UPDATE');
+        expect(stateQueries[0][0]).toContain('SELECT *, clock_timestamp() AS now FROM locked');
+        expect(stateQueries[0][0]).toContain('trip_request_driver_refusals');
+        expect(stateQueries[0][1]).toEqual([driver, notice.data.tripRequestId]);
+        expect(queries.mock.calls.filter(([sql]) => sql.startsWith('SELECT 1 WHERE'))).toHaveLength(0);
+        const eventWrites = queries.mock.calls.filter(([sql]) => sql.includes('INSERT INTO nearby_driver_ring_events'));
+        expect(eventWrites).toHaveLength(1);
+        expect(eventWrites[0][0]).toContain('RETURNING "notificationId", "processedAt", "declinedAt"');
+        expect(eventWrites[0][0]).toContain('IS DISTINCT FROM EXCLUDED."responseDeadline"');
+        // An unchanged event is reread after the conflict lock, not rewritten
+        // and not read through an old snapshot shared with the upsert.
+        expect(queries.mock.calls.filter(([sql]) => /SELECT "notificationId", "processedAt", "declinedAt"/.test(sql))).toHaveLength(1);
+      } finally { queries.mockRestore(); await runner.release(); }
+      const [state] = await db.query('SELECT *, xmin::text AS version FROM nearby_driver_ring_state WHERE "driverId"=$1', [driver]);
+      const [event] = await db.query('SELECT *, xmin::text AS version FROM nearby_driver_ring_events WHERE "notificationId"=$1', [notice.id]);
+      expect(state.cycleStartedAt).toEqual(original.cycleStartedAt);
+      expect(event.responseDeadline).toEqual(new Date(deadline));
+      expect(state.version).toBe(original.version);
+      expect(event.version).toBe(originalEvent.version);
+    });
+
+    it.each(['target', 'refusal'] as const)('does not create or reset driver state for a request hidden by %s', async reason => {
+      const n = await create();
+      if (reason === 'target') await db.query('UPDATE trip_requests SET "targetDriverId"=$2 WHERE id=$1',
+        [n.data.tripRequestId, otherDriver]);
+      else await refuse(n);
+      expect(await prepare(n)).toBe(false);
+      expect(await db.query('SELECT * FROM nearby_driver_ring_state WHERE "driverId"=$1', [driver])).toEqual([]);
+      // A hidden request must not reset a pre-existing legacy state either.
+      await db.query(`INSERT INTO nearby_driver_ring_state ("driverId","missedCount","mutedUntil")
+        VALUES ($1,2,clock_timestamp()+interval '1 hour')`, [driver]);
+      const before = await status();
+      expect(await prepare(n)).toBe(false);
+      expect(await status()).toEqual(before);
+      expect(await db.query('SELECT * FROM nearby_driver_ring_events')).toEqual([]);
+    });
+
+    it('serializes simultaneous first push and realtime preparations without duplicate events', async () => {
+      const notice = await create();
+      const deadline = new Date(Date.now() + 20_000).toISOString();
+      Object.assign(notice.data, { expiresAt: deadline, alertExpiresAt: deadline });
+      const results = await Promise.allSettled(Array.from({ length: 8 }, () => prepare(notice)));
+      expect(results).toEqual(Array.from({ length: 8 }, () => ({ status: 'fulfilled', value: true })));
+      const rows = await db.query('SELECT * FROM nearby_driver_ring_events WHERE "notificationId"=$1', [notice.id]);
+      expect(rows).toHaveLength(1);
+      expect(rows[0].responseDeadline).toEqual(new Date(deadline));
+      expect(await db.query('SELECT * FROM nearby_driver_ring_state WHERE "driverId"=$1', [driver])).toHaveLength(1);
+    });
+
+    it('rolls back the state insert and never grants ringing when event persistence fails', async () => {
+      const notice = await create();
+      await db.query('ALTER TABLE nearby_driver_ring_events ADD CONSTRAINT reject_test_event CHECK (false) NOT VALID');
+      try {
+        await expect(prepare(notice)).rejects.toMatchObject({ code: '23514' });
+        expect(await db.query('SELECT * FROM nearby_driver_ring_state WHERE "driverId"=$1', [driver])).toHaveLength(0);
+        expect(await db.query('SELECT * FROM nearby_driver_ring_events')).toHaveLength(0);
+      } finally { await db.query('ALTER TABLE nearby_driver_ring_events DROP CONSTRAINT reject_test_event'); }
+      expect(await prepare(notice)).toBe(true);
+    });
+
 
     it('hides a list refusal persistently for that driver only, without requiring a push', async () => {
       const n = await create();

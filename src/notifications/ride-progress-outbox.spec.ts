@@ -43,9 +43,26 @@ describe('automatic ride push is deferred, not awaited over HTTP', () => {
         }),
       );
       expect(f.service.deliverSavedNotification).not.toHaveBeenCalled();
-      expect(f.manager.transaction).toHaveBeenCalledTimes(1);
+      expect(f.query.execute).toHaveBeenCalledTimes(1);
+      expect(f.manager.transaction).not.toHaveBeenCalled();
     },
   );
+  it('waits for the single INSERT before acknowledging the alert', async () => {
+    const f = fixture();
+    let persist!: () => void;
+    f.query.execute.mockReturnValue(new Promise<void>(resolve => { persist = resolve; }));
+    let acknowledged = false;
+    const pending = f.service.sendNotification('', 'Title', 'Body', {
+      type: 'pickup_confirmed_automatically', bookingId: 'booking',
+    }, 'recipient').then(() => { acknowledged = true; });
+    await Promise.resolve();
+    expect(acknowledged).toBe(false);
+    expect(f.service.deliverSavedNotification).not.toHaveBeenCalled();
+    persist();
+    await pending;
+    expect(acknowledged).toBe(true);
+    expect(f.service.deliverSavedNotification).not.toHaveBeenCalled();
+  });
   it('does not report a successful enqueue when storage fails', async () => {
     const f = fixture();
     f.query.execute.mockRejectedValue(new Error('storage failed'));

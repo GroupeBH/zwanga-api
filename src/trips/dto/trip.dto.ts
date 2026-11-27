@@ -159,8 +159,8 @@ export class TripDiscoveryPageDto {
   limit?: number;
   @IsOptional() @IsString() @MaxLength(1024)
   cursor?: string;
-  @IsOptional() @IsIn(['price', 'date', 'nearby'])
-  sort?: 'price' | 'date' | 'nearby';
+  @IsOptional() @IsIn(['price', 'date', 'nearby', 'soonest'])
+  sort?: 'price' | 'date' | 'nearby' | 'soonest';
 }
 
 // GET query arrays can arrive as CSV or repeated string parameters. Leave
@@ -179,6 +179,12 @@ function parseSearchCoordinates(value: unknown): unknown {
 }
 
 export class SearchTripsDto extends TripDiscoveryPageDto {
+  @ApiProperty({ required: false, description: 'Origine du tri de proximité [longitude, latitude], sans filtre de rayon. Utilisée par soonest après la date de départ.' })
+  @Transform(({ value }) => parseSearchCoordinates(value), { toClassOnly: true })
+  @IsOptional() @IsArray() @ArrayMinSize(2) @ArrayMaxSize(2)
+  @IsNumber({}, { each: true }) @Min(-180, { each: true }) @Max(180, { each: true })
+  sortOriginCoordinates?: [number, number];
+
   @ApiProperty({
     required: false,
     description:

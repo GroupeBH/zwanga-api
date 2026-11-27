@@ -14,18 +14,28 @@ export async function hasRefusedRequest(manager: EntityManager, driverId: string
 }
 
 /** Caller holds the request lock, as acceptance and dispatch already do. */
-export async function recordRequestRefusal(manager: EntityManager, driverId: string, requestId: string): Promise<void> {
-  await manager.query(`INSERT INTO trip_request_driver_refusals ("driverId", "requestId")
-    VALUES ($1, $2) ON CONFLICT ("driverId", "requestId") DO NOTHING`, [driverId, requestId]);
-  await manager.query(`UPDATE trip_requests SET "targetDriverId"=NULL,"targetDriverPriorityUntil"=NULL,"updatedAt"=clock_timestamp()
+export async function recordRequestRefusal(manager: EntityManager, driverId: string, requestId: string, invitationId?: string): Promise<void> {
+  // Disjoint writes; no CTE reads another CTE's modified rows. The caller's
+  // request lock still serializes refusal with acceptance and cancellation.
+  // The optional invitation has already been checked and locked by respond().
+  // Notification matching below uses IDs only, never the offer's old/new status.
+  const declined = invitationId ? `declined AS (
+    UPDATE trip_request_dispatch_offers SET status='declined'
+      WHERE id=$3 AND "requestId"=$2 AND "driverId"=$1 AND status='pending' RETURNING id
+  ), ` : '';
+  await manager.query(`WITH ${declined}refused AS (
+    INSERT INTO trip_request_driver_refusals ("driverId", "requestId")
+      VALUES ($1, $2) ON CONFLICT ("driverId", "requestId") DO NOTHING RETURNING "requestId"
+  ), released_priority AS (
+    UPDATE trip_requests SET "targetDriverId"=NULL,"targetDriverPriorityUntil"=NULL,"updatedAt"=clock_timestamp()
     WHERE id=$2 AND "targetDriverId"=$1 AND "targetDriverPriorityUntil" IS NOT NULL
-      AND "selectedDriverId" IS NULL AND "tripId" IS NULL AND status IN ('pending','offers_received')`, [driverId, requestId]);
-  await manager.query(`UPDATE notifications SET "isActive" = false
+      AND "selectedDriverId" IS NULL AND "tripId" IS NULL AND status IN ('pending','offers_received') RETURNING id
+  ) UPDATE notifications SET "isActive" = false
     WHERE "userId" = $1 AND "isActive" = true
       AND data ->> 'type' IN ('trip_request', 'new_trip_request', 'trip_request_nearby', 'driver_dispatch_offer')
       AND (data ->> 'tripRequestId' = $2::text OR data ->> 'requestId' = $2::text
         OR data ->> 'offerId' IN (SELECT id::text FROM trip_request_dispatch_offers
-          WHERE "driverId" = $1 AND "requestId" = $2::uuid))`, [driverId, requestId]);
+          WHERE "driverId" = $1 AND "requestId" = $2::uuid))`, [driverId, requestId, ...(invitationId ? [invitationId] : [])]);
 }
 
 /** Also supports a request opened from the list, with no preceding push delivery. */

@@ -16,7 +16,7 @@ import { trustedProxyCidrs } from './common/trusted-proxy';
 import { WINSTON_MODULE_NEST_PROVIDER } from 'nest-winston';
 import { join } from 'path';
 import { AppModule } from './app.module';
-import { createAdapter } from '@socket.io/redis-adapter';
+import { createResilientRedisAdapter } from './common/resilient-redis.adapter';
 import { createClient } from 'redis';
 import {
   buildRedisClientOptions,
@@ -32,7 +32,7 @@ import type { Request, Response } from 'express';
 import { resolve } from 'path';
 
 class RedisSocketIoAdapter extends ConfiguredIoAdapter {
-  private redisAdapter?: ReturnType<typeof createAdapter>;
+  private redisAdapter?: ReturnType<typeof createResilientRedisAdapter>;
   private readonly socketIoServers = new Set<Server>();
   private pubClient?: ReturnType<typeof createClient>;
   private subClient?: ReturnType<typeof createClient>;
@@ -41,7 +41,7 @@ class RedisSocketIoAdapter extends ConfiguredIoAdapter {
     super(app, configService);
   }
 
-  setRedisAdapter(redisAdapter: ReturnType<typeof createAdapter>): void {
+  setRedisAdapter(redisAdapter: ReturnType<typeof createResilientRedisAdapter>): void {
     this.redisAdapter = redisAdapter;
     for (const server of this.socketIoServers) {
       if ('adapter' in server && typeof server.adapter === 'function') {
@@ -104,7 +104,15 @@ async function configureSocketIoRedisAdapter(
   }
 
   redisIoAdapter.setRedisClients(pubClient, subClient);
-  redisIoAdapter.setRedisAdapter(createAdapter(pubClient, subClient));
+  // Aggregate outages instead of logging every failed GPS publication.
+  let adapterFailures = 0, lastAdapterWarning = 0;
+  redisIoAdapter.setRedisAdapter(createResilientRedisAdapter(pubClient, subClient, (client, operation) => {
+    adapterFailures++;
+    if (Date.now() - lastAdapterWarning >= 5000) {
+      lastAdapterWarning = Date.now();
+      logger.warn(`socketio_redis_operation_failed client=${client} operation=${operation} total=${adapterFailures}`);
+    }
+  }));
   logger.log(
     `Redis adapter connected${redisOptionsUseTls(redisOptions) ? ' with TLS' : ''}`,
   );

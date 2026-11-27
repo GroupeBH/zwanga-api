@@ -16,6 +16,7 @@ import { Roles } from '../../common/decorators/roles.decorator';
 import { SensitiveThrottle } from '../../common/decorators/sensitive-throttle.decorator';
 import { UserRole } from '../entities/user.entity';
 import { KycEvidenceService } from './kyc-evidence.service';
+import { ATTACHMENTS } from './didit-archive.policy';
 
 @ApiTags('Admin')
 @Controller('admin/kyc/:kycId/evidence')
@@ -73,5 +74,27 @@ export class KycEvidenceController {
         disposition: `attachment; filename="kyc-${index}.jpg"`,
       },
     );
+  }
+
+  @Get(':archiveId/attachments/:kind')
+  @Header('Cache-Control', 'no-store')
+  @Header('X-Content-Type-Options', 'nosniff')
+  async attachment(
+    @Param('kycId', new ParseUUIDPipe()) kycId: string,
+    @Param('archiveId', new ParseUUIDPipe()) id: string,
+    @Param('kind') kind: string,
+    @Request() req: { user: { userId: string } },
+  ) {
+    const file = await this.evidence.attachment(
+      kycId,
+      id,
+      kind,
+      req.user.userId,
+    );
+    return new StreamableFile(file.body, {
+      type: file.mimeType,
+      length: file.size,
+      disposition: `attachment; filename="${ATTACHMENTS[file.kind].filename}"`,
+    });
   }
 }

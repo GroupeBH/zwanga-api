@@ -35,11 +35,16 @@ export async function selectDiscoveryPage(query: SelectQueryBuilder<Trip>, filte
   const filter = discoveryFilterHash(filters);
   const backwards = filters.direction === 'previous' && Boolean(filters.cursor);
   const order = backwards ? 'DESC' : 'ASC';
+  const soonest = filters.sort === 'soonest';
+  const ranking = soonest ? '0' : rankSql;
   const sortSql = filters.sort === 'price' ? '"trip"."pricePerSeat"::double precision'
-    : filters.sort === 'date' ? 'EXTRACT(EPOCH FROM trip.departureDate)::double precision' : nearbyOrder;
+    : filters.sort === 'date' ? 'EXTRACT(EPOCH FROM trip.departureDate)::double precision'
+    : soonest ? `COALESCE(${nearbyOrder}, 1e12)::double precision` : nearbyOrder;
   if (filters.cursor) {
     const cursor = readDiscoveryCursor(filters.cursor, filter);
-    query.andWhere(`(${rankSql}, ${sortSql}, trip.departureDate, trip.id) ${backwards ? '<' : '>'} (:cursorRank, :cursorSort, :cursorDate, :cursorId)`,
+    query.andWhere(soonest
+      ? `(trip.departureDate, ${sortSql}, trip.id) ${backwards ? '<' : '>'} (:cursorDate, :cursorSort, :cursorId)`
+      : `(${rankSql}, ${sortSql}, trip.departureDate, trip.id) ${backwards ? '<' : '>'} (:cursorRank, :cursorSort, :cursorDate, :cursorId)`,
       // New cursors preserve the exact timestamp-without-time-zone value.
       // Older ISO cursors still work: pg serializes Date in the same timezone
       // as entity writes, unlike an ISO string cast directly to timestamp.
@@ -49,9 +54,9 @@ export async function selectDiscoveryPage(query: SelectQueryBuilder<Trip>, filte
   // materialized CTE keeps inaccurate geographic row estimates from causing
   // thousands of repeated relation scans. One statement keeps one snapshot.
   const candidates = query.select('trip.id', 'id')
-    .addSelect(rankSql, 'discovery_rank').addSelect(sortSql, 'discovery_sort')
+    .addSelect(ranking, 'discovery_rank').addSelect(sortSql, 'discovery_sort')
     .addSelect(`to_char(trip.departureDate, 'YYYY-MM-DD"T"HH24:MI:SS.US')`, 'discovery_date')
-    .orderBy('discovery_rank', order).addOrderBy('discovery_sort', order)
+    .orderBy(soonest ? 'trip.departureDate' : 'discovery_rank', order).addOrderBy('discovery_sort', order)
     .addOrderBy('trip.departureDate', order).addOrderBy('trip.id', order).limit(limit + 1);
   const readQuery = query.createQueryBuilder().select('trip').from(Trip, 'trip')
     .addCommonTableExpression(candidates, 'discovery_page', { materialized: true })
@@ -59,7 +64,7 @@ export async function selectDiscoveryPage(query: SelectQueryBuilder<Trip>, filte
     .leftJoinAndSelect('trip.driver', 'driver').leftJoinAndSelect('trip.vehicle', 'vehicle')
     .addSelect('page.discovery_rank', 'discovery_rank').addSelect('page.discovery_sort', 'discovery_sort')
     .addSelect('page.discovery_date', 'discovery_date')
-    .orderBy('page.discovery_rank', order).addOrderBy('page.discovery_sort', order)
+    .orderBy(soonest ? 'trip.departureDate' : 'page.discovery_rank', order).addOrderBy('page.discovery_sort', order)
     .addOrderBy('trip.departureDate', order).addOrderBy('trip.id', order);
   const result = await executeDiscoveryRead(readQuery);
   const entities = result.entities.slice(0, limit);

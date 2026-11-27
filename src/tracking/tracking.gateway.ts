@@ -22,6 +22,7 @@ import {
   DriverLocationSocketDto,
   PassengerLocationSocketDto,
   TripSocketDto,
+  TrackingStateSocketDto,
 } from './dto/tracking-socket.dto';
 import {
   assertSocketRoomCapacity,
@@ -30,6 +31,8 @@ import {
   WsAuthenticatedGuard,
   WsErrorFilter,
 } from '../common/websocket-security';
+import { TrackingStateChangedException } from '../common/tracking-state-changed.exception';
+import { TrackingStateService } from './tracking-state.service';
 
 @WebSocketGateway({
   namespace: '/tracking',
@@ -51,6 +54,7 @@ export class TrackingGateway
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
     private readonly sessions: WsSessionService,
+    private readonly trackingState: TrackingStateService,
   ) {}
 
   private parseCoordinates(coordinates?: [number, number]): [number, number] {
@@ -200,6 +204,21 @@ export class TrackingGateway
     await client.leave(`trip:${data.tripId}`);
   }
 
+  @SubscribeMessage('get_tracking_state')
+  async handleGetTrackingState(@ConnectedSocket() client: Socket, @MessageBody() data: TrackingStateSocketDto) {
+    try {
+      return { success: true, state: await this.trackingState.read(client.data.userId, data.tripId, data.bookingId) };
+    } catch (error) {
+      emitSocketError(client, error);
+      return { success: false };
+    }
+  }
+
+  private stoppedAcknowledgement(error: TrackingStateChangedException, recordedAt?: string) {
+    return { success: false, status: 'state_changed', code: 'TRACKING_STATE_CHANGED',
+      tripId: error.tripId, ...(error.bookingId ? { bookingId: error.bookingId } : {}), recordedAt };
+  }
+
   @SubscribeMessage('driver_location_update')
   async handleDriverLocationUpdate(
     @ConnectedSocket() client: Socket,
@@ -219,8 +238,6 @@ export class TrackingGateway
           recordedAt: data.recordedAt,
         },
       );
-      await this.bookingsService.queueAutomaticRideProgressForTrip(data.tripId);
-
       this.server.to(`trip:${data.tripId}`).emit('driver_location', location);
       this.logGpsSample('driver_location_update', {
         tripId: data.tripId,
@@ -239,6 +256,7 @@ export class TrackingGateway
         updatedAt: location.updatedAt,
       };
     } catch (error) {
+      if (error instanceof TrackingStateChangedException) return this.stoppedAcknowledgement(error, data.recordedAt);
       emitSocketError(client, error);
       return { success: false };
     }
@@ -303,6 +321,7 @@ export class TrackingGateway
         updatedAt: location.updatedAt,
       };
     } catch (error) {
+      if (error instanceof TrackingStateChangedException) return this.stoppedAcknowledgement(error, data.recordedAt);
       emitSocketError(client, error);
       return { success: false };
     }

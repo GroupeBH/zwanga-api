@@ -3,7 +3,7 @@ import { withRedisCommandDeadlines } from './redis-command-deadline';
 describe('Redis command deadlines', () => {
   beforeEach(() => jest.useFakeTimers());
   afterEach(() => jest.useRealTimers());
-  it.each(['eval', 'zScore', 'zAdd', 'zRangeByScore', 'zRem'])('bounds stalled %s without retrying it', async command => {
+  it.each(['mGet', 'eval', 'evalSha', 'zScore', 'zAdd', 'zRangeByScore', 'zRem'])('bounds stalled %s without retrying it', async command => {
     const client = { [command]: jest.fn(() => new Promise(() => undefined)) };
     const recover = jest.fn();
     const wrapped = withRedisCommandDeadlines(client, 2000, recover);

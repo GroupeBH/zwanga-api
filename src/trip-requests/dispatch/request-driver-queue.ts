@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { randomUUID } from 'node:crypto';
 import { RedisService } from '../../common/services/redis.service';
 import { REQUEST_RESPONSE_MS } from './sequential-policy';
+import { EMPTY_DISCOVERY_RETRY_MS } from './dispatch-scheduling-policy';
 
 export const REQUEST_DEADLINES_KEY = 'ride-requests:deadlines';
 // Scheduling lease only, not the driver's response/delivery deadline. A worker
@@ -82,19 +83,67 @@ export class RequestDriverQueue {
     return deadline === null || deadline <= Date.now();
   }
   async schedule(id: string, at: number) { await this.redis.getClient().zAdd(REQUEST_DEADLINES_KEY, { score: at, value: id }); }
-  async claimDue(now: number): Promise<string[]> {
+  /** Shared across replicas, so cron and event hints cannot repeatedly rebuild
+   * the same geographic candidate list in a burst. SQL still fences offers. */
+  async claimDiscovery(id: string, version = 'default'): Promise<boolean> {
+    return !!await this.redis.getClient().set(key(id) + ':discovery:' + version, '1', { NX: true, PX: 1000 });
+  }
+  async retryEmpty(id: string, hasBeenOffered: boolean): Promise<number> {
+    const now = Date.now();
+    return Number(await this.redis.getClient().eval(`
+      local attempt = redis.call('INCR', KEYS[1])
+      redis.call('EXPIRE', KEYS[1], 300)
+      local delays = {${EMPTY_DISCOVERY_RETRY_MS.join(',')}}
+      local delay = delays[math.min(attempt, #delays)]
+      if ARGV[2] == '1' then delay = delays[#delays] end
+      redis.call('ZADD', KEYS[2], tonumber(ARGV[1]) + delay, ARGV[3])
+      return delay`, { keys: [key(id) + ':empty-attempts', REQUEST_DEADLINES_KEY],
+      arguments: [String(now), hasBeenOffered ? '1' : '0', id] }));
+  }
+  async offered(id: string) { await this.redis.getClient().del(key(id) + ':empty-attempts'); }
+  async claimAvailability(driverId: string): Promise<boolean> {
+    return (await this.claimAvailabilityMany([driverId])).length > 0;
+  }
+  /** One bounded round trip for a release wave, shared across API replicas.
+   * Hints only: a Redis error still falls back to the durable dispatch scan. */
+  async claimAvailabilityMany(ids: string[]): Promise<string[]> {
+    const unique = [...new Set(ids)].slice(0, 16);
+    if (!unique.length) return [];
+    const claimed = await this.redis.getClient().eval(`
+      local claimed = {}
+      for i, key in ipairs(KEYS) do
+        if redis.call('SET', key, '1', 'NX', 'PX', 1000) then
+          table.insert(claimed, ARGV[i])
+        end
+      end
+      return claimed`, { keys: unique.map(id => 'ride-requests:availability:' + id), arguments: unique });
+    if (!Array.isArray(claimed)) throw new Error('Invalid Redis availability claim result');
+    return claimed.map(String);
+  }
+  async wake(id: string): Promise<boolean> {
+    // Cross-replica deduplication and bounded SQL hint rate. Do not postpone an
+    // earlier deadline, and do not remove the crash-recovery scheduling entry.
+    return Number(await this.redis.getClient().eval(`
+      if not redis.call('SET', KEYS[1], '1', 'NX', 'PX', 1000) then return 0 end
+      redis.call('ZADD', KEYS[2], 'LT', ARGV[1], ARGV[2])
+      return 1`, { keys: [key(id) + ':wake', REQUEST_DEADLINES_KEY],
+      arguments: [String(Date.now()), id] })) === 1;
+  }
+  async claimDue(now: number, limit = 50): Promise<string[]> {
+    if (!Number.isInteger(limit) || limit < 0 || limit > 50) throw new Error('Invalid deadline claim limit');
+    if (!limit) return [];
     const result = await this.redis.getClient().eval(`
-      local due = redis.call('ZRANGEBYSCORE', KEYS[1], 0, ARGV[1], 'LIMIT', 0, 50)
+      local due = redis.call('ZRANGEBYSCORE', KEYS[1], 0, ARGV[1], 'LIMIT', 0, ARGV[3])
       for _, id in ipairs(due) do
         redis.call('ZADD', KEYS[1], ARGV[2], id)
       end
       return due`, { keys: [REQUEST_DEADLINES_KEY],
-      arguments: [String(now), String(now + REQUEST_DEADLINE_CLAIM_MS)] });
+      arguments: [String(now), String(now + REQUEST_DEADLINE_CLAIM_MS), String(limit)] });
     if (!Array.isArray(result)) throw new Error('Invalid Redis deadline claim result');
     return result.map(String);
   }
   async close(id: string) {
-    await this.redis.getClient().del([key(id) + ':waiting', key(id) + ':version']);
+    await this.redis.getClient().del([key(id) + ':waiting', key(id) + ':version', key(id) + ':empty-attempts']);
     await this.redis.getClient().zRem(REQUEST_DEADLINES_KEY, id);
   }
 }

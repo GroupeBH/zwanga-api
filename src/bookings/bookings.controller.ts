@@ -1,4 +1,6 @@
+import { BookingResponseInterceptor } from './booking-response.interceptor';
 import {
+  UseInterceptors,
   ParseUUIDPipe,
   Controller,
   Get,
@@ -28,6 +30,7 @@ import {
 } from '../trips/dto/trip-interruption.dto';
 
 @ApiTags('Bookings')
+@UseInterceptors(BookingResponseInterceptor)
 @Controller('bookings')
 export class BookingsController {
   constructor(private readonly bookingsService: BookingsService, private readonly rideDeclarations: RideDeclarationsService) { }
@@ -312,7 +315,7 @@ export class BookingsController {
   @Auth()
   // @Roles(UserRole.DRIVER)
   @SensitiveThrottle(20, 60000)
-  @ApiOperation({ summary: 'Record driver pickup confirmation (both parties required)' })
+  @ApiOperation({ summary: 'Confirm pickup: driver alone for request-origin trips, both parties for published trips' })
   async confirmPickup(@Request() req, @Param('id') id: string, @Body() dto: ConfirmPickupDto) {
     return this.declareLegacy(id, req.user.userId, 'pickup', 'driver');
   }
@@ -320,7 +323,7 @@ export class BookingsController {
   @Put(':id/confirm-pickup-passenger')
   @Auth()
   @SensitiveThrottle(20, 60000)
-  @ApiOperation({ summary: 'Confirm pickup by passenger' })
+  @ApiOperation({ summary: 'Confirm pickup by passenger for a published trip only' })
   async confirmPickupByPassenger(@Request() req, @Param('id') id: string, @Body() dto: ConfirmPickupDto) {
     return this.declareLegacy(id, req.user.userId, 'pickup', 'passenger');
   }
@@ -329,7 +332,7 @@ export class BookingsController {
   @Auth()
   // @Roles(UserRole.DRIVER)
   @SensitiveThrottle(20, 60000)
-  @ApiOperation({ summary: 'Record driver arrival declaration (passenger confirmation required)' })
+  @ApiOperation({ summary: 'Confirm arrival: driver alone for request-origin trips, existing passenger rule for published trips' })
   async confirmDropoff(@Request() req, @Param('id') id: string, @Body() dto: ConfirmDropoffDto) {
     return this.declareLegacy(id, req.user.userId, 'dropoff', 'driver');
   }
@@ -337,7 +340,7 @@ export class BookingsController {
   @Put(':id/confirm-dropoff-passenger')
   @Auth()
   @SensitiveThrottle(20, 60000)
-  @ApiOperation({ summary: 'Confirm arrival and allow payment by the reservation holder without waiting for the driver' })
+  @ApiOperation({ summary: 'Confirm arrival and allow payment by the reservation holder for a published trip only' })
   async confirmDropoffByPassenger(@Request() req, @Param('id') id: string, @Body() dto: ConfirmDropoffDto) {
     return this.declareLegacy(id, req.user.userId, 'dropoff', 'passenger');
   }
@@ -360,7 +363,7 @@ export class BookingsController {
   @ApiOperation({ summary: 'Update passenger current location (passenger only)' })
   async updatePassengerLocation(
     @Request() req,
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Body() updateLocationDto: UpdatePassengerLocationDto,
   ) {
     return this.bookingsService.updatePassengerLocation(req.user.userId, id, updateLocationDto, { deferProgress: true });

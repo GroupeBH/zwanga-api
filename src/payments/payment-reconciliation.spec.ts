@@ -40,6 +40,8 @@ describe('Durable deposit reconciliation', () => {
   });
   it('preserves success when a concurrent provider request finishes late with pending state', async () => {
     const stored = {
+      reference: 'merchant-reference',
+      orderNumber: 'provider-order',
       id: 'payment',
       provider: PaymentProvider.FLEXPAY,
       status: PaymentStatus.SUCCEEDED,

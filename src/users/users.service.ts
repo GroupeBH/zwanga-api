@@ -49,6 +49,7 @@ import { assertSelfServiceUserRole, isAdminRole } from './user-role.policy';
 import { activateRequestedDriver } from './driver-activation';
 import { resolveDriverCategory } from './driver-category';
 import { accountReservesPhone } from './registration-phone.policy';
+import { assertPhoneNotDeleted } from './deleted-phone.policy';
 import {
   accountPhoneWhere,
   authAccountPhoneWhere,
@@ -282,6 +283,7 @@ export class UsersService {
         googleId: () => 'NULL',
         appleId: () => 'NULL',
         phone: () => 'NULL',
+        deletedAt: () => 'COALESCE("deletedAt", CURRENT_TIMESTAMP)',
         password: () => 'NULL',
         firstName: 'Compte',
         lastName: 'supprimé',
@@ -884,6 +886,9 @@ export class UsersService {
     sendOtpDto: SendPhoneVerificationOtpDto,
   ): Promise<{ message: string; codeLength?: number; expiresInSeconds?: number }> {
     const phone = canonicalAccountPhone(sendOtpDto.phone);
+    if (sendOtpDto.context === PhoneVerificationContext.REGISTRATION) {
+      await assertPhoneNotDeleted(this.userRepository.manager, phone);
+    }
     const existingUser = await this.userRepository.findOne({
       where: {
         phone: sendOtpDto.context === PhoneVerificationContext.REGISTRATION

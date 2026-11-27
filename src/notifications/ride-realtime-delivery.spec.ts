@@ -1,11 +1,11 @@
 import { NotificationService } from './notifications.service';
 import { prepareNearbyRequestRinging } from './nearby-request-cooldown';
-import { claimRideRealtimeNotifications } from './ride-realtime-delivery';
+import { claimRideRealtimeBatch } from './ride-realtime-delivery';
 
 jest.mock('./nearby-request-cooldown', () => ({
   ...jest.requireActual('./nearby-request-cooldown'), prepareNearbyRequestRinging: jest.fn(),
 }));
-jest.mock('./ride-realtime-delivery', () => ({ claimRideRealtimeNotifications: jest.fn() }));
+jest.mock('./ride-realtime-delivery', () => ({ claimRideRealtimeBatch: jest.fn() }));
 
 describe('independent ride realtime delivery', () => {
   const fixture = () => {
@@ -20,10 +20,17 @@ describe('independent ride realtime delivery', () => {
     jest.spyOn(service as any, 'isCriticalNotificationStillDeliverable').mockResolvedValue(true);
     const send = jest.spyOn(service as any, 'sendFirebaseNotification').mockImplementation(() => new Promise(() => {}));
     jest.mocked(prepareNearbyRequestRinging).mockResolvedValue(true);
-    jest.mocked(claimRideRealtimeNotifications).mockResolvedValue(['notice']);
+    jest.mocked(claimRideRealtimeBatch).mockResolvedValue([notice as any]);
     return { service, notice, query, publish, send };
   };
   afterEach(() => jest.restoreAllMocks());
+  it('payment invitation refreshes the passenger booking without the incoming-ride ringtone', async () => {
+    const f = fixture(); f.notice.userId = 'passenger';
+    Object.assign(f.notice.data, { type: 'booking_payment_requested', role: 'passenger', bookingId: 'booking' });
+    await f.service.dispatchRealtimeNotifications();
+    expect(f.publish).toHaveBeenCalledWith('passenger', { kind: 'changed', bookingId: 'booking', terminal: false });
+    expect(f.send).not.toHaveBeenCalled();
+  });
   it.each(['passenger_counter', 'driver_final'])('routes %s to the actual respondent without rewriting the passenger identity', async stage => {
     const f = fixture();
     f.notice.userId = stage === 'passenger_counter' ? 'driver' : 'passenger';

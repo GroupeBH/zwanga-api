@@ -58,6 +58,7 @@ import { normalizeLegalName } from '../users/legal-identity.util';
 import { RedisService } from '../common/services/redis.service';
 import { matchesStoredToken, tokenFingerprint } from './token-fingerprint';
 import { rethrowSessionError } from './session-error';
+import { assertPhoneNotDeleted } from '../users/deleted-phone.policy';
 import { openRefreshReceipt, REFRESH_RECOVERY_SECONDS, sealRefreshReceipt } from './refresh-recovery';
 import {
   accountReservesPhone,
@@ -204,6 +205,7 @@ export class AuthService {
     });
     const driverCategory = resolveDriverCategory(registerDto.driverCategory, role === UserRole.DRIVER);
 
+    await assertPhoneNotDeleted(this.userRepository.manager, phone);
     // Check if user already exists
     const existingUser = await this.userRepository.findOne({
       where: [{ phone: accountPhoneWhere(phone, false) }],
@@ -1200,6 +1202,7 @@ export class AuthService {
           );
         }
 
+        await assertPhoneNotDeleted(this.userRepository.manager, phone);
         // Ensure phone is not already used
         const phoneOwner = await this.userRepository.findOne({
           where: { phone: accountPhoneWhere(phone, false) },
@@ -1606,6 +1609,7 @@ export class AuthService {
         );
       }
 
+      await assertPhoneNotDeleted(this.userRepository.manager, phone);
       const phoneOwner = await this.userRepository.findOne({
         where: { phone: accountPhoneWhere(phone, false) },
       });

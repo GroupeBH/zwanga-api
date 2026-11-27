@@ -1,3 +1,11 @@
+import { TrackingStateChangedException } from '../common/tracking-state-changed.exception';
+import { cancelBookingBeforePickup } from './cancel-booking';
+import { cappedFirstTripFare } from './first-trip-subsidy.policy';
+import { canContactBookingDriver } from './booking-response';
+import { completePaidRequestTransaction } from './paid-request-completion';
+import { persistPassengerLocation } from '../tracking/persist-tracking-location';
+import { readPassengerTrackingBooking } from '../tracking/read-tracking-location';
+import { readRideProgressBookings } from './read-ride-progress';
 import { enqueueTransactionalNotification } from '../notifications/transactional-notification';
 import { acceptedBookingProposalTotal, validateBookingPriceProposal } from './booking-price-proposal';
 import { trustedContactMessagesEnabled } from '../safety/trusted-contact-policy';
@@ -7,10 +15,12 @@ import { enqueueRideProgress } from '../tracking/ride-progress-queue';
 import { runExclusiveMaintenanceJob } from '../common/exclusive-maintenance-job';
 import { scanFinancialIntegrity } from '../wallet/financial-integrity-scan';
 import { withBookableTrip } from './bookable-trip-transaction';
+import { assertBookingPickupNearRoute, bookingRouteSignature } from './booking-pickup-route';
 import { lockAvailableAccounts } from '../users/account-availability';
 import { canApplyBookingPayment } from './booking-payment-transition';
 import { finishEmptyPrivateTrip } from './private-trip-cancellation';
 import { hasRecentDestinationPassage } from './destination-passage';
+import { ArrivalAssistanceService } from './arrival-assistance.service';
 import {
   Injectable,
   NotFoundException,
@@ -19,6 +29,7 @@ import {
   Logger,
   ForbiddenException,
   OnModuleInit,
+  Optional,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { ConfigService } from '@nestjs/config';
@@ -26,6 +37,7 @@ import { Cron } from '@nestjs/schedule';
 import { NO_RIDE_DISPUTE_SQL } from '../ride-declarations/ride-declaration.policy';
 import type { RideStage } from '../ride-declarations/ride-declaration.model';
 import { hasRideDispute } from '../ride-declarations/ride-declaration.model';
+import { assertPassengerCanConfirmRide } from '../ride-declarations/ride-confirmation-mode';
 import { canPayNearArrival, EARLY_PAYMENT_DISTANCE_METERS } from './near-arrival-payment';
 import { activeBookingWhere } from '../common/activity-read-policy';
 import { selectBookingHistory } from './booking-history';
@@ -221,7 +233,7 @@ export class BookingsService implements OnModuleInit {
   private readonly MAX_SEATS_WITHOUT_APPROVED_KYC = 2;
   private readonly BOOKING_RELATED_ENTITY_TYPE = 'booking';
   private readonly DEFAULT_TRIP_PAYMENT_CURRENCY = 'CDF';
-  private readonly DEFAULT_FIRST_TRIP_SUBSIDY_ENABLED = true;
+  private readonly DEFAULT_FIRST_TRIP_SUBSIDY_ENABLED = false;
   private readonly DEFAULT_FIRST_TRIP_PASSENGER_PAYMENT_RATE = 0.4;
   private readonly FIRST_TRIP_SUBSIDY_RELEASED_STATUSES = [
     BookingStatus.CANCELLED,
@@ -258,6 +270,7 @@ export class BookingsService implements OnModuleInit {
     private referralsService: ReferralsService,
     private locationHistoryService: LocationHistoryService,
     private readonly dataSource: DataSource,
+    @Optional() private readonly arrivalAssistance?: ArrivalAssistanceService,
   ) {
     this.boardingDetectionConfig = loadBoardingDetectionConfig(
       this.configService,
@@ -1287,6 +1300,11 @@ export class BookingsService implements OnModuleInit {
           )
         : trip.departurePoint;
 
+    // Validate before creating a booking, reserving seats or touching money. Never call
+    // the route provider while holding the trip transaction lock below.
+    const validatedRouteSignature = bookingRouteSignature(trip);
+    await assertBookingPickupNearRoute(trip, passengerOriginPoint, this.googleMapsService);
+
     // Use trip's arrival location as default if passenger destination is not specified
     const passengerDestination =
       createBookingDto.passengerDestination || trip.arrivalLocation;
@@ -1355,6 +1373,9 @@ export class BookingsService implements OnModuleInit {
     const savedBooking = await withBookableTrip(
       this.tripRepository, trip.id, booking.numberOfSeats,
       async (manager, currentTrip) => {
+        if (bookingRouteSignature(currentTrip) !== validatedRouteSignature) {
+          throw new BadRequestException('L’itinéraire a changé. Actualisez le trajet avant de réserver.');
+        }
         if (Number(currentTrip.pricePerSeat) !== Number(trip.pricePerSeat) ||
             (grossPaymentAmount > 0 && currentTrip.acceptedPaymentModes &&
              !currentTrip.acceptedPaymentModes.includes(paymentMode))) {
@@ -2380,7 +2401,7 @@ export class BookingsService implements OnModuleInit {
   async cancel(bookingId: string, userId: string): Promise<void> {
     this.logger.log(`Cancelling booking ${bookingId} by user ${userId}`);
 
-    const booking = await this.bookingRepository.findOne({
+    let booking = await this.bookingRepository.findOne({
       where: { id: bookingId },
       relations: ['passenger', 'trip', 'trip.driver'],
     });
@@ -2442,20 +2463,13 @@ export class BookingsService implements OnModuleInit {
       );
     }
 
-    const oldStatus = booking.status;
-    const trip = await this.tripRepository.findOne({
-      where: { id: booking.tripId },
-      relations: ['driver'],
-    });
-
-    if (!trip) {
-      throw new NotFoundException('Trajet non trouvé');
-    }
-
-    booking.status = BookingStatus.CANCELLED;
-    booking.cancelledAt = new Date();
-    this.releaseFirstTripSubsidyReservation(booking, trip);
-    await this.bookingRepository.save(booking);
+    const previous = booking;
+    const cancelled = await cancelBookingBeforePickup(this.bookingRepository, bookingId, userId,
+      (current, currentTrip) => this.releaseFirstTripSubsidyReservation(current, currentTrip));
+    booking = Object.assign(cancelled.booking, { passenger: previous.passenger,
+      trip: Object.assign(cancelled.trip, { driver: previous.trip.driver }) });
+    const { oldStatus } = cancelled;
+    const trip = booking.trip;
     await this.refundPointsPaymentIfNeeded(booking);
 
     // Remettre les places disponibles si la réservation était en PENDING ou ACCEPTED
@@ -2706,6 +2720,9 @@ export class BookingsService implements OnModuleInit {
       throw new ForbiddenException('Accès refusé');
     }
 
+    if (requesterId !== booking.trip.driverId && !canContactBookingDriver(booking.status, booking.trip.status)) {
+      throw new ForbiddenException('Le contact du conducteur n’est plus disponible pour cette réservation');
+    }
     const driver = booking.trip.driver;
 
     if (!driver) {
@@ -3094,6 +3111,19 @@ export class BookingsService implements OnModuleInit {
         : Number(completedBooking.paymentAmount ?? grossAmount),
     );
     await this.referralsService.awardBookingReward(completedBooking);
+    if (completedBooking.trip.tripRequestId) await this.completePaidRequestTrip(completedBooking.tripId);
+  }
+
+  /** Also called after cash receipts. Payment and arrival may arrive in either order. */
+  async completePaidRequestTrip(tripId: string): Promise<boolean> {
+    const completed = await completePaidRequestTransaction(this.tripRepository, tripId, new Date());
+    if (!completed) return false;
+    await this.cacheService.del(CacheService.getTripKey(tripId));
+    await this.cacheService.del(CacheService.getTripsListKey());
+    await this.cacheService.del(CacheService.getTripsListKey('all'));
+    await this.walletService.awardLoyaltyForCompletedTrip(completed);
+    await this.driverSettlementsService.notifyDriverTripRevenue(completed.driverId, tripId);
+    return true;
   }
 
   private async ensureLoyaltyDistanceForCompletedBooking(
@@ -3153,6 +3183,10 @@ export class BookingsService implements OnModuleInit {
   private resolveBookingPaymentAmount(booking: Booking, trip: Trip): number {
     if (booking.mixedPaymentAt) return Number(booking.paymentAmount);
     if (booking.interruptionFareLocked) return this.roundMoney(Number(booking.paymentAmount));
+    // The agreed amount is authoritative, not the rounded display ratio.
+    if (this.isFirstTripSubsidyReserved(booking) && booking.paymentAmount != null && Number.isFinite(Number(booking.paymentAmount))) {
+      return this.roundMoney(Number(booking.paymentAmount));
+    }
     const grossAmount = this.resolveBookingGrossPaymentAmount(booking, trip);
     if (
       this.isFirstTripSubsidyReserved(booking) &&
@@ -3208,6 +3242,27 @@ export class BookingsService implements OnModuleInit {
     if (booking.interruptionFareLocked) {
       return this.buildBookingFareBreakdown(booking, Number(booking.grossPaymentAmount), Number(booking.paymentAmount));
     }
+    // Preserve existing commitments, including legacy fares above the new ceiling.
+    // Such legacy earnings are blocked at withdrawal pending reconciliation.
+    if (this.isFirstTripSubsidyReserved(booking) && booking.grossPaymentAmount != null && booking.paymentAmount != null) {
+      const gross = Number(booking.grossPaymentAmount);
+      const passenger = Number(booking.paymentAmount);
+      const subsidy = Number(booking.zwangaSubsidyAmount);
+      const agreedGross = this.roundMoney(passenger + subsidy);
+      if ([gross, passenger, subsidy].every(Number.isFinite) && gross > 0 && passenger >= 0 && subsidy >= 0) {
+        if (this.roundMoney(gross) === agreedGross) {
+          return this.buildBookingFareBreakdown(booking, gross, passenger);
+        }
+        // A driver can accept a lower proposed fare before pickup. Reduce both
+        // shares proportionally; never keep an inconsistent old subsidy snapshot.
+        if (gross < agreedGross) {
+          booking.paymentAmount = this.roundMoney(gross * passenger / agreedGross);
+          booking.zwangaSubsidyAmount = this.roundMoney(gross - booking.paymentAmount);
+          booking.passengerPaymentRate = booking.paymentAmount / gross;
+          return this.buildBookingFareBreakdown(booking, gross, booking.paymentAmount);
+        }
+      }
+    }
     const grossAmount = this.resolveBookingGrossPaymentAmount(booking, trip);
     booking.grossPaymentAmount = grossAmount;
 
@@ -3245,13 +3300,10 @@ export class BookingsService implements OnModuleInit {
     const passengerPaymentRate = this.isFirstTripSubsidyReserved(booking)
       ? this.resolvePersistedPassengerPaymentRate(booking)
       : this.getFirstTripPassengerPaymentRate();
-    const passengerAmount = this.roundMoney(grossAmount * passengerPaymentRate);
-    const zwangaSubsidyAmount = this.roundMoney(
-      Math.max(0, grossAmount - passengerAmount),
-    );
+    const { passengerAmount, subsidyAmount: zwangaSubsidyAmount } = cappedFirstTripFare(grossAmount, passengerPaymentRate);
 
     booking.firstTripSubsidyApplied = true;
-    booking.passengerPaymentRate = passengerPaymentRate;
+    booking.passengerPaymentRate = passengerAmount / grossAmount;
     booking.paymentAmount = passengerAmount;
     booking.zwangaSubsidyAmount = zwangaSubsidyAmount;
 
@@ -3287,7 +3339,8 @@ export class BookingsService implements OnModuleInit {
     grossAmount: number,
     manager?: EntityManager,
   ): Promise<boolean> {
-    if (!this.isFirstTripSubsidyEnabled() || grossAmount <= 0) {
+    if (!this.isFirstTripSubsidyEnabled() || grossAmount <= 0 ||
+        (booking.paymentCurrency || this.getTripPaymentCurrency()) !== 'CDF') {
       return false;
     }
 
@@ -3895,13 +3948,13 @@ export class BookingsService implements OnModuleInit {
       return;
     }
     if (stage === 'dropoff') {
-      if (!booking.droppedOff || !['manual_dual_confirmation', 'manual_passenger_confirmation'].includes(booking.dropoffDetectionMethod ?? '')) return;
+      if (!booking.droppedOff || !['manual_dual_confirmation', 'manual_passenger_confirmation', 'manual_driver_confirmation', 'manual_passenger_near_destination'].includes(booking.dropoffDetectionMethod ?? '')) return;
       await this.settlePaymentAfterArrival(booking);
       await this.notifySelectedEmergencyContacts(booking, 'dropoff');
       await this.notifyPassengerAboutAutomaticDropoffConfirmation(booking);
       await this.notifyDriverAboutAutomaticDropoffConfirmation(booking);
     } else {
-      if (!booking.pickedUp || !['manual_dual_confirmation', 'manual_passenger_confirmation'].includes(booking.pickupDetectionMethod ?? '')) return;
+      if (!booking.pickedUp || !['manual_dual_confirmation', 'manual_passenger_confirmation', 'manual_driver_confirmation'].includes(booking.pickupDetectionMethod ?? '')) return;
       await this.notifySelectedEmergencyContacts(booking, 'pickup');
       await this.notifyDriverEmergencyContactsOnPickup(booking);
       await this.notifyPassengerAboutAutomaticPickupConfirmation(booking);
@@ -3946,6 +3999,8 @@ export class BookingsService implements OnModuleInit {
     if (!booking) {
       throw new NotFoundException('Réservation non trouvée');
     }
+
+    assertPassengerCanConfirmRide(booking.trip);
 
     if (booking.status !== BookingStatus.ACCEPTED) {
       throw new BadRequestException(
@@ -4020,6 +4075,8 @@ export class BookingsService implements OnModuleInit {
     if (!booking) {
       throw new NotFoundException('Réservation non trouvée');
     }
+
+    assertPassengerCanConfirmRide(booking.trip);
 
     if (!this.hasBookingBeenPickedUpForRideProgress(booking)) {
       throw new BadRequestException(
@@ -4279,7 +4336,7 @@ export class BookingsService implements OnModuleInit {
 
   async evaluateAutomaticRideProgressForTrip(
     tripId: string,
-    options: { checkProximity?: boolean } = {},
+    options: { checkProximity?: boolean; requireRecordedHistory?: boolean } = {},
   ): Promise<AutomaticRideProgressResult> {
     return this.automaticRideProgressQueues.run(tripId, () =>
       this.evaluateAutomaticRideProgressForTripUnlocked(tripId, options),
@@ -4288,13 +4345,26 @@ export class BookingsService implements OnModuleInit {
 
   private async evaluateAutomaticRideProgressForTripUnlocked(
     tripId: string,
-    options: { checkProximity?: boolean } = {},
+    options: { checkProximity?: boolean; requireRecordedHistory?: boolean } = {},
+  ): Promise<AutomaticRideProgressResult> {
+    const bookings = await readRideProgressBookings(this.bookingRepository, tripId);
+    const evaluate = () => this.evaluateAutomaticRideProgressForBookings(tripId, bookings, options);
+    if (options.requireRecordedHistory) {
+      return this.locationHistoryService.withRideSnapshot(tripId, bookings.map(booking => ({
+        bookingId: booking.id, passengerId: booking.passengerId, driverId: booking.trip.driverId,
+        driverRecordedAt: this.isFreshLocationUpdate(booking.trip.lastLocationUpdateAt)
+          ? booking.trip.lastLocationUpdateAt : null,
+        passengerRecordedAt: this.isFreshLocationUpdate(booking.passengerLastLocationUpdateAt)
+          ? booking.passengerLastLocationUpdateAt : null,
+      })), evaluate);
+    }
+    return evaluate();
+  }
+
+  private async evaluateAutomaticRideProgressForBookings(
+    tripId: string, bookings: Booking[], options: { checkProximity?: boolean },
   ): Promise<AutomaticRideProgressResult> {
     const result: AutomaticRideProgressResult = { tripId, events: [] };
-    const bookings = await this.bookingRepository.find({
-      where: { tripId, status: In([BookingStatus.ACCEPTED, BookingStatus.NO_SHOW, BookingStatus.BOARDING_UNCERTAIN]) },
-      relations: ['trip', 'passenger'],
-    });
 
     for (const booking of bookings) {
       if (options.checkProximity && booking.status === BookingStatus.ACCEPTED && this.hasFreshGpsPair(booking)) {
@@ -4448,9 +4518,14 @@ export class BookingsService implements OnModuleInit {
       ) {
         return bookingEvents;
       }
+      if (trip.tripRequestId) {
+        await this.completePaidRequestTrip(trip.id);
+        return bookingEvents;
+      }
       const completionResult = await this.tripRepository.update(
         { id: trip.id, status: TripStatus.ACTIVE },
         {
+          id: trip.id, // Post-commit availability subscriber needs the affected trip.
           status: TripStatus.COMPLETED,
           completedAt: trip.completedAt ?? now,
         },
@@ -4508,10 +4583,16 @@ export class BookingsService implements OnModuleInit {
       const destinationApproachNotifiedAt =
         trip.destinationApproachNotifiedAt ?? now;
       const destinationReachedAt = trip.destinationReachedAt ?? now;
+      if (trip.tripRequestId) {
+        await this.tripRepository.update({ id: trip.id }, { destinationApproachNotifiedAt, destinationReachedAt });
+        await this.completePaidRequestTrip(trip.id);
+        return bookingEvents;
+      }
       const completedAt = trip.completedAt ?? now;
       const completionResult = await this.tripRepository.update(
         { id: trip.id, status: TripStatus.ACTIVE },
         {
+          id: trip.id, // Post-commit availability subscriber needs the affected trip.
           destinationApproachNotifiedAt,
           destinationReachedAt,
           status: TripStatus.COMPLETED,
@@ -4553,7 +4634,8 @@ export class BookingsService implements OnModuleInit {
     }
 
     trip.destinationApproachNotifiedAt = now;
-    await this.tripRepository.save(trip);
+    // A concurrent payment may have completed a request since this GPS snapshot.
+    await this.tripRepository.update({ id: trip.id, status: TripStatus.ACTIVE }, { destinationApproachNotifiedAt: now });
 
     return [
       {
@@ -4831,6 +4913,7 @@ export class BookingsService implements OnModuleInit {
   ): Promise<AutomaticRideProgressEvent | null> {
     if (
       !this.canEvaluateAutomaticPickupProgress(booking) ||
+      (booking.pickedUp && booking.pickupDetectionMethod === 'manual_driver_confirmation') ||
       (booking.pickedUp && booking.pickedUpConfirmedByPassenger)
     ) {
       return null;
@@ -5245,8 +5328,9 @@ export class BookingsService implements OnModuleInit {
       driverLocation,
       dropoffPoint,
     );
+    const destinationHistory = await this.locationHistoryService.getDriverLocationHistory(booking.tripId);
     const passage = hasRecentDestinationPassage(
-      await this.locationHistoryService.getDriverLocationHistory(booking.tripId),
+      destinationHistory,
       dropoffPoint, now, booking.pickedUpAt ?? booking.pickedUpConfirmedAt ?? booking.trip.startedAt,
     );
     if (
@@ -5265,12 +5349,12 @@ export class BookingsService implements OnModuleInit {
       !booking.passengerDestinationApproachNotifiedAt ||
       !this.hasFreshGpsPair(booking, now)
     ) {
-      return null;
+      return this.observeAssistedArrival(booking, destinationHistory);
     }
 
     const passengerLocation = booking.passengerCurrentLocation ?? null;
     if (!passengerLocation) {
-      return null;
+      return this.observeAssistedArrival(booking, destinationHistory);
     }
 
     const passengerDistanceToDestination = this.calculatePointDistanceMeters(
@@ -5281,10 +5365,8 @@ export class BookingsService implements OnModuleInit {
       driverLocation,
       passengerLocation,
     );
-    const [driverHistory, passengerHistory] = await Promise.all([
-      this.locationHistoryService.getDriverLocationHistory(booking.tripId),
-      this.locationHistoryService.getPassengerLocationHistory(booking.id),
-    ]);
+    const driverHistory = destinationHistory;
+    const passengerHistory = await this.locationHistoryService.getPassengerLocationHistory(booking.id);
     if (
       driverDistanceToDestination === null ||
       passengerDistanceToDestination === null ||
@@ -5304,7 +5386,7 @@ export class BookingsService implements OnModuleInit {
         now,
       )
     ) {
-      return null;
+      return this.observeAssistedArrival(booking, destinationHistory);
     }
 
     return this.completeAutomaticDropoff(
@@ -5312,6 +5394,14 @@ export class BookingsService implements OnModuleInit {
       now,
       'automatic_passenger_separation',
     );
+  }
+
+  private async observeAssistedArrival(booking: Booking, history: LocationHistorySnapshot | null): Promise<null> {
+    // Only after the existing GPS completion rules failed; never delays their success.
+    await this.arrivalAssistance?.observe(booking, history).catch(() => {
+      this.logger.warn('Arrival assistance temporarily unavailable; GPS progression remains active');
+    });
+    return null;
   }
 
   private async completeAutomaticDropoff(
@@ -6081,7 +6171,7 @@ export class BookingsService implements OnModuleInit {
       await this.notificationService.sendNotification(
         passenger.fcmToken,
         'Récupération confirmée',
-        `Votre récupération a été confirmée automatiquement par GPS pour le trajet ${booking.trip.departureLocation} -> ${booking.passengerDestination || booking.trip.arrivalLocation}.`,
+        `Votre récupération a été confirmée ${booking.pickupDetectionMethod === 'manual_driver_confirmation' ? 'par le conducteur' : 'automatiquement par GPS'} pour le trajet ${booking.trip.departureLocation} -> ${booking.passengerDestination || booking.trip.arrivalLocation}.`,
         {
           type: 'pickup_confirmed_automatically',
           bookingId: booking.id,
@@ -6117,7 +6207,7 @@ export class BookingsService implements OnModuleInit {
       await this.notificationService.sendNotification(
         driver.fcmToken,
         'Passager recupere',
-        `${passengerName} est marque comme recupere automatiquement par GPS.`,
+        booking.pickupDetectionMethod === 'manual_driver_confirmation' ? `Vous avez confirmé l’embarquement de ${passengerName}.` : `${passengerName} est marque comme recupere automatiquement par GPS.`,
         {
           type: 'pickup_confirmed_automatically',
           bookingId: booking.id,
@@ -6151,7 +6241,7 @@ export class BookingsService implements OnModuleInit {
       await this.notificationService.sendNotification(
         passenger.fcmToken,
         'Arrivee confirmee',
-        `Votre arrivée a été confirmée automatiquement par GPS pour le trajet ${booking.trip.departureLocation} -> ${booking.passengerDestination || booking.trip.arrivalLocation}.`,
+        `Votre arrivée a été confirmée ${booking.dropoffDetectionMethod === 'manual_driver_confirmation' ? 'par le conducteur' : booking.dropoffDetectionMethod === 'manual_passenger_near_destination' ? 'avec votre accord près de la destination' : 'automatiquement par GPS'} pour le trajet ${booking.trip.departureLocation} -> ${booking.passengerDestination || booking.trip.arrivalLocation}.`,
         {
           type: 'dropoff_confirmed_automatically',
           bookingId: booking.id,
@@ -6187,7 +6277,7 @@ export class BookingsService implements OnModuleInit {
       await this.notificationService.sendNotification(
         driver.fcmToken,
         'Arrivée à destination confirmée',
-        `L’arrivée à destination de ${passengerName} a été confirmée automatiquement par GPS.`,
+        booking.dropoffDetectionMethod === 'manual_driver_confirmation' ? `Vous avez confirmé la dépose de ${passengerName}.` : `L’arrivée à destination de ${passengerName} a été confirmée ${booking.dropoffDetectionMethod === 'manual_passenger_near_destination' ? 'avec son accord près de la destination' : 'automatiquement par GPS'}.`,
         {
           type: 'dropoff_confirmed_automatically',
           bookingId: booking.id,
@@ -6341,32 +6431,9 @@ export class BookingsService implements OnModuleInit {
     autoProgress: AutomaticRideProgressResult;
     ignoredAsOutOfOrder?: boolean;
   }> {
-    const booking = await this.bookingRepository.findOne({
-      where: { id: bookingId, passengerId },
-      relations: ['trip'],
-    });
+    const booking = await this.findPassengerTrackingBooking(bookingId, passengerId);
 
-    if (!booking) {
-      throw new NotFoundException(
-        "Réservation non trouvée ou vous n'êtes pas le passager",
-      );
-    }
-
-    // Vérifier que la réservation est acceptée
-    if (
-      ![BookingStatus.ACCEPTED, BookingStatus.NO_SHOW].includes(booking.status)
-    ) {
-      throw new BadRequestException(
-        'Seules les réservations acceptées ou récupérables peuvent partager leur position',
-      );
-    }
-
-    // Vérifier que le trajet est actif
-    if (booking.trip.status !== TripStatus.ACTIVE) {
-      throw new BadRequestException(
-        'Le trajet doit être actif pour partager la position',
-      );
-    }
+    this.assertPassengerLocationWritable(booking);
 
     // Construire le point de position
     const currentCoordinate = normalizeCoordinateForTrip(
@@ -6405,30 +6472,22 @@ export class BookingsService implements OnModuleInit {
 
     const passengerCurrentLocation =
       buildPointFromCoordinate(currentCoordinate);
-    const updateResult = await this.bookingRepository.update(
-      {
-        id: booking.id,
-        passengerId,
-        status: In([BookingStatus.ACCEPTED, BookingStatus.NO_SHOW]),
-        passengerLastLocationUpdateAt: Raw(
-          (alias) => `(${alias} IS NULL OR ${alias} < :observedAt)`,
-          { observedAt },
-        ),
-      },
-      {
-        passengerCurrentLocation,
-        passengerLastLocationUpdateAt: observedAt,
-      },
-    );
-    if (updateResult.affected !== 1) {
-      const latestBooking = await this.bookingRepository.findOne({
-        where: { id: booking.id, passengerId },
-        relations: ['trip'],
-      });
+    const saved = await persistPassengerLocation(this.bookingRepository, {
+      bookingId: booking.id, tripId: booking.tripId, ownerId: passengerId,
+      longitude: currentCoordinate.longitude, latitude: currentCoordinate.latitude, observedAt,
+    });
+    if (!saved) {
+      const latestBooking = await this.findPassengerTrackingBooking(booking.id, passengerId);
+      // Dropoff may commit after the first read but before the conditional
+      // write. Revalidate scoped state before returning any coordinates.
+      this.assertPassengerLocationWritable(latestBooking);
+      if (latestBooking.tripId !== booking.tripId ||
+          !latestBooking.passengerLastLocationUpdateAt ||
+          !(latestBooking.passengerLastLocationUpdateAt.getTime() >= observedAt.getTime())) {
+        throw new ConflictException('La position n’a pas été enregistrée. Réessayez.');
+      }
       const autoProgress = await this.progressAfterPassengerLocation(booking.tripId, options.deferProgress);
-      const existingCoordinates =
-        latestBooking?.passengerCurrentLocation?.coordinates ??
-        booking.passengerCurrentLocation?.coordinates;
+      const existingCoordinates = latestBooking.passengerCurrentLocation?.coordinates;
       return {
         tripId: booking.tripId,
         bookingId: booking.id,
@@ -6436,10 +6495,7 @@ export class BookingsService implements OnModuleInit {
           Number(existingCoordinates?.[0] ?? currentCoordinate.longitude),
           Number(existingCoordinates?.[1] ?? currentCoordinate.latitude),
         ],
-        updatedAt:
-          latestBooking?.passengerLastLocationUpdateAt ??
-          booking.passengerLastLocationUpdateAt ??
-          observedAt,
+        updatedAt: latestBooking.passengerLastLocationUpdateAt!,
         autoProgress,
         ignoredAsOutOfOrder: true,
       };
@@ -6459,11 +6515,13 @@ export class BookingsService implements OnModuleInit {
         samples: updateLocationDto.samples?.filter(s => normalizeCoordinateForTrip(s.latitude, s.longitude, booking.trip)),
       },
     );
-    await this.touchTripInteraction(booking.tripId);
-
+    // The trip activity timestamp was persisted atomically with this GPS.
     // Vérifier la proximité de la destination et notifier si nécessaire
     if (!options.deferProgress) await this.checkAndNotifyDestinationProximity(booking);
-    const autoProgress = await this.progressAfterPassengerLocation(booking.tripId, options.deferProgress);
+    // The accepted GPS and durable job were committed by the same statement.
+    const autoProgress = options.deferProgress
+      ? { tripId: booking.tripId, events: [] }
+      : await this.evaluateAutomaticRideProgressForTrip(booking.tripId);
 
     const responseCoordinates: [number, number] = [
       currentCoordinate.longitude,
@@ -6477,6 +6535,31 @@ export class BookingsService implements OnModuleInit {
       updatedAt: booking.passengerLastLocationUpdateAt!,
       autoProgress,
     };
+  }
+
+  private findPassengerTrackingBooking(bookingId: string, passengerId: string): Promise<Booking | null> {
+    return readPassengerTrackingBooking(this.bookingRepository, bookingId, passengerId);
+  }
+
+  /** Called only on bookings loaded with a passengerId ownership predicate. */
+  private assertPassengerLocationWritable(booking: Booking | null): asserts booking is Booking {
+    if (!booking) {
+      throw new NotFoundException("Réservation non trouvée ou vous n'êtes pas le passager");
+    }
+    if (booking.status === BookingStatus.COMPLETED) {
+      throw new TrackingStateChangedException(booking.tripId, booking.id);
+    }
+    if (![BookingStatus.ACCEPTED, BookingStatus.NO_SHOW].includes(booking.status)) {
+      throw new BadRequestException(
+        'Seules les réservations acceptées ou récupérables peuvent partager leur position',
+      );
+    }
+    if (booking.trip?.status !== TripStatus.ACTIVE) {
+      if (booking.trip?.status === TripStatus.COMPLETED) {
+        throw new TrackingStateChangedException(booking.tripId, booking.id, 'Le trajet doit être actif pour partager la position');
+      }
+      throw new BadRequestException('Le trajet doit être actif pour partager la position');
+    }
   }
 
   /** Preserve the response shape while deferring progression until after the GPS ACK. */

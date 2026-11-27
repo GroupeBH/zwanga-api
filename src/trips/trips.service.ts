@@ -1,3 +1,7 @@
+import { TrackingStateChangedException } from '../common/tracking-state-changed.exception';
+import { persistDriverLocation } from '../tracking/persist-tracking-location';
+import { readDriverTrackingTrip } from '../tracking/read-tracking-location';
+import { enqueueRideProgress } from '../tracking/ride-progress-queue';
 import { trustedContactMessagesEnabled } from '../safety/trusted-contact-policy';
 import { expirePendingTrip } from './expire-pending-trip';
 import { enqueueTripReminder, TripReminderKind } from './trip-reminders';
@@ -15,6 +19,7 @@ import {
   BadRequestException,
   Logger,
   ForbiddenException,
+  ConflictException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import {
@@ -588,9 +593,18 @@ export class TripsService {
       queryBuilder.orderBy('trip.departureDate', 'ASC');
     }
 
-    const nearbyOrder = hasDepartureCoords ? `ST_Distance(${this.getDepartureSearchPointExpression()}, ST_SetSRID(ST_MakePoint(:depLng, :depLat), 4326)::geography)`
+    let nearbyOrder = hasDepartureCoords ? `ST_Distance(${this.getDepartureSearchPointExpression()}, ST_SetSRID(ST_MakePoint(:depLng, :depLat), 4326)::geography)`
       : hasArrivalCoords ? 'ST_Distance(trip.arrivalPoint, ST_SetSRID(ST_MakePoint(:arrLng, :arrLat), 4326)::geography)'
       : 'EXTRACT(EPOCH FROM trip.departureDate)::double precision';
+    if (searchTripsDto.sort === 'soonest') {
+      // Rank from the requested pickup or a stable user-position snapshot.
+      // This ordering point must not silently add a 50 km search restriction.
+      const origin = departureSearchCoordinates ?? normalizeLngLatCoordinates(searchTripsDto.sortOriginCoordinates);
+      nearbyOrder = origin
+        ? 'ST_Distance(trip.departurePoint, ST_SetSRID(ST_MakePoint(:sortLng, :sortLat), 4326)::geography)'
+        : '0';
+      if (origin) queryBuilder.setParameters({ sortLng: origin[0], sortLat: origin[1] });
+    }
     const selectionStarted = performance.now();
     const page = await selectDiscoveryPage(queryBuilder, searchTripsDto, nearbyOrder);
     const selectionMs = performance.now() - selectionStarted;
@@ -600,13 +614,9 @@ export class TripsService {
     const userRatingsMap = await this.buildUserRatingsMap(userIds);
     const userPremiumMap =
       await this.subscriptionsService.getPremiumFeaturesForUsers(userIds);
-    const sanitized = this.sortSanitizedTripsByPremium(
-      await Promise.all(
-        results.map((trip) =>
-          this.sanitizeTrip(trip, userRatingsMap, userPremiumMap),
-        ),
-      ),
-    );
+    const enriched = await Promise.all(results.map(trip => this.sanitizeTrip(trip, userRatingsMap, userPremiumMap)));
+    // Preserve the date/distance cursor order across pages, including premium trips.
+    const sanitized = searchTripsDto.sort === 'soonest' ? enriched : this.sortSanitizedTripsByPremium(enriched);
     this.logger.log(`Trip search returned ${sanitized.length} results`);
     const totalMs = performance.now() - searchStarted;
     if (totalMs >= 500) this.logger.warn({ event: 'trip_search_slow',
@@ -3612,15 +3622,7 @@ export class TripsService {
     }
   }
 
-  async updateDriverLocation(
-    driverId: string,
-    tripId: string,
-    coordinates: [number, number],
-    metadata: LocationObservationMetadata & { recordedAt?: string } = {},
-  ) {
-    // Driver GPS never needs to hydrate every passenger/booking to authorize
-    // its owner. Keep the authoritative database check on every update.
-    const trip = await this.tripRepository.findOne({ where: { id: tripId } });
+  private assertDriverLocationWritable(trip: Trip | null, driverId: string): asserts trip is Trip {
     if (!trip) throw new NotFoundException('Trajet non trouvé');
     if (trip.driverId !== driverId) {
       throw new ForbiddenException(
@@ -3630,13 +3632,26 @@ export class TripsService {
 
     // Stop tracking updates if trip is not ACTIVE
     if (trip.status !== TripStatus.ACTIVE) {
+      if (trip.status === TripStatus.COMPLETED) throw new TrackingStateChangedException(trip.id);
       this.logger.warn(
-        `Ignoring location update for trip ${tripId} with status ${trip.status} (driver: ${driverId})`,
+        `Ignoring location update for trip ${trip.id} with status ${trip.status} (driver: ${driverId})`,
       );
       throw new BadRequestException(
         'Le trajet n’est plus en cours, le suivi en temps réel est arrêté',
       );
     }
+  }
+
+  async updateDriverLocation(
+    driverId: string,
+    tripId: string,
+    coordinates: [number, number],
+    metadata: LocationObservationMetadata & { recordedAt?: string } = {},
+  ) {
+    // Driver GPS never needs to hydrate every passenger/booking to authorize
+    // its owner. Keep the authoritative database check on every update.
+    const trip = await readDriverTrackingTrip(this.tripRepository, tripId);
+    this.assertDriverLocationWritable(trip, driverId);
 
     const normalizedCoordinates = normalizeLngLatCoordinates(coordinates);
     if (!normalizedCoordinates) {
@@ -3654,6 +3669,7 @@ export class TripsService {
     const observedAt = normalizeLocationRecordedAt(metadata.recordedAt);
     const previousTimestamp = trip.lastLocationUpdateAt?.getTime() ?? 0;
     if (previousTimestamp >= observedAt.getTime()) {
+      await enqueueRideProgress(this.tripRepository, trip.id);
       return {
         tripId: trip.id,
         coordinates: this.pointToCoordinates(trip.currentLocation),
@@ -3663,32 +3679,23 @@ export class TripsService {
     }
 
     const currentLocation = buildPointFromCoordinate(currentCoordinate);
-    const updateResult = await this.tripRepository.update(
-      {
-        id: trip.id,
-        driverId,
-        status: TripStatus.ACTIVE,
-        lastLocationUpdateAt: Raw(
-          (alias) => `(${alias} IS NULL OR ${alias} < :observedAt)`,
-          { observedAt },
-        ),
-      },
-      {
-        currentLocation,
-        lastLocationUpdateAt: observedAt,
-      },
-    );
-    if (updateResult.affected !== 1) {
-      const latestTrip = await this.tripRepository.findOne({
-        where: { id: trip.id },
-      });
+    const saved = await persistDriverLocation(this.tripRepository, {
+      tripId: trip.id, ownerId: driverId, longitude, latitude, observedAt,
+    });
+    if (!saved) {
+      const latestTrip = await readDriverTrackingTrip(this.tripRepository, trip.id);
+      // A failed conditional write can mean completion or revoked ownership,
+      // not just a newer GPS sample. Never ACK stale state as superseded.
+      this.assertDriverLocationWritable(latestTrip, driverId);
+      if (!latestTrip.lastLocationUpdateAt ||
+          !(latestTrip.lastLocationUpdateAt.getTime() >= observedAt.getTime())) {
+        throw new ConflictException('La position n’a pas été enregistrée. Réessayez.');
+      }
+      await enqueueRideProgress(this.tripRepository, trip.id);
       return {
         tripId: trip.id,
-        coordinates: this.pointToCoordinates(
-          latestTrip?.currentLocation ?? trip.currentLocation,
-        ),
-        updatedAt:
-          latestTrip?.lastLocationUpdateAt ?? trip.lastLocationUpdateAt,
+        coordinates: this.pointToCoordinates(latestTrip.currentLocation),
+        updatedAt: latestTrip.lastLocationUpdateAt,
         ignoredAsOutOfOrder: true,
       };
     }

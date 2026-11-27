@@ -2,7 +2,6 @@ import { BadRequestException, ConflictException, Injectable, NotFoundException }
 import { DataSource } from 'typeorm';
 import { Booking, BookingPaymentStatus, BookingStatus } from './entities/booking.entity';
 import { Trip } from '../trips/entities/trip.entity';
-import { TripPaymentMode } from '../payments/enums/trip-payment-mode.enum';
 import { PaymentPurpose, PaymentTransaction } from '../payments/entities/payment-transaction.entity';
 import { WalletLedgerEntry, WalletLedgerEntryType } from '../wallet/entities/wallet-ledger-entry.entity';
 import { BookingsService } from './bookings.service';
@@ -28,7 +27,7 @@ export class TokenCashFallbackService {
       }
       const amount = Number(booking.paymentAmount);
       const trip = await manager.findOneBy(Trip, { id: booking.tripId });
-      if (!trip || trip.driverId === passengerId || !trip.acceptedPaymentModes?.includes(TripPaymentMode.CASH) ||
+      if (!trip || trip.driverId === passengerId ||
           !Number.isFinite(amount) || amount <= 0) {
         throw new BadRequestException('Le paiement en espèces n’est pas disponible pour ce trajet.');
       }

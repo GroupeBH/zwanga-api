@@ -38,6 +38,10 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Block new staging images on exposed secrets
+        if: inputs.action == 'deploy' || inputs.action == 'bootstrap'
+        uses: ./.github/actions/secret-scan
+
       - name: Validate isolation and helper tests
         shell: bash
         run: |
@@ -59,7 +63,7 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y postgresql-16 postgresql-16-postgis-3 redis-server
-          for suite in APP_UPDATES INSTALLATION_UPDATES DISPATCH KYC_EVIDENCE DRIVER_FINANCE WALLET PAYOUT NOTIFICATIONS PIN_RESET PHONE_REGISTRATION PAWAPAY AUDIT MIXED_CASH ACCOUNT_LIFECYCLE RESILIENCE TRIP_SEARCH PERFORMANCE NEARBY_RING PAID_SUBSIDY ZONES ASSET PRO_CREDIT; do
+          for suite in APP_UPDATES INSTALLATION_UPDATES DISPATCH KYC_EVIDENCE DRIVER_FINANCE WALLET PAYOUT NOTIFICATIONS PIN_RESET PHONE_REGISTRATION PAWAPAY AUDIT MIXED_CASH ACCOUNT_LIFECYCLE RESILIENCE TRIP_SEARCH PERFORMANCE NEARBY_RING PAID_SUBSIDY ZONES ASSET PRO_CREDIT SECURITY; do
             echo "${suite}_TEST_POSTGRES_BIN=/usr/lib/postgresql/16/bin" >> "${GITHUB_ENV}"
           done
 
@@ -79,7 +83,8 @@ jobs:
         run: |
           npm ci --legacy-peer-deps
           npm run test:dependencies
-          node --test test/ci-integration-policy.test.cjs test/observability-kms.test.cjs test/capacity-budget.test.cjs test/terraform-backend.test.cjs test/load/production-readonly.test.cjs
+          npm run test:load:journeys:unit
+          node --test test/secret-scan.test.cjs test/ci-integration-policy.test.cjs test/observability-kms.test.cjs test/capacity-budget.test.cjs test/terraform-backend.test.cjs test/load/production-readonly.test.cjs test/load/production-monitoring.test.cjs
           npm audit --omit=dev --audit-level=high
           node test/run-otp-redis.cjs
           npm run test -- --runInBand

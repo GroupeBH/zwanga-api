@@ -1,4 +1,5 @@
 import type { Point } from 'typeorm';
+import type { ArrivalPrompt } from '../arrival-assistance.policy';
 import { TOKEN_VALUE_CDF } from '../../wallet/token-value.policy';
 import type { RideDeclarations, RideStage } from '../../ride-declarations/ride-declaration.model';
 import {
@@ -47,6 +48,10 @@ export enum BookingPaymentStatus {
 @Index('IDX_bookings_passenger_history', ['passengerId', 'tripId', 'id'])
 @Index(['tripId', 'passengerId'])
 export class Booking {
+  // Server-only proposal and consent receipt, never overwritten by stale entity saves.
+  @Column({ type: 'jsonb', nullable: true, update: false })
+  arrivalPrompt: ArrivalPrompt | null;
+
   // Explicit cash choice after a wallet top-up. Never erased by stale entity saves.
   @Column({ type: 'timestamptz', nullable: true, update: false })
   tokenCashFallbackAt: Date | null;

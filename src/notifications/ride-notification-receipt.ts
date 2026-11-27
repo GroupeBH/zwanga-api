@@ -1,20 +1,15 @@
 import type { EntityManager } from 'typeorm';
+import { acknowledgeNearbyRequestSql } from './nearby-request-cooldown';
 
 export const AUDIO_RECEIPT_STAGES = ['audio_started', 'audio_failed', 'audio_suppressed'] as const;
 export const AUDIO_RECEIPT_REASONS = ['PLAYER_STARTED', 'PLAYER_ERROR', 'AUDIO_FOCUS_DENIED', 'DEVICE_POLICY', 'BACKGROUND_START_DENIED', 'NOTIFICATIONS_DISABLED'] as const;
 export type RideReceiptDetail = { observedAt?: string; source?: 'native' | 'javascript'; failureCode?: string;
   audioStage?: typeof AUDIO_RECEIPT_STAGES[number]; audioObservedAt?: string; audioReason?: typeof AUDIO_RECEIPT_REASONS[number] };
 
-/** Telemetry reports player state, never proof of hearing or a business decision. */
-export async function recordRideNotificationReceipt(
-  manager: EntityManager,
-  userId: string,
-  notificationId: string,
-  stage: 'received' | 'displayed' = 'received',
-  detail?: RideReceiptDetail,
-): Promise<{ received: boolean }> {
-  const rows: { notificationId: string }[] = await manager.query(
-    `
+// Internal SQL only. $1..$9 are always bound using rideReceiptParameters below.
+// The optional dependency orders offer locking before telemetry in the same
+// statement; it must never contain a caller-provided SQL expression.
+export const rideReceiptRecordedSql = (afterResponseWindow = false) => `
     INSERT INTO ride_notification_receipts ("notificationId", "displayedAt", "clientObservedAt", source, "failureCode", "audioEvents")
     SELECT id, CASE WHEN $3 = 'displayed' THEN clock_timestamp() ELSE NULL END,
       CASE WHEN $4::timestamptz BETWEEN now() - interval '7 days' AND now() + interval '5 minutes' THEN $4::timestamptz END, $5, $6,
@@ -23,16 +18,41 @@ export async function recordRideNotificationReceipt(
         'reason', $9::text)) ELSE '{}'::jsonb END
     FROM notifications WHERE id = $1 AND "userId" = $2
       AND data ->> 'type' IN ('new_booking','driver_dispatch_offer','trip_request_nearby')
+      ${afterResponseWindow ? 'AND (SELECT count(*) FROM response_window) >= 0' : ''}
     ON CONFLICT ("notificationId") DO UPDATE SET "displayedAt" =
       COALESCE(ride_notification_receipts."displayedAt", EXCLUDED."displayedAt"),
       "clientObservedAt" = COALESCE(ride_notification_receipts."clientObservedAt", EXCLUDED."clientObservedAt"),
       source = COALESCE(ride_notification_receipts.source, EXCLUDED.source),
       "failureCode" = COALESCE(EXCLUDED."failureCode", ride_notification_receipts."failureCode"),
       "audioEvents" = EXCLUDED."audioEvents" || ride_notification_receipts."audioEvents"
-    RETURNING "notificationId"`,
-    [notificationId, userId, stage, detail?.observedAt ?? null, detail?.source ?? null, detail?.failureCode ?? null,
-      AUDIO_RECEIPT_STAGES.includes(detail?.audioStage as any) ? detail!.audioStage : null,
-      detail?.audioObservedAt ?? null, AUDIO_RECEIPT_REASONS.includes(detail?.audioReason as any) ? detail!.audioReason : null],
+    RETURNING "notificationId"`;
+
+export const rideReceiptParameters = (userId: string, notificationId: string,
+  stage: 'received' | 'displayed', detail?: RideReceiptDetail) => [
+  notificationId, userId, stage, detail?.observedAt ?? null, detail?.source ?? null, detail?.failureCode ?? null,
+  AUDIO_RECEIPT_STAGES.includes(detail?.audioStage as any) ? detail!.audioStage : null,
+  detail?.audioObservedAt ?? null, AUDIO_RECEIPT_REASONS.includes(detail?.audioReason as any) ? detail!.audioReason : null,
+];
+
+/** Telemetry reports player state, never proof of hearing or a business decision.
+ * acknowledgeRinging requires the caller to hold the matching request SHARE lock,
+ * preventing a business change while this statement waits on another receipt. */
+export async function recordRideNotificationReceipt(
+  manager: EntityManager,
+  userId: string,
+  notificationId: string,
+  stage: 'received' | 'displayed' = 'received',
+  detail?: RideReceiptDetail,
+  acknowledgeRinging = false,
+): Promise<{ received: boolean }> {
+  const rows: { notificationId: string }[] = await manager.query(
+    `WITH recorded AS (
+    ${rideReceiptRecordedSql()}
+    )${acknowledgeRinging ? `, ringing AS (
+      ${acknowledgeNearbyRequestSql('$2', '$1')}
+        AND EXISTS (SELECT 1 FROM recorded) RETURNING e."notificationId"
+    )` : ''} SELECT "notificationId" FROM recorded`,
+    rideReceiptParameters(userId, notificationId, stage, detail),
   );
   return { received: rows.length > 0 };
 }

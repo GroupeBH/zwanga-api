@@ -20,6 +20,12 @@ export class BookingSocketDto {
   bookingId: string;
 }
 
+export class TrackingStateSocketDto extends TripSocketDto {
+  @IsOptional()
+  @IsUUID('4')
+  bookingId?: string;
+}
+
 export class DriverLocationSocketDto extends TripSocketDto {
   @IsArray()
   @ArrayMinSize(2)

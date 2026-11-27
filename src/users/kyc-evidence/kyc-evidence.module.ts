@@ -5,16 +5,20 @@ import { KycEvidenceService } from './kyc-evidence.service';
 import { KycEvidenceStorage } from './kyc-evidence.storage';
 import { KycEvidenceTransport } from './kyc-evidence.transport';
 import { KycEvidenceController } from './kyc-evidence.controller';
+import { DiditFullCollector } from './didit-full-collector';
+import { DiditArchiveTransport } from './didit-archive.transport';
 
 @Module({
   imports: [ConfigModule],
   controllers: [KycEvidenceController],
   providers: [
+    DiditFullCollector,
+    DiditArchiveTransport,
     KycEvidenceRepository,
     KycEvidenceService,
     KycEvidenceStorage,
     KycEvidenceTransport,
   ],
-  exports: [KycEvidenceRepository, KycEvidenceStorage],
+  exports: [KycEvidenceRepository, KycEvidenceStorage, KycEvidenceService],
 })
 export class KycEvidenceModule {}

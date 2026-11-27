@@ -17,6 +17,16 @@ export interface CreditActor {
 @Injectable()
 export class CreditStore {
   constructor(readonly db: DataSource) {}
+  /** Bounded, consistent read of related balances; never calls external services. */
+  async read<T>(run: (m: EntityManager) => Promise<T>): Promise<T> {
+    return this.db.transaction('REPEATABLE READ', async (m) => {
+      await m.query('SET TRANSACTION READ ONLY');
+      await m.query("SET LOCAL lock_timeout='5s'");
+      await m.query("SET LOCAL statement_timeout='15s'");
+      await m.query("SET LOCAL TIME ZONE 'UTC'");
+      return run(m);
+    });
+  }
   async authorize(
     m: EntityManager,
     actor: CreditActor,
@@ -51,10 +61,11 @@ export class CreditStore {
     detail: unknown,
     creditId?: string,
   ) {
-    await m.query(
-      'INSERT INTO pro_credit_audit("actorId","creditId",action,detail) VALUES($1,$2,$3,$4)',
+    const [receipt] = await m.query<{ id: string; createdAt: Date }[]>(
+      'INSERT INTO pro_credit_audit("actorId","creditId",action,detail) VALUES($1,$2,$3,$4) RETURNING id,"createdAt"',
       [actorId, creditId ?? null, action, JSON.stringify(detail)],
     );
+    return receipt;
   }
   async notify(
     m: EntityManager,

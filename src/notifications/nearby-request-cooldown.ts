@@ -33,30 +33,32 @@ type Event = {
 
 // Lock order is always state -> events. Never lock a trip/request here, or hold
 // a database lock while sending a push. The existing business transactions stay independent.
+function lockState(manager: EntityManager, driverId: string): Promise<State>;
+function lockState(manager: EntityManager, driverId: string, requestId: string): Promise<State | undefined>;
 async function lockState(
   manager: EntityManager,
   driverId: string,
-): Promise<State> {
-  await manager.query(
-    `INSERT INTO nearby_driver_ring_state ("driverId") VALUES ($1) ON CONFLICT DO NOTHING`,
-    [driverId],
-  );
+  requestId?: string,
+): Promise<State | undefined> {
+  // Normal deliveries only lock/read the existing state: do not create another
+  // row version for every push + WebSocket retry. The materialized lock executes
+  // before reading clock_timestamp (a contended lock must not shorten the window).
+  // A missing/legacy row goes through a NEW statement snapshot below, not a
+  // DO NOTHING + same-snapshot fallback that can miss a concurrent first insert.
+  const args = requestId === undefined ? [driverId] : [driverId, requestId];
+  const [existing]: State[] = await manager.query(`WITH locked AS MATERIALIZED (
+    SELECT * FROM nearby_driver_ring_state WHERE "driverId"=$1
+      ${requestId === undefined ? '' : `AND ${requestDriverVisibilitySql('$2::uuid', '$1::uuid')}`}
+    FOR UPDATE
+  ) SELECT *, clock_timestamp() AS now FROM locked`, args);
+  if (existing && existing.missedCount === 0 && !existing.mutedUntil) return existing;
   const [state]: State[] = await manager.query(
-    `SELECT *, clock_timestamp() AS now
-    FROM nearby_driver_ring_state WHERE "driverId" = $1 FOR UPDATE`,
-    [driverId],
+    `INSERT INTO nearby_driver_ring_state ("driverId")
+    ${requestId === undefined ? 'VALUES ($1)' : `SELECT $1::uuid WHERE ${requestDriverVisibilitySql('$2::uuid', '$1::uuid')}`}
+    ON CONFLICT ("driverId") DO UPDATE SET "missedCount" = 0, "mutedUntil" = NULL
+    RETURNING *, clock_timestamp() AS now`,
+    args,
   );
-  // Keep the row lock and old response fields for compatible clients, but retire
-  // the global penalty, including rows muted before this version was deployed.
-  if (state.missedCount !== 0 || state.mutedUntil !== null) {
-    await manager.query(
-      `UPDATE nearby_driver_ring_state SET "missedCount" = 0, "mutedUntil" = NULL
-      WHERE "driverId" = $1`,
-      [driverId],
-    );
-    state.missedCount = 0;
-    state.mutedUntil = null;
-  }
   return state;
 }
 
@@ -154,8 +156,10 @@ export async function prepareNearbyRequestRinging(
   )
     return false;
   return manager.transaction(async (tx) => {
-    if (!(await tx.query(`SELECT 1 WHERE ${requestDriverVisibilitySql('$1::uuid', '$2::uuid')}`, [requestId, driverId])).length) return false;
-    const state = await lockState(tx, driverId);
+    // Visibility and acquisition share one fresh SQL statement. No cache and
+    // no driver-state write for a refused or differently targeted request.
+    const state = await lockState(tx, driverId, requestId);
+    if (!state) return false;
     await reconcile(tx, state);
     const now = new Date(state.now).getTime();
     let deadline = now + REQUEST_RESPONSE_MS;
@@ -180,21 +184,23 @@ export async function prepareNearbyRequestRinging(
          WHERE r.id=$2 AND r."targetDriverId"=$1 AND r."targetDriverPriorityUntil">clock_timestamp()
            AND o.id=$5 AND o."driverId"=$1 AND o.status='pending' AND o.phase='driver' AND o."expiresAt">clock_timestamp())`,
       [driverId, requestId, notification.id, new Date(deadline), notification.data.offerId]);
-    await tx.query(
+    const written: { notificationId: string; processedAt: Date | null; declinedAt: Date | null }[] = await tx.query(
       `INSERT INTO nearby_driver_ring_events
       ("driverId", "requestId", "notificationId", "responseDeadline") VALUES ($1,$2,$3,$4)
       ON CONFLICT ("driverId", "requestId") DO UPDATE SET "responseDeadline" = EXCLUDED."responseDeadline"
       WHERE nearby_driver_ring_events."notificationId" = EXCLUDED."notificationId"
         AND nearby_driver_ring_events."processedAt" IS NULL AND nearby_driver_ring_events."declinedAt" IS NULL
         AND nearby_driver_ring_events."receivedAt" IS NULL
-        AND EXISTS (SELECT 1 FROM notifications n WHERE n.id = EXCLUDED."notificationId" AND n.status <> 'sent')`,
+        AND nearby_driver_ring_events."responseDeadline" IS DISTINCT FROM EXCLUDED."responseDeadline"
+        AND EXISTS (SELECT 1 FROM notifications n WHERE n.id = EXCLUDED."notificationId" AND n.status <> 'sent')
+      RETURNING "notificationId", "processedAt", "declinedAt"`,
       [driverId, requestId, notification.id, new Date(deadline)],
     );
     const [event]: {
       notificationId: string;
       processedAt: Date | null;
       declinedAt: Date | null;
-    }[] = await tx.query(
+    }[] = written.length ? written : await tx.query(
       `SELECT "notificationId", "processedAt", "declinedAt"
       FROM nearby_driver_ring_events WHERE "driverId" = $1 AND "requestId" = $2`,
       [driverId, requestId],
@@ -208,6 +214,16 @@ export async function prepareNearbyRequestRinging(
 }
 
 /** Authenticated recipient acknowledgement, idempotent and bounded by the original deadline. */
+// Only internal parameter expressions may be interpolated; never client input.
+// Shared with the atomic telemetry + ringing receipt write.
+export const acknowledgeNearbyRequestSql = (driver: string, notification: string) => `UPDATE nearby_driver_ring_events e
+    SET "receivedAt" = COALESCE(e."receivedAt", clock_timestamp())
+    WHERE e."driverId" = ${driver} AND e."notificationId" = ${notification} AND e."processedAt" IS NULL
+      AND e."responseDeadline" > clock_timestamp()
+      AND EXISTS (SELECT 1 FROM trip_requests r WHERE r.id = e."requestId"
+        AND r."passengerId" <> ${driver} AND r.status IN ('pending','offers_received')
+        AND r."selectedDriverId" IS NULL AND r."tripId" IS NULL AND r."departureDateMax" > clock_timestamp())`;
+
 export async function acknowledgeNearbyRequest(
   manager: EntityManager,
   driverId: string,
@@ -216,14 +232,7 @@ export async function acknowledgeNearbyRequest(
   const rows:
     { notificationId: string }[] | [{ notificationId: string }[], number] =
     await manager.query(
-      `UPDATE nearby_driver_ring_events e
-    SET "receivedAt" = COALESCE(e."receivedAt", clock_timestamp())
-    WHERE e."driverId" = $1 AND e."notificationId" = $2 AND e."processedAt" IS NULL
-      AND e."responseDeadline" > clock_timestamp()
-      AND EXISTS (SELECT 1 FROM trip_requests r WHERE r.id = e."requestId"
-        AND r."passengerId" <> $1 AND r.status IN ('pending','offers_received')
-        AND r."selectedDriverId" IS NULL AND r."tripId" IS NULL AND r."departureDateMax" > clock_timestamp())
-    RETURNING e."notificationId"`,
+      `${acknowledgeNearbyRequestSql('$1', '$2')} RETURNING e."notificationId"`,
       [driverId, notificationId],
     );
   // TypeORM PostgreSQL UPDATE ... RETURNING returns [rows, affected].

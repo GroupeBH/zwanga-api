@@ -9,6 +9,9 @@ import { DataSource } from 'typeorm';
 import { KycEvidenceArchive1780000061000 } from './migrations/1780000061000-KycEvidenceArchive';
 import { KycEvidenceIndefiniteRetention1780000062000 } from './migrations/1780000062000-KycEvidenceIndefiniteRetention';
 import { KycEvidenceRepository } from '../users/kyc-evidence/kyc-evidence.repository';
+import { DiditFullEvidence1780000146000 } from './migrations/1780000146000-DiditFullEvidence';
+import { ManualKycEvidence1780000147000 } from './migrations/1780000147000-ManualKycEvidence';
+import { ManualKycRepository } from '../admin/manual-kyc/manual-kyc.repository';
 
 // Explicit local disposable cluster only: never loads an application .env.
 const bin = process.env.KYC_EVIDENCE_TEST_POSTGRES_BIN;
@@ -21,6 +24,7 @@ const bin = process.env.KYC_EVIDENCE_TEST_POSTGRES_BIN;
       sessionId = randomUUID();
     const config = {
       DIDIT_KYC_ARCHIVE_ENABLED: 'true',
+      DIDIT_KYC_ARCHIVE_FULL_DATA_ENABLED: 'false',
       DIDIT_KYC_ARCHIVE_RETENTION_DAYS: '30',
       DIDIT_KYC_MEDIA_HOSTS: 'media.didit.test',
       AWS_S3_BUCKET_NAME: 'synthetic-private',
@@ -78,7 +82,8 @@ const bin = process.env.KYC_EVIDENCE_TEST_POSTGRES_BIN;
       await db.initialize();
       await db.query(`CREATE EXTENSION "uuid-ossp";
       CREATE TABLE users (id uuid PRIMARY KEY,"isActive" boolean DEFAULT true,status text DEFAULT 'active');
-      CREATE TABLE kyc_documents (id uuid PRIMARY KEY,"userId" uuid REFERENCES users(id),status text DEFAULT 'approved');`);
+      CREATE TABLE kyc_documents (id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),"userId" uuid REFERENCES users(id),status text DEFAULT 'approved',
+        provider text DEFAULT 'didit',"providerMetadata" jsonb,"createdAt" timestamptz NOT NULL DEFAULT now());`);
       await db.transaction((m) =>
         new KycEvidenceArchive1780000061000().up(m.queryRunner!),
       );
@@ -88,8 +93,15 @@ const bin = process.env.KYC_EVIDENCE_TEST_POSTGRES_BIN;
       repository = new KycEvidenceRepository(db, {
         get: (key: string) => config[key],
       } as any);
+      await db.transaction((m) =>
+        new DiditFullEvidence1780000146000().up(m.queryRunner!),
+      );
+      await db.transaction((m) =>
+        new ManualKycEvidence1780000147000().up(m.queryRunner!),
+      );
     }, 60000);
     beforeEach(async () => {
+      config.DIDIT_KYC_ARCHIVE_FULL_DATA_ENABLED = 'false';
       config.DIDIT_KYC_ARCHIVE_RETENTION_DAYS = '30';
       await db.query(
         'TRUNCATE kyc_evidence_access_log,kyc_evidence_archives,kyc_documents,users',
@@ -120,16 +132,20 @@ const bin = process.env.KYC_EVIDENCE_TEST_POSTGRES_BIN;
         }
       }
     }, 40000);
-    const enqueue = () =>
+    const enqueue = (payload?: unknown) =>
       db.transaction((m) =>
-        repository.enqueue(m, {
-          id: kycId,
-          userId: user,
-          diditSessionId: sessionId,
-          provider: 'didit',
-          status: 'approved',
-          diditSessionStatus: 'Approved',
-        } as any),
+        repository.enqueue(
+          m,
+          {
+            id: kycId,
+            userId: user,
+            diditSessionId: sessionId,
+            provider: 'didit',
+            status: 'approved',
+            diditSessionStatus: 'Approved',
+          } as any,
+          payload,
+        ),
       );
 
     it('deduplicates repeated/concurrent events without extending retention', async () => {
@@ -141,6 +157,172 @@ const bin = process.env.KYC_EVIDENCE_TEST_POSTGRES_BIN;
       expect(
         (await db.query('SELECT status FROM kyc_documents'))[0].status,
       ).toBe('approved');
+    });
+    it('captures changed full payloads and fences completion of an earlier revision without extending retention', async () => {
+      config.DIDIT_KYC_ARCHIVE_FULL_DATA_ENABLED = 'true';
+      await enqueue({ status: 'In Review' });
+      const first = (await repository.claim())!;
+      expect(first.revision).toBe(1);
+      await Promise.all([
+        enqueue({ status: 'Approved' }),
+        enqueue({ status: 'Approved' }),
+      ]);
+      expect(await repository.claim()).toBeUndefined();
+      expect(await repository.saveExport(first, randomUUID())).toBe(false);
+      await repository.finish(first, 'ready', first.objectKeys[0], null);
+      const [snapshot] = await repository.list(kycId);
+      expect(snapshot).toMatchObject({
+        revision: 2,
+        capturedRevision: 1,
+        state: 'pending',
+        attempts: 0,
+        expiresAt: first.expiresAt,
+      });
+      const next = (await repository.claim())!;
+      expect(next.revision).toBe(2);
+      expect(await repository.saveExport(next, randomUUID())).toBe(true);
+      await repository.finish(next, 'ready', next.objectKeys[1], null);
+      await enqueue({ status: 'Approved' });
+      expect((await repository.list(kycId))[0]).toMatchObject({
+        revision: 2,
+        capturedRevision: 2,
+        state: 'ready',
+      });
+    });
+    it('retains partial full snapshots during export polling and honors the 12-attempt budget', async () => {
+      config.DIDIT_KYC_ARCHIVE_FULL_DATA_ENABLED = 'true';
+      await enqueue({ status: 'Not Started' });
+      const first = (await repository.claim())!;
+      const exportId = randomUUID();
+      expect(await repository.saveExport(first, exportId)).toBe(true);
+      await repository.finish(
+        first,
+        'pending',
+        first.objectKeys[0],
+        'FULL_EVIDENCE_INCOMPLETE',
+      );
+      expect(await repository.readable(kycId, first.id)).toBeDefined();
+      await db.query(
+        `UPDATE kyc_evidence_archives SET attempts=5,"nextAttemptAt"=now()`,
+      );
+      const sixth = (await repository.claim())!;
+      expect(sixth).toMatchObject({ attempts: 6, exportId, exportRevision: 1 });
+      await repository.finish(sixth, 'pending', null, 'FULL_CAPTURE_FAILED');
+      expect((await repository.readable(kycId, first.id))!.objectKey).toBe(
+        first.objectKeys[0],
+      );
+      await db.query(
+        `UPDATE kyc_evidence_archives SET attempts=12,"nextAttemptAt"=now()`,
+      );
+      expect(await repository.claim()).toBeUndefined();
+      expect((await repository.list(kycId))[0].state).toBe('failed');
+    });
+    it('does not roll back KYC changes when the optional archive SQL fails', async () => {
+      config.DIDIT_KYC_ARCHIVE_FULL_DATA_ENABLED = 'true';
+      await db.transaction(async (m) => {
+        await m.query(`UPDATE kyc_documents SET status='approved'`);
+        // Intentionally fail the queue FK; savepoint recovery keeps business TX usable.
+        await repository.enqueue(m, {
+          id: randomUUID(),
+          userId: user,
+          provider: 'didit',
+          diditSessionId: sessionId,
+        } as any);
+        await m.query(`UPDATE kyc_documents SET status='still-approved'`);
+      });
+      expect(
+        (await db.query('SELECT status FROM kyc_documents'))[0].status,
+      ).toBe('still-approved');
+      expect(await repository.list(kycId)).toEqual([]);
+    });
+    it('never resurrects full archives with new events after expiry or purge', async () => {
+      config.DIDIT_KYC_ARCHIVE_FULL_DATA_ENABLED = 'true';
+      await enqueue({ status: 'Approved' });
+      const first = (await repository.list(kycId))[0];
+      await repository.expire(kycId, first.id, user);
+      await repository.finishPurge((await repository.claimPurge())!, true);
+      await enqueue({ status: 'Changed' });
+      expect((await repository.list(kycId))[0]).toMatchObject({
+        revision: 1,
+        state: 'purged',
+      });
+      expect(await repository.claim()).toBeUndefined();
+    });
+    it('creates a pending manual dossier without approving or changing the user, with an audited save', async () => {
+      await db.query('DELETE FROM kyc_documents');
+      const manual = new ManualKycRepository(db);
+      const row = await manual.reserve(
+        user,
+        { kycId: null, baseRevision: 0, note: 'Synthetic control', fields: {} },
+        1095,
+      );
+      expect(
+        (await db.query('SELECT provider,status FROM kyc_documents'))[0],
+      ).toEqual({ provider: 'legacy', status: 'pending' });
+      expect(await repository.claim()).toBeUndefined();
+      await manual.finish(row, user);
+      expect((await manual.current(user)).archive).toMatchObject({
+        state: 'ready',
+        revision: 1,
+      });
+      expect(
+        (await db.query('SELECT action FROM kyc_evidence_access_log'))[0]
+          .action,
+      ).toBe('manual_save');
+      expect((await db.query('SELECT status FROM users'))[0].status).toBe(
+        'active',
+      );
+    });
+    it('serializes manual editors, rejects stale versions and preserves provider status/retention', async () => {
+      const manual = new ManualKycRepository(db);
+      const input = {
+        kycId,
+        baseRevision: 0,
+        note: 'Synthetic control',
+        fields: {},
+      };
+      const results = await Promise.allSettled([
+        manual.reserve(user, input, 1095),
+        manual.reserve(user, input, 1095),
+      ]);
+      expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+      const row = (
+        results.find(
+          (r) => r.status === 'fulfilled',
+        ) as PromiseFulfilledResult<any>
+      ).value;
+      await manual.finish(row, user);
+      await expect(manual.reserve(user, input, 1095)).rejects.toThrow(
+        'Une autre saisie',
+      );
+      const second = await manual.reserve(
+        user,
+        { ...input, baseRevision: 1 },
+        100,
+      );
+      expect(second.expiresAt).toEqual(row.expiresAt);
+      await manual.release(second);
+      expect((await manual.current(user)).archive).toMatchObject({
+        revision: 1,
+        objectKey: row.objectKeys[0],
+      });
+      expect(
+        (await db.query('SELECT provider,status FROM kyc_documents'))[0],
+      ).toEqual({ provider: 'didit', status: 'approved' });
+    });
+    it('never collects a crashed manual upload with Didit, nor publishes it after revocation', async () => {
+      const manual = new ManualKycRepository(db);
+      const row = await manual.reserve(
+        user,
+        { kycId, baseRevision: 0, note: 'Synthetic control', fields: {} },
+        1095,
+      );
+      await db.query(
+        `UPDATE kyc_evidence_archives SET "leaseUntil"=now()-interval '1 second'`,
+      );
+      expect(await repository.claim()).toBeUndefined();
+      await repository.expire(kycId, row.id, user);
+      await expect(manual.finish(row, user)).rejects.toThrow('révoquée');
     });
     it('only one worker claims a given session and records the planned key before upload', async () => {
       await enqueue();

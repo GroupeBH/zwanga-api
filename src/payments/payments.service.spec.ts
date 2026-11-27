@@ -111,6 +111,33 @@ describe('PaymentsService', () => {
 
   afterEach(() => jest.restoreAllMocks());
 
+  it.each([PaymentPurpose.TRIP_BOOKING, PaymentPurpose.SUBSCRIPTION_PRO])(
+    'rejects callback replay of a different successful order for %s before any check or save', async purpose => {
+      const transaction = { id: 'victim', userId: 'user', provider: PaymentProvider.FLEXPAY, purpose,
+        reference: 'VICTIM', orderNumber: 'VICTIM-ORDER', amount: 5000, currency: 'CDF', status: PaymentStatus.INITIATED };
+      paymentTransactionRepository.findOne.mockResolvedValue(transaction);
+      await expect(service.handleFlexPayCallback({ reference: 'VICTIM', orderNumber: 'PAID-ORDER', code: '0' }))
+        .rejects.toThrow('commande FlexPay enregistrée');
+      expect(flexPayService.checkTransaction).not.toHaveBeenCalled();
+      expect(paymentTransactionRepository.save).not.toHaveBeenCalled();
+      expect(transaction.orderNumber).toBe('VICTIM-ORDER');
+    });
+
+  it.each([PaymentPurpose.TRIP_BOOKING, PaymentPurpose.SUBSCRIPTION_PRO])(
+    'does not settle %s when the server check contains a foreign order despite matching amount', async purpose => {
+      configService.get.mockImplementation(key => key === 'NODE_ENV' ? 'test' : key === 'FLEXPAY_VERIFY_CALLBACKS' ? 'true' : undefined);
+      const transaction = { id: 'victim', userId: 'user', provider: PaymentProvider.FLEXPAY, purpose,
+        reference: 'VICTIM', orderNumber: 'VICTIM-ORDER', amount: 5000, currency: 'CDF', status: PaymentStatus.INITIATED };
+      paymentTransactionRepository.findOne.mockResolvedValue(transaction);
+      flexPayService.isSuccessfulTransaction.mockReturnValue(true);
+      flexPayService.checkTransaction.mockResolvedValue({ code: '0', raw: {}, transaction: {
+        orderNumber: 'PAID-ORDER', reference: 'PAID-ORDER', amount: '5000', currency: 'CDF', status: '0' } });
+      const response = await service.handleFlexPayCallback({ reference: 'VICTIM', orderNumber: 'VICTIM-ORDER', code: '0' });
+      expect(flexPayService.checkTransaction).toHaveBeenCalledWith('VICTIM-ORDER');
+      expect(response.status).toBe(PaymentStatus.INITIATED);
+      expect(response.orderNumber).toBe('VICTIM-ORDER');
+    });
+
   it.each(['production', 'development', undefined])('rejects unverified callbacks in %s, even without lifecycle initialization', env => {
     configService.get.mockImplementation((key: string) => key === 'NODE_ENV' ? env : key === 'FLEXPAY_VERIFY_CALLBACKS' ? 'false' : undefined);
     expect(() => service.onModuleInit()).toThrow('only permitted in isolated tests');
@@ -508,6 +535,8 @@ describe('PaymentsService', () => {
 
   it('returns a french success message after a confirmed payment check', async () => {
     paymentTransactionRepository.findOne.mockResolvedValue({
+      amount: 5000,
+      currency: 'CDF',
       id: 'payment-1',
       userId: 'user-1',
       status: PaymentStatus.INITIATED,
@@ -709,7 +738,7 @@ describe('PaymentsService', () => {
     await expect(
       service.checkPaymentStatus('r2npySEnChn6243831919710', 'user-1'),
     ).rejects.toThrow(
-      'La référence FlexPay ne correspond pas à cette transaction',
+      'La preuve FlexPay ne correspond pas à la commande enregistrée',
     );
   });
 

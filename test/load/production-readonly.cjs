@@ -3,12 +3,10 @@
 // Deliberately separate from the isolated benchmark. Fixed production target,
 // GET-only allowlist, no credentials/response bodies saved, no retry or proxy spoofing.
 const https = require('node:https');
-const { execFile } = require('node:child_process');
-const { promisify } = require('node:util');
+const { createAwsReader } = require('./production-monitoring.cjs');
 const { mkdirSync, writeFileSync } = require('node:fs');
 const { resolve, join } = require('node:path');
 const { performance } = require('node:perf_hooks');
-const execute = promisify(execFile);
 const REGION = 'eu-central-1', ACCOUNT = '046374119247';
 const PREFIX = 'zwanga-api-production', CLUSTER = `${PREFIX}-cluster`, SERVICE = `${PREFIX}-api`;
 const TG = 'targetgroup/zwanga-api-production-api-tg/47218716421646ca';
@@ -26,22 +24,6 @@ const ROUTES = Object.freeze({
 const STAGES = Object.freeze([1, 2, 4]);
 const INTERVAL_MS = 10500, BURSTS = 6, HARD_LIMIT_MS = 290000;
 const wait = ms => new Promise(done => setTimeout(done, ms));
-
-async function aws(service, operation, ...args) {
-  const allowed = new Set(['sts:get-caller-identity', 'ecs:describe-services',
-    'ecs:describe-task-definition', 'elbv2:describe-target-health', 'cloudwatch:get-metric-data',
-    'cloudwatch:describe-alarms', 'rds:describe-db-instances', 'elasticache:describe-replication-groups',
-    'sns:list-subscriptions-by-topic']);
-  if (!allowed.has(`${service}:${operation}`)) throw new Error('AWS operation is not read-only/allowlisted');
-  try {
-    const { stdout } = await execute(process.platform === 'win32' ? 'aws.exe' : 'aws',
-      [service, operation, ...args, '--region', REGION, '--output', 'json', '--no-cli-pager',
-        '--cli-connect-timeout', '5', '--cli-read-timeout', '10'],
-      { windowsHide: true, timeout: 20000, maxBuffer: 3 * 1024 * 1024,
-        env: { ...process.env, AWS_MAX_ATTEMPTS: '1', AWS_PAGER: '' } });
-    return JSON.parse(stdout);
-  } catch { throw new Error(`Read-only monitoring unavailable: ${service}/${operation}`); }
-}
 
 function metricQueries() {
   const queries = [];
@@ -75,7 +57,7 @@ function metricQueries() {
   return queries;
 }
 
-async function snapshot() {
+async function snapshot(aws) {
   const now = new Date();
   const [metrics, service, targets, alarms, subscriptions] = await Promise.all([
     aws('cloudwatch', 'get-metric-data', '--start-time', new Date(now - 15 * 60000).toISOString(),
@@ -183,8 +165,14 @@ async function main(mode) {
       method: 'GET', routes: ROUTES, noRetries: true, noAuthentication: true, noForwardedHeaders: true },
     exclusions: ['authenticated workflows', 'writes/OTP/KYC/push/payments', 'stress/saturation',
       'autoscaling/failover', 'local code deployment', 'database queries outside existing read endpoints'],
-    snapshots: [], probes: [], stages: [], requests: [] };
+    snapshots: [], probes: [], stages: [], requests: [], monitoringCalls: [] };
   const save = () => writeFileSync(join(output, 'report.json'), JSON.stringify(report, null, 2));
+  const aws = createAwsReader({ region: REGION, onDiagnostic: diagnostic => {
+    report.monitoringCalls.push(diagnostic);
+    if (!diagnostic.ok) console.log(`Monitoring failure: ${JSON.stringify(diagnostic)}`);
+    save();
+  } });
+  const readSnapshot = () => snapshot(aws);
   const agent = new https.Agent({ keepAlive: true, maxSockets: 4 });
   let stopped, monitorTimer, deadlineTimer, monitorPromise;
   const inflight = new Set();
@@ -230,7 +218,7 @@ async function main(mode) {
   try {
     const identity = await aws('sts', 'get-caller-identity', '--query', '{Account:Account}');
     if (identity.Account !== ACCOUNT) throw new Error('Wrong AWS account; refusing production probe');
-    const initial = await snapshot(); report.snapshots.push(initial);
+    const initial = await readSnapshot(); report.snapshots.push(initial);
     const [task, rds, redis] = await Promise.all([
       aws('ecs', 'describe-task-definition', '--task-definition', initial.service.taskDefinition,
         '--query', 'taskDefinition.{cpu:cpu,memory:memory,containers:containerDefinitions[].{name:name,image:image}}'),
@@ -256,7 +244,7 @@ async function main(mode) {
     report.limits.abortRequestLatencyMs = latencyLimit;
     const monitor = async () => {
       try {
-        const s = await snapshot(); report.snapshots.push(s);
+        const s = await readSnapshot(); report.snapshots.push(s);
         const unsafe = unsafeState(s, initial.service.taskDefinition);
         if (unsafe) stop(unsafe);
         save();
@@ -297,7 +285,7 @@ async function main(mode) {
     clearTimeout(deadlineTimer); clearInterval(monitorTimer);
     if (monitorPromise) await monitorPromise;
     if (mode === '--run-confirmed-readonly') {
-      const reason = await recordFinalMonitoring(report, snapshot);
+      const reason = await recordFinalMonitoring(report, readSnapshot);
       if (reason) stop(reason);
     }
     if (stopped && report.result === 'completed') report.result = 'stopped_early';

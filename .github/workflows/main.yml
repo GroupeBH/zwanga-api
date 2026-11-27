@@ -50,6 +50,11 @@ jobs:
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Block migrations on exposed secrets
+        uses: ./.github/actions/secret-scan
 
       - name: Validate migration configuration
         shell: bash

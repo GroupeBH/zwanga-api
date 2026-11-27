@@ -20,6 +20,10 @@ import {
 import { assertSequentialInvitation } from '../src/trip-requests/dispatch/sequential-policy';
 import { FourDriverDispatchWaves1780000123000 } from '../src/database/migrations/1780000123000-FourDriverDispatchWaves';
 import { startReceivedResponseWindow } from '../src/trip-requests/dispatch/receipt-response-window';
+import { lockQueuedCandidates, sequentialCandidates } from '../src/trip-requests/dispatch/sequential-candidates';
+import { Trip, TripStatus } from '../src/trips/entities/trip.entity';
+import { setDispatchTransactionTimeouts } from '../src/trip-requests/dispatch/dispatch-transaction';
+import { receiptConcurrencyFlow } from './receipt-concurrency-flow';
 
 type Offer = {
   id: string;
@@ -62,6 +66,32 @@ export function fourDriverWaveFlow(context: () => Context) {
       await c.relay.advance(request.id);
       return { ...c, drivers, request };
     };
+    receiptConcurrencyFlow(() => prepare(4));
+    it.each([false, true])('discovery exclusions preserve busy ownership and per-request invitation history (ongoing=%s)', async ongoing => {
+      const c = context(), drivers = [await c.driver(), await c.driver(15.311), await c.driver(15.312)];
+      const wanted = await c.request(true), other = await c.request(true);
+      const vehicles = await Promise.all(drivers.map(d => c.db.getRepository(Vehicle).findOneByOrFail({ ownerId: d.id })));
+      if (ongoing) {
+        for (let i = 0; i < drivers.length; i++) await c.db.getRepository(Trip).save({
+          driverId: drivers[i].id, vehicleId: vehicles[i].id, departureLocation: 'A', arrivalLocation: 'B',
+          departureDate: new Date(), status: TripStatus.ACTIVE, totalSeats: 4, availableSeats: 3,
+          pricePerSeat: 1000, currentLocation: wanted.departurePoint, lastLocationUpdateAt: new Date(),
+        });
+        await c.db.query('DELETE FROM driver_dispatch_presence');
+      }
+      const candidates = async (r = wanted) => (await sequentialCandidates(c.db.manager, r)).map(d => d.driverId).sort();
+      expect(await candidates()).toEqual(drivers.map(d => d.id).sort());
+      const busyId = randomUUID();
+      for (const [i, r, status, id] of [[0, other, 'pending', busyId], [1, wanted, 'expired', randomUUID()]] as const)
+        await c.db.query(`INSERT INTO trip_request_dispatch_offers
+          (id,"requestId","driverId","vehicleId",seats,"expiresAt",sequential,"waveSlot",status)
+          VALUES ($1,$2,$3,$4,3,now()+interval '30 seconds',true,1,$5)`,
+          [id, r.id, drivers[i].id, vehicles[i].id, status]);
+      expect(await candidates()).toEqual([drivers[2].id]);
+      expect(await candidates(await c.request(true))).toEqual([drivers[1].id, drivers[2].id].sort());
+      await c.db.query("UPDATE trip_request_dispatch_offers SET status='cancelled' WHERE id=$1", [busyId]);
+      expect(await candidates()).toEqual([drivers[0].id, drivers[2].id].sort());
+    });
     const isDeliverable = (notification: Notification) => {
       const c = context();
       const notifier = Object.create(
@@ -109,6 +139,89 @@ export function fourDriverWaveFlow(context: () => Context) {
       expect(
         (await c.notices(c.request.id)).filter((n) => n.isActive),
       ).toHaveLength(4);
+    });
+
+    it('uses one validation and one outbox insert for a four-driver wave, preserving actual deadlines', async () => {
+      const c = context();
+      for (let i = 0; i < 4; i++) await c.driver(15.31 + i * 0.0001);
+      const r = await c.request(true);
+      const sql: string[] = [];
+      const create = c.db.createQueryRunner.bind(c.db);
+      const spy = jest.spyOn(c.db, 'createQueryRunner').mockImplementation((...args) => {
+        const runner = create(...args), query = runner.query.bind(runner);
+        runner.query = ((...params: Parameters<typeof runner.query>) => {
+          sql.push(String(params[0])); return query(...params);
+        }) as typeof runner.query;
+        return runner;
+      });
+      try { expect(await c.relay.advance(r.id)).toBe(true); }
+      finally { spy.mockRestore(); }
+      expect(sql.filter(q => q.includes('WITH queued_driver AS MATERIALIZED'))).toHaveLength(1);
+      expect(sql.filter(q => /^INSERT INTO trip_request_dispatch_offers/.test(q))).toHaveLength(1);
+      expect(sql.filter(q => /^INSERT INTO "notifications"/.test(q))).toHaveLength(1);
+      expect(sql.filter(q => q.includes('WITH pending AS MATERIALIZED'))).toHaveLength(1);
+      expect(sql.filter(q => q.includes('WITH deadlines AS'))).toHaveLength(1);
+      const rows = await c.db.query(`SELECT "expiresAt", "deliveryDeadlineAt" FROM trip_request_dispatch_offers WHERE "requestId"=$1`, [r.id]);
+      expect(rows).toHaveLength(4);
+      for (const row of rows) expect(row.deliveryDeadlineAt).toEqual(row.expiresAt);
+      expect(await c.notices(r.id)).toHaveLength(4);
+    });
+
+    it('skips a locked driver in a bounded wave and rechecks inactive accounts and vehicles', async () => {
+      const c = context(), drivers: User[] = [];
+      for (let i = 0; i < 5; i++) drivers.push(await c.driver(15.31 + i * 0.0001));
+      const r = await c.request(true);
+      await c.db.getRepository(User).update(drivers[1].id, { isActive: false });
+      await c.db.getRepository(Vehicle).update({ ownerId: drivers[2].id }, { isActive: false });
+      const blocker = c.db.createQueryRunner();
+      await blocker.connect(); await blocker.startTransaction();
+      try {
+        await blocker.query('SELECT id FROM users WHERE id=$1 FOR NO KEY UPDATE', [drivers[0].id]);
+        const checked = await c.db.transaction(manager => lockQueuedCandidates(manager, r, drivers.map(d => d.id), 4));
+        expect(checked.map(row => row.driverId)).toEqual(drivers.slice(1).map(d => d.id));
+        expect(checked.map(row => !!row.candidate)).toEqual([false, false, true, true]);
+      } finally { await blocker.rollbackTransaction(); await blocker.release(); }
+    });
+
+    it('keeps dispatch timeouts local to the transaction on a reused connection', async () => {
+      const runner = context().db.createQueryRunner(); await runner.connect();
+      try {
+        const settings = () => runner.query(`SELECT current_setting('lock_timeout') AS lock,
+          current_setting('statement_timeout') AS statement`);
+        const original = await settings();
+        await runner.startTransaction(); await setDispatchTransactionTimeouts(runner.manager);
+        expect(await settings()).toEqual([{ lock: '2s', statement: '5s' }]);
+        await runner.commitTransaction(); expect(await settings()).toEqual(original);
+        await runner.startTransaction(); await setDispatchTransactionTimeouts(runner.manager);
+        await runner.rollbackTransaction(); expect(await settings()).toEqual(original);
+      } finally { if (runner.isTransactionActive) await runner.rollbackTransaction(); await runner.release(); }
+    });
+
+    it('concurrent receipts start one response window and never rewrite it on retries', async () => {
+      const c = await prepare(4), offer = (await c.offers(c.request.id))[0];
+      const notice = (await c.notices(c.request.id)).find(n => n.userId === offer.driverId)!;
+      const results = await Promise.all(Array.from({ length: 6 }, () => c.db.transaction(m =>
+        startReceivedResponseWindow(m, offer.driverId, notice.id))));
+      expect(results.every(result => !!result)).toBe(true);
+      expect(new Set(results.map(result => result!.expiresAt)).size).toBe(1);
+      const [before] = await c.db.query(`SELECT xmin::text AS version FROM trip_request_dispatch_offers WHERE id=$1`, [offer.id]);
+      expect(await c.db.transaction(m => startReceivedResponseWindow(m, offer.driverId, notice.id)))
+        .toEqual(expect.objectContaining({ expiresAt: results[0]!.expiresAt }));
+      expect(await c.db.query(`SELECT xmin::text AS version FROM trip_request_dispatch_offers WHERE id=$1`, [offer.id])).toEqual([before]);
+      expect(await c.db.transaction(m => startReceivedResponseWindow(m, randomUUID(), notice.id))).toBeUndefined();
+      await c.db.query(`UPDATE trip_request_dispatch_offers SET "expiresAt"=clock_timestamp()-interval '1 second' WHERE id=$1`, [offer.id]);
+      expect(await c.db.transaction(m => startReceivedResponseWindow(m, offer.driverId, notice.id))).toBeUndefined();
+    });
+
+    it('does not start a response window for legacy or undelivered-expired offers', async () => {
+      const c = await prepare(4), offers = await c.offers(c.request.id), notices = await c.notices(c.request.id);
+      await c.db.query(`UPDATE trip_request_dispatch_offers SET "deliveryDeadlineAt"=NULL WHERE id=$1`, [offers[0].id]);
+      await c.db.query(`UPDATE trip_request_dispatch_offers SET "deliveryDeadlineAt"=clock_timestamp()-interval '1 second' WHERE id=$1`, [offers[1].id]);
+      for (const offer of offers.slice(0, 2)) {
+        const notice = notices.find(n => n.userId === offer.driverId)!;
+        expect(await c.db.transaction(m => startReceivedResponseWindow(m, offer.driverId, notice.id))).toBeUndefined();
+      }
+      expect(await c.db.query(`SELECT id FROM trip_request_dispatch_offers WHERE "requestId"=$1 AND "responseStartedAt" IS NOT NULL`, [c.request.id])).toEqual([]);
     });
 
     it('one concurrent acceptance wins and retires every competing invitation and queued alert', async () => {

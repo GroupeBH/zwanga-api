@@ -49,6 +49,7 @@ import { payoutRecoveryState, payoutReviewDelay } from './driver-payout-recovery
 import { DRIVER_FINANCE } from '../driver-finance/driver-finance.policy';
 import { hasCurrentApprovedIdentity } from '../users/current-identity';
 import { earningForClient, spendableEarning } from '../asset-credit/earning-credit';
+import { assertNoSubsidyPayoutHold, hasSubsidyPayoutHold, WITHDRAWABLE_EARNINGS_SUM_SQL } from './subsidy-payout-guard';
 
 export interface DriverSettlementSummary {
   availableBalance: number;
@@ -836,6 +837,8 @@ export class DriverSettlementsService implements OnModuleInit {
       return this.applyPaymentToPayout(existingPayment, driverId);
     }
 
+    // Recheck even an old idempotent reservation before any new provider transfer.
+    await assertNoSubsidyPayoutHold(this.dataSource.manager, driverId);
     try {
       const payment = await this.paymentsService.initiatePayout({
         userId: driverId,
@@ -1274,6 +1277,7 @@ export class DriverSettlementsService implements OnModuleInit {
   }
 
   private async getAvailableBalance(driverId: string): Promise<number> {
+    if (await hasSubsidyPayoutHold(this.dataSource.manager, driverId)) return 0;
     if (await this.payoutRepository.exists({ where: { driverId, recoveryBlocked: true } })) return 0;
     const earnings = await this.sumEarnings(driverId, [
       DriverEarningStatus.AVAILABLE,
@@ -1291,9 +1295,10 @@ export class DriverSettlementsService implements OnModuleInit {
     manager: EntityManager,
     driverId: string,
   ): Promise<number> {
+    await assertNoSubsidyPayoutHold(manager, driverId);
     const earningResult = await manager
       .createQueryBuilder(DriverEarning, 'earning')
-      .select('COALESCE(SUM(CASE WHEN earning.proCreditPending THEN 0 ELSE earning.netAmount - earning.assetRepaymentAmount - earning.proRepaymentAmount END), 0)', 'sum')
+      .select(WITHDRAWABLE_EARNINGS_SUM_SQL, 'sum')
       .where('earning.driverId = :driverId', { driverId })
       .andWhere('earning.status = :status', {
         status: DriverEarningStatus.AVAILABLE,
@@ -1323,7 +1328,7 @@ export class DriverSettlementsService implements OnModuleInit {
   ): Promise<number> {
     const result = await this.earningRepository
       .createQueryBuilder('earning')
-      .select('COALESCE(SUM(CASE WHEN earning.proCreditPending THEN 0 ELSE earning.netAmount - earning.assetRepaymentAmount - earning.proRepaymentAmount END), 0)', 'sum')
+      .select(WITHDRAWABLE_EARNINGS_SUM_SQL, 'sum')
       .where('earning.driverId = :driverId', { driverId })
       .andWhere('earning.status IN (:...statuses)', { statuses })
       .getRawOne<{ sum: string }>();

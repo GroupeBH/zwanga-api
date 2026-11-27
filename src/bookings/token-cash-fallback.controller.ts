@@ -1,8 +1,10 @@
-import { Controller, Param, ParseUUIDPipe, Post, Request } from '@nestjs/common';
+import { Controller, Param, ParseUUIDPipe, Post, Request, UseInterceptors } from '@nestjs/common';
+import { BookingResponseInterceptor } from './booking-response.interceptor';
 import { Auth } from '../auth/decorators/auth.decorator';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
 import { TokenCashFallbackService } from './token-cash-fallback.service';
 
+@UseInterceptors(BookingResponseInterceptor)
 @Controller('bookings')
 export class TokenCashFallbackController {
   constructor(private readonly service: TokenCashFallbackService) {}

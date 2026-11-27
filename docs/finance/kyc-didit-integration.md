@@ -5,6 +5,205 @@ Date : 1 septembre 2026
 Périmètre : application mobile, backend NestJS, back-office admin, retraits conducteur, retraits de parrainage  
 Statut : implémenté localement ; migration, variables d'environnement, configuration Didit et déploiements requis
 
+## 26 novembre 2026 — Collecte complète et saisie manuelle admin
+
+Cette section complète et remplace les limites de la collecte d'images décrite
+plus bas. Travail local uniquement : aucune activation, session réelle ou
+modification AWS. La décision KYC, les permissions conducteur et les règles
+de paiement restent indépendantes de l'archivage et de la saisie.
+
+### Données disponibles chez Didit
+
+| Source officielle | Usage du backend |
+| --- | --- |
+| [Décision de session](https://docs.didit.me/sessions-api/retrieve-session) | GET `/v3/session/{sessionId}/decision/`, puis la variante `?include=events,resubmissions`. Conservation des deux réponses : leurs formes ne sont pas identiques. |
+| [Profil utilisateur](https://docs.didit.me/management-api/users/get) | GET `/v3/users/{vendor_data}/` avec l'ID Zwanga du propriétaire, jamais un ID trouvé dans une correspondance biométrique. |
+| [Export des fichiers](https://docs.didit.me/sessions-api/export-files) | POST `/v3/session/{sessionId}/files-export/`, clé d'idempotence propre à la révision. Images, vidéos et documents originaux dans un ZIP. |
+| [État de l'export](https://docs.didit.me/sessions-api/get-files-export) | GET `/v3/session/{sessionId}/files-export/{exportId}/`, puis téléchargement HTTPS contrôlé. Les liens d'export sont temporaires. |
+| [Rapport PDF](https://docs.didit.me/sessions-api/generate-pdf) | GET `/v3/session/{sessionId}/generate-pdf/?language=fr`, lorsque l'état de session le permet. |
+
+Le JSON privé conserve les champs retournés, y compris ceux ajoutés à l'avenir :
+identité, MRZ/NFC, liveness, comparaison faciale, AML, adresse, téléphone/email,
+appareil/IP, questionnaires, avertissements, commentaires, événements, décisions
+et anciennes soumissions. Les champs absents restent absents : nous ne créons
+pas de contrôles supplémentaires ni de faux résultats pour compléter le dossier.
+
+« Tout récupérer » signifie **tout ce que ces endpoints rendent accessible pour
+ce dossier et ce propriétaire**. Les [Returned data](https://help.didit.me/workflows/returned-data),
+droits de la clé, fonctionnalités du workflow et rétentions Didit peuvent limiter
+le résultat. Les sessions/comptes d'autres personnes mentionnés dans un résultat
+ne sont jamais parcourus. Les identifiants d'accès et capacités d'URL signées
+(requête, fragment, identifiants HTTP) sont retirés de l'archive JSON. Les valeurs
+métier ne sont pas réduites à la liste des champs actuellement affichés par Zwanga.
+
+La collecte est mise en file dès la création de session en mode complet, puis
+mise à jour lors des webhooks/synchronisations dont le contenu change. Le hash
+de déduplication et les révisions sont les seules nouvelles données de contrôle
+en SQL : les réponses complètes et fichiers restent dans S3 privé. Un savepoint
+isole une erreur d'enqueue du traitement KYC. Aucun téléchargement ne se fait
+dans une transaction SQL. Pas de collecte rétroactive massive implicite.
+
+Un export `PENDING`/`PROCESSING` laisse une archive partielle consultable et
+relance la collecte après une minute (12 tentatives maximum). Un échec ou une
+limite apparaît dans `missing` et `details.coverage` ; l'état n'est pas annoncé
+complet. Une reprise admin d'une archive partielle/échouée ouvre une nouvelle
+révision d'export sans prolonger la conservation. Limite de 64 tentatives
+enregistrées par archive ; intervention technique au-delà.
+
+Les objets supplémentaires, sous le même préfixe privé du bail, sont :
+
+- `provider.json` : réponses structurées et couverture ; plafond 8 Mio.
+- `originals.zip` : originaux, transférés en flux sans extraction ; plafond 128 Mio.
+- `report.pdf` : rapport fournisseur ; plafond 16 Mio.
+
+Le ZIP conserve les originaux, donc potentiellement leurs métadonnées EXIF,
+contrairement aux aperçus JPEG normalisés. L'accès admin authentifié et audité
+utilise `GET /admin/kyc/:kycId/evidence/:archiveId/attachments/:kind`, avec
+`kind=provider_data|original_files|report`. Les détails du dossier ne chargent pas
+les fichiers volumineux. Les versions, marqueurs S3 et objets d'une tentative
+interrompue sont inclus dans la purge à l'échéance.
+
+### Saisie manuelle dans zwanga-admin
+
+Disponible dans la fiche utilisateur (y compris sans KYC) et dans la page KYC,
+via « Saisie manuelle des informations et documents KYC ». Sections repliables,
+composants/styles existants conservés. Le schéma reprend les catégories de
+l'en-tête CSV Didit examiné ; aucune ligne contenant des données réelles n'a été
+importée. `vendor_data` n'est pas éditable : le propriétaire vient de la route.
+
+1. Saisir les informations connues et un compte rendu de 10 à 2 000 caractères.
+2. Joindre facultativement recto, verso, photo du visage et justificatif de
+   domicile (JPEG/PNG/WebP, 5 Mio maximum par image ; pas de PDF dans ce formulaire).
+3. Enregistrer. Sans dossier existant, un dossier `legacy/pending` est créé.
+   Sinon, le dossier Didit/AWS existant et ses résultats sont préservés.
+4. La décision de validation/refus reste l'action existante, séparée. Une saisie
+   de score AML, présence ou consentement reste une **déclaration administrative**,
+   jamais un contrôle exécuté ou un consentement obtenu automatiquement.
+
+Routes réservées aux administrateurs :
+
+- `GET /admin/manual-kyc/schema` : champs et sections du formulaire.
+- `GET /admin/users/:userId/manual-kyc` : dernière saisie privée, lecture auditée.
+- `POST /admin/users/:userId/manual-kyc` : multipart ; champ `payload` JSON
+  `{ kycId, baseRevision, note, fields }`, images dans `document_front`,
+  `document_back`, `selfie`, `address_proof`.
+
+Chaque version garde l'auteur, la date, l'origine `administrator`, et un événement
+d'audit `manual_save`. Les saisies concurrentes/périmées reçoivent un conflit,
+pas un écrasement silencieux. Une panne S3 ne publie pas la nouvelle version et
+ne détruit pas la dernière version enregistrée. Les photos non remplacées sont
+conservées. Les champs et images manuels restent en S3 privé, sans URL publique
+ni copie dans `providerMetadata`. Les workers Didit ne traitent jamais une archive
+manuelle. La création d'un dossier vide peut subsister en `pending` si le premier
+upload échoue ; recharger le formulaire permet de reprendre sur ce dossier.
+
+### Préparation et déploiement
+
+- Appliquer les migrations `1780000146000` (révisions/export) et `1780000147000`
+  (séparation manuelle/audit), après les migrations d'archivage existantes, avant
+  de déployer ce backend. Aucune migration n'a été appliquée à la base applicative.
+- `DIDIT_KYC_ARCHIVE_ENABLED=false` reste inchangé ;
+  `DIDIT_KYC_ARCHIVE_FULL_DATA_ENABLED=true` prépare le nouveau mode dans les
+  exemples et le `.env` local. Rétention nouvelles archives : 1 095 jours.
+- `KYC_MANUAL_RETENTION_DAYS` vaut 1 095 par défaut et ne change pas les échéances
+  déjà enregistrées. Le formulaire manuel ne nécessite ni clé Didit ni hôtes
+  médias, mais exige le stockage privé et les permissions S3 d'archivage.
+- Avant activation Didit : vérifier les champs retournés, scopes de lecture,
+  hôtes exacts du téléchargement ZIP et des images, droits IAM, chiffrement,
+  blocage public, rétention/consentement applicables, quotas et éventuelle
+  facturation des appels supplémentaires. Ne pas ajouter de contrôles payants
+  au workflow pour simplement rendre l'archivage fonctionnel.
+- Déployer backend puis admin ; recette sur identité synthétique autorisée :
+  création manuelle, complément Didit, accès hors admin refusé, conflit entre
+  deux éditeurs, panne S3, export en attente, téléchargement privé et purge.
+
+### Vérifications de cette extension
+
+- **334 tests backend, 18 suites, réussis** : collecte complète, transport et
+  stockage bornés, compatibilité Didit/AWS, saisie manuelle et 20 scénarios sur
+  une instance PostgreSQL temporaire locale isolée. Les appels Didit/S3 des tests
+  sont simulés ; ils ne certifient pas les scopes, quotas ou permissions réels.
+- **4 tests admin réussis** : contrat multipart, maintien de la saisie après
+  erreur, rendu création/complément et présence dans les deux écrans existants.
+- Compilation TypeScript complète du backend réussie :
+  `tsc --noEmit --incremental false -p tsconfig.build.json`.
+- TypeScript ciblé du formulaire/API admin réussi avec
+  `tsc --noEmit --incremental false -p tests/manualKyc.types.json`.
+  La vérification TypeScript globale de l'admin a dépassé les limites de mémoire
+  de processus essayées (384 puis 640 Mio) ; elle reste à refaire avec davantage
+  de mémoire disponible. Pas de validation visuelle navigateur ni de test AWS réel.
+
+## Étape précédente — Images S3 séparées et conservation de trois ans
+
+Choix actuel : **1 095 jours à partir de la première mise en file**, pour les
+nouvelles archives Didit. Le `.env` local et les exemples préparent cette durée,
+mais la collecte reste désactivée et les hôtes médias restent à renseigner.
+Aucun paramètre AWS ni session Didit réelle n'a été modifié pour cette préparation.
+Les échéances des archives déjà enregistrées, y compris `expiresAt: null`, ne
+sont pas modifiées rétroactivement.
+
+Les nouvelles copies Didit sont des objets `image/jpeg` indépendants sous
+`kyc/evidence/<archive>/<tentative>/<index>.jpg`, avec un manifeste JSON v2 privé
+à côté (`<tentative>.json`). Il contient les métadonnées et empreintes SHA-256,
+pas les images en base64. Les anciens bundles v1 restent lisibles ; le flux AWS
+KYC interne continue à utiliser son format existant. Aucun changement de schéma
+ni nouvelle migration n'est nécessaire pour ce format.
+
+- Écriture immutable des JPEG, puis du manifeste en dernier. Une panne ne publie
+  pas d'archive complète ; les fichiers d'une tentative interrompue restent
+  rattachés à la clé de bail déjà enregistrée en base pour leur purge ultérieure.
+- Les détails admin ne téléchargent que le manifeste ; demander une image ne
+  télécharge que celle-ci. Les anciennes archives v1 nécessitent encore la lecture
+  du bundle. Les routes restent compatibles, privées et auditées, sans exposer les
+  clés S3 ni les URLs temporaires Didit.
+- Les lectures vérifient taille, empreinte et appartenance au même dossier/bail.
+  Les limites de téléchargement, la normalisation JPEG et la suppression EXIF/GPS
+  restent actives. Pas de téléchargement réseau dans les transactions SQL.
+- À l'échéance, l'accès est refusé et le worker purge le manifeste, les images,
+  leurs versions S3 et marqueurs de suppression. La suppression physique est
+  asynchrone : une panne AWS/IAM/Object Lock peut la retarder et doit être traitée.
+  Une suppression de compte ou demande admin peut déclencher la purge plus tôt.
+
+### Recette et activation à effectuer séparément
+
+1. Vérifier les migrations existantes `1780000061000` et `1780000062000`, ainsi
+   que le blocage public du bucket applicatif, son chiffrement et ses règles de
+   lifecycle/réplication. Aucune règle ne doit expirer ces objets avant la durée
+   convenue ; les copies externes/sauvegardes ont leur propre politique.
+2. Vérifier le rôle ECS : Put/Get/DeleteObject et DeleteObjectVersion sous
+   `kyc/evidence/*`, ListBucketVersions sur ce préfixe. Ces droits sont déclarés
+   dans `infra-aws/kyc.tf` lorsque `enable_aws_kyc_permissions` est activé ; leur
+   présence dans le code ne prouve pas leur déploiement effectif.
+3. Sur une session synthétique autorisée, vérifier que le workflow Didit retourne
+   bien les images et relever uniquement leurs **hôtes exacts**. Les champs exclus
+   des « Returned data » du workflow ne seront pas disponibles : voir
+   [la configuration Didit](https://help.didit.me/workflows/returned-data) et
+   [l'API de résultat v3](https://docs.didit.me/sessions-api/retrieve-session).
+4. Configurer `DIDIT_KYC_MEDIA_HOSTS`, garder
+   `DIDIT_KYC_ARCHIVE_RETENTION_DAYS=1095`, puis activer explicitement
+   `DIDIT_KYC_ARCHIVE_ENABLED=true` dans l'environnement de recette. Vérifier
+   webhook/synchronisation → `pending` → `ready`, ouverture d'un JPEG par admin,
+   refus hors admin et suppression complète des versions sur ce seul dossier test.
+5. Après recette et autorisation de déploiement, reporter la configuration dans
+   les paramètres runtime de production et redémarrer/déployer le backend.
+   Aucun appel réel ni activation en production n'est inclus dans les tests locaux.
+
+Les nouvelles validations éligibles sont collectées automatiquement après activation.
+Pour un dossier antérieur, utiliser explicitement `POST /admin/kyc/:kycId/evidence`
+si ses images existent toujours chez Didit. Aucun rattrapage massif automatique.
+
+### Vérifications locales du 26 novembre
+
+- **267 tests réussis, 13 suites** : archivage (stockage, worker, transport,
+  politique), flux Didit/signatures et compatibilité AWS KYC/normalisation image.
+- Une simulation avec PNG synthétiques utilise le vrai normaliseur et le vrai
+  service de stockage, avec transport Didit et SDK S3 simulés : trois JPEG privés,
+  manifeste v2, lecture admin auditée, métadonnées EXIF retirées et purge complète.
+- Compilation backend validée avec
+  `tsc --noEmit --incremental false -p tsconfig.build.json` sous Node 24.22.1.
+- Pas de test PostgreSQL réel ni de suite globale relancés pour cette modification
+  sans migration ; pas d'appel réel Didit/S3 ni de recette en production.
+
 ## 24 octobre 2026 — Validation serveur et signatures renforcées
 
 - `POST /users/kyc/didit/sync` accepte toujours le champ mobile `status`, mais
@@ -51,14 +250,15 @@ sans modifier la migration 61 ni réécrire les échéances déjà enregistrées
   côté maximal 2 560 px), pas des originaux judiciaires certifiés. Empreinte SHA-256
   par copie. Pas de vidéo, PDF, gabarit biométrique, IP, numéro personnel supplémentaire,
   recherche de visages ou données d'autres personnes issues de `matches[]`.
-- Stockage dans un bundle JSON privé sous `kyc/evidence/<archive>/<tentative>.json`
-  du bucket applicatif, chiffré SSE-S3 AES256. Pas de données d'identité extraites ni
+- Stockage dans le bucket applicatif, chiffré SSE-S3 AES256 : historiquement un
+  bundle JSON v1 ; depuis le 26 novembre, JPEG séparés et manifeste v2 pour Didit.
+  Pas de données d'identité extraites ni
   d'URL fournisseur dans les nouvelles tables SQL ; pas de lien public/présigné
   retourné au client. Limites : quatre documents et quatre contrôles selfie,
   5 Mo par image source, 24 Mo par bundle. Les absences sont signalées : `partial`
   après épuisement des tentatives, jamais un faux `ready`.
-- Le choix d'un bundle permet de ne pas exposer d'URL directe ; chaque consultation
-  lit le bundle côté backend, avec au maximum deux lectures simultanées par
+- Aucun format n'expose d'URL directe ; chaque consultation
+  passe côté backend, avec au maximum deux lectures simultanées par
   instance (HTTP 503 temporaire au-delà). Pour de forts volumes, surveiller mémoire/latence
   et faire évoluer le stockage sans ouvrir d'accès public.
 
@@ -87,7 +287,7 @@ back-office réalisé ; ces derniers peuvent consommer les nouveaux endpoints.
 | Variable | Valeur / rôle |
 | --- | --- |
 | `DIDIT_KYC_ARCHIVE_ENABLED` | `false` par défaut ; `true` seulement après revue confidentialité et stockage. |
-| `DIDIT_KYC_ARCHIVE_RETENTION_DAYS` | `0` pour la conservation sans expiration demandée ; sinon de 1 à 3 650 jours. Valeur obligatoire : vide ou absente ne signifie jamais « indéfiniment ». |
+| `DIDIT_KYC_ARCHIVE_RETENTION_DAYS` | `1095` (trois ans), choix du 26 novembre. Valeur obligatoire ; `0` reste supporté pour compatibilité mais n'est plus la configuration retenue. |
 | `DIDIT_KYC_MEDIA_HOSTS` | Hôtes HTTPS exacts des médias de votre application Didit, séparés par virgules ; pas de wildcard ni URL complète. |
 
 La clé Didit existante (`DIDIT_API_KEY`, sinon `DIDIT_KYC_API_KEY`) et
@@ -113,13 +313,15 @@ Aucun fichier Terraform/IAM, secret SSM ou réglage de bucket n'a été modifié
 
 ### Conservation, suppression et limites
 
-- Décision utilisateur du 8 octobre 2026 : **conservation sans expiration automatique**.
+- Ancienne décision du 8 octobre 2026, remplacée pour les nouvelles archives le
+  26 novembre : conservation sans expiration automatique.
   Avec `DIDIT_KYC_ARCHIVE_RETENTION_DAYS=0`, les nouvelles archives ont
   `expiresAt: null` en base et dans l'API admin. Ce n'est pas une date très lointaine
   ni une suspension du worker de purge. La migration 62 conserve les échéances
   finies existantes ; changer la configuration ou rejouer un webhook ne prolonge
-  pas les archives et ne restaure pas celles déjà purgées. Les exemples sont à `0`,
-  mais aucun `.env` réel ou paramètre AWS n'a été modifié.
+  pas les archives et ne restaure pas celles déjà purgées. Les exemples et le
+  `.env` local sont désormais à `1095`, collecte désactivée. Les paramètres AWS
+  doivent être mis à jour séparément après recette.
 - Pour une durée positive, l'échéance reste fixée lors de la première mise en file,
   non renouvelée à chaque webhook. La politique de confidentialité doit refléter
   la décision retenue ; ce choix technique ne constitue pas une validation juridique.
@@ -519,9 +721,12 @@ un retrait réel FlexPay n'est autorisé que si kyc_documents.status = approved
 
 ## Données personnelles
 
-Zwanga ne stocke pas les images Didit ni le payload complet de décision.
+Sans activation de l'archivage, Zwanga ne stocke pas les images Didit ni le
+payload complet de décision. Lorsque l'archivage privé est activé, les copies
+JPEG et les métadonnées d'identité sélectionnées sont conservées dans S3 selon
+la durée ci-dessus, mais jamais le payload complet.
 
-Zwanga conserve seulement :
+Le résumé KYC courant en base conserve :
 
 - l'identifiant de session ;
 - le workflow ;

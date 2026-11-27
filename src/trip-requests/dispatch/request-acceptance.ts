@@ -4,7 +4,6 @@ import { EntityManager, In, QueryFailedError } from 'typeorm';
 import { TripRequest, TripRequestStatus } from '../entities/trip-request.entity';
 import { Trip, TripStatus } from '../../trips/entities/trip.entity';
 import { Booking, BookingStatus } from '../../bookings/entities/booking.entity';
-import { DriverOffer, DriverOfferStatus } from '../entities/driver-offer.entity';
 import { assertRequestSnapshot, assertUnassignedRequest } from '../request-edit-policy';
 import { assertSequentialInvitation } from './sequential-policy';
 import { enqueueTransactionalNotification } from '../../notifications/transactional-notification';
@@ -74,18 +73,25 @@ export async function completeRequestAcceptance(manager: EntityManager, request:
       (request.selectedDriverId && request.selectedDriverId !== trip.driverId) || (request.tripId && request.tripId !== trip.id))
     throw new ConflictException('Cette commande a changé. Actualisez ses détails.');
   const booking = await manager.findOne(Booking, { where: { tripId: trip.id, passengerId: request.passengerId,
-    status: In([BookingStatus.ACCEPTED, BookingStatus.COMPLETED]) } });
+    status: In([BookingStatus.ACCEPTED, BookingStatus.COMPLETED]) }, select: { id: true } });
   if (!booking) throw new ConflictException('La réservation doit être confirmée avant le trajet.');
   const selectedAt = request.selectedAt ?? new Date();
   await manager.update(TripRequest, request.id, { status: TripRequestStatus.DRIVER_SELECTED,
     selectedDriverId: trip.driverId, selectedVehicleId: trip.vehicleId,
     selectedPricePerSeat: trip.pricePerSeat, selectedDriverRequiresPassengerKyc: trip.requiresPassengerKyc,
-    selectedAt, tripId: trip.id, driverPickupOverdueNotifiedAt: null });
-  await manager.update(TripRequest, request.id, { targetDriverPriorityUntil: null });
-  await manager.query(`UPDATE trip_request_dispatch_offers SET status=CASE WHEN "driverId"=$2 THEN 'accepted' ELSE 'cancelled' END
-    WHERE "requestId"=$1 AND status='pending'`, [request.id, trip.driverId]);
-  await manager.update(DriverOffer, { tripRequestId: request.id, status: DriverOfferStatus.PENDING }, { status: DriverOfferStatus.REJECTED });
-  await silenceRequestInvitation(manager, request.id);
+    selectedAt, tripId: trip.id, driverPickupOverdueNotifiedAt: null, targetDriverPriorityUntil: null });
+  // One round trip for disjoint invitation/offer/notification rows. No business
+  // decision relies on reading a row modified by another CTE in this snapshot.
+  await manager.query(`WITH closed_dispatch AS (
+    UPDATE trip_request_dispatch_offers SET status=CASE WHEN "driverId"=$2 THEN 'accepted' ELSE 'cancelled' END
+      WHERE "requestId"=$1 AND status='pending' RETURNING id
+  ), rejected_offers AS (
+    UPDATE driver_offers SET status='rejected', "updatedAt"=CURRENT_TIMESTAMP
+      WHERE "tripRequestId"=$1 AND status='pending' RETURNING id
+  ) UPDATE notifications SET "isActive"=false WHERE "isActive"=true
+    AND data->>'tripRequestId'=$1::text
+    AND data->>'type' IN ('trip_request_nearby','driver_dispatch_offer','trip_request','new_trip_request')`,
+    [request.id, trip.driverId]);
   await enqueueTransactionalNotification(manager, { eventKey: `request-accepted:${request.id}:${trip.id}`,
     userId: request.passengerId, title: 'Commande acceptée',
     body: 'Un conducteur a accepté votre commande. Ouvrez-la pour voir les détails.',
@@ -99,9 +105,15 @@ export type AcceptanceRecovery = { wait: number } | { complete: true } | { booki
 export async function recoverRequestAcceptance(manager: EntityManager, request: TripRequest): Promise<AcceptanceRecovery | null> {
   if (request.selectedDriverId || request.tripId) return null;
   const trip = await manager.findOne(Trip, { where: { tripRequestId: request.id, isPrivate: true,
-    status: In([TripStatus.PENDING, TripStatus.ACTIVE, TripStatus.COMPLETED]) }, lock: { mode: 'pessimistic_write' } });
+    status: In([TripStatus.PENDING, TripStatus.ACTIVE, TripStatus.COMPLETED]) }, lock: { mode: 'pessimistic_write' },
+    // Recovery only reads these fields, including completeRequestAcceptance.
+    // Keep the row lock, but avoid geometry/financial hydration on each relay.
+    // This partial object must never be saved as a complete trip.
+    select: { id: true, driverId: true, vehicleId: true, status: true, createdAt: true,
+      pricePerSeat: true, requiresPassengerKyc: true } });
   if (!trip) return null;
-  const bookings = await manager.find(Booking, { where: { tripId: trip.id } });
+  const bookings = await manager.find(Booking, { where: { tripId: trip.id },
+    select: { id: true, passengerId: true, status: true } });
   if (![TripRequestStatus.PENDING, TripRequestStatus.OFFERS_RECEIVED].includes(request.status)) {
     // Cancellation can race a crash after trip insertion but before the atomic booking.
     if (!bookings.length && trip.status === TripStatus.PENDING) await manager.update(Trip, trip.id, { status: TripStatus.CANCELLED });

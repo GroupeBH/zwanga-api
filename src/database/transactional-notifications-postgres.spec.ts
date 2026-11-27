@@ -51,7 +51,7 @@ const pgBin = process.env.NOTIFICATIONS_TEST_POSTGRES_BIN;
     let referrals: ReferralsService;
     const referralNotifications = { sendNotification: jest.fn().mockResolvedValue(true) };
     let notifications: NotificationService;
-    let users: { findOne: jest.Mock; update: jest.Mock; count: jest.Mock };
+    let users: { query: jest.Mock; findOne: jest.Mock; update: jest.Mock; count: jest.Mock };
 
     beforeAll(async () => {
       directory = mkdtempSync(join(tmpdir(), 'zwanga-notifications-test-'));
@@ -172,6 +172,7 @@ const pgBin = process.env.NOTIFICATIONS_TEST_POSTGRES_BIN;
       });
       new TransactionalNotificationsSubscriber(source);
       users = {
+        query: jest.fn(),
         count: jest.fn().mockResolvedValue(1),
         findOne: jest.fn(async ({ where }) => ({
           id: where.id,
@@ -181,6 +182,10 @@ const pgBin = process.env.NOTIFICATIONS_TEST_POSTGRES_BIN;
         })),
         update: jest.fn(),
       };
+      users.query.mockImplementation(async (_sql, [id]) => {
+        const owner = await users.findOne({ where: { id } });
+        return owner ? [{ ...owner, hasExclusivePushToken: await users.count() === 1 }] : [];
+      });
       wallet = new WalletService(
         source.getRepository(WalletAccount),
         source.getRepository(WalletLedgerEntry),

@@ -103,7 +103,7 @@ describe('driver category persistence and role isolation', () => {
 function registrationFixture() {
   const repo = { findOne: jest.fn().mockResolvedValue(null), create: jest.fn(value => value),
     save: jest.fn(async value => ({ id: 'test-account', isActive: true, ...value })),
-    update: jest.fn().mockResolvedValue({ affected: 1 }), manager: { transaction: jest.fn() } };
+    update: jest.fn().mockResolvedValue({ affected: 1 }), manager: { transaction: jest.fn(), query: jest.fn().mockResolvedValue([]) } };
   repo.manager.transaction.mockImplementation(callback => callback({
     query: jest.fn().mockResolvedValue([]), getRepository: () => repo,
   }));

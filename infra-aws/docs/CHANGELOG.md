@@ -1,5 +1,32 @@
 # Journal détaillé des changements d'infrastructure AWS
 
+## INFRA-2026-11-26-002 — Préparation du comparatif de capacité
+
+- Statut : local uniquement, aucune modification Terraform de production, aucun apply ni lancement AWS.
+- La proposition isolée `profiles/journey-load-lab.proposal.json` décrit le comparatif de deux API à 0,5 vCPU / 1 Gio puis 1 vCPU / 2 Gio, avec charge et garde-fous identiques. Le runner local applique ces tailles aux conteneurs et vérifie les prérequis avant démarrage.
+- Le générateur sur machine séparée, le service worker et la comparaison RDS restent explicitement non implémentés/non provisionnés ; machines, raccordement sécurisé et coût restent à valider. Aucun seuil 750/1 000 déduit de cette préparation.
+- Rapports : empreinte des sources et comparaison en lecture seule des essais complets compatibles ; les rapports historiques incomplets ne peuvent pas certifier la nouvelle configuration. Procédure : `docs/operations/journey-load-testing.md` à la racine du dépôt.
+- Validation : 41 tests ciblés du banc réussis ; précontrôle réel bloquant avec environ 0,21 Gio libres et Docker/WSL indisponibles. Aucun test de charge lancé ; préparation seulement à la demande de l'opérateur.
+
+## INFRA-2026-11-26-001 — Préparation de réponse à la fuite de secrets Terraform
+
+- Statut : P0 toujours ouvert ; contrôles et procédure locaux uniquement. Métadonnées AWS lues sans valeurs : quatre paramètres SSM en version 1 du 14 août et dernière modification AUTH Redis du 14 août. Aucune rotation, aucun apply, aucun redéploiement ni force-push effectué.
+- Prévention : action Gitleaks 8.30.1 épinglée par sommes SHA-256, historique complet et masquage total, sans rapport uploadé ni baseline d'exemption. Contrôle distinct des chemins de plans/state/env/variables privés, y compris supprimés dans HEAD. Scan dédié push/PR/manuel/hebdomadaire et garde avant credentials AWS dans les workflows de livraison/migration. Le contrôle reste bloquant sur l'historique contaminé.
+- Redis : ajout de `redis_auth_token_update_strategy` (ROTATE par défaut, SET permis, DELETE refusé) et `redis_apply_immediately` (false par défaut). Aucun secret régénéré par défaut, aucune modification de capacité. Le changement immédiat concerne aussi les autres changements Redis en attente, à relire avant intervention.
+- Exploitation : procédure dans `secret-incident-response.md`, rotation des quatre générateurs avec un plan privé revu, bascule de tous les consommateurs puis phase SET sans remplacement du jeton pour révoquer l'ancien. RDS/JWT, maintenance et connexion obligatoire traités séparément de la purge GitHub. Les 36 occurrences signalées doivent faire l'objet d'un inventaire de secrets distincts et de leurs consommateurs.
+- Coût/disponibilité : aucun impact AWS pendant cette préparation ; la future rotation impose une fenêtre coordonnée. Aucun changement de version PostgreSQL inclus. Ne jamais restaurer les secrets compromis pour revenir en arrière.
+- Validation : 8 tests Node de politique CI/chemins et 22 tests Jest de session réussis, format et validation Terraform réussis, sonde synthétique Gitleaks réussie. Répétition sur miroir GitHub neuf : 183 références conservées, 441/454 commits réécrits, arbres identiques hors plan, 10 détections textuelles restantes à trier. Aucun push ni succès de rotation/purge de production déduit des tests locaux.
+
+## INFRA-2026-11-25-001 — Préparation locale des paramètres d'annonces Store
+
+- Date / opérateur : 25 novembre 2026, Africa/Kinshasa ; Codex à la demande du mainteneur. Statut : exemple local complété, aucune activation ni intervention AWS.
+- Constat : l'exemple `store-management.env.example` préparait les imports mais omettait les deux paramètres distincts des annonces. Un Store accessible dans l'administration ne signifie pas que les annonces automatiques sont activées.
+- Correction : ajout de `APP_UPDATES_ENABLED=false` et `APP_UPDATES_FROM_STORES_ENABLED=false` à cet exemple, avec avertissement sur les annonces déjà actives. Aucun secret ajouté et aucun fichier `.env` effectif ou opérateur modifié.
+- Disponibilité / coût : aucune ressource créée, redimensionnée, redémarrée ou déployée ; aucune migration, requête fournisseur ou notification réelle. RDS, Redis, autoscaling et paramètres d'envoi conservent leur état.
+- Activation ultérieure : vérifier les migrations et le catalogue sous annonces désactivées, les intégrations et annonces des deux plateformes, puis les destinataires avant autorisation des envois. L'import Google requiert une identité dédiée aux éditions temporaires ; aucune édition n'est publiée par l'importeur. Les nouveaux paramètres doivent être référencés par une nouvelle définition ECS. Terraform prépare la révision et le pipeline la déploie après migrations : un simple redémarrage d'une révision ne les référençant pas ne suffit pas. Examiner le plan complet avec les variables opérateur privées ; ne pas appliquer de réduction de capacité parasite.
+- Repli futur : désactiver les annonces et déployer la configuration correspondante ; l'effet n'est pas immédiat sur les tâches encore anciennes et les messages déjà envoyés ne peuvent pas être rappelés. Désactiver seulement `APP_UPDATES_FROM_STORES_ENABLED` ne retire pas les annonces existantes.
+- Validation : valeurs d'exemple maintenues à `false` ; contrôles ciblés locaux consignés dans le journal applicatif. Aucun `terraform plan/apply`, test de livraison réelle ni certification de production dans cette intervention.
+
 ## INFRA-2026-11-21-001 — Destinataire obligatoire pour les alertes de production
 
 - Statut : abonnement email SNS créé en production le 21 novembre, confirmé par le destinataire et réconcilié dans Terraform. Aucun changement de capacité, migration RDS ou redémarrage ECS ; les correctifs backend restent locaux.

@@ -18,23 +18,37 @@ export function sequentialCandidates(manager: EntityManager, request: TripReques
  * re-running discovery. The caller holds a transaction until the outbox commits. */
 export async function lockNextQueuedCandidate(manager: EntityManager, request: TripRequest,
   driverIds: string[]): Promise<{ driverId: string; candidate: QueueCandidate | null } | null> {
-  if (!driverIds.length) return null;
-  const [row] = await candidates(manager, request, driverIds);
-  return row ? { driverId: row.driverId, candidate: row.vehicleId ? row : null } : null;
+  return (await lockQueuedCandidates(manager, request, driverIds, 1))[0] ?? null;
 }
 
-async function candidates(manager: EntityManager, request: TripRequest, driverIds?: string[]): Promise<QueueCandidate[]> {
+/** Validate at most one wave in Redis order, under the same SQL driver locks.
+ * Return rejected IDs too so stale cached entries cannot stall the next batch. */
+export async function lockQueuedCandidates(manager: EntityManager, request: TripRequest,
+  driverIds: string[], limit: number): Promise<{ driverId: string; candidate: QueueCandidate | null }[]> {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 4) throw new Error('Candidate batch must contain 1 to 4 drivers');
+  if (!driverIds.length) return [];
+  const rows = await candidates(manager, request, [...new Set(driverIds)], limit);
+  return rows.map(row => ({ driverId: row.driverId, candidate: row.vehicleId ? row : null }));
+}
+
+async function candidates(manager: EntityManager, request: TripRequest, driverIds?: string[], limit = 1): Promise<QueueCandidate[]> {
   if (!request.departurePoint) return [];
   // MATERIALIZED + LIMIT keeps the costly vehicle/KYC/spatial checks downstream
-  // of one driver reservation. Busy drivers are skipped using invitation indexes,
-  // in Redis order, without doing those checks for the other 49 IDs.
+  // of a bounded driver wave. Busy drivers are skipped using invitation indexes,
+  // in Redis order, without doing those checks for the rest of the cached IDs.
   const queued = driverIds ? `queued_driver AS MATERIALIZED (
-    SELECT driver.id FROM unnest($11::uuid[]) WITH ORDINALITY AS q(id, position)
+    SELECT driver.id, q.position FROM unnest($11::uuid[]) WITH ORDINALITY AS q(id, position)
     JOIN users driver ON driver.id = q.id
     WHERE NOT EXISTS (SELECT 1 FROM trip_request_dispatch_offers o WHERE o."requestId" = $7 AND o."driverId" = driver.id)
       AND NOT EXISTS (SELECT 1 FROM trip_request_dispatch_offers o WHERE o."driverId" = driver.id AND o.status = 'pending')
-    ORDER BY q.position LIMIT 1 FOR NO KEY UPDATE OF driver SKIP LOCKED
+    ORDER BY q.position LIMIT $12 FOR NO KEY UPDATE OF driver SKIP LOCKED
   ),` : '';
+  // Keep anti-joins inside each UNION branch: applying them to the combined
+  // eligible set can repeatedly scan every pending offer for every candidate.
+  // This is only discovery pruning; reservation still rechecks under SQL locks.
+  const uninvited = (driver: string) => driverIds ? '' : `AND
+    NOT EXISTS (SELECT 1 FROM trip_request_dispatch_offers o WHERE o."requestId" = $7 AND o."driverId" = ${driver})
+    AND NOT EXISTS (SELECT 1 FROM trip_request_dispatch_offers o WHERE o."driverId" = ${driver} AND o.status = 'pending')`;
   return manager.query(`WITH ${queued} eligible AS (
     SELECT p."driverId", v.id AS "vehicleId",
     CASE WHEN v.id = p."vehicleId" THEN p.seats WHEN v.type = 'motorcycle_2_wheels' THEN 2
@@ -46,7 +60,8 @@ async function candidates(manager: EntityManager, request: TripRequest, driverId
       AND (CASE WHEN v.id = p."vehicleId" THEN p.seats WHEN v.type = 'motorcycle_2_wheels' THEN 2
         WHEN v.type = 'motorcycle_3_wheels' THEN 3 ELSE 4 END) >= $3 ORDER BY (v.id = p."vehicleId") DESC, v.id LIMIT 1) v ON true
     WHERE ${PRESENCE_ALERT_LOCATION_SQL} AND p."driverId" <> $1
-      ${driverIds ? 'AND p."driverId" = (SELECT id FROM queued_driver)' : ''}
+      ${uninvited('p."driverId"')}
+      ${driverIds ? 'AND p."driverId" IN (SELECT id FROM queued_driver)' : ''}
       AND (CASE WHEN v.id = p."vehicleId" THEN p.seats WHEN v.type = 'motorcycle_2_wheels' THEN 2
         WHEN v.type = 'motorcycle_3_wheels' THEN 3 ELSE 4 END) >= $3
       AND ST_DWithin(p.position, ST_SetSRID(ST_MakePoint($4,$5),4326)::geography, $6)
@@ -61,7 +76,8 @@ async function candidates(manager: EntityManager, request: TripRequest, driverId
     LEFT JOIN driver_dispatch_presence p ON p."driverId" = t."driverId"
     WHERE t.status = 'ongoing' AND t."destinationReachedAt" IS NULL
       AND t."driverId" <> $1 AND v.type::text = ANY($2::text[]) AND t."availableSeats" >= $3 AND t."totalSeats" > 0
-      ${driverIds ? 'AND t."driverId" = (SELECT id FROM queued_driver)' : ''}
+      ${uninvited('t."driverId"')}
+      ${driverIds ? 'AND t."driverId" IN (SELECT id FROM queued_driver)' : ''}
       AND t."totalSeats" <= CASE WHEN v.type = 'motorcycle_2_wheels' THEN 2
         WHEN v.type = 'motorcycle_3_wheels' THEN 3 ELSE 20 END
       AND $8::timestamptz <= now() + interval '10 minutes' AND $9::numeric IS NOT NULL
@@ -75,14 +91,13 @@ async function candidates(manager: EntityManager, request: TripRequest, driverId
         ST_SetSRID(ST_MakePoint($4,$5),4326)::geography, $6)
     )
     ${driverIds ? `SELECT q.id AS "driverId", e."vehicleId", e.seats, e."existingTripId"
-    FROM queued_driver q LEFT JOIN eligible e ON e."driverId" = q.id
-    ORDER BY e."existingTripId" LIMIT 1` : `SELECT e."driverId", e."vehicleId", e.seats, e."existingTripId"
+    FROM queued_driver q LEFT JOIN LATERAL (
+      SELECT e.* FROM eligible e WHERE e."driverId" = q.id ORDER BY e."existingTripId" LIMIT 1
+    ) e ON true ORDER BY q.position` : `SELECT e."driverId", e."vehicleId", e.seats, e."existingTripId"
     FROM eligible e
-    WHERE NOT EXISTS (SELECT 1 FROM trip_request_dispatch_offers o WHERE o."requestId" = $7 AND o."driverId" = e."driverId")
-      AND NOT EXISTS (SELECT 1 FROM trip_request_dispatch_offers o WHERE o."driverId" = e."driverId" AND o.status = 'pending')
     ORDER BY e."stalePosition", ST_Distance(e.position, ST_SetSRID(ST_MakePoint($4,$5),4326)::geography), e."driverId", e."existingTripId"
     LIMIT 50`}`,
     [request.passengerId, requestVehicleTypes(request), request.numberOfSeats, ...request.departurePoint.coordinates,
       NEARBY_DRIVER_RADIUS_METERS, request.id, request.departureDateMin, request.maxPricePerSeat, request.paymentMode,
-      ...(driverIds ? [driverIds] : [])]);
+      ...(driverIds ? [driverIds, limit] : [])]);
 }

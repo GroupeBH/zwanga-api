@@ -18,6 +18,9 @@ function harness() {
   };
   const repository = { findOneBy: jest.fn().mockImplementation(async () => ({ ...booking })), createQueryBuilder: jest.fn(() => builder) };
   const manager = {
+    query: jest.fn().mockImplementation(async (_sql, args) => {
+      booking.arrivalPrompt = JSON.parse(args[1]); return [];
+    }),
     findOne: jest.fn().mockImplementation(async () => { locks.push('trip'); return { ...trip }; }),
     getRepository: jest.fn(() => repository),
     update: jest.fn().mockImplementation(async (_entity, _id, patch) => {
@@ -30,10 +33,11 @@ function harness() {
   };
   const db = { getRepository: jest.fn(() => repository), transaction: jest.fn(async fn => fn(manager)) };
   const bookings = { validateManualRidePassenger: jest.fn(), invalidateManualRideCaches: jest.fn().mockResolvedValue(undefined), finishManualRideEffects: jest.fn() };
-  const service = new RideDeclarationsService(db as unknown as DataSource, bookings as unknown as BookingsService);
+  const arrivalAssistance = { latestObservation: jest.fn() };
+  const service = new RideDeclarationsService(db as unknown as DataSource, bookings as unknown as BookingsService, arrivalAssistance as any);
   let sequence = 0;
   const dto = (stage: 'pickup' | 'dropoff' = 'pickup', decision: 'confirm' | 'reject' = 'confirm', actorUserId = 'passenger'): RideDeclarationDto => ({ eventId: `event-${++sequence}`, actorUserId, stage, decision, occurredAt: new Date().toISOString() });
-  return { booking, trip, locks, manager, bookings, service, dto };
+  return { booking, trip, locks, manager, bookings, service, dto, arrivalAssistance };
 }
 
 describe('manual ride transaction', () => {
@@ -223,6 +227,122 @@ describe('manual ride transaction', () => {
   });
 });
 
+describe('request-origin manual confirmations', () => {
+  it.each(['pickup', 'dropoff'] as const)('%s: driver alone applies once without inventing a passenger vote', async stage => {
+    const h = harness(); h.trip.tripRequestId = 'request'; h.booking.pickedUp = stage === 'dropoff';
+    const dto = h.dto(stage, 'confirm', 'driver');
+    const result = await h.service.declare('booking', 'driver', dto, 'driver');
+    expect(result.confirmationMode).toBe('driver_only');
+    expect(result[stage].status).toBe('confirmed');
+    expect(h.booking[stage === 'pickup' ? 'pickupDetectionMethod' : 'dropoffDetectionMethod']).toBe('manual_driver_confirmation');
+    expect(h.booking[stage === 'pickup' ? 'pickedUpConfirmedByPassenger' : 'droppedOffConfirmedByPassenger']).not.toBe(true);
+    expect(h.booking.rideDeclarations[stage]?.passenger).toBeUndefined();
+    expect(h.booking.rideEffectsPending).toEqual([stage]);
+    expect(h.bookings.finishManualRideEffects).not.toHaveBeenCalled();
+    await h.service.declare('booking', 'driver', dto);
+    await h.service.declare('booking', 'driver', h.dto(stage, 'confirm', 'driver'));
+    expect(h.manager.update).toHaveBeenCalledTimes(1);
+    expect(h.locks.slice(0, 2)).toEqual(['trip', 'booking']);
+  });
+  it.each(['pickup', 'dropoff'] as const)('%s: passenger old-client taps and replays are forbidden', async stage => {
+    const h = harness(); h.trip.tripRequestId = 'request'; h.booking.pickedUp = stage === 'dropoff';
+    const dto = h.dto(stage);
+    for (const saved of [false, true]) {
+      if (saved) h.booking.rideDeclarations = { [stage]: { passenger: { ...dto, receivedAt: dto.occurredAt } } };
+      await expect(h.service.declare('booking', 'passenger', dto, 'passenger'))
+        .rejects.toMatchObject({ status: 403, response: { code: 'RIDE_DRIVER_CONFIRMATION_REQUIRED' } });
+    }
+    expect(h.manager.update).not.toHaveBeenCalled();
+  });
+  it('driver arrival requires boarding and unlocks payment without changing the amount', async () => {
+    const h = harness(); h.trip.tripRequestId = 'request';
+    h.booking.paymentMode = TripPaymentMode.ELECTRONIC; h.booking.paymentStatus = BookingPaymentStatus.PENDING; h.booking.paymentAmount = 5000;
+    await expect(h.service.declare('booking', 'driver', h.dto('dropoff', 'confirm', 'driver')))
+      .rejects.toMatchObject({ response: { code: 'RIDE_PICKUP_REQUIRED' } });
+    await h.service.declare('booking', 'driver', h.dto('pickup', 'confirm', 'driver'));
+    expect(h.bookings.validateManualRidePassenger).toHaveBeenCalledTimes(1);
+    await h.service.declare('booking', 'driver', h.dto('dropoff', 'confirm', 'driver'));
+    expect(h.booking.status).toBe(BookingStatus.COMPLETED);
+    const service = Object.create(BookingsService.prototype) as BookingsService;
+    expect(() => service['ensureBookingCanBePaid']({ ...h.booking, trip: h.trip })).not.toThrow();
+    expect(h.booking.paymentAmount).toBe(5000);
+    expect(h.booking.paymentStatus).toBe(BookingPaymentStatus.PENDING);
+  });
+  it.each(['pickup', 'dropoff'] as const)('%s: GPS confirmation still wins a late driver tap', async stage => {
+    const h = harness(); h.trip.tripRequestId = 'request'; h.booking.pickedUp = true;
+    h.booking.pickupDetectionMethod = 'automatic_shared_movement';
+    if (stage === 'dropoff') { h.booking.droppedOff = true; h.booking.status = BookingStatus.COMPLETED; }
+    expect((await h.service.declare('booking', 'driver', h.dto(stage, 'confirm', 'driver')))[stage].status).toBe('confirmed');
+    expect(h.manager.update).not.toHaveBeenCalled();
+  });
+  it('retains disputes, KYC, expiry and cancelled-trip checks', async () => {
+    const disputed = harness(); disputed.trip.tripRequestId = 'request';
+    await disputed.service.declare('booking', 'passenger', disputed.dto('pickup', 'reject'));
+    expect((await disputed.service.declare('booking', 'driver', disputed.dto('pickup', 'confirm', 'driver'))).pickup.status).toBe('disputed');
+    expect(disputed.booking.pickedUp).toBe(false);
+    const h = harness(); h.trip.tripRequestId = 'request';
+    h.bookings.validateManualRidePassenger.mockRejectedValueOnce(new ForbiddenException());
+    await expect(h.service.declare('booking', 'driver', h.dto('pickup', 'confirm', 'driver'))).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(h.service.declare('booking', 'driver', { ...h.dto('pickup', 'confirm', 'driver'), occurredAt: new Date(Date.now() - 73 * 3600_000).toISOString() }))
+      .rejects.toMatchObject({ response: { code: 'RIDE_EVENT_TIME' } });
+    h.trip.status = TripStatus.CANCELLED;
+    await expect(h.service.declare('booking', 'driver', h.dto('pickup', 'confirm', 'driver')))
+      .rejects.toMatchObject({ response: { code: 'RIDE_STATE_CHANGED' } });
+    expect(h.manager.update).not.toHaveBeenCalled();
+  });
+  it.each(['confirmPickupByPassenger', 'confirmDropoffByPassenger'] as const)('%s internal entry cannot bypass request-trip permissions', async method => {
+    const context = { logger: { log: jest.fn() }, bookingRepository: { findOne: jest.fn().mockResolvedValue({ trip: { tripRequestId: 'request' } }), save: jest.fn() } };
+    await expect(BookingsService.prototype[method].call(context, 'booking', 'passenger'))
+      .rejects.toMatchObject({ response: { code: 'RIDE_DRIVER_CONFIRMATION_REQUIRED' } });
+    expect(context.bookingRepository.save).not.toHaveBeenCalled();
+  });
+  it('does not re-evaluate GPS pickup after driver confirmation', async () => {
+    const service = Object.create(BookingsService.prototype) as BookingsService;
+    await expect(service['tryConfirmAutomaticPickup']({ pickedUp: true, pickedUpConfirmedByPassenger: false,
+      pickupDetectionMethod: 'manual_driver_confirmation', status: BookingStatus.ACCEPTED,
+      trip: { status: TripStatus.ACTIVE, tripRequestId: 'request' } } as Booking)).resolves.toBeNull();
+  });
+});
+
+describe('passenger consent to a server-proposed near-destination dropoff', () => {
+  function proposed() {
+    const h = harness(), now = new Date(); h.trip.tripRequestId = 'request'; h.booking.pickedUp = true;
+    h.trip.currentLocation = { type: 'Point', coordinates: [15.3, -4.3+190/111195] };
+    h.trip.arrivalPoint = { type: 'Point', coordinates: [15.3, -4.3] }; h.trip.lastLocationUpdateAt = now;
+    h.booking.arrivalPrompt = { id: 'prompt', proposedAt: new Date(now.getTime()-1000).toISOString(), expiresAt: new Date(now.getTime()+600000).toISOString() };
+    h.arrivalAssistance.latestObservation.mockResolvedValue({ longitude: 15.3, latitude: h.trip.currentLocation.coordinates[1], accuracyMeters: 5, recordedAt: now.toISOString() });
+    return { ...h, consent: { ...h.dto('dropoff'), arrivalPromptId: 'prompt' } };
+  }
+  it('passenger consent at 190m completes once, preserves fare, records the agreement and defers payment effects', async () => {
+    const h = proposed(); h.booking.paymentAmount = 7500; h.booking.paymentStatus = BookingPaymentStatus.PENDING;
+    h.booking.paymentMode = TripPaymentMode.CASH;
+    expect((await h.service.declare('booking', 'passenger', h.consent)).dropoff.status).toBe('confirmed');
+    expect(h.booking.dropoffDetectionMethod).toBe('manual_passenger_near_destination');
+    expect(h.booking.rideDeclarations.dropoff?.passenger?.arrivalPromptId).toBe('prompt');
+    expect(h.booking.rideDeclarations.dropoff?.driver).toBeUndefined();
+    expect(h.booking.arrivalPrompt?.acceptedAt).toBeDefined();
+    expect(h.booking.paymentAmount).toBe(7500); expect(h.booking.cashReceivedAt).toBeUndefined();
+    expect(h.bookings.finishManualRideEffects).not.toHaveBeenCalled();
+    h.trip.lastLocationUpdateAt = new Date(0); // Retry is still idempotent after moving away.
+    await h.service.declare('booking', 'passenger', h.consent);
+    expect(h.manager.update).toHaveBeenCalledTimes(1); expect(h.manager.query).toHaveBeenCalledTimes(1);
+  });
+  it.each(['missing', 'forged', 'expired', 'far', 'stale', 'inaccurate', 'dispute', 'driver', 'stranger', 'pickup', 'historical'])('rejects %s consent without any write or payment', async reason => {
+    const h = proposed(); let actor = 'passenger';
+    if (reason === 'missing') h.booking.arrivalPrompt = null;
+    if (reason === 'forged') h.consent.arrivalPromptId = 'different';
+    if (reason === 'expired') h.booking.arrivalPrompt!.expiresAt = new Date(0).toISOString();
+    if (reason === 'far') h.trip.currentLocation!.coordinates[1] = -4.3+201/111195;
+    if (reason === 'stale') h.trip.lastLocationUpdateAt = new Date(0);
+    if (reason === 'inaccurate') h.arrivalAssistance.latestObservation.mockResolvedValue({ recordedAt: new Date().toISOString(), accuracyMeters: 100 });
+    if (reason === 'dispute' || reason === 'historical') h.booking.rideDeclarations = { dropoff: { passenger: { ...h.dto('dropoff', reason === 'dispute' ? 'reject' : 'confirm'), receivedAt: new Date().toISOString() } } };
+    if (reason === 'driver' || reason === 'stranger') { actor = reason; h.consent.actorUserId = actor; }
+    if (reason === 'pickup') h.consent.stage = 'pickup';
+    await expect(h.service.declare('booking', actor, h.consent)).rejects.toThrow();
+    expect(h.manager.update).not.toHaveBeenCalled(); expect(h.manager.query).not.toHaveBeenCalled();
+  });
+});
+
 describe('committed manual ride side effects', () => {
   it('a lone declaration only notifies the other actor, never settles or announces final pickup', async () => {
     for (const stage of ['pickup', 'dropoff'] as const) {
@@ -240,7 +360,7 @@ describe('committed manual ride side effects', () => {
     await expect(BookingsService.prototype.confirmDropoff.call({}, 'booking', 'driver'))
       .rejects.toMatchObject({ response: expect.objectContaining({ code: 'RIDE_DECLARATION_REQUIRED' }) });
   });
-  it.each(['manual_dual_confirmation', 'manual_passenger_confirmation'])('%s arrival retains the existing settlement and notification worker', async dropoffDetectionMethod => {
+  it.each(['manual_dual_confirmation', 'manual_passenger_confirmation', 'manual_driver_confirmation', 'manual_passenger_near_destination'])('%s arrival retains the existing settlement and notification worker', async dropoffDetectionMethod => {
     const booking = { id: 'booking', tripId: 'trip', droppedOff: true, dropoffDetectionMethod };
     const context = { bookingRepository: { findOne: jest.fn().mockResolvedValue(booking) }, settlePaymentAfterArrival: jest.fn(),
       notifySelectedEmergencyContacts: jest.fn(), notifyPassengerAboutAutomaticDropoffConfirmation: jest.fn(),
@@ -254,8 +374,8 @@ describe('committed manual ride side effects', () => {
     await expect(BookingsService.prototype.confirmPickup.call({}, 'booking', 'driver'))
       .rejects.toMatchObject({ response: expect.objectContaining({ code: 'RIDE_DECLARATION_REQUIRED' }) });
   });
-  it('keeps pickup notifications and cache refresh but never settles arrival payment', async () => {
-    const context = { bookingRepository: { findOne: jest.fn().mockResolvedValue({ id: 'booking', tripId: 'trip', pickedUp: true, pickupDetectionMethod: 'manual_passenger_confirmation' }) },
+  it.each(['manual_passenger_confirmation', 'manual_driver_confirmation'])('%s keeps pickup notifications and cache refresh but never settles arrival payment', async pickupDetectionMethod => {
+    const context = { bookingRepository: { findOne: jest.fn().mockResolvedValue({ id: 'booking', tripId: 'trip', pickedUp: true, pickupDetectionMethod }) },
       notifySelectedEmergencyContacts: jest.fn(), notifyDriverEmergencyContactsOnPickup: jest.fn(),
       notifyPassengerAboutAutomaticPickupConfirmation: jest.fn(), notifyDriverAboutAutomaticPickupConfirmation: jest.fn(),
       touchTripInteraction: jest.fn(), invalidateBookingCaches: jest.fn(), settlePaymentAfterArrival: jest.fn() };

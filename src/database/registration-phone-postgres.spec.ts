@@ -11,6 +11,8 @@ import { DataSource, EntitySchema, Repository } from 'typeorm';
 import { User, UserRole, UserStatus } from '../users/entities/user.entity';
 import { saveRegistrationWithPhone } from '../users/registration-phone.policy';
 import { CanonicalPhoneIdentity1780000119000 } from './migrations/1780000119000-CanonicalPhoneIdentity';
+import { ReserveDeletedAccountPhones1780000144000 } from './migrations/1780000144000-ReserveDeletedAccountPhones';
+import { assertPhoneNotDeleted } from '../users/deleted-phone.policy';
 import { accountPhoneWhere, authAccountPhoneWhere, canonicalAccountPhone } from '../users/phone-identity';
 import { AuthService } from '../auth/auth.service';
 import { UsersService } from '../users/users.service';
@@ -27,7 +29,10 @@ const pgBin = process.env.PHONE_REGISTRATION_TEST_POSTGRES_BIN;
     const identityMigration = new CanonicalPhoneIdentity1780000119000();
     async function migrate(direction: 'up' | 'down') {
       const runner = source.createQueryRunner();
-      try { await identityMigration[direction](runner); }
+      try {
+        await identityMigration[direction](runner);
+        if (direction === 'up') await new ReserveDeletedAccountPhones1780000144000().up(runner);
+      }
       finally { await runner.release(); }
     }
     const executable = (name: string) =>
@@ -83,6 +88,9 @@ const pgBin = process.env.PHONE_REGISTRATION_TEST_POSTGRES_BIN;
         columns: {
           id: { type: 'uuid', primary: true },
           phone: { type: String, nullable: true, unique: true },
+          deletedAt: { type: 'timestamptz', nullable: true },
+          googleId: { type: String, nullable: true },
+          appleId: { type: String, nullable: true },
           email: { type: String, nullable: true, unique: true },
           firstName: { type: String },
           lastName: { type: String },
@@ -186,14 +194,15 @@ const pgBin = process.env.PHONE_REGISTRATION_TEST_POSTGRES_BIN;
       }
     });
 
-    it('rejects malformed writes and releases a deleted account reservation', async () => {
+    it('rejects malformed writes and keeps a deleted account reservation', async () => {
       await expect(users.save({ ...fresh(), phone: 'not a phone' })).rejects
         .toMatchObject({ driverError: { code: '23514', constraint: 'CHK_users_phone_identity' } });
       const first = await users.save(fresh());
       await users.delete(first.id);
-      expect(await source.query('SELECT * FROM user_phone_identities')).toEqual([]);
-      const second = await users.save({ ...fresh(), phone: '0890000001' });
-      expect((await users.findOneByOrFail({ phone: accountPhoneWhere(phone) })).id).toBe(second.id);
+      await expect(users.save({ ...fresh(), phone: '0890000001' })).rejects.toMatchObject({
+        driverError: { constraint: 'CHK_users_deleted_phone' },
+      });
+      expect(await users.findOneBy({ phone: accountPhoneWhere(phone) })).toBeNull();
     });
 
     it('serializes alias registrations and preserves the canonical error contract', async () => {
@@ -600,7 +609,7 @@ const pgBin = process.env.PHONE_REGISTRATION_TEST_POSTGRES_BIN;
       expect((await users.findOneByOrFail({ id: old.id })).phone).toBeNull();
     });
 
-    it('allows exactly one signup when a deleted account has already released the phone', async () => {
+    it('still distinguishes explicit non-deletion phone release from account deletion', async () => {
       const deleted = await previous({
         status: UserStatus.INACTIVE,
         isActive: false,
@@ -615,6 +624,105 @@ const pgBin = process.env.PHONE_REGISTRATION_TEST_POSTGRES_BIN;
       ).toHaveLength(1);
       expect(await users.countBy({ phone })).toBe(1);
       expect(await users.count()).toBe(2);
+    });
+
+    it.each(['0890000001', '890000001', '+243890000001', '00243890000001', '+243 890-000-001'])(
+      'permanently blocks %s after logical deletion, without retaining a phone on the profile', async input => {
+        const account = await users.save(fresh());
+        await users.update(account.id, { phone: () => 'NULL', deletedAt: new Date(), isActive: false, status: UserStatus.INACTIVE });
+        expect((await users.findOneByOrFail({ id: account.id })).phone).toBeNull();
+        await expect(assertPhoneNotDeleted(source.manager, input)).rejects.toMatchObject({
+          status: 409, response: { code: 'PHONE_PREVIOUSLY_DELETED' },
+        });
+        await expect(saveRegistrationWithPhone(users, users.create({ ...fresh(), phone: input })))
+          .rejects.toMatchObject({ response: { code: 'PHONE_PREVIOUSLY_DELETED' } });
+        // A different path (admin, social account linking, direct repository) cannot bypass the guard.
+        await expect(users.save({ ...fresh(), phone: input })).rejects.toMatchObject({
+          driverError: { code: '23514', constraint: 'CHK_users_deleted_phone' },
+        });
+        expect(await users.count()).toBe(1);
+      },
+    );
+
+    it('preserves the reservation through repeated anonymization, physical deletion and attempted reactivation', async () => {
+      const account = await users.save(fresh());
+      const anonymize = { phone: () => 'NULL', firstName: 'Compte', lastName: 'supprimé', isActive: false, status: UserStatus.INACTIVE };
+      await users.update(account.id, anonymize); // old backend version, no explicit deletedAt
+      const deleted = await users.findOneByOrFail({ id: account.id });
+      expect(deleted.deletedAt).toBeInstanceOf(Date);
+      await users.update(account.id, anonymize);
+      await users.update(account.id, { deletedAt: null, isActive: true, status: UserStatus.ACTIVE });
+      expect(await users.findOneByOrFail({ id: account.id })).toMatchObject({
+        deletedAt: deleted.deletedAt, isActive: false, status: UserStatus.INACTIVE,
+      });
+      await users.delete(account.id);
+      await expect(assertPhoneNotDeleted(source.manager, phone)).rejects.toMatchObject({ status: 409 });
+      expect(await source.query('SELECT "userId", "deletedAt" FROM user_phone_identities WHERE phone=$1', [phone]))
+        .toEqual([{ userId: null, deletedAt: expect.any(Date) }]);
+    });
+
+    it('reserves the phone even when a user is physically deleted without prior anonymization', async () => {
+      const account = await users.save(fresh());
+      await users.delete(account.id);
+      await expect(users.save(fresh())).rejects.toMatchObject({ driverError: { constraint: 'CHK_users_deleted_phone' } });
+      const other = await users.save({ ...fresh(), phone: '+243890000002' });
+      await expect(users.update(other.id, { phone: '0890000001' })).rejects.toMatchObject({
+        driverError: { constraint: 'CHK_users_deleted_phone' },
+      });
+      expect((await users.findOneByOrFail({ id: other.id })).phone).toBe('+243890000002');
+    });
+
+    it('rolls back the reservation if account deletion fails', async () => {
+      const account = await users.save(fresh());
+      await expect(source.transaction(async manager => {
+        await manager.update(User, account.id, { phone: () => 'NULL', deletedAt: new Date() });
+        throw new Error('cleanup failed');
+      })).rejects.toThrow('cleanup failed');
+      await expect(assertPhoneNotDeleted(source.manager, phone)).resolves.toBeUndefined();
+      expect((await users.findOneByOrFail({ id: account.id })).phone).toBe(phone);
+    });
+
+    it('rejects a signup that was already in flight when deletion commits', async () => {
+      const account = await users.save(fresh());
+      const deletion = source.createQueryRunner(), registration = source.createQueryRunner();
+      await deletion.connect();
+      await registration.connect();
+      await deletion.startTransaction();
+      let attempt: Promise<unknown> | undefined;
+      try {
+        await deletion.manager.update(User, account.id, { phone: () => 'NULL', deletedAt: new Date() });
+        const [{ pid }] = await registration.query('SELECT pg_backend_pid() AS pid');
+        attempt = registration.manager.save(User, { ...fresh(), phone: '0890000001' }).then(
+          () => ({ accepted: true }), error => ({ error }),
+        );
+        let waiting = false;
+        for (let i = 0; i < 100; i++) {
+          const [row] = await source.query('SELECT EXISTS(SELECT 1 FROM pg_locks WHERE pid=$1 AND NOT granted) AS waiting', [pid]);
+          if (row.waiting) { waiting = true; break; }
+          await new Promise(resolve => setTimeout(resolve, 10));
+        }
+        expect(waiting).toBe(true);
+        await deletion.commitTransaction();
+        expect(await attempt).toMatchObject({ error: { driverError: { constraint: 'CHK_users_deleted_phone' } } });
+        expect(await users.count()).toBe(1);
+      } finally {
+        if (deletion.isTransactionActive) await deletion.rollbackTransaction();
+        await attempt;
+        await registration.release();
+        await deletion.release();
+      }
+    });
+
+    it('backfills only identifiable deleted accounts, never temporarily inactive accounts', async () => {
+      await migrate('down');
+      const deleted = await users.save({ ...fresh(), firstName: 'Compte', lastName: 'supprimé', status: UserStatus.INACTIVE, isActive: false });
+      const inactive = await users.save({ ...fresh(), phone: '+243890000002', status: UserStatus.INACTIVE, isActive: false });
+      await migrate('up');
+      expect((await users.findOneByOrFail({ id: deleted.id })).deletedAt).toBeInstanceOf(Date);
+      expect((await users.findOneByOrFail({ id: inactive.id })).deletedAt).toBeNull();
+      await expect(assertPhoneNotDeleted(source.manager, phone)).rejects.toMatchObject({ status: 409 });
+      await expect(assertPhoneNotDeleted(source.manager, inactive.phone)).resolves.toBeUndefined();
+      await expect(new ReserveDeletedAccountPhones1780000144000().down()).rejects.toThrow('automatic rollback');
     });
   },
 );

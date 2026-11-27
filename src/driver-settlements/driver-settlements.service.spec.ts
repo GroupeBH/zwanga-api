@@ -49,13 +49,14 @@ describe('DriverSettlementsService', () => {
     formatPaymentLogResponse: jest.Mock;
   };
   let manager: {
+    query: jest.Mock;
     findOne: jest.Mock;
     exists: jest.Mock;
     create: jest.Mock;
     save: jest.Mock;
     createQueryBuilder: jest.Mock;
   };
-  let dataSource: { transaction: jest.Mock };
+  let dataSource: { transaction: jest.Mock; manager: typeof manager };
   let service: DriverSettlementsService;
 
   beforeEach(() => {
@@ -101,6 +102,7 @@ describe('DriverSettlementsService', () => {
       formatPaymentLogResponse: jest.fn().mockReturnValue({}),
     };
     manager = {
+      query: jest.fn().mockResolvedValue([]),
       findOne: jest.fn(),
       exists: jest.fn(async entity => entity !== DriverPayout),
       create: jest.fn((_entity, payload) => payload),
@@ -111,6 +113,7 @@ describe('DriverSettlementsService', () => {
       createQueryBuilder: jest.fn(),
     };
     dataSource = {
+      manager,
       transaction: jest.fn(async (work) => work(manager)),
     };
     Object.assign(manager, { getRepository: () => kycRepository });

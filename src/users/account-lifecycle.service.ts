@@ -32,7 +32,8 @@ export class AccountLifecycleService {
   /** Logical retirement only. Financial records and completed journeys are never deleted.
    * All business changes and outbox events commit together, with no network I/O. */
   async deactivate(userId: string, status: UserStatus.SUSPENDED | UserStatus.INACTIVE,
-    profileChange?: (manager: EntityManager) => Promise<void>): Promise<User> {
+    profileChange?: (manager: EntityManager) => Promise<void>,
+    beforeRetirement?: (manager: EntityManager) => Promise<void>): Promise<User> {
     const keys = new Set<string>([CacheService.getVehiclesByOwnerKey(userId),
       CacheService.getTripsListKey(), CacheService.getTripsListKey('all'), CacheService.getTripsListKey('allTrips')]);
     const result = await this.db.transaction(async manager => {
@@ -67,6 +68,10 @@ export class AccountLifecycleService {
         .where('t.id IN (:...ids)', { ids: tripRows.map(t => t.id) })
         .orderBy('t.id', 'ASC').setLock('pessimistic_write').getMany() : [];
       const tripMap = new Map(trips.map(t => [t.id, t]));
+
+      // Optional business gate after ride locks and before any cancellation or
+      // session change. Throwing rolls the entire retirement back.
+      await beforeRetirement?.(manager);
 
       for (const booking of bookings) {
         const trip = tripMap.get(booking.tripId)!;

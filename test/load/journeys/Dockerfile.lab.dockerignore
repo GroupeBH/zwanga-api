@@ -1,0 +1,13 @@
+**
+!package.json
+!package-lock.json
+!tsconfig.json
+!tsconfig.build.json
+!nest-cli.json
+!src
+!src/**
+!test
+!test/load
+!test/load/isolation.cjs
+!test/load/journeys
+!test/load/journeys/**

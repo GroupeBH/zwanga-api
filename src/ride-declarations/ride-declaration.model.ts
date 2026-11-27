@@ -1,3 +1,5 @@
+import type { RideConfirmationMode } from './ride-confirmation-mode';
+
 export type RideStage = 'pickup' | 'dropoff';
 export type RideDecision = 'confirm' | 'reject';
 export type RideActor = 'driver' | 'passenger';
@@ -6,6 +8,7 @@ export interface RideEvidence {
   decision: RideDecision;
   occurredAt: string;
   receivedAt: string;
+  arrivalPromptId?: string;
   latitude?: number;
   longitude?: number;
   accuracy?: number;
@@ -24,13 +27,18 @@ export function declarationStatus(stage: StageDeclarations | undefined, applied:
   return 'none' as const;
 }
 
-/** Boarding still needs both parties; automatic confirmations stay authoritative. */
-export function pickupDeclarationStatus(stage: StageDeclarations | undefined, applied: boolean) {
-  return declarationStatus(stage, applied);
+/** Published trips keep two-party boarding; request trips need only the driver. */
+export function pickupDeclarationStatus(stage: StageDeclarations | undefined, applied: boolean, mode: RideConfirmationMode = 'shared') {
+  const status = declarationStatus(stage, applied);
+  if (mode === 'driver_only' && !applied && status !== 'disputed') {
+    return stage?.driver?.decision === 'confirm' ? 'ready' as const : 'none' as const;
+  }
+  return status;
 }
 
 /** The reservation holder can finish their own ride without waiting for the driver. */
-export function dropoffDeclarationStatus(stage: StageDeclarations | undefined, applied: boolean) {
+export function dropoffDeclarationStatus(stage: StageDeclarations | undefined, applied: boolean, mode: RideConfirmationMode = 'shared') {
+  if (mode === 'driver_only') return pickupDeclarationStatus(stage, applied, mode);
   const status = declarationStatus(stage, applied);
   if (status === 'awaiting_other' && stage?.passenger?.decision === 'confirm') return 'ready' as const;
   return status;

@@ -1,5 +1,181 @@
 # Zwanga Pro et gestion des crédits
 
+## Recouvrement — 25 novembre 2026
+
+Les lots 1 à 3 ajoutent le domaine `src/financing/collections/`, sans migration ni modification des montants, prélèvements, commissions ou notifications. Aucun changement du dépôt admin. Le [lot 4](team-credit-rescheduling-design.md) est une proposition de conception **à valider**, pas une fonctionnalité livrée.
+
+### Droits et conventions HTTP
+
+Authentification JWT et identité persistée active requises. Un simple rôle `admin` ne suffit pas : les grants sont relus en base. `super_admin` a les droits internes, mais ne peut pas journaliser son propre recouvrement. Les rôles indiqués ci-dessous sont des grants Zwanga Pro actifs.
+
+| Route sous `/zwanga-pro` | Droits, en plus de `super_admin` | Succès |
+| --- | --- | --- |
+| `POST /admin/credits/:id/recovery-actions` | `collector`, `manager` | 201, reçu idempotent |
+| `GET /admin/credits/:id/recovery-actions` | `collector`, `manager`, `analyst`, `accountant`, `auditor` | 200, historique |
+| `GET /admin/collections/debtors` | `collector`, `manager`, `accountant`, `auditor` | 200, débiteurs |
+| `GET /admin/contracts` | `collector`, `manager`, `analyst`, `accountant`, `auditor` | 200, contrats catalogue |
+| `GET /admin/contracts/:id` | Droits existants ci-dessus, plus `funder` lié au créancier | 200, détail catalogue |
+| `GET /admin/overview` | `collector`, `manager`, `accountant`, `auditor` | 200, agrégats catalogue |
+
+Les trois nouvelles routes et les deux lectures admin de contrats portent `Cache-Control: no-store`. Les noms et téléphones sont des chaînes ou `null`. **Aucune nouvelle lecture personnelle n'est ouverte au `funder`** : pour conserver son accès existant au détail financier, `driverId` et `debtor` sont omis s'il n'a pas aussi un grant interne autorisé. Cette distinction résout les contraintes « autorisations inchangées » / « pas de données personnelles pour funder ». Les réponses `mine` ne gagnent aucun de ces champs.
+
+Les nouvelles routes utilisent `@Auth()`, `@SensitiveThrottle(30, 60000)` et le tag Swagger `Financing - collections`. Limitation effective par le mécanisme global existant ; les tests HTTP injectent l'identité, ils ne testent pas une signature JWT réelle ni le quota distribué.
+
+Tous les nouveaux montants sont des **chaînes de chiffres en centimes CDF**, jamais des nombres flottants. Dates ISO 8601 UTC ; l'historique conserve les six décimales PostgreSQL afin de ne pas perdre de ligne au changement de page. Les exemples ci-dessous sont des **réponses HTTP réellement obtenues sur la fixture locale fictive du 25 novembre**, pas des données de clients. Son snapshot est volontairement minimal.
+
+### POST `/admin/credits/:id/recovery-actions`
+
+`:id` désigne un `asset_credits.id`, historique ou catalogue. Corps strict : `mutationId` UUID, `kind`, `outcome`, `note` de 3 à 1000 caractères (au moins trois après retrait des espaces de bord). `kind` : `call`, `sms`, `whatsapp`, `visit`, `office_meeting`, `written_notice`, `promise`, `other`. `outcome` : `reached`, `unreachable`, `promise_to_pay`, `refused`, `paid`, `disputed`, `other`.
+
+Pour `promise_to_pay` uniquement, les deux champs de promesse sont obligatoires : date future avec fuseau **au plus 90 jours** après la validation serveur et montant > 0, ≤ `principalMinor - paidMinor`, de 1 à 13 chiffres. Date et montant sont normalisés dans l'audit (UTC, sans zéros initiaux). Pour les autres résultats, ces champs sont refusés, même à `null`. La promesse est une observation, pas un débit : pas de contrainte supplémentaire de multiple de dix centimes.
+
+Même `mutationId` + même auteur/contenu : reçu original, sans nouvel audit. Clé réutilisée avec un autre contenu : 409. Les droits sont revérifiés même lors d'un rejeu. `outcome: "paid"` **ne règle pas la dette**. Aucun SMS, WhatsApp ou push n'est envoyé : `kind` décrit une action effectuée par l'agent.
+
+Requête capturée vers le crédit `f0e833c5-1aa6-4397-a2a6-3389f33ed39a` (adapter la date à l'heure du nouvel appel) :
+
+```json
+{
+  "mutationId": "a0b7cf73-6998-447d-a73c-4f9e62abc7cf",
+  "kind": "promise",
+  "outcome": "promise_to_pay",
+  "note": "Échange fictif de test",
+  "promisedAt": "2026-11-27T12:13:51.191Z",
+  "promisedAmountMinor": "7500"
+}
+```
+
+Réponse 201 :
+
+```json
+{
+  "id": "4b6bc8ac-ec36-43d1-b659-979e9b5c02c5",
+  "creditId": "f0e833c5-1aa6-4397-a2a6-3389f33ed39a",
+  "createdAt": "2026-11-25T12:13:51.200Z"
+}
+```
+
+### GET `/admin/credits/:id/recovery-actions?limit=25&after=…`
+
+`limit` entier 1–100, défaut 25. `after` est le `nextCursor` opaque renvoyé précédemment, à conserver tel quel (maximum 2048 caractères). Ordre `(createdAt DESC, id DESC)`. Un curseur d'un autre crédit est refusé. Historique des crédits actifs **ou clôturés** ; actions incluses : `recovery_action`, `reschedule_proposed`, `reschedule_consented`, `reschedule_approved`, `execution_updated`, `delivered`, `mandate_revoked`. `detail` contient le détail propre à l'événement ; `actor` vaut `null` si l'acteur est absent. Fin de pagination : `nextCursor: null`.
+
+```json
+{
+  "items": [{
+    "id": "4b6bc8ac-ec36-43d1-b659-979e9b5c02c5",
+    "action": "recovery_action",
+    "createdAt": "2026-11-25T12:13:51.200145Z",
+    "actor": { "id": "0baf0f2f-1a21-44a4-b20f-21a8b4c2f05c", "firstName": "Aline", "lastName": "Exemple" },
+    "detail": {
+      "kind": "promise", "outcome": "promise_to_pay", "note": "Échange fictif de test",
+      "promisedAt": "2026-11-27T12:13:51.191Z", "promisedAmountMinor": "7500"
+    }
+  }],
+  "nextCursor": null
+}
+```
+
+### GET `/admin/collections/debtors?limit=50&minDays=0&maxDays=365000&after=…`
+
+`limit` entier 1–100 (défaut 50) ; filtres inclusifs entiers 0–365000, `minDays <= maxDays`. Une entrée par conducteur et uniquement les contrats actifs présentant un reste échu. Un compte inactif avec une dette active reste visible et porte son `accountStatus` : désactiver le compte n'efface pas la dette. Les contrats soldés, annulés ou à jour ne sont pas listés.
+
+Pour l'équipe : `lateMinor = creditSchedule().minimumDueMinor`, échéances `dueAt <= asOf`, mois calculés depuis le jour d'origine en UTC, dernier montant recevant le reliquat. Les contrats sans échéancier daté/déclaré ne créent pas de retard inventé. Le port SQL est comparé à la fonction existante sur PostgreSQL, notamment fins de mois, année bissextile, précision milliseconde, paiements partiels et 120 échéances.
+
+Pour le catalogue : version `scheduleVersion` courante uniquement, paiements imputés = `paidMinor - scheduleBaselineMinor`, échéances `dueAt < asOf`. `daysLate` est le nombre entier de jours révolus depuis la plus ancienne échéance non couverte, maximal parmi les contrats du débiteur ; `lateMinor` est la somme des restes échus. `remainingMinor` inclut aussi le restant non encore échu. `nextDueAt` désigne la **prochaine échéance non couverte et non échue**, ou `null` ; ne pas le confondre avec le `nextInstallment` historique qui peut être passé.
+
+Tri : `daysLate DESC, lateMinor DESC, driverId ASC`. Curseur sur ces trois clés, lié aux filtres et à `asOf`. Ne pas le reconstruire, le réutiliser pour un autre filtre ou l'assimiler à une autorisation. `asOf` fixe l'horloge entre les pages, **pas les données financières** : un paiement concurrent peut modifier l'appartenance/l'ordre ; recommencer en première page pour une liste rafraîchie. `lastAction` est la dernière observation de recouvrement parmi tous les crédits du conducteur, y compris ceux depuis clôturés, au plus tard à `asOf`.
+
+```json
+{
+  "asOf": "2026-11-25T12:13:51.236Z",
+  "items": [{
+    "driverId": "b2d5b4c0-106d-4b45-892f-df1199f373a3",
+    "firstName": "Aline", "lastName": "Exemple", "phone": "+243000000001", "accountStatus": "active",
+    "daysLate": 22, "lateMinor": "15000",
+    "contracts": [
+      { "id": "2325c49b-4ded-4364-ad78-6a7662066d73", "source": "team", "label": "Offre équipe test", "kind": "phone", "daysLate": 22, "lateMinor": "7500", "remainingMinor": "7500", "nextDueAt": null },
+      { "id": "f0e833c5-1aa6-4397-a2a6-3389f33ed39a", "source": "catalogue", "label": "Catalogue test", "kind": "phone", "daysLate": 10, "lateMinor": "7500", "remainingMinor": "7500", "nextDueAt": null }
+    ],
+    "lastAction": { "kind": "promise", "outcome": "promise_to_pay", "createdAt": "2026-11-25T12:13:51.200145Z", "promisedAt": "2026-11-27T12:13:51.191Z", "promisedAmountMinor": "7500" }
+  }],
+  "nextCursor": null
+}
+```
+
+`lastAction` vaut `null` sans observation ; ses deux champs de promesse valent `null` pour les autres résultats. `kind` d'un contrat provient de `assetKind` pour l'équipe et de `snapshot.product.kind` pour le catalogue. Pas d'appel `/users/:id/public` supplémentaire nécessaire.
+
+### GET `/admin/contracts?limit=25&after=…` — champs ajoutés
+
+Pagination existante conservée : limite 1–100 et curseur **UUID**, contrairement aux deux nouvelles listes à curseur opaque. Ajout de `driverId` et `debtor` dans la même requête SQL, sans lecture utilisateur par ligne.
+
+```json
+{
+  "items": [{
+    "id": "f0e833c5-1aa6-4397-a2a6-3389f33ed39a", "label": "Catalogue test", "status": "active",
+    "principalMinor": "10000", "paidMinor": "2500", "depositMinor": "0", "depositPaidMinor": "0",
+    "deliveryState": "pending", "createdAt": "2026-11-25T12:13:51.158Z",
+    "driverId": "b2d5b4c0-106d-4b45-892f-df1199f373a3",
+    "debtor": { "firstName": "Aline", "lastName": "Exemple", "phone": "+243000000001" }
+  }],
+  "nextCursor": null
+}
+```
+
+### GET `/admin/contracts/:id` — champs ajoutés
+
+Ajouts admin : `driverId`, `debtor`, somme `overdueMinor` des restes échus et maximum `overdueDays` des échéances. Champs financiers et calcul des réponses `mine` conservés ; un `funder` seul ne reçoit pas les deux champs d'identité. Exemple complet sur la fixture :
+
+```json
+{
+  "id": "f0e833c5-1aa6-4397-a2a6-3389f33ed39a",
+  "driverId": "b2d5b4c0-106d-4b45-892f-df1199f373a3",
+  "debtor": { "firstName": "Aline", "lastName": "Exemple", "phone": "+243000000001" },
+  "overdueMinor": "7500", "overdueDays": 10, "status": "active", "label": "Catalogue test", "currency": "CDF",
+  "snapshot": { "policy": { "rules": { "maxInstallments": 12 } }, "product": { "kind": "phone" } },
+  "termsHash": "test", "principalMinor": "10000", "paidMinor": "2500", "creditedMinor": "2500",
+  "discountMinor": "0", "remainingMinor": "7500", "depositMinor": "0", "depositPaidMinor": "0",
+  "mandateUntil": null, "mandateRevokedAt": null, "deliveryState": "pending",
+  "installments": [{ "ordinal": 1, "dueAt": "2026-11-15T12:13:51.175Z", "amountMinor": "10000", "remainingMinor": "7500", "overdueDays": 10 }],
+  "evaluation": {}, "scheduleReviewRequired": false, "rescheduleProposals": []
+}
+```
+
+### GET `/admin/overview` — compatibilité
+
+Ajout de `lateMinor` dans chaque ligne `overdue`, sans retrait des champs précédents. L'overview reste limité aux achats du catalogue, à 100 retards ; utiliser `collections/debtors` pour les deux sources paginées. Réponse capturée :
+
+```json
+{
+  "currency": "CDF",
+  "totals": [{ "creditorId": "acd34ee3-f102-4ca6-8c99-3ff3d8e2ea0d", "status": "active", "count": 1, "principalMinor": "10000", "paidMinor": "2500", "remainingMinor": "7500" }],
+  "queue": { "pending": 0, "oldestSeconds": 0, "retrying": 0 },
+  "reconciliation": { "mismatches": [{ "id": "f0e833c5-1aa6-4397-a2a6-3389f33ed39a" }], "limit": 100 },
+  "overdue": [{ "id": "f0e833c5-1aa6-4397-a2a6-3389f33ed39a", "driverId": "b2d5b4c0-106d-4b45-892f-df1199f373a3", "overdueDays": 10, "lateMinor": "7500" }],
+  "overdueLimit": 100
+}
+```
+
+Le `mismatch` de cet exemple vient de la fixture de lecture minimale, sans écritures complètes d'octroi dans le grand livre ; ce n'est pas une observation de production. Les tests métier financiers existants sont exécutés séparément.
+
+### Erreurs, protections et limites
+
+- **400** : UUID, enum, note, date/montant de promesse, limite, filtres ou curseur invalides ; promesse incohérente avec le résultat. Curseur lié à un autre crédit/filtre refusé. Les nouvelles erreurs métier sont en français.
+- **401** : identité non authentifiée ; **403** : identité inactive/suspendue, changement de mot de passe requis ou grant absent/révoqué. Pas de données personnelles dans les réponses de refus.
+- **404** : crédit introuvable (POST/historique), ou financement absent au détail ; les listes vides répondent **200**.
+- **409** sur POST : crédit non actif (`CREDIT_NOT_ACTIVE`), auteur débiteur (`RECOVERY_SELF_ACTION`), ou clé d'idempotence réutilisée avec un autre contenu. Le rejeu exact autorisé conserve le reçu original, sans refaire l'action.
+- **429** : quota de la protection existante dépassé. Les exceptions SQL suivent la gestion d'erreurs globale ; pas de réponse partielle inventée après timeout.
+
+Lectures cohérentes `REPEATABLE READ`, `READ ONLY`, fuseau UTC, `lock_timeout=5s`, `statement_timeout=15s` locaux à la transaction ; mutations réutilisant les délais/idempotence du store. Aucune transaction ouverte pendant un appel externe. Tri et regroupement des débiteurs en SQL avant pagination ; aucune collecte de tous les utilisateurs en mémoire ni N+1. Le tri peut néanmoins examiner tous les crédits actifs et l'historique d'un débiteur : la limite de page n'est pas une certification de performance globale. Aucun index/migration ajouté dans ces lots ; mesurer `EXPLAIN` sur une volumétrie représentative avant de décider d'une migration d'index séparée.
+
+Pour reproduire les tests : définir `PRO_CREDIT_TEST_POSTGRES_BIN` vers les binaires PostgreSQL, lancer Jest sur `credit-collections.postgres.spec.ts` et `pro-credit.postgres.spec.ts` en série. Sans cette variable les suites sont explicitement ignorées. `COLLECTIONS_PRINT_EXAMPLES=1` affiche les exemples fictifs complets du scénario dédié. Aucune variable `.env` de l'application n'est utilisée par le cluster jetable.
+
+### Fichiers du lot recouvrement
+
+- Ajouts dans `src/financing/collections/` : `credit-collections.module.ts`, `credit-collections.controller.ts`, `credit-collections.service.ts`, `credit-collections.dto.ts`, `collection-balances.sql.ts`, `collection-cursor.ts`, `collection-cursor.spec.ts`.
+- Ajout : `src/financing/tests/credit-collections.postgres.spec.ts`.
+- Modifications : `src/financing/financing.module.ts`, `shared/credit.store.ts`, `contracts/credit-contracts.controller.ts`, `contracts/credit-contracts.service.ts`, `reporting/credit-reporting.service.ts`, `tests/financing-architecture.spec.ts` (ces cinq derniers chemins sont relatifs à `src/financing/`).
+- Fixture de test uniquement : `test/pro-credit-fixture.ts` ajoute les colonnes d'identité déjà présentes dans la vraie table utilisateurs. Ce changement n'est pas une migration.
+- Documentation : ce guide, `docs/CHANGEMENTS_TECHNIQUES.md`, `docs/financing-architecture.md`, et la nouvelle note `docs/team-credit-rescheduling-design.md`.
+
 ## Audit et choix d'intégration
 
 Le backend NestJS utilise TypeORM et PostgreSQL. `asset_credits` porte déjà la dette, `asset_credit_entries` les remboursements, et `wallet_accounts` le portefeuille. `driver_earnings` n'est alimenté pour un paiement électronique qu'après règlement confirmé. Les retraits verrouillent la ligne utilisateur ; les débits de jetons verrouillent le portefeuille. Ces mécanismes doivent être conservés.

@@ -39,6 +39,9 @@ import { AdminAnalyticsController } from './admin-analytics.controller';
 import { AdminAnalyticsService } from './admin-analytics.service';
 import { AdminFinanceOtpController } from './admin-finance-otp.controller';
 import { FinanceOtpModule } from '../otp/finance-otp.module';
+import { ManualKycController } from './manual-kyc/manual-kyc.controller';
+import { ManualKycService } from './manual-kyc/manual-kyc.service';
+import { ManualKycRepository } from './manual-kyc/manual-kyc.repository';
 
 @Module({
   imports: [
@@ -71,8 +74,10 @@ import { FinanceOtpModule } from '../otp/finance-otp.module';
     VehiclesModule,
     PaymentsModule,
   ],
-  controllers: [AdminController, AdminAnalyticsController, AdminVehiclesController, AdminPaymentsController, AdminDirectPayoutController, AdminFinanceOtpController],
+  controllers: [AdminController, AdminAnalyticsController, AdminVehiclesController, AdminPaymentsController, AdminDirectPayoutController, AdminFinanceOtpController, ManualKycController],
   providers: [
+    ManualKycService,
+    ManualKycRepository,
     AdminService,
     AdminAnalyticsService,
     AdminReferralsService,

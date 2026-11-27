@@ -1,14 +1,16 @@
 import { SequentialDispatchService } from './sequential-dispatch.service';
-import { requestAcceptsVehicle, requestVehicleTypes } from '../request-vehicle-types';
-import { assertSequentialInvitation, REQUEST_RESPONSE_MS } from './sequential-policy';
+import { REQUEST_DISPATCH_PRIORITY_SQL } from './dispatch-scheduling-policy';
+import { requestVehicleTypes } from '../request-vehicle-types';
+import { REQUEST_RESPONSE_MS } from './sequential-policy';
+import { assertDispatchAcceptance, commitDispatchSelection } from './dispatch-acceptance';
 import { assertRequestTarget } from '../target-driver-policy';
 import { assertRequestDriverProximity, requestDriverProximitySql } from '../request-proximity';
 import { recordRequestRefusal } from '../request-refusal';
 import { requestDriverVisibilitySql } from '../target-driver-policy';
-import { recordRideNotificationReceipt } from '../../notifications/ride-notification-receipt';
 import { BadRequestException, ConflictException, Injectable, Logger, NotFoundException, Optional } from '@nestjs/common';
 import { RideAlertChanges } from '../../notifications/ride-alert-changes';
 import { ConfigService } from '@nestjs/config';
+import { backgroundSql } from '../../database/background-sql-budget';
 import { Cron } from '@nestjs/schedule';
 import { createHash, randomUUID } from 'node:crypto';
 import { DataSource, EntityManager } from 'typeorm';
@@ -26,11 +28,15 @@ import { enqueueSharedTripAlert } from './shared-trip-alert';
 import { rideSpeechData } from '../../notifications/ride-speech-data';
 import { ELIGIBLE_DRIVER_ACCOUNT_SQL, NEARBY_DRIVER_RADIUS_METERS } from './nearby-driver-policy';
 import { enqueueStaleLocationReminders } from './stale-location-reminder';
-import { hasUsableDriverLocation, USABLE_DRIVER_LOCATION_SQL } from './driver-location-policy';
+import { USABLE_DRIVER_LOCATION_SQL } from './driver-location-policy';
 import { PRESENCE_ALERT_LOCATION_SQL, ONGOING_ALERT_LOCATION_SQL, DRIVER_ALERT_LOCATION_MAX_AGE_HOURS } from './driver-alert-location-policy';
-import { startReceivedResponseWindow } from './receipt-response-window';
-import { acknowledgeNearbyRequest, declineNearbyRequest } from '../../notifications/nearby-request-cooldown';
-import { assertDriverRequestSchedule, driverRequestConflictSql, driverScheduleConflictSql } from './driver-schedule-policy';
+import { acknowledgeDispatchNotification } from './receipt-response-window';
+import { setDispatchTransactionTimeouts } from './dispatch-transaction';
+import { dispatchResponseAdmission } from './dispatch-response-admission';
+import { receiptAdmission } from './receipt-admission';
+import { releaseDispatchClaims } from './release-dispatch-claims';
+import { declineNearbyRequest } from '../../notifications/nearby-request-cooldown';
+import { driverRequestConflictSql, driverScheduleConflictSql } from './driver-schedule-policy';
 
 interface DispatchOffer {
   id: string; requestId: string; driverId: string; vehicleId: string;
@@ -54,6 +60,7 @@ export class DriverDispatchService {
   async declineNearbyRequest(driverId: string, requestId: string) {
     const result = await declineNearbyRequest(this.db.manager, driverId, requestId);
     this.rideChanges?.enqueue({ kind: 'request', id: requestId, terminal: false });
+    await this.sequential?.driverAvailable(driverId);
     await this.sequential?.advance(requestId);
     return result;
   }
@@ -64,15 +71,10 @@ export class DriverDispatchService {
     return this.declineNearbyRequest(driverId, requestId);
   }
   async acknowledgeNotification(driverId: string, notificationId: string, stage: 'received' | 'displayed' = 'received', detail?: import('../../notifications/ride-notification-receipt').RideReceiptDetail) {
-    return this.db.transaction(async manager => {
-      await manager.query("SET LOCAL lock_timeout = '2s'");
-      await manager.query("SET LOCAL statement_timeout = '5s'");
-      // Acquire business locks before recording telemetry (same order as retirement).
-      const responseWindow = await startReceivedResponseWindow(manager, driverId, notificationId);
-      const result = await recordRideNotificationReceipt(manager, driverId, notificationId, stage, detail);
-      if (result.received) await acknowledgeNearbyRequest(manager, driverId, notificationId);
-      return { ...result, ...(result.received && responseWindow ? { responseWindow } : {}) };
-    });
+    return receiptAdmission(this.db).run(() => this.db.transaction(async manager => {
+      await setDispatchTransactionTimeouts(manager);
+      return acknowledgeDispatchNotification(manager, driverId, notificationId, stage, detail);
+    }));
   }
   private get responseSeconds() { if (this.sequential) return REQUEST_RESPONSE_MS / 1000; return boundedInteger(this.config.get('DRIVER_DISPATCH_RESPONSE_SECONDS'), 60, 60, 120); }
   private get presenceSeconds() { return boundedInteger(this.config.get('DRIVER_DISPATCH_PRESENCE_SECONDS'), 90, 45, 180); }
@@ -121,7 +123,7 @@ export class DriverDispatchService {
     if (!Number.isFinite(age) || age < -5000)
       throw new BadRequestException({ code: 'DRIVER_POSITION_TIMESTAMP_INVALID',
         message: 'La date de la position est invalide ou dans le futur. Vérifiez l’heure du téléphone.' });
-    await this.db.transaction(async manager => {
+    const newlyLocated = await this.db.transaction(async manager => {
       const driver = await manager.getRepository(User).findOneBy({ id: driverId });
       if (!driver) throw new NotFoundException('Conducteur introuvable.');
       await assertDriverCanOperate(manager, driver);
@@ -141,7 +143,12 @@ export class DriverDispatchService {
         WHERE driver_dispatch_presence."updatedAt" <= EXCLUDED."updatedAt"`,
         [driverId, vehicle.id, getVehicleMaxSeats(vehicle.type) ?? 4, body.longitude, body.latitude,
           new Date(recordedAt.getTime() + this.positionSeconds * 1000), randomUUID(), recordedAt]);
+      const freshSince = Date.now() - DRIVER_ALERT_LOCATION_MAX_AGE_HOURS * 3600_000;
+      return previous?.discoveryEnabled !== false && recordedAt.getTime() >= freshSince &&
+        (!previous || new Date(previous.updatedAt).getTime() < freshSince);
     });
+    // Ordinary GPS updates never trigger another geographic matching search.
+    if (newlyLocated) await this.sequential?.driverAvailable(driverId);
     return this.status(driverId);
   }
 
@@ -161,7 +168,7 @@ export class DriverDispatchService {
       await this.db.query(`UPDATE driver_dispatch_presence SET "expiresAt" = now(), "discoveryEnabled" = false WHERE "driverId" = $1`, [driverId]);
       return this.status(driverId);
     }
-    await this.db.transaction(async (manager) => {
+    const newlyAvailable = await this.db.transaction(async (manager) => {
       const driver = await manager.getRepository(User).findOneBy({ id: driverId });
       if (!driver) throw new NotFoundException('Conducteur introuvable.');
       await assertDriverCanOperate(manager, driver);
@@ -187,7 +194,9 @@ export class DriverDispatchService {
         position = EXCLUDED.position, "expiresAt" = EXCLUDED."expiresAt", "updatedAt" = now(), "leaseId" = EXCLUDED."leaseId",
         "locationReminderSentAt" = NULL, "discoveryEnabled" = true`,
         [driverId, vehicle.id, body.seats, body.longitude, body.latitude, this.presenceSeconds, randomUUID()]);
+      return true;
     });
+    if (newlyAvailable) await this.sequential?.driverAvailable(driverId);
     return this.status(driverId);
   }
 
@@ -233,13 +242,28 @@ export class DriverDispatchService {
 
   async respond(driverId: string, id: string, decision: DispatchDecision) {
     if (!this.enabled) throw new BadRequestException('Les propositions sont désactivées.');
+    const result = await dispatchResponseAdmission(this.db).run(() => this.commitResponse(driverId, id, decision));
+    // Release admission as well as SQL before network work or next-wave scheduling.
+    this.rideChanges?.enqueue({ kind: 'request', id: result.requestId, terminal: decision === 'accept' });
+    if (decision === 'decline') await this.sequential?.driverAvailable(driverId);
+    else await this.sequential?.requestReleased(result.requestId);
+    await this.sequential?.advance(result.requestId);
+    void this.notifications.dispatchUrgentNotifications()
+      .catch(() => this.logger.warn('Dispatch response push delivery deferred.'));
+    return result;
+  }
+
+  private async commitResponse(driverId: string, id: string, decision: DispatchDecision) {
     const [snapshot]: DispatchOffer[] = await this.db.query(`SELECT * FROM trip_request_dispatch_offers WHERE id = $1 AND "driverId" = $2`, [id, driverId]);
     if (!snapshot) throw new NotFoundException('Proposition introuvable.');
-    const result = await this.db.transaction(async (manager) => {
-      // Same lock order as allocation: request, offer, presence. No network in this transaction.
+    return this.db.transaction(async (manager) => {
+      await setDispatchTransactionTimeouts(manager);
+      // Request -> offer -> owner -> presence. No network in this transaction.
       const requests = manager.getRepository(TripRequest);
       const request = await requests.findOne({ where: { id: snapshot.requestId }, lock: { mode: 'pessimistic_write' } });
       const [offer]: DispatchOffer[] = await manager.query(`SELECT * FROM trip_request_dispatch_offers WHERE id = $1 FOR UPDATE`, [id]);
+      if (!offer || offer.driverId !== driverId || offer.requestId !== snapshot.requestId)
+        throw new NotFoundException('Proposition introuvable.');
       if (request) assertRequestTarget(request, driverId);
       if (request?.sequentialDispatch && !request.immediateDispatch)
         throw new BadRequestException('Ouvrez la commande pour choisir votre véhicule et répondre.');
@@ -250,57 +274,31 @@ export class DriverDispatchService {
           request.tripId || request.departureDateMax.getTime() <= Date.now())
         throw new ConflictException('Cette proposition a expiré ou a déjà été traitée.');
       if (decision === 'accept') {
-        // A prior driver's quick-action button cannot bypass the passenger consent phase.
-        await assertSequentialInvitation(manager, request, driverId);
-        await assertRequestDriverProximity(manager, request.id, driverId);
-        await assertDriverRequestSchedule(manager, driverId, request.id);
-        const [presence] = await manager.query(`SELECT * FROM driver_dispatch_presence WHERE "driverId" = $1 FOR UPDATE`, [driverId]);
-        if (!hasUsableDriverLocation(presence) || presence.vehicleId !== offer.vehicleId)
-          throw new ConflictException('Votre position ou votre véhicule ne sont plus valides. Rouvrez l’application pour actualiser votre position.');
-        const driver = await manager.getRepository(User).findOneBy({ id: driverId });
-        if (!driver) throw new NotFoundException('Conducteur introuvable.');
-        await assertDriverCanOperate(manager, driver);
-        const vehicle = await manager.getRepository(Vehicle).findOneBy({ id: offer.vehicleId, ownerId: driverId, isActive: true });
-        if (!vehicle || !requestAcceptsVehicle(request, vehicle.type) || offer.seats < request.numberOfSeats ||
-            (getVehicleMaxSeats(vehicle.type) ?? 20) < offer.seats || await this.isBusy(manager, driverId, request.id))
-          throw new ConflictException('Vous ou votre véhicule ne pouvez plus prendre en charge cette commande.');
+        await assertDispatchAcceptance(manager, request, offer);
         if (request.maxPricePerSeat === null) throw new ConflictException('Le tarif de la commande est indisponible.');
         const offers = manager.getRepository(DriverOffer);
-        await offers.save(offers.create({ tripRequestId: request.id, driverId, vehicleId: vehicle.id,
+        await offers.insert({ tripRequestId: request.id, driverId, vehicleId: offer.vehicleId,
           availableSeats: offer.seats, pricePerSeat: request.maxPricePerSeat,
           proposedDepartureDate: new Date(Math.max(Date.now(), request.departureDateMin.getTime())),
           status: DriverOfferStatus.ACCEPTED, acceptedAt: new Date(), requiresPassengerKyc: false,
           departurePoint: request.departurePoint, arrivalPoint: request.arrivalPoint,
-          departureReference: request.departureReference, arrivalReference: request.arrivalReference }));
+          departureReference: request.departureReference, arrivalReference: request.arrivalReference });
         const selectedAt = new Date();
-        await requests.update(request.id, { status: TripRequestStatus.DRIVER_SELECTED, selectedDriverId: driverId,
-          selectedVehicleId: vehicle.id, selectedPricePerSeat: request.maxPricePerSeat,
-          selectedDriverRequiresPassengerKyc: false, selectedAt, driverPickupOverdueNotifiedAt: null });
         // First acceptance wins. Every other invitation loses its actionability;
         // queued pushes are revalidated before delivery and retries cannot reassign.
-        await manager.query(`UPDATE trip_request_dispatch_offers SET status = 'cancelled'
-          WHERE "requestId" = $1 AND id <> $2 AND status = 'pending'`, [request.id, id]);
-        await manager.query(`UPDATE driver_dispatch_presence SET "expiresAt" = now() WHERE "driverId" = $1`, [driverId]);
+        await commitDispatchSelection(manager, request.id, id, driverId, offer.vehicleId, selectedAt, request.maxPricePerSeat);
         await enqueueTransactionalNotification(manager, { eventKey: `dispatch-accepted:${id}`, userId: request.passengerId,
           title: 'Conducteur trouvé', body: 'Un conducteur a accepté votre commande. Consultez les détails de la prise en charge.',
           data: { type: 'trip_request_accepted', tripRequestId: request.id, driverId, selectedAt: selectedAt.toISOString() } });
       }
-      await manager.query(`UPDATE trip_request_dispatch_offers SET status = $2 WHERE id = $1`, [id, expected]);
       // Commit the refusal and its successor's durable invitation together. Do
       // not depend on the global cron's busy flag or its 25-request batch.
       if (decision === 'decline') {
-        await recordRequestRefusal(manager, driverId, request.id);
+        await recordRequestRefusal(manager, driverId, request.id, id);
         if (!this.sequential) await this.allocateNext(manager, request);
       }
       return { status: expected, requestId: request.id };
     });
-    // The existing urgent lane sends the committed push immediately when a
-    // worker is free; its cron retries delivery without keeping HTTP/DB locks.
-    this.rideChanges?.enqueue({ kind: 'request', id: result.requestId, terminal: decision === 'accept' });
-    await this.sequential?.advance(result.requestId);
-    void this.notifications.dispatchUrgentNotifications()
-      .catch(() => this.logger.warn('Dispatch response push delivery deferred.'));
-    return result;
   }
 
   @Cron('*/5 * * * * *')
@@ -309,21 +307,24 @@ export class DriverDispatchService {
     this.ticking = true;
     try {
       // Release deadlines even if no driver is currently available; batches remain bounded.
-      await this.db.query(`UPDATE trip_request_dispatch_offers SET status = 'expired' WHERE sequential = false AND id IN
+      await backgroundSql(this.db, 'dispatch', () => this.db.query(`UPDATE trip_request_dispatch_offers SET status = 'expired' WHERE sequential = false AND id IN
         (SELECT id FROM trip_request_dispatch_offers WHERE status = 'pending' AND "expiresAt" <= now()
-          ORDER BY "expiresAt", id LIMIT 100 FOR UPDATE SKIP LOCKED)`);
+          ORDER BY "expiresAt", id LIMIT 100 FOR UPDATE SKIP LOCKED)`));
       const leaseId = randomUUID();
-      const requests: { id: string; immediateDispatch: boolean }[] = await this.db.query(`WITH candidates AS (
-        SELECT r.id FROM trip_requests r
+      const requests: { id: string; immediateDispatch: boolean }[] = await backgroundSql(this.db, 'dispatch', () => this.db.query(`WITH candidates AS (
+        SELECT r.id, ${REQUEST_DISPATCH_PRIORITY_SQL} AS priority, r."dispatchCheckedAt" AS checked,
+          (r."dispatchCheckedAt" IS NULL OR r."dispatchCheckedAt" < now() - interval '30 seconds') AS overdue
+        FROM trip_requests r
         WHERE r.status IN ('pending', 'offers_received') AND r."departureDateMax" > now()
           AND r."selectedDriverId" IS NULL AND r."tripId" IS NULL AND r."departurePoint" IS NOT NULL
           AND (r."immediateDispatch" = false OR r."maxPricePerSeat" IS NOT NULL)
           AND (r."dispatchClaimedUntil" IS NULL OR r."dispatchClaimedUntil" <= now())
-        ORDER BY r."dispatchCheckedAt" NULLS FIRST, r."createdAt", r.id LIMIT 25 FOR UPDATE SKIP LOCKED
+        ORDER BY overdue DESC, priority, checked NULLS FIRST, r.id LIMIT 25 FOR UPDATE SKIP LOCKED
       ), claimed AS (
         UPDATE trip_requests r SET "dispatchLeaseId" = $1, "dispatchClaimedUntil" = now() + interval '10 seconds',
           "dispatchCheckedAt" = now() FROM candidates c WHERE r.id = c.id RETURNING r.id, r."immediateDispatch"
-      ) SELECT * FROM claimed`, [leaseId]);
+      ) SELECT claimed.* FROM claimed JOIN candidates c ON c.id=claimed.id
+        ORDER BY c.overdue DESC, c.priority, c.checked NULLS FIRST, c.id`, [leaseId]));
       // Small bounded concurrency: preserve pool capacity for acceptance and GPS.
       // A bad request must neither abort the batch nor monopolise its next turn.
       let next = 0;
@@ -342,14 +343,12 @@ export class DriverDispatchService {
             try {
               await this.db.query(`UPDATE trip_requests SET "dispatchCheckedAt" = now() WHERE id = $1`, [request.id]);
             } catch { /* Database outage: leave state intact for the next cycle. */ }
-          } finally {
-            try {
-              await this.db.query(`UPDATE trip_requests SET "dispatchLeaseId" = NULL, "dispatchClaimedUntil" = NULL
-                WHERE id = $1 AND "dispatchLeaseId" = $2`, [request.id, leaseId]);
-            } catch { /* Lease expires automatically if this worker/database stops. */ }
           }
         }
       }));
+      try {
+        await backgroundSql(this.db, 'dispatch', () => releaseDispatchClaims(this.db, requests.map(request => request.id), leaseId));
+      } catch { /* The bounded lease still expires if this worker/database stops. */ }
       void this.notifications.dispatchTransactionalNotifications().catch(() => this.logger.warn('Dispatch push delivery deferred.'));
     } catch (error) {
       this.logger.error('Driver dispatch cycle failed', error instanceof Error ? error.stack : undefined);

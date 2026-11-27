@@ -43,6 +43,7 @@ const fixture = (patch = {}) => {
   };
   const bookings = {
     invalidateManualRideCaches: jest.fn(async () => undefined),
+    completePaidRequestTrip: jest.fn(async () => true),
     findOne: jest.fn(async () => booking),
   };
   const service = new CashReceiptsService(
@@ -53,6 +54,21 @@ const fixture = (patch = {}) => {
 };
 
 describe('explicit driver cash receipt', () => {
+  it('binds the explicitly acknowledged exception ordinal to this receipt transaction only', async () => {
+    const env = fixture();
+    await env.service.confirm('booking', 'driver', 2000, 'CDF', 2);
+    expect(env.repository.query.mock.calls[0]).toEqual(["SELECT set_config('zwanga.cash_exception_ack',$1,true)", ['booking:2']]);
+    expect(env.repository.query.mock.calls[1][0]).toContain('UPDATE bookings');
+  });
+  it('tries closing a request only after the cash receipt transaction commits', async () => {
+    const env = fixture({ tripId: 'trip', trip: { driverId: 'driver', tripRequestId: 'request' } });
+    await env.service.confirm('booking', 'driver', 2000, 'CDF');
+    expect(env.bookings.completePaidRequestTrip).toHaveBeenCalledWith('trip');
+    expect(env.bookings.completePaidRequestTrip.mock.invocationCallOrder[0]).toBeGreaterThan(env.repository.query.mock.invocationCallOrder[0]);
+    env.repository.query.mockRejectedValueOnce(new Error('rollback') as never);
+    await expect(env.service.confirm('booking', 'driver', 2000, 'CDF')).rejects.toThrow('rollback');
+    expect(env.bookings.completePaidRequestTrip).toHaveBeenCalledTimes(1);
+  });
   it('rejects missing bookings and passengers/other drivers before any write', async () => {
     const env = fixture();
     await expect(

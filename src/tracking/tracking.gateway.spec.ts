@@ -39,6 +39,7 @@ describe('TrackingGateway boarding detection recovery', () => {
       {} as any,
       {} as any,
       {} as any,
+      {} as any,
     );
   });
 

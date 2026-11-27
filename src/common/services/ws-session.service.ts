@@ -15,6 +15,9 @@ import { pruneTrackingRooms } from './ws-tracking-rooms';
 export class WsSessionService implements OnModuleInit, OnModuleDestroy {
   private readonly sessions = new Map<Socket, { token: string; timer: NodeJS.Timeout }>();
   private readonly inFlight = new Map<string, number>();
+  private totalInFlight = 0;
+  private peakInFlight = 0;
+  private readonly rejectedWork = { global: 0, user: 0 };
   private sweepTimer?: NodeJS.Timeout;
   private sweeping = false;
   private stopping = false;
@@ -92,27 +95,44 @@ export class WsSessionService implements OnModuleInit, OnModuleDestroy {
   async validateSessions() {
     if (this.stopping || this.sweeping || !this.sessions.size) return;
     this.sweeping = true;
+    // A connection can finish while the SQL read is in flight. Only validate
+    // the exact registrations included in this read, not the live Map afterward.
+    const checked = [...this.sessions.entries()];
     try {
-      const ids = [...new Set([...this.sessions.keys()].map(socket => socketUserId(socket)))];
+      const ids = [...new Set(checked.map(([socket]) => socketUserId(socket)))];
       const users = new Map((await this.users(ids)).map(user => [user.id, user]));
       if (this.stopping) return;
-      for (const [socket, session] of this.sessions) {
+      const authorized: Socket[] = [];
+      for (const [socket, session] of checked) {
+        if (this.sessions.get(socket) !== session) continue;
         if (!this.allowed(users.get(socketUserId(socket)), session.token)) this.close(socket);
+        else authorized.push(socket);
       }
-      await pruneTrackingRooms(this.dataSource, [...this.sessions.keys()]);
+      await pruneTrackingRooms(this.dataSource, authorized);
     } catch {
-      // Fail closed if server-owned account/session state cannot be checked.
-      if (!this.stopping) for (const socket of this.sessions.keys()) this.close(socket, true);
+      // Fail closed for checked registrations, without revoking a newer
+      // connection whose independent authentication succeeded in the meantime.
+      if (!this.stopping) for (const [socket, session] of checked) {
+        if (this.sessions.get(socket) === session) this.close(socket, true);
+      }
     } finally { this.sweeping = false; }
   }
   async begin(socket: Socket): Promise<() => void> {
     if (!this.sessions.has(socket)) throw new WsException('Authentification requise.');
     const id = socketUserId(socket);
     const count = this.inFlight.get(id) ?? 0;
-    const total = [...this.inFlight.values()].reduce((sum, value) => sum + value, 0);
-    if (count >= 3 || total >= 64) throw new WsException('Une opération est déjà en cours. Réessayez dans un instant.');
+    if (count >= 3 || this.totalInFlight >= 64) {
+      this.rejectedWork[count >= 3 ? 'user' : 'global']++;
+      throw new WsException('Une opération est déjà en cours. Réessayez dans un instant.');
+    }
     this.inFlight.set(id, count + 1);
+    this.totalInFlight++;
+    this.peakInFlight = Math.max(this.peakInFlight, this.totalInFlight);
+    let released = false;
     const release = () => {
+      if (released) return;
+      released = true;
+      this.totalInFlight--;
       const next = (this.inFlight.get(id) ?? 1) - 1;
       if (next) this.inFlight.set(id, next); else this.inFlight.delete(id);
     };
@@ -121,5 +141,11 @@ export class WsSessionService implements OnModuleInit, OnModuleDestroy {
       if (quota.totalHits > 120) throw new WsException('Trop de demandes. Réessayez dans un instant.');
       return release;
     } catch (error) { release(); throw error; }
+  }
+
+  // Internal diagnostics only: no token, account identifier or authorization cache.
+  workloadSnapshot() {
+    return { active: this.totalInFlight, peak: this.peakInFlight,
+      rejected: { ...this.rejectedWork }, limits: { global: 64, perUser: 3 } };
   }
 }

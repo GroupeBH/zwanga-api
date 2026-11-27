@@ -1,4 +1,6 @@
+import { BookingResponseInterceptor } from './booking-response.interceptor';
 import {
+  UseInterceptors,
   Body,
   Controller,
   Param,
@@ -11,6 +13,7 @@ import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decor
 import { MixedCashPaymentDto } from './dto/mixed-cash-payment.dto';
 import { MixedCashPaymentService } from './mixed-cash-payment.service';
 
+@UseInterceptors(BookingResponseInterceptor)
 @Controller('bookings')
 export class MixedCashPaymentController {
   constructor(private readonly payments: MixedCashPaymentService) {}

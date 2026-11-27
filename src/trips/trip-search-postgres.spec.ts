@@ -169,6 +169,28 @@ const bin = process.env.TRIP_SEARCH_TEST_POSTGRES_BIN;
     expect([first, second, third].map(page => page.data[0].id)).toEqual(fixtures.map(t => t.id));
     expect(third.nextCursor).toBeNull();
   });
+  it('soonest keeps time then geographic distance across pages, regardless of price/premium and without an implicit radius', async () => {
+    const late = await trip({ departureDate: new Date('2099-01-02T12:00:00Z'), pricePerSeat: 0 });
+    const distant = await trip({ departurePoint: far, pricePerSeat: 500 });
+    const close = await trip();
+    const missing = await trip({ departurePoint: null });
+    await db.getRepository(Subscription).save({ userId: distant.driverId,
+      startDate: new Date('2026-01-01'), endDate: new Date('2099-02-01'), amount: 5000, currency: 'CDF' });
+    const options = { sort: 'soonest' as const, sortOriginCoordinates: [15.28, -4.34] as [number, number], limit: 1 };
+    const premiumSort = jest.spyOn(service as any, 'sortSanitizedTripsByPremium');
+    try {
+      const pages = [await service.searchPage(options)];
+      while (pages.at(-1)!.nextCursor) pages.push(await service.searchPage({ ...options, cursor: pages.at(-1)!.nextCursor! }));
+      expect(pages.flatMap(page => page.data.map(t => t.id))).toEqual([close.id, distant.id, missing.id, late.id]);
+      expect(premiumSort).not.toHaveBeenCalled();
+      const back = await service.searchPage({ ...options, cursor: pages[2].previousCursor!, direction: 'previous' });
+      expect(back.data[0].id).toBe(distant.id);
+      const noGps = await service.searchPage({ sort: 'soonest', limit: 10 });
+      expect(noGps.data.at(-1)!.id).toBe(late.id);
+      const mapOrigin = await service.searchPage({ ...options, departureCoordinates: [16.28, -5.34], departureRadiusKm: 200, limit: 10 });
+      expect(mapOrigin.data[0].id).toBe(distant.id);
+    } finally { premiumSort.mockRestore(); }
+  });
 
   it('keeps the 30-result default and global premium precedence when populating the list cache', async () => {
     const fixtures: Trip[] = [];

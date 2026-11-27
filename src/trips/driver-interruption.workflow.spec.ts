@@ -140,6 +140,18 @@ function fixture() {
 }
 
 describe('DriverInterruptionWorkflow', () => {
+  it('locks the scoped booking before the trip, like GPS and completion', async () => {
+    const f = fixture();
+    await f.pause();
+    f.manager.findOne.mockClear();
+    await f.wait();
+    const locked = f.manager.findOne.mock.calls.filter(([, options]: any[]) => options.lock);
+    expect(locked.map(([entity]: any[]) => entity)).toEqual([Booking, Trip]);
+    expect(locked[0][1]).toEqual({
+      where: { id: 'booking-1', passengerId: 'passenger-1', tripId: 'trip' },
+      lock: { mode: 'pessimistic_write' },
+    });
+  });
   it('serializes confirmations and pauses only when all onboard passengers confirmed, without completing bookings', async () => {
     const f = fixture();
     await f.service.respond('trip', 'passenger-1', 'booking-1', true);

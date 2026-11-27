@@ -48,6 +48,19 @@ describe('Bounded discovery cursor queries', () => {
     const invalid = Buffer.from(JSON.stringify({ ...JSON.parse(Buffer.from(cursor, 'base64url').toString()), at: 'invalid' })).toString('base64url');
     expect(() => readDiscoveryCursor(invalid, discoveryFilterHash(filters))).toThrow();
   });
+  it('soonest orders by exact departure then distance, with a matching reverse-page cursor and no premium priority', async () => {
+    const options = { sort: 'soonest' as const, sortOriginCoordinates: [15.28, -4.34] as [number, number], limit: 2 };
+    const first = fixture();
+    const page = await selectDiscoveryPage(first.query, options, 'ST_Distance(trip.departurePoint, :point)');
+    expect(first.query.orderBy).toHaveBeenCalledWith('trip.departureDate', 'ASC');
+    expect(first.query.addSelect).toHaveBeenCalledWith('0', 'discovery_rank');
+    expect(first.outer.orderBy).toHaveBeenCalledWith('trip.departureDate', 'ASC');
+    const previous = fixture();
+    await selectDiscoveryPage(previous.query, { ...options, cursor: page.nextCursor!, direction: 'previous' }, '0');
+    expect(previous.query.andWhere.mock.calls[0][0]).toContain('< (:cursorDate, :cursorSort, :cursorId)');
+    expect(previous.query.andWhere.mock.calls[0][1].cursorSort).toBe(2000);
+    expect(() => readDiscoveryCursor(page.nextCursor!, discoveryFilterHash({ ...options, sortOriginCoordinates: [15.3, -4.3] }))).toThrow();
+  });
   it.each(['2026-02-31T12:00:00.000001', '2026-01-01T24:00:00.000000',
     '2026-13-01T12:00:00.000000', '0000-01-01T12:00:00.000000'])
     ('rejects impossible timestamp %s before SQL execution', at => {

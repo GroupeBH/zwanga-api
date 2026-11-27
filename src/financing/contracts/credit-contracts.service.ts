@@ -2,6 +2,7 @@ import {
   Injectable,
   ConflictException,
   BadRequestException,
+  ForbiddenException,
 } from '@nestjs/common';
 import { CreditStore } from '../shared/credit.store';
 import { CreditCatalogService } from '../catalogue/credit-catalogue.service';
@@ -245,108 +246,176 @@ export class CreditContractsService {
   }
 
   async detail(actor: CreditActor, id: string, admin = false) {
-    const c = await this.store.contract(
-      this.store.db.manager,
-      id,
-      admin ? undefined : actor.userId,
-    );
-    if (admin)
-      await this.store.authorize(
-        this.store.db.manager,
-        actor,
-        ['manager', 'analyst', 'accountant', 'collector', 'auditor', 'funder'],
-        c.creditorId,
+    return this.store.read(async (m) => {
+      const c = await this.store.contract(
+        m,
+        id,
+        admin ? undefined : actor.userId,
       );
-    const rows = await this.store.db.query<
-      { ordinal: number; dueAt: Date; amountMinor: string }[]
-    >(
-      'SELECT ordinal,"dueAt","amountMinor" FROM pro_credit_installments WHERE "creditId"=$1 AND version=$2 ORDER BY ordinal',
-      [id, c.scheduleVersion],
-    );
-    let paid = BigInt(c.paidMinor) - BigInt(c.scheduleBaselineMinor);
-    const installments = rows.map((i) => {
-      const amount = BigInt(i.amountMinor),
-        applied = paid > 0n ? (paid < amount ? paid : amount) : 0n;
-      paid -= applied;
-      const remaining = amount - applied;
+      if (admin)
+        await this.store.authorize(
+          m,
+          actor,
+          [
+            'manager',
+            'analyst',
+            'accountant',
+            'collector',
+            'auditor',
+            'funder',
+          ],
+          c.creditorId,
+        );
+      let identity:
+        | {
+            driverId: string;
+            debtor: {
+              firstName: string | null;
+              lastName: string | null;
+              phone: string | null;
+            };
+          }
+        | undefined;
+      if (admin) {
+        let mayReadIdentity = false;
+        try {
+          await this.store.authorize(
+            m,
+            actor,
+            ['manager', 'analyst', 'accountant', 'collector', 'auditor'],
+            c.creditorId,
+          );
+          mayReadIdentity = true;
+        } catch (error) {
+          if (!(error instanceof ForbiddenException)) throw error;
+        }
+        // Preserve existing funder detail access without disclosing new identity data.
+        if (mayReadIdentity) {
+          const [debtor] = await m.query<
+            {
+              firstName: string | null;
+              lastName: string | null;
+              phone: string | null;
+            }[]
+          >('SELECT "firstName","lastName",phone FROM users WHERE id=$1', [
+            c.driverId,
+          ]);
+          identity = { driverId: c.driverId, debtor };
+        }
+      }
+      const rows = await m.query<
+        { ordinal: number; dueAt: Date; amountMinor: string }[]
+      >(
+        'SELECT ordinal,"dueAt","amountMinor" FROM pro_credit_installments WHERE "creditId"=$1 AND version=$2 ORDER BY ordinal',
+        [id, c.scheduleVersion],
+      );
+      const asOf = Date.now();
+      let paid = BigInt(c.paidMinor) - BigInt(c.scheduleBaselineMinor);
+      const installments = rows.map((i) => {
+        const amount = BigInt(i.amountMinor),
+          applied = paid > 0n ? (paid < amount ? paid : amount) : 0n;
+        paid -= applied;
+        const remaining = amount - applied;
+        return {
+          ...i,
+          remainingMinor: remaining.toString(),
+          overdueDays:
+            remaining > 0n
+              ? Math.max(
+                  0,
+                  Math.floor((asOf - new Date(i.dueAt).getTime()) / 86400000),
+                )
+              : 0,
+        };
+      });
+      const proposals = await m.query<RescheduleRow[]>(
+        `SELECT id,"expectedRemainingMinor","expectedVersion",installments,period,reason,"consentedAt","approvedAt","createdAt"
+      FROM pro_credit_reschedules WHERE "creditId"=$1 ORDER BY "createdAt" DESC,id DESC LIMIT 20`,
+        [id],
+      );
+      const [reductions] = await m.query<{ discountMinor: string }[]>(
+        'SELECT coalesce(sum("amountMinor"),0)::text AS "discountMinor" FROM asset_credit_entries WHERE "creditId"=$1 AND kind=\'discount\'',
+        [id],
+      );
       return {
-        ...i,
-        remainingMinor: remaining.toString(),
-        overdueDays:
-          remaining > 0n
-            ? Math.max(
+        id: c.id,
+        ...identity,
+        ...(admin
+          ? {
+              overdueMinor: installments
+                .reduce(
+                  (total, installment) =>
+                    total +
+                    (new Date(installment.dueAt).getTime() < asOf
+                      ? BigInt(installment.remainingMinor)
+                      : 0n),
+                  0n,
+                )
+                .toString(),
+              overdueDays: installments.reduce(
+                (days, installment) => Math.max(days, installment.overdueDays),
                 0,
-                Math.floor(
-                  (Date.now() - new Date(i.dueAt).getTime()) / 86400000,
-                ),
-              )
-            : 0,
+              ),
+            }
+          : {}),
+        status: c.status,
+        label: c.label,
+        currency: 'CDF',
+        snapshot: c.snapshot,
+        termsHash: c.termsHash,
+        principalMinor: c.principalMinor,
+        paidMinor: (
+          BigInt(c.paidMinor) - BigInt(reductions.discountMinor)
+        ).toString(),
+        creditedMinor: c.paidMinor,
+        discountMinor: reductions.discountMinor,
+        remainingMinor: (
+          BigInt(c.principalMinor) - BigInt(c.paidMinor)
+        ).toString(),
+        depositMinor: c.depositMinor,
+        depositPaidMinor: c.depositPaidMinor,
+        mandateUntil: c.mandateUntil,
+        mandateRevokedAt: c.mandateRevokedAt,
+        deliveryState: c.deliveryState,
+        installments,
+        evaluation: c.evaluation,
+        scheduleReviewRequired:
+          BigInt(c.paidMinor) < BigInt(c.scheduleBaselineMinor),
+        rescheduleProposals: proposals.map((r) => ({
+          ...r,
+          schedule: schedule(
+            minor(r.expectedRemainingMinor),
+            r.installments,
+            r.period,
+            new Date(r.createdAt),
+          ),
+        })),
       };
     });
-    const proposals = await this.store.db.query<RescheduleRow[]>(
-      `SELECT id,"expectedRemainingMinor","expectedVersion",installments,period,reason,"consentedAt","approvedAt","createdAt"
-      FROM pro_credit_reschedules WHERE "creditId"=$1 ORDER BY "createdAt" DESC,id DESC LIMIT 20`,
-      [id],
-    );
-    const [reductions] = await this.store.db.query<{ discountMinor: string }[]>(
-      'SELECT coalesce(sum("amountMinor"),0)::text AS "discountMinor" FROM asset_credit_entries WHERE "creditId"=$1 AND kind=\'discount\'',
-      [id],
-    );
-    return {
-      id: c.id,
-      status: c.status,
-      label: c.label,
-      currency: 'CDF',
-      snapshot: c.snapshot,
-      termsHash: c.termsHash,
-      principalMinor: c.principalMinor,
-      paidMinor: (
-        BigInt(c.paidMinor) - BigInt(reductions.discountMinor)
-      ).toString(),
-      creditedMinor: c.paidMinor,
-      discountMinor: reductions.discountMinor,
-      remainingMinor: (
-        BigInt(c.principalMinor) - BigInt(c.paidMinor)
-      ).toString(),
-      depositMinor: c.depositMinor,
-      depositPaidMinor: c.depositPaidMinor,
-      mandateUntil: c.mandateUntil,
-      mandateRevokedAt: c.mandateRevokedAt,
-      deliveryState: c.deliveryState,
-      installments,
-      evaluation: c.evaluation,
-      scheduleReviewRequired:
-        BigInt(c.paidMinor) < BigInt(c.scheduleBaselineMinor),
-      rescheduleProposals: proposals.map((r) => ({
-        ...r,
-        schedule: schedule(
-          minor(r.expectedRemainingMinor),
-          r.installments,
-          r.period,
-          new Date(r.createdAt),
-        ),
-      })),
-    };
   }
   async list(actor: CreditActor, page: CreditPageDto, admin = false) {
-    if (admin)
-      await this.store.authorize(this.store.db.manager, actor, [
-        'manager',
-        'analyst',
-        'accountant',
-        'collector',
-        'auditor',
-      ]);
-    const rows = await this.store.db.query<ContractRow[]>(
-      `SELECT c.id,c.label,c.status,c."principalMinor",c."paidMinor",p."depositMinor",p."depositPaidMinor",p."deliveryState",c."createdAt"
-      FROM asset_credits c JOIN pro_credit_contracts p ON p."creditId"=c.id WHERE ($1::uuid IS NULL OR c."driverId"=$1)
+    return this.store.read(async (m) => {
+      if (admin)
+        await this.store.authorize(m, actor, [
+          'manager',
+          'analyst',
+          'accountant',
+          'collector',
+          'auditor',
+        ]);
+      const rows = await m.query<ContractRow[]>(
+        `SELECT c.id,c.label,c.status,c."principalMinor",c."paidMinor",p."depositMinor",p."depositPaidMinor",p."deliveryState",c."createdAt"
+      ${admin ? ',c."driverId",jsonb_build_object(\'firstName\',u."firstName",\'lastName\',u."lastName",\'phone\',u.phone) AS debtor' : ''}
+      FROM asset_credits c JOIN pro_credit_contracts p ON p."creditId"=c.id
+      ${admin ? 'JOIN users u ON u.id=c."driverId"' : ''} WHERE ($1::uuid IS NULL OR c."driverId"=$1)
       AND ($2::uuid IS NULL OR c.id>$2) ORDER BY c.id LIMIT $3`,
-      [admin ? null : actor.userId, page.after ?? null, page.limit + 1],
-    );
-    return {
-      items: rows.slice(0, page.limit),
-      nextCursor: rows.length > page.limit ? rows[page.limit - 1].id : null,
-    };
+        [admin ? null : actor.userId, page.after ?? null, page.limit + 1],
+      );
+      return {
+        items: rows.slice(0, page.limit),
+        nextCursor: rows.length > page.limit ? rows[page.limit - 1].id : null,
+      };
+    });
   }
 
   async revoke(driverId: string, id: string, mutationId: string) {

@@ -1,8 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type { LocationHistorySampleDto } from '../dto/location-history-sample.dto';
 import { RedisService } from './redis.service';
 import { normalizeLatLngCoordinate } from '../utils/tracking-coordinates';
 import type { BoardingCandidateSnapshot } from '../../bookings/boarding-detection';
+import { appendLocationHistory } from './location-history-store';
 
 export interface LocationObservationMetadata {
   samples?: LocationHistorySampleDto[];
@@ -26,15 +28,42 @@ export interface LocationHistorySnapshot {
   samples?: TrackedLocationPoint[];
 }
 
+export class LocationHistoryPendingError extends Error {
+  constructor() { super('Committed GPS history is not ready for automatic progression'); }
+}
+
 @Injectable()
 export class LocationHistoryService {
+  // Shared only within one evaluation, never a cross-request authorization cache.
+  private readonly evaluationSnapshot = new AsyncLocalStorage<Map<string, unknown>>();
   private readonly logger = new Logger(LocationHistoryService.name);
   private readonly LOCATION_HISTORY_TTL_SECONDS = 6 * 60 * 60;
-  private readonly DUPLICATE_LOCATION_DISTANCE_METERS = 3;
-  private readonly DUPLICATE_LOCATION_WINDOW_MS = 20_000;
-  private readonly LOCATION_WINDOW_SIZE = 10;
 
   constructor(private readonly redisService: RedisService) {}
+
+  async withRideSnapshot<T>(tripId: string, participants: Array<{
+    bookingId: string; passengerId: string; driverId: string;
+    driverRecordedAt: Date | null; passengerRecordedAt: Date | null;
+  }>, work: () => Promise<T>): Promise<T> {
+    const keys = [...new Set([this.getDriverKey(tripId), ...participants.flatMap(p => [
+      this.getPassengerKey(p.bookingId), this.getBoardingCandidateKey(tripId, p.driverId, p.passengerId),
+    ])])];
+    const values = await this.redisService.getMany<unknown>(keys);
+    const snapshot = new Map(keys.map((key, i) => [key, values[i]]));
+    const requireRecorded = (key: string, at: Date | null) => {
+      if (!at) return;
+      const history = snapshot.get(key) as LocationHistorySnapshot | null;
+      if (!(Date.parse(history?.current?.recordedAt ?? '') >= at.getTime()))
+        throw new LocationHistoryPendingError();
+    };
+    // The SQL queue can now commit before Redis history. Do not make a pickup,
+    // no-show or dropoff decision from a cache snapshot older than that SQL GPS.
+    for (const p of participants) {
+      requireRecorded(this.getDriverKey(tripId), p.driverRecordedAt);
+      requireRecorded(this.getPassengerKey(p.bookingId), p.passengerRecordedAt);
+    }
+    return this.evaluationSnapshot.run(snapshot, work);
+  }
 
   private getDriverKey(tripId: string) {
     return `tracking:history:driver:${tripId}`;
@@ -97,79 +126,20 @@ export class LocationHistoryService {
     }
 
     try {
-      // Rebuild from the winning snapshot on contention; retries are bounded.
-      for (let attempt = 0; attempt < 3; attempt++) {
-        const existing =
-          await this.redisService.get<LocationHistorySnapshot>(key);
-        const existingSamples = this.getSamples(existing);
-        const existingCurrentTimestamp = existing?.current
-          ? new Date(existing.current.recordedAt).getTime()
-          : Number.NEGATIVE_INFINITY;
-        const currentTimestamp = new Date(current.recordedAt).getTime();
-        if (currentTimestamp < existingCurrentTimestamp) {
-          this.logger.debug(
-            `Ignoring out-of-order location history update for ${key}`,
-          );
-          return;
-        }
-
-        if (metadata.samples?.length) {
-          const merged = new Map<string, TrackedLocationPoint>();
-          const now = Date.now();
-          for (const sample of metadata.samples.slice(-10)) {
-            const at = Date.parse(sample.recordedAt);
-            if (!Number.isFinite(at) || at > now || now - at > 90_000 ||
-              at > currentTimestamp || !Number.isFinite(sample.accuracy) ||
-              sample.accuracy < 0 || sample.accuracy > 70) continue;
-            const point = this.normalizePoint(sample.latitude, sample.longitude, new Date(at),
-              { accuracyMeters: sample.accuracy });
-            if (point) merged.set(point.recordedAt, point);
-          }
-          // Already accepted samples win conflicting duplicates.
-          for (const point of existingSamples) merged.set(point.recordedAt, point);
-          merged.set(current.recordedAt, current);
-          const samples = [...merged.values()].sort((a,b) =>
-            Date.parse(a.recordedAt) - Date.parse(b.recordedAt)).slice(-this.LOCATION_WINDOW_SIZE);
-          if (await this.redisService.compareAndSet(key, existing, {
-            previous: samples.at(-2) ?? null, current: samples.at(-1)!, samples,
-          }, this.LOCATION_HISTORY_TTL_SECONDS)) return;
-          continue;
-        }
-        if (this.isDuplicateCurrentLocation(existing?.current, current)) {
-          const samples = [...existingSamples.slice(0, -1), current].slice(
-            -this.LOCATION_WINDOW_SIZE,
-          );
-          const saved = await this.redisService.compareAndSet(
-            key,
-            existing,
-            {
-              previous: samples.at(-2) ?? existing?.previous ?? null,
-              current,
-              samples,
-            },
-            this.LOCATION_HISTORY_TTL_SECONDS,
-          );
-          if (saved) return;
-          continue;
-        }
-
-        const samples = [...existingSamples, current].slice(
-          -this.LOCATION_WINDOW_SIZE,
-        );
-        const saved = await this.redisService.compareAndSet(
-          key,
-          existing,
-          {
-            previous: samples.at(-2) ?? existing?.current ?? null,
-            current,
-            samples,
-          },
-          this.LOCATION_HISTORY_TTL_SECONDS,
-        );
-        if (saved) return;
+      const native: TrackedLocationPoint[] = [];
+      const now = Date.now();
+      for (const sample of metadata.samples?.slice(-10) ?? []) {
+        const at = Date.parse(sample.recordedAt);
+        if (!Number.isFinite(at) || at > now || now - at > 90_000 ||
+          at > recordedAt.getTime() || !Number.isFinite(sample.accuracy) ||
+          sample.accuracy < 0 || sample.accuracy > 70) continue;
+        const point = this.normalizePoint(sample.latitude, sample.longitude, new Date(at),
+          { accuracyMeters: sample.accuracy });
+        if (point) native.push(point);
       }
-      this.logger.debug(
-        'Location history contention: skipped a sample without overwriting newer GPS',
+      await appendLocationHistory(
+        this.redisService.getClient(), key, current, native,
+        Boolean(metadata.samples?.length), this.LOCATION_HISTORY_TTL_SECONDS,
       );
     } catch (error) {
       this.logger.warn(
@@ -180,70 +150,12 @@ export class LocationHistoryService {
     }
   }
 
-  private getSamples(
-    snapshot?: LocationHistorySnapshot | null,
-  ): TrackedLocationPoint[] {
-    if (snapshot?.samples?.length) {
-      return snapshot.samples;
-    }
-    return [snapshot?.previous, snapshot?.current].filter(
-      (sample): sample is TrackedLocationPoint => Boolean(sample),
-    );
-  }
-
-  private isDuplicateCurrentLocation(
-    previous: TrackedLocationPoint | null | undefined,
-    current: TrackedLocationPoint,
-  ): boolean {
-    if (!previous) {
-      return false;
-    }
-
-    const previousTimestamp = new Date(previous.recordedAt).getTime();
-    const currentTimestamp = new Date(current.recordedAt).getTime();
-    if (
-      !Number.isFinite(previousTimestamp) ||
-      !Number.isFinite(currentTimestamp) ||
-      Math.abs(currentTimestamp - previousTimestamp) >
-        this.DUPLICATE_LOCATION_WINDOW_MS
-    ) {
-      return false;
-    }
-
-    return (
-      this.calculateDistanceMeters(previous, current) <=
-      this.DUPLICATE_LOCATION_DISTANCE_METERS
-    );
-  }
-
-  private calculateDistanceMeters(
-    first: TrackedLocationPoint,
-    second: TrackedLocationPoint,
-  ): number {
-    const earthRadiusMeters = 6371000;
-    const toRadians = (value: number) => (value * Math.PI) / 180;
-    const deltaLatitude = toRadians(second.latitude - first.latitude);
-    const deltaLongitude = toRadians(second.longitude - first.longitude);
-    const firstLatitude = toRadians(first.latitude);
-    const secondLatitude = toRadians(second.latitude);
-    const haversine =
-      Math.sin(deltaLatitude / 2) * Math.sin(deltaLatitude / 2) +
-      Math.cos(firstLatitude) *
-        Math.cos(secondLatitude) *
-        Math.sin(deltaLongitude / 2) *
-        Math.sin(deltaLongitude / 2);
-
-    return (
-      earthRadiusMeters *
-      2 *
-      Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine))
-    );
-  }
-
   private async getLocationHistory(
     key: string,
   ): Promise<LocationHistorySnapshot | null> {
     try {
+      const snapshot = this.evaluationSnapshot.getStore();
+      if (snapshot?.has(key)) return snapshot.get(key) as LocationHistorySnapshot | null;
       return await this.redisService.get<LocationHistorySnapshot>(key);
     } catch (error) {
       this.logger.warn(
@@ -313,6 +225,9 @@ export class LocationHistoryService {
     passengerId: string,
   ): Promise<BoardingCandidateSnapshot | null> {
     try {
+      const key = this.getBoardingCandidateKey(tripId, driverId, passengerId);
+      const snapshot = this.evaluationSnapshot.getStore();
+      if (snapshot?.has(key)) return snapshot.get(key) as BoardingCandidateSnapshot | null;
       return await this.redisService.get<BoardingCandidateSnapshot>(
         this.getBoardingCandidateKey(tripId, driverId, passengerId),
       );
@@ -338,6 +253,8 @@ export class LocationHistoryService {
         candidate,
         this.LOCATION_HISTORY_TTL_SECONDS,
       );
+      const key = this.getBoardingCandidateKey(tripId, driverId, passengerId);
+      if (this.evaluationSnapshot.getStore()?.has(key)) this.evaluationSnapshot.getStore()!.set(key, candidate);
     } catch (error) {
       this.logger.warn(
         `Unable to persist boarding candidate for trip ${tripId}: ${

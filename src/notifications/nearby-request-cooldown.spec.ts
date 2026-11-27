@@ -21,6 +21,7 @@ const fixture = (expo = false) => {
     manager: {},
   };
   const users = {
+    query: jest.fn(),
     findOne: jest.fn(() =>
       Promise.resolve({
         role: 'driver',
@@ -31,6 +32,8 @@ const fixture = (expo = false) => {
     ),
     count: jest.fn(() => Promise.resolve(1)),
   };
+  users.query.mockImplementation(async () => [{ ...await users.findOne(),
+    hasExclusivePushToken: await users.count() === 1 }]);
   const service = new NotificationService(
     { get: jest.fn() } as never,
     notices as never,

@@ -31,11 +31,14 @@ resource "aws_elasticache_replication_group" "redis" {
   transit_encryption_enabled = true
   transit_encryption_mode    = "required"
   auth_token                 = random_password.redis_auth.result
+  # ROTATE retains the previous token. Complete an incident rotation with SET
+  # only after every client uses the new token (see docs/secret-incident-response.md).
+  auth_token_update_strategy = var.redis_auth_token_update_strategy
 
   snapshot_retention_limit = 7
   snapshot_window          = "01:00-02:00"
   maintenance_window       = "sun:04:30-sun:05:30"
-  apply_immediately        = false
+  apply_immediately        = var.redis_apply_immediately
 
   log_delivery_configuration {
     destination      = aws_cloudwatch_log_group.redis_slow.name

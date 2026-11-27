@@ -1,4 +1,6 @@
+import { BookingResponseInterceptor } from './booking-response.interceptor';
 import {
+  UseInterceptors,
   Body,
   Controller,
   Param,
@@ -7,12 +9,17 @@ import {
   Request,
 } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
-import { IsIn, IsNumber, Max, Min } from 'class-validator';
+import { IsIn, IsInt, IsNumber, IsOptional, Max, Min } from 'class-validator';
 import { Auth } from '../auth/decorators/auth.decorator';
 import { SensitiveThrottle } from '../common/decorators/sensitive-throttle.decorator';
 import { CashReceiptsService } from './cash-receipts.service';
 
 class ConfirmCashReceiptDto {
+  @IsOptional()
+  @IsInt()
+  @Min(1)
+  @Max(100000)
+  cashExceptionOccurrence?: number;
   @IsNumber({ maxDecimalPlaces: 2, allowNaN: false, allowInfinity: false })
   @Min(0.01)
   @Max(99999999.99)
@@ -23,6 +30,7 @@ class ConfirmCashReceiptDto {
 }
 
 @ApiTags('Bookings')
+@UseInterceptors(BookingResponseInterceptor)
 @Controller('bookings')
 export class CashReceiptsController {
   constructor(private readonly receipts: CashReceiptsService) {}
@@ -54,6 +62,6 @@ export class CashReceiptsController {
     @Request() req: { user: { userId: string } },
     @Body() dto: ConfirmCashReceiptDto,
   ) {
-    return this.receipts.confirm(id, req.user.userId, dto.amount, dto.currency);
+    return this.receipts.confirm(id, req.user.userId, dto.amount, dto.currency, dto.cashExceptionOccurrence);
   }
 }

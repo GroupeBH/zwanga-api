@@ -11,7 +11,8 @@ describe('driver finance API projections', () => {
     account: any,
     debt: number,
     policyActive: boolean,
-    creditAvailable: boolean;
+    creditAvailable: boolean,
+    exceptionRow: any;
   beforeEach(() => {
     trip = {
       id: 'trip',
@@ -38,6 +39,7 @@ describe('driver finance API projections', () => {
     debt = 0;
     policyActive = true;
     creditAvailable = false;
+    exceptionRow = null;
     const db = {
       getRepository: (entity: any) => ({
         findOneBy: async () =>
@@ -57,7 +59,7 @@ describe('driver finance API projections', () => {
                 debtAmount: debt * 10,
               },
             ]
-          : [],
+          : sql.includes('FROM users u') && exceptionRow ? [exceptionRow] : [],
     };
     service = new DriverFinanceService(
       db as any,
@@ -149,6 +151,68 @@ describe('driver finance API projections', () => {
         .availablePaymentModes,
     ).not.toContain('cash');
   });
+  it.each(['electronic', 'points'])(
+    'offers full cash after arrival over %s without changing publication or mixed payment',
+    async (mode) => {
+      trip.acceptedPaymentModes = [mode];
+      booking.paymentMode = mode;
+      booking.status = 'completed';
+      booking.droppedOff = true;
+      booking.paymentStatus = 'pending';
+      booking.paymentCurrency = 'CDF';
+      booking.cashCommissionTokenValue = 10;
+      account.balance = 100;
+      account.reservedCashCommissionBalance = 0;
+      const options = await service.bookingOptions('passenger', 'booking');
+      expect(options).toMatchObject({
+        acceptedPaymentModes: [mode],
+        availablePaymentModes: [mode, 'cash'],
+        cashFallbackAvailable: true,
+        mixedCashSupported: false,
+      });
+      expect(trip.acceptedPaymentModes).toEqual([mode]);
+      expect(
+        (await service.tripOptions('passenger', 'trip')).availablePaymentModes,
+      ).toEqual([mode]);
+      expect(options).not.toHaveProperty('availableTokens');
+    },
+  );
+  it('does not offer the arrival exception before arrival, after settlement or with insufficient cash eligibility', async () => {
+    trip.acceptedPaymentModes = ['points'];
+    account.balance = 100;
+    account.reservedCashCommissionBalance = 0;
+    for (const patch of [
+      { status: 'accepted' },
+      { droppedOff: false },
+      { paymentStatus: 'succeeded' },
+      { cashReceivedAt: new Date() },
+      { mixedPaymentAt: new Date() },
+      { paymentAmount: 0 },
+      { status: 'cancelled' },
+    ]) {
+      Object.assign(
+        booking,
+        {
+          status: 'completed',
+          droppedOff: true,
+          paymentStatus: 'pending',
+          cashReceivedAt: null,
+          mixedPaymentAt: null,
+          paymentAmount: 10000,
+        },
+        patch,
+      );
+      const options = await service.bookingOptions('passenger', 'booking');
+      expect(options.cashFallbackAvailable).toBe(false);
+      expect(options.availablePaymentModes).not.toContain('cash');
+    }
+    Object.assign(booking, { status: 'completed', droppedOff: true });
+    account.balance = 0;
+    const unavailable = await service.bookingOptions('passenger', 'booking');
+    expect(unavailable.cashFallbackAvailable).toBe(false);
+    expect(unavailable.availablePaymentModes).not.toContain('cash');
+    expect(unavailable.cashUnavailableReason).toEqual(expect.any(String));
+  });
   it('enforces booking ownership and private-trip visibility', async () => {
     await expect(
       service.bookingOptions('stranger', 'booking'),
@@ -156,6 +220,29 @@ describe('driver finance API projections', () => {
     trip.isPrivate = true;
     await expect(service.tripOptions('stranger', 'trip')).rejects.toThrow();
     await expect(service.tripOptions('driver', 'trip')).resolves.toBeDefined();
+  });
+  it('shows first warning before arrival but offers exceptional cash only after actual dropoff', async () => {
+    exceptionRow = { active: true, pending: false, occurrence: 1 };
+    Object.assign(booking, { paymentCurrency: 'CDF', paymentStatus: 'pending' });
+    trip.acceptedPaymentModes = ['points'];
+    const before = await service.bookingOptions('driver', 'booking');
+    expect(before.cashException).toMatchObject({ occurrence: 1, penaltyAmount: 0 });
+    expect(before.availablePaymentModes).not.toContain('cash');
+    Object.assign(booking, { status: 'completed', droppedOff: true });
+    const after = await service.bookingOptions('passenger', 'booking');
+    expect(after.cashFallbackAvailable).toBe(true);
+    expect(after.availablePaymentModes).toContain('cash');
+    expect(after.cashException).not.toHaveProperty('occurrence');
+    expect(after.cashException).not.toHaveProperty('penaltyAmount');
+    expect((await service.tripOptions('passenger', 'trip')).availablePaymentModes).not.toContain('cash');
+  });
+  it('retains the pending offence after switching cash, but never overrides an administrative block', async () => {
+    exceptionRow = { active: true, pending: true, occurrence: 4 };
+    Object.assign(booking, { paymentMode: 'cash', paymentCurrency: 'CDF', status: 'completed', droppedOff: true });
+    expect((await service.bookingOptions('driver', 'booking')).cashException).toMatchObject({ penaltyAmount: 3000, suspensionAfterRide: true });
+    account.withdrawalsBlocked = true; booking.paymentMode = 'points';
+    const blocked = await service.bookingOptions('driver', 'booking');
+    expect(blocked.cashException).toBeUndefined(); expect(blocked.cashFallbackAvailable).toBe(false);
   });
   it('exposes the server offer and permits cash without funds, without erasing existing debt', async () => {
     creditAvailable = true;

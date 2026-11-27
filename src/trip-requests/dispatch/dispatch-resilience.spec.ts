@@ -23,8 +23,26 @@ describe('dispatch batch isolation', () => {
     expect(selection).toContain('r."departurePoint" IS NOT NULL');
     expect(selection).toContain('r."maxPricePerSeat" IS NOT NULL');
     expect(query).toHaveBeenCalledWith(expect.stringContaining('SET "dispatchCheckedAt"'), ['1']);
+    expect(query.mock.calls.filter(([sql]) => sql.includes('SET "dispatchLeaseId"=NULL'))).toHaveLength(1);
+    expect(query).toHaveBeenCalledWith(expect.stringContaining('FOR UPDATE SKIP LOCKED'),
+      [requests.map(r => r.id), expect.any(String)]);
     expect(enqueueSharedTripAlert).toHaveBeenCalledTimes(6);
     expect(notifications.dispatchTransactionalNotifications).toHaveBeenCalledTimes(1);
+    expect(service['ticking']).toBe(false);
+  });
+  it('keeps retrying and dispatching alerts when batch release fails', async () => {
+    const query = jest.fn(async (sql: string) => {
+      if (sql.startsWith('WITH candidates')) return [{ id: 'request', immediateDispatch: true }];
+      if (sql.includes('SET "dispatchLeaseId"=NULL')) throw new Error('synthetic release failure');
+      return [];
+    });
+    const notifications = { dispatchTransactionalNotifications: jest.fn().mockResolvedValue(undefined) };
+    const sequential = { poll: jest.fn().mockResolvedValue(false) };
+    const service = new DriverDispatchService({ query } as never, { get: () => 'true' } as never,
+      notifications as never, undefined, sequential as never);
+    await service.tick(); await service.tick();
+    expect(sequential.poll).toHaveBeenCalledTimes(2);
+    expect(notifications.dispatchTransactionalNotifications).toHaveBeenCalledTimes(2);
     expect(service['ticking']).toBe(false);
   });
 });

@@ -8,6 +8,7 @@ import {
   ParseUUIDPipe,
   Post,
   Body,
+  Header,
 } from '@nestjs/common';
 import { Auth } from '../../auth/decorators/auth.decorator';
 import { SensitiveThrottle } from '../../common/decorators/sensitive-throttle.decorator';
@@ -53,14 +54,15 @@ export class CreditContractsController {
     return this.contractsService.revoke(req.user.userId, id, dto.mutationId);
   }
 
-  @Get('admin/contracts') contracts(
-    @Request() req: { user: CreditActor },
-    @Query() q: CreditPageDto,
-  ) {
+  @Get('admin/contracts')
+  @Header('Cache-Control', 'no-store')
+  contracts(@Request() req: { user: CreditActor }, @Query() q: CreditPageDto) {
     return this.contractsService.list(req.user, q, true);
   }
 
-  @Get('admin/contracts/:id') adminDetail(
+  @Get('admin/contracts/:id')
+  @Header('Cache-Control', 'no-store')
+  adminDetail(
     @Request() req: { user: CreditActor },
     @Param('id', ParseUUIDPipe) id: string,
   ) {

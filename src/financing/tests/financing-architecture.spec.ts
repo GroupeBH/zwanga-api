@@ -61,7 +61,7 @@ describe('Financing domain boundaries', () => {
   it('keeps the composition root free of controllers and business providers', () => {
     expect(providers(FinancingModule)).toEqual([]);
     expect(controllers(FinancingModule)).toEqual([]);
-    expect(imports(FinancingModule)).toHaveLength(13);
+    expect(imports(FinancingModule)).toHaveLength(14);
   });
 
   it('contains no circular Nest module dependency or forwardRef escape hatch', () => {
@@ -132,6 +132,9 @@ describe('Financing domain boundaries', () => {
         'GET admin/access',
         'GET admin/configuration',
         'GET admin/overview',
+        'GET admin/collections/debtors',
+        'GET admin/credits/:id/recovery-actions',
+        'POST admin/credits/:id/recovery-actions',
         'PUT admin/parties/:id',
         'POST admin/grants',
         'POST admin/policies',

@@ -4,6 +4,18 @@ import { In, Not } from 'typeorm';
 import { UsersService } from './users.service';
 
 describe('UsersService OTP routes', () => {
+  it('explains a deleted number without sending or charging an unnecessary registration SMS', async () => {
+    const sendOtp = jest.fn();
+    const service = {
+      userRepository: { manager: { query: jest.fn().mockResolvedValue([{ deleted: true }]) }, findOne: jest.fn() },
+      otpService: { sendOtp },
+    };
+    await expect(UsersService.prototype.sendPhoneVerificationOtp.call(service, {
+      phone: '0890000001', context: PhoneVerificationContext.REGISTRATION,
+    })).rejects.toMatchObject({ status: 409, response: { code: 'PHONE_PREVIOUSLY_DELETED', message: expect.stringContaining('compte supprimé') } });
+    expect(sendOtp).not.toHaveBeenCalled();
+    expect(service.userRepository.findOne).not.toHaveBeenCalled();
+  });
   it.each([UserStatus.ACTIVE, UserStatus.PENDING_KYC])(
     'verifies an existing %s account after an app update without changing login or creating a new account',
     async (status) => {
@@ -39,6 +51,7 @@ describe('UsersService OTP routes', () => {
   it('never forwards provider codes, raw responses or OTPs to the mobile', async () => {
     const service = {
       userRepository: {
+        manager: { query: jest.fn().mockResolvedValue([]) },
         findOne: jest.fn().mockResolvedValue(null),
         update: jest.fn(),
       },
@@ -91,7 +104,7 @@ describe('UsersService OTP routes', () => {
 
   it('passes Mobishastra expiry and length through the existing send endpoint', async () => {
     const service = {
-      userRepository: { findOne: jest.fn().mockResolvedValue(null) },
+      userRepository: { findOne: jest.fn().mockResolvedValue(null), manager: { query: jest.fn().mockResolvedValue([]) } },
       otpService: {
         sendOtp: jest.fn().mockResolvedValue({
           success: true,
@@ -142,6 +155,7 @@ describe('UsersService OTP routes', () => {
       const service = {
         logger: { log: jest.fn(), warn: jest.fn() },
         userRepository: {
+          manager: { query: jest.fn().mockResolvedValue([]) },
           findOne: jest
             .fn()
             .mockResolvedValue(
@@ -230,6 +244,7 @@ describe('UsersService OTP routes', () => {
       const service = {
         logger: { log: jest.fn(), warn: jest.fn() },
         userRepository: {
+          manager: { query: jest.fn().mockResolvedValue([]) },
           findOne: jest.fn().mockResolvedValue({ id: 'old-user', ...account }),
           update,
         },
@@ -258,6 +273,7 @@ describe('UsersService OTP routes', () => {
       const service = {
         logger: { log: jest.fn(), warn: jest.fn() },
         userRepository: {
+          manager: { query: jest.fn().mockResolvedValue([]) },
           findOne: jest
             .fn()
             .mockResolvedValue({ id: 'active-user', isActive: true, status }),

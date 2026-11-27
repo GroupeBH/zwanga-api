@@ -1,4 +1,8 @@
 import { Module } from '@nestjs/common';
+import { BookingResponseInterceptor } from './booking-response.interceptor';
+import { PaymentRequestController } from './payment-request.controller';
+import { PaymentRequestService } from './payment-request.service';
+import { ArrivalAssistanceService } from './arrival-assistance.service';
 import { RideDeclarationsController } from '../ride-declarations/ride-declarations.controller';
 import { RideDeclarationsService } from '../ride-declarations/ride-declarations.service';
 import { TypeOrmModule } from '@nestjs/typeorm';
@@ -46,8 +50,8 @@ import {
     DriverSettlementsModule,
     ReferralsModule,
   ],
-  controllers: [BookingsController, RideDeclarationsController, CashReceiptsController, MixedCashPaymentController, TokenCashFallbackController],
-  providers: [BookingsService, RideDeclarationsService, CashReceiptsService, MixedCashPaymentService, TokenCashFallbackService],
+  controllers: [BookingsController, RideDeclarationsController, CashReceiptsController, MixedCashPaymentController, TokenCashFallbackController, PaymentRequestController],
+  providers: [BookingResponseInterceptor, BookingsService, RideDeclarationsService, ArrivalAssistanceService, CashReceiptsService, MixedCashPaymentService, TokenCashFallbackService, PaymentRequestService],
   exports: [BookingsService],
 })
 export class BookingsModule {}

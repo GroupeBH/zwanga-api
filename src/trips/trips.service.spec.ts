@@ -10,6 +10,7 @@ import { VehicleType } from '../vehicles/entities/vehicle.entity';
 describe('TripsService daily trip publication quota', () => {
   let service: any;
   let tripRepository: {
+    query: jest.Mock;
     create: jest.Mock;
     save: jest.Mock;
     update: jest.Mock;
@@ -36,6 +37,7 @@ describe('TripsService daily trip publication quota', () => {
 
   beforeEach(() => {
     tripRepository = {
+      query: jest.fn().mockResolvedValue([{ tripId: 'trip-1' }]),
       create: jest.fn((payload) => payload),
       save: jest.fn().mockResolvedValue({ id: 'trip-1' }),
       update: jest.fn().mockResolvedValue({ affected: 1 }),
@@ -364,7 +366,7 @@ describe('TripsService daily trip publication quota', () => {
       departurePoint: { type: 'Point', coordinates: [15.3, -4.3] },
       arrivalPoint: { type: 'Point', coordinates: [15.4, -4.4] },
     };
-    tripRepository.findOne.mockResolvedValueOnce(activeTrip);
+    tripRepository.query.mockResolvedValueOnce([activeTrip]);
     const recordedAt = new Date().toISOString();
 
     const result = await service.updateDriverLocation(
@@ -374,23 +376,12 @@ describe('TripsService daily trip publication quota', () => {
       { recordedAt, accuracyMeters: 5 },
     );
 
-    expect(tripRepository.update).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: 'trip-1',
-        driverId: 'driver-1',
-        status: TripStatus.ACTIVE,
-        lastLocationUpdateAt: expect.anything(),
-      }),
-      expect.objectContaining({
-        currentLocation: {
-          type: 'Point',
-          coordinates: [15.31, -4.31],
-        },
-        lastLocationUpdateAt: new Date(recordedAt),
-      }),
+    expect(tripRepository.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO ride_progress_jobs'),
+      ['trip-1', 'driver-1', 15.31, -4.31, new Date(recordedAt)],
     );
     expect(tripRepository.save).not.toHaveBeenCalled();
-    expect(tripRepository.findOne).toHaveBeenCalledWith({ where: { id: 'trip-1' } });
+    expect(tripRepository.query).toHaveBeenCalledWith(expect.stringContaining('FROM trips t WHERE t.id = ANY($1::uuid[])'), [['trip-1']]);
     expect(result).toEqual(
       expect.objectContaining({
         tripId: 'trip-1',

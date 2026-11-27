@@ -25,6 +25,17 @@ describe('NotificationService critical push reliability', () => {
       getRepository: jest.fn().mockReturnValue(transactionalRepository),
     };
     const notificationRepository = {
+      // Share the row source with the legacy critical-retry builder. SQL policy
+      // and atomicity are tested against real PostgreSQL in the queue suite.
+      query: jest.fn(async (_sql: string, parameters: any[]) => {
+        queryBuilder.take(parameters[1]);
+        const rows: any[] = await queryBuilder.getMany();
+        for (const row of rows) {
+          row.status = NotificationStatus.PENDING;
+          row.errorMessage = `${parameters[2]}:${row.id}`;
+        }
+        return rows;
+      }),
       create: jest.fn((value: Record<string, unknown>) => ({
         id: 'notification-1',
         messageId: null,
@@ -43,10 +54,17 @@ describe('NotificationService critical push reliability', () => {
       },
     };
     const userRepository = {
+      query: jest.fn(),
       count: jest.fn().mockResolvedValue(1),
       findOne: jest.fn(),
       update: jest.fn().mockResolvedValue({ affected: 1 }),
     };
+    // Reuse mutable recipient fixtures; the one-statement SQL and fresh ownership
+    // semantics are covered by transactional-push-queue.postgres.spec.ts.
+    userRepository.query.mockImplementation(async (_sql, [id]) => {
+      const owner = await userRepository.findOne({ where: { id } });
+      return owner ? [{ ...owner, hasExclusivePushToken: await userRepository.count() === 1 }] : [];
+    });
     const tripRequestRepository = {
       findOne: jest.fn(),
     };
@@ -94,7 +112,8 @@ describe('NotificationService critical push reliability', () => {
     await jest.advanceTimersByTimeAsync(15_000); await second;
     expect(started).toHaveLength(16); expect(peak).toBe(8);
     expect(Math.max(...started)).toBe(15_000);
-    expect(f.queryBuilder.orderBy).toHaveBeenCalledWith('notification.createdAt', 'ASC');
+    expect(f.notificationRepository.query).toHaveBeenCalledWith(
+      expect.stringContaining('ORDER BY notification."createdAt", notification.id'), expect.any(Array));
     // Completion schedules one coalesced check for newly available work.
     await jest.advanceTimersByTimeAsync(1);
     expect(jest.getTimerCount()).toBe(0);
@@ -193,9 +212,9 @@ describe('NotificationService critical push reliability', () => {
     try {
       await new Promise(resolve => setImmediate(resolve));
       expect((f.service as any).urgentWorkers).toBe(1);
-      expect(delivery).toHaveBeenCalledWith(expect.objectContaining({ id: '4' }));
+      expect(delivery).toHaveBeenCalledWith(expect.objectContaining({ id: '4' }), true);
       await f.service.dispatchUrgentNotifications();
-      expect(delivery).toHaveBeenCalledWith(expect.objectContaining({ id: 'next' }));
+      expect(delivery).toHaveBeenCalledWith(expect.objectContaining({ id: 'next' }), true);
       expect(f.queryBuilder.take).toHaveBeenLastCalledWith(4);
     } finally {
       resolveSlow(true);
@@ -234,11 +253,12 @@ describe('NotificationService critical push reliability', () => {
     const run = f.service.dispatchTransactionalNotifications();
     try {
       await new Promise(resolve => setImmediate(resolve));
-      expect(delivery).toHaveBeenCalledWith(urgent);
-      expect(f.queryBuilder.andWhere).toHaveBeenCalledWith("notification.data ->> 'type' IN (:...urgentTypes)", {
-        urgentTypes: ['new_booking', 'driver_dispatch_offer', 'trip_request_nearby', 'booking_response', 'trip_request_accepted', 'driver_offer', 'offer_accepted'],
-      });
-      expect(f.queryBuilder.andWhere).toHaveBeenCalledWith("COALESCE(notification.data ->> 'type', '') NOT IN (:...urgentTypes)", expect.any(Object));
+      expect(delivery).toHaveBeenCalledWith(urgent, true);
+      expect(f.notificationRepository.query).toHaveBeenCalledWith(
+        expect.stringContaining("notification.data ->> 'type' = ANY($1::text[])"),
+        expect.arrayContaining([['new_booking', 'driver_dispatch_offer', 'trip_request_nearby', 'booking_response', 'trip_request_accepted', 'driver_offer', 'offer_accepted']]));
+      expect(f.notificationRepository.query).toHaveBeenCalledWith(
+        expect.stringContaining("NOT (COALESCE(notification.data ->> 'type', '') = ANY($1::text[]))"), expect.any(Array));
       expect(f.queryBuilder.take).toHaveBeenCalledWith(5);
     } finally {
       finishRegular([]);
@@ -252,7 +272,7 @@ describe('NotificationService critical push reliability', () => {
       userId: 'driver', data: { type: 'new_booking', bookingId: 'b' } }] as never[]);
     const query = jest.fn().mockResolvedValue([]);
     Object.assign(f.notificationRepository.manager, { query });
-    const delivery = jest.spyOn(f.service as any, 'deliverSavedNotification').mockResolvedValue(true);
+    const delivery = jest.spyOn(f.service as any, 'sendFirebaseNotification').mockResolvedValue('synthetic');
     await f.service.dispatchUrgentNotifications();
     expect(query).toHaveBeenCalledWith(expect.stringContaining("b.status = 'pending'"), ['b', 'driver']);
     expect(delivery).not.toHaveBeenCalled();
@@ -429,15 +449,14 @@ describe('NotificationService critical push reliability', () => {
     expect(f.queryBuilder.getMany).toHaveBeenCalledTimes(2);
   });
 
-  it('delivers a committed outbox row only after releasing its claim transaction', async () => {
+  it('delivers a committed outbox row only after the atomic claim returns', async () => {
     const { service, notificationRepository, userRepository, queryBuilder } =
       buildService();
     let claimed = false;
-    const work =
-      notificationRepository.manager.transaction.getMockImplementation()!;
-    notificationRepository.manager.transaction.mockImplementation(
-      async (callback) => {
-        const result = await work(callback);
+    const work = notificationRepository.query.getMockImplementation()!;
+    notificationRepository.query.mockImplementation(
+      async (sql, parameters) => {
+        const result = await work(sql, parameters);
         claimed = true;
         return result;
       },
@@ -467,7 +486,9 @@ describe('NotificationService critical push reliability', () => {
       });
     await service.dispatchTransactionalNotifications();
     expect(fetchSpy).toHaveBeenCalledTimes(1);
-    expect(queryBuilder.setOnLocked).toHaveBeenCalledWith('skip_locked');
+    expect(notificationRepository.query).toHaveBeenCalledWith(
+      expect.stringContaining('FOR UPDATE OF notification SKIP LOCKED'), expect.any(Array));
+    expect(notificationRepository.manager.transaction).not.toHaveBeenCalled();
     expectClaimedResult(notificationRepository, 'outbox', {
       status: NotificationStatus.SENT,
       fcmToken: 'ExponentPushToken[new-device]',

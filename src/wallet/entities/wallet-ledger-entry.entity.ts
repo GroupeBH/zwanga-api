@@ -26,6 +26,7 @@ export enum WalletLedgerEntryType {
   WITHDRAWAL = 'withdrawal',
   WITHDRAWAL_REFUND = 'withdrawal_refund',
   CASH_COMMISSION = 'cash_commission',
+  CASH_PENALTY = 'cash_penalty',
   CASH_COMMISSION_REFUND = 'cash_commission_refund',
 }
 

@@ -501,4 +501,34 @@ describe('AdminService user listing and export', () => {
     expect(file.buffer.toString('utf8')).toContain('Paul');
     expect(file.buffer.toString('utf8')).not.toContain('must-not-leak');
   });
+
+  it('exports every matching user beyond the displayed page and first export batch', async () => {
+    const rows = Array.from({ length: 1201 }, (_, index) => ({
+      id: `export-user-${index}`,
+      firstName: 'Utilisateur',
+      lastName: String(index),
+      role: UserRole.PASSENGER,
+      status: UserStatus.ACTIVE,
+      isDriver: false,
+      isActive: true,
+    }));
+    usersQuery.getManyAndCount.mockResolvedValue([rows.slice(20, 30), rows.length]);
+    const displayed = await service.getAllUsers(3, 10);
+    expect(displayed.users).toHaveLength(10);
+    expect(displayed.total).toBe(1201);
+
+    usersQuery.getMany
+      .mockResolvedValueOnce(rows.slice(0, 500))
+      .mockResolvedValueOnce(rows.slice(500, 1000))
+      .mockResolvedValueOnce(rows.slice(1000));
+    const file = await service.exportUsersXls();
+    const chunks: Buffer[] = [];
+    if ('buffer' in file) chunks.push(file.buffer);
+    else for await (const chunk of file.stream) chunks.push(Buffer.from(chunk));
+    const workbook = Buffer.concat(chunks).toString('utf8');
+    expect(workbook.match(/<Workbook /g)).toHaveLength(1);
+    expect(workbook.match(/<Row>/g)).toHaveLength(1202);
+    const exportedIds = [...workbook.matchAll(/>export-user-(\d+)<\/Data>/g)].map(match => Number(match[1]));
+    expect(exportedIds).toEqual(Array.from({ length: 1201 }, (_, index) => index));
+  });
 });

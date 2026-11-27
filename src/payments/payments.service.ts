@@ -43,6 +43,7 @@ import { formatPaymentLogPayload } from './payment-log.util';
 import { getPayoutFailureMessage, PAYOUT_MESSAGES } from './payout-policy';
 import { hasVerifiedWalletTopUpProof } from './wallet-topup-proof';
 import { assertWalletTopUpCheckEvidence } from './wallet-topup-check-evidence';
+import { assertFlexPayDepositCallbackIdentity, assertFlexPayDepositEvidence } from './flexpay-deposit-evidence';
 import { loadPaymentHistoryPage, loadPaymentHistorySummary } from './payment-history-page';
 import { loadPaymentContext, PaymentContextDto } from './payment-context';
 import type { PaymentHistoryPageDto } from '../common/pagination/history-page';
@@ -526,6 +527,7 @@ export class PaymentsService {
     if (transaction.provider === PaymentProvider.PAWAPAY) {
       throw new BadRequestException('Cette transaction ne dépend pas de FlexPay');
     }
+    if (!this.isPayoutTransaction(transaction)) assertFlexPayDepositCallbackIdentity(transaction, callback);
     if (
       (this.isPayoutTransaction(transaction) ||
         transaction.purpose === PaymentPurpose.WALLET_TOP_UP) &&
@@ -569,7 +571,7 @@ export class PaymentsService {
     transaction.providerStatusCode = callback.code;
     transaction.providerReference =
       callback.providerReference ?? transaction.providerReference;
-    transaction.orderNumber = callback.orderNumber ?? transaction.orderNumber;
+    // Only the authenticated initiation response can bind the provider order.
     transaction.rawCallbackPayload = callback.raw;
 
     if (
@@ -1035,6 +1037,11 @@ export class PaymentsService {
       !providerSucceeded &&
       (providerTransactionStatus === '1' ||
         this.isDeclinedPaymentMessage(checkResult.message));
+    // Wallet credits already have their own strict success proof and correlated
+    // decline policy; preserve that distinction when a refusal omits amount data.
+    if (transaction.purpose !== PaymentPurpose.WALLET_TOP_UP) {
+      assertFlexPayDepositEvidence(transaction, providerTransaction, providerSucceeded);
+    }
     assertWalletTopUpCheckEvidence(
       transaction,
       providerTransaction,

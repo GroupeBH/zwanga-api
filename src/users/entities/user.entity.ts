@@ -61,6 +61,10 @@ export class User {
   @Column({ unique: true, nullable: true })
   phone: string;
 
+  // Explicit logical deletion, independent of temporary suspension/deactivation.
+  @Column({ type: 'timestamptz', nullable: true })
+  deletedAt: Date | null;
+
   @Column({ nullable: true, select: false })
   password: string;
 

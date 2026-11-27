@@ -106,6 +106,7 @@ export class CashReceiptsService {
     driverId: string,
     amount: number,
     currency: string,
+    cashExceptionOccurrence?: number,
   ): Promise<Booking> {
     const booking = await this.repository.findOne({
       where: { id },
@@ -137,6 +138,9 @@ export class CashReceiptsService {
     // A single conditional statement rechecks ownership, fare and mode under PostgreSQL's row lock.
     // COALESCE preserves the original receipt on retries/double taps, including concurrent retries.
     await this.repository.manager.transaction(async (manager) => {
+      if (Number.isSafeInteger(cashExceptionOccurrence) && cashExceptionOccurrence! > 0) {
+        await manager.query("SELECT set_config('zwanga.cash_exception_ack',$1,true)", [`${id}:${cashExceptionOccurrence}`]);
+      }
       const rows = await manager.query<
         [{ id: string; passengerId: string }[], number]
       >(
@@ -191,7 +195,9 @@ export class CashReceiptsService {
       }
     });
     await this.bookings.invalidateManualRideCaches(id);
-    // Deliberately NO settlement, transfer, subsidy, wallet credit or external payment call.
+    // No second fare settlement or debit. Closing a request keeps the usual end-of-trip rewards/summary.
+    // Request rides close only after this committed receipt; no cash is charged again.
+    if (booking.trip?.tripRequestId) await this.bookings.completePaidRequestTrip(booking.tripId);
     return this.bookings.findOne(id);
   }
 }

@@ -60,6 +60,12 @@ export async function activateRequestedDriver(
 // Authorization reads never activate a user. This is separate from participation
 // in an existing trip: bookings, cash receipts, balances and history stay intact.
 export async function assertDriverCanOperate(manager: EntityManager, user: User) {
+  assertDriverAccountCanOperate(user);
+  assertRequirements(await driverRequirements(manager, user.id));
+}
+
+/** Pure checks shared by ordinary reads and the locked dispatch projection. */
+export function assertDriverAccountCanOperate(user: Pick<User, 'role' | 'isActive' | 'status'>) {
   if (user.role !== UserRole.DRIVER) {
     throw new ForbiddenException({ code: 'DRIVER_PROFILE_REQUIRED',
       message: 'Terminez le parcours Devenir conducteur avant cette action.' });
@@ -67,5 +73,6 @@ export async function assertDriverCanOperate(manager: EntityManager, user: User)
   if (!user.isActive || user.status === UserStatus.SUSPENDED || user.status === UserStatus.INACTIVE) {
     throw new ForbiddenException('Votre compte ne peut pas proposer de nouveaux trajets.');
   }
-  assertRequirements(await driverRequirements(manager, user.id));
 }
+
+export const assertDriverRequirements = assertRequirements;

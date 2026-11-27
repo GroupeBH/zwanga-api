@@ -40,6 +40,7 @@ import { RequireFinanceOtp } from '../otp/finance-otp.guard';
 import { AdminPhoneVerificationDto } from './dto/admin-phone-verification.dto';
 import { AdminUserDetailsQuery, AdminUserHistoryKind } from './dto/user-history.dto';
 import { HistoryPageQuery } from '../common/history-page';
+import { AdminUserReferralsQuery } from './dto/admin-user-referrals.dto';
 
 interface AuthenticatedAdminRequest {
   user: { userId: string };
@@ -585,6 +586,25 @@ export class AdminController {
     @Param('kind', new ParseEnumPipe(AdminUserHistoryKind)) kind: AdminUserHistoryKind,
     @Query() query: HistoryPageQuery) {
     return this.adminService.getUserHistory(userId, kind, query);
+  }
+
+  @Get('users/:userId/referrals')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(30, 60000)
+  @ApiOperation({ summary: 'List direct referrals with account roles and inclusive account creation date filters' })
+  getUserReferrals(@Param('userId', ParseUUIDPipe) userId: string, @Query() query: AdminUserReferralsQuery) {
+    return this.adminReferralsService.getUserReferrals(userId, query);
+  }
+
+  @Get('users/:userId/referrals/export')
+  @Auth()
+  @Roles(UserRole.ADMIN)
+  @SensitiveThrottle(10, 60000)
+  @ApiOperation({ summary: 'Export all direct referrals matching role and account creation dates, without page limits' })
+  async exportUserReferrals(@Res({ passthrough: true }) res: Response,
+    @Param('userId', ParseUUIDPipe) userId: string, @Query() query: AdminUserReferralsQuery) {
+    return this.sendSpreadsheet(res, await this.adminReferralsService.exportUserReferrals(userId, query));
   }
 
   @Get('users/:userId/financial-summary')

@@ -68,6 +68,16 @@ export class RedisService implements OnModuleInit, OnModuleDestroy {
     return value ? JSON.parse(value) : null;
   }
 
+  /** Bounded multi-key reads on the application's non-clustered Redis client. */
+  async getMany<T>(keys: string[]): Promise<Array<T | null>> {
+    const values: Array<T | null> = [];
+    for (let offset = 0; offset < keys.length; offset += 64) {
+      const batch = await this.client.mGet(keys.slice(offset, offset + 64));
+      values.push(...batch.map(value => value === null ? null : JSON.parse(value) as T));
+    }
+    return values;
+  }
+
   /** Read and delete in one Redis command: a one-time value cannot be replayed. */
   async consume<T>(key: string): Promise<T | null> {
     const value = await this.client.getDel(key);

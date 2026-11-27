@@ -40,6 +40,16 @@ describe('KYC evidence configuration and minimization', () => {
       } as any),
     ).toMatchObject({ days: 0 });
   });
+  it('accepts the agreed three-year retention for newly enqueued archives', () => {
+    expect(
+      archiveConfig({
+        get: (name: string) =>
+          name === 'DIDIT_KYC_ARCHIVE_RETENTION_DAYS'
+            ? '1095'
+            : configuration[name],
+      } as any),
+    ).toMatchObject({ days: 1095 });
+  });
   it.each(['', '   ', null, '-1', '1.5', '3651', 'NaN'])(
     'rejects retention %s',
     (days) => {

@@ -38,6 +38,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Block deployment on exposed secrets or Terraform artifacts
+        uses: ./.github/actions/secret-scan
+
       - name: Validate infrastructure documentation
         env:
           BASE_SHA: ${{ github.event.before }}
@@ -59,7 +62,7 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y postgresql-16 postgresql-16-postgis-3 redis-server
-          for suite in APP_UPDATES INSTALLATION_UPDATES DISPATCH KYC_EVIDENCE DRIVER_FINANCE WALLET PAYOUT NOTIFICATIONS PIN_RESET PHONE_REGISTRATION PAWAPAY AUDIT MIXED_CASH ACCOUNT_LIFECYCLE RESILIENCE TRIP_SEARCH PERFORMANCE NEARBY_RING PAID_SUBSIDY ZONES ASSET PRO_CREDIT; do
+          for suite in APP_UPDATES INSTALLATION_UPDATES DISPATCH KYC_EVIDENCE DRIVER_FINANCE WALLET PAYOUT NOTIFICATIONS PIN_RESET PHONE_REGISTRATION PAWAPAY AUDIT MIXED_CASH ACCOUNT_LIFECYCLE RESILIENCE TRIP_SEARCH PERFORMANCE NEARBY_RING PAID_SUBSIDY ZONES ASSET PRO_CREDIT SECURITY; do
             echo "${suite}_TEST_POSTGRES_BIN=/usr/lib/postgresql/16/bin" >> "${GITHUB_ENV}"
           done
 
@@ -76,7 +79,8 @@ jobs:
       - name: Check dependency integrations
         run: |
           npm run test:dependencies
-          node --test test/ci-integration-policy.test.cjs test/observability-kms.test.cjs test/capacity-budget.test.cjs test/terraform-backend.test.cjs test/load/production-readonly.test.cjs
+          npm run test:load:journeys:unit
+          node --test test/secret-scan.test.cjs test/ci-integration-policy.test.cjs test/observability-kms.test.cjs test/capacity-budget.test.cjs test/terraform-backend.test.cjs test/load/production-readonly.test.cjs test/load/production-monitoring.test.cjs
 
       - name: Check known runtime vulnerabilities
         run: npm audit --omit=dev --audit-level=high

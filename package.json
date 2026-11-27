@@ -36,6 +36,8 @@
     "admin:create:prod": "node dist/database/create-admin.js",
     "test": "jest",
     "test:load:dispatch": "node test/load/dispatch.cjs",
+    "test:load:journeys": "node test/load/journeys/run.cjs",
+    "test:load:journeys:unit": "node --test test/load/journeys/*.test.cjs",
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",

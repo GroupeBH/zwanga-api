@@ -11,6 +11,7 @@ import { ChatService } from './chat.service';
 import { ChatRealtime } from './chat-realtime.service';
 import { ConfiguredIoAdapter } from '../common/configured-io.adapter';
 import { TrackingGateway } from '../tracking/tracking.gateway';
+import { TrackingStateService } from '../tracking/tracking-state.service';
 import { TripsService } from '../trips/trips.service';
 import { BookingsService } from '../bookings/bookings.service';
 import { WsSessionService } from '../common/services/ws-session.service';
@@ -108,12 +109,17 @@ describe('Chat and tracking Socket.IO security integration', () => {
     getMessages: jest.fn().mockResolvedValue([]),
   };
   const trips = { updateDriverLocation: jest.fn() };
+  const trackingState = { read: jest.fn(async (userId: string, tripId: string) => {
+    if (userId !== driver) throw new ForbiddenException('Accès refusé.');
+    return { tripId, tripStatus: 'completed' };
+  }) };
 
   beforeAll(async () => {
     const module = await Test.createTestingModule({
       providers: [
         ChatGateway,
         TrackingGateway,
+        { provide: TrackingStateService, useValue: trackingState },
         WsSessionService,
         WsWorkInterceptor,
         { provide: DataSource, useValue: { getRepository: () => ({ find: async ({ where }) =>
@@ -229,6 +235,19 @@ describe('Chat and tracking Socket.IO security integration', () => {
       'Données WebSocket invalides.',
     );
     expect(trips.updateDriverLocation).not.toHaveBeenCalled();
+  });
+
+  it('validates recovery payloads and uses the authenticated identity, not a supplied one', async () => {
+    const owner = await connect(driver, '/tracking');
+    owner.emit('get_tracking_state', { tripId: bookingId, userId: outsider }, '1');
+    expect(await owner.event('error')).toContain('Données WebSocket invalides.');
+    expect(trackingState.read).not.toHaveBeenCalled();
+    owner.emit('get_tracking_state', { tripId: bookingId }, '2');
+    expect(await owner.take('43/tracking,2')).toContain('"tripStatus":"completed"');
+    expect(trackingState.read).toHaveBeenCalledWith(driver, bookingId, undefined);
+    const attacker = await connect(outsider, '/tracking');
+    attacker.emit('get_tracking_state', { tripId: bookingId }, '3');
+    expect(await attacker.take('43/tracking,3')).toContain('"success":false');
   });
 
   it('accepts native polling and allowlisted web origins, but rejects other origins', async () => {

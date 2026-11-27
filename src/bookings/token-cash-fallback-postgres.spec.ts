@@ -65,6 +65,16 @@ const bin = process.env.MIXED_CASH_TEST_POSTGRES_BIN;
     expect(Number((await db.getRepository(WalletAccount).findOneByOrFail({ userId: f.passenger.id })).balance)).toBe(58);
     expect(await db.getRepository(WalletLedgerEntry).count()).toBe(0);
   });
+  it('allows cash without a published cash option', async () => {
+    const f = await fixture();
+    await db.getRepository(Trip).update(f.booking.tripId, {
+      acceptedPaymentModes: [TripPaymentMode.POINTS],
+    });
+    const result = await f.run();
+    expect(result.paymentMode).toBe(TripPaymentMode.CASH);
+    expect(result.cashReceivedAt).toBeNull();
+    expect(await db.getRepository(WalletLedgerEntry).count()).toBe(0);
+  });
   it.each([PaymentStatus.PENDING, PaymentStatus.INITIATED, PaymentStatus.SUCCEEDED, PaymentStatus.FAILED, PaymentStatus.CANCELLED])('leaves direct booking collection %s in its existing reconciliation flow', async status => {
     const f = await fixture(); await f.payment('trip_booking', status);
     await expect(f.run()).rejects.toMatchObject({ status: 409 });

@@ -9,6 +9,7 @@ import {
   Query,
   Request,
   BadRequestException,
+  ParseUUIDPipe,
 } from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { TripsService } from './trips.service';
@@ -197,7 +198,7 @@ export class TripsController {
   @ApiOperation({ summary: 'Update driver location for an active trip' })
   async updateDriverLocation(
     @Request() req,
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateDriverLocationDto,
   ) {
     const location = await this.tripsService.updateDriverLocation(
@@ -212,7 +213,6 @@ export class TripsController {
         samples: dto.samples,
       },
     );
-    await this.bookingsService.queueAutomaticRideProgressForTrip(id);
     return { ...location, autoProgress: { tripId: id, events: [] } };
   }
 

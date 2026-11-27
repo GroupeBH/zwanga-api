@@ -1,6 +1,7 @@
 import { RequestResponsePhases1780000098000 } from '../../database/migrations/1780000098000-RequestResponsePhases';
 import { ReceiptResponseWindow1780000110000 } from '../../database/migrations/1780000110000-ReceiptResponseWindow';
 import { driverSchedulePostgresTests } from '../../../test/driver-schedule-postgres';
+import { dispatchAcceptancePostgresTests } from '../../../test/dispatch-acceptance-postgres';
 import { driverScheduleConflictPostgresTests } from '../../../test/driver-schedule-conflict-postgres';
 import { driverAlertLocationPostgresTests } from '../../../test/driver-alert-location-postgres';
 import { homeDiscoveryPostgresTests } from '../../../test/home-discovery-postgres';
@@ -44,6 +45,7 @@ import { DispatchDeliveryResilience1780000088000 } from '../../database/migratio
 import { enqueueStaleLocationReminders, isStaleLocationReminderDeliverable } from './stale-location-reminder';
 import { IndexNearbyRequestAlerts1780000066000 } from '../../database/migrations/1780000066000-IndexNearbyRequestAlerts';
 import { DriverDispatchService } from './dispatch.service';
+import { dispatchResponseAdmission } from './dispatch-response-admission';
 import { User, UserRole, UserStatus } from '../../users/entities/user.entity';
 import { KycDocument, KycStatus } from '../../users/entities/kyc-document.entity';
 import { Vehicle, VehicleType } from '../../vehicles/entities/vehicle.entity';
@@ -58,7 +60,7 @@ import { RideNotificationReceipts1780000093000 } from '../../database/migrations
 import { recordRideNotificationReceipt } from '../../notifications/ride-notification-receipt';
 import { ownPushClaim, renewPushClaim, saveNotificationResult } from '../../notifications/notification-push-claim';
 import { NotificationStatus } from '../../notifications/entities/notification.entity';
-import { claimRideRealtimeNotifications } from '../../notifications/ride-realtime-delivery';
+import { claimRideRealtimeNotifications, claimRideRealtimeBatch } from '../../notifications/ride-realtime-delivery';
 
 describe('dispatch policy', () => {
   it.each([undefined, '30', '59', '60', '90', '120', '121'])(
@@ -186,6 +188,7 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
   };
   const offers = (requestId: string) => source.query('SELECT * FROM trip_request_dispatch_offers WHERE "requestId" = $1 ORDER BY "createdAt"', [requestId]);
   driverSchedulePostgresTests(() => ({ source, driver, request }));
+  dispatchAcceptancePostgresTests(() => ({ source, service, driver, request, offers }));
   driverScheduleConflictPostgresTests(() => ({ source, driver, request }));
   driverAlertLocationPostgresTests(() => ({ source, service, driver, request, offers }));
   tripUpdateSchedulePostgresTests(() => ({ source, driver, request }));
@@ -206,8 +209,11 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
 
   it('realtime recovers a dead worker lease and deduplicates replicas without waiting for push', async () => {
     await driver(); const r = await request(); await service.tick();
-    const [id] = await claimRideRealtimeNotifications(source.manager);
-    expect(id).toBeDefined();
+    const batch = await claimRideRealtimeBatch(source.manager);
+    const id = batch[0].id;
+    expect(batch[0].id).toBeDefined();
+    expect(batch[0].data?.tripRequestId).toBe(r.id);
+    expect(batch[0].createdAt).toBeInstanceOf(Date);
     expect(await claimRideRealtimeNotifications(source.manager)).toHaveLength(0);
     await source.query(`UPDATE ride_realtime_deliveries SET "attemptedAt" = now() - interval '6 seconds'`);
     const publish = jest.fn().mockReturnValue(true);
@@ -1196,6 +1202,41 @@ const pgBin = process.env.DISPATCH_TEST_POSTGRES_BIN;
     const selected = await source.getRepository(TripRequest).findOneByOrFail({ id: r.id });
     expect([a.user.id, b.user.id]).toContain(selected.selectedDriverId);
     expect(await source.getRepository(DriverOffer).countBy({ tripRequestId: r.id })).toBe(1);
+  });
+
+  it('keeps one winner across three independent pools and an idempotent winner retry', async () => {
+    const drivers = await Promise.all([driver(), driver(15.311), driver(15.312), driver(15.313)]);
+    const r = await request(); await service['allocate'](r.id);
+    for (const d of drivers) await legacyBroadcast(r.id, d);
+    const invitations = await offers(r.id); expect(invitations).toHaveLength(4);
+    const replicas = [new DataSource({ ...source.options, synchronize: false }), new DataSource({ ...source.options, synchronize: false })];
+    try {
+      for (const replica of replicas) await replica.initialize();
+      const services = [service, ...replicas.map(db => new DriverDispatchService(db,
+        new ConfigService({ DRIVER_DISPATCH_ENABLED: 'true' }), notifications as never))];
+      const results = await Promise.allSettled(invitations.map((o, i) => services[i % 3].respond(o.driverId, o.id, 'accept')));
+      expect(results.filter(result => result.status === 'fulfilled')).toHaveLength(1);
+      for (const result of results) if (result.status === 'rejected') expect(result.reason.getStatus()).toBe(409);
+      const winner = (await offers(r.id)).find(o => o.status === 'accepted');
+      await expect(services[2].respond(winner.driverId, winner.id, 'accept')).resolves.toMatchObject({ status: 'accepted' });
+      expect(await source.getRepository(DriverOffer).countBy({ tripRequestId: r.id })).toBe(1);
+    } finally { for (const replica of replicas) if (replica.isInitialized) await replica.destroy(); }
+  });
+
+  it.each(['cancelled', 'expired'])('rechecks %s state after waiting in response admission', async reason => {
+    const d = await driver(), r = await request(); await service['allocate'](r.id);
+    const [offer] = await offers(r.id), budget = dispatchResponseAdmission(source);
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const holders = Array.from({ length: budget.capacity }, () => budget.run(() => held));
+    const response = service.respond(d.user.id, offer.id, 'accept').catch(error => error);
+    try {
+      expect(budget.snapshot().waiting).toBe(1);
+      if (reason === 'cancelled') await source.query("UPDATE trip_requests SET status='cancelled' WHERE id=$1", [r.id]);
+      else await source.query(`UPDATE trip_request_dispatch_offers SET "expiresAt"=now()-interval '1 second' WHERE id=$1`, [offer.id]);
+    } finally { release(); await Promise.all(holders); }
+    expect((await response).getStatus()).toBe(409);
+    expect(await source.getRepository(DriverOffer).countBy({ tripRequestId: r.id })).toBe(0);
   });
 
   it('keeps all other broadcast invitations pending after individual refusals', async () => {

@@ -12,7 +12,7 @@ describe('Phone ownership during registration', () => {
       update: jest.fn(),
       save: jest.fn(async (user) => ({ ...user, id: 'new-user' })),
     };
-    const manager = { query: jest.fn(), getRepository: jest.fn(() => users) };
+    const manager = { query: jest.fn().mockResolvedValue([]), getRepository: jest.fn(() => users) };
     const repository = {
       manager: { transaction: jest.fn((callback) => callback(manager)) },
     };
@@ -101,10 +101,20 @@ describe('Phone ownership during registration', () => {
     expect(afterSave).toHaveBeenCalledWith(expect.objectContaining({ id: 'new-user' }), f.manager);
   });
 
-  it('creates a fresh account when deletion has already released the phone', async () => {
+  it('creates a fresh account for a never-reserved phone', async () => {
     const f = fixture(null);
     await saveRegistrationWithPhone(f.repository as any, f.fresh);
     expect(f.users.update).not.toHaveBeenCalled();
     expect(f.users.save).toHaveBeenCalledWith(f.fresh);
+  });
+
+  it('rejects a permanently deleted phone even without a remaining user row', async () => {
+    const f = fixture(null);
+    f.manager.query.mockResolvedValueOnce([]).mockResolvedValueOnce([{ deleted: true }]);
+    await expect(saveRegistrationWithPhone(f.repository as any, f.fresh)).rejects.toMatchObject({
+      status: 409, response: { code: 'PHONE_PREVIOUSLY_DELETED' },
+    });
+    expect(f.users.save).not.toHaveBeenCalled();
+    expect(f.users.update).not.toHaveBeenCalled();
   });
 });

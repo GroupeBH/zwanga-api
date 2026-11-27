@@ -690,7 +690,11 @@ export class DiditKycService {
           : null;
 
       const savedKyc = await kycRepository.save(kycDocument);
-      if (input.source !== 'session_created') await this.evidence?.enqueue(manager, savedKyc);
+      if (this.evidence?.fullDataEnabled?.()) {
+        await this.evidence.enqueue(manager, savedKyc, diditPayload);
+      } else if (input.source !== 'session_created') {
+        await this.evidence?.enqueue(manager, savedKyc);
+      }
 
       let userStatusChanged = false;
       const mayUpdateStatus = user.isActive &&

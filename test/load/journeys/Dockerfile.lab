@@ -1,0 +1,15 @@
+ARG NODE_VERSION=24.22.1
+FROM node:${NODE_VERSION}-alpine
+ARG NODE_VERSION
+ARG SOURCE_HASH
+LABEL zwanga.load.source=${SOURCE_HASH} zwanga.load.node=${NODE_VERSION}
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --legacy-peer-deps
+COPY tsconfig.json tsconfig.build.json nest-cli.json ./
+COPY src ./src
+COPY test/load ./test/load
+RUN npm run build && mkdir /runner && chown node:node /runner
+USER node
+WORKDIR /runner
+CMD ["node", "--max-old-space-size=768", "/app/test/load/journeys/server.cjs"]

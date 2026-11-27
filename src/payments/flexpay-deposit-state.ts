@@ -19,6 +19,9 @@ export async function commitFlexPayDepositState(
       lock: { mode: 'pessimistic_write' },
     });
     if (!current) throw new NotFoundException('Paiement introuvable');
+    if (!initiation && (!current.orderNumber || current.orderNumber !== candidate.orderNumber)) {
+      throw new BadRequestException('Une vérification ne peut pas créer ou changer la commande FlexPay');
+    }
     if (
       current.provider !== PaymentProvider.FLEXPAY ||
       current.reference !== candidate.reference ||

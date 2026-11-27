@@ -316,11 +316,11 @@ describe('TripRequestsService KYC seat limit', () => {
       {} as any,
     );
 
-    return { service, tripRequestRepository };
+    return { service, tripRequestRepository, userRepository };
   };
 
   it('allows an approved passenger to request three seats', async () => {
-    const { service, tripRequestRepository } = buildCreateService(
+    const { service, tripRequestRepository, userRepository } = buildCreateService(
       KycStatus.APPROVED,
     );
     jest
@@ -349,6 +349,8 @@ describe('TripRequestsService KYC seat limit', () => {
     expect(tripRequestRepository.create).toHaveBeenCalledWith(
       expect.objectContaining({ numberOfSeats: 3 }),
     );
+    expect(userRepository.findOne).toHaveBeenCalledWith({ where: { id: 'passenger-1' },
+      relations: ['kycDocuments'], select: { id: true, kycDocuments: { id: true, status: true } } });
   });
 
   it('allows an approved passenger to update a request to three seats', async () => {

@@ -111,7 +111,14 @@ describe('Trip search coordinate compatibility over HTTP', () => {
     }
   });
 
-  describe.each(['departureCoordinates', 'arrivalCoordinates'])('%s validation', field => {
+  it('accepts chronological discovery with an ordering origin but no implicit radius filter', async () => {
+    await request(server).post('/api/v1/trips/discovery')
+      .send({ sort: 'soonest', sortOriginCoordinates: [15.28, -4.34], limit: 2 }).expect(201);
+    expect(service.searchPage).toHaveBeenCalledWith(expect.objectContaining({ sort: 'soonest', sortOriginCoordinates: [15.28, -4.34] }));
+    expect(service.searchPage.mock.calls[0][0].departureCoordinates).toBeUndefined();
+  });
+
+  describe.each(['departureCoordinates', 'arrivalCoordinates', 'sortOriginCoordinates'])('%s validation', field => {
     it.each([
       '', ',', '15.3,', ', -4.3', '15.3,   ', '15.3', '15.3,-4.3,1',
       'abc,-4.3', '15.3garbage,-4.3', 'NaN,-4.3', 'Infinity,-4.3',

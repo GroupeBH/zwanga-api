@@ -5,6 +5,8 @@ import {
   BookingStatus,
 } from './entities/booking.entity';
 import { BookingsService } from './bookings.service';
+import { readRideProgressBookings } from './read-ride-progress';
+jest.mock('./read-ride-progress');
 import { scanFinancialIntegrity } from '../wallet/financial-integrity-scan';
 jest.mock('../wallet/financial-integrity-scan');
 import { Trip, TripStatus } from '../trips/entities/trip.entity';
@@ -17,9 +19,12 @@ import {
 } from '../payments/entities/payment-transaction.entity';
 import { TripPaymentMode } from '../payments/enums/trip-payment-mode.enum';
 import { LocationHistoryService } from '../common/services/location-history.service';
+import type { LocationHistorySnapshot } from '../common/services/location-history.service';
+import { mergeHistoryReference } from '../../test/location-history-reference';
 
 describe('BookingsService trip payments', () => {
   let bookingRepository: {
+    query: jest.Mock;
     exists: jest.Mock;
     find: jest.Mock;
     findOne: jest.Mock;
@@ -118,6 +123,7 @@ describe('BookingsService trip payments', () => {
   beforeEach(() => {
     jest.mocked(scanFinancialIntegrity).mockResolvedValue({ unsafeAnomalies: 0, walletBalanceMismatches: 0 });
     bookingRepository = {
+      query: jest.fn().mockResolvedValue([{ tripId: 'trip-1' }]),
       exists: jest.fn().mockResolvedValue(false),
       find: jest.fn(),
       findOne: jest.fn(),
@@ -127,6 +133,7 @@ describe('BookingsService trip payments', () => {
       update: jest.fn().mockResolvedValue({ affected: 1 }),
       remove: jest.fn((payload: unknown) => Promise.resolve(payload)),
     };
+    jest.mocked(readRideProgressBookings).mockImplementation(async () => bookingRepository.find());
     tripRepository = {
       findOne: jest.fn(),
       save: jest.fn((payload: unknown) => Promise.resolve(payload)),
@@ -279,11 +286,15 @@ describe('BookingsService trip payments', () => {
       const memory = new Map<string, unknown>();
       const history = new LocationHistoryService({
         get: async (key: string) => memory.get(key) ?? null,
+        getMany: async (keys: string[]) => keys.map(key => memory.get(key) ?? null),
         set: async (key: string, value: unknown) => { memory.set(key, value); },
-        compareAndSet: async (key: string, expected: unknown, value: unknown) => {
-          if (JSON.stringify(memory.get(key) ?? null) !== JSON.stringify(expected)) return false;
-          memory.set(key, value); return true;
-        },
+        getClient: () => ({ evalSha: async (_sha: string, options: { keys: string[]; arguments: string[] }) => {
+          const [key] = options.keys;
+          const [current, native, batch] = options.arguments;
+          memory.set(key, mergeHistoryReference(memory.get(key) as LocationHistorySnapshot ?? null,
+            JSON.parse(current), JSON.parse(native), batch === '1'));
+          return 1;
+        } }),
       } as any);
       (service as any).locationHistoryService = history;
       jest.spyOn((service as any).logger, 'log').mockImplementation(() => {});
@@ -402,6 +413,13 @@ describe('BookingsService trip payments', () => {
     };
     bookingRepository.findOne.mockResolvedValue(privateBooking);
     tripRepository.findOne.mockResolvedValue(privateTrip);
+    const cancellationQuery: any = { getOne: async () => privateBooking };
+    for (const method of ['addSelect', 'where', 'setLock']) cancellationQuery[method] = () => cancellationQuery;
+    bookingRepository.manager = { transaction: async work => work({
+      findOne: async () => privateTrip,
+      getRepository: () => ({ createQueryBuilder: () => cancellationQuery }),
+      save: async (_entity, row) => bookingRepository.save(row),
+    }) };
     jest
       .spyOn(service as any, 'recalculateAvailableSeatsForTrip')
       .mockResolvedValue(1);
@@ -765,8 +783,8 @@ describe('BookingsService trip payments', () => {
       bookings: [],
       departureLocation: 'Gombe',
       arrivalLocation: 'Limete',
-      departurePoint: null,
-      arrivalPoint: null,
+      departurePoint: { type: 'Point', coordinates: [15.3, -4.32] },
+      arrivalPoint: { type: 'Point', coordinates: [15.35, -4.34] },
     });
     userRepository.findOne.mockResolvedValue({
       id: 'passenger-approved',
@@ -2012,7 +2030,9 @@ describe('BookingsService trip payments', () => {
       passengerLastLocationUpdateAt: null,
       trip: activeTrip,
     };
-    bookingRepository.findOne.mockResolvedValue(recoverableBooking);
+    jest
+      .spyOn(service as any, 'findPassengerTrackingBooking')
+      .mockResolvedValue(recoverableBooking);
     jest
       .spyOn(service as any, 'touchTripInteraction')
       .mockResolvedValue(undefined);
@@ -2037,20 +2057,9 @@ describe('BookingsService trip payments', () => {
       },
     );
 
-    expect(bookingRepository.update).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: 'booking-1',
-        passengerId: 'passenger-1',
-        status: expect.anything(),
-        passengerLastLocationUpdateAt: expect.anything(),
-      }),
-      expect.objectContaining({
-        passengerCurrentLocation: {
-          type: 'Point',
-          coordinates: [15.31, -4.31],
-        },
-        passengerLastLocationUpdateAt: new Date(recordedAt),
-      }),
+    expect(bookingRepository.query).toHaveBeenCalledWith(
+      expect.stringContaining('INSERT INTO ride_progress_jobs'),
+      ['booking-1', 'passenger-1', 15.31, -4.31, new Date(recordedAt), 'trip-1'],
     );
     expect(locationHistoryService.recordPassengerLocation).toHaveBeenCalled();
     expect(result.coordinates).toEqual([15.31, -4.31]);

@@ -18,6 +18,9 @@ import { TripPaymentMode } from '../payments/enums/trip-payment-mode.enum';
 import { lockAvailableAccounts } from './account-availability';
 import { TripsService } from '../trips/trips.service';
 import { UsersService } from './users.service';
+import { CanonicalPhoneIdentity1780000119000 } from '../database/migrations/1780000119000-CanonicalPhoneIdentity';
+import { ReserveDeletedAccountPhones1780000144000 } from '../database/migrations/1780000144000-ReserveDeletedAccountPhones';
+import { assertPhoneNotDeleted } from './deleted-phone.policy';
 import { assertRequestTarget, requestDriverVisibilitySql } from '../trip-requests/target-driver-policy';
 
 const bin = process.env.ACCOUNT_LIFECYCLE_TEST_POSTGRES_BIN;
@@ -34,6 +37,11 @@ const bin = process.env.ACCOUNT_LIFECYCLE_TEST_POSTGRES_BIN;
     await db.query('CREATE EXTENSION IF NOT EXISTS postgis');
     await db.query('CREATE EXTENSION IF NOT EXISTS "uuid-ossp"');
     await db.synchronize();
+    const runner = db.createQueryRunner();
+    try {
+      await new CanonicalPhoneIdentity1780000119000().up(runner);
+      await new ReserveDeletedAccountPhones1780000144000().up(runner);
+    } finally { await runner.release(); }
     // Dispatch is migration-owned, not an ORM entity. These are its exercised columns.
     await db.query(`CREATE TABLE driver_dispatch_presence ("driverId" uuid PRIMARY KEY, "discoveryEnabled" boolean);
       CREATE TABLE trip_request_dispatch_offers (id uuid PRIMARY KEY, "requestId" uuid, "driverId" uuid,
@@ -47,7 +55,7 @@ const bin = process.env.ACCOUNT_LIFECYCLE_TEST_POSTGRES_BIN;
   });
   afterAll(() => cluster.stop(), 40000);
   beforeEach(async () => {
-    await db.query('TRUNCATE users, driver_dispatch_presence, trip_request_dispatch_offers, trip_request_driver_refusals CASCADE');
+    await db.query('TRUNCATE users, user_phone_identities, driver_dispatch_presence, trip_request_dispatch_offers, trip_request_driver_refusals CASCADE');
     jest.clearAllMocks();
   });
   const user = (role = UserRole.PASSENGER) => db.getRepository(User).save({ role, firstName: 'Test', lastName: 'Lifecycle',
@@ -191,11 +199,15 @@ const bin = process.env.ACCOUNT_LIFECYCLE_TEST_POSTGRES_BIN;
   });
   it('self deletion uses the same resource cleanup while keeping historical rows', async () => {
     const f = await fixture();
+    await db.manager.update(User, f.passenger.id, { phone: '+243890000001' });
     const users = Object.assign(Object.create(UsersService.prototype), { accountLifecycle: lifecycle,
       userRepository: db.getRepository(User), kycDocumentRepository: { find: async () => [] },
       fileUploadService: { deleteFile: jest.fn() }, logger: { warn: jest.fn(), debug: jest.fn() } });
     await users.deactivateAccount(f.passenger.id);
-    expect(await db.manager.findOneByOrFail(User, { id: f.passenger.id })).toMatchObject({ isActive: false, status: 'inactive', firstName: 'Compte', phone: null });
+    expect(await db.manager.findOneByOrFail(User, { id: f.passenger.id })).toMatchObject({ isActive: false, status: 'inactive', firstName: 'Compte', phone: null, deletedAt: expect.any(Date) });
+    await expect(assertPhoneNotDeleted(db.manager, '0890000001')).rejects.toMatchObject({
+      response: { code: 'PHONE_PREVIOUSLY_DELETED' },
+    });
     expect((await db.manager.findOneByOrFail(TripRequest, { id: f.request.id })).status).toBe('cancelled');
     expect(await db.manager.count(Booking)).toBe(1);
   });

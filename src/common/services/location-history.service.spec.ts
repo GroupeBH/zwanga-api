@@ -1,5 +1,7 @@
-import { LocationHistoryService } from './location-history.service';
+import { LocationHistoryService, LocationHistoryPendingError } from './location-history.service';
 import { RedisService } from './redis.service';
+import { mergeHistoryReference } from '../../../test/location-history-reference';
+import type { LocationHistorySnapshot } from './location-history.service';
 import {
   BoardingCandidateSnapshot,
   BoardingDetectionState,
@@ -23,16 +25,20 @@ describe('LocationHistoryService', () => {
   });
   const createService = () => {
     const store = new Map<string, unknown>();
+    const client = { eval: jest.fn(), evalSha: jest.fn(async (_sha: string, options: { keys: string[]; arguments: string[] }) => {
+      const [key] = options.keys;
+      const [current, native, batch] = options.arguments;
+      store.set(key, mergeHistoryReference(store.get(key) as LocationHistorySnapshot ?? null,
+        JSON.parse(current), JSON.parse(native), batch === '1'));
+      return 1;
+    }) };
     const redisService = {
+      getClient: () => client,
+      getMany: jest.fn(async (keys: string[]) => keys.map(key => store.get(key) ?? null)),
       get: jest.fn((key: string) => Promise.resolve(store.get(key) ?? null)),
       set: jest.fn((key: string, value: unknown) => {
         store.set(key, value);
         return Promise.resolve();
-      }),
-      compareAndSet: jest.fn(async (key: string, expected: unknown, value: unknown) => {
-        if (JSON.stringify(store.get(key) ?? null) !== JSON.stringify(expected)) return false;
-        store.set(key, value);
-        return true;
       }),
     };
     return {
@@ -41,6 +47,7 @@ describe('LocationHistoryService', () => {
       ),
       store,
       redisService,
+      client,
     };
   };
 
@@ -167,7 +174,7 @@ describe('LocationHistoryService', () => {
     ]);
   });
   it('keeps the newest concurrent update and the bounded history', async () => {
-    const { service, redisService } = createService();
+    const { service, client } = createService();
     await Promise.all(Array.from({ length: 12 }, (_, i) => service.recordDriverLocation(
       'trip', -4.3, 15.3 + i * 0.001, new Date(Date.UTC(2026, 9, 14, 10, 0, i)),
     )));
@@ -175,20 +182,20 @@ describe('LocationHistoryService', () => {
     await service.recordDriverLocation('trip', -4.3, 15.4, new Date('2026-10-14T10:01:00Z'));
     await service.recordDriverLocation('trip', -4.3, 15.2, new Date('2026-10-14T09:59:00Z'));
     expect((await service.getDriverLocationHistory('trip'))?.current?.longitude).toBe(15.4);
-    expect(redisService.compareAndSet).toHaveBeenCalled();
+    expect(client.evalSha).toHaveBeenCalledTimes(14);
   });
 
-  it('cannot overwrite a newer sample committed after its snapshot was read', async () => {
-    const { service, redisService } = createService();
-    const compareAndSet = redisService.compareAndSet.getMockImplementation()!;
+  it('cannot overwrite a newer sample when an older command arrives late', async () => {
+    const { service, redisService, client } = createService();
+    const execute = client.evalSha.getMockImplementation()!;
     let release!: () => void;
     let read!: () => void;
     const paused = new Promise<void>(resolve => { release = resolve; });
     const snapshotRead = new Promise<void>(resolve => { read = resolve; });
-    redisService.compareAndSet.mockImplementationOnce(async (...args) => {
+    client.evalSha.mockImplementationOnce(async (...args) => {
       read();
       await paused;
-      return compareAndSet(...args);
+      return execute(...args);
     });
     const older = service.recordDriverLocation('trip', -4.3, 15.3, new Date('2026-10-14T10:00:00Z'));
     await snapshotRead;
@@ -199,5 +206,82 @@ describe('LocationHistoryService', () => {
     expect(history?.current?.longitude).toBe(15.4);
     expect(history?.samples).toHaveLength(1);
     expect(redisService.set).not.toHaveBeenCalled();
+  });
+
+  it('writes once without reading a client-side snapshot or retrying an ambiguous failure', async () => {
+    const { service, redisService, client } = createService();
+    await service.recordDriverLocation('trip', -4.3, 15.3);
+    expect(client.evalSha).toHaveBeenCalledTimes(1);
+    expect(redisService.get).not.toHaveBeenCalled();
+    client.evalSha.mockRejectedValueOnce(new Error('Redis command deadline'));
+    await service.recordDriverLocation('trip', -4.3, 15.4);
+    expect(client.evalSha).toHaveBeenCalledTimes(2);
+    expect(client.eval).not.toHaveBeenCalled();
+  });
+
+  const participant = (at: Date) => [{ bookingId: 'booking', passengerId: 'passenger', driverId: 'driver',
+    driverRecordedAt: at, passengerRecordedAt: at }];
+
+  it('reads a bounded snapshot once and reuses it only inside the evaluation', async () => {
+    const { service, redisService } = createService();
+    const at = new Date();
+    await service.recordDriverLocation('trip', -4.3, 15.31, at);
+    await service.recordPassengerLocation('booking', -4.3, 15.31, at);
+    redisService.get.mockClear();
+    await service.withRideSnapshot('trip', participant(at), async () => {
+      for (let i = 0; i < 3; i++) {
+        expect((await service.getDriverLocationHistory('trip'))?.current?.recordedAt).toBe(at.toISOString());
+        expect((await service.getPassengerLocationHistory('booking'))?.current?.recordedAt).toBe(at.toISOString());
+      }
+      const candidate = { updatedAt: at.toISOString() } as BoardingCandidateSnapshot;
+      await service.saveBoardingCandidate('trip', 'driver', 'passenger', candidate);
+      expect(await service.getBoardingCandidate('trip', 'driver', 'passenger')).toEqual(candidate);
+    });
+    expect(redisService.getMany).toHaveBeenCalledTimes(1);
+    expect(redisService.getMany.mock.calls[0][0]).toHaveLength(3);
+    expect(redisService.get).not.toHaveBeenCalled();
+    await service.getDriverLocationHistory('trip');
+    expect(redisService.get).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses an old or evicted Redis history before any automatic decision', async () => {
+    const { service, store } = createService();
+    const at = new Date();
+    const work = jest.fn();
+    await service.recordDriverLocation('trip', -4.3, 15.31, at);
+    await service.recordPassengerLocation('booking', -4.3, 15.31, new Date(at.getTime() - 1));
+    await expect(service.withRideSnapshot('trip', participant(at), work)).rejects.toBeInstanceOf(LocationHistoryPendingError);
+    await service.recordPassengerLocation('booking', -4.3, 15.31, at);
+    store.delete('tracking:history:driver:trip');
+    await expect(service.withRideSnapshot('trip', participant(at), work)).rejects.toBeInstanceOf(LocationHistoryPendingError);
+    expect(work).not.toHaveBeenCalled();
+  });
+
+  it('isolates concurrent evaluation snapshots without caching authorization', async () => {
+    const { service } = createService();
+    const at = new Date();
+    await service.recordDriverLocation('trip', -4.3, 15.31, at);
+    await service.recordPassengerLocation('booking', -4.3, 15.31, at);
+    let release!: () => void, ready!: () => void;
+    const paused = new Promise<void>(resolve => { release = resolve; });
+    const started = new Promise<void>(resolve => { ready = resolve; });
+    const first = service.withRideSnapshot('trip', participant(at), async () => {
+      ready(); await paused;
+      expect((await service.getDriverLocationHistory('trip'))?.current?.longitude).toBe(15.31);
+    });
+    await started;
+    await service.recordDriverLocation('trip', -4.3, 15.32, new Date(at.getTime() + 1));
+    await service.withRideSnapshot('trip', participant(at), async () => {
+      expect((await service.getDriverLocationHistory('trip'))?.current?.longitude).toBe(15.32);
+    });
+    release(); await first;
+  });
+
+  it('propagates a failed multi-read so durable work can retry instead of guessing from missing histories', async () => {
+    const { service, redisService } = createService();
+    redisService.getMany.mockRejectedValue(new Error('offline'));
+    const work = jest.fn();
+    await expect(service.withRideSnapshot('trip', participant(new Date()), work)).rejects.toThrow('offline');
+    expect(work).not.toHaveBeenCalled();
   });
 });

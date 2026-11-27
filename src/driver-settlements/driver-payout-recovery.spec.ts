@@ -21,6 +21,7 @@ describe('Driver payout reservation and recovery', () => {
     approved = true;
     let balanceRead = 0;
     manager = {
+      query: jest.fn().mockResolvedValue([]),
       findOne: jest.fn(async (entity) => entity === User ? { id: 'driver-A', phone: driverPhone } : entity === PaymentTransaction ? payment : saved),
       exists: jest.fn(async (entity) => entity === DriverPayout ? Boolean(saved?.recoveryBlocked) : approved),
       getRepository: jest.fn(() => ({ findOne: jest.fn(async () => ({ status: approved ? 'approved' : 'pending' })) })),
@@ -47,12 +48,28 @@ describe('Driver payout reservation and recovery', () => {
     service = new DriverSettlementsService(
       {} as any, { find: async () => saved ? [saved] : [], update: jest.fn() } as any, {} as any, {} as any, {} as any, {} as any,
       { get: () => undefined } as any, payments,
-      { transaction: async (work) => work(manager) } as any, {} as any,
+      { manager, transaction: async (work) => work(manager) } as any, {} as any,
     );
   });
   afterEach(() => jest.restoreAllMocks());
 
   const dto = { amount: 9500, idempotencyKey: '00000000-0000-4000-8000-000000000001' };
+
+  it('blocks new withdrawal reservations against legacy unsafe subsidies', async () => {
+    manager.query.mockResolvedValue([{ found: 1 }]);
+    await expect(service.requestPayout('driver-A', dto)).rejects.toMatchObject({ response: { code: 'SUBSIDY_PAYOUT_REVIEW_REQUIRED' } });
+    expect(payments.initiatePayout).not.toHaveBeenCalled();
+    expect(manager.create).not.toHaveBeenCalled();
+  });
+
+  it('also blocks an old idempotent pending reservation before provider submission', async () => {
+    saved = { id: 'payout-A', driverId: 'driver-A', amount: dto.amount, currency: 'CDF',
+      phone: '+243891234567', idempotencyKey: dto.idempotencyKey, status: DriverPayoutStatus.PENDING };
+    manager.query.mockResolvedValue([{ found: 1 }]);
+    await expect(service.requestPayout('driver-A', dto)).rejects.toMatchObject({ response: { code: 'SUBSIDY_PAYOUT_REVIEW_REQUIRED' } });
+    expect(payments.initiatePayout).not.toHaveBeenCalled();
+    expect(payment).toBeNull();
+  });
 
   it('normalizes the profile phone before reservation and preserves the driver account lock', async () => {
     const payout = await service.requestPayout('driver-A', dto);

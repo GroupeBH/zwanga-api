@@ -1,11 +1,14 @@
 # FIN-BOOKING-003 — Subvention Zwanga du premier trajet passager
 
-Dernière mise à jour : 4 septembre 2026  
-Statut : implémenté localement ; migration, import SSM et déploiement backend requis.
+Dernière mise à jour : 26 novembre 2026
+
+Statut : plafond et protections de retrait corrigés localement, non déployés.
 
 ## 1. Besoin métier
 
-Lors de son premier trajet réel sur Zwanga, un passager paie seulement 40 % du prix total dû. Les 60 % restants sont subventionnés par Zwanga.
+Lors de son premier trajet réel sur Zwanga, le passager bénéficie d'une subvention de 60 % du prix total, **plafonnée à 7 500 FC (CDF) par réservation**, toutes places comprises. Le passager paie le prix total moins cette subvention. Au-delà de 12 500 FC de prix total, sa part dépasse donc 40 %.
+
+Le plafond est défini dans `src/bookings/first-trip-subsidy.policy.ts`, pas dans une valeur envoyée par le mobile. Le module n'accorde pas de nouvelle subvention si `FIRST_TRIP_SUBSIDY_ENABLED` est absent, invalide ou désactivé. Les nouvelles subventions sont réservées à la devise CDF.
 
 Cette règle doit être calculée côté serveur pour éviter qu'une application mobile modifiée puisse changer le montant. Elle doit aussi protéger le conducteur : la réduction accordée au passager ne doit pas réduire son gain attendu.
 
@@ -13,7 +16,7 @@ Cette règle doit être calculée côté serveur pour éviter qu'une application
 
 - `grossPaymentAmount` : prix total serveur du trajet avant subvention.
 - `paymentAmount` : montant réellement demandé au passager.
-- `passengerPaymentRate` : part payée par le passager, `0.40` par défaut.
+- `passengerPaymentRate` : part effective payée par le passager après application du plafond ; les montants enregistrés font foi, pas ce ratio arrondi.
 - `zwangaSubsidyAmount` : remise commerciale prise en charge par Zwanga, soit `grossPaymentAmount - paymentAmount`.
 - `firstTripSubsidyApplied` : marque durable indiquant que la réservation consomme la subvention premier trajet.
 
@@ -25,6 +28,16 @@ passengerPaymentRate = 0,40
 paymentAmount = 10 000 × 0,40 = 4 000 CDF
 zwangaSubsidyAmount = 10 000 - 4 000 = 6 000 CDF
 ```
+
+Pour une réservation de 20 000 FC : subvention = min(12 000, 7 500) = 7 500 FC ; passager = 12 500 FC. Quatre places dans une seule réservation ne multiplient pas le plafond par quatre.
+
+Une réservation déjà engagée conserve ses montants. Une négociation acceptée diminuant le prix brut réduit les deux parts proportionnellement. La baisse ne permet pas d'augmenter la subvention.
+
+### Réservations historiques au-dessus du plafond
+
+Le correctif ne réclame pas davantage au passager et ne supprime aucun gain historique. Si un conducteur possède un gain non annulé lié à une subvention supérieure à 7 500 FC ou dans une devise incohérente, son solde retirable est présenté à zéro et les nouveaux virements sont refusés avec `SUBSIDY_PAYOUT_REVIEW_REQUIRED`. Le contrôle s'applique aussi à une ancienne réservation de retrait rejouée avec sa clé d'idempotence, avant tout nouvel appel au prestataire.
+
+Ces dossiers nécessitent un rapprochement financier autorisé et traçable. Aucun bouton de contournement ni remise à zéro automatique n'est ajouté. Un virement déjà envoyé au prestataire doit être rapproché ; ce contrôle ne peut pas le rappeler.
 
 ## 3. Éligibilité
 
@@ -54,27 +67,29 @@ Ces états ne prouvent pas un trajet payable. Le passager pourra donc encore bé
 
 ### Paiement électronique FlexPay
 
-Le passager paie `paymentAmount`. FlexPay n'encaisse donc que 40 % du prix total lors du premier trajet subventionné.
+Le passager paie `paymentAmount`. FlexPay encaisse le prix brut diminué de la subvention plafonnée.
 
-Le revenu conducteur reste calculé sur `grossPaymentAmount`, puis la commission Zwanga habituelle est appliquée :
+Le revenu conducteur part de `grossPaymentAmount`. Pour les nouvelles réservations (`cashCommissionPolicyVersion >= 1`), la commission de 5 % porte sur la somme payée par le passager, pas sur la subvention :
 
 ```text
-commission = arrondi(grossPaymentAmount × ZWANGA_COMMISSION_RATE)
+commission = arrondi(paymentAmount × 0,05)
 revenu conducteur = arrondi(grossPaymentAmount - commission)
 ```
 
-Avec `ZWANGA_COMMISSION_RATE = 0.05` et un trajet de `10 000 CDF` :
+Pour un trajet de `10 000 CDF` :
 
 ```text
 passager paie = 4 000 CDF
 subvention commerciale = 6 000 CDF
-commission théorique Zwanga = 500 CDF
-revenu conducteur = 9 500 CDF
+commission Zwanga = 200 CDF
+revenu conducteur = 9 800 CDF
 ```
+
+Les écritures historiques conservent leur commission enregistrée ; ce correctif ne les recalcule pas.
 
 ### Paiement en jetons
 
-Le débit interne de jetons est calculé à partir de `paymentAmount`, pas à partir du prix brut. Pour un trajet de `10 000 CDF` et `1 jeton = 100 CDF`, le passager dépense donc `40` jetons au lieu de `100`.
+Le débit interne de jetons est calculé à partir de `paymentAmount`, pas du prix brut, avec la conversion monétaire du portefeuille en vigueur. Pour un trajet de `10 000 CDF`, le débit correspond donc à `4 000 CDF`.
 
 Le revenu conducteur est enregistré sur le prix brut du trajet, avec la commission Zwanga habituelle.
 
@@ -161,10 +176,11 @@ Les notifications de revenu conducteur peuvent aussi inclure `grossTripAmount` e
 
 | Variable                            | Valeur recommandée | Rôle                                                  |
 | ----------------------------------- | ------------------ | ----------------------------------------------------- |
-| `FIRST_TRIP_SUBSIDY_ENABLED`        | `true`             | active ou coupe la subvention sans changer le code    |
-| `FIRST_TRIP_PASSENGER_PAYMENT_RATE` | `0.40`             | part du prix brut payée par le passager               |
+| `FIRST_TRIP_SUBSIDY_ENABLED`        | `false` avant validation | autorise de nouvelles subventions ; ne revalorise pas les engagements existants |
+| `FIRST_TRIP_PASSENGER_PAYMENT_RATE` | `0.40`             | part théorique avant application du plafond de 7 500 FC |
 | `TRIP_PAYMENT_CURRENCY`             | `CDF`              | devise des courses                                    |
-| `ZWANGA_COMMISSION_RATE`            | `0.05`             | commission appliquée aux revenus électroniques/jetons |
+
+Le taux de commission courant vient de `DRIVER_FINANCE.commissionRate` (5 %), pas de la variable historique `ZWANGA_COMMISSION_RATE`.
 
 Sur AWS, importer les deux nouvelles variables dans SSM Parameter Store sous `/zwanga-api/production/env/*`, puis créer une nouvelle révision ECS.
 

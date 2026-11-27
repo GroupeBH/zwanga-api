@@ -21,7 +21,8 @@ import {
   DriverInterruptionFareQueryDto,
 } from './dto/trip-interruption.dto';
 
-/** All transitions serialize on the trip row. Route/payment services run outside transactions. */
+/** Transitions serialize on the trip row; decisions first lock their booking,
+ * matching GPS/completion's booking -> trip order. Route/payment I/O stays outside. */
 export class DriverInterruptionWorkflow {
   constructor(
     private readonly manager: EntityManager,
@@ -226,6 +227,10 @@ export class DriverInterruptionWorkflow {
     dto: DriverInterruptionDecisionDto,
   ) {
     const quote = await this.manager.transaction(async (manager) => {
+      const booking = await manager.findOne(Booking, {
+        where: { id: dto.bookingId, passengerId, tripId },
+        lock: { mode: 'pessimistic_write' },
+      });
       const trip = await this.lockTrip(manager, tripId);
       const { request, confirmation } = await this.getPassengerContext(
         manager,
@@ -249,10 +254,6 @@ export class DriverInterruptionWorkflow {
           'Vérifiez le montant affiché avant de confirmer votre arrêt.',
         );
       }
-      const booking = await manager.findOne(Booking, {
-        where: { id: dto.bookingId, passengerId, tripId },
-        lock: { mode: 'pessimistic_write' },
-      });
       if (
         !booking ||
         booking.status !== BookingStatus.ACCEPTED ||

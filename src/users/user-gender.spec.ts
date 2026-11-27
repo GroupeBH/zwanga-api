@@ -47,7 +47,7 @@ describe('User gender', () => {
         Promise.resolve({ id: 'user-1', ...payload }),
       ),
       update: jest.fn().mockResolvedValue({ affected: 1 }),
-      manager: { transaction: jest.fn() },
+      manager: { transaction: jest.fn(), query: jest.fn().mockResolvedValue([]) },
     };
     userRepository.manager.transaction.mockImplementation(callback => callback({
       query: jest.fn().mockResolvedValue([]), getRepository: () => userRepository,

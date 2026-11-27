@@ -1,4 +1,5 @@
 import { ConfigService } from '@nestjs/config';
+import type { EvidenceAttachment } from './didit-archive.policy';
 
 export const ARCHIVE_MAX_BYTES = 24 * 1024 * 1024;
 export const MEDIA_MAX_BYTES = 5 * 1024 * 1024;
@@ -20,6 +21,7 @@ export type EvidenceBundle = {
   details: Record<string, unknown>;
   files: EvidenceFile[];
   missing: string[];
+  attachments?: EvidenceAttachment[];
 };
 export type ArchiveRow = {
   id: string;
@@ -36,6 +38,10 @@ export type ArchiveRow = {
   createdAt: Date;
   archivedAt: Date | null;
   errorCode: string | null;
+  revision?: number;
+  capturedRevision?: number;
+  exportId?: string | null;
+  exportRevision?: number | null;
 };
 
 export function archiveConfig(config: ConfigService) {

@@ -3,6 +3,7 @@ import { In, Repository } from 'typeorm';
 import { Booking, BookingStatus } from '../bookings/entities/booking.entity';
 import { lockTripBookingCreation } from '../bookings/bookable-trip-transaction';
 import { Trip, TripStatus } from './entities/trip.entity';
+import { allRequestPassengersArrivedAndPaid } from '../bookings/paid-request-completion';
 
 export async function completeTripTransaction(
   repository: Repository<Trip>,
@@ -18,7 +19,7 @@ export async function completeTripTransaction(
     const bookings = await manager.find(Booking, {
       where: {
         tripId: id,
-        status: In([BookingStatus.PENDING, BookingStatus.ACCEPTED]),
+        status: In([BookingStatus.PENDING, BookingStatus.ACCEPTED, BookingStatus.BOARDING_UNCERTAIN, BookingStatus.COMPLETED]),
       },
       order: { id: 'ASC' },
       lock: { mode: 'pessimistic_write' },
@@ -31,6 +32,9 @@ export async function completeTripTransaction(
     if (trip.status === TripStatus.COMPLETED) return false;
     if (trip.status !== TripStatus.ACTIVE)
       throw new BadRequestException('Ce trajet ne peut plus être terminé');
+    if (trip.tripRequestId && !allRequestPassengersArrivedAndPaid(bookings)) {
+      throw new BadRequestException('La commande sera terminée après confirmation de l’arrivée et du paiement.');
+    }
     if (
       bookings.some(
         (booking) =>
@@ -44,7 +48,8 @@ export async function completeTripTransaction(
     await manager.update(
       Trip,
       { id, driverId, status: TripStatus.ACTIVE },
-      { status: TripStatus.COMPLETED, completedAt },
+      // Preserve the identifier in the subscriber event for post-commit availability.
+      { id, status: TripStatus.COMPLETED, completedAt },
     );
     return true;
   });

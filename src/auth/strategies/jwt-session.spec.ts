@@ -3,6 +3,7 @@ import { Request } from 'express';
 import { JwtStrategy } from './jwt.strategy';
 import { tokenFingerprint } from '../token-fingerprint';
 import { UserStatus } from '../../users/entities/user.entity';
+import { JwtService } from '@nestjs/jwt';
 
 describe('HTTP session revocation', () => {
   const token = 'synthetic-access-token';
@@ -17,7 +18,7 @@ describe('HTTP session revocation', () => {
       isActive: true,
       accessToken: stored,
     };
-    const users = { findAuthIdentity: jest.fn(async () => user) };
+    const users = { findAuthIdentity: jest.fn().mockResolvedValue(user) };
     return {
       user,
       strategy: new JwtStrategy(
@@ -49,5 +50,28 @@ describe('HTTP session revocation', () => {
     await expect(strategy.validate(request, payload)).rejects.toMatchObject({
       status: 401,
     });
+  });
+  it('rejects a freshly forged token even when its signature verifies with the known signing key', async () => {
+    const jwt = new JwtService({ secret: 'test-only-secret' });
+    const forged = jwt.sign(
+      { ...payload, role: 'super_admin' },
+      { expiresIn: '1m' },
+    );
+    const verified = jwt.verify<typeof payload>(forged);
+    const forgedRequest = {
+      headers: { authorization: `Bearer ${forged}` },
+    } as Request;
+    await expect(
+      fixture(tokenFingerprint(token)).strategy.validate(
+        forgedRequest,
+        verified,
+      ),
+    ).rejects.toMatchObject({ status: 401 });
+  });
+  it('uses the database role, not a privileged role claim, even for the stored session', async () => {
+    const { strategy } = fixture(tokenFingerprint(token));
+    await expect(
+      strategy.validate(request, { ...payload, role: 'super_admin' }),
+    ).resolves.toMatchObject({ role: 'passenger' });
   });
 });
